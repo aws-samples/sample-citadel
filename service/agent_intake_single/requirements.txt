@@ -1,0 +1,7 @@
+bedrock-agentcore
+strands-agents
+strands-agents[otel]
+fastapi
+boto3
+python-dotenv
+requests

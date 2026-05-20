@@ -1,0 +1,26 @@
+{
+  "sizing": {
+    "agent": { "S": 3, "M": 5, "L": 10 },
+    "integration": { "S": 1, "M": 2, "L": 4 },
+    "hitl_point": 1,
+    "ui_touchpoint": 2
+  },
+  "overhead": {
+    "discovery_days": 3,
+    "testing_days": 5,
+    "deployment_days": 2,
+    "pm_buffer_pct": 15
+  },
+  "confidence_band_pct": 20,
+  "days_per_week": 5,
+  "agent_sizing_criteria": {
+    "S": "1-2 tools, single responsibility, no branching decisions",
+    "M": "3-5 tools, some conditional logic or external calls",
+    "L": "6+ tools, complex decision trees, multiple integrations, or HITL"
+  },
+  "integration_sizing_criteria": {
+    "S": "Read-only, standard REST/SDK, no auth complexity",
+    "M": "Read-write, OAuth or API key, moderate field mapping",
+    "L": "Bidirectional, complex auth, webhooks, or custom protocol"
+  }
+}

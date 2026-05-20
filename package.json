@@ -1,0 +1,78 @@
+{
+  "name": "3-layer-architecture",
+  "version": "1.0.0",
+  "description": "Scalable 3-layer application architecture",
+  "private": true,
+  "workspaces": [
+    "service",
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "install:all": "npm install && npm run install:service && npm run install:backend && npm run install:frontend",
+    "install:service": "cd service && npm install",
+    "install:backend": "cd backend && npm install",
+    "install:frontend": "cd frontend && npm install",
+    "dev": "concurrently \"npm run dev:service\" \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:service": "cd service && npm run dev",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm start",
+    "build": "npm run build:service && npm run build:backend && npm run build:frontend",
+    "build:service": "cd service && npm run build",
+    "build:backend": "cd backend && npm run build",
+    "build:frontend": "cd frontend && npm run build",
+    "test": "npm run test:service && npm run test:backend && npm run test:frontend",
+    "test:service": "cd service && npm test",
+    "test:backend": "cd backend && npm test",
+    "test:frontend": "cd frontend && npm test -- --watchAll=false",
+    "test:integration": "npm run test:integration:service && npm run test:integration:backend",
+    "test:integration:service": "cd service && npm run test:integration",
+    "test:integration:backend": "cd backend && npm run test:integration",
+    "test:e2e": "cd frontend && npm run test:e2e",
+    "lint": "npm run lint:service && npm run lint:backend && npm run lint:frontend",
+    "lint:service": "cd service && npm run lint",
+    "lint:backend": "cd backend && npm run lint",
+    "lint:frontend": "cd frontend && npm run lint",
+    "lint:fix": "npm run lint:fix:service && npm run lint:fix:backend && npm run lint:fix:frontend",
+    "lint:fix:service": "cd service && npm run lint:fix",
+    "lint:fix:backend": "cd backend && npm run lint:fix",
+    "lint:fix:frontend": "cd frontend && npm run lint:fix",
+    "format": "npm run format:service && npm run format:backend && npm run format:frontend",
+    "format:service": "cd service && npm run format",
+    "format:backend": "cd backend && npm run format",
+    "format:frontend": "cd frontend && npm run format"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.6"
+  },
+  "husky": {
+    "hooks": {
+      "pre-commit": "lint-staged"
+    }
+  },
+  "lint-staged": {
+    "service/**/*.{ts,js}": [
+      "cd service && npm run lint:fix",
+      "cd service && npm run format"
+    ],
+    "backend/**/*.{ts,js}": [
+      "cd backend && npm run lint:fix",
+      "cd backend && npm run format"
+    ],
+    "frontend/**/*.{ts,tsx,js,jsx}": [
+      "cd frontend && npm run lint:fix",
+      "cd frontend && npm run format"
+    ]
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "esbuild": "0.25.11"
+  },
+  "overrides": {
+    "dompurify": "^3.4.0"
+  }
+}

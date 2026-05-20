@@ -1,0 +1,107 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Build outputs
+dist/
+build/
+*.tgz
+*.tar.gz
+*.zip
+cdk.out/
+.cdk.out/
+cdk.out.citadel-*/
+cdk-outputs.json
+.npm-ci-hash
+
+# Environment variables
+.env
+.env.*
+!.env.example
+*.local
+
+# AWS
+.aws/
+aws-exports.js
+.bedrock_agentcore.yaml
+.bedrock_agentcore/
+.bedrock/
+.aws-sam/
+samconfig.toml
+
+# CDK
+cdk.context.json
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+
+# Logs
+logs/
+*.log
+
+# Coverage
+coverage/
+*.lcov
+.nyc_output
+htmlcov/
+.coverage
+
+# IDE
+.kiro
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-*
+.project
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+/**/DS.Store
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Testing
+test-results/
+test-reports/
+.pytest_cache/
+.hypothesis/
+
+# Temporary
+tmp/
+temp/
+.tmp/
+*.bak
+*.backup
+
+# Deployment artifacts
+agent*_api.zip
+deployment-*.json
+packaged-template.yaml
+
+# PDF generator local test folder
+service/hld_pdf_generator/test/

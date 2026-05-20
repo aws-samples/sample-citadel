@@ -1,0 +1,3 @@
+boto3==1.38
+
+# v2: force rebuild

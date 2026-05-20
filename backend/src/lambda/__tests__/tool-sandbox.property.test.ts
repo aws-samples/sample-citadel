@@ -1,0 +1,253 @@
+// Feature: datastore-integration-pipeline, Property 11: Tool Sandbox Execution Isolation
+// Validates: Requirements 7.5, 7.8, 7.9
+
+import * as fc from 'fast-check';
+
+// Import testable functions (to be implemented in tool-sandbox.ts)
+import { executeTool, addToHistory } from '../tool-sandbox';
+
+// ---- Types ----
+
+interface ToolTestResult {
+  success: boolean;
+  output?: any;
+  error?: string;
+  executionTimeMs: number;
+}
+
+// ---- Generators ----
+
+const toolIdArb = fc.stringMatching(/^tool-[a-z0-9]{8}$/);
+const orgIdArb = fc.stringMatching(/^org-[a-z0-9]{8}$/);
+
+const bindingDirectionArb = fc.constantFrom('input', 'output', 'bidirectional');
+
+const integrationBindingArb = fc.record({
+  integrationId: fc.stringMatching(/^int-[a-z0-9]{6}$/),
+  integrationType: fc.constantFrom('CONFLUENCE', 'SLACK', 'JIRA', 'GITHUB'),
+  operations: fc.array(fc.constantFrom('read', 'write', 'list', 'delete'), { minLength: 1, maxLength: 3 }),
+  direction: bindingDirectionArb,
+});
+
+const dataStoreBindingArb = fc.record({
+  dataStoreId: fc.stringMatching(/^ds-[a-z0-9]{6}$/),
+  dataStoreType: fc.constantFrom('S3', 'DYNAMODB', 'RDS_POSTGRESQL', 'OPENSEARCH'),
+  operations: fc.array(fc.constantFrom('read_object', 'write_object', 'query', 'scan'), { minLength: 1, maxLength: 3 }),
+  direction: bindingDirectionArb,
+});
+
+/** Simulated execution time in ms — some within timeout, some exceeding */
+const executionTimeMsArb = fc.oneof(
+  fc.integer({ min: 10, max: 200 }),   // within timeout
+  fc.integer({ min: 600, max: 1000 })  // exceeds timeout
+);
+
+const toolConfigArb = fc.record({
+  toolId: toolIdArb,
+  config: fc.constant(JSON.stringify({ name: 'test-tool', version: '1.0.0', schema: { properties: { input1: { type: 'string' } } } })),
+  state: fc.constant('active' as const),
+  integrationBindings: fc.array(integrationBindingArb, { minLength: 0, maxLength: 3 }),
+  dataStoreBindings: fc.array(dataStoreBindingArb, { minLength: 0, maxLength: 3 }),
+});
+
+const toolInputsArb = fc.record({
+  input1: fc.string({ minLength: 1, maxLength: 50 }),
+});
+
+/** Generate a tool execution scenario */
+const executionScenarioArb = fc.record({
+  toolConfig: toolConfigArb,
+  orgId: orgIdArb,
+  inputs: toolInputsArb,
+  simulatedExecutionTimeMs: executionTimeMsArb,
+  shouldSucceed: fc.boolean(),
+  errorMessage: fc.stringMatching(/^[A-Za-z ]{5,30}$/),
+});
+
+// ---- Mock dependency builders ----
+
+const TIMEOUT_MS = 30000;
+
+/** Test timeout — use a short value for fast tests */
+const TEST_TIMEOUT_MS = 500;
+
+interface MockDeps {
+  loadToolConfig: (toolId: string) => Promise<any>;
+  loadToolCode: (toolId: string) => Promise<string>;
+  resolveCredentials: (bindings: { integrationBindings?: any[]; dataStoreBindings?: any[] }) => Promise<Record<string, any>>;
+  executeCode: (code: string, inputs: any, credentials: any) => Promise<{ output: any }>;
+}
+
+function buildMockDeps(scenario: {
+  toolConfig: any;
+  simulatedExecutionTimeMs: number;
+  shouldSucceed: boolean;
+  errorMessage: string;
+}): MockDeps {
+  const { toolConfig, simulatedExecutionTimeMs, shouldSucceed, errorMessage } = scenario;
+
+  // Track which bindings credentials were resolved for
+  const resolvedBindings: any[] = [];
+
+  return {
+    loadToolConfig: async (_toolId: string) => toolConfig,
+    loadToolCode: async (_toolId: string) => 'module.exports = async (inputs, creds) => ({ result: inputs });',
+    resolveCredentials: async (bindings) => {
+      // Record which bindings were requested
+      const allBindings = [
+        ...(bindings.integrationBindings || []),
+        ...(bindings.dataStoreBindings || []),
+      ];
+      resolvedBindings.push(...allBindings);
+
+      // Return scoped credentials keyed by binding ID
+      const creds: Record<string, any> = {};
+      for (const b of allBindings) {
+        const id = b.integrationId || b.dataStoreId;
+        creds[id] = { accessKeyId: `AKIA-${id}`, secretAccessKey: 'scoped-secret' };
+      }
+      return creds;
+    },
+    executeCode: async (_code, inputs, _credentials) => {
+      // Simulate execution time — if over timeout, the executeTool function
+      // should enforce the timeout and return an error before this resolves
+      if (simulatedExecutionTimeMs > TEST_TIMEOUT_MS) {
+        // Simulate a long-running execution that would be killed by timeout
+        await new Promise(resolve => setTimeout(resolve, simulatedExecutionTimeMs));
+        return { output: inputs };
+      }
+      if (!shouldSucceed) {
+        throw new Error(errorMessage);
+      }
+      return { output: inputs };
+    },
+  };
+}
+
+// ---- Tests ----
+
+describe('Property 11: Tool Sandbox Execution Isolation', () => {
+
+  // **Validates: Requirements 7.5, 7.8**
+  it('execution completes within 30-second timeout or returns a timeout error', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        executionScenarioArb,
+        async (scenario) => {
+          const deps = buildMockDeps(scenario);
+
+          const result: ToolTestResult = await executeTool(
+            scenario.toolConfig.toolId,
+            scenario.inputs,
+            scenario.orgId,
+            deps,
+            TEST_TIMEOUT_MS
+          );
+
+          if (scenario.simulatedExecutionTimeMs > TEST_TIMEOUT_MS) {
+            // Should have timed out
+            expect(result.success).toBe(false);
+            expect(result.error).toContain('timed out');
+            expect(result.executionTimeMs).toBeLessThanOrEqual(TEST_TIMEOUT_MS + 1000); // small tolerance
+          } else {
+            // Should have completed (success or runtime error)
+            expect(result.executionTimeMs).toBeLessThanOrEqual(TEST_TIMEOUT_MS + 1000);
+            expect(result.executionTimeMs).toBeGreaterThanOrEqual(0);
+          }
+        }
+      ),
+      { numRuns: 100 }
+    );
+  }, 120000);
+
+  // **Validates: Requirements 7.5**
+  it('sandbox resolves scoped credentials matching the tool declared bindings', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        executionScenarioArb.filter(s => s.simulatedExecutionTimeMs <= TEST_TIMEOUT_MS),
+        async (scenario) => {
+          let resolvedBindingIds: string[] = [];
+
+          const deps: MockDeps = {
+            ...buildMockDeps(scenario),
+            resolveCredentials: async (bindings) => {
+              const allBindings = [
+                ...(bindings.integrationBindings || []),
+                ...(bindings.dataStoreBindings || []),
+              ];
+              resolvedBindingIds = allBindings.map(b => b.integrationId || b.dataStoreId);
+
+              const creds: Record<string, any> = {};
+              for (const b of allBindings) {
+                const id = b.integrationId || b.dataStoreId;
+                creds[id] = { accessKeyId: `AKIA-${id}`, secretAccessKey: 'scoped-secret' };
+              }
+              return creds;
+            },
+          };
+
+          await executeTool(
+            scenario.toolConfig.toolId,
+            scenario.inputs,
+            scenario.orgId,
+            deps,
+            TEST_TIMEOUT_MS
+          );
+
+          // The resolved binding IDs should match exactly the tool's declared bindings
+          const expectedIntegrationIds = (scenario.toolConfig.integrationBindings || []).map((b: any) => b.integrationId);
+          const expectedDataStoreIds = (scenario.toolConfig.dataStoreBindings || []).map((b: any) => b.dataStoreId);
+          const expectedIds = [...expectedIntegrationIds, ...expectedDataStoreIds].sort();
+
+          expect(resolvedBindingIds.sort()).toEqual(expectedIds);
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
+  // **Validates: Requirements 7.9**
+  it('test run history retains at most 5 entries — 6th entry evicts the oldest', async () => {
+    await fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            success: fc.boolean(),
+            output: fc.constant({ data: 'test' }),
+            error: fc.oneof(fc.constant(undefined), fc.string({ minLength: 3, maxLength: 20 })),
+            executionTimeMs: fc.integer({ min: 10, max: 5000 }),
+            timestamp: fc.date({ min: new Date('2024-01-01'), max: new Date('2025-12-31') }).filter(d => !isNaN(d.getTime())).map(d => d.toISOString()),
+          }),
+          { minLength: 1, maxLength: 20 }
+        ),
+        (entries) => {
+          let history: any[] = [];
+
+          for (const entry of entries) {
+            history = addToHistory(history, entry, 5);
+          }
+
+          // History should never exceed 5 entries
+          expect(history.length).toBeLessThanOrEqual(5);
+
+          // If we added more than 5 entries, history should be exactly 5
+          if (entries.length >= 5) {
+            expect(history.length).toBe(5);
+          } else {
+            expect(history.length).toBe(entries.length);
+          }
+
+          // The most recent entry should be the last one added
+          expect(history[history.length - 1]).toEqual(entries[entries.length - 1]);
+
+          // When more than 5 entries, the oldest entries should have been evicted
+          if (entries.length > 5) {
+            const expectedHistory = entries.slice(entries.length - 5);
+            expect(history).toEqual(expectedHistory);
+          }
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+});

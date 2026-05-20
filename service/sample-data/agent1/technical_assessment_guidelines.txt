@@ -1,0 +1,142 @@
+Technical Feasibility Assessment Guidelines
+
+Weight: 30%
+Description: Evaluates the technical readiness and capability to implement agentic AI solutions
+
+Assessment Categories
+
+1. Current Architecture & Systems
+
+Points to Extract:
+- Existing system architecture (monolithic, microservices, serverless)
+- Core platforms and technologies in use
+- Cloud maturity level (on-premise, hybrid, cloud-native)
+- System integration patterns currently employed
+- API landscape and API management approach
+
+Sample Questions:
+- Can you describe your current system architecture?
+- What cloud platforms are you currently using, if any?
+- How do your systems currently communicate with each other?
+- Do you have an API gateway or API management solution in place?
+
+2. Integration Landscape
+
+Points to Extract:
+- Number and types of systems requiring integration
+- Integration protocols in use (REST, GraphQL, gRPC, message queues)
+- Event-driven architecture capabilities
+- Real-time vs batch processing requirements
+- Critical SLAs and performance requirements
+
+Sample Questions:
+- How many systems would need to integrate with the agentic AI solution?
+- Do you currently use event-driven patterns or message queues?
+- What are your latency and throughput requirements?
+- Are there any critical SLAs we need to be aware of?
+
+3. Data Strategy & Readiness
+
+Points to Extract:
+- Data sources and their locations
+- Data quality and governance maturity
+- Data classification and sensitivity levels (PII, PHI, PCI)
+- Data residency and sovereignty requirements
+- Existing data lakes, warehouses, or knowledge bases
+- Vector database or semantic search capabilities
+
+Sample Questions:
+- Where does your critical business data currently reside?
+- How would you rate your data quality and governance practices?
+- Do you handle sensitive data that requires special compliance?
+- Do you have any existing knowledge bases or document repositories?
+- Have you worked with vector databases or semantic search before?
+
+4. Security & Identity
+
+Points to Extract:
+- Identity and access management approach
+- Authentication and authorization mechanisms
+- Encryption standards (at rest, in transit, in use)
+- Network security posture (VPCs, firewalls, segmentation)
+- Security monitoring and incident response capabilities
+- Secrets management approach
+
+Sample Questions:
+- What identity provider do you use for authentication?
+- How do you currently manage application secrets and credentials?
+- What encryption standards are you required to meet?
+- Do you have network segmentation or VPC isolation in place?
+- How do you monitor for security threats and incidents?
+
+5. Observability & Operations
+
+Points to Extract:
+- Logging and monitoring infrastructure
+- Distributed tracing capabilities
+- Alerting and incident management processes
+- Performance monitoring and APM tools
+- Operational runbooks and automation level
+
+Sample Questions:
+- What logging and monitoring tools do you currently use?
+- Do you have distributed tracing implemented?
+- How do you currently handle alerts and incidents?
+- What level of operational automation do you have?
+
+6. Model & AI Infrastructure
+
+Points to Extract:
+- Current AI/ML capabilities and experience
+- Foundation models in use or evaluated
+- Model deployment and serving infrastructure
+- MLOps maturity and practices
+- Model governance and versioning approach
+- Prompt engineering and management capabilities
+
+Sample Questions:
+- Have you deployed AI/ML models in production before?
+- Which foundation models have you evaluated or used?
+- How do you currently manage model versions and deployments?
+- Do you have prompt engineering expertise in your team?
+- What's your approach to model monitoring and drift detection?
+
+7. Scalability & Performance
+
+Points to Extract:
+- Expected transaction volumes and growth projections
+- Peak load patterns and seasonality
+- Auto-scaling capabilities and experience
+- Performance benchmarks and targets
+- Disaster recovery and business continuity requirements
+
+Sample Questions:
+- What transaction volumes do you expect to handle?
+- Do you experience seasonal peaks or variable load patterns?
+- What are your performance targets (latency, throughput)?
+- What are your disaster recovery and uptime requirements?
+
+8. Development & Deployment
+
+Points to Extract:
+- CI/CD pipeline maturity
+- Infrastructure as Code adoption (Terraform, CloudFormation)
+- Testing practices (unit, integration, E2E)
+- Deployment strategies (blue-green, canary, rolling)
+- Environment management (dev, staging, prod)
+- Version control and branching strategies
+
+Sample Questions:
+- Do you have CI/CD pipelines in place?
+- Are you using Infrastructure as Code?
+- What testing practices do you follow?
+- How do you manage deployments across environments?
+- What version control system and branching strategy do you use?
+
+Scoring Guidance
+
+High Readiness: Cloud-native architecture, strong API/event-driven patterns, mature data governance, comprehensive security, MLOps experience
+
+Medium Readiness: Hybrid architecture, some integration capabilities, basic data governance, standard security practices, limited AI experience
+
+Low Readiness: Legacy monolithic systems, limited integration, poor data quality, basic security, no AI/ML experience

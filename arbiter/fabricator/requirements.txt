@@ -1,0 +1,5 @@
+strands-agents
+strands-agents-tools
+boto3==1.38
+
+# v4: use raw SigV4 HTTP for registry calls

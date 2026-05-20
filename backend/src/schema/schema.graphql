@@ -1,0 +1,1278 @@
+type Query {
+  getProject(id: ID!): Project
+  listProjects(filter: ProjectFilter): ProjectConnection
+  getAgentStatus(projectId: ID!, agentId: String!): AgentStatus
+  getConversationHistory(projectId: ID!, limit: Int, nextToken: String): ConversationHistoryPage
+  listAgentConfigs: [AgentConfig]
+  getAgentConfig(agentId: String!): AgentConfig
+  getAgentCode(agentId: String!): AgentCode
+  listToolConfigs: [ToolConfig]
+  getToolConfig(toolId: String!): ToolConfig
+  listUsers: [User]
+  getUser(userId: String!): User
+  getCurrentUserProfile: User
+  listAvailableRoles: [String]
+  listOrganizations: [Organization]
+  getWorkflow(workflowId: ID!): Workflow
+  listWorkflows(orgId: String!, status: WorkflowStatus): WorkflowConnection
+  listBlueprints(category: String): BlueprintConnection
+  getApp(appId: ID!): AgentApp
+  listApps(orgId: String!): AppConnection
+  listAppWorkflows(appId: ID!): [Workflow!]
+  getExecution(executionId: ID!): Execution
+  listExecutions(workflowId: ID!): ExecutionConnection
+  exportWorkflow(workflowId: ID!): AWSJSON
+  getWorkflowVersion(workflowId: ID!, version: Int!): Workflow
+  getAssessmentProgress(sessionId: String!): [AssessmentDimensionProgress]
+  generateReportDownloadUrl(projectId: ID!): ReportDownloadUrl
+  listIntegrations(orgId: String!, integrationType: IntegrationType, status: IntegrationStatus): [Integration]
+  getIntegration(integrationId: ID!): Integration
+  getFabricatorQueue: [FabricationQueueItem]
+  listDataStores(orgId: String!, category: DataStoreCategory): [DataStore]
+  getDataStore(dataStoreId: ID!): DataStore
+  getDataStoreStats(orgId: String!): DataStoreStats
+  getProjectDocument(projectId: ID!, documentKey: String!): ProjectDocument
+  getDocumentIngestionStatus(projectId: ID!, documentKey: String!): DocumentIngestionStatus
+  listProjectDocuments(projectId: ID!): [ProjectDocumentItem]
+  listDocumentVersions(projectId: ID!, documentKey: String!): [DocumentVersion]
+  getDocumentVersion(projectId: ID!, documentKey: String!, versionId: String!): ProjectDocument
+  listAvailableDataSources(orgId: String!, usage: DataStoreUsage): [AvailableDataSource!]!
+  listIntegrationOperations(integrationType: String!): [IntegrationOperation!]!
+  listAppApiKeys(appId: ID!): [AppApiKey!]!
+  getAppMetrics(appId: ID!, startTime: AWSDateTime!, endTime: AWSDateTime!): AppMetrics
+  listAppAccessEntries(appId: ID!): [AppAccessEntry!]!
+  getDashboardMetrics(orgId: String!, startTime: AWSDateTime!, endTime: AWSDateTime!): DashboardMetricsResult
+  getRecentActivity(orgId: String!, limit: Int): RecentActivityResult
+  searchAgentConfigs(query: String!): [AgentConfig]
+  searchToolConfigs(query: String!): [ToolConfig]
+}
+
+type Mutation {
+  createProject(input: CreateProjectInput!): Project
+  updateProject(id: ID!, input: UpdateProjectInput!): Project
+  sendMessageToAgent(
+    projectId: ID!
+    agentId: String!
+    message: String!
+  ): ConversationMessage
+  uploadDocument(projectId: ID!, file: S3Object!): DocumentUploadResult
+  updateAgentStatus(
+    projectId: ID!
+    agentId: String!
+    status: AgentStatusInput!
+  ): AgentStatus
+  updateProjectProgress(
+    projectId: ID!
+    progress: ProjectProgressInput!
+  ): ProjectProgress
+  sendMessage(
+    projectId: ID!
+    message: ConversationMessageInput!
+  ): ConversationMessage
+  publishConversationMessage(input: PublishMessageInput!): ConversationMessage
+    @aws_iam
+  generateDocumentUploadUrl(input: GenerateUploadUrlInput!): DocumentUploadUrl
+  ingestDocument(projectId: ID!, documentKey: String!): IngestDocumentResult
+  notifyDocumentReady(projectId: ID!, documentKey: String!, fileName: String!, fileSize: Int!, fileType: String!): NotifyDocumentReadyResult
+  deleteDocument(projectId: ID!, documentKey: String!): DocumentDeleteResult
+  generateDocumentPdf(projectId: ID!, documentKey: String!): ReportDownloadUrl
+  updateAgentConfig(input: UpdateAgentConfigInput!): AgentConfig
+  createAgentConfig(input: CreateAgentConfigInput!): AgentConfig
+  deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
+  updateAgentCode(input: UpdateAgentCodeInput!): AgentCode
+  updateToolConfig(input: UpdateToolConfigInput!): ToolConfig
+  createToolConfig(input: CreateToolConfigInput!): ToolConfig
+  deleteToolConfig(toolId: String!): DeleteToolConfigResult
+  requestAgentCreation(input: CreateAgentRequestInput!): AgentCreationResponse
+  requestToolCreation(input: CreateToolRequestInput!): AgentCreationResponse
+  submitTask(input: SubmitTaskInput!): TaskSubmissionResponse
+  adminCreateUser(input: AdminCreateUserInput!): UserManagementResponse
+  assignUserRole(input: AssignUserRoleInput!): UserManagementResponse
+  removeUserRole(userId: String!, role: String!): UserManagementResponse
+  changePassword(input: ChangePasswordInput!): UserManagementResponse
+  adminResetUserPassword(userId: String!): UserManagementResponse
+  adminResendInvitation(userId: String!): UserManagementResponse
+  createOrganization(input: CreateOrganizationInput!): Organization
+  deleteOrganization(orgId: String!): UserManagementResponse
+  publishAssessmentCompletion(input: AssessmentCompletionInput!): AssessmentCompletionEvent @aws_iam
+  publishDesignProgress(input: DesignProgressInput!): DesignProgressEvent @aws_iam @aws_cognito_user_pools
+  publishChatter(input: AgentChatterInput!): AgentChatterMessage @aws_iam
+  createIntegration(input: CreateIntegrationInput!): Integration
+  updateIntegration(input: UpdateIntegrationInput!): Integration
+  deleteIntegration(integrationId: ID!): DeleteIntegrationResult
+  testIntegration(integrationId: ID!): IntegrationTestResult
+  connectIntegration(integrationId: ID!): Integration
+  disconnectIntegration(integrationId: ID!): Integration
+  publishFabricationEvent(input: FabricationEventInput!): FabricationEvent @aws_iam
+  createDataStore(input: CreateDataStoreInput!): DataStore
+  updateDataStore(input: UpdateDataStoreInput!): DataStore
+  deleteDataStore(dataStoreId: ID!): DeleteDataStoreResult
+  connectDataStore(dataStoreId: ID!): DataStore
+  disconnectDataStore(dataStoreId: ID!): DataStore
+  testDataStoreConnection(dataStoreId: ID!): DataStoreTestResult
+  testTool(toolId: String!, inputs: AWSJSON!, orgId: String!): ToolTestResult!
+  addAppComponent(appId: ID!, component: AppComponentInput!): AgentApp
+  removeAppComponent(appId: ID!, componentType: String!, componentId: String!): AgentApp
+  updateAgentBinding(input: UpdateAgentBindingInput!): AgentApp
+  setAppConfigSchema(appId: ID!, schema: AWSJSON!, version: Int!): AgentApp
+  setAppConfigValues(appId: ID!, values: AWSJSON!, version: Int!): AgentApp
+  publishAppStatusEvent(input: AppStatusEventInput!): AppStatusEvent @aws_iam
+  publishAgentManifest(agentId: String!, manifest: AWSJSON!): AgentConfig
+  createWorkflow(input: CreateWorkflowInput!): Workflow
+  updateWorkflow(input: UpdateWorkflowInput!): Workflow
+  deleteWorkflow(workflowId: ID!): DeleteWorkflowResult
+  publishWorkflow(workflowId: ID!): Workflow
+  updateWorkflowConfiguration(workflowId: ID!, configuration: AWSJSON!, version: Int!): Workflow
+  importBlueprint(blueprintId: ID!, appId: ID!, name: String): Workflow
+  importWorkflow(input: ImportWorkflowInput!): Workflow
+  createApp(input: CreateAppInput!): AgentApp
+  updateApp(input: UpdateAppInput!): AgentApp
+  deleteApp(appId: ID!): DeleteAppResult
+  bindWorkflowToApp(appId: ID!, workflowId: ID!): AgentApp
+  unbindWorkflowFromApp(appId: ID!, workflowId: ID!): AgentApp
+  publishApp(appId: ID!): PublishResult
+  unpublishApp(appId: ID!): AgentApp
+  createAppApiKey(appId: ID!, name: String!, expiresIn: Int): AppApiKeyWithPlaintext
+  revokeAppApiKey(appId: ID!, keyId: ID!): AppApiKey
+  rotateAppApiKey(appId: ID!, keyId: ID!): AppApiKeyWithPlaintext
+  setAppAuthConfig(appId: ID!, authConfig: AWSJSON!): AgentApp
+  grantAppAccess(appId: ID!, userId: String!, role: String!): AgentApp
+  revokeAppAccess(appId: ID!, userId: String!): AgentApp
+  startExecution(workflowId: ID!, input: AWSJSON): Execution
+  cancelExecution(executionId: ID!): Execution
+  publishWorkflowProgress(input: WorkflowProgressInput!): WorkflowProgressEvent @aws_iam
+}
+
+type Subscription {
+  onAgentStatusUpdate(projectId: ID!): AgentStatus
+    @aws_subscribe(mutations: ["updateAgentStatus"])
+  onConversationMessage(projectId: ID!): ConversationMessage
+    @aws_subscribe(mutations: ["sendMessage", "publishConversationMessage"])
+  onProjectProgress(projectId: ID!): ProjectProgress
+    @aws_subscribe(mutations: ["updateProjectProgress"])
+  onAssessmentCompleted(projectId: ID!): AssessmentCompletionEvent
+    @aws_subscribe(mutations: ["publishAssessmentCompletion"])
+  onDesignProgress(projectId: ID!): DesignProgressEvent
+    @aws_subscribe(mutations: ["publishDesignProgress"])
+    @aws_iam @aws_cognito_user_pools
+  onChatter: AgentChatterMessage
+    @aws_subscribe(mutations: ["publishChatter"])
+    @aws_cognito_user_pools
+  onFabricationEvent: FabricationEvent
+    @aws_subscribe(mutations: ["publishFabricationEvent"])
+    @aws_iam @aws_cognito_user_pools
+  onWorkflowProgress(executionId: ID!): WorkflowProgressEvent
+    @aws_subscribe(mutations: ["publishWorkflowProgress"])
+    @aws_iam @aws_cognito_user_pools
+  onAppStatusChange(appId: ID!): AppStatusEvent
+    @aws_subscribe(mutations: ["publishAppStatusEvent"])
+    @aws_iam @aws_cognito_user_pools
+}
+
+type Project {
+  id: ID!
+  name: String!
+  status: ProjectStatus!
+  currentModule: Module!
+  progress: ProjectProgress!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  owner: String!
+  description: String
+  requirements: String
+  agents: [AgentStatus]
+}
+
+type Module {
+  id: String!
+  name: String!
+  description: String!
+  status: ModuleStatus!
+  agentId: String!
+}
+
+type ProjectProgress {
+  overall: Float!
+  assessment: Float!
+  design: Float!
+  planning: Float!
+  implementation: Float!
+  currentPhase: String!
+  estimatedCompletion: AWSDateTime
+}
+
+type AgentStatus {
+  agentId: String!
+  projectId: ID!
+  status: AgentStatusEnum!
+  currentTask: String
+  progress: Float
+  lastUpdate: AWSDateTime!
+  metadata: AWSJSON
+  errorMessage: String
+}
+
+type ConversationHistoryPage @aws_iam @aws_cognito_user_pools {
+  items: [ConversationMessage]
+  nextToken: String
+}
+
+type ConversationMessage @aws_iam @aws_cognito_user_pools {
+  id: ID!
+  projectId: ID!
+  agentId: String!
+  message: String!
+  messageType: MessageType!
+  timestamp: AWSDateTime!
+  metadata: AWSJSON
+  correlationId: String
+}
+
+type DocumentUploadResult {
+  success: Boolean!
+  documentId: String
+  url: String
+  message: String
+}
+
+type DocumentUploadUrl {
+  uploadUrl: String!
+  documentKey: String!
+  expiresIn: Int!
+}
+
+type IngestDocumentResult {
+  documentKey: String!
+  status: String!
+}
+
+type DocumentIngestionStatus {
+  documentKey: String!
+  status: String!
+  statusReason: String
+  updatedAt: String
+}
+
+type NotifyDocumentReadyResult {
+  success: Boolean!
+}
+
+type DocumentDeleteResult {
+  documentKey: String!
+  status: String!
+}
+
+type ProjectDocumentItem {
+  documentKey: String!
+  fileName: String!
+  size: Int!
+  lastModified: String!
+}
+
+type ProjectDocument {
+  documentKey: String!
+  content: String!
+  versionId: String
+  lastModified: AWSDateTime
+}
+
+type DocumentVersion {
+  versionId: String!
+  lastModified: AWSDateTime!
+  size: Int!
+  isLatest: Boolean!
+}
+
+type AgentConfig {
+  agentId: String!
+  config: AWSJSON!
+  state: AgentState!
+  categories: [String]
+  createdAt: AWSDateTime
+  updatedAt: AWSDateTime
+  manifest: AgentManifest
+}
+
+type DeleteAgentConfigResult {
+  success: Boolean!
+  message: String
+}
+
+type AgentCode {
+  agentId: String!
+  code: String!
+  version: String
+  lastModified: AWSDateTime
+}
+
+enum BindingDirection {
+  INPUT
+  OUTPUT
+  BIDIRECTIONAL
+}
+
+type IntegrationBinding {
+  integrationId: String!
+  integrationType: String!
+  operations: [String!]
+  direction: BindingDirection
+}
+
+type DataStoreBinding {
+  dataStoreId: String!
+  dataStoreType: String!
+  operations: [String!]
+  direction: BindingDirection
+}
+
+type ToolConfig {
+  toolId: String!
+  config: AWSJSON!
+  state: ToolState!
+  categories: [String]
+  integrationBindings: [IntegrationBinding]
+  dataStoreBindings: [DataStoreBinding]
+  createdAt: AWSDateTime
+  updatedAt: AWSDateTime
+}
+
+type DeleteToolConfigResult {
+  success: Boolean!
+  message: String
+}
+
+type AgentCreationResponse {
+  success: Boolean!
+  requestId: String!
+  message: String
+}
+
+type TaskSubmissionResponse {
+  success: Boolean!
+  orchestrationId: String!
+  message: String
+}
+
+type User {
+  userId: String!
+  email: String!
+  name: String!
+  givenName: String!
+  familyName: String!
+  role: String
+  organization: String
+  status: String!
+  createdAt: AWSDateTime!
+  enabled: Boolean!
+}
+
+type UserManagementResponse {
+  success: Boolean!
+  message: String
+}
+
+type Organization {
+  orgId: String!
+  name: String!
+  description: String
+  createdAt: AWSDateTime
+}
+
+type AssessmentCompletionEvent {
+  projectId: ID!
+  allDimensionsComplete: Boolean!
+  timestamp: AWSDateTime!
+}
+
+type DesignProgressEvent @aws_iam @aws_cognito_user_pools {
+  projectId: ID!
+  sectionId: String!
+  completionPercentage: Float!
+  timestamp: AWSDateTime!
+}
+
+type AssessmentDimensionProgress {
+  dimension: String!
+  completionPercentage: Float!
+  isComplete: Boolean!
+}
+
+type ReportDownloadUrl {
+  url: String!
+  expiresIn: Int!
+}
+
+type AgentChatterMessage @aws_iam @aws_cognito_user_pools {
+  id: ID!
+  timestamp: AWSDateTime!
+  source: String!
+  detailType: String!
+  detail: AWSJSON!
+}
+
+type FabricationQueueItem {
+  requestId: ID!
+  agentName: String!
+  taskDescription: String!
+  status: FabricationStatus!
+  submittedAt: AWSDateTime!
+  errorMessage: String
+  metadata: AWSJSON
+}
+
+type FabricationEvent {
+  type: FabricationEventType!
+  requestId: ID!
+  agentId: String
+  errorMessage: String
+  timestamp: AWSDateTime!
+}
+
+type ProjectConnection {
+  items: [Project]
+  nextToken: String
+}
+
+type Integration {
+  integrationId: ID!
+  integrationType: IntegrationType!
+  name: String!
+  status: IntegrationStatus!
+  orgId: String!
+  createdBy: String!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  config: AWSJSON!
+  lastSyncAt: AWSDateTime
+  lastTestAt: AWSDateTime
+  errorMessage: String
+  metadata: IntegrationMetadata!
+  gatewayTargetId: String
+  credentialProviderArn: String
+}
+
+type IntegrationMetadata {
+  version: String!
+  protocol: String!
+  provider: String!
+  authMethod: AuthenticationMethod!
+}
+
+type IntegrationTestResult {
+  success: Boolean!
+  message: String!
+  details: AWSJSON
+}
+
+type DeleteIntegrationResult {
+  success: Boolean!
+  message: String
+}
+
+input ProjectFilter {
+  status: ProjectStatus
+  owner: String
+  createdAfter: AWSDateTime
+  createdBefore: AWSDateTime
+}
+
+input CreateProjectInput {
+  name: String!
+  description: String
+  requirements: String
+}
+
+input UpdateProjectInput {
+  name: String
+  description: String
+  requirements: String
+  status: ProjectStatus
+}
+
+input AgentStatusInput {
+  status: AgentStatusEnum!
+  currentTask: String
+  progress: Float
+  metadata: AWSJSON
+  errorMessage: String
+}
+
+input ProjectProgressInput {
+  overall: Float
+  assessment: Float
+  design: Float
+  planning: Float
+  implementation: Float
+  currentPhase: String
+  estimatedCompletion: AWSDateTime
+}
+
+input ConversationMessageInput {
+  agentId: String!
+  message: String!
+  messageType: MessageType!
+  metadata: AWSJSON
+  correlationId: String
+}
+
+input PublishMessageInput {
+  id: ID!
+  projectId: ID!
+  agentId: String!
+  message: String!
+  messageType: MessageType!
+  timestamp: AWSDateTime!
+  metadata: AWSJSON
+  correlationId: String
+}
+
+input S3Object {
+  bucket: String!
+  key: String!
+  region: String!
+}
+
+input GenerateUploadUrlInput {
+  projectId: ID!
+  fileName: String!
+  fileType: String!
+  fileSize: Int!
+}
+
+input CreateAgentConfigInput {
+  agentId: String!
+  config: AWSJSON!
+  state: AgentState
+  categories: [String]
+}
+
+input UpdateAgentConfigInput {
+  agentId: String!
+  config: AWSJSON
+  state: AgentState
+  categories: [String]
+}
+
+input UpdateAgentCodeInput {
+  agentId: String!
+  code: String!
+}
+
+input IntegrationBindingInput {
+  integrationId: String!
+  integrationType: String!
+  operations: [String!]
+  direction: BindingDirection
+}
+
+input DataStoreBindingInput {
+  dataStoreId: String!
+  dataStoreType: String!
+  operations: [String!]
+  direction: BindingDirection
+}
+
+input CreateToolConfigInput {
+  toolId: String!
+  config: AWSJSON!
+  state: ToolState
+  categories: [String]
+  integrationBindings: [IntegrationBindingInput]
+  dataStoreBindings: [DataStoreBindingInput]
+}
+
+input UpdateToolConfigInput {
+  toolId: String!
+  config: AWSJSON
+  state: ToolState
+  categories: [String]
+  integrationBindings: [IntegrationBindingInput]
+  dataStoreBindings: [DataStoreBindingInput]
+}
+
+input CreateAgentRequestInput {
+  agentName: String!
+  taskDescription: String!
+  tools: [String]
+  integrations: [String]
+  dataStores: [String]
+  appId: String
+}
+
+input CreateToolRequestInput {
+  toolName: String!
+  toolDescription: String!
+  integrationBindings: [IntegrationBindingInput]
+  dataStoreBindings: [DataStoreBindingInput]
+  appId: String
+}
+
+input SubmitTaskInput {
+  taskDetails: String!
+  callback: TaskCallbackInput
+  appId: String
+}
+
+input TaskCallbackInput {
+  type: String!
+  eventBusName: String
+  source: String
+  detailType: String
+  queueUrl: String
+  endpoint: String
+  serverId: String
+  metadata: AWSJSON
+}
+
+input AdminCreateUserInput {
+  email: String!
+  givenName: String!
+  familyName: String!
+}
+
+input AssignUserRoleInput {
+  userId: String!
+  role: String!
+  organization: String
+}
+
+input ChangePasswordInput {
+  newPassword: String!
+}
+
+input CreateOrganizationInput {
+  name: String!
+  description: String
+}
+
+input AssessmentCompletionInput {
+  projectId: ID!
+  allDimensionsComplete: Boolean!
+  timestamp: AWSDateTime!
+}
+
+input DesignProgressInput {
+  projectId: ID!
+  sectionId: String!
+  completionPercentage: Float!
+  timestamp: AWSDateTime!
+}
+
+input AgentChatterInput {
+  id: ID!
+  timestamp: AWSDateTime!
+  source: String!
+  detailType: String!
+  detail: AWSJSON!
+}
+
+input CreateIntegrationInput {
+  integrationType: IntegrationType!
+  name: String!
+  orgId: String!
+  config: AWSJSON!
+  credentials: AWSJSON!
+}
+
+input IntegrationConfigInput {
+  baseUrl: String!
+  spaceKeys: [String!]
+  enabledFeatures: [String!]
+}
+
+input IntegrationCredentialsInput {
+  apiToken: String!
+  email: String!
+}
+
+input UpdateIntegrationInput {
+  integrationId: ID!
+  name: String
+  config: AWSJSON
+  credentials: AWSJSON
+  status: IntegrationStatus
+}
+
+input FabricationEventInput {
+  type: FabricationEventType!
+  requestId: ID!
+  agentId: String
+  errorMessage: String
+  timestamp: AWSDateTime!
+}
+
+enum ProjectStatus {
+  CREATED
+  IN_PROGRESS
+  ASSESSMENT_COMPLETE
+  DESIGN_COMPLETE
+  PLANNING_COMPLETE
+  IMPLEMENTATION_READY
+  COMPLETED
+  ERROR
+}
+
+enum ModuleStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  ERROR
+}
+
+enum AgentStatusEnum {
+  IDLE
+  PROCESSING
+  WAITING_FOR_INPUT
+  COMPLETED
+  ERROR
+}
+
+enum MessageType {
+  USER_INPUT
+  AGENT_RESPONSE
+  SYSTEM_NOTIFICATION
+  PROGRESS_UPDATE
+}
+
+enum AgentState {
+  active
+  inactive
+  maintenance
+}
+
+enum ToolState {
+  active
+  inactive
+  maintenance
+}
+
+enum IntegrationType {
+  CONFLUENCE
+  SLACK
+  JIRA
+  SHAREPOINT
+  SALESFORCE
+  GITHUB
+  SERVICENOW
+  ZENDESK
+  PAGERDUTY
+  MICROSOFT
+  AWS_LAMBDA
+  AWS_SMITHY
+  MCP_SERVER
+}
+
+enum AuthenticationMethod {
+  API_KEY
+  OAUTH2
+  BASIC_AUTH
+  BEARER_TOKEN
+  IAM_ROLE
+  CONFIGURABLE
+}
+
+enum IntegrationStatus {
+  CREATED
+  CONFIGURED
+  TESTED
+  CONNECTING
+  CONNECTED
+  DISCONNECTED
+  CONNECTION_FAILED
+  CONFIGURING
+}
+
+enum FabricationStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum FabricationEventType {
+  COMPLETED
+  FAILED
+}
+
+type IntegrationOperation {
+  operationId: String!
+  name: String!
+  description: String!
+  method: String!
+  parameters: [OperationParameter!]!
+}
+
+type OperationParameter {
+  name: String!
+  type: String!
+  required: Boolean!
+  description: String!
+}
+
+type DataStore {
+  dataStoreId: ID!
+  name: String!
+  description: String
+  type: DataStoreType!
+  category: DataStoreCategory!
+  status: DataStoreStatus!
+  usage: DataStoreUsage!
+  icon: String!
+  provider: String!
+  provisionMode: DataStoreProvisionMode!
+  orgId: String!
+  createdBy: String!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  config: AWSJSON!
+  size: String
+  records: Int
+  lastSync: AWSDateTime
+  features: [String]
+  errorMessage: String
+  resourceArn: String
+  secretArn: String
+  version: Int!
+}
+
+type DataStoreStats {
+  total: Int!
+  connected: Int!
+  error: Int!
+  byCategory: AWSJSON
+  byType: AWSJSON
+}
+
+type AvailableDataSource {
+  dataStoreId: ID!
+  name: String!
+  type: DataStoreType!
+  category: DataStoreCategory!
+  usage: DataStoreUsage!
+  status: DataStoreStatus!
+  provider: String!
+  capabilities: [String!]!
+  scopedRoleArn: String
+}
+
+type DataStoreTestResult {
+  success: Boolean!
+  message: String!
+  details: AWSJSON
+}
+
+type ToolTestResult {
+  success: Boolean!
+  output: AWSJSON
+  error: String
+  executionTimeMs: Int!
+}
+
+type DeleteDataStoreResult {
+  success: Boolean!
+  message: String
+}
+
+input CreateDataStoreInput {
+  name: String!
+  description: String
+  type: DataStoreType!
+  category: DataStoreCategory!
+  provisionMode: DataStoreProvisionMode!
+  orgId: String!
+  config: AWSJSON!
+  credentials: AWSJSON
+  clientRequestToken: String!
+  usage: DataStoreUsage
+}
+
+input UpdateDataStoreInput {
+  dataStoreId: ID!
+  name: String
+  description: String
+  config: AWSJSON
+  version: Int!
+  usage: DataStoreUsage
+}
+
+enum DataStoreType {
+  S3
+  DYNAMODB
+  RDS_POSTGRESQL
+  RDS_MYSQL
+  KNOWLEDGE_BASE
+  AURORA_POSTGRESQL
+  AURORA_MYSQL
+  REDSHIFT
+  LAKE_FORMATION
+  OPENSEARCH
+  NEPTUNE
+  TIMESTREAM
+  DOCUMENTDB
+  ELASTICACHE_REDIS
+  KEYSPACES
+  QLDB
+  SAGEMAKER_FEATURE_STORE
+  EXTERNAL_POSTGRESQL
+  EXTERNAL_MYSQL
+  EXTERNAL_MONGODB
+  EXTERNAL_ELASTICSEARCH
+  EXTERNAL_REDIS
+  EXTERNAL_API
+}
+
+enum DataStoreCategory {
+  S3_STORAGE
+  NOSQL_DATABASE
+  RELATIONAL_DATABASE
+  KNOWLEDGE_BASE
+  DATA_WAREHOUSE
+  DATA_LAKE
+  SEARCH_ENGINE
+  GRAPH_DATABASE
+  TIME_SERIES
+  DOCUMENT_DATABASE
+  CACHE
+  EXTERNAL
+}
+
+enum DataStoreStatus {
+  CREATED
+  CONNECTING
+  CONNECTED
+  PROVISIONING
+  PROVISIONED
+  DISCONNECTED
+  ERROR
+  DELETING
+}
+
+enum DataStoreProvisionMode {
+  CREATE_NEW
+  CONNECT_EXISTING
+}
+
+enum DataStoreUsage {
+  KNOWLEDGE
+  OPERATIONAL
+  BOTH
+}
+
+# --- Workflow & Blueprint Types ---
+
+enum WorkflowStatus {
+  DRAFT
+  PUBLISHED
+}
+
+type Workflow {
+  workflowId: ID!
+  orgId: String!
+  name: String!
+  description: String
+  status: WorkflowStatus!
+  isBlueprint: Boolean!
+  definition: AWSJSON!
+  configuration: AWSJSON
+  version: Int!
+  versionHistory: AWSJSON
+  appId: String
+  createdBy: String!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  metadata: AWSJSON
+  timeout: Int
+}
+
+type WorkflowConnection {
+  items: [Workflow]
+  nextToken: String
+}
+
+type BlueprintConnection {
+  items: [Workflow]
+  nextToken: String
+}
+
+type DeleteWorkflowResult {
+  success: Boolean!
+  message: String
+}
+
+# --- Agent App Types ---
+
+enum AppStatus {
+  DRAFT
+  ACTIVE
+  PUBLISHED
+  ARCHIVED
+}
+
+enum ComponentStatus {
+  DESIGN
+  READY
+}
+
+type AgentBinding {
+  agentId: String!
+  status: ComponentStatus!
+  systemPromptAddition: String
+  toolRestrictions: [String]
+  modelOverride: String
+  addedAt: AWSDateTime!
+}
+
+type AppPermission {
+  permissionId: String!
+  actions: [String!]!
+  resources: [String!]!
+  description: String
+}
+
+type AppStatusEvent {
+  appId: ID!
+  previousStatus: AppStatus!
+  newStatus: AppStatus!
+  timestamp: AWSDateTime!
+}
+
+type AgentManifest {
+  name: String!
+  description: String!
+  version: String!
+  inputSchema: AWSJSON
+  outputSchema: AWSJSON
+  tools: [String]
+  resourceRequirements: AWSJSON
+}
+
+type AgentApp {
+  appId: ID!
+  orgId: String!
+  name: String!
+  description: String
+  status: AppStatus!
+  workflowIds: [String!]
+  routingConfig: AWSJSON
+  createdBy: String!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  version: Int!
+  agentBindings: [AgentBinding]
+  permissions: [AppPermission]
+  configSchema: AWSJSON
+  configValues: AWSJSON
+  endpointUrl: String
+  apiId: String
+  authMode: String
+}
+
+type AppApiKey {
+  keyId: ID!
+  name: String!
+  prefix: String!
+  status: String!
+  createdAt: AWSDateTime!
+  expiresAt: AWSDateTime
+  lastUsedAt: AWSDateTime
+}
+
+# Returned only by createAppApiKey and rotateAppApiKey mutations.
+# The apiKey field carries the full plaintext secret and is returned to the
+# caller exactly once at creation or rotation time. It is never persisted in
+# retrievable form and is never returned by listAppApiKeys or revokeAppApiKey.
+type AppApiKeyWithPlaintext {
+  keyId: ID!
+  name: String!
+  prefix: String!
+  status: String!
+  createdAt: AWSDateTime!
+  expiresAt: AWSDateTime
+  lastUsedAt: AWSDateTime
+  apiKey: String!
+}
+
+type AppMetrics {
+  totalRequests: Int!
+  successCount: Int!
+  clientErrorCount: Int!
+  serverErrorCount: Int!
+  p50Latency: Float!
+  p95Latency: Float!
+  p99Latency: Float!
+  timeSeries: [AppMetricsBucket!]!
+}
+
+type AppMetricsBucket {
+  timestamp: AWSDateTime!
+  requestCount: Int!
+  errorCount: Int!
+  avgLatency: Float!
+}
+
+type AppAccessEntry {
+  userId: String!
+  role: String!
+  grantedBy: String!
+  grantedAt: AWSDateTime!
+}
+
+type PublishResult {
+  app: AgentApp!
+  endpointUrl: String!
+  apiKey: String!
+  apiKeyId: String!
+}
+
+type AppConnection {
+  items: [AgentApp]
+  nextToken: String
+}
+
+type DeleteAppResult {
+  success: Boolean!
+  message: String
+}
+
+# --- Execution Types ---
+
+type Execution {
+  executionId: ID!
+  workflowId: String!
+  appId: String
+  orgId: String!
+  status: String!
+  workflowVersion: Int
+  currentNode: String
+  nodeResults: AWSJSON
+  input: AWSJSON
+  output: AWSJSON
+  startedAt: AWSDateTime!
+  completedAt: AWSDateTime
+  triggeredBy: String!
+  error: String
+}
+
+type ExecutionConnection {
+  items: [Execution]
+  nextToken: String
+}
+
+# --- Subscription Types ---
+
+type WorkflowProgressEvent @aws_iam @aws_cognito_user_pools {
+  executionId: ID!
+  workflowId: String!
+  eventType: String!
+  nodeId: String
+  status: String
+  output: AWSJSON
+  error: String
+  timestamp: AWSDateTime!
+}
+
+# --- Workflow & App Input Types ---
+
+input CreateWorkflowInput {
+  name: String!
+  description: String
+  orgId: String!
+  definition: AWSJSON!
+  configuration: AWSJSON
+  isBlueprint: Boolean
+  metadata: AWSJSON
+}
+
+input UpdateWorkflowInput {
+  workflowId: ID!
+  name: String
+  description: String
+  definition: AWSJSON
+  configuration: AWSJSON
+  metadata: AWSJSON
+  version: Int!
+}
+
+input ImportWorkflowInput {
+  orgId: String!
+  workflowJson: AWSJSON!
+  name: String
+}
+
+input CreateAppInput {
+  name: String!
+  description: String
+  orgId: String!
+}
+
+input UpdateAppInput {
+  appId: ID!
+  name: String
+  description: String
+  status: AppStatus
+  routingConfig: AWSJSON
+  version: Int!
+}
+
+input AppComponentInput {
+  type: String!
+  data: AWSJSON!
+}
+
+input UpdateAgentBindingInput {
+  appId: ID!
+  agentId: String!
+  systemPromptAddition: String
+  toolRestrictions: [String]
+  modelOverride: String
+  status: ComponentStatus
+}
+
+input AppStatusEventInput {
+  appId: ID!
+  previousStatus: AppStatus!
+  newStatus: AppStatus!
+  timestamp: AWSDateTime!
+}
+
+input WorkflowProgressInput {
+  executionId: ID!
+  workflowId: String!
+  eventType: String!
+  nodeId: String
+  status: String
+  output: AWSJSON
+  error: String
+  timestamp: AWSDateTime!
+}
+
+type DailyActivity {
+  date: String!
+  successCount: Int!
+  errorCount: Int!
+}
+
+type DashboardMetricsResult {
+  dailyActivity: [DailyActivity!]!
+  totalRequests: Int!
+  successRate: Float!
+  avgLatency: Float!
+}
+
+type ActivityItem {
+  entityType: String!
+  entityId: String!
+  title: String!
+  description: String!
+  timestamp: AWSDateTime!
+}
+
+type RecentActivityResult {
+  items: [ActivityItem!]!
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+  subscription: Subscription
+}

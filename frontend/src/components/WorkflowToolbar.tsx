@@ -1,0 +1,621 @@
+/**
+ * WorkflowToolbar Component
+ * 
+ * Provides action buttons for workflow operations including:
+ * - Save: Download workflow as JSON file
+ * - Load: Upload and load workflow from JSON file
+ * - Validate: Check workflow for errors and warnings
+ * - Clear: Remove all nodes and edges from canvas
+ * - Export: Download workflow as formatted JSON
+ * 
+ */
+
+import React, { useRef, useState, memo, useCallback } from 'react';
+import { 
+  SaveIcon, 
+  FolderOpenIcon, 
+  CheckCircleIcon, 
+  TrashIcon, 
+  DownloadIcon,
+  AlertCircleIcon,
+  AlertTriangleIcon,
+} from 'lucide-react';
+import { Button } from './ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui/dialog';
+import { Alert, AlertDescription, AlertTitle } from './ui/alert';
+import { toast } from 'sonner';
+import type { WorkflowNode, WorkflowEdge, ValidationResult } from '../types/workflow';
+import { serializeWorkflow, validateWorkflow, WorkflowError, deserializeWorkflow } from '../services/workflowService';
+
+export interface WorkflowToolbarProps {
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  onLoad: (nodes: WorkflowNode[], edges: WorkflowEdge[]) => void;
+  onClear: () => void;
+  hasUnsavedChanges?: boolean;
+  validationResult?: ValidationResult | null;
+}
+
+export const WorkflowToolbar = memo(function WorkflowToolbar({
+  nodes,
+  edges,
+  onLoad,
+  onClear,
+  hasUnsavedChanges = false,
+  validationResult: externalValidationResult,
+}: WorkflowToolbarProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showClearDialog, setShowClearDialog] = useState(false);
+  const [showValidationDialog, setShowValidationDialog] = useState(false);
+  const [showSaveWarningDialog, setShowSaveWarningDialog] = useState(false);
+  const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
+
+  /**
+   * Handle Save button click
+   * Requirement: Save workflow as JSON file
+   * Requirement: Serialize workflow with all data
+   * Requirement: Prevent saving invalid workflows with prompt
+   */
+  const handleSave = useCallback(() => {
+    try {
+      // Use external validation result if available, otherwise validate now
+      const validation = externalValidationResult || validateWorkflow(nodes, edges);
+      
+      // Show warning dialog if workflow has errors
+      if (!validation.isValid) {
+        setValidationResult(validation);
+        setShowSaveWarningDialog(true);
+        return;
+      }
+
+      // Proceed with save
+      performSave();
+    } catch (error) {
+      console.error('Failed to save workflow:', error);
+      
+      if (error instanceof WorkflowError) {
+        toast.error('Failed to save workflow', {
+          description: error.message,
+        });
+      } else {
+        toast.error('Failed to save workflow', {
+          description: 'An unexpected error occurred',
+        });
+      }
+    }
+  }, [nodes, edges, externalValidationResult]);
+
+  /**
+   * Perform the actual save operation
+   */
+  const performSave = useCallback(() => {
+    try {
+      // Serialize workflow to JSON
+      const workflow = serializeWorkflow(nodes, edges, {
+        name: `Workflow ${new Date().toLocaleDateString()}`,
+      });
+
+      // Create blob and download
+      const blob = new Blob([JSON.stringify(workflow, null, 2)], {
+        type: 'application/json',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `workflow-${workflow.id}-${Date.now()}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      toast.success('Workflow saved successfully', {
+        description: `Saved as ${link.download}`,
+      });
+    } catch (error) {
+      console.error('Failed to save workflow:', error);
+      
+      if (error instanceof WorkflowError) {
+        toast.error('Failed to save workflow', {
+          description: error.message,
+        });
+      } else {
+        toast.error('Failed to save workflow', {
+          description: 'An unexpected error occurred',
+        });
+      }
+    }
+  }, [nodes, edges]);
+
+  /**
+   * Handle save confirmation when workflow has errors
+   */
+  const handleSaveConfirm = useCallback(() => {
+    setShowSaveWarningDialog(false);
+    performSave();
+    toast.warning('Workflow saved with errors', {
+      description: 'The workflow may not execute correctly.',
+    });
+  }, [performSave]);
+
+  /**
+   * Handle Load button click
+   * Opens file picker for JSON file selection
+   * Requirement: Load workflow from JSON file
+   */
+  const handleLoadClick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  /**
+   * Handle file selection from file picker
+   * Requirement: Parse, validate, and load workflow
+   */
+  const handleFileChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      // Read file content
+      const content = await file.text();
+      
+      // Deserialize and validate workflow
+      const { nodes: loadedNodes, edges: loadedEdges } = await deserializeWorkflow(content);
+      
+      // Validate the loaded workflow
+      const validation = validateWorkflow(loadedNodes, loadedEdges);
+      
+      // Load the workflow
+      onLoad(loadedNodes, loadedEdges);
+      
+      // Show success message
+      if (validation.isValid) {
+        toast.success('Workflow loaded successfully', {
+          description: `Loaded ${loadedNodes.length} nodes and ${loadedEdges.length} connections`,
+        });
+      } else {
+        toast.warning('Workflow loaded with warnings', {
+          description: `${validation.errors.length} errors found. Review validation results.`,
+        });
+      }
+    } catch (error) {
+      console.error('Failed to load workflow:', error);
+      
+      if (error instanceof WorkflowError) {
+        toast.error('Failed to load workflow', {
+          description: error.message,
+        });
+      } else {
+        toast.error('Failed to load workflow', {
+          description: 'Invalid workflow file or format',
+        });
+      }
+    } finally {
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  }, [onLoad]);
+
+  /**
+   * Handle Validate button click
+   * Requirement: Validate workflow and display results
+   */
+  const handleValidate = useCallback(() => {
+    try {
+      const validation = validateWorkflow(nodes, edges);
+      setValidationResult(validation);
+      setShowValidationDialog(true);
+
+      if (validation.isValid) {
+        toast.success('Workflow is valid', {
+          description: 'No errors found',
+        });
+      } else {
+        toast.error('Workflow has validation errors', {
+          description: `${validation.errors.length} errors found`,
+        });
+      }
+    } catch (error) {
+      console.error('Validation failed:', error);
+      toast.error('Validation failed', {
+        description: 'An unexpected error occurred during validation',
+      });
+    }
+  }, [nodes, edges]);
+
+  /**
+   * Handle Clear button click
+   * Shows confirmation dialog before clearing
+   */
+  const handleClearClick = useCallback(() => {
+    if (nodes.length === 0 && edges.length === 0) {
+      toast.info('Canvas is already empty');
+      return;
+    }
+    setShowClearDialog(true);
+  }, [nodes.length, edges.length]);
+
+  /**
+   * Confirm clear operation
+   * Removes all nodes and edges from canvas
+   */
+  const handleClearConfirm = useCallback(() => {
+    onClear();
+    setShowClearDialog(false);
+    toast.success('Canvas cleared', {
+      description: 'All nodes and connections removed',
+    });
+  }, [onClear]);
+
+  /**
+   * Handle Export button click
+   * Similar to Save but with formatted JSON
+   */
+  const handleExport = useCallback(() => {
+    try {
+      // Serialize workflow to JSON
+      const workflow = serializeWorkflow(nodes, edges, {
+        name: `Workflow Export ${new Date().toLocaleDateString()}`,
+      });
+
+      // Create formatted JSON blob
+      const blob = new Blob([JSON.stringify(workflow, null, 2)], {
+        type: 'application/json',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `workflow-export-${Date.now()}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      toast.success('Workflow exported successfully', {
+        description: `Exported as ${link.download}`,
+      });
+    } catch (error) {
+      console.error('Failed to export workflow:', error);
+      toast.error('Failed to export workflow', {
+        description: 'An unexpected error occurred',
+      });
+    }
+  }, [nodes, edges]);
+
+  return (
+    <>
+      {/* Toolbar */}
+      <div 
+        className="workflow-toolbar flex items-center gap-2 px-4 py-3 bg-accent border-b border-border"
+        role="toolbar"
+        aria-label="Workflow actions"
+      >
+        <div className="flex items-center gap-2">
+          {/* Save Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleSave}
+            disabled={nodes.length === 0}
+            title="Save workflow to file"
+            aria-label="Save workflow to file"
+            className="workflow-toolbar-button"
+          >
+            <SaveIcon className="size-4" aria-hidden="true" />
+            Save
+          </Button>
+
+          {/* Load Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleLoadClick}
+            title="Load workflow from file"
+            aria-label="Load workflow from file"
+            className="workflow-toolbar-button"
+          >
+            <FolderOpenIcon className="size-4" aria-hidden="true" />
+            Load
+          </Button>
+
+          {/* Hidden file input */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleFileChange}
+            className="hidden"
+            aria-label="Select workflow file to load"
+          />
+
+          {/* Validate Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleValidate}
+            disabled={nodes.length === 0}
+            title="Validate workflow"
+            aria-label="Validate workflow for errors"
+            className="workflow-toolbar-button"
+          >
+            <CheckCircleIcon className="size-4" aria-hidden="true" />
+            Validate
+          </Button>
+
+          {/* Clear Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleClearClick}
+            disabled={nodes.length === 0 && edges.length === 0}
+            title="Clear canvas"
+            aria-label="Clear all nodes and connections from canvas"
+            className="workflow-toolbar-button"
+          >
+            <TrashIcon className="size-4" aria-hidden="true" />
+            Clear
+          </Button>
+
+          {/* Export Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleExport}
+            disabled={nodes.length === 0}
+            title="Export workflow as JSON"
+            aria-label="Export workflow as JSON file"
+            className="workflow-toolbar-button"
+          >
+            <DownloadIcon className="size-4" aria-hidden="true" />
+            Export
+          </Button>
+        </div>
+
+        {/* Status indicators */}
+        <div 
+          className="ml-auto flex items-center gap-3 text-sm text-muted-foreground"
+          role="status"
+          aria-live="polite"
+        >
+          {/* Validation Status */}
+          {externalValidationResult && nodes.length > 0 && (
+            <>
+              {externalValidationResult.isValid ? (
+                <span 
+                  className="workflow-badge workflow-badge-success flex items-center gap-1"
+                  aria-label="Workflow is valid"
+                >
+                  <CheckCircleIcon className="size-4" aria-hidden="true" />
+                  Valid
+                </span>
+              ) : (
+                <span 
+                  className="workflow-badge workflow-badge-error flex items-center gap-1"
+                  aria-label={`Workflow has ${externalValidationResult.errors.length} validation error${externalValidationResult.errors.length !== 1 ? 's' : ''}`}
+                >
+                  <AlertCircleIcon className="size-4" aria-hidden="true" />
+                  {externalValidationResult.errors.length} error{externalValidationResult.errors.length !== 1 ? 's' : ''}
+                </span>
+              )}
+              <span className="text-muted-foreground" aria-hidden="true">•</span>
+            </>
+          )}
+          
+          {hasUnsavedChanges && (
+            <>
+              <span 
+                className="workflow-badge workflow-badge-warning"
+                aria-label="Workflow has unsaved changes"
+              >
+                Unsaved changes
+              </span>
+              <span className="text-muted-foreground" aria-hidden="true">•</span>
+            </>
+          )}
+          <span aria-label={`${nodes.length} node${nodes.length !== 1 ? 's' : ''} in workflow`}>
+            {nodes.length} {nodes.length === 1 ? 'node' : 'nodes'}
+          </span>
+          <span aria-hidden="true">•</span>
+          <span aria-label={`${edges.length} connection${edges.length !== 1 ? 's' : ''} in workflow`}>
+            {edges.length} {edges.length === 1 ? 'connection' : 'connections'}
+          </span>
+        </div>
+      </div>
+
+      {/* Clear Confirmation Dialog */}
+      <Dialog open={showClearDialog} onOpenChange={setShowClearDialog}>
+        <DialogContent className="bg-card border-border text-foreground">
+          <DialogHeader>
+            <DialogTitle>Clear Canvas</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to clear the canvas? This will remove all nodes and
+              connections. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowClearDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleClearConfirm}
+            >
+              Clear Canvas
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Validation Results Dialog */}
+      <Dialog open={showValidationDialog} onOpenChange={setShowValidationDialog}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto bg-card border-border text-foreground">
+          <DialogHeader>
+            <DialogTitle>Workflow Validation Results</DialogTitle>
+            <DialogDescription>
+              {validationResult?.isValid
+                ? 'Your workflow is valid and ready to execute'
+                : 'Your workflow has validation issues that need attention'}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-4">
+            {/* Validation Status */}
+            {validationResult?.isValid ? (
+              <Alert>
+                <CheckCircleIcon className="text-chart-2" />
+                <AlertTitle>Validation Passed</AlertTitle>
+                <AlertDescription>
+                  No errors found. Your workflow is ready to be saved and executed.
+                </AlertDescription>
+              </Alert>
+            ) : (
+              <Alert variant="destructive">
+                <AlertCircleIcon />
+                <AlertTitle>Validation Failed</AlertTitle>
+                <AlertDescription>
+                  {validationResult?.errors.length || 0} error(s) found. Please fix these
+                  issues before executing the workflow.
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {/* Errors */}
+            {validationResult && validationResult.errors.length > 0 && (
+              <div className="flex flex-col gap-2">
+                <h4 className="text-sm font-semibold text-destructive">Errors</h4>
+                <div className="flex flex-col gap-2">
+                  {validationResult.errors.map((error, index) => (
+                    <div
+                      key={index}
+                      className="p-3 rounded-md bg-destructive/10 border border-destructive/20"
+                    >
+                      <div className="flex items-start gap-2">
+                        <AlertCircleIcon className="size-4 text-destructive mt-0.5 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-destructive">
+                            {error.type.replace(/_/g, ' ').toUpperCase()}
+                          </p>
+                          <p className="text-sm text-foreground mt-1">
+                            {error.message}
+                          </p>
+                          {error.nodeId && (
+                            <p className="text-xs text-muted-foreground mt-1">
+                              Node ID: {error.nodeId}
+                            </p>
+                          )}
+                          {error.edgeId && (
+                            <p className="text-xs text-muted-foreground mt-1">
+                              Edge ID: {error.edgeId}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Warnings */}
+            {validationResult && validationResult.warnings.length > 0 && (
+              <div className="flex flex-col gap-2">
+                <h4 className="text-sm font-semibold text-chart-4">Warnings</h4>
+                <div className="flex flex-col gap-2">
+                  {validationResult.warnings.map((warning, index) => (
+                    <div
+                      key={index}
+                      className="p-3 rounded-md bg-chart-4/10 border border-chart-4/20"
+                    >
+                      <div className="flex items-start gap-2">
+                        <AlertTriangleIcon className="size-4 text-chart-4 mt-0.5 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-chart-4">
+                            {warning.type.replace(/_/g, ' ').toUpperCase()}
+                          </p>
+                          <p className="text-sm text-foreground mt-1">
+                            {warning.message}
+                          </p>
+                          {warning.nodeId && (
+                            <p className="text-xs text-muted-foreground mt-1">
+                              Node ID: {warning.nodeId}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button onClick={() => setShowValidationDialog(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Save Warning Dialog */}
+      <Dialog open={showSaveWarningDialog} onOpenChange={setShowSaveWarningDialog}>
+        <DialogContent className="bg-card border-border text-foreground">
+          <DialogHeader>
+            <DialogTitle>Save Workflow with Errors?</DialogTitle>
+            <DialogDescription>
+              Your workflow has {validationResult?.errors.length || 0} validation error(s).
+              Saving it may result in execution failures.
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Show first few errors */}
+          {validationResult && validationResult.errors.length > 0 && (
+            <div className="flex flex-col gap-2 max-h-48 overflow-y-auto">
+              {validationResult.errors.slice(0, 3).map((error, index) => (
+                <div
+                  key={index}
+                  className="p-2 rounded-md bg-destructive/10 border border-destructive/20"
+                >
+                  <p className="text-sm text-destructive">{error.message}</p>
+                </div>
+              ))}
+              {validationResult.errors.length > 3 && (
+                <p className="text-xs text-muted-foreground">
+                  +{validationResult.errors.length - 3} more error(s)
+                </p>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowSaveWarningDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleSaveConfirm}
+            >
+              Save Anyway
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+});

@@ -1,0 +1,136 @@
+# Citadel CI — Lint, Test, Build on every push and PR
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  # ── Backend: lint, type-check, unit tests ──
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test -- --ci --coverage
+
+      - name: Build Lambda bundles
+        run: npm run build:lambda
+
+      - name: Build CDK
+        run: npm run build
+
+      - name: CDK synth (validate templates)
+        run: npx cdk synth --quiet
+        env:
+          ENVIRONMENT: test
+          CDK_DEFAULT_ACCOUNT: "000000000000"
+          CDK_DEFAULT_REGION: us-east-1
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high || true
+
+  # ── Frontend: lint, unit tests, build ──
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: Unit tests
+        run: npm test -- --ci --coverage
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build/
+          retention-days: 7
+
+  # ── Arbiter (Python): lint, property-based tests ──
+  arbiter:
+    name: Arbiter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install pytest hypothesis boto3 strands-agents strands-agents-tools
+
+      - name: Run tests
+        run: pytest arbiter/ -v --tb=short
+
+  # ── Security scanning ──
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Backend audit
+        working-directory: backend
+        run: |
+          npm ci
+          npm audit --audit-level=high || true
+
+      - name: Frontend audit
+        working-directory: frontend
+        run: |
+          npm ci
+          npm audit --audit-level=high || true

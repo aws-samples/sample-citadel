@@ -1,0 +1,261 @@
+.agent-details-container {
+  min-height: 100vh;
+  background: #0f1319;
+  padding: 20px;
+}
+
+.agent-details-page-header {
+  margin-bottom: 20px;
+}
+
+.agent-details-loading {
+  text-align: center;
+  padding: 40px;
+  color: #9ca3af;
+}
+
+.agent-details-error {
+  background-color: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  color: #f87171;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.agent-details-content {
+  max-width: 1200px;
+  margin: 0 auto;
+  background: #1a1f2e;
+  border: 1px solid #2a3142;
+  border-radius: 8px;
+  padding: 24px;
+}
+
+.agent-details-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #2a3142;
+}
+
+.agent-details-title {
+  font-size: 24px;
+  font-weight: 600;
+  color: white;
+  margin: 0 0 8px 0;
+}
+
+.agent-details-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.agent-details-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.agent-details-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-label {
+  font-weight: 600;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+.config-fields-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  background: #0f1319;
+  border: 1px solid #2a3142;
+  border-radius: 8px;
+}
+
+.config-section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #d1d5db;
+  margin: 0;
+}
+
+.config-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #2a3142;
+}
+
+.config-section-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.config-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.config-field-label {
+  font-weight: 500;
+  color: #9ca3af;
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.config-nested-fields {
+  margin-left: 20px;
+  padding-left: 16px;
+  border-left: 2px solid #2a3142;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-array-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-error {
+  padding: 16px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  border-radius: 6px;
+  color: #f87171;
+}
+
+.config-error pre {
+  margin-top: 8px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 12px;
+}
+
+.agent-details-metadata {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #2a3142;
+  color: #9ca3af;
+  font-size: 13px;
+}
+
+.agent-details-metadata p {
+  margin: 6px 0;
+}
+
+.agent-details-metadata strong {
+  color: #d1d5db;
+}
+
+/* Tabs */
+.agent-details-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid #2a3142;
+}
+
+.agent-tab {
+  padding: 12px 24px;
+  background: transparent;
+  border: none;
+  color: #9ca3af;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s ease;
+  position: relative;
+  bottom: -1px;
+}
+
+.agent-tab:hover {
+  color: #d1d5db;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.agent-tab.active {
+  color: white;
+  border-bottom-color: #3b82f6;
+}
+
+/* Code Editor */
+.agent-code-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.code-editor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #2a3142;
+}
+
+.monaco-editor-wrapper {
+  height: 650px;
+  border: 1px solid #2a3142;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #1e1e1e;
+}
+
+.editor-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 600px;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+/* Legacy textarea styles (kept for fallback) */
+.code-editor-textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 400px;
+  padding: 16px;
+  background: #0f1319;
+  border: 1px solid #2a3142;
+  border-radius: 8px;
+  color: white;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+
+.code-editor-textarea:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+}
+
+.code-editor-textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

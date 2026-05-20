@@ -1,0 +1,157 @@
+Commercial & Economics Assessment Guidelines
+
+Weight: 20%
+Description: Evaluates financial viability, budget adequacy, cost modeling, and return on investment for agentic AI transformation
+
+Assessment Categories
+
+1. Budget & Investment
+
+Points to Extract:
+- Total budget allocated for transformation
+- Budget breakdown (development, infrastructure, training, operations)
+- Budget approval status and authority
+- Multi-year investment commitment
+- Contingency and reserve allocation
+- Funding source (CapEx, OpEx, innovation fund)
+
+Sample Questions:
+- What budget has been allocated for this transformation?
+- How is the budget distributed across different areas?
+- Has the budget been formally approved?
+- Is this a one-time investment or multi-year commitment?
+- Do you have contingency funds for unexpected costs?
+- How is this being funded (CapEx, OpEx, etc.)?
+
+2. Cost Modeling & Estimation
+
+Points to Extract:
+- Cost estimation methodology and accuracy
+- Understanding of AI/ML cost drivers (tokens, compute, storage)
+- Infrastructure cost projections
+- Licensing and subscription costs
+- Professional services and consulting budget
+- Hidden or overlooked cost considerations
+
+Sample Questions:
+- How did you arrive at your budget estimates?
+- Do you understand the cost drivers for AI systems (tokens, compute)?
+- What infrastructure costs are you anticipating?
+- Have you budgeted for licenses, subscriptions, and professional services?
+- What costs might you be overlooking?
+
+3. Operational Costs & Sustainability
+
+Points to Extract:
+- Ongoing operational cost projections
+- Model inference and API call volume estimates
+- Data storage and transfer costs
+- Monitoring and observability costs
+- Support and maintenance budget
+- Cost optimization strategies and FinOps practices
+
+Sample Questions:
+- What are your projected ongoing operational costs?
+- What volume of AI model calls do you expect?
+- Have you estimated data storage and transfer costs?
+- What's your budget for monitoring and support?
+- Do you have FinOps practices or cost optimization strategies?
+- How will you control and optimize costs over time?
+
+4. Return on Investment (ROI)
+
+Points to Extract:
+- Expected ROI and payback period
+- ROI calculation methodology
+- Quantifiable benefits (cost savings, revenue increase)
+- Qualitative benefits (customer satisfaction, competitive advantage)
+- ROI measurement and tracking approach
+- Sensitivity analysis and risk scenarios
+
+Sample Questions:
+- What ROI are you expecting from this transformation?
+- What's your target payback period?
+- How are you calculating ROI?
+- What quantifiable benefits do you expect (cost savings, revenue)?
+- What qualitative benefits are you targeting?
+- How will you measure and track ROI over time?
+
+5. Resource Allocation
+
+Points to Extract:
+- Team size and composition
+- Full-time vs contractor/consultant mix
+- Resource availability and allocation percentage
+- Competing priorities and resource conflicts
+- Backfill or replacement plans for allocated resources
+- Ramp-up and ramp-down resource planning
+
+Sample Questions:
+- How many people will be dedicated to this initiative?
+- What's the mix of full-time staff vs contractors?
+- What percentage of time can team members dedicate?
+- Are there competing priorities for these resources?
+- Do you have backfill plans for allocated staff?
+- How will you scale the team up and down?
+
+6. Cost-Benefit Analysis
+
+Points to Extract:
+- Current state costs (baseline)
+- Efficiency gains and productivity improvements
+- Error reduction and quality improvements
+- Time savings and speed to market
+- Customer experience improvements
+- Risk reduction and compliance cost avoidance
+
+Sample Questions:
+- What are your current costs for the processes being transformed?
+- What efficiency gains do you expect?
+- How will this reduce errors or improve quality?
+- What time savings or speed improvements do you anticipate?
+- How will customer experience improve?
+- What risks or compliance costs will be reduced?
+
+7. Financial Governance & Controls
+
+Points to Extract:
+- Budget tracking and reporting processes
+- Variance analysis and corrective action procedures
+- Approval thresholds and escalation paths
+- Cost allocation and chargeback models
+- Financial audit and compliance requirements
+- Budget flexibility and reallocation authority
+
+Sample Questions:
+- How will you track and report on budget vs actuals?
+- What's your process for handling budget variances?
+- What are the approval thresholds for additional spending?
+- Do you have cost allocation or chargeback models?
+- What financial audit requirements apply?
+- How much flexibility do you have to reallocate budget?
+
+8. Economic Viability & Market Factors
+
+Points to Extract:
+- Market conditions and economic outlook
+- Competitive pressure and urgency
+- Opportunity cost of not transforming
+- Alternative investment options considered
+- Economic sensitivity and scenario planning
+- Long-term strategic value beyond immediate ROI
+
+Sample Questions:
+- How do current market conditions affect this investment?
+- What's the competitive pressure or urgency?
+- What's the cost of not doing this transformation?
+- What alternative investments did you consider?
+- How sensitive is this to economic changes?
+- What's the long-term strategic value beyond immediate ROI?
+
+Scoring Guidance
+
+High Readiness: Adequate approved budget, realistic cost modeling, clear ROI case, committed resources, strong financial governance, strategic value recognized
+
+Medium Readiness: Reasonable budget, basic cost estimates, positive ROI expected, resources identified, standard financial controls, business case approved
+
+Low Readiness: Insufficient budget, poor cost understanding, unclear ROI, resource constraints, weak financial controls, questionable viability

@@ -1,0 +1,100 @@
+# CodeBuild buildspec — Deploy phase
+# Deploys CDK stacks, invalidates CloudFront, runs health checks
+version: 0.2
+
+env:
+  variables:
+    ENVIRONMENT: "dev"
+    CDK_DEFAULT_REGION: "us-east-1"
+  parameter-store:
+    CDK_DEFAULT_ACCOUNT: "/citadel/account-id"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 24
+      python: 3.12
+    commands:
+      - cd backend && npm ci
+
+  pre_build:
+    commands:
+      - export GIT_SHA=$(git rev-parse --short HEAD)
+      - echo "Deploying $ENVIRONMENT from $GIT_SHA"
+      # CDK diff for audit trail
+      - cd backend
+      - npx cdk diff --all 2>&1 || true
+      - cd ..
+
+  build:
+    commands:
+      # Deploy all stacks
+      - cd backend
+      - npx cdk deploy --all
+          --require-approval never
+          --outputs-file ../cdk-outputs.json
+          --ci
+      - cd ..
+
+  post_build:
+    commands:
+      # Extract CloudFront distribution ID
+      - |
+        DIST_ID=$(python3 -c "
+        import json
+        with open('cdk-outputs.json') as f:
+            outputs = json.load(f)
+        stack = outputs.get('citadel-frontend-${ENVIRONMENT}', {})
+        print(stack.get('CloudFrontDistributionId', ''))
+        " 2>/dev/null || echo "")
+
+      # CloudFront invalidation
+      - |
+        if [ -n "$DIST_ID" ]; then
+          echo "Invalidating CloudFront $DIST_ID..."
+          INV_ID=$(aws cloudfront create-invalidation \
+            --distribution-id "$DIST_ID" \
+            --paths "/*" \
+            --query 'Invalidation.Id' --output text)
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$DIST_ID" \
+            --id "$INV_ID" || echo "Invalidation wait timed out"
+        fi
+
+      # Health check
+      - |
+        FRONTEND_URL=$(python3 -c "
+        import json
+        with open('cdk-outputs.json') as f:
+            outputs = json.load(f)
+        stack = outputs.get('citadel-frontend-${ENVIRONMENT}', {})
+        print(stack.get('FrontendUrl', ''))
+        " 2>/dev/null || echo "")
+        if [ -n "$FRONTEND_URL" ]; then
+          for i in 1 2 3; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$FRONTEND_URL" || echo "000")
+            echo "Health check attempt $i: HTTP $HTTP_CODE"
+            [ "$HTTP_CODE" = "200" ] && break
+            sleep 10
+          done
+        fi
+
+      # Deployment manifest
+      - |
+        cat > deployment-manifest.json <<EOF
+        {
+          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "environment": "$ENVIRONMENT",
+          "region": "$CDK_DEFAULT_REGION",
+          "git_sha": "$GIT_SHA",
+          "build_id": "$CODEBUILD_BUILD_ID",
+          "status": "completed"
+        }
+        EOF
+        echo "Deployment manifest:"
+        cat deployment-manifest.json
+
+artifacts:
+  files:
+    - cdk-outputs.json
+    - deployment-manifest.json

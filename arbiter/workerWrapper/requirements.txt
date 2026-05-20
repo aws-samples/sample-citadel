@@ -1,0 +1,3 @@
+strands-agents
+strands-agents-tools
+boto3==1.38
