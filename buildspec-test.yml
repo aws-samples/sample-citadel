@@ -1,0 +1,56 @@
+# CodeBuild buildspec — Test phase
+# Used by CodePipeline test stage
+version: 0.2
+
+env:
+  variables:
+    NODE_VERSION: "24"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 24
+      python: 3.12  # CodeBuild may not yet support 3.14; use latest available
+    commands:
+      - echo "Installing backend dependencies..."
+      - cd backend && npm ci
+      - cd ../frontend && npm ci
+      - cd ..
+      - pip install pytest hypothesis boto3
+
+  build:
+    commands:
+      # Backend lint + type check
+      - echo "Backend lint..."
+      - cd backend && npm run lint
+      - echo "Backend type check..."
+      - npx tsc --noEmit
+
+      # Backend unit tests
+      - echo "Backend tests..."
+      - npm test -- --ci --coverage
+      - cd ..
+
+      # Frontend unit tests
+      - echo "Frontend tests..."
+      - cd frontend && npm test -- --ci --coverage
+      - cd ..
+
+      # Arbiter tests
+      - echo "Arbiter tests..."
+      - pytest arbiter/ -v --tb=short
+
+      # Security audit
+      - echo "Dependency audit..."
+      - cd backend && npm audit --audit-level=high || true
+      - cd ../frontend && npm audit --audit-level=high || true
+
+reports:
+  backend-tests:
+    files:
+      - "backend/coverage/clover.xml"
+    file-format: CLOVERXML
+  frontend-tests:
+    files:
+      - "frontend/coverage/clover.xml"
+    file-format: CLOVERXML

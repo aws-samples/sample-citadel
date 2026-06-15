@@ -1,0 +1,156 @@
+{
+  "dimension": "Governance, Risk & Compliance",
+  "weight": 0.25,
+  "description": "Evaluates organizational governance structures, risk management capabilities, and compliance requirements for autonomous AI systems",
+  "categories": [
+    {
+      "category": "AI Governance Framework",
+      "points_to_extract": [
+        "Existing AI/ML governance policies and structures",
+        "AI ethics board or oversight committee existence",
+        "Decision-making authority for AI deployments",
+        "AI risk assessment processes",
+        "Model approval and validation workflows",
+        "Responsible AI principles and guidelines"
+      ],
+      "sample_questions": [
+        "Do you have an AI governance framework or policy in place?",
+        "Is there an AI ethics board or oversight committee?",
+        "Who has authority to approve AI system deployments?",
+        "How do you assess risks associated with AI systems?",
+        "What responsible AI principles does your organization follow?"
+      ]
+    },
+    {
+      "category": "Regulatory & Compliance Requirements",
+      "points_to_extract": [
+        "Industry-specific regulations (HIPAA, PCI-DSS, SOX, GDPR, etc.)",
+        "Data privacy requirements and jurisdictions",
+        "AI-specific regulations (EU AI Act, state-level AI laws)",
+        "Audit and reporting requirements",
+        "Data retention and deletion policies",
+        "Cross-border data transfer restrictions"
+      ],
+      "sample_questions": [
+        "What regulatory frameworks apply to your organization?",
+        "Do you operate in jurisdictions with specific AI regulations?",
+        "What data privacy laws must you comply with?",
+        "What are your audit and reporting obligations?",
+        "Do you have restrictions on cross-border data transfers?"
+      ]
+    },
+    {
+      "category": "Risk Management",
+      "points_to_extract": [
+        "Enterprise risk management framework maturity",
+        "Risk appetite for autonomous decision-making",
+        "Risk assessment methodologies in use",
+        "Risk mitigation and contingency planning processes",
+        "Insurance coverage for AI-related risks",
+        "Third-party risk management approach"
+      ],
+      "sample_questions": [
+        "How mature is your enterprise risk management framework?",
+        "What's your organization's appetite for AI making autonomous decisions?",
+        "How do you currently assess and mitigate technology risks?",
+        "Do you have insurance coverage for AI-related incidents?",
+        "How do you manage risks from third-party vendors and services?"
+      ]
+    },
+    {
+      "category": "Data Governance",
+      "points_to_extract": [
+        "Data ownership and stewardship model",
+        "Data classification and labeling practices",
+        "Data lineage and provenance tracking",
+        "Data quality management processes",
+        "Master data management approach",
+        "Data access controls and policies"
+      ],
+      "sample_questions": [
+        "Who owns and is accountable for different data domains?",
+        "How do you classify and label sensitive data?",
+        "Can you track data lineage and provenance?",
+        "What processes ensure data quality?",
+        "How do you control access to sensitive data?"
+      ]
+    },
+    {
+      "category": "Model Governance & Explainability",
+      "points_to_extract": [
+        "Model documentation and registry practices",
+        "Model versioning and change management",
+        "Explainability and interpretability requirements",
+        "Bias detection and mitigation processes",
+        "Model performance monitoring and drift detection",
+        "Model decommissioning procedures"
+      ],
+      "sample_questions": [
+        "How do you document and track AI models in production?",
+        "What are your requirements for model explainability?",
+        "How do you detect and mitigate bias in AI systems?",
+        "Do you monitor models for performance drift?",
+        "What's your process for retiring or replacing models?"
+      ]
+    },
+    {
+      "category": "Audit & Traceability",
+      "points_to_extract": [
+        "Audit logging requirements and retention",
+        "Decision traceability and explainability needs",
+        "Compliance reporting capabilities",
+        "Immutable audit trail requirements",
+        "Right to explanation obligations",
+        "Audit frequency and scope"
+      ],
+      "sample_questions": [
+        "What audit logging is required for your systems?",
+        "Do you need to explain AI-driven decisions to customers or regulators?",
+        "How often are you audited and by whom?",
+        "Do you need immutable audit trails?",
+        "What compliance reports must you generate?"
+      ]
+    },
+    {
+      "category": "Security Governance",
+      "points_to_extract": [
+        "Security policies and standards",
+        "Security certification requirements (SOC 2, ISO 27001, etc.)",
+        "Vulnerability management processes",
+        "Penetration testing and security assessment frequency",
+        "Incident response and breach notification procedures",
+        "Security training and awareness programs"
+      ],
+      "sample_questions": [
+        "What security certifications does your organization hold or require?",
+        "How often do you conduct security assessments and penetration tests?",
+        "What's your incident response and breach notification process?",
+        "Do you have security training programs for employees?",
+        "What security standards must vendors and partners meet?"
+      ]
+    },
+    {
+      "category": "Change Management & Approval",
+      "points_to_extract": [
+        "Change approval board structure and authority",
+        "Change management process maturity",
+        "Deployment approval requirements",
+        "Rollback and emergency change procedures",
+        "Stakeholder notification and communication processes",
+        "Change impact assessment practices"
+      ],
+      "sample_questions": [
+        "What's your change approval process for production systems?",
+        "Who must approve AI system deployments?",
+        "How do you assess the impact of changes?",
+        "What are your rollback procedures?",
+        "How do you communicate changes to stakeholders?"
+      ]
+    }
+  ],
+  "scoring_guidance": {
+    "high_readiness": "Mature AI governance framework, comprehensive compliance program, strong risk management, established audit processes, clear accountability",
+    "medium_readiness": "Basic governance policies, standard compliance practices, developing risk framework, some audit capabilities, defined roles",
+    "low_readiness": "No AI governance, reactive compliance approach, limited risk management, minimal audit trails, unclear accountability"
+  }
+}

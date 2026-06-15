@@ -1,0 +1,219 @@
+# Citadel Deploy — Build, deploy, verify
+#
+# Triggers:
+#   - Push to main → deploy to dev
+#   - Manual dispatch → deploy to any environment
+#
+# Prerequisites:
+#   - OIDC identity provider configured in AWS for GitHub Actions
+#   - IAM role with CDK deploy permissions
+#   - GitHub environment secrets: AWS_ROLE_ARN, CDK_DEFAULT_ACCOUNT
+#   - GitHub environment variables: ENVIRONMENT, CDK_DEFAULT_REGION
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: dev
+        type: choice
+        options: [dev, staging, prod]
+      skip_tests:
+        description: "Skip test phase"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false  # Never cancel in-progress deploys
+
+permissions:
+  id-token: write   # OIDC
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  # ── Gate: run tests before deploy ──
+  test:
+    if: ${{ !inputs.skip_tests }}
+    uses: ./.github/workflows/ci.yml
+
+  # ── Build all artifacts ──
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: ${{ !cancelled() && (needs.test.result == 'success' || needs.test.result == 'skipped') }}
+    outputs:
+      git_sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build backend
+        working-directory: backend
+        run: |
+          npm ci
+          npm run build
+          npm run build:lambda
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build/
+
+      - name: Upload backend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-dist
+          path: backend/dist/
+
+  # ── Deploy to AWS ──
+  deploy:
+    name: Deploy (${{ github.event.inputs.environment || 'dev' }})
+    runs-on: ubuntu-latest
+    needs: [build]
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    env:
+      ENVIRONMENT: ${{ vars.ENVIRONMENT || 'dev' }}
+      CDK_DEFAULT_REGION: ${{ vars.CDK_DEFAULT_REGION || 'us-east-1' }}
+      CDK_DEFAULT_ACCOUNT: ${{ secrets.CDK_DEFAULT_ACCOUNT }}
+      GIT_SHA: ${{ needs.build.outputs.git_sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.CDK_DEFAULT_REGION || 'us-east-1' }}
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-build
+          path: frontend/build/
+
+      - name: Download backend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-dist
+          path: backend/dist/
+
+      - name: Install backend CDK dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: CDK diff (preview changes)
+        working-directory: backend
+        run: npx cdk diff --all 2>&1 || true
+
+      - name: CDK deploy all stacks
+        working-directory: backend
+        run: |
+          npx cdk deploy --all \
+            --require-approval never \
+            --outputs-file ../cdk-outputs.json \
+            --ci
+
+      - name: CloudFront invalidation
+        if: success()
+        run: |
+          DIST_ID=$(python3 -c "
+          import json
+          with open('cdk-outputs.json') as f:
+              outputs = json.load(f)
+          stack = outputs.get('citadel-frontend-${{ env.ENVIRONMENT }}', {})
+          print(stack.get('CloudFrontDistributionId', ''))
+          " 2>/dev/null || echo "")
+
+          if [ -n "$DIST_ID" ]; then
+            echo "Invalidating CloudFront distribution $DIST_ID..."
+            INV_ID=$(aws cloudfront create-invalidation \
+              --distribution-id "$DIST_ID" \
+              --paths "/*" \
+              --query 'Invalidation.Id' --output text)
+            echo "Invalidation created: $INV_ID"
+            aws cloudfront wait invalidation-completed \
+              --distribution-id "$DIST_ID" \
+              --id "$INV_ID" || echo "Invalidation wait timed out"
+          fi
+
+      - name: Verify frontend bundle
+        if: success()
+        run: |
+          BUCKET="citadel-frontend-${{ env.ENVIRONMENT }}-${{ env.CDK_DEFAULT_ACCOUNT }}-${{ env.CDK_DEFAULT_REGION }}"
+          S3_COUNT=$(aws s3 ls "s3://$BUCKET/" --recursive | wc -l | tr -d ' ')
+          LOCAL_COUNT=$(find frontend/build -type f | wc -l | tr -d ' ')
+          echo "S3 objects: $S3_COUNT, Local files: $LOCAL_COUNT"
+          if [ "$S3_COUNT" -lt "$LOCAL_COUNT" ]; then
+            echo "::warning::S3 object count ($S3_COUNT) < local ($LOCAL_COUNT)"
+          fi
+
+      - name: Health check
+        if: success()
+        run: |
+          FRONTEND_URL=$(python3 -c "
+          import json
+          with open('cdk-outputs.json') as f:
+              outputs = json.load(f)
+          stack = outputs.get('citadel-frontend-${{ env.ENVIRONMENT }}', {})
+          print(stack.get('FrontendUrl', ''))
+          " 2>/dev/null || echo "")
+
+          if [ -n "$FRONTEND_URL" ]; then
+            echo "Checking $FRONTEND_URL..."
+            for i in 1 2 3; do
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$FRONTEND_URL" || echo "000")
+              echo "Attempt $i: HTTP $HTTP_CODE"
+              [ "$HTTP_CODE" = "200" ] && exit 0
+              sleep 10
+            done
+            echo "::warning::Health check did not return 200 after 3 attempts"
+          fi
+
+      - name: Write deployment manifest
+        if: always()
+        run: |
+          cat > deployment-manifest.json <<EOF
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "environment": "${{ env.ENVIRONMENT }}",
+            "region": "${{ env.CDK_DEFAULT_REGION }}",
+            "git_sha": "${{ env.GIT_SHA }}",
+            "git_ref": "${{ github.ref }}",
+            "run_id": "${{ github.run_id }}",
+            "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "status": "${{ job.status }}"
+          }
+          EOF
+          cat deployment-manifest.json

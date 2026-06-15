@@ -1,0 +1,41 @@
+{
+  "version": "1.0.0",
+  "id": "test-workflow-123",
+  "name": "Test Workflow",
+  "description": "A test workflow for verifying load functionality",
+  "createdAt": "2024-12-17T10:00:00.000Z",
+  "updatedAt": "2024-12-17T10:00:00.000Z",
+  "nodes": [
+    {
+      "id": "node-1",
+      "agentId": "agent1_assessment",
+      "position": {
+        "x": 100,
+        "y": 100
+      },
+      "configuration": {}
+    },
+    {
+      "id": "node-2",
+      "agentId": "agent2_design",
+      "position": {
+        "x": 400,
+        "y": 100
+      },
+      "configuration": {}
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge-1",
+      "source": "node-1",
+      "target": "node-2",
+      "sourceHandle": "output",
+      "targetHandle": "input"
+    }
+  ],
+  "metadata": {
+    "author": "Test User",
+    "tags": ["test", "example"]
+  }
+}

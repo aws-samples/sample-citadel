@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "typeRoots": ["./node_modules/@types", "../node_modules/@types"],
+    "target": "ES2022",
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["scripts/**/*.ts"],
+  "ts-node": {
+    "transpileOnly": true,
+    "compilerOptions": {
+      "module": "commonjs"
+    }
+  }
+}

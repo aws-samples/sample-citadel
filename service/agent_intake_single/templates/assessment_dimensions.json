@@ -1,0 +1,14 @@
+{
+  "pillar": "dimensions",
+  "sections": {
+    "coverage": {
+      "label": "Four-Dimension Coverage Assessment",
+      "fields": {
+        "code_dimension": { "label": "Code dimension — current-state coverage + confidence (high/medium/low)", "value": null, "required": true },
+        "data_dimension": { "label": "Data dimension — current-state coverage + confidence (high/medium/low)", "value": null, "required": true },
+        "integration_dimension": { "label": "Integration dimension — current-state coverage + confidence (high/medium/low)", "value": null, "required": true },
+        "infrastructure_dimension": { "label": "Infrastructure dimension — current-state coverage + confidence (high/medium/low)", "value": null, "required": true }
+      }
+    }
+  }
+}

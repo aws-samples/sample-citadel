@@ -1,0 +1,19 @@
+{
+  "pillar": "governance",
+  "sections": {
+    "guardrails": {
+      "label": "Human-in-the-Loop & Guardrails",
+      "fields": {
+        "hitl_requirements": { "label": "What decisions must always involve a human? (payments, approvals, exceptions)", "value": null, "required": true },
+        "compliance_constraints": { "label": "Regulatory or compliance requirements that constrain automation", "value": null, "required": true }
+      }
+    },
+    "org_readiness": {
+      "label": "Organisational Readiness",
+      "fields": {
+        "sponsor_commitment": { "label": "Is executive sponsor actively committed (budget, time, access)?", "value": null, "required": true },
+        "risk_tolerance": { "label": "Acceptable error rate and consequence of agent mistakes", "value": null, "required": true }
+      }
+    }
+  }
+}

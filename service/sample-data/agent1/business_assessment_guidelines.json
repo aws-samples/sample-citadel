@@ -1,0 +1,160 @@
+{
+  "dimension": "Business Feasibility",
+  "weight": 0.25,
+  "description": "Evaluates organizational readiness, value alignment, and change management capabilities for agentic AI transformation",
+  "categories": [
+    {
+      "category": "Business Objectives & Value Alignment",
+      "points_to_extract": [
+        "Primary business objectives for AI transformation",
+        "Expected business outcomes and success metrics",
+        "Strategic alignment with organizational goals",
+        "Problem statements and pain points being addressed",
+        "Competitive pressures or market drivers",
+        "Innovation vs efficiency focus"
+      ],
+      "sample_questions": [
+        "What business problems are you trying to solve with agentic AI?",
+        "What does success look like for this transformation?",
+        "How does this align with your broader strategic objectives?",
+        "What competitive or market pressures are driving this initiative?",
+        "Are you focused more on innovation or operational efficiency?"
+      ]
+    },
+    {
+      "category": "Stakeholder Engagement & Buy-in",
+      "points_to_extract": [
+        "Executive sponsorship level and commitment",
+        "Key stakeholder identification and involvement",
+        "Cross-functional alignment and support",
+        "Budget authority and decision-making power",
+        "Resistance or concerns from stakeholders",
+        "Communication and engagement strategy"
+      ],
+      "sample_questions": [
+        "Who is the executive sponsor for this initiative?",
+        "Which departments and stakeholders are involved?",
+        "Do you have buy-in from all affected business units?",
+        "Are there any concerns or resistance you're encountering?",
+        "How are you communicating about this transformation?"
+      ]
+    },
+    {
+      "category": "Organizational Culture & Innovation",
+      "points_to_extract": [
+        "Innovation appetite and risk tolerance",
+        "Previous transformation experience and outcomes",
+        "Learning culture and experimentation mindset",
+        "Failure tolerance and psychological safety",
+        "Speed of decision-making and bureaucracy level",
+        "Collaboration across teams and silos"
+      ],
+      "sample_questions": [
+        "How would you describe your organization's appetite for innovation?",
+        "Have you undertaken major technology transformations before?",
+        "How does your organization handle failure and learning?",
+        "How quickly can decisions be made and implemented?",
+        "How well do teams collaborate across organizational boundaries?"
+      ]
+    },
+    {
+      "category": "User Adoption & Change Readiness",
+      "points_to_extract": [
+        "End user identification and segmentation",
+        "Current user technology proficiency",
+        "User attitudes toward AI and automation",
+        "Change fatigue or transformation saturation",
+        "User involvement in design and testing",
+        "Training and support infrastructure"
+      ],
+      "sample_questions": [
+        "Who are the primary users of the agentic AI solution?",
+        "How comfortable are users with current technology?",
+        "What's the general attitude toward AI and automation?",
+        "Are users experiencing change fatigue from other initiatives?",
+        "How will users be involved in the design process?",
+        "What training and support will be provided?"
+      ]
+    },
+    {
+      "category": "Change Management Capability",
+      "points_to_extract": [
+        "Change management methodology and maturity",
+        "Change management resources and expertise",
+        "Communication plan and channels",
+        "Training program design and delivery approach",
+        "Resistance management strategies",
+        "Success measurement and feedback loops"
+      ],
+      "sample_questions": [
+        "Do you have a change management team or methodology?",
+        "What's your approach to managing organizational change?",
+        "How will you communicate changes to affected users?",
+        "What training programs are planned?",
+        "How will you measure adoption and success?",
+        "How will you gather and act on user feedback?"
+      ]
+    },
+    {
+      "category": "Process Maturity & Automation",
+      "points_to_extract": [
+        "Current process documentation and standardization",
+        "Existing automation level and tools",
+        "Process optimization and continuous improvement culture",
+        "Workflow complexity and variability",
+        "Exception handling and edge case frequency",
+        "Process ownership and accountability"
+      ],
+      "sample_questions": [
+        "How well documented and standardized are your processes?",
+        "What level of automation do you currently have?",
+        "Do you have a continuous improvement culture?",
+        "How complex and variable are the workflows you want to automate?",
+        "How often do exceptions and edge cases occur?",
+        "Who owns and is accountable for these processes?"
+      ]
+    },
+    {
+      "category": "Skills & Capabilities",
+      "points_to_extract": [
+        "Current team skills and competencies",
+        "AI/ML expertise availability",
+        "Skill gaps and training needs",
+        "Hiring plans and talent acquisition strategy",
+        "Partner and vendor relationships",
+        "Knowledge transfer and retention approach"
+      ],
+      "sample_questions": [
+        "What AI/ML skills exist in your current team?",
+        "What skill gaps have you identified?",
+        "Are you planning to hire or train existing staff?",
+        "Do you have partnerships with AI vendors or consultants?",
+        "How do you ensure knowledge transfer and retention?"
+      ]
+    },
+    {
+      "category": "Success Metrics & Measurement",
+      "points_to_extract": [
+        "Key performance indicators (KPIs) defined",
+        "Baseline metrics and current state measurement",
+        "Target metrics and success thresholds",
+        "Measurement frequency and reporting cadence",
+        "Analytics and reporting infrastructure",
+        "Continuous improvement and iteration approach"
+      ],
+      "sample_questions": [
+        "What KPIs will you use to measure success?",
+        "Do you have baseline metrics for current performance?",
+        "What targets are you aiming to achieve?",
+        "How often will you measure and report progress?",
+        "Do you have analytics infrastructure to track these metrics?",
+        "How will you iterate based on results?"
+      ]
+    }
+  ],
+  "scoring_guidance": {
+    "high_readiness": "Strong executive sponsorship, clear value alignment, innovation culture, mature change management, engaged users, defined success metrics",
+    "medium_readiness": "Management support, reasonable alignment, some change capability, moderate user engagement, basic metrics defined",
+    "low_readiness": "Weak sponsorship, unclear value proposition, resistant culture, no change management, user concerns, undefined success criteria"
+  }
+}

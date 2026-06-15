@@ -1,0 +1,14 @@
+{
+  "pillar": "technical",
+  "sections": {
+    "feasibility": {
+      "label": "Technical Feasibility",
+      "fields": {
+        "core_systems": { "label": "Core systems involved in the process", "value": null, "required": true },
+        "api_accessible": { "label": "Are the key systems API-accessible? (yes / partial / no)", "value": null, "required": true },
+        "data_formats": { "label": "Input data formats (structured / semi-structured / unstructured)", "value": null, "required": true },
+        "automation_blockers": { "label": "Any known blockers to automation (legacy systems, no API, data quality, compliance)?", "value": null, "required": true }
+      }
+    }
+  }
+}

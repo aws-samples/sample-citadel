@@ -1,0 +1,17 @@
+# Frontend specific
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+build
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# AWS Configuration
+public/aws-exports.json
+
+#local context
+guidelines/
+
+# Compiled Tailwind output (source is src/styles/custom.css)
+src/styles/global.css

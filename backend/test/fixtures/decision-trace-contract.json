@@ -1,0 +1,182 @@
+[
+  {
+    "name": "case-law match",
+    "finding": {
+      "findingId": "f-case-law-1",
+      "workflowId": "wf-case-law",
+      "decision": "permit",
+      "reason": "case_law:CL-EXAMPLE-1",
+      "requestingAgent": "agent-a",
+      "targetAgent": "agent-b",
+      "scopeEvaluated": null,
+      "contractEvaluated": null,
+      "escalationTarget": null,
+      "residualAuthorityDenial": false,
+      "timestamp": 1700000000
+    },
+    "expected": {
+      "findingId": "f-case-law-1",
+      "terminalStepNumber": 1,
+      "terminalDecision": "permit",
+      "reasonTokens": ["case_law", "CL-EXAMPLE-1"],
+      "constitutionalOverride": false,
+      "arbitrationPattern": null,
+      "scopeReduction": null,
+      "steps": [
+        { "stepNumber": 1, "status": "matched" },
+        { "stepNumber": 2, "status": "pass-through" },
+        { "stepNumber": 3, "status": "skipped" },
+        { "stepNumber": 4, "status": "skipped" },
+        { "stepNumber": 5, "status": "skipped" },
+        { "stepNumber": 6, "status": "skipped" },
+        { "stepNumber": 7, "status": "skipped" },
+        { "stepNumber": 8, "status": "skipped" }
+      ]
+    }
+  },
+  {
+    "name": "residual authority denial",
+    "finding": {
+      "findingId": "f-residual-1",
+      "workflowId": "wf-residual",
+      "decision": "deny",
+      "reason": "residual_authority_denial:no_scope_covers_action",
+      "requestingAgent": "agent-a",
+      "targetAgent": "agent-b",
+      "scopeEvaluated": null,
+      "contractEvaluated": null,
+      "escalationTarget": null,
+      "residualAuthorityDenial": true,
+      "timestamp": 1700000100
+    },
+    "expected": {
+      "findingId": "f-residual-1",
+      "terminalStepNumber": 4,
+      "terminalDecision": "deny",
+      "reasonTokens": ["residual_authority_denial", "no_scope_covers_action"],
+      "constitutionalOverride": false,
+      "arbitrationPattern": null,
+      "scopeReduction": null,
+      "steps": [
+        { "stepNumber": 1, "status": "pass-through" },
+        { "stepNumber": 2, "status": "pass-through" },
+        { "stepNumber": 3, "status": "matched" },
+        { "stepNumber": 4, "status": "denied" },
+        { "stepNumber": 5, "status": "skipped" },
+        { "stepNumber": 6, "status": "skipped" },
+        { "stepNumber": 7, "status": "skipped" },
+        { "stepNumber": 8, "status": "skipped" }
+      ]
+    }
+  },
+  {
+    "name": "single-domain permit",
+    "finding": {
+      "findingId": "f-scope-1",
+      "workflowId": "wf-scope",
+      "decision": "permit",
+      "reason": "scope_match:UNIT-1",
+      "requestingAgent": "agent-a",
+      "targetAgent": "agent-b",
+      "scopeEvaluated": "UNIT-1",
+      "contractEvaluated": null,
+      "escalationTarget": null,
+      "residualAuthorityDenial": false,
+      "timestamp": 1700000200
+    },
+    "expected": {
+      "findingId": "f-scope-1",
+      "terminalStepNumber": 7,
+      "terminalDecision": "permit",
+      "reasonTokens": ["scope_match", "UNIT-1"],
+      "constitutionalOverride": false,
+      "arbitrationPattern": null,
+      "scopeReduction": null,
+      "steps": [
+        { "stepNumber": 1, "status": "pass-through" },
+        { "stepNumber": 2, "status": "pass-through" },
+        { "stepNumber": 3, "status": "matched" },
+        { "stepNumber": 4, "status": "pass-through" },
+        { "stepNumber": 5, "status": "matched" },
+        { "stepNumber": 6, "status": "pass-through" },
+        { "stepNumber": 7, "status": "permitted" },
+        { "stepNumber": 8, "status": "skipped" }
+      ]
+    }
+  },
+  {
+    "name": "arbitration rivalrous claim",
+    "finding": {
+      "findingId": "f-arbitration-1",
+      "workflowId": "wf-arbitration",
+      "decision": "permit",
+      "reason": "rivalrous_claim:winner=A:loser=B:attenuation",
+      "requestingAgent": "agent-a",
+      "targetAgent": "agent-b",
+      "scopeEvaluated": "UNIT-A",
+      "contractEvaluated": "CONTRACT-AB",
+      "escalationTarget": null,
+      "residualAuthorityDenial": false,
+      "timestamp": 1700000300
+    },
+    "expected": {
+      "findingId": "f-arbitration-1",
+      "terminalStepNumber": 6,
+      "terminalDecision": "permit",
+      "reasonTokens": ["rivalrous_claim", "winner=A", "loser=B", "attenuation"],
+      "constitutionalOverride": false,
+      "arbitrationPattern": "rivalrous_claim",
+      "scopeReduction": "attenuation",
+      "steps": [
+        { "stepNumber": 1, "status": "pass-through" },
+        { "stepNumber": 2, "status": "pass-through" },
+        { "stepNumber": 3, "status": "matched" },
+        { "stepNumber": 4, "status": "pass-through" },
+        { "stepNumber": 5, "status": "matched" },
+        { "stepNumber": 6, "status": "matched" },
+        { "stepNumber": 7, "status": "skipped" },
+        { "stepNumber": 8, "status": "skipped" }
+      ]
+    }
+  },
+  {
+    "name": "constitutional override",
+    "finding": {
+      "findingId": "f-const-1",
+      "workflowId": "wf-const",
+      "decision": "deny",
+      "reason": "constitutional_review:GLOBAL-LAYER:invariant_violated:approval_required",
+      "requestingAgent": "agent-a",
+      "targetAgent": "agent-b",
+      "scopeEvaluated": null,
+      "contractEvaluated": null,
+      "escalationTarget": null,
+      "residualAuthorityDenial": false,
+      "timestamp": 1700000400
+    },
+    "expected": {
+      "findingId": "f-const-1",
+      "terminalStepNumber": 8,
+      "terminalDecision": "deny",
+      "reasonTokens": [
+        "constitutional_review",
+        "GLOBAL-LAYER",
+        "invariant_violated",
+        "approval_required"
+      ],
+      "constitutionalOverride": true,
+      "arbitrationPattern": null,
+      "scopeReduction": null,
+      "steps": [
+        { "stepNumber": 1, "status": "pass-through" },
+        { "stepNumber": 2, "status": "pass-through" },
+        { "stepNumber": 3, "status": "pass-through" },
+        { "stepNumber": 4, "status": "pass-through" },
+        { "stepNumber": 5, "status": "pass-through" },
+        { "stepNumber": 6, "status": "pass-through" },
+        { "stepNumber": 7, "status": "pass-through" },
+        { "stepNumber": 8, "status": "overridden" }
+      ]
+    }
+  }
+]

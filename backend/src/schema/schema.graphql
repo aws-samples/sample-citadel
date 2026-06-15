@@ -1,0 +1,2282 @@
+type Query {
+  getProject(id: ID!): Project
+  listProjects(filter: ProjectFilter): ProjectConnection
+  # ADR governance queries.
+  getADR(adrId: ID!): ADR
+  listADRsForProject(projectId: ID!): [ADR!]!
+  getAgentStatus(projectId: ID!, agentId: String!): AgentStatus
+  getConversationHistory(projectId: ID!, limit: Int, nextToken: String): ConversationHistoryPage
+  listAgentConfigs: [AgentConfig]
+  getAgentConfig(agentId: String!): AgentConfig
+  getAgentCode(agentId: String!): AgentCode
+  listToolConfigs: [ToolConfig]
+  getToolConfig(toolId: String!): ToolConfig
+  listUsers: [User]
+  getUser(userId: String!): User
+  getCurrentUserProfile: User
+  listAvailableRoles: [String]
+  listOrganizations: [Organization]
+  getWorkflow(workflowId: ID!): Workflow
+  listWorkflows(orgId: String!, status: WorkflowStatus): WorkflowConnection
+  listBlueprints(category: String): BlueprintConnection
+  getApp(appId: ID!): RegistryAgentRecord
+  listApps(orgId: String!): AppConnection
+  listAppWorkflows(appId: ID!): [Workflow!]
+  getExecution(executionId: ID!): Execution
+  listExecutions(workflowId: ID!): ExecutionConnection
+  exportWorkflow(workflowId: ID!): AWSJSON
+  getWorkflowVersion(workflowId: ID!, version: Int!): Workflow
+  getAssessmentProgress(sessionId: String!): [AssessmentDimensionProgress]
+  generateReportDownloadUrl(projectId: ID!): ReportDownloadUrl
+  listIntegrations(orgId: String!, integrationType: IntegrationType, status: IntegrationStatus): [Integration]
+  getIntegration(integrationId: ID!): Integration
+  getFabricatorQueue: [FabricationQueueItem]
+  listDataStores(orgId: String!, category: DataStoreCategory): [DataStore]
+  getDataStore(dataStoreId: ID!): DataStore
+  getDataStoreStats(orgId: String!): DataStoreStats
+  getProjectDocument(projectId: ID!, documentKey: String!): ProjectDocument
+  getDocumentIngestionStatus(projectId: ID!, documentKey: String!): DocumentIngestionStatus
+  listProjectDocuments(projectId: ID!): [ProjectDocumentItem]
+  listDocumentVersions(projectId: ID!, documentKey: String!): [DocumentVersion]
+  getDocumentVersion(projectId: ID!, documentKey: String!, versionId: String!): ProjectDocument
+  listAvailableDataSources(orgId: String!, usage: DataStoreUsage): [AvailableDataSource!]!
+  listIntegrationOperations(integrationType: String!): [IntegrationOperation!]!
+  listAppApiKeys(appId: ID!): [AppApiKey!]!
+  getAppMetrics(appId: ID!, startTime: AWSDateTime!, endTime: AWSDateTime!): AppMetrics
+  listAppAccessEntries(appId: ID!): [AppAccessEntry!]!
+  getDashboardMetrics(orgId: String!, startTime: AWSDateTime!, endTime: AWSDateTime!): DashboardMetricsResult
+  getRecentActivity(orgId: String!, limit: Int): RecentActivityResult
+  searchAgentConfigs(query: String!): [AgentConfig]
+  searchToolConfigs(query: String!): [ToolConfig]
+
+  # AgentDesignAssessment (Requirement 7)
+  getAgentDesignAssessment(projectId: ID!): AgentDesignAssessment
+  # ProgramReview (Requirement 10)
+  getProgramReview(reviewId: ID!): ProgramReview
+  listProgramReviewsForProject(projectId: ID!): [ProgramReview!]!
+  # ExecutionSpecification
+  getExecutionSpecification(specId: ID!): ExecutionSpecification
+  listExecutionSpecifications(projectId: ID!): [ExecutionSpecification!]!
+  # InterrogationRound
+  getInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound
+  listInterrogationRounds(projectId: ID!): [InterrogationRound!]!
+
+  getGovernanceMode: GovernanceMode!
+  listGovernanceFindings(limit: Int, cursor: String, decision: String, workflowId: String, sinceTs: Float): GovernanceFindingConnection!
+  getGovernanceFinding(findingId: String!): GovernanceFinding
+  getReconcilerStatus: ReconcilerStatus!
+
+  getRolloutReadiness: RolloutReadinessReport!
+
+  getMismatchHeatmap(sinceTs: Float, untilTs: Float, bucketSeconds: Int): MismatchHeatmapReport!
+
+  getEscalationMetricSeries(sinceTs: Float, untilTs: Float, periodSeconds: Int): MetricSeries!
+
+  getDecisionTrace(findingId: String!): DecisionTrace
+
+  listAuthorityUnits(registryId: String, includeRevoked: Boolean): [AuthorityUnit!]!
+  listCompositionContracts: [CompositionContract!]!
+
+  getRevokeImpact(unitId: String!, sinceTs: Float, untilTs: Float): RevokeImpactReport!
+
+  listConstitutionalLayers: [ConstitutionalLayer!]!
+  getConstitutionalRuleStats(sinceTs: Float, untilTs: Float): ConstitutionRuleStatsReport!
+
+  listCaseLaw(includeRevoked: Boolean): [CaseLawEntry!]!
+
+  getAuthorityGraphHistorySettings: AuthorityGraphHistorySettings!
+
+  listAuthorityGraphSnapshots(sinceTs: Float, untilTs: Float): [AuthorityGraphSnapshotSummary!]!
+  getAuthorityGraphSnapshot(snapshotId: String!): AuthorityGraphSnapshot
+
+  getD4RetrospectiveReport(windowDays: Int): D4RetrospectiveReport!
+
+  getTrustPath(resourceType: String!, resourceId: String!): TrustPathReport!
+
+  getResourceIamDrift(resourceType: String!, resourceId: String!): IamDriftReport!
+}
+
+type Mutation {
+  createProject(input: CreateProjectInput!): Project
+  updateProject(id: ID!, input: UpdateProjectInput!): Project
+  # ADR governance mutations. adds reopenADR with
+  # audit-before-auth (QT2A-7 + QT3-3): every reopen attempt is durably
+  # audited in citadel-adr-reopen-attempts-{env} BEFORE the Cognito
+  # permission check, so denied attempts remain non-repudiable.
+  createADR(input: ADRInput!): ADR!
+  supersedeADR(oldAdrId: ID!, newAdrId: ID!): ADR!
+  reopenADR(adrId: ID!, proposedChange: String!, revisitConditionMatched: Boolean!, reason: String!): ADR!
+  sendMessageToAgent(
+    projectId: ID!
+    agentId: String!
+    message: String!
+  ): ConversationMessage
+  uploadDocument(projectId: ID!, file: S3Object!): DocumentUploadResult
+  updateAgentStatus(
+    projectId: ID!
+    agentId: String!
+    status: AgentStatusInput!
+  ): AgentStatus
+  updateProjectProgress(
+    projectId: ID!
+    progress: ProjectProgressInput!
+  ): ProjectProgress
+  sendMessage(
+    projectId: ID!
+    message: ConversationMessageInput!
+  ): ConversationMessage
+  publishConversationMessage(input: PublishMessageInput!): ConversationMessage
+    @aws_iam
+  generateDocumentUploadUrl(input: GenerateUploadUrlInput!): DocumentUploadUrl
+  ingestDocument(projectId: ID!, documentKey: String!): IngestDocumentResult
+  notifyDocumentReady(projectId: ID!, documentKey: String!, fileName: String!, fileSize: Int!, fileType: String!): NotifyDocumentReadyResult
+  deleteDocument(projectId: ID!, documentKey: String!): DocumentDeleteResult
+  generateDocumentPdf(projectId: ID!, documentKey: String!): ReportDownloadUrl
+  updateAgentConfig(input: UpdateAgentConfigInput!): AgentConfig
+  createAgentConfig(input: CreateAgentConfigInput!): AgentConfig
+  deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
+  updateAgentCode(input: UpdateAgentCodeInput!): AgentCode
+  updateToolConfig(input: UpdateToolConfigInput!): ToolConfig
+  createToolConfig(input: CreateToolConfigInput!): ToolConfig
+  deleteToolConfig(toolId: String!): DeleteToolConfigResult
+  requestAgentCreation(input: CreateAgentRequestInput!): AgentCreationResponse
+  requestToolCreation(input: CreateToolRequestInput!): AgentCreationResponse
+  submitTask(input: SubmitTaskInput!): TaskSubmissionResponse
+  adminCreateUser(input: AdminCreateUserInput!): UserManagementResponse
+  assignUserRole(input: AssignUserRoleInput!): UserManagementResponse
+  removeUserRole(userId: String!, role: String!): UserManagementResponse
+  changePassword(input: ChangePasswordInput!): UserManagementResponse
+  adminResetUserPassword(userId: String!): UserManagementResponse
+  adminResendInvitation(userId: String!): UserManagementResponse
+  createOrganization(input: CreateOrganizationInput!): Organization
+  deleteOrganization(orgId: String!): UserManagementResponse
+  publishAssessmentCompletion(input: AssessmentCompletionInput!): AssessmentCompletionEvent @aws_iam
+  publishDesignProgress(input: DesignProgressInput!): DesignProgressEvent @aws_iam @aws_cognito_user_pools
+  publishChatter(input: AgentChatterInput!): AgentChatterMessage @aws_iam
+  createIntegration(input: CreateIntegrationInput!): Integration
+  updateIntegration(input: UpdateIntegrationInput!): Integration
+  deleteIntegration(integrationId: ID!): DeleteIntegrationResult
+  testIntegration(integrationId: ID!): IntegrationTestResult
+  connectIntegration(integrationId: ID!): Integration
+  disconnectIntegration(integrationId: ID!): Integration
+  publishFabricationEvent(input: FabricationEventInput!): FabricationEvent @aws_iam
+  createDataStore(input: CreateDataStoreInput!): DataStore
+  updateDataStore(input: UpdateDataStoreInput!): DataStore
+  deleteDataStore(dataStoreId: ID!): DeleteDataStoreResult
+  connectDataStore(dataStoreId: ID!): DataStore
+  disconnectDataStore(dataStoreId: ID!): DataStore
+  testDataStoreConnection(dataStoreId: ID!): DataStoreTestResult
+  testTool(toolId: String!, inputs: AWSJSON!, orgId: String!): ToolTestResult!
+  addAppComponent(appId: ID!, component: RegistryAgentComponentInput!): RegistryAgentRecord
+  removeAppComponent(appId: ID!, componentType: String!, componentId: String!): RegistryAgentRecord
+  updateAgentBinding(input: UpdateRegistryAgentBindingInput!): RegistryAgentRecord
+  setAppConfigSchema(appId: ID!, schema: AWSJSON!, version: Int!): RegistryAgentRecord
+  setAppConfigValues(appId: ID!, values: AWSJSON!, version: Int!): RegistryAgentRecord
+  publishAppStatusEvent(input: AppStatusEventInput!): AppStatusEvent @aws_iam
+  publishAgentManifest(agentId: String!, manifest: AWSJSON!): AgentConfig
+  createWorkflow(input: CreateWorkflowInput!): Workflow
+  updateWorkflow(input: UpdateWorkflowInput!): Workflow
+  deleteWorkflow(workflowId: ID!): DeleteWorkflowResult
+  publishWorkflow(workflowId: ID!): Workflow
+  updateWorkflowConfiguration(workflowId: ID!, configuration: AWSJSON!, version: Int!): Workflow
+  importBlueprint(blueprintId: ID!, appId: ID!, name: String): Workflow
+  importWorkflow(input: ImportWorkflowInput!): Workflow
+  createApp(input: CreateAppInput!): RegistryAgentRecord
+  updateApp(input: UpdateAppInput!): RegistryAgentRecord
+  deleteApp(appId: ID!): DeleteAppResult
+  bindWorkflowToApp(appId: ID!, workflowId: ID!): RegistryAgentRecord
+  unbindWorkflowFromApp(appId: ID!, workflowId: ID!): RegistryAgentRecord
+  publishApp(appId: ID!): PublishResult
+  unpublishApp(appId: ID!): RegistryAgentRecord
+  createAppApiKey(appId: ID!, name: String!, expiresIn: Int): AppApiKeyWithPlaintext
+  revokeAppApiKey(appId: ID!, keyId: ID!): AppApiKey
+  rotateAppApiKey(appId: ID!, keyId: ID!): AppApiKeyWithPlaintext
+  setAppAuthConfig(appId: ID!, authConfig: AWSJSON!): RegistryAgentRecord
+  grantAppAccess(appId: ID!, userId: String!, role: String!): RegistryAgentRecord
+  revokeAppAccess(appId: ID!, userId: String!): RegistryAgentRecord
+  startExecution(workflowId: ID!, input: AWSJSON): Execution
+  cancelExecution(executionId: ID!): Execution
+  publishWorkflowProgress(input: WorkflowProgressInput!): WorkflowProgressEvent @aws_iam
+
+  # AgentDesignAssessment (Requirement 7)
+  startAgentDesignAssessment(projectId: ID!): AgentDesignAssessment!
+  submitAgentDesignAssessment(
+    projectId: ID!
+    archetype: GovernanceArchetype!
+    archetypeConfidence: Float
+    dimensionRanking: [DimensionComplexityInput!]!
+    accessibleDataSources: [String!]!
+    primaryRiskAreas: [String!]!
+  ): AgentDesignAssessment!
+  # ProgramReview (Requirement 10)
+  runProgramReview(projectId: ID!): ProgramReview!
+  # ExecutionSpecification
+  createExecutionSpecification(input: ExecutionSpecificationInput!): ExecutionSpecification!
+  submitExecutionSpecification(specId: ID!): ExecutionSpecification!
+  approveExecutionSpecification(specId: ID!): ExecutionSpecification!
+  rejectExecutionSpecification(specId: ID!, reason: String!): ExecutionSpecification!
+  reviseExecutionSpecification(specId: ID!, input: ReviseExecutionSpecificationInput!): ExecutionSpecification!
+  # InterrogationRound
+  startInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound!
+  injectConstraints(projectId: ID!, roundN: Int!, constraints: [String!]!): InterrogationRound!
+  stabiliseRound(projectId: ID!, roundN: Int!, transcript: [TranscriptMessageInput!]!, stabilisedSummary: String!): InterrogationRound!
+
+  setGovernanceMode(input: SetGovernanceModeInput!): SetGovernanceModeResult!
+
+  markReadinessCheckVerified(input: MarkReadinessCheckVerifiedInput!): MarkReadinessCheckVerifiedResult!
+
+  # Internal-only: published by the governance fanout Lambda via an
+  # IAM-signed request. MUST NOT be exposed to user-pool clients —
+  # the auth check at the resolver level rejects non-IAM callers as a
+  # defence-in-depth measure on top of the directive.
+  publishGovernanceFinding(input: PublishGovernanceFindingInput!): GovernanceFinding!
+    @aws_iam
+
+  # Internal-only: published by the governance-notifier relay Lambda
+  # (driven by EventBridge governance.* detail-types). Carries the full
+  # original event payload (detail) as AWSJSON so admin subscribers see
+  # the same shape the producer wrote, plus a contract version so future
+  # additions to the GovernanceEvent payload are non-breaking.
+  publishGovernanceEvent(input: GovernanceEventInput!): GovernanceEvent!
+    @aws_iam
+
+  addConstitutionalRule(input: AddConstitutionalRuleInput!): ConstitutionalRuleMutationResult!
+  updateConstitutionalRule(input: UpdateConstitutionalRuleInput!): ConstitutionalRuleMutationResult!
+  deleteConstitutionalRule(input: DeleteConstitutionalRuleInput!): ConstitutionalRuleMutationResult!
+
+  revokeCaseLaw(input: RevokeCaseLawInput!): CaseLawMutationResult!
+  unrevokeCaseLaw(input: UnrevokeCaseLawInput!): CaseLawMutationResult!
+  updateCaseLawPrecedence(input: UpdateCaseLawPrecedenceInput!): CaseLawMutationResult!
+
+  updateAuthorityGraphHistorySettings(input: UpdateAuthorityGraphHistorySettingsInput!): AuthorityGraphHistorySettingsResult!
+}
+
+type Subscription {
+  onAgentStatusUpdate(projectId: ID!): AgentStatus
+    @aws_subscribe(mutations: ["updateAgentStatus"])
+  onConversationMessage(projectId: ID!): ConversationMessage
+    @aws_subscribe(mutations: ["sendMessage", "publishConversationMessage"])
+  onProjectProgress(projectId: ID!): ProjectProgress
+    @aws_subscribe(mutations: ["updateProjectProgress"])
+  onAssessmentCompleted(projectId: ID!): AssessmentCompletionEvent
+    @aws_subscribe(mutations: ["publishAssessmentCompletion"])
+  onDesignProgress(projectId: ID!): DesignProgressEvent
+    @aws_subscribe(mutations: ["publishDesignProgress"])
+    @aws_iam @aws_cognito_user_pools
+  onChatter: AgentChatterMessage
+    @aws_subscribe(mutations: ["publishChatter"])
+    @aws_cognito_user_pools
+  onFabricationEvent: FabricationEvent
+    @aws_subscribe(mutations: ["publishFabricationEvent"])
+    @aws_iam @aws_cognito_user_pools
+  onWorkflowProgress(executionId: ID!): WorkflowProgressEvent
+    @aws_subscribe(mutations: ["publishWorkflowProgress"])
+    @aws_iam @aws_cognito_user_pools
+  onAppStatusChange(appId: ID!): AppStatusEvent
+    @aws_subscribe(mutations: ["publishAppStatusEvent"])
+    @aws_iam @aws_cognito_user_pools
+
+  # Live stream of governance findings as they are recorded. Admin-only
+  # via the Cognito group filter on the directive — non-admin tokens are
+  # rejected by AppSync at CONNECT time, the resolver layer never runs.
+  onGovernanceFinding(decision: String): GovernanceFinding
+    @aws_subscribe(mutations: ["publishGovernanceFinding"])
+    @aws_cognito_user_pools(cognito_groups: ["admin"])
+
+  # Live stream of governance.* EventBridge events relayed via the
+  # governance-notifier Lambda. Admin-only — the directive rejects
+  # non-admin tokens at CONNECT time. Optional `detailType` filter
+  # surfaces a single channel of the 14 governance.* detail-types when
+  # callers don't want the firehose.
+  onGovernanceEvent(detailType: String): GovernanceEvent
+    @aws_subscribe(mutations: ["publishGovernanceEvent"])
+    @aws_cognito_user_pools(cognito_groups: ["admin"])
+}
+
+type Project {
+  id: ID!
+  name: String!
+  status: ProjectStatus!
+  currentModule: Module!
+  progress: ProjectProgress!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  owner: String!
+  description: String
+  requirements: String
+  agents: [AgentStatus]
+  archetype: GovernanceArchetype
+  archetypeConfidence: Float
+  archetypeStatus: ProjectArchetypeStatus!
+}
+
+# ADR governance entity.
+# See enum ADRStatus / ADRSeverity for lifecycle and severity domains.
+# The five mandatory framework fields (decision, reasoning, constraints,
+# alternativesConsidered, revisitConditions) implement the canonical
+# Architecture Decision Record pattern. QT1-6 adds severity/affectsModules/
+# reviewers as optional metadata. QT3-2 guarantees optimistic-lock writes
+# via the version field. sourceRoundIds carries the conversation rounds
+# that produced the decision (C7/C14 traceability).
+type ADR {
+  adrId: ID!
+  projectId: ID!
+  title: String!
+  decision: String!
+  reasoning: String!
+  constraints: [String!]!
+  alternativesConsidered: [String!]!
+  revisitConditions: [String!]!
+  status: ADRStatus!
+  severity: ADRSeverity
+  affectsModules: [String!]
+  reviewers: [String!]
+  version: Int!
+  createdAt: AWSDateTime!
+  createdBy: String!
+  lockedAt: AWSDateTime
+  supersededBy: ID
+  sourceRoundIds: [ID!]!
+}
+
+input ADRInput {
+  projectId: ID!
+  title: String!
+  decision: String!
+  reasoning: String!
+  constraints: [String!]!
+  alternativesConsidered: [String!]!
+  revisitConditions: [String!]!
+  severity: ADRSeverity
+  affectsModules: [String!]
+  reviewers: [String!]
+  sourceRoundIds: [ID!]!
+}
+
+type Module {
+  id: String!
+  name: String!
+  description: String!
+  status: ModuleStatus!
+  agentId: String!
+}
+
+type ProjectProgress {
+  overall: Float!
+  assessment: Float!
+  design: Float!
+  planning: Float!
+  implementation: Float!
+  currentPhase: String!
+  estimatedCompletion: AWSDateTime
+}
+
+type AgentStatus {
+  agentId: String!
+  projectId: ID!
+  status: AgentStatusEnum!
+  currentTask: String
+  progress: Float
+  lastUpdate: AWSDateTime!
+  metadata: AWSJSON
+  errorMessage: String
+}
+
+type ConversationHistoryPage @aws_iam @aws_cognito_user_pools {
+  items: [ConversationMessage]
+  nextToken: String
+}
+
+type ConversationMessage @aws_iam @aws_cognito_user_pools {
+  id: ID!
+  projectId: ID!
+  agentId: String!
+  message: String!
+  messageType: MessageType!
+  timestamp: AWSDateTime!
+  metadata: AWSJSON
+  correlationId: String
+}
+
+type DocumentUploadResult {
+  success: Boolean!
+  documentId: String
+  url: String
+  message: String
+}
+
+type DocumentUploadUrl {
+  uploadUrl: String!
+  documentKey: String!
+  expiresIn: Int!
+}
+
+type IngestDocumentResult {
+  documentKey: String!
+  status: String!
+}
+
+type DocumentIngestionStatus {
+  documentKey: String!
+  status: String!
+  statusReason: String
+  updatedAt: String
+}
+
+type NotifyDocumentReadyResult {
+  success: Boolean!
+}
+
+type DocumentDeleteResult {
+  documentKey: String!
+  status: String!
+}
+
+type ProjectDocumentItem {
+  documentKey: String!
+  fileName: String!
+  size: Int!
+  lastModified: String!
+}
+
+type ProjectDocument {
+  documentKey: String!
+  content: String!
+  versionId: String
+  lastModified: AWSDateTime
+}
+
+type DocumentVersion {
+  versionId: String!
+  lastModified: AWSDateTime!
+  size: Int!
+  isLatest: Boolean!
+}
+
+type AgentConfig {
+  agentId: String!
+  name: String
+  orgId: String!
+  config: AWSJSON!
+  state: AgentState!
+  categories: [String]
+  createdAt: AWSDateTime
+  updatedAt: AWSDateTime
+  manifest: AgentManifest
+}
+
+type DeleteAgentConfigResult {
+  success: Boolean!
+  message: String
+}
+
+type AgentCode {
+  agentId: String!
+  code: String!
+  version: String
+  lastModified: AWSDateTime
+}
+
+enum BindingDirection {
+  INPUT
+  OUTPUT
+  BIDIRECTIONAL
+}
+
+type IntegrationBinding {
+  integrationId: String!
+  integrationType: String!
+  operations: [String!]
+  direction: BindingDirection
+}
+
+type DataStoreBinding {
+  dataStoreId: String!
+  dataStoreType: String!
+  operations: [String!]
+  direction: BindingDirection
+}
+
+type ToolConfig {
+  toolId: String!
+  orgId: String!
+  config: AWSJSON!
+  state: ToolState!
+  categories: [String]
+  integrationBindings: [IntegrationBinding]
+  dataStoreBindings: [DataStoreBinding]
+  createdAt: AWSDateTime
+  updatedAt: AWSDateTime
+}
+
+type DeleteToolConfigResult {
+  success: Boolean!
+  message: String
+}
+
+type AgentCreationResponse {
+  success: Boolean!
+  requestId: String!
+  message: String
+}
+
+type TaskSubmissionResponse {
+  success: Boolean!
+  orchestrationId: String!
+  message: String
+}
+
+type User {
+  userId: String!
+  email: String!
+  name: String!
+  givenName: String!
+  familyName: String!
+  role: String
+  organization: String
+  status: String!
+  createdAt: AWSDateTime!
+  enabled: Boolean!
+}
+
+type UserManagementResponse {
+  success: Boolean!
+  message: String
+}
+
+type Organization {
+  orgId: String!
+  name: String!
+  description: String
+  createdAt: AWSDateTime
+}
+
+type AssessmentCompletionEvent {
+  projectId: ID!
+  allDimensionsComplete: Boolean!
+  timestamp: AWSDateTime!
+}
+
+type DesignProgressEvent @aws_iam @aws_cognito_user_pools {
+  projectId: ID!
+  sectionId: String!
+  completionPercentage: Float!
+  timestamp: AWSDateTime!
+}
+
+type AssessmentDimensionProgress {
+  dimension: String!
+  completionPercentage: Float!
+  isComplete: Boolean!
+}
+
+type ReportDownloadUrl {
+  url: String!
+  expiresIn: Int!
+}
+
+type AgentChatterMessage @aws_iam @aws_cognito_user_pools {
+  id: ID!
+  timestamp: AWSDateTime!
+  source: String!
+  detailType: String!
+  detail: AWSJSON!
+}
+
+type FabricationQueueItem {
+  requestId: ID!
+  agentName: String!
+  taskDescription: String!
+  status: FabricationStatus!
+  submittedAt: AWSDateTime!
+  errorMessage: String
+  metadata: AWSJSON
+}
+
+type FabricationEvent {
+  type: FabricationEventType!
+  requestId: ID!
+  agentId: String
+  errorMessage: String
+  timestamp: AWSDateTime!
+}
+
+type ProjectConnection {
+  items: [Project]
+  nextToken: String
+}
+
+type Integration {
+  integrationId: ID!
+  integrationType: IntegrationType!
+  name: String!
+  status: IntegrationStatus!
+  orgId: String!
+  createdBy: String!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  config: AWSJSON!
+  lastSyncAt: AWSDateTime
+  lastTestAt: AWSDateTime
+  errorMessage: String
+  metadata: IntegrationMetadata!
+  gatewayTargetId: String
+  credentialProviderArn: String
+  # P2.A: AgentCore Identity OAuth2 callback URL — surfaced to the user so
+  # they can register it as a redirect_uri at their IdP. Populated at create
+  # time for MCP_SERVER + OAUTH2 (both 2LO and 3LO).
+  agentCoreCallbackUrl: String
+  # P2.A: 3LO authorization redirect URL — populated only while the
+  # credential provider is in CREATE_PENDING_AUTH. Cleared once the user
+  # completes the OAuth dance and the target moves past CREATE_PENDING_AUTH.
+  authorizationUrl: String
+}
+
+type IntegrationMetadata {
+  version: String!
+  protocol: String!
+  provider: String!
+  authMethod: AuthenticationMethod!
+}
+
+type IntegrationTestResult {
+  success: Boolean!
+  message: String!
+  details: AWSJSON
+}
+
+type DeleteIntegrationResult {
+  success: Boolean!
+  message: String
+}
+
+input ProjectFilter {
+  status: ProjectStatus
+  owner: String
+  createdAfter: AWSDateTime
+  createdBefore: AWSDateTime
+}
+
+input CreateProjectInput {
+  name: String!
+  description: String
+  requirements: String
+}
+
+input UpdateProjectInput {
+  name: String
+  description: String
+  requirements: String
+  status: ProjectStatus
+  archetype: GovernanceArchetype
+  archetypeConfidence: Float
+  archetypeStatus: ProjectArchetypeStatus
+}
+
+input AgentStatusInput {
+  status: AgentStatusEnum!
+  currentTask: String
+  progress: Float
+  metadata: AWSJSON
+  errorMessage: String
+}
+
+input ProjectProgressInput {
+  overall: Float
+  assessment: Float
+  design: Float
+  planning: Float
+  implementation: Float
+  currentPhase: String
+  estimatedCompletion: AWSDateTime
+}
+
+input ConversationMessageInput {
+  agentId: String!
+  message: String!
+  messageType: MessageType!
+  metadata: AWSJSON
+  correlationId: String
+}
+
+input PublishMessageInput {
+  id: ID!
+  projectId: ID!
+  agentId: String!
+  message: String!
+  messageType: MessageType!
+  timestamp: AWSDateTime!
+  metadata: AWSJSON
+  correlationId: String
+}
+
+input S3Object {
+  bucket: String!
+  key: String!
+  region: String!
+}
+
+input GenerateUploadUrlInput {
+  projectId: ID!
+  fileName: String!
+  fileType: String!
+  fileSize: Int!
+}
+
+input CreateAgentConfigInput {
+  agentId: String!
+  config: AWSJSON!
+  state: AgentState
+  categories: [String]
+}
+
+input UpdateAgentConfigInput {
+  agentId: String!
+  config: AWSJSON
+  state: AgentState
+  categories: [String]
+}
+
+input UpdateAgentCodeInput {
+  agentId: String!
+  code: String!
+}
+
+input IntegrationBindingInput {
+  integrationId: String!
+  integrationType: String!
+  operations: [String!]
+  direction: BindingDirection
+}
+
+input DataStoreBindingInput {
+  dataStoreId: String!
+  dataStoreType: String!
+  operations: [String!]
+  direction: BindingDirection
+}
+
+input CreateToolConfigInput {
+  toolId: String!
+  config: AWSJSON!
+  state: ToolState
+  categories: [String]
+  integrationBindings: [IntegrationBindingInput]
+  dataStoreBindings: [DataStoreBindingInput]
+}
+
+input UpdateToolConfigInput {
+  toolId: String!
+  config: AWSJSON
+  state: ToolState
+  categories: [String]
+  integrationBindings: [IntegrationBindingInput]
+  dataStoreBindings: [DataStoreBindingInput]
+}
+
+input CreateAgentRequestInput {
+  agentName: String!
+  taskDescription: String!
+  tools: [String]
+  integrations: [String]
+  dataStores: [String]
+  appId: String
+}
+
+input CreateToolRequestInput {
+  toolName: String!
+  toolDescription: String!
+  integrationBindings: [IntegrationBindingInput]
+  dataStoreBindings: [DataStoreBindingInput]
+  appId: String
+}
+
+input SubmitTaskInput {
+  taskDetails: String!
+  callback: TaskCallbackInput
+  appId: String
+}
+
+input TaskCallbackInput {
+  type: String!
+  eventBusName: String
+  source: String
+  detailType: String
+  queueUrl: String
+  endpoint: String
+  serverId: String
+  metadata: AWSJSON
+}
+
+input AdminCreateUserInput {
+  email: String!
+  givenName: String!
+  familyName: String!
+}
+
+input AssignUserRoleInput {
+  userId: String!
+  role: String!
+  organization: String
+}
+
+input ChangePasswordInput {
+  newPassword: String!
+}
+
+input CreateOrganizationInput {
+  name: String!
+  description: String
+}
+
+input AssessmentCompletionInput {
+  projectId: ID!
+  allDimensionsComplete: Boolean!
+  timestamp: AWSDateTime!
+}
+
+input DesignProgressInput {
+  projectId: ID!
+  sectionId: String!
+  completionPercentage: Float!
+  timestamp: AWSDateTime!
+}
+
+input AgentChatterInput {
+  id: ID!
+  timestamp: AWSDateTime!
+  source: String!
+  detailType: String!
+  detail: AWSJSON!
+}
+
+input CreateIntegrationInput {
+  integrationType: IntegrationType!
+  name: String!
+  orgId: String!
+  config: AWSJSON!
+  credentials: AWSJSON!
+}
+
+input IntegrationConfigInput {
+  baseUrl: String!
+  spaceKeys: [String!]
+  enabledFeatures: [String!]
+}
+
+input IntegrationCredentialsInput {
+  apiToken: String!
+  email: String!
+}
+
+input UpdateIntegrationInput {
+  integrationId: ID!
+  name: String
+  config: AWSJSON
+  credentials: AWSJSON
+  status: IntegrationStatus
+}
+
+input FabricationEventInput {
+  type: FabricationEventType!
+  requestId: ID!
+  agentId: String
+  errorMessage: String
+  timestamp: AWSDateTime!
+}
+
+enum ProjectStatus {
+  CREATED
+  IN_PROGRESS
+  ASSESSMENT_COMPLETE
+  DESIGN_COMPLETE
+  PLANNING_COMPLETE
+  IMPLEMENTATION_READY
+  COMPLETED
+  ERROR
+}
+
+# governance archetype classification — frozen at three values
+# per QT2A-8 (no OTHER escape hatch). Ambiguous projects use archetypeStatus
+# PENDING_ESCALATION instead.
+enum GovernanceArchetype {
+  MONOLITHIC_DB
+  ENTERPRISE_APP_SPRAWL
+  HYBRID_IT_OT
+}
+
+enum ProjectArchetypeStatus {
+  PENDING
+  CLASSIFIED
+  PENDING_ESCALATION
+}
+
+# ----------: AgentDesignAssessment (Requirement 7) ----------
+enum FourDimension { CODE DATA INTEGRATION INFRASTRUCTURE }
+
+type AgentDesignAssessment {
+  projectId: ID!
+  archetype: GovernanceArchetype
+  archetypeConfidence: Float
+  archetypeStatus: ProjectArchetypeStatus!
+  dimensionRanking: [DimensionComplexity!]!
+  accessibleDataSources: [String!]!
+  primaryRiskAreas: [String!]!
+  completedAt: AWSDateTime
+  completedBy: ID
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+}
+
+type DimensionComplexity {
+  dimension: FourDimension!
+  rank: Int!
+  rationale: String!
+}
+
+input DimensionComplexityInput {
+  dimension: FourDimension!
+  rank: Int!
+  rationale: String!
+}
+
+# ----------: ProgramReview (Requirement 10) ----------
+# Executive audit of the 20-question governance checklist defined in
+# backend/src/lambda/governance-checklist.md. `runProgramReview` is a read-only
+# evaluation over existing governance evidence (ADRs, ExecutionSpecifications,
+# InterrogationRounds, AgentDesignAssessments) — it does NOT emit a governance
+# EventBridge event (see docs/EVENTBRIDGE_CATALOG.md §Governance Events).
+enum ChecklistAnswer { PASS FAIL NOT_APPLICABLE PENDING_EVIDENCE }
+
+type ChecklistResult {
+  questionId: String!
+  question: String!
+  answer: ChecklistAnswer!
+  evidenceRefs: [String!]!
+  notes: String
+}
+
+type ProgramReview {
+  reviewId: ID!
+  projectId: ID!
+  results: [ChecklistResult!]!
+  runAt: AWSDateTime!
+  runBy: ID!
+  createdAt: AWSDateTime!
+}
+
+# ADR (Architecture Decision Record) governance entity.
+# Matrix locked by QT3-5 in.kiro/planning/PLAN_GOV_DIFF.md §9.
+enum ADRStatus {
+  PROPOSED
+  LOCKED
+  SUPERSEDED
+  REOPENED
+}
+
+enum ADRSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ModuleStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  ERROR
+}
+
+enum AgentStatusEnum {
+  IDLE
+  PROCESSING
+  WAITING_FOR_INPUT
+  COMPLETED
+  ERROR
+}
+
+enum MessageType {
+  USER_INPUT
+  AGENT_RESPONSE
+  SYSTEM_NOTIFICATION
+  PROGRESS_UPDATE
+}
+
+enum AgentState {
+  active
+  inactive
+  maintenance
+}
+
+enum ToolState {
+  active
+  inactive
+  maintenance
+}
+
+enum IntegrationType {
+  CONFLUENCE
+  SLACK
+  JIRA
+  SHAREPOINT
+  SALESFORCE
+  GITHUB
+  SERVICENOW
+  ZENDESK
+  PAGERDUTY
+  MICROSOFT
+  AWS_LAMBDA
+  AWS_SMITHY
+  MCP_SERVER
+}
+
+enum AuthenticationMethod {
+  API_KEY
+  OAUTH2
+  BASIC_AUTH
+  BEARER_TOKEN
+  IAM_ROLE
+  CONFIGURABLE
+}
+
+enum IntegrationStatus {
+  CREATED
+  CONFIGURED
+  TESTED
+  CONNECTING
+  CONNECTED
+  DISCONNECTED
+  CONNECTION_FAILED
+  CONFIGURING
+}
+
+enum FabricationStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum FabricationEventType {
+  COMPLETED
+  FAILED
+}
+
+type IntegrationOperation {
+  operationId: String!
+  name: String!
+  description: String!
+  method: String!
+  parameters: [OperationParameter!]!
+}
+
+type OperationParameter {
+  name: String!
+  type: String!
+  required: Boolean!
+  description: String!
+}
+
+type DataStore {
+  dataStoreId: ID!
+  name: String!
+  description: String
+  type: DataStoreType!
+  category: DataStoreCategory!
+  status: DataStoreStatus!
+  usage: DataStoreUsage!
+  icon: String!
+  provider: String!
+  provisionMode: DataStoreProvisionMode!
+  orgId: String!
+  createdBy: String!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  config: AWSJSON!
+  size: String
+  records: Int
+  lastSync: AWSDateTime
+  features: [String]
+  errorMessage: String
+  resourceArn: String
+  secretArn: String
+  version: Int!
+}
+
+type DataStoreStats {
+  total: Int!
+  connected: Int!
+  error: Int!
+  byCategory: AWSJSON
+  byType: AWSJSON
+}
+
+type AvailableDataSource {
+  dataStoreId: ID!
+  name: String!
+  type: DataStoreType!
+  category: DataStoreCategory!
+  usage: DataStoreUsage!
+  status: DataStoreStatus!
+  provider: String!
+  capabilities: [String!]!
+  scopedRoleArn: String
+}
+
+type DataStoreTestResult {
+  success: Boolean!
+  message: String!
+  details: AWSJSON
+}
+
+type ToolTestResult {
+  success: Boolean!
+  output: AWSJSON
+  error: String
+  executionTimeMs: Int!
+}
+
+type DeleteDataStoreResult {
+  success: Boolean!
+  message: String
+}
+
+input CreateDataStoreInput {
+  name: String!
+  description: String
+  type: DataStoreType!
+  category: DataStoreCategory!
+  provisionMode: DataStoreProvisionMode!
+  orgId: String!
+  config: AWSJSON!
+  credentials: AWSJSON
+  clientRequestToken: String!
+  usage: DataStoreUsage
+}
+
+input UpdateDataStoreInput {
+  dataStoreId: ID!
+  name: String
+  description: String
+  config: AWSJSON
+  version: Int!
+  usage: DataStoreUsage
+}
+
+enum DataStoreType {
+  S3
+  DYNAMODB
+  RDS_POSTGRESQL
+  RDS_MYSQL
+  KNOWLEDGE_BASE
+  AURORA_POSTGRESQL
+  AURORA_MYSQL
+  REDSHIFT
+  LAKE_FORMATION
+  OPENSEARCH
+  NEPTUNE
+  TIMESTREAM
+  DOCUMENTDB
+  ELASTICACHE_REDIS
+  KEYSPACES
+  QLDB
+  SAGEMAKER_FEATURE_STORE
+  EXTERNAL_POSTGRESQL
+  EXTERNAL_MYSQL
+  EXTERNAL_MONGODB
+  EXTERNAL_ELASTICSEARCH
+  EXTERNAL_REDIS
+  EXTERNAL_API
+}
+
+enum DataStoreCategory {
+  S3_STORAGE
+  NOSQL_DATABASE
+  RELATIONAL_DATABASE
+  KNOWLEDGE_BASE
+  DATA_WAREHOUSE
+  DATA_LAKE
+  SEARCH_ENGINE
+  GRAPH_DATABASE
+  TIME_SERIES
+  DOCUMENT_DATABASE
+  CACHE
+  EXTERNAL
+}
+
+enum DataStoreStatus {
+  CREATED
+  CONNECTING
+  CONNECTED
+  PROVISIONING
+  PROVISIONED
+  DISCONNECTED
+  ERROR
+  DELETING
+}
+
+enum DataStoreProvisionMode {
+  CREATE_NEW
+  CONNECT_EXISTING
+}
+
+enum DataStoreUsage {
+  KNOWLEDGE
+  OPERATIONAL
+  BOTH
+}
+
+# --- Workflow & Blueprint Types ---
+
+enum WorkflowStatus {
+  DRAFT
+  PUBLISHED
+}
+
+type Workflow {
+  workflowId: ID!
+  orgId: String!
+  name: String!
+  description: String
+  status: WorkflowStatus!
+  isBlueprint: Boolean!
+  definition: AWSJSON!
+  configuration: AWSJSON
+  version: Int!
+  versionHistory: AWSJSON
+  appId: String
+  createdBy: String!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  metadata: AWSJSON
+  timeout: Int
+}
+
+type WorkflowConnection {
+  items: [Workflow]
+  nextToken: String
+}
+
+type BlueprintConnection {
+  items: [Workflow]
+  nextToken: String
+}
+
+type DeleteWorkflowResult {
+  success: Boolean!
+  message: String
+}
+
+# --- Agent App Types ---
+
+# Registry-native lifecycle (matches RegistryRecordStatus from @aws-sdk/client-bedrock-agentcore-control).
+# PUBLISHED is an app-specific extension: approved AND publicly accessible via API.
+enum AppStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  DEPRECATED
+  CREATING
+  UPDATING
+  CREATE_FAILED
+  UPDATE_FAILED
+  PUBLISHED
+}
+
+enum ComponentStatus {
+  DESIGN
+  READY
+}
+
+type RegistryAgentBinding {
+  agentId: String!
+  status: ComponentStatus!
+  systemPromptAddition: String
+  toolRestrictions: [String]
+  modelOverride: String
+  addedAt: AWSDateTime!
+}
+
+type RegistryAgentRecordPermission {
+  permissionId: String!
+  actions: [String!]!
+  resources: [String!]!
+  description: String
+}
+
+type AppStatusEvent {
+  appId: ID!
+  previousStatus: AppStatus!
+  newStatus: AppStatus!
+  timestamp: AWSDateTime!
+}
+
+type AgentManifest {
+  name: String!
+  description: String!
+  version: String!
+  inputSchema: AWSJSON
+  outputSchema: AWSJSON
+  tools: [String]
+  resourceRequirements: AWSJSON
+}
+
+type RegistryAgentRecord {
+  appId: ID!
+  orgId: String!
+  name: String!
+  description: String
+  status: AppStatus!
+  workflowIds: [String!]
+  routingConfig: AWSJSON
+  createdBy: String!
+  createdAt: AWSDateTime!
+  updatedAt: AWSDateTime!
+  version: Int!
+  agentBindings: [RegistryAgentBinding]
+  permissions: [RegistryAgentRecordPermission]
+  configSchema: AWSJSON
+  configValues: AWSJSON
+  endpointUrl: String
+  apiId: String
+  authMode: String
+  # US-ARB-017: pointer to the Project that authored this record's fabrication
+  # spec. Nullable because not all records come from governance-tracked projects
+  # (bootstrap, legacy, and test records may have no source project). When set,
+  # fabricator-request-resolver propagates it into agent_input so the
+  # fabricator's design_assessment_gate can enforce preconditions.
+  sourceProjectId: ID
+}
+
+type AppApiKey {
+  keyId: ID!
+  name: String!
+  prefix: String!
+  status: String!
+  createdAt: AWSDateTime!
+  expiresAt: AWSDateTime
+  lastUsedAt: AWSDateTime
+}
+
+# Returned only by createAppApiKey and rotateAppApiKey mutations.
+# The apiKey field carries the full plaintext secret and is returned to the
+# caller exactly once at creation or rotation time. It is never persisted in
+# retrievable form and is never returned by listAppApiKeys or revokeAppApiKey.
+type AppApiKeyWithPlaintext {
+  keyId: ID!
+  name: String!
+  prefix: String!
+  status: String!
+  createdAt: AWSDateTime!
+  expiresAt: AWSDateTime
+  lastUsedAt: AWSDateTime
+  apiKey: String!
+}
+
+type AppMetrics {
+  totalRequests: Int!
+  successCount: Int!
+  clientErrorCount: Int!
+  serverErrorCount: Int!
+  p50Latency: Float!
+  p95Latency: Float!
+  p99Latency: Float!
+  timeSeries: [AppMetricsBucket!]!
+}
+
+type AppMetricsBucket {
+  timestamp: AWSDateTime!
+  requestCount: Int!
+  errorCount: Int!
+  avgLatency: Float!
+}
+
+type AppAccessEntry {
+  userId: String!
+  role: String!
+  grantedBy: String!
+  grantedAt: AWSDateTime!
+}
+
+type PublishResult {
+  app: RegistryAgentRecord!
+  endpointUrl: String!
+  apiKey: String!
+  apiKeyId: String!
+}
+
+type AppConnection {
+  items: [RegistryAgentRecord]
+  nextToken: String
+}
+
+type DeleteAppResult {
+  success: Boolean!
+  message: String
+}
+
+# --- Execution Types ---
+
+type Execution {
+  executionId: ID!
+  workflowId: String!
+  appId: String
+  orgId: String!
+  status: String!
+  workflowVersion: Int
+  currentNode: String
+  nodeResults: AWSJSON
+  input: AWSJSON
+  output: AWSJSON
+  startedAt: AWSDateTime!
+  completedAt: AWSDateTime
+  triggeredBy: String!
+  error: String
+}
+
+type ExecutionConnection {
+  items: [Execution]
+  nextToken: String
+}
+
+# --- Subscription Types ---
+
+type WorkflowProgressEvent @aws_iam @aws_cognito_user_pools {
+  executionId: ID!
+  workflowId: String!
+  eventType: String!
+  nodeId: String
+  status: String
+  output: AWSJSON
+  error: String
+  timestamp: AWSDateTime!
+}
+
+# --- Workflow & App Input Types ---
+
+input CreateWorkflowInput {
+  name: String!
+  description: String
+  orgId: String!
+  definition: AWSJSON!
+  configuration: AWSJSON
+  isBlueprint: Boolean
+  metadata: AWSJSON
+}
+
+input UpdateWorkflowInput {
+  workflowId: ID!
+  name: String
+  description: String
+  definition: AWSJSON
+  configuration: AWSJSON
+  metadata: AWSJSON
+  version: Int!
+}
+
+input ImportWorkflowInput {
+  orgId: String!
+  workflowJson: AWSJSON!
+  name: String
+}
+
+input CreateAppInput {
+  name: String!
+  description: String
+  orgId: String!
+  sourceProjectId: ID
+}
+
+input UpdateAppInput {
+  appId: ID!
+  name: String
+  description: String
+  status: AppStatus
+  routingConfig: AWSJSON
+  version: Int!
+  sourceProjectId: ID
+}
+
+input RegistryAgentComponentInput {
+  type: String!
+  data: AWSJSON!
+}
+
+input UpdateRegistryAgentBindingInput {
+  appId: ID!
+  agentId: String!
+  systemPromptAddition: String
+  toolRestrictions: [String]
+  modelOverride: String
+  status: ComponentStatus
+}
+
+input AppStatusEventInput {
+  appId: ID!
+  previousStatus: AppStatus!
+  newStatus: AppStatus!
+  timestamp: AWSDateTime!
+}
+
+input WorkflowProgressInput {
+  executionId: ID!
+  workflowId: String!
+  eventType: String!
+  nodeId: String
+  status: String
+  output: AWSJSON
+  error: String
+  timestamp: AWSDateTime!
+}
+
+type DailyActivity {
+  date: String!
+  successCount: Int!
+  errorCount: Int!
+}
+
+type DashboardMetricsResult {
+  dailyActivity: [DailyActivity!]!
+  totalRequests: Int!
+  successRate: Float!
+  avgLatency: Float!
+}
+
+type ActivityItem {
+  entityType: String!
+  entityId: String!
+  title: String!
+  description: String!
+  timestamp: AWSDateTime!
+}
+
+type RecentActivityResult {
+  items: [ActivityItem!]!
+}
+
+# ExecutionSpecification (do not interleave with)
+enum SpecStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+type ExecutionSpecification {
+  specId: ID!
+  projectId: ID!
+  sourceAdrIds: [ID!]!
+  structuredPayload: AWSJSON!
+  narrativeS3Uri: String!
+  status: SpecStatus!
+  version: Int!
+  createdAt: AWSDateTime!
+  createdBy: String!
+  submittedAt: AWSDateTime
+  approvedAt: AWSDateTime
+  approvedBy: String
+  rejectedAt: AWSDateTime
+  rejectedBy: String
+  rejectionReason: String
+}
+
+input ExecutionSpecificationInput {
+  projectId: ID!
+  sourceAdrIds: [ID!]!
+  structuredPayload: AWSJSON!
+  narrativeS3Uri: String!
+}
+
+input ReviseExecutionSpecificationInput {
+  structuredPayload: AWSJSON!
+  narrativeS3Uri: String!
+}
+
+# InterrogationRound
+enum RoundStatus {
+  IN_PROGRESS
+  AWAITING_CONSTRAINTS
+  REVISED
+  STABILISED
+}
+
+type InterrogationRound {
+  projectId: ID!
+  roundN: Int!
+  transcriptS3Uri: String!
+  status: RoundStatus!
+  humanConstraints: [String!]
+  revisedRecommendation: String
+  startedAt: AWSDateTime!
+  completedAt: AWSDateTime
+  transcriptSizeBytes: Int
+}
+
+input TranscriptMessageInput {
+  role: String!
+  content: String!
+}
+
+
+
+# Governance UI — Wave 1
+
+type GovernanceMode {
+  enforce: String!
+  effectiveAt: String
+  env: String!
+}
+
+# Wave 3.C augments GovernanceFinding to be reachable under both auth modes:
+#   - default (Cognito user pools) for getGovernanceFinding / listGovernanceFindings
+#   - IAM for the new publishGovernanceFinding fanout mutation (Lambda → AppSync)
+# Adding @aws_iam @aws_cognito_user_pools is non-breaking for the existing
+# Cognito callers: it widens the reachable auth modes rather than narrowing.
+type GovernanceFinding @aws_iam @aws_cognito_user_pools {
+  findingId: String!
+  workflowId: String!
+  decision: String!
+  reason: String!
+  requestingAgent: String!
+  targetAgent: String!
+  scopeEvaluated: String
+  contractEvaluated: String
+  escalationTarget: String
+  residualAuthorityDenial: Boolean
+  timestamp: Float!
+}
+
+type GovernanceFindingConnection {
+  items: [GovernanceFinding!]!
+  nextCursor: String
+}
+
+type ReconcilerClassification {
+  inSync: Int!
+  missing: Int!
+  stale: Int!
+  orphan: Int!
+}
+
+type ReconcilerStatus {
+  lastRunAt: String
+  lastRunMode: String
+  classifications: ReconcilerClassification!
+  totalRecords: Int!
+}
+# Governance UI — Wave 2.A (rollout readiness)
+
+enum ReadinessCheckStatus {
+  PASS
+  FAIL
+  WARN
+  UNKNOWN
+  STUB
+}
+
+type ReadinessCheck {
+  id: String!
+  label: String!
+  status: ReadinessCheckStatus!
+  detail: String
+  evidence: String
+  category: String!
+}
+
+type RolloutReadinessReport {
+  generatedAt: Float!
+  currentMode: String!
+  effectiveAt: String
+  env: String!
+  shadowSoakStartedAt: String
+  checks: [ReadinessCheck!]!
+  passCount: Int!
+  failCount: Int!
+  warnCount: Int!
+  stubCount: Int!
+}
+# Governance UI — Wave 2.C (mismatch heatmap)
+
+type MismatchBucket {
+  bucketStart: Float!
+  count: Int!
+  decision: String!
+  topReason: String
+}
+
+type MismatchHeatmapReport {
+  generatedAt: Float!
+  sinceTs: Float!
+  untilTs: Float!
+  bucketSeconds: Int!
+  totalDenials: Int!
+  totalEscalations: Int!
+  modeWindows: [ModeWindow!]!
+  buckets: [MismatchBucket!]!
+}
+
+type ModeWindow {
+  startTs: Float!
+  endTs: Float
+  mode: String!
+}
+# Governance UI — Wave 2.D (escalation drill-down)
+
+type MetricDatapoint {
+  timestamp: Float!
+  value: Float!
+}
+
+type MetricSeries {
+  namespace: String!
+  metric: String!
+  statistic: String!
+  periodSeconds: Int!
+  sinceTs: Float!
+  untilTs: Float!
+  datapoints: [MetricDatapoint!]!
+  total: Float!
+}
+# Governance UI — Wave 2.E (mode mutation)
+
+input SetGovernanceModeInput {
+  targetMode: String!
+  acknowledgement: String!
+  reason: String
+}
+
+type SetGovernanceModeResult {
+  ok: Boolean!
+  previousMode: String!
+  newMode: String!
+  effectiveAt: String
+  noop: Boolean!
+  emittedEventDetailType: String
+}
+# Governance UI — Wave 2.B.2 (mark-verified UI for manual checks)
+
+input MarkReadinessCheckVerifiedInput {
+  checkId: String!
+  expiresInDays: Int
+  note: String
+}
+
+type MarkReadinessCheckVerifiedResult {
+  ok: Boolean!
+  checkId: String!
+  verifiedAt: String!
+  expiresAt: String!
+  verifiedBy: String!
+}
+# Governance UI — Wave 3.B (decision flow tracer)
+
+type DecisionTraceStep {
+  stepNumber: Int!
+  name: String!
+  status: String!
+  inputs: String!
+  outputs: String
+  detail: String!
+}
+
+type DecisionTrace {
+  findingId: String!
+  finding: GovernanceFinding!
+  steps: [DecisionTraceStep!]!
+  terminalDecision: String!
+  terminalStepNumber: Int!
+  reasonTokens: [String!]!
+  constitutionalOverride: Boolean!
+  arbitrationPattern: String
+  scopeReduction: String
+}
+# Governance UI — Wave 3.C (live tail subscription)
+#
+# Real-time AppSync subscription. The fanout Lambda observes the governance
+# ledger DynamoDB stream (path A — see governance-finding-fanout.ts header
+# block) and signs an IAM-authed `publishGovernanceFinding` mutation; the
+# subscription fan-outs the projected payload to admin user-pool clients.
+#
+# Auth model:
+#   * `publishGovernanceFinding` is `@aws_iam` ONLY — no user-pool clients
+#     can call it. The governance-ui-resolver also performs a defence-in-
+#     depth check that the AppSyncIdentity is IAM-shaped (no Cognito sub).
+#   * `onGovernanceFinding` is `@aws_cognito_user_pools(cognito_groups: ["admin"])`
+#     so AppSync rejects CONNECT for non-admin tokens at the directive
+#     layer. The `admin` Cognito group is provisioned by BackendStack
+#     (see lib/backend-stack.ts AdminGroup CfnUserPoolGroup). When that
+#     group is absent, AppSync falls through to `Forbidden` rather than
+#     leaking findings.
+
+input PublishGovernanceFindingInput {
+  findingId: String!
+  workflowId: String!
+  decision: String!
+  reason: String!
+  requestingAgent: String!
+  targetAgent: String!
+  scopeEvaluated: String
+  contractEvaluated: String
+  escalationTarget: String
+  residualAuthorityDenial: Boolean
+  timestamp: Float!
+}
+
+# Governance UI — governance.* EventBridge relay (P8 [HIGH]).
+#
+# The governance-notifier Lambda receives every governance.* EventBridge
+# event, signs a `publishGovernanceEvent` mutation with SigV4, and the
+# `@aws_subscribe`-driven onGovernanceEvent subscription fan-outs to
+# admin user-pool clients. Mirrors the publishGovernanceFinding /
+# onGovernanceFinding pattern but is generalised across the 14
+# governance.* detail-types declared in
+# backend/src/utils/notifier-base.ts.
+#
+# Auth model — `publishGovernanceEvent` is `@aws_iam` only (relay
+# Lambda) and `onGovernanceEvent` is admin-only Cognito.
+# `GovernanceEvent` carries `@aws_iam @aws_cognito_user_pools` so both
+# the IAM-authed Lambda and admin user-pool subscribers can produce /
+# consume the type.
+#
+# `version` is bumped manually when the payload contract changes so
+# downstream subscribers can branch on it rather than guessing from
+# shape.
+
+type GovernanceEvent @aws_iam @aws_cognito_user_pools {
+  detailType: String!
+  source: String!
+  eventTime: AWSDateTime!
+  detail: AWSJSON!
+  version: Int!
+}
+
+input GovernanceEventInput {
+  detailType: String!
+  source: String!
+  eventTime: AWSDateTime!
+  detail: AWSJSON!
+  version: Int!
+}
+
+# Governance UI — Wave 4.A (authority graph)
+#
+# Read-only projections of the per-app authority topology stored in the
+# governance DynamoDB tables. Both queries are admin-only — the resolver
+# rejects non-admin callers at the dispatch layer.
+#
+# `AuthorityScope` mirrors the four-tuple from arbiter/governance/models.py
+# (decision_type, domain, conditions, limits). `conditions` and `limits`
+# are JSON-encoded maps so the GraphQL transport stays simple; the
+# frontend parses them on render. `specificity` is computed server-side
+# from the parsed conditions + limits key counts.
+#
+# Constitutional layer + case-law projections are deferred to Wave 4.C/4.D.
+
+type AuthorityScope {
+  decisionType: String!
+  domain: String!
+  conditions: String!
+  limits: String!
+  specificity: Int!
+}
+
+type AuthorityUnit {
+  unitId: String!
+  agentId: String!
+  scope: AuthorityScope!
+  delegationSource: String
+  canRedelegate: Boolean!
+  expiryTimestamp: Float
+  revoked: Boolean!
+  riskRating: String!
+  registryId: String
+  isValid: Boolean!
+}
+
+type CompositionContract {
+  contractId: String!
+  partyA: String!
+  partyB: String!
+  authorityPrecedence: String!
+  conflictResolution: String!
+  invariants: [String!]!
+  stopRights: [String!]!
+  scope: AuthorityScope!
+  escalationPath: String
+}
+# Governance UI — Wave 4.B (blast-radius)
+#
+# Approximation of the revocation blast radius for a given authority unit
+# computed from the recent ledger window. A "true" blast radius would
+# require re-running the engine against pending traffic; instead we
+# surface the count + workflows + agent pairs of permit findings where
+# `scopeEvaluated == unitId` over the requested time window. See
+# `.kiro/specs/governance-ui/waves-2-5-roadmap.md` §4.2.
+#
+# Admin-only — the resolver rejects non-admin callers at the dispatch
+# layer. Window defaults to the last 1h, capped at 24h.
+
+type RevokeImpactWorkflow {
+  workflowId: String!
+  permitCount: Int!
+  lastTimestamp: Float!
+}
+
+type RevokeImpactAgentPair {
+  requestingAgent: String!
+  targetAgent: String!
+  permitCount: Int!
+}
+
+type RevokeImpactReport {
+  unitId: String!
+  sinceTs: Float!
+  untilTs: Float!
+  totalPermits: Int!
+  distinctWorkflows: Int!
+  distinctAgentPairs: Int!
+  workflows: [RevokeImpactWorkflow!]!
+  agentPairs: [RevokeImpactAgentPair!]!
+  truncated: Boolean!
+}
+# Governance UI — Wave 4.C (constitutional rule tree)
+#
+# Read-only projection of the per-app constitutional layers table.
+# Both queries are admin-only — the resolver rejects non-admin callers
+# at the dispatch layer.
+#
+# `ConstitutionalRule` mirrors the rule dict shape from
+# arbiter/governance/engine.py:_constitutional_review. The six supported
+# operators (eq, neq, exists, not_exists, gt, lt) are the source of
+# truth; any other operator value renders as a degraded badge in the UI
+# (matching the engine's "Unknown operator" fallback).
+#
+# `value` is JSON-encoded for transport (frontend parses on render).
+# When the operator is `exists` or `not_exists`, `value` is null.
+#
+# Rule editing (create/update/revoke) is deferred to Wave 4.C.2.
+
+type ConstitutionalRule {
+  field: String!
+  operator: String!
+  value: String
+}
+
+type ConstitutionalLayer {
+  layerId: String!
+  layerType: String!
+  appliesTo: [String!]!
+  rules: [ConstitutionalRule!]!
+  parentLayerId: String
+}
+
+type ConstitutionalRuleOverrideStat {
+  layerId: String!
+  field: String!
+  count7d: Int!
+  lastFiredAt: Float
+  firstFiredAt: Float
+  topAffectedAgents: [String!]!
+}
+
+type ConstitutionRuleStatsReport {
+  generatedAt: Float!
+  sinceTs: Float!
+  untilTs: Float!
+  totalOverrides: Int!
+  stats: [ConstitutionalRuleOverrideStat!]!
+  truncated: Boolean!
+}
+# Governance UI — Wave 4.D (case-law timeline)
+#
+# Read-only projection of the case-law DynamoDB table. Each entry encodes a
+# resolution from a prior human-adjudicated escalation; the engine consults
+# them in precedence order (highest first) before falling back to the
+# composition / authority-unit pipeline. See
+# arbiter/governance/case_law_admin.py for the row schema written to DDB
+# and arbiter/governance/hierarchy.py for the engine-side loader.
+#
+# Admin-only — the resolver rejects non-admin callers at the dispatch
+# layer. Encode/revoke admin actions ship in Wave 4.D.2; this wave is
+# read-only.
+#
+# `pattern` and `scopeOfApplicability` are JSON-encoded maps for transport
+# (frontend parses on render). `encodedAt` is normalised to an ISO-8601
+# string at the resolver — legacy float (epoch seconds) rows are coerced
+# via `new Date(value * 1000).toISOString()`.
+
+type CaseLawEntry {
+  caseId: String!
+  pattern: String!
+  resolution: String!
+  encodedAt: String!
+  encodedBy: String!
+  scopeOfApplicability: String!
+  precedence: Int!
+  revoked: Boolean!
+}
+# Governance UI — Wave 4.C.2 (constitutional rule editor)
+#
+# Three admin-only mutations layered on top of the existing read-only
+# constitutional projections (Wave 4.C). Each mutation requires an
+# acknowledgement string that matches the resolver's
+# CONSTITUTIONAL_RULE_ACKNOWLEDGEMENT_TEXT constant verbatim — drift
+# between this contract and the resolver is a bug enforced by the
+# `contract-constitutional-ack-text.test.ts` drift test.
+#
+# `ConstitutionalOperator` mirrors the 6 operators in
+# arbiter/governance/engine.py:_constitutional_review (eq, neq, exists,
+# not_exists, gt, lt). Adding a new operator here without first adding
+# its branch in the engine is a contract bug.
+#
+# The mutation result returns the freshly-projected layer so the page
+# can splice it into its local cache without an extra round-trip.
+# `emittedEventDetailType` is null when the audit-event emission failed
+# (matches the Wave 2.E setGovernanceMode best-effort semantics).
+
+enum ConstitutionalOperator {
+  eq
+  neq
+  exists
+  not_exists
+  gt
+  lt
+}
+
+input ConstitutionalRuleInput {
+  field: String!
+  operator: ConstitutionalOperator!
+  value: String
+}
+
+input AddConstitutionalRuleInput {
+  layerId: String!
+  rule: ConstitutionalRuleInput!
+  acknowledgement: String!
+}
+
+input UpdateConstitutionalRuleInput {
+  layerId: String!
+  ruleIndex: Int!
+  newRule: ConstitutionalRuleInput!
+  acknowledgement: String!
+}
+
+input DeleteConstitutionalRuleInput {
+  layerId: String!
+  ruleIndex: Int!
+  acknowledgement: String!
+}
+
+type ConstitutionalRuleMutationResult {
+  ok: Boolean!
+  layerId: String!
+  action: String!
+  layer: ConstitutionalLayer!
+  emittedEventDetailType: String
+}
+# Governance UI — Wave 4.D.2 (case-law admin actions)
+#
+# Three admin-only mutations layered on top of the read-only case-law
+# timeline (Wave 4.D). Each requires an acknowledgement string that
+# matches the resolver's CASELAW_ACKNOWLEDGEMENT_TEXT constant verbatim
+# — drift between this contract and the resolver is a bug enforced by
+# the `contract-caselaw-ack-text.test.ts` drift test.
+#
+# Soft-delete via `revoked: true` mirrors `case_law_admin.py` semantics
+# (see arbiter/governance/hierarchy.py — revoked rows are filtered at
+# engine load time). Encoding new rows is intentionally NOT exposed via
+# the UI: the encoding flow remains the offline `case_law_admin.py` CLI
+# so an operator runbook drives every new precedent.
+#
+# `revoke` and `unrevoke` are idempotent — calling revoke on an already-
+# revoked row no-ops with `emittedEventDetailType: null`. Same shape
+# applies to unrevoke. `update-precedence` is also a no-op when the
+# supplied `newPrecedence` matches the existing value.
+#
+# `newPrecedence` MUST be a finite integer in the range [-1000, 1000].
+# Out-of-range values throw at the resolver before any DDB write.
+
+input RevokeCaseLawInput {
+  caseId: String!
+  acknowledgement: String!
+  reason: String
+}
+
+input UnrevokeCaseLawInput {
+  caseId: String!
+  acknowledgement: String!
+  reason: String
+}
+
+input UpdateCaseLawPrecedenceInput {
+  caseId: String!
+  newPrecedence: Int!
+  acknowledgement: String!
+  reason: String
+}
+
+type CaseLawMutationResult {
+  ok: Boolean!
+  caseId: String!
+  action: String!
+  entry: CaseLawEntry!
+  emittedEventDetailType: String
+}
+# Governance UI — Wave 4.E.A (authority graph history config)
+#
+# Configurable daily-snapshot infrastructure backing the Wave 4.E.B time
+# scrubber. Default OFF — operators consciously opt in to enable
+# snapshots and pay the storage cost. The scheduled Lambda
+# `governance-graph-snapshot` reads the SSM-backed settings JSON and
+# either skips early (`enabled: false`) or scans all four authority
+# tables and writes a snapshot row to the new
+# `governanceGraphSnapshotsTable` (TTL-managed).
+#
+# `captureMode` Wave 4.E.A allowlist is ONLY `'daily'`. The values
+# `'on-change'` and `'both'` are reserved for Wave 4.E.A.2 (which
+# would require DDB streams on the source tables) and the resolver
+# rejects them with a forward-compat error.
+
+type AuthorityGraphHistorySettings {
+  enabled: Boolean!
+  retentionDays: Int!
+  captureMode: String!
+  lastSnapshotAt: String
+  snapshotCountInWindow: Int!
+  storageEstimate: String
+}
+
+input UpdateAuthorityGraphHistorySettingsInput {
+  enabled: Boolean!
+  retentionDays: Int!
+  captureMode: String!
+  acknowledgement: String!
+  reason: String
+}
+
+type AuthorityGraphHistorySettingsResult {
+  ok: Boolean!
+  settings: AuthorityGraphHistorySettings!
+  emittedEventDetailType: String
+}
+# Governance UI — Wave 4.E.B (history scrubber)
+#
+# Read-only listing + per-snapshot fetch backing the time scrubber on the
+# governance Graph page. Snapshots themselves are produced by the Wave
+# 4.E.A scheduled writer (governance-graph-snapshot Lambda); this wave
+# adds the projection so admin operators can replay the authority graph
+# as it was at any captured snapshot.
+#
+# Both queries are admin-only via the resolver dispatch (defence in depth
+# on top of AppSync auth). The graph rendering only uses authorityUnits +
+# compositionContracts + agents, so the per-snapshot query intentionally
+# omits constitutional layers + case law for size optimisation.
+
+type AuthorityGraphSnapshotSummary {
+  snapshotId: String!
+  timestamp: Float!
+  expiresAt: Float!
+  kind: String!
+  partial: Boolean!
+  authorityUnitsCount: Int!
+  compositionContractsCount: Int!
+  constitutionalLayersCount: Int!
+  caseLawCount: Int!
+}
+
+type AuthorityGraphSnapshot {
+  snapshotId: String!
+  timestamp: Float!
+  expiresAt: Float!
+  kind: String!
+  partial: Boolean!
+  authorityUnits: [AuthorityUnit!]!
+  compositionContracts: [CompositionContract!]!
+}
+# Governance UI — Wave 5.A (D4 retrospective)
+#
+# Admin-only D4 defense-in-depth retrospective. Compares denial sets at the
+# `worker-pre-filter` and `worker-tool-handler` engine scopes over a
+# configurable window (allowlist: 7, 14, 30, 60, 90 days; default 30) and
+# returns counts + an overlap-ratio-driven recommendation. Mirrors
+# `arbiter/governance/d4_retrospective.py` verbatim — thresholds and the
+# insufficient-evidence cut-off MUST match the Python script.
+
+type D4RetrospectiveCounts {
+  preFilterTotal: Int!
+  toolHandlerTotal: Int!
+  distinctPreFilter: Int!
+  distinctToolHandler: Int!
+  overlap: Int!
+}
+
+type D4RetrospectiveReport {
+  generatedAt: Float!
+  windowStart: Float!
+  windowEnd: Float!
+  windowDays: Int!
+  insufficientEvidence: Boolean!
+  counts: D4RetrospectiveCounts!
+  overlapRatio: Float!
+  recommendation: String!     # 'keep-both' | 'keep-both-strong-evidence' | 're-debate' | 'deferred-90d'
+  truncated: Boolean!
+}
+# Governance UI — Wave 5.C.1 (IAM trust path)
+#
+# Admin-only audit of the IAM assume chain that an admin Lambda follows
+# to reach a target resource (datastore / integration / agent). Wave 5.C.1
+# computes the chain AS IF the governance-ui-resolver Lambda were the
+# assumer — real call sites (datastore / integration / agent resolvers)
+# follow the same pattern but the operator-pickable assumer ships in a
+# future slice. Drift detection + simulate-principal-policy
+# effective-permissions overlay are reserved for Wave 5.C.2.
+
+type TrustPathPolicyStatement {
+  effect: String!
+  actions: [String!]!
+  resources: [String!]!
+  conditionsJson: String
+}
+
+type TrustPathRole {
+  arn: String!
+  name: String!
+  scope: String!                   # 'lambda' | 'cross-account' | 'datastore' | 'integration' | 'agent'
+  trustPolicyPrincipals: [String!]!
+  inlinePolicy: [TrustPathPolicyStatement!]!
+  inlinePolicyName: String
+  totalActions: Int!
+  totalResources: Int!
+}
+
+type TrustPathReport {
+  resourceType: String!            # 'agent' | 'datastore' | 'integration'
+  resourceId: String!
+  generatedAt: Float!
+  hops: [TrustPathRole!]!          # ordered Lambda → cross-account? → scoped
+  notes: [String!]!                # operational notes (e.g. cross-account role unconfigured)
+}
+# Governance UI — Wave 5.C.2 (IAM drift detector)
+
+type IamDriftActionGroup {
+  resourceArnPattern: String!
+  declaredActions: [String!]!
+  effectiveActions: [String!]!
+  excessActions: [String!]!
+  missingActions: [String!]!
+}
+
+type IamDriftReport {
+  resourceType: String!
+  resourceId: String!
+  scopedRoleArn: String!
+  generatedAt: Float!
+  hasDrift: Boolean!
+  totalExcess: Int!
+  totalMissing: Int!
+  groups: [IamDriftActionGroup!]!
+  notes: [String!]!
+}

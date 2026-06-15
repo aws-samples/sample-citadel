@@ -1,0 +1,536 @@
+/**
+ * Tests for project-resolver Lambda — GovernanceArchetype coverage.
+ *
+ * Scope of this test file:
+ *  - createProject writes archetypeStatus='PENDING', archetype absent, archetypeConfidence absent.
+ *  - updateProject persists {archetype, archetypeConfidence, archetypeStatus} passthrough.
+ *  - getProject normalises a missing archetypeStatus in the DDB item to 'PENDING'
+ *    (grandfathering pre-existing projects — DynamoDB is schemaless so rows
+ *    written before this story do not carry the attribute).
+ *  - fast-check property tests confirm the TS enums are frozen at their declared values.
+ */
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+} from '@aws-sdk/lib-dynamodb';
+import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import {
+  CognitoIdentityProviderClient,
+  AdminGetUserCommand,
+} from '@aws-sdk/client-cognito-identity-provider';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { mockClient } from 'aws-sdk-client-mock';
+import * as fc from 'fast-check';
+
+import { GovernanceArchetype, ProjectArchetypeStatus } from '../../types';
+import { __resetGovernanceNotifierForTest } from '../../utils/notifier-base';
+import { __resetGovernanceFlagCacheForTest } from '../../utils/governance-flag';
+
+const dynamoMock = mockClient(DynamoDBDocumentClient);
+const eventBridgeMock = mockClient(EventBridgeClient);
+const cognitoMock = mockClient(CognitoIdentityProviderClient);
+const ssmMock = mockClient(SSMClient);
+
+jest.mock('../../utils/appsync', () => ({
+  getUserId: jest.fn().mockReturnValue('user-123'),
+}));
+
+jest.mock('uuid', () => ({ v4: jest.fn().mockReturnValue('project-uuid-1') }));
+
+// Import after mocks are registered
+import { handler } from '../project-resolver';
+
+const makeEvent = (fieldName: string, args: any) => ({
+  info: { fieldName },
+  arguments: args,
+  identity: { sub: 'user-123' },
+});
+
+describe('project-resolver — archetype attributes', () => {
+  beforeEach(() => {
+    dynamoMock.reset();
+    eventBridgeMock.reset();
+    cognitoMock.reset();
+    process.env.PROJECTS_TABLE = 'test-projects';
+    process.env.EVENT_BUS_NAME = 'test-bus';
+    process.env.USER_POOL_ID = 'test-pool';
+
+    // Default: no organization on the user — getProject's org-based access
+    // path simply falls back to owner-based checks, which is all we need here.
+    cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
+    eventBridgeMock.on(PutEventsCommand).resolves({});
+  });
+
+  afterEach(() => {
+    delete process.env.PROJECTS_TABLE;
+    delete process.env.EVENT_BUS_NAME;
+    delete process.env.USER_POOL_ID;
+  });
+
+  describe('createProject', () => {
+    test('new project is created with archetypeStatus=PENDING and no archetype/confidence', async () => {
+      dynamoMock.on(PutCommand).resolves({});
+
+      const result = await handler(
+        makeEvent('createProject', {
+          input: { name: 'Legacy DB migration', description: 'Mono schema' },
+        }) as any,
+        {} as any,
+        {} as any
+      );
+
+      // Response shape
+      expect(result.archetypeStatus).toBe('PENDING');
+      expect(result.archetype ?? null).toBeNull();
+      expect(result.archetypeConfidence ?? null).toBeNull();
+
+      // Persisted shape — inspect the PutCommand payload
+      const putCalls = dynamoMock.commandCalls(PutCommand);
+      expect(putCalls).toHaveLength(1);
+      const persisted = putCalls[0].args[0].input.Item as any;
+      expect(persisted.archetypeStatus).toBe('PENDING');
+      expect(persisted.archetype).toBeUndefined();
+      expect(persisted.archetypeConfidence).toBeUndefined();
+    });
+  });
+
+  describe('updateProject', () => {
+    test('persists archetype, archetypeConfidence and archetypeStatus passthrough', async () => {
+      const existing = {
+        id: 'proj-1',
+        name: 'Existing',
+        status: 'CREATED',
+        owner: 'user-123',
+        version: 0,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      };
+
+      // getProject inside updateProject
+      dynamoMock.on(GetCommand).resolves({ Item: existing });
+      // UpdateCommand returns the merged item
+      dynamoMock.on(UpdateCommand).resolves({
+        Attributes: {
+          ...existing,
+          archetype: 'MONOLITHIC_DB',
+          archetypeConfidence: 0.85,
+          archetypeStatus: 'CLASSIFIED',
+          version: 1,
+        },
+      });
+
+      const result = await handler(
+        makeEvent('updateProject', {
+          id: 'proj-1',
+          input: {
+            archetype: 'MONOLITHIC_DB',
+            archetypeConfidence: 0.85,
+            archetypeStatus: 'CLASSIFIED',
+          },
+        }) as any,
+        {} as any,
+        {} as any
+      );
+
+      expect(result.archetype).toBe('MONOLITHIC_DB');
+      expect(result.archetypeConfidence).toBeCloseTo(0.85);
+      expect(result.archetypeStatus).toBe('CLASSIFIED');
+
+      // Confirm the UpdateCommand's expression carried the new attrs through
+      const updateCalls = dynamoMock.commandCalls(UpdateCommand);
+      expect(updateCalls).toHaveLength(1);
+      const updateInput = updateCalls[0].args[0].input as any;
+      const values = updateInput.ExpressionAttributeValues as Record<string, any>;
+      expect(values[':archetype']).toBe('MONOLITHIC_DB');
+      expect(values[':archetypeConfidence']).toBeCloseTo(0.85);
+      expect(values[':archetypeStatus']).toBe('CLASSIFIED');
+    });
+  });
+
+  describe('getProject', () => {
+    test('grandfathers legacy rows: missing archetypeStatus normalises to PENDING', async () => {
+      // Simulate a pre-existing DDB item.
+      dynamoMock.on(GetCommand).resolves({
+        Item: {
+          id: 'legacy-1',
+          name: 'Legacy',
+          status: 'CREATED',
+          owner: 'user-123',
+          createdAt: '2024-12-01T00:00:00Z',
+          updatedAt: '2024-12-01T00:00:00Z',
+        },
+      });
+
+      const result = await handler(
+        makeEvent('getProject', { id: 'legacy-1' }) as any,
+        {} as any,
+        {} as any
+      );
+
+      expect(result.archetypeStatus).toBe('PENDING');
+      expect(result.archetype ?? null).toBeNull();
+      expect(result.archetypeConfidence ?? null).toBeNull();
+    });
+
+    test('claim-first path: reads custom:organization from identity and skips Cognito', async () => {
+      dynamoMock.on(GetCommand).resolves({
+        Item: {
+          id: 'proj-claim',
+          name: 'Claim Project',
+          status: 'CREATED',
+          owner: 'someone-else',
+          organization: 'org-claim',
+          createdAt: '2025-01-01T00:00:00Z',
+          updatedAt: '2025-01-01T00:00:00Z',
+          archetypeStatus: 'PENDING',
+        },
+      });
+
+      const claimEvent = {
+        info: { fieldName: 'getProject' },
+        arguments: { id: 'proj-claim' },
+        identity: { sub: 'user-123', 'custom:organization': 'org-claim' },
+      };
+
+      const result = await handler(claimEvent as any, {} as any, {} as any);
+
+      expect(result.id).toBe('proj-claim');
+      expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
+    });
+  });
+});
+
+describe('GovernanceArchetype enum — property tests', () => {
+  const ALLOWED = ['MONOLITHIC_DB', 'ENTERPRISE_APP_SPRAWL', 'HYBRID_IT_OT'];
+  const enumValues = Object.values(GovernanceArchetype) as string[];
+
+  test('enum contains exactly the three allowed values', () => {
+    expect(enumValues.sort()).toEqual([...ALLOWED].sort());
+  });
+
+  test('any random string not in the allowlist is rejected by the enum', () => {
+    fc.assert(
+      fc.property(fc.string(), (s) => {
+        fc.pre(!ALLOWED.includes(s));
+        return !enumValues.includes(s);
+      }),
+      { numRuns: 100 }
+    );
+  });
+});
+
+describe('ProjectArchetypeStatus enum — property tests', () => {
+  const ALLOWED = ['PENDING', 'CLASSIFIED', 'PENDING_ESCALATION'];
+  const enumValues = Object.values(ProjectArchetypeStatus) as string[];
+
+  test('enum contains exactly the three allowed values', () => {
+    expect(enumValues.sort()).toEqual([...ALLOWED].sort());
+  });
+
+  test('any random string not in the allowlist is rejected by the enum', () => {
+    fc.assert(
+      fc.property(fc.string(), (s) => {
+        fc.pre(!ALLOWED.includes(s));
+        return !enumValues.includes(s);
+      }),
+      { numRuns: 100 }
+    );
+  });
+});
+
+describe('phase-transition gates', () => {
+  // Gate effective_at cutoff used by SSM mock. Any project with
+  // createdAt < EFFECTIVE_AT is grandfathered; >= is non-grandfathered.
+  const EFFECTIVE_AT = '2026-01-01T00:00:00Z';
+  const NON_GF_CREATED_AT = '2026-06-01T00:00:00Z'; // after cutoff → gated
+  const GF_CREATED_AT = '2025-06-01T00:00:00Z'; // before cutoff → bypass
+
+  let adrSpy: jest.SpyInstance;
+  let specSpy: jest.SpyInstance;
+  let assessmentSpy: jest.SpyInstance;
+
+  const makeExistingProject = (overrides: Partial<Record<string, any>> = {}) => ({
+    id: 'proj-gate-1',
+    name: 'Gate Test',
+    description: 'fixture',
+    status: 'CREATED',
+    owner: 'user-123',
+    version: 0,
+    createdAt: NON_GF_CREATED_AT,
+    updatedAt: NON_GF_CREATED_AT,
+    archetypeStatus: 'PENDING',
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    dynamoMock.reset();
+    eventBridgeMock.reset();
+    cognitoMock.reset();
+    ssmMock.reset();
+    __resetGovernanceNotifierForTest();
+    __resetGovernanceFlagCacheForTest();
+
+    process.env.PROJECTS_TABLE = 'test-projects';
+    process.env.EVENT_BUS_NAME = 'test-bus';
+    process.env.USER_POOL_ID = 'test-pool';
+    process.env.ENVIRONMENT = 'dev';
+
+    cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
+    eventBridgeMock.on(PutEventsCommand).resolves({});
+
+    // SSM returns shadow + a populated effective_at so isGrandfathered()
+    // compares project.createdAt against EFFECTIVE_AT (not the null bypass).
+    ssmMock
+      .on(GetParameterCommand, { Name: '/citadel/governance/enforce/dev' })
+      .resolves({ Parameter: { Value: 'shadow' } });
+    ssmMock
+      .on(GetParameterCommand, { Name: '/citadel/governance/effective_at/dev' })
+      .resolves({ Parameter: { Value: EFFECTIVE_AT } });
+
+    // Spy on sibling resolver modules (C7/C10/C3 data sources). Each test
+    // overrides the return value as needed. Default: empty arrays / null.
+    adrSpy = jest
+      .spyOn(require('../adr-resolver'), 'listADRsForProject')
+      .mockResolvedValue([]);
+    specSpy = jest
+      .spyOn(require('../execspec-resolver'), 'listExecutionSpecifications')
+      .mockResolvedValue([]);
+    assessmentSpy = jest
+      .spyOn(require('../agent-design-assessment-resolver'), 'getAgentDesignAssessment')
+      .mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    adrSpy.mockRestore();
+    specSpy.mockRestore();
+    assessmentSpy.mockRestore();
+    delete process.env.PROJECTS_TABLE;
+    delete process.env.EVENT_BUS_NAME;
+    delete process.env.USER_POOL_ID;
+    delete process.env.ENVIRONMENT;
+  });
+
+  /** Count bypass events in the EventBridge mock's call log. */
+  const bypassEvents = () => {
+    const out: Array<Record<string, unknown>> = [];
+    for (const call of eventBridgeMock.commandCalls(PutEventsCommand)) {
+      const entries = (call.args[0].input as any).Entries ?? [];
+      for (const e of entries) {
+        if (e.DetailType === 'governance.grandfathered.bypass') {
+          out.push(JSON.parse(e.Detail));
+        }
+      }
+    }
+    return out;
+  };
+
+  // ---- C7_adr_required -----------------------------------------------------
+
+  test('C7: non-grandfathered project with zero LOCKED ADRs rejects DESIGN_COMPLETE → PLANNING_COMPLETE', async () => {
+    const existing = makeExistingProject({ status: 'DESIGN_COMPLETE' });
+    dynamoMock.on(GetCommand).resolves({ Item: existing });
+    adrSpy.mockResolvedValue([{ status: 'PROPOSED' }, { status: 'REOPENED' }]);
+
+    await expect(
+      handler(
+        makeEvent('updateProject', {
+          id: existing.id,
+          input: { status: 'PLANNING_COMPLETE' },
+        }) as any,
+        {} as any,
+        {} as any,
+      ),
+    ).rejects.toThrow(/PLANNING_COMPLETE requires at least one LOCKED ADR/);
+
+    // No DDB Update should have been issued.
+    expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    // No bypass event either.
+    expect(bypassEvents()).toHaveLength(0);
+  });
+
+  test('C7: non-grandfathered project with one LOCKED ADR resolves and issues Update', async () => {
+    const existing = makeExistingProject({ status: 'DESIGN_COMPLETE' });
+    dynamoMock.on(GetCommand).resolves({ Item: existing });
+    adrSpy.mockResolvedValue([{ status: 'LOCKED' }]);
+    dynamoMock.on(UpdateCommand).resolves({
+      Attributes: { ...existing, status: 'PLANNING_COMPLETE', version: 1 },
+    });
+
+    const result = await handler(
+      makeEvent('updateProject', {
+        id: existing.id,
+        input: { status: 'PLANNING_COMPLETE' },
+      }) as any,
+      {} as any,
+      {} as any,
+    );
+
+    expect(result.status).toBe('PLANNING_COMPLETE');
+    expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(1);
+    expect(bypassEvents()).toHaveLength(0);
+  });
+
+  test('C7: grandfathered project with zero LOCKED ADRs resolves, fires Update, emits exactly one bypass event', async () => {
+    const existing = makeExistingProject({
+      status: 'DESIGN_COMPLETE',
+      createdAt: GF_CREATED_AT, // pre-cutoff → grandfathered
+    });
+    dynamoMock.on(GetCommand).resolves({ Item: existing });
+    adrSpy.mockResolvedValue([]); // zero LOCKED ADRs
+    dynamoMock.on(UpdateCommand).resolves({
+      Attributes: { ...existing, status: 'PLANNING_COMPLETE', version: 1 },
+    });
+
+    const result = await handler(
+      makeEvent('updateProject', {
+        id: existing.id,
+        input: { status: 'PLANNING_COMPLETE' },
+      }) as any,
+      {} as any,
+      {} as any,
+    );
+
+    expect(result.status).toBe('PLANNING_COMPLETE');
+    expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(1);
+
+    const bypasses = bypassEvents();
+    expect(bypasses).toHaveLength(1);
+    expect(bypasses[0].bypassedGate).toBe('C7_adr_required');
+    expect(bypasses[0].projectId).toBe(existing.id);
+    expect(bypasses[0].projectCreatedAt).toBe(GF_CREATED_AT);
+    expect(bypasses[0].effectiveAt).toBe(EFFECTIVE_AT);
+  });
+
+  // ---- C3_assessment_required ---------------------------------------------
+
+  test('C3: non-grandfathered project with no AgentDesignAssessment rejects CREATED → IN_PROGRESS', async () => {
+    const existing = makeExistingProject({ status: 'CREATED' });
+    dynamoMock.on(GetCommand).resolves({ Item: existing });
+    assessmentSpy.mockResolvedValue(null);
+
+    await expect(
+      handler(
+        makeEvent('updateProject', {
+          id: existing.id,
+          input: { status: 'IN_PROGRESS' },
+        }) as any,
+        {} as any,
+        {} as any,
+      ),
+    ).rejects.toThrow(/IN_PROGRESS requires a completed AgentDesignAssessment/);
+
+    expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(bypassEvents()).toHaveLength(0);
+  });
+
+  test('C3: grandfathered project with no assessment resolves and emits bypass event', async () => {
+    const existing = makeExistingProject({
+      status: 'CREATED',
+      createdAt: GF_CREATED_AT,
+    });
+    dynamoMock.on(GetCommand).resolves({ Item: existing });
+    assessmentSpy.mockResolvedValue(null);
+    dynamoMock.on(UpdateCommand).resolves({
+      Attributes: { ...existing, status: 'IN_PROGRESS', version: 1 },
+    });
+
+    const result = await handler(
+      makeEvent('updateProject', {
+        id: existing.id,
+        input: { status: 'IN_PROGRESS' },
+      }) as any,
+      {} as any,
+      {} as any,
+    );
+
+    expect(result.status).toBe('IN_PROGRESS');
+    expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(1);
+
+    const bypasses = bypassEvents();
+    expect(bypasses).toHaveLength(1);
+    expect(bypasses[0].bypassedGate).toBe('C3_assessment_required');
+  });
+
+  // ---- C10_spec_required --------------------------------------------------
+
+  test('C10: non-grandfathered project with no APPROVED ExecSpec rejects PLANNING_COMPLETE → IMPLEMENTATION_READY', async () => {
+    const existing = makeExistingProject({ status: 'PLANNING_COMPLETE' });
+    dynamoMock.on(GetCommand).resolves({ Item: existing });
+    specSpy.mockResolvedValue([{ status: 'DRAFT' }, { status: 'IN_REVIEW' }]);
+
+    await expect(
+      handler(
+        makeEvent('updateProject', {
+          id: existing.id,
+          input: { status: 'IMPLEMENTATION_READY' },
+        }) as any,
+        {} as any,
+        {} as any,
+      ),
+    ).rejects.toThrow(
+      /IMPLEMENTATION_READY requires at least one APPROVED ExecutionSpecification/,
+    );
+
+    expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(bypassEvents()).toHaveLength(0);
+  });
+
+  test('C10: grandfathered project with no APPROVED ExecSpec resolves and emits bypass event', async () => {
+    const existing = makeExistingProject({
+      status: 'PLANNING_COMPLETE',
+      createdAt: GF_CREATED_AT,
+    });
+    dynamoMock.on(GetCommand).resolves({ Item: existing });
+    specSpy.mockResolvedValue([]);
+    dynamoMock.on(UpdateCommand).resolves({
+      Attributes: { ...existing, status: 'IMPLEMENTATION_READY', version: 1 },
+    });
+
+    const result = await handler(
+      makeEvent('updateProject', {
+        id: existing.id,
+        input: { status: 'IMPLEMENTATION_READY' },
+      }) as any,
+      {} as any,
+      {} as any,
+    );
+
+    expect(result.status).toBe('IMPLEMENTATION_READY');
+    expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(1);
+
+    const bypasses = bypassEvents();
+    expect(bypasses).toHaveLength(1);
+    expect(bypasses[0].bypassedGate).toBe('C10_spec_required');
+  });
+
+  // ---- Non-gated transitions pass through ---------------------------------
+
+  test('non-gated transition ASSESSMENT_COMPLETE → DESIGN_COMPLETE resolves with no bypass event', async () => {
+    const existing = makeExistingProject({ status: 'ASSESSMENT_COMPLETE' });
+    dynamoMock.on(GetCommand).resolves({ Item: existing });
+    dynamoMock.on(UpdateCommand).resolves({
+      Attributes: { ...existing, status: 'DESIGN_COMPLETE', version: 1 },
+    });
+
+    const result = await handler(
+      makeEvent('updateProject', {
+        id: existing.id,
+        input: { status: 'DESIGN_COMPLETE' },
+      }) as any,
+      {} as any,
+      {} as any,
+    );
+
+    expect(result.status).toBe('DESIGN_COMPLETE');
+    expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(1);
+    expect(bypassEvents()).toHaveLength(0);
+
+    // None of the gate data sources should have been consulted for a
+    // non-gated transition.
+    expect(adrSpy).not.toHaveBeenCalled();
+    expect(specSpy).not.toHaveBeenCalled();
+    expect(assessmentSpy).not.toHaveBeenCalled();
+  });
+});

@@ -1,0 +1,51 @@
+Accounts Payables – Invoice Exceptions
+Invoice exceptions within the context of Accounts Payables refers to the process of receiving
+an invoice from a vendor, validating against the goods or services that needed to be
+provided and paying the invoice.
+The traditional process of buying is composed of the following artifacts:
+- Purchase Order: order to buy goods or services from a vendor. Issued by the Buyer.
+- Goods / Service Receipt (usually referred to as Goods Receipt): acknowledgement by
+the buyer that the goods / services were received. Internal process by the Buyer.
+- Invoice: Payment request for the amount of the goods / services provided. Issued by
+the Vendor.
+Once the three documents match (referred to three way matching process), the invoice is
+sent for payment.
+Within this context, there are several common types of issues that can occur when receiving vendor
+invoices and some examples.
+Data Quality and Accuracy Issues
+• Incorrect invoice amounts - Mathematical errors, wrong pricing, or quantity discrepancies. This
+could be due to a vendor error or wrong information in the buyer’s system, such as incorrect
+amounts in the PO, price variations not taken into consideration or data not up to date.
+• Missing, incomplete or incorrect information - Delivery dates, tax details, vendor information or
+incorrect payment terms.
+• Duplicate invoices - Same invoice submitted multiple times or similar charges from different
+periods
+• Wrong billing addresses - Invoices sent to incorrect departments or locations within the
+organization
+• Wrong Purchase Order in the Invoice – Vendor uses previously exhausted Purchase Order
+number to send an invoice.
+• No Purchase Order number in the Invoice – Invoice received with no PO number. This can be
+caused due to vendor data issues or because the buyer has not created the PO in time.
+Process and Timing Issues
+• Late invoice submissions - Vendors submitting invoices after payment terms have expired
+• Early invoicing - Billing for goods/services not yet delivered or completed
+• Invoice format problems - Non-standard formats that don't integrate well with AP systems
+• Missing supporting documentation - Lack of delivery receipts, contracts, or approval signatures
+• Goods received but not entered in the system – Goods physically delivered but goods receipt
+process not registered in the system. When invoice arrives, the three way matching process fails
+and the invoice is rejected.
+Matching and Reconciliation Problems
+• Three-way matching failures - Discrepancies between purchase orders, receiving documents,
+and invoices
+• Vendor master data issues - Incorrect vendor information, outdated payment terms, or wrong
+tax classifications
+• Currency and exchange rate problems - Issues with foreign currency invoices and fluctuating
+exchange rates
+• Tax calculation errors - Incorrect sales tax, VAT, or other regulatory tax applications
+Cause of issues
+• Invo - Lack of required tax documentation or compliance certificates
+• Audit trail problems - Insufficient documentation for regulatory or internal audit purposes
+• Vendor compliance issues - Suppliers not meeting contractual terms or regulatory standards
+These issues can lead to delayed payments, strained vendor relationships, compliance problems, and
+increased processing costs. Implementing robust invoice validation processes, automated matching
+systems, and clear vendor communication protocols can help minimize these problems.

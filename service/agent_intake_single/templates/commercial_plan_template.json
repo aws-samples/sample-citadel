@@ -1,0 +1,45 @@
+{
+  "default_day_rate": 1200,
+  "currency": "USD",
+  "infra_cost_monthly_estimate": 500,
+  "agent_infra": {
+    "fixed_monthly": { "S": 500, "M": 1000, "L": 2000 },
+    "per_1000_invocations": { "S": 100, "M": 300, "L": 500 },
+    "default_monthly_invocations": 1000
+  },
+  "sections": [
+    {
+      "id": "cp1",
+      "title": "Resourcing & Timeline",
+      "description": "Effort estimate, team composition, and delivery timeline.",
+      "required_content": [
+        "Effort range (low/mid/high) in days and weeks — from resourcing report",
+        "Recommended team composition (roles and FTE)",
+        "Delivery timeline with key milestones",
+        "Dependencies and critical path items"
+      ]
+    },
+    {
+      "id": "cp2",
+      "title": "Budget",
+      "description": "Cost breakdown covering build, infrastructure, and ongoing operations.",
+      "required_content": [
+        "Build cost: effort days × day rate",
+        "Infrastructure cost estimate (monthly and annualised)",
+        "Total cost of ownership for year 1",
+        "Budget assumptions and exclusions"
+      ]
+    },
+    {
+      "id": "cp3",
+      "title": "Return on Investment",
+      "description": "Expected financial and operational return from the investment.",
+      "required_content": [
+        "Quantified benefits (time saved, error reduction, cost avoidance)",
+        "Payback period",
+        "3-year NPV or ROI estimate where data supports it",
+        "Non-financial benefits"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+# CodeBuild buildspec — Build phase
+# Produces frontend and backend artifacts for the deploy stage
+version: 0.2
+
+env:
+  variables:
+    ENVIRONMENT: "dev"
+  exported-variables:
+    - GIT_SHA
+    - BUILD_ID
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 24
+    commands:
+      - npm --version
+      - node --version
+
+  pre_build:
+    commands:
+      - export GIT_SHA=$(git rev-parse --short HEAD)
+      - export BUILD_ID=$CODEBUILD_BUILD_ID
+      - echo "Building commit $GIT_SHA"
+
+  build:
+    commands:
+      # Frontend build
+      - echo "Building frontend..."
+      - cd frontend
+      - npm ci
+      - npm run build
+      - cd ..
+
+      # Backend build
+      - echo "Building backend..."
+      - cd backend
+      - npm ci
+      - npm run build
+      - npm run build:lambda
+
+      # CDK synth (validate templates)
+      - echo "Synthesizing CDK..."
+      - npx cdk synth --quiet
+      - cd ..
+
+artifacts:
+  files:
+    - "**/*"
+  secondary-artifacts:
+    frontend-build:
+      base-directory: frontend/build
+      files:
+        - "**/*"
+    backend-dist:
+      base-directory: backend/dist
+      files:
+        - "**/*"
+    cdk-out:
+      base-directory: backend/cdk.out
+      files:
+        - "**/*"
+
+cache:
+  paths:
+    - "backend/node_modules/**/*"
+    - "frontend/node_modules/**/*"

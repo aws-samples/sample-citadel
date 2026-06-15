@@ -1,0 +1,65 @@
+{
+  "document_title": "Technical Design",
+  "sections": [
+    {
+      "id": "1",
+      "title": "Solution Overview",
+      "description": "What is being built and why agentic AI is the right approach.",
+      "required_content": [
+        "One-paragraph summary of the process being agentified",
+        "Why agentic AI vs RPA or traditional automation",
+        "Core value proposition — what changes for the business",
+        "Key assumptions and constraints"
+      ],
+      "kb_queries": ["process overview business problem", "current state pain points manual steps"]
+    },
+    {
+      "id": "2",
+      "title": "Agent Definitions",
+      "description": "Each agent in the solution: name, responsibility, tools, inputs, outputs, decision authority.",
+      "required_content": [
+        "Table of agents: name, responsibility, Strands tools used, inputs, outputs",
+        "What each agent decides autonomously vs escalates",
+        "handler() function signature for each agent (Arbiter pattern)",
+        "Agent registration config: agentId, description, input schema"
+      ],
+      "kb_queries": ["process steps roles responsibilities", "decision rules approval thresholds"]
+    },
+    {
+      "id": "3",
+      "title": "Orchestration & Data Flow",
+      "description": "How agents coordinate, sequencing, data passed between agents, failure handling.",
+      "required_content": [
+        "Step-by-step orchestration flow for the primary happy path",
+        "Data passed between agents — field names and types",
+        "Exception handling and retry strategy",
+        "Concurrency considerations"
+      ],
+      "kb_queries": ["workflow sequence process flow", "exception handling error scenarios"]
+    },
+    {
+      "id": "4",
+      "title": "Integrations",
+      "description": "External systems each agent connects to: how, auth, key data exchanged.",
+      "required_content": [
+        "Table: system, agent that uses it, integration method (http_request/use_aws/custom tool), auth method",
+        "Key request/response fields for each integration",
+        "Custom tools needed for integrations not covered by Strands built-ins",
+        "Rate limits, error codes, retry behaviour"
+      ],
+      "kb_queries": ["systems APIs integrations endpoints", "authentication credentials access methods"]
+    },
+    {
+      "id": "5",
+      "title": "Human-in-the-Loop Design",
+      "description": "Where humans stay in the loop: triggers, routing, SLAs, override mechanisms.",
+      "required_content": [
+        "Table: trigger condition, who is notified, SLA, action required",
+        "How approval responses are routed back into the orchestration",
+        "Audit trail — what is logged and where",
+        "Compliance controls mapped to specific agent behaviours"
+      ],
+      "kb_queries": ["approval thresholds human review compliance requirements", "audit logging regulatory"]
+    }
+  ]
+}

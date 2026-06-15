@@ -1,0 +1,10 @@
+# Investigation agent suite for the HYBRID_IT_OT archetype.
+# Placeholder stub per QT2B-3 and US-GOV-017; real agent list is refined
+# iteratively per C15 compound-learning effect.
+# Source: GOV-FW §Component 3 / C5c
+archetype: HYBRID_IT_OT
+agents: []  # TODO(US-GOV-017 follow-up): populate per C5c specification
+metadata:
+  placeholder: true
+  source: "GOV-FW §Component 3 / C5c"
+  populated_at: null

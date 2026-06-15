@@ -1,0 +1,110 @@
+{
+  "pillar": "governance",
+  "sections": {
+    "regulatory_compliance": {
+      "label": "Regulatory & Compliance",
+      "fields": {
+        "industry_regulations": {
+          "label": "Applicable regulations (HIPAA, PCI-DSS, SOX, GDPR, APRA, etc.)",
+          "value": null,
+          "required": true
+        },
+        "data_residency": {
+          "label": "Data residency and sovereignty requirements",
+          "value": null,
+          "required": true
+        },
+        "audit_requirements": {
+          "label": "Audit logging, retention, and reporting requirements",
+          "value": null,
+          "required": true
+        },
+        "ai_policy": {
+          "label": "Org policies on AI/LLM usage and responsible AI frameworks",
+          "value": null,
+          "required": true
+        }
+      }
+    },
+    "responsible_ai": {
+      "label": "Responsible AI & Guardrails",
+      "fields": {
+        "decisions_requiring_humans": {
+          "label": "Decisions that cannot be delegated to an agent",
+          "value": null,
+          "required": true
+        },
+        "approval_workflows": {
+          "label": "What requires human sign-off before execution?",
+          "value": null,
+          "required": true
+        },
+        "escalation_paths": {
+          "label": "When should the agent hand off to a human?",
+          "value": null,
+          "required": true
+        },
+        "override_mechanisms": {
+          "label": "How can humans override agent decisions?",
+          "value": "Not specified in document. Will need: AP Team Lead dashboard to review/override agent decisions, ability to manually post invoices bypassing agent, audit log of all overrides. SAP retains ability to manually post invoices as fallback.",
+          "required": true
+        },
+        "confidence_thresholds": {
+          "label": "At what confidence level should the agent escalate?",
+          "value": null,
+          "required": false
+        },
+        "bias_fairness": {
+          "label": "Fairness concerns in the process (lending, hiring, claims, etc.)",
+          "value": null,
+          "required": false
+        },
+        "transparency_requirements": {
+          "label": "Must end users know they are interacting with an agent?",
+          "value": null,
+          "required": true
+        },
+        "explainability": {
+          "label": "Must the agent explain its reasoning? To whom?",
+          "value": null,
+          "required": false
+        }
+      }
+    },
+    "org_readiness": {
+      "label": "Organisational Readiness",
+      "fields": {
+        "change_appetite": {
+          "label": "Org readiness for AI-driven process change",
+          "value": null,
+          "required": true
+        },
+        "training_needs": {
+          "label": "Who needs to learn new workflows?",
+          "value": null,
+          "required": false
+        },
+        "support_model": {
+          "label": "Who supports the agents in production?",
+          "value": null,
+          "required": true
+        },
+        "risk_tolerance": {
+          "label": "Acceptable failure rate and consequence of agent errors",
+          "value": null,
+          "required": true
+        },
+        "rollback_plan": {
+          "label": "Can the org revert to the manual process if needed?",
+          "value": "Yes \u2014 manual SAP data entry process can be resumed if needed. However, with 3 FTEs reducing via attrition, rollback capacity diminishes over time. Phased rollout recommended to maintain manual fallback during transition. Rollback plan not formally documented.",
+          "required": true
+        },
+        "workforce_change_management": {
+          "label": "How will affected roles transition?",
+          "value": null,
+          "required": false
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "pillar": "business",
+  "sections": {
+    "qualification": {
+      "label": "Qualification",
+      "fields": {
+        "process_name": { "label": "Process name and owning business unit", "value": null, "required": true },
+        "executive_sponsor": { "label": "Named executive sponsor with mandate to proceed", "value": null, "required": true },
+        "problem_statement": { "label": "What is broken and why does it matter now?", "value": null, "required": true },
+        "annual_impact": { "label": "Quantified annual cost or impact ($ or hours)", "value": null, "required": true },
+        "volume_and_frequency": { "label": "Transaction volume and frequency (daily/weekly/monthly)", "value": null, "required": true }
+      }
+    },
+    "process_fit": {
+      "label": "Process Fit for Agentification",
+      "fields": {
+        "repetitive_rules_based": { "label": "Is the process repetitive and rules-based (vs highly creative/judgement-heavy)?", "value": null, "required": true },
+        "digital_inputs": { "label": "Are inputs digital or digitisable (documents, emails, forms, APIs)?", "value": null, "required": true },
+        "decision_points": { "label": "Key decision points — can they be expressed as rules or trained on examples?", "value": null, "required": true },
+        "current_pain": { "label": "Top 2-3 pain points driving the need for automation", "value": null, "required": true }
+      }
+    },
+    "success": {
+      "label": "Success Criteria",
+      "fields": {
+        "kpis": { "label": "2-3 measurable KPIs that define success", "value": null, "required": true },
+        "poc_criteria": { "label": "What must a POC demonstrate to get production funding?", "value": null, "required": true }
+      }
+    }
+  }
+}

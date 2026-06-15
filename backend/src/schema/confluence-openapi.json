@@ -1,0 +1,68 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Confluence API",
+    "version": "1.0.0",
+    "description": "Confluence Cloud REST API"
+  },
+  "servers": [
+    {
+      "url": "https://{confluenceDomain}/wiki/rest/api",
+      "variables": {
+        "confluenceDomain": {
+          "default": "example.atlassian.net"
+        }
+      }
+    }
+  ],
+  "paths": {
+    "/content": {
+      "get": {
+        "summary": "Get content",
+        "operationId": "getContent",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "spaceKey",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        }
+      }
+    },
+    "/content/{id}": {
+      "get": {
+        "summary": "Get content by ID",
+        "operationId": "getContentById",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "sections": [
+    {
+      "id": "bp1",
+      "title": "Strategic Context",
+      "description": "Why this project exists — the business problem, strategic driver, and what changes if it succeeds.",
+      "required_content": [
+        "Organisation and business unit context",
+        "Problem statement — current state pain and cost of inaction",
+        "Strategic alignment — how this supports broader business goals",
+        "Expected outcomes with measurable success criteria"
+      ]
+    },
+    {
+      "id": "bp2",
+      "title": "Stakeholders & Governance",
+      "description": "Who is involved, who decides, and how the project is governed.",
+      "required_content": [
+        "Sponsor and executive owner",
+        "Decision makers and sign-off chain",
+        "Impacted teams and change management considerations",
+        "Governance model — how decisions are made and escalated"
+      ]
+    },
+    {
+      "id": "bp3",
+      "title": "Risks & Compliance",
+      "description": "Key risks, regulatory constraints, data sensitivity, and mitigation approach.",
+      "required_content": [
+        "Top 3–5 risks with likelihood and impact rating",
+        "Regulatory and compliance requirements",
+        "Data sensitivity and privacy considerations",
+        "Risk mitigation strategies"
+      ]
+    },
+    {
+      "id": "bp4",
+      "title": "Recommendation & Build Path",
+      "description": "Go/No-Go rationale and how the solution will be built.",
+      "required_content": [
+        "Go/No-Go/Conditional-Go recommendation with rationale",
+        "Build path per agent: Fabricate / Custom / Workflow tool",
+        "Key assumptions underpinning the recommendation",
+        "Conditions or prerequisites for proceeding"
+      ]
+    }
+  ]
+}

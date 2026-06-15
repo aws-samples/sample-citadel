@@ -1,0 +1,959 @@
+/**
+ * Workflow Builder Styles
+ * 
+ * Custom styles for the Agent Workflow Builder including:
+ * - Dark theme consistency
+ * - Node styling with borders, shadows, and hover effects
+ * - Connection edge styling with smooth curves
+ * - Drag-and-drop animations
+ * - Responsive layout adjustments
+ */
+
+/* ===== ReactFlow Canvas Customization ===== */
+
+/* Canvas background */
+.react-flow {
+  background-color: #0a0a0a;
+}
+
+.react-flow__background {
+  background-color: #0a0a0a;
+}
+
+/* Grid pattern */
+.react-flow__background-pattern {
+  stroke: #2a2a2a;
+}
+
+/* ===== Node Styling ===== */
+
+/* Base node styles */
+.react-flow__node {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* Node hover effect */
+.react-flow__node:hover {
+  transform: translateY(-2px);
+}
+
+/* Selected node glow effect */
+.react-flow__node.selected {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.5));
+  }
+  50% {
+    filter: drop-shadow(0 0 16px rgba(59, 130, 246, 0.7));
+  }
+}
+
+/* Node dragging state */
+.react-flow__node.dragging {
+  opacity: 0.8;
+  cursor: grabbing !important;
+  transform: scale(1.05);
+  transition: transform 0.1s ease;
+}
+
+/* ===== Connection Edge Styling ===== */
+
+/* Edge paths */
+.react-flow__edge-path {
+  stroke: #3a3a3a;
+  stroke-width: 2;
+  transition: stroke 0.2s ease, stroke-width 0.2s ease;
+}
+
+/* Edge hover effect */
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: #4a4a4a;
+  stroke-width: 3;
+}
+
+/* Selected edge */
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: #3b82f6;
+  stroke-width: 3;
+  animation: edge-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes edge-pulse {
+  0%, 100% {
+    stroke-opacity: 1;
+  }
+  50% {
+    stroke-opacity: 0.6;
+  }
+}
+
+/* Animated edges */
+.react-flow__edge.animated .react-flow__edge-path {
+  stroke-dasharray: 5;
+  animation: edge-flow 1s linear infinite;
+}
+
+@keyframes edge-flow {
+  to {
+    stroke-dashoffset: -10;
+  }
+}
+
+/* Edge labels */
+.react-flow__edge-text {
+  fill: #9ca3af;
+  font-size: 12px;
+}
+
+/* Edge buttons (delete, etc.) */
+.react-flow__edge-textbg {
+  fill: #1a1a1a;
+}
+
+/* ===== Handle Styling ===== */
+
+/* Connection handles */
+.react-flow__handle {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid #1a1a1a;
+  background: #3a3a3a;
+  transition: all 0.2s ease;
+}
+
+/* Handle hover effect */
+.react-flow__handle:hover {
+  transform: scale(1.3);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
+}
+
+/* Handle when connecting */
+.react-flow__handle.connecting {
+  background: #3b82f6;
+  animation: handle-pulse 0.6s ease-in-out infinite;
+}
+
+@keyframes handle-pulse {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.4);
+  }
+}
+
+/* Handle when connection is valid */
+.react-flow__handle.valid {
+  background: #10b981;
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.6);
+}
+
+/* Handle when connection is invalid */
+.react-flow__handle.invalid {
+  background: #ef4444;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.6);
+}
+
+/* ===== Controls Styling ===== */
+
+/* Control buttons */
+.react-flow__controls {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+.react-flow__controls-button {
+  background: #1a1a1a;
+  border-bottom: 1px solid #2a2a2a;
+  color: #9ca3af;
+  transition: all 0.2s ease;
+}
+
+.react-flow__controls-button:hover {
+  background: #2a2a2a;
+  color: #ffffff;
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: none;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+/* ===== MiniMap Styling ===== */
+
+.react-flow__minimap {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+.react-flow__minimap-mask {
+  fill: rgba(0, 0, 0, 0.6);
+}
+
+.react-flow__minimap-node {
+  fill: #3a3a3a;
+  stroke: #2a2a2a;
+}
+
+/* ===== Drag and Drop Animations ===== */
+
+/* Dragging from tray */
+@keyframes drag-start {
+  from {
+    transform: scale(1);
+    opacity: 1;
+  }
+  to {
+    transform: scale(0.95);
+    opacity: 0.7;
+  }
+}
+
+.agent-tray-item-dragging {
+  animation: drag-start 0.2s ease forwards;
+}
+
+/* Drop zone highlight */
+.react-flow__pane.drag-over {
+  background-color: rgba(59, 130, 246, 0.05);
+  transition: background-color 0.2s ease;
+}
+
+/* Node drop animation */
+@keyframes node-drop {
+  0% {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.react-flow__node.just-dropped {
+  animation: node-drop 0.4s ease;
+}
+
+/* ===== Validation Error Styling ===== */
+
+/* Error node highlight */
+.react-flow__node.has-error {
+  animation: error-shake 0.5s ease;
+}
+
+@keyframes error-shake {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-4px);
+  }
+  75% {
+    transform: translateX(4px);
+  }
+}
+
+/* Error edge */
+.react-flow__edge.has-error .react-flow__edge-path {
+  stroke: #ef4444;
+  stroke-width: 2;
+  stroke-dasharray: 4;
+  animation: error-dash 1s linear infinite;
+}
+
+@keyframes error-dash {
+  to {
+    stroke-dashoffset: -8;
+  }
+}
+
+/* ===== Selection Box ===== */
+
+.react-flow__selection {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid #3b82f6;
+}
+
+/* ===== Connection Line ===== */
+
+.react-flow__connectionline {
+  stroke: #3b82f6;
+  stroke-width: 2;
+  stroke-dasharray: 5;
+  animation: connection-line-flow 0.5s linear infinite;
+}
+
+@keyframes connection-line-flow {
+  to {
+    stroke-dashoffset: -10;
+  }
+}
+
+/* ===== Responsive Adjustments ===== */
+
+/* Mobile and tablet adjustments */
+@media (max-width: 768px) {
+  /* Smaller controls on mobile */
+  .react-flow__controls {
+    transform: scale(0.9);
+  }
+  
+  /* Smaller minimap on mobile */
+  .react-flow__minimap {
+    width: 120px;
+    height: 80px;
+  }
+  
+  /* Larger touch targets for handles */
+  .react-flow__handle {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+@media (max-width: 640px) {
+  /* Hide minimap on very small screens */
+  .react-flow__minimap {
+    display: none;
+  }
+  
+  /* Adjust node sizing */
+  .react-flow__node {
+    font-size: 14px;
+  }
+}
+
+/* ===== Accessibility ===== */
+
+/* Focus indicators for keyboard navigation */
+.react-flow__node:focus,
+.react-flow__node:focus-visible {
+  outline: 3px solid #3b82f6;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3);
+}
+
+.react-flow__edge:focus,
+.react-flow__edge:focus-visible {
+  outline: 3px solid #3b82f6;
+  outline-offset: 4px;
+}
+
+.react-flow__handle:focus,
+.react-flow__handle:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.4);
+}
+
+/* Button focus indicators */
+button:focus-visible,
+.workflow-toolbar-button:focus-visible,
+.agent-tray-item:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.2);
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  .react-flow__edge-path {
+    stroke-width: 4;
+    stroke: #ffffff;
+  }
+  
+  .react-flow__handle {
+    border-width: 3px;
+    border-color: #ffffff;
+  }
+  
+  .react-flow__node {
+    border-width: 3px;
+    border-color: #ffffff;
+  }
+  
+  /* Increase contrast for text */
+  .text-\[\#6b7280\],
+  .text-\[\#9ca3af\] {
+    color: #ffffff !important;
+  }
+  
+  /* Increase contrast for borders */
+  .border-\[\#2a2a2a\],
+  .border-\[\#3a3a3a\] {
+    border-color: #ffffff !important;
+  }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  
+  .react-flow__node,
+  .react-flow__edge-path,
+  .react-flow__handle {
+    transition: none;
+    animation: none;
+  }
+  
+  .react-flow__node.selected {
+    animation: none;
+    filter: drop-shadow(0 0 8px rgba(59, 130, 246, 0.5));
+  }
+  
+  .agent-tray-item,
+  .workflow-toolbar-button {
+    transition: none;
+    animation: none;
+  }
+}
+
+/* Screen reader only content */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Skip to main content link */
+.skip-to-content {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: #1a1a1a;
+  color: #ffffff;
+  padding: 8px 16px;
+  text-decoration: none;
+  border: 2px solid #3b82f6;
+  border-radius: 4px;
+  z-index: 100;
+}
+
+.skip-to-content:focus {
+  top: 8px;
+  left: 8px;
+}
+
+/* Keyboard navigation indicators */
+[role="button"]:focus-visible,
+[role="listitem"]:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.2);
+}
+
+/* Improve color contrast for WCAG AA compliance */
+.text-muted-foreground {
+  color: #9ca3af;
+}
+
+@media (prefers-contrast: high) {
+  .text-muted-foreground {
+    color: #e5e7eb;
+  }
+}
+
+/* Focus trap for modals and dialogs */
+[role="dialog"]:focus {
+  outline: none;
+}
+
+/* Ensure interactive elements are keyboard accessible */
+[draggable="true"] {
+  cursor: grab;
+}
+
+[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* Improve touch targets for mobile */
+@media (max-width: 768px) {
+  button,
+  [role="button"],
+  .react-flow__handle {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* ===== Custom Scrollbar for Tray ===== */
+
+.agent-tray-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.agent-tray-scroll::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+
+.agent-tray-scroll::-webkit-scrollbar-thumb {
+  background: #2a2a2a;
+  border-radius: 4px;
+}
+
+.agent-tray-scroll::-webkit-scrollbar-thumb:hover {
+  background: #3a3a3a;
+}
+
+/* ===== Loading States ===== */
+
+@keyframes skeleton-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.workflow-skeleton {
+  animation: skeleton-pulse 2s ease-in-out infinite;
+  background: linear-gradient(
+    90deg,
+    #1a1a1a 25%,
+    #2a2a2a 50%,
+    #1a1a1a 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 2s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* ===== Toolbar Enhancements ===== */
+
+.workflow-toolbar {
+  backdrop-filter: blur(8px);
+  background: rgba(26, 26, 26, 0.95);
+}
+
+.workflow-toolbar-button {
+  transition: all 0.2s ease;
+}
+
+.workflow-toolbar-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.workflow-toolbar-button:active {
+  transform: translateY(0);
+}
+
+/* ===== Empty State ===== */
+
+.workflow-empty-state {
+  animation: fade-in 0.5s ease;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ===== Agent Tray Item Enhancements ===== */
+
+.agent-tray-item {
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.agent-tray-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(59, 130, 246, 0.1),
+    transparent
+  );
+  transition: left 0.5s ease;
+}
+
+.agent-tray-item:hover::before {
+  left: 100%;
+}
+
+.agent-tray-item:hover {
+  transform: translateX(4px);
+}
+
+.agent-tray-item:active {
+  transform: scale(0.98);
+}
+
+/* ===== Configuration Panel Animations ===== */
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slide-out-right {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+.config-panel-enter {
+  animation: slide-in-right 0.3s ease;
+}
+
+.config-panel-exit {
+  animation: slide-out-right 0.3s ease;
+}
+
+/* ===== Utility Classes ===== */
+
+.workflow-card {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.workflow-card:hover {
+  border-color: #3a3a3a;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.workflow-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.workflow-badge-success {
+  background: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.workflow-badge-error {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.workflow-badge-warning {
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.workflow-badge-info {
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.2);
+}
+
+
+/* ===== Additional Responsive Enhancements ===== */
+
+/* Tablet adjustments */
+@media (max-width: 1024px) {
+  .agent-tray-item {
+    padding: 0.625rem;
+  }
+  
+  .workflow-toolbar {
+    padding: 0.5rem 0.75rem;
+  }
+  
+  .workflow-toolbar-button {
+    font-size: 0.875rem;
+    padding: 0.375rem 0.75rem;
+  }
+}
+
+/* Mobile-specific adjustments */
+@media (max-width: 768px) {
+  /* Hide agent tray on mobile - can be toggled with a button */
+  .agent-tray-mobile-hidden {
+    display: none;
+  }
+  
+  /* Full-width canvas on mobile */
+  .workflow-canvas-mobile {
+    width: 100%;
+  }
+  
+  /* Compact toolbar on mobile */
+  .workflow-toolbar {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  
+  .workflow-toolbar-button span {
+    display: none;
+  }
+  
+  /* Larger node text on mobile for readability */
+  .react-flow__node {
+    min-width: 180px;
+  }
+}
+
+/* ===== Print Styles ===== */
+
+@media print {
+  .workflow-toolbar,
+  .agent-tray,
+  .react-flow__controls,
+  .react-flow__minimap {
+    display: none !important;
+  }
+  
+  .react-flow {
+    background: white !important;
+  }
+  
+  .react-flow__node {
+    border-color: #000 !important;
+    background: white !important;
+    color: #000 !important;
+  }
+  
+  .react-flow__edge-path {
+    stroke: #000 !important;
+  }
+}
+
+/* ===== Dark Mode Enhancements ===== */
+
+/* Ensure consistent dark theme across all elements */
+.dark .workflow-card,
+.dark .agent-tray-item,
+.dark .react-flow__node {
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+}
+
+.dark .workflow-toolbar {
+  background: rgba(26, 26, 26, 0.95);
+  border-color: #2a2a2a;
+}
+
+/* ===== Performance Optimizations ===== */
+
+/* Use GPU acceleration for animations */
+.react-flow__node,
+.react-flow__edge,
+.agent-tray-item,
+.workflow-toolbar-button {
+  will-change: transform;
+  transform: translateZ(0);
+}
+
+/* Optimize repaints */
+.react-flow__renderer {
+  contain: layout style paint;
+}
+
+/* ===== Smooth Scrolling ===== */
+
+.agent-tray-scroll {
+  scroll-behavior: smooth;
+}
+
+/* ===== Focus Visible Enhancements ===== */
+
+.workflow-toolbar-button:focus-visible,
+.agent-tray-item:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+  border-radius: 0.375rem;
+}
+
+/* ===== Tooltip Styles ===== */
+
+.workflow-tooltip {
+  position: absolute;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  color: #e5e7eb;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  pointer-events: none;
+  animation: tooltip-fade-in 0.2s ease;
+}
+
+@keyframes tooltip-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ===== Connection Indicator ===== */
+
+.connection-indicator {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: #3b82f6;
+  border-radius: 50%;
+  animation: connection-pulse 1s ease-in-out infinite;
+}
+
+@keyframes connection-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 0.5;
+  }
+}
+
+/* ===== Success/Error Animations ===== */
+
+@keyframes success-bounce {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.1);
+  }
+}
+
+.workflow-success {
+  animation: success-bounce 0.3s ease;
+}
+
+@keyframes error-pulse {
+  0%, 100% {
+    background-color: rgba(239, 68, 68, 0.1);
+  }
+  50% {
+    background-color: rgba(239, 68, 68, 0.2);
+  }
+}
+
+.workflow-error {
+  animation: error-pulse 1s ease-in-out 3;
+}
+
+/* ===== Gradient Backgrounds ===== */
+
+.workflow-gradient-bg {
+  background: linear-gradient(
+    135deg,
+    #0a0a0a 0%,
+    #1a1a1a 50%,
+    #0a0a0a 100%
+  );
+}
+
+.workflow-gradient-border {
+  position: relative;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  padding: 2px;
+  border-radius: 0.5rem;
+}
+
+.workflow-gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  background: #1a1a1a;
+  border-radius: calc(0.5rem - 2px);
+}
+
+/* ===== Glassmorphism Effect ===== */
+
+.workflow-glass {
+  background: rgba(26, 26, 26, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* ===== Neon Glow Effects ===== */
+
+.workflow-neon-blue {
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.5),
+              0 0 20px rgba(59, 130, 246, 0.3),
+              0 0 30px rgba(59, 130, 246, 0.1);
+}
+
+.workflow-neon-green {
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.5),
+              0 0 20px rgba(16, 185, 129, 0.3),
+              0 0 30px rgba(16, 185, 129, 0.1);
+}
+
+.workflow-neon-red {
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.5),
+              0 0 20px rgba(239, 68, 68, 0.3),
+              0 0 30px rgba(239, 68, 68, 0.1);
+}
