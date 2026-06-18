@@ -570,7 +570,6 @@ async function adminResendInvitation(event: any, userId: string) {
 function generateTemporaryPassword(): string {
   const length = 12;
   const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*';
-  const randomBytes = crypto.randomBytes(length);
   let password = '';
   
   // Ensure password meets Cognito requirements
@@ -580,13 +579,13 @@ function generateTemporaryPassword(): string {
   password += '!'; // symbol
   
   for (let i = password.length; i < length; i++) {
-    password += charset.charAt(randomBytes[i] % charset.length);
+    password += charset.charAt(crypto.randomInt(charset.length));
   }
   
   // Shuffle the password using crypto-secure randomness
   const arr = password.split('');
   for (let i = arr.length - 1; i > 0; i--) {
-    const j = crypto.randomBytes(1)[0] % (i + 1);
+    const j = crypto.randomInt(i + 1);
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr.join('');

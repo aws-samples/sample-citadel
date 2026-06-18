@@ -27,8 +27,19 @@ def send(event, context, responseStatus, responseData, physicalResourceId=None, 
 
     json_responseBody = json.dumps(responseBody)
 
-    print("Response body:")
-    print(json_responseBody)
+    # Do not log the full response body: the 'Data' field may contain sensitive
+    # values (generated secrets, passwords, ARNs). Log only non-sensitive metadata.
+    print(
+        "Response status: {}; physicalResourceId={}; stackId={}; requestId={}; "
+        "logicalResourceId={}; dataKeys={}".format(
+            responseStatus,
+            responseBody['PhysicalResourceId'],
+            event['StackId'],
+            event['RequestId'],
+            event['LogicalResourceId'],
+            list(responseData.keys()) if isinstance(responseData, dict) else [],
+        )
+    )
 
     headers = {
         'content-type': '',

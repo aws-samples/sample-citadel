@@ -121,29 +121,46 @@ export type DetailPayloadOf<D extends GovernanceDetailType> = GovernancePayloadM
 
 // Fail-closed sanitiser — strips tags (and their content) for the three most
 // dangerous HTML embed vectors. Applied recursively across string fields only.
-const SCRIPT_RE = /<script\b[^>]*>[\s\S]*?<\/script\s*>/gi;
-const IFRAME_RE = /<iframe\b[^>]*>[\s\S]*?<\/iframe\s*>/gi;
-const OBJECT_RE = /<object\b[^>]*>[\s\S]*?<\/object\s*>/gi;
-// Also strip self-closing / un-closed opening tags so `<script src=x>` on its
-// own cannot survive.
-const SCRIPT_OPEN_RE = /<script\b[^>]*>/gi;
-const IFRAME_OPEN_RE = /<iframe\b[^>]*>/gi;
-const OBJECT_OPEN_RE = /<object\b[^>]*>/gi;
-const SCRIPT_CLOSE_RE = /<\/script\s*>/gi;
-const IFRAME_CLOSE_RE = /<\/iframe\s*>/gi;
-const OBJECT_CLOSE_RE = /<\/object\s*>/gi;
+//
+// This is plain-text stripping for a JSON-serialised event payload, NOT HTML
+// rendering: the contract is "remove <script>/<iframe>/<object> markup, leave
+// every other character (including bare `<`, `>`, `&`) byte-for-byte intact and
+// be idempotent". A general HTML sanitiser (sanitize-html / DOMPurify) is
+// deliberately NOT used here because it entity-encodes text (`<` -> `&lt;`,
+// `&` -> `&amp;`), which would both mutate benign payload fields and break the
+// idempotency contract that the unit + property tests enforce.
+//
+// Robustness fixes for CodeQL js/incomplete-multi-character-sanitization and
+// js/bad-tag-filter:
+//   * Each pass runs to a fixed point (loop until the string stops changing)
+//     so a replacement cannot re-introduce a stripped construct via nesting or
+//     overlap (e.g. "<scr<script>ipt>").
+//   * Opening tags tolerate leading whitespace (`<  script`); closing tags
+//     tolerate arbitrary junk before `>` (`</script foo>`), and stray /
+//     unterminated openers are removed, so a malformed tag cannot bypass the
+//     filter.
+//   * `[\s\S]` is used for tag bodies/content so newlines cannot hide a tag.
+const DANGEROUS_TAGS = 'script|iframe|object';
+// Balanced <tag …> … </tag …> block (content included). Backreference keeps
+// the open/close tag names matched.
+const PAIRED_TAG_RE = new RegExp(
+  `<\\s*(${DANGEROUS_TAGS})\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*\\1\\b[^>]*>`,
+  'gi'
+);
+// Any leftover opening or closing tag for the dangerous set, including an
+// unterminated opener at end-of-input (trailing `>` optional).
+const STRAY_TAG_RE = new RegExp(
+  `<\\s*\\/?\\s*(?:${DANGEROUS_TAGS})\\b[^>]*>?`,
+  'gi'
+);
 
 function sanitizeString(s: string): string {
   let out = s;
-  out = out.replace(SCRIPT_RE, '');
-  out = out.replace(IFRAME_RE, '');
-  out = out.replace(OBJECT_RE, '');
-  out = out.replace(SCRIPT_OPEN_RE, '');
-  out = out.replace(IFRAME_OPEN_RE, '');
-  out = out.replace(OBJECT_OPEN_RE, '');
-  out = out.replace(SCRIPT_CLOSE_RE, '');
-  out = out.replace(IFRAME_CLOSE_RE, '');
-  out = out.replace(OBJECT_CLOSE_RE, '');
+  let previous: string;
+  do {
+    previous = out;
+    out = out.replace(PAIRED_TAG_RE, '').replace(STRAY_TAG_RE, '');
+  } while (out !== previous);
   return out;
 }
 

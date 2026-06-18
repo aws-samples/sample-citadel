@@ -2,9 +2,25 @@
 // Validates: Requirements 6.3, 6.4, 10.4
 
 import * as fc from 'fast-check';
+import { STSClient } from '@aws-sdk/client-sts';
+import { mockClient } from 'aws-sdk-client-mock';
 
 // Import the testable health check logic (to be implemented)
 import { processHealthChecks, HealthCheckResult } from '../health-monitor';
+
+// processHealthChecks assumes a scoped STS role per store (GetCallerIdentity +
+// AssumeRole). With no real AWS credentials in the test environment, the
+// un-mocked STS client hangs on credential resolution (IMDS) and retries,
+// which blows past Jest's 30s timeout and leaks open handles. Mock STS so
+// those calls resolve instantly. The assumed credentials are irrelevant to
+// the idempotency invariant under test — the per-store testConnection mocks
+// (wired below) are what drive the property assertions.
+const stsMock = mockClient(STSClient);
+
+beforeEach(() => {
+  stsMock.reset();
+  stsMock.onAnyCommand().resolves({});
+});
 
 // ---- Generators ----
 
