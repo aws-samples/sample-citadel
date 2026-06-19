@@ -55,6 +55,7 @@ const DOC_TABS: DocTab[] = [
   { id: 'resourcing',        label: 'Resourcing',         documentKey: 'design/resourcing_report.md', progressKey: 'planning', planningOrder: 0 },
   { id: 'business_plan',     label: 'Business Plan',      documentKey: 'planning/business_plan.md', progressKey: 'planning', planningOrder: 1 },
   { id: 'commercial_plan',   label: 'Commercial Plan',    documentKey: 'planning/commercial_plan.md', progressKey: 'planning', planningOrder: 2 },
+  { id: 'fabrication_plan',  label: 'Fabrication Plan',   documentKey: 'planning/fabrication_plan.md', progressKey: 'implementation' },
 ];
 
 const WELCOME_MESSAGE: Message = {
@@ -106,10 +107,12 @@ function VersionPanel({
   const [selected, setSelected] = useState<string | null>(null);
   const [compareDoc, setCompareDoc] = useState<ProjectDocument | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     listDocumentVersions(projectId, documentKey)
       .then(setVersions)
+      .catch((e) => setError(e?.message || 'Failed to load versions'))
       .finally(() => setLoading(false));
   }, [projectId, documentKey]);
 
@@ -130,8 +133,10 @@ function VersionPanel({
         <div className="w-48 border-r border-border overflow-y-auto">
           {loading ? (
             <p className="text-xs text-muted-foreground p-3">Loading...</p>
+          ) : error ? (
+            <p className="text-xs text-destructive p-3">{error}</p>
           ) : versions.length === 0 ? (
-            <p className="text-xs text-muted-foreground p-3">No versions yet</p>
+            <p className="text-xs text-muted-foreground p-3">No versions yet — edit a section to create a revision</p>
           ) : versions.map((v) => (
             <Button
               key={v.versionId}
@@ -399,6 +404,8 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
         setSending(false);
         setMessages(prev => prev.filter(m => m.id !== 'thinking'));
         if (sendingTimerRef.current) { clearTimeout(sendingTimerRef.current); sendingTimerRef.current = null; }
+        // Force document panel refresh on agent response (design/planning may have generated docs)
+        docTabRefreshRef.current += 1;
       }
       setMessages((prev) => {
         if (msg.id && prev.some((m) => m.id === msg.id)) return prev;

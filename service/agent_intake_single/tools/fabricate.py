@@ -39,8 +39,10 @@ def _extract_agents(td2_content: str) -> list[dict]:
 Each item must have:
 - "name": agent name (string)
 - "spec": full agent specification including responsibility, tools, handler() signature, input/output schema
-- "requires_external": true if this agent requires proprietary SDKs, on-prem systems, hardware, or cannot be auto-built; false otherwise
+- "requires_external": true ONLY if this agent absolutely cannot function without proprietary hardware, physical devices, or vendor-locked on-premises systems that have no API. Set false for anything that can be built with AWS services, REST APIs, databases, or standard protocols. Default to false when uncertain.
 - "external_reason": brief reason if requires_external is true, else null
+
+IMPORTANT: Most agents should be "requires_external": false. An agent that calls REST APIs, reads databases, processes documents, or orchestrates other services is NOT external — it can be auto-built.
 
 Return ONLY a JSON array, no markdown.
 

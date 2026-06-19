@@ -19,33 +19,49 @@ export const handler = async (event: any) => {
       return;
     }
 
+    // Atomic monotonic update: only advance progress, never regress.
+    // This prevents concurrent fabrication events from overwriting each other.
+    const phaseKey = `progress.${phase}`;
+
+    let currentPhase = 'CREATED';
+    if (phase === 'implementation') currentPhase = completionPercentage === 100 ? 'IMPLEMENTATION_COMPLETE' : 'IMPLEMENTATION_IN_PROGRESS';
+    else if (phase === 'planning')  currentPhase = completionPercentage === 100 ? 'PLANNING_COMPLETE' : 'PLANNING_IN_PROGRESS';
+    else if (phase === 'design')    currentPhase = completionPercentage === 100 ? 'DESIGN_COMPLETE' : 'DESIGN_IN_PROGRESS';
+    else if (phase === 'assessment') currentPhase = completionPercentage === 100 ? 'ASSESSMENT_COMPLETE' : 'ASSESSMENT_IN_PROGRESS';
+
+    try {
+      await client.send(new UpdateCommand({
+        TableName: projectsTable,
+        Key: { id: sessionId },
+        UpdateExpression: 'SET #phase = :pct, progress.currentPhase = :cp, updatedAt = :now',
+        ConditionExpression: 'attribute_not_exists(#phase) OR #phase < :pct',
+        ExpressionAttributeNames: { '#phase': phaseKey },
+        ExpressionAttributeValues: {
+          ':pct': completionPercentage,
+          ':cp': currentPhase,
+          ':now': new Date().toISOString(),
+        },
+      }));
+    } catch (err: any) {
+      if (err.name === 'ConditionalCheckFailedException') {
+        console.log(`Skipping stale progress: ${phase}=${completionPercentage}% (already higher)`);
+        return;
+      }
+      throw err;
+    }
+
+    // Recompute overall from the now-updated record
     const getResult = await client.send(new GetCommand({
       TableName: projectsTable,
       Key: { id: sessionId },
     }));
-
-    const current = getResult.Item?.progress || {};
-    const assessment     = phase === 'assessment'     ? completionPercentage : (current.assessment || 0);
-    const design         = phase === 'design'         ? completionPercentage : (current.design || 0);
-    const planning       = phase === 'planning'       ? completionPercentage : (current.planning || 0);
-    const implementation = phase === 'implementation' ? completionPercentage : (current.implementation || 0);
-
-    const overall = Math.round((assessment + design + planning + implementation) / 4);
-
-    let currentPhase = 'CREATED';
-    if (implementation > 0)  currentPhase = implementation === 100 ? 'IMPLEMENTATION_COMPLETE' : 'IMPLEMENTATION_IN_PROGRESS';
-    else if (planning > 0)   currentPhase = planning === 100 ? 'PLANNING_COMPLETE' : 'PLANNING_IN_PROGRESS';
-    else if (design > 0)     currentPhase = design === 100 ? 'DESIGN_COMPLETE' : 'DESIGN_IN_PROGRESS';
-    else if (assessment > 0) currentPhase = assessment === 100 ? 'ASSESSMENT_COMPLETE' : 'ASSESSMENT_IN_PROGRESS';
-
+    const p = getResult.Item?.progress || {};
+    const overall = Math.round(((p.assessment || 0) + (p.design || 0) + (p.planning || 0) + (p.implementation || 0)) / 4);
     await client.send(new UpdateCommand({
       TableName: projectsTable,
       Key: { id: sessionId },
-      UpdateExpression: 'SET progress = :p, updatedAt = :now',
-      ExpressionAttributeValues: {
-        ':p': { overall, assessment, design, planning, implementation, currentPhase },
-        ':now': new Date().toISOString(),
-      },
+      UpdateExpression: 'SET progress.overall = :o',
+      ExpressionAttributeValues: { ':o': overall },
     }));
 
     console.log(`Updated ${sessionId}: ${phase}=${completionPercentage}%, overall=${overall}%, currentPhase=${currentPhase}`);

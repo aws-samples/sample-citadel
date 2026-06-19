@@ -55,13 +55,27 @@ export function sanitizeString(input: string, maxLength: number = 1000): string 
     return '';
   }
 
-  // Remove potentially dangerous characters
-  const sanitized = input
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/<[^>]*>/g, '')
-    .trim();
+  // Strip dangerous markup, producing plain text. Two passes are each applied
+  // repeatedly to a fixed point so a replacement cannot re-introduce a stripped
+  // construct via nesting/overlap (e.g. "<scr<script>ipt>") — this is the
+  // CodeQL js/incomplete-multi-character-sanitization remediation:
+  //   1. Drop <script>…</script> blocks together with their text content. The
+  //      closing tag tolerates trailing junk ("</script foo>") and the body
+  //      uses [\s\S] so a newline or malformed end tag cannot bypass it
+  //      (js/bad-tag-filter remediation).
+  //   2. Remove any remaining HTML tag. A bare "<" with no closing ">" is left
+  //      intact, matching the prior behaviour (no benign text is dropped).
+  const SCRIPT_BLOCK_RE = /<\s*script\b[^>]*>[\s\S]*?<\s*\/\s*script\b[^>]*>/gi;
+  const HTML_TAG_RE = /<[^>]*>/g;
 
-  return sanitized.substring(0, maxLength);
+  let sanitized = input;
+  let previous: string;
+  do {
+    previous = sanitized;
+    sanitized = sanitized.replace(SCRIPT_BLOCK_RE, '').replace(HTML_TAG_RE, '');
+  } while (sanitized !== previous);
+
+  return sanitized.trim().substring(0, maxLength);
 }
 
 export function validatePaginationInput(input: any): void {

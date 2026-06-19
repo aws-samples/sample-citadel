@@ -1692,6 +1692,9 @@ def process_event(event, context, request_type=None):
         )
         raise
 
+    # Fallback: ensure progress is published even if the LLM didn't call complete_task
+    publish_intake_progress(orchestration_id, agent_index, total_agents, agent_use_id)
+
 
 def lambda_handler(event, context):
     print(f"processing event {event}")

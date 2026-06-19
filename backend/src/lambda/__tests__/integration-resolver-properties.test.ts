@@ -11,6 +11,7 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { SSMClient } from '@aws-sdk/client-ssm';
 import { BedrockAgentCoreControlClient } from '@aws-sdk/client-bedrock-agentcore-control';
+import { EventBridgeClient } from '@aws-sdk/client-eventbridge';
 import { mockClient } from 'aws-sdk-client-mock';
 
 // Mock AWS SDK clients
@@ -18,6 +19,13 @@ const dynamoMock = mockClient(DynamoDBDocumentClient);
 const secretsMock = mockClient(SecretsManagerClient);
 const ssmMock = mockClient(SSMClient);
 const bedrockAgentMock = mockClient(BedrockAgentCoreControlClient);
+// createIntegration / deleteIntegration emit EventBridge events via
+// `eventBridge.send(PutEventsCommand)`. Left un-mocked, that real client hangs
+// on credential resolution (IMDS) and retries, pushing this 100-run property
+// over Jest's 30s timeout under full-suite worker contention. Mock it so the
+// event handoff resolves instantly — no assertion in these properties inspects
+// EventBridge, so the invariants are unchanged.
+const eventBridgeMock = mockClient(EventBridgeClient);
 
 // Import the handler after mocking
 import { handler } from '../integration-resolver';
@@ -28,6 +36,8 @@ describe('Integration Resolver - Property-Based Tests', () => {
     secretsMock.reset();
     ssmMock.reset();
     bedrockAgentMock.reset();
+    eventBridgeMock.reset();
+    eventBridgeMock.onAnyCommand().resolves({});
     
     // Set environment variables
     process.env.INTEGRATIONS_TABLE = 'test-integrations-table';
