@@ -13,6 +13,13 @@ export interface AgentConfig {
   updatedAt?: string;
 }
 
+/** Outcome of a bulk project-agent activation, grouped by per-agent result. */
+export interface ActivateAgentsResult {
+  activated: string[];
+  failed: string[];
+  alreadyActive: string[];
+}
+
 const listAgentConfigsQuery = `
   query ListAgentConfigs {
     listAgentConfigs {
@@ -84,6 +91,16 @@ const deleteAgentConfigMutation = `
     deleteAgentConfig(agentId: $agentId) {
       success
       message
+    }
+  }
+`;
+
+const activateProjectAgentsMutation = `
+  mutation ActivateProjectAgents($projectId: ID!) {
+    activateProjectAgents(projectId: $projectId) {
+      activated
+      failed
+      alreadyActive
     }
   }
 `;
@@ -263,6 +280,26 @@ export const agentConfigService = {
       return response.deleteAgentConfig;
     } catch (error) {
       console.error('Error deleting agent config:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Activates every fabricated agent belonging to a project in one call.
+   * Returns the per-agent outcome grouped into activated / failed /
+   * alreadyActive name lists. Never partially throws — the backend swallows
+   * per-agent errors and reports them in `failed`.
+   */
+  async activateProjectAgents(projectId: string): Promise<ActivateAgentsResult> {
+    try {
+      const response = await serverService.mutate<{ activateProjectAgents: ActivateAgentsResult }>(
+        activateProjectAgentsMutation,
+        { projectId }
+      );
+
+      return response.activateProjectAgents;
+    } catch (error) {
+      console.error('Error activating project agents:', error);
       throw error;
     }
   },

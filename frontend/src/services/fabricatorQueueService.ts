@@ -26,8 +26,8 @@ export interface FabricationQueueItem {
 
 // GraphQL Queries
 const getFabricatorQueueQuery = /* GraphQL */ `
-  query GetFabricatorQueue {
-    getFabricatorQueue {
+  query GetFabricatorQueue($projectId: ID) {
+    getFabricatorQueue(projectId: $projectId) {
       requestId
       agentName
       taskDescription
@@ -82,12 +82,18 @@ function initializeFabricationSubscription(): void {
 }
 
 /**
- * Get the current state of the fabricator queue
+ * Get the current state of the fabricator queue.
+ *
+ * @param projectId Optional project/orchestration id. When provided, only
+ *   fabrication jobs for that project are returned. When omitted (e.g. the
+ *   Agent Catalog drawer), all jobs are returned. The intake
+ *   session_id === orchestrationId === projectId.
  */
-export async function getFabricatorQueue(): Promise<FabricationQueueItem[]> {
+export async function getFabricatorQueue(projectId?: string): Promise<FabricationQueueItem[]> {
   try {
     const response = await serverService.query<{ getFabricatorQueue: FabricationQueueItem[] }>(
-      getFabricatorQueueQuery
+      getFabricatorQueueQuery,
+      { projectId }
     );
 
     const items = response.getFabricatorQueue || [];

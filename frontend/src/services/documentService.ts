@@ -128,14 +128,6 @@ const generateDocumentPdfMutation = /* GraphQL */ `
   }
 `;
 
-const ingestDocumentMutation = /* GraphQL */ `
-  mutation IngestDocument($projectId: ID!, $documentKey: String!) {
-    ingestDocument(projectId: $projectId, documentKey: $documentKey) {
-      documentKey status
-    }
-  }
-`;
-
 export interface ProjectDocument {
   documentKey: string;
   content: string;
@@ -182,16 +174,12 @@ export async function generateDocumentPdf(projectId: string, documentKey: string
   return res.generateDocumentPdf.url;
 }
 
-export async function ingestDocument(projectId: string, documentKey: string): Promise<void> {
-  await serverService.mutate(ingestDocumentMutation, { projectId, documentKey });
-}
-
 // ── Document Ingestion Status Polling ────────────────────────────────────────
 
 const listProjectDocumentsQuery = /* GraphQL */ `
   query ListProjectDocuments($projectId: ID!) {
     listProjectDocuments(projectId: $projectId) {
-      documentKey fileName size lastModified
+      documentKey fileName size lastModified status statusReason
     }
   }
 `;
@@ -201,6 +189,8 @@ export interface ProjectDocumentItem {
   fileName: string;
   size: number;
   lastModified: string;
+  status?: string;
+  statusReason?: string;
 }
 
 export async function listProjectDocuments(projectId: string): Promise<ProjectDocumentItem[]> {
@@ -232,12 +222,21 @@ export async function getDocumentIngestionStatus(projectId: string, documentKey:
   return response.getDocumentIngestionStatus;
 }
 
-const TERMINAL_STATUSES = ['INDEXED', 'PARTIALLY_INDEXED', 'FAILED', 'METADATA_UPDATE_FAILED', 'IGNORED', 'NOT_FOUND'];
 const SUCCESS_STATUSES = ['INDEXED', 'PARTIALLY_INDEXED'];
+// IGNORED is a Bedrock dedup/no-op (the doc already exists and is indexed), not a
+// failure — treat it as transient and keep polling for the true status.
+const FAILURE_STATUSES = ['FAILED', 'METADATA_UPDATE_FAILED'];
 
 export interface WaitForIndexedOptions {
   timeoutMs?: number;
   pollIntervalMs?: number;
+  /**
+   * Grace window during which a NOT_FOUND / empty status is treated as a TRANSIENT
+   * pre-indexing state (Bedrock is eventually consistent right after ingestion) rather
+   * than a terminal failure. The window ends once any concrete status is observed OR
+   * this duration elapses, whichever comes first.
+   */
+  gracePeriodMs?: number;
   onStatusChange?: (status: string) => void;
 }
 
@@ -246,33 +245,37 @@ export async function waitForDocumentIndexed(
   documentKey: string,
   opts: WaitForIndexedOptions = {},
 ): Promise<DocumentIngestionStatus> {
-  const { timeoutMs = 300_000, pollIntervalMs = 3_000, onStatusChange } = opts;
+  const { timeoutMs = 300_000, pollIntervalMs = 3_000, gracePeriodMs = 30_000, onStatusChange } = opts;
   const deadline = Date.now() + timeoutMs;
+  const graceDeadline = Date.now() + gracePeriodMs;
+  let sawConcreteStatus = false;
 
   while (Date.now() < deadline) {
     const result = await getDocumentIngestionStatus(projectId, documentKey);
     onStatusChange?.(result.status);
+
     if (SUCCESS_STATUSES.includes(result.status)) return result;
-    if (TERMINAL_STATUSES.includes(result.status)) throw new Error(`Indexing failed: ${result.status} — ${result.statusReason ?? ''}`);
+    if (FAILURE_STATUSES.includes(result.status)) {
+      throw new Error(`Indexing failed: ${result.status} — ${result.statusReason ?? ''}`);
+    }
+
+    const isNotFound = !result.status || result.status === 'NOT_FOUND';
+    if (isNotFound) {
+      // Transient pre-indexing state: keep polling while still inside the grace window and
+      // before any concrete status has been seen.
+      if (!sawConcreteStatus && Date.now() < graceDeadline) {
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+        continue;
+      }
+      // Grace window elapsed (or a concrete status was already observed): treat as terminal.
+      throw new Error(`Indexing failed: NOT_FOUND — ${result.statusReason ?? 'document not found after grace period'}`);
+    }
+
+    // Non-terminal concrete status (STARTING/PENDING/IN_PROGRESS): keep polling.
+    sawConcreteStatus = true;
     await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
   throw new Error('TIMEOUT');
-}
-
-// ── Notify Document Ready ────────────────────────────────────────────────────
-
-const notifyDocumentReadyMutation = /* GraphQL */ `
-  mutation NotifyDocumentReady($projectId: ID!, $documentKey: String!, $fileName: String!, $fileSize: Int!, $fileType: String!) {
-    notifyDocumentReady(projectId: $projectId, documentKey: $documentKey, fileName: $fileName, fileSize: $fileSize, fileType: $fileType) {
-      success
-    }
-  }
-`;
-
-export async function notifyDocumentReady(
-  projectId: string, documentKey: string, fileName: string, fileSize: number, fileType: string,
-): Promise<void> {
-  await serverService.mutate(notifyDocumentReadyMutation, { projectId, documentKey, fileName, fileSize, fileType });
 }
 
 // ── Delete Document ──────────────────────────────────────────────────────────
