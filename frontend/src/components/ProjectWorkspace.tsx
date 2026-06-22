@@ -17,12 +17,13 @@ import { projectService, type ProjectProgress } from '../services/projectService
 import { sendMessageToAgent, getConversationHistoryForProject, subscribeToConversation, type ConversationMessage } from '../services/conversationService';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './ui/dialog';
 import {
-  uploadDocument, ingestDocument, getProjectDocument, listDocumentVersions,
-  getDocumentVersion, generateDocumentPdf, waitForDocumentIndexed, notifyDocumentReady,
+  uploadDocument, getProjectDocument, listDocumentVersions,
+  getDocumentVersion, generateDocumentPdf, waitForDocumentIndexed,
   deleteDocument as deleteDocumentApi, listProjectDocuments,
   type ProjectDocument, type DocumentVersion,
 } from '../services/documentService';
 import { diffLines, type Change } from 'diff';
+import { FabricationStatusPanel } from './FabricationStatusPanel';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,7 +47,7 @@ interface DocTab {
   id: string;
   label: string;
   documentKey: string;
-  progressKey: 'design' | 'planning';
+  progressKey: 'design' | 'planning' | 'implementation';
   planningOrder?: number; // 0=resourcing, 1=business, 2=commercial
 }
 
@@ -281,6 +282,31 @@ function DocTabContent({ projectId, tab, phaseProgress, phaseExpected }: { proje
 
 // ── Main Component ───────────────────────────────────────────────────────────
 
+/**
+ * Map a Bedrock KB ingestion status to the UI document status. Failed ingestions
+ * must NOT render as 'ready'; unknown/undefined stays on a safe non-success value.
+ */
+function mapIngestionStatusToUi(status?: string): UploadedFile['status'] {
+  switch (status) {
+    case 'INDEXED':
+    case 'PARTIALLY_INDEXED':
+      return 'ready';
+    case 'FAILED':
+    case 'METADATA_UPDATE_FAILED':
+    case 'NOT_FOUND':
+      return 'failed';
+    case 'STARTING':
+    case 'PENDING':
+    case 'IN_PROGRESS':
+    // IGNORED is a Bedrock dedup/no-op (already indexed), not a failure: show as
+    // transient indexing and let the poller resolve the true status.
+    case 'IGNORED':
+      return 'indexing';
+    default:
+      return 'indexing';
+  }
+}
+
 interface ProjectWorkspaceProps {
   project: Project;
   onBack: () => void;
@@ -324,7 +350,7 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
         id: d.documentKey,
         name: d.fileName,
         size: d.size,
-        status: 'ready' as const,
+        status: mapIngestionStatusToUi(d.status),
         documentKey: d.documentKey,
       })));
     }).catch(() => {});
@@ -536,10 +562,7 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
     setUploadModal({ open: true, fileName: file.name, status: 'Uploading...' });
     try {
       const documentKey = await uploadDocument(project.id, file);
-      updateFileStatus(id, { status: 'ingesting', documentKey });
-      setUploadModal((m) => ({ ...m, status: 'Processing document...' }));
-      await ingestDocument(project.id, documentKey);
-      updateFileStatus(id, { status: 'indexing' });
+      updateFileStatus(id, { status: 'indexing', documentKey });
       setUploadModal((m) => ({ ...m, status: 'Indexing document...' }));
       await waitForDocumentIndexed(project.id, documentKey, {
         timeoutMs: 300_000,
@@ -550,12 +573,10 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
         },
       });
       updateFileStatus(id, { status: 'ready' });
-      setUploadModal((m) => ({ ...m, status: 'Finalising index...' }));
-      // Allow OpenSearch index to become searchable after INDEXED status
-      await new Promise((r) => setTimeout(r, 10_000));
       setUploadModal((m) => ({ ...m, status: 'Document ready! Extracting information...' }));
-      await notifyDocumentReady(project.id, documentKey, file.name, file.size, file.type);
-      // Wait for agent response before closing modal
+      // Wait for agent response before closing modal. The server-side ingestion
+      // path fires the assessment trigger exactly once after the document is
+      // indexed, so the client only listens for the resulting agent response.
       await new Promise<void>((resolve) => {
         const unsub = subscribeToConversation(project.id, (msg) => {
           if (msg.messageType === 'AGENT_RESPONSE') { unsub(); resolve(); }
@@ -674,6 +695,17 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
                 </div>
               </div>
             )}
+
+            {/* Fabrication status — visible during/after the build phase or
+                whenever fabrication jobs exist for this project. The panel
+                self-hides when neither condition holds. */}
+            <FabricationStatusPanel
+              projectId={project.id}
+              phaseActive={
+                (progress?.implementation ?? 0) > 0 ||
+                (progress?.currentPhase ?? '').toUpperCase().includes('IMPLEMENTATION')
+              }
+            />
 
             {/* Messages */}
             <ScrollArea className="flex-1 min-h-0 px-4 py-3">

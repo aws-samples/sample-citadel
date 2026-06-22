@@ -1,6 +1,6 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, DeleteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { RegistryService } from '../services/registry-service';
+import { RegistryService, RegistryRecordStatusValues } from '../services/registry-service';
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
 
 const client = new DynamoDBClient({});
@@ -106,6 +106,9 @@ export const handler = async (event: any) => {
 
       case 'searchAgentConfigs':
         return await searchAgentConfigsRegistry(event.arguments.query);
+
+      case 'activateProjectAgents':
+        return await activateProjectAgents(event.arguments.projectId);
 
       default:
         throw new Error(`Unknown field: ${fieldName}`);
@@ -457,6 +460,78 @@ async function searchAgentConfigsRegistry(query: string): Promise<AgentConfig[]>
   const registryService = getRegistryService();
   const records = await registryService.searchResources('agent', query);
   return records.map((record) => registryService.mapToAgentConfig(record));
+}
+
+/** Result of a bulk activation, grouped by per-agent outcome. */
+interface ActivateAgentsResult {
+  activated: string[];
+  failed: string[];
+  alreadyActive: string[];
+}
+
+/**
+ * Parses a Registry record's customDescriptorContent JSON and returns its
+ * `sourceProjectId` when present. Malformed/missing metadata yields
+ * `undefined` rather than throwing — a single bad record must not abort the
+ * whole bulk operation.
+ */
+function extractSourceProjectId(customDescriptorContent: string | undefined): string | undefined {
+  if (!customDescriptorContent) return undefined;
+  try {
+    const parsed = JSON.parse(customDescriptorContent);
+    if (parsed && typeof parsed === 'object' && typeof parsed.sourceProjectId === 'string') {
+      return parsed.sourceProjectId;
+    }
+  } catch {
+    // Malformed metadata — treat as "no project" and skip.
+  }
+  return undefined;
+}
+
+/**
+ * Activates every fabricated agent belonging to a project in one operation.
+ *
+ * Fabricated agents carry their originating `sourceProjectId` inside the
+ * Registry record's customDescriptorContent JSON. We list all agent records,
+ * select those matching `projectId`, and submit each non-active one for
+ * approval (APPROVED == active via toInternalState). Already-active agents
+ * (status APPROVED) are reported separately and skipped.
+ *
+ * Per-agent failures are swallowed and collected so one bad agent never
+ * aborts activation of the rest; the whole operation never throws on a
+ * single-agent error. Logs are kept free of record metadata (which can
+ * carry org-scoped fields) — only the agent name and error message are
+ * logged.
+ */
+export async function activateProjectAgents(projectId: string): Promise<ActivateAgentsResult> {
+  const registryService = getRegistryService();
+  const result: ActivateAgentsResult = { activated: [], failed: [], alreadyActive: [] };
+
+  const records = await registryService.listResources('agent');
+  for (const record of records) {
+    if (extractSourceProjectId(record.customDescriptorContent) !== projectId) {
+      continue;
+    }
+
+    const name = record.name || record.recordId;
+
+    if (record.status === RegistryRecordStatusValues.APPROVED) {
+      result.alreadyActive.push(name);
+      continue;
+    }
+
+    try {
+      await registryService.updateResourceStatus('agent', record.recordId, RegistryRecordStatusValues.APPROVED);
+      result.activated.push(name);
+    } catch (err) {
+      console.error(
+        `Failed to activate agent "${name}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+      result.failed.push(name);
+    }
+  }
+
+  return result;
 }
 
 async function listAgentConfigs(): Promise<AgentConfig[]> {

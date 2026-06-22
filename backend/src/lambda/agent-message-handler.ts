@@ -388,8 +388,16 @@ export const handler = async (
 ): Promise<void> => {
   console.log("Received event:", JSON.stringify(event, null, 2));
 
-  // Idempotency check using EventBridge event ID
-  const { executed } = await idempotencyGuard.withIdempotency(event.id, async () => {
+  // Idempotency key: prefer the logical message id (deterministic for the
+  // document-indexed trigger, a unique uuid for every other producer) so that
+  // duplicate emits of the same logical message collapse to one execution.
+  // Fall back to the EventBridge envelope id for any producer that omits a
+  // messageId (events.ts publishEvent does not set one), preserving today's
+  // behaviour for those.
+  const idempotencyKey = event.detail?.messageId ?? event.id;
+
+  // Idempotency check using the logical message id (falls back to event.id).
+  const { executed } = await idempotencyGuard.withIdempotency(idempotencyKey, async () => {
     const { projectId, agentId, message, messageId, userId, metadata } =
       event.detail;
 
@@ -481,6 +489,6 @@ export const handler = async (
   }); // end idempotency guard
 
   if (!executed) {
-    console.log("Skipping duplicate event:", event.id);
+    console.log("Skipping duplicate event:", idempotencyKey);
   }
 };

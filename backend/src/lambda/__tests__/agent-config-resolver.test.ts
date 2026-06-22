@@ -6,7 +6,31 @@ import { mockClient } from 'aws-sdk-client-mock';
 
 const dynamoMock = mockClient(DynamoDBDocumentClient);
 
-import { handler } from '../agent-config-resolver';
+// Mock the RegistryService so registry-backed paths (activateProjectAgents)
+// can be driven without hitting the AgentCore Registry SDK. DynamoDB-only
+// tests never construct a RegistryService, so this mock does not affect them.
+const mockListResources = jest.fn();
+const mockUpdateResourceStatus = jest.fn();
+
+jest.mock('../../services/registry-service', () => ({
+  RegistryService: jest.fn().mockImplementation(() => ({
+    listResources: mockListResources,
+    updateResourceStatus: mockUpdateResourceStatus,
+  })),
+  RegistryRecordStatusValues: {
+    DRAFT: 'DRAFT',
+    PENDING_APPROVAL: 'PENDING_APPROVAL',
+    APPROVED: 'APPROVED',
+    REJECTED: 'REJECTED',
+    DEPRECATED: 'DEPRECATED',
+    CREATING: 'CREATING',
+    UPDATING: 'UPDATING',
+    CREATE_FAILED: 'CREATE_FAILED',
+    UPDATE_FAILED: 'UPDATE_FAILED',
+  },
+}));
+
+import { handler, _resetRegistryService } from '../agent-config-resolver';
 
 describe('agent-config-resolver', () => {
   beforeEach(() => {
@@ -110,6 +134,77 @@ describe('agent-config-resolver', () => {
 
       const result = await handler(makeEvent('deleteAgentConfig', { agentId: 'a1' }));
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe('activateProjectAgents', () => {
+    beforeEach(() => {
+      process.env.REGISTRY_ID = 'reg-123';
+      _resetRegistryService();
+      mockListResources.mockReset();
+      mockUpdateResourceStatus.mockReset();
+    });
+
+    afterEach(() => {
+      delete process.env.REGISTRY_ID;
+    });
+
+    const agentRecord = (
+      recordId: string,
+      name: string,
+      sourceProjectId: string | undefined,
+      status: string,
+    ) => ({
+      recordId,
+      name,
+      status,
+      customDescriptorContent: JSON.stringify({ sourceProjectId, manifest: {} }),
+    });
+
+    test('filters by sourceProjectId, activates non-active, skips already-active', async () => {
+      mockListResources.mockResolvedValue([
+        agentRecord('r1', 'Agent One', 'proj-1', 'DRAFT'),
+        agentRecord('r2', 'Agent Two', 'proj-1', 'APPROVED'),
+        agentRecord('r3', 'Other Project', 'proj-2', 'DRAFT'),
+      ]);
+      mockUpdateResourceStatus.mockResolvedValue({});
+
+      const result = await handler(makeEvent('activateProjectAgents', { projectId: 'proj-1' }));
+
+      expect(mockListResources).toHaveBeenCalledWith('agent');
+      expect(mockUpdateResourceStatus).toHaveBeenCalledTimes(1);
+      expect(mockUpdateResourceStatus).toHaveBeenCalledWith('agent', 'r1', 'APPROVED');
+      expect(result.activated).toEqual(['Agent One']);
+      expect(result.alreadyActive).toEqual(['Agent Two']);
+      expect(result.failed).toEqual([]);
+    });
+
+    test('continues and records failed when one agent errors', async () => {
+      mockListResources.mockResolvedValue([
+        agentRecord('r1', 'Agent One', 'proj-1', 'DRAFT'),
+        agentRecord('r2', 'Agent Two', 'proj-1', 'DRAFT'),
+      ]);
+      mockUpdateResourceStatus
+        .mockRejectedValueOnce(new Error('boom'))
+        .mockResolvedValueOnce({});
+
+      const result = await handler(makeEvent('activateProjectAgents', { projectId: 'proj-1' }));
+
+      expect(result.activated).toEqual(['Agent Two']);
+      expect(result.failed).toEqual(['Agent One']);
+      expect(result.alreadyActive).toEqual([]);
+    });
+
+    test('returns empty arrays when no agents match the project', async () => {
+      mockListResources.mockResolvedValue([
+        agentRecord('r3', 'Other Project', 'proj-2', 'DRAFT'),
+        agentRecord('r4', 'No Project', undefined, 'DRAFT'),
+      ]);
+
+      const result = await handler(makeEvent('activateProjectAgents', { projectId: 'proj-1' }));
+
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+      expect(result).toEqual({ activated: [], failed: [], alreadyActive: [] });
     });
   });
 

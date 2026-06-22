@@ -53,6 +53,44 @@ def _reset_registry_client_for_test() -> None:
     _registry_client = None
 
 
+def _find_existing_record_id(registry_id: str, agent_id: str) -> str | None:
+    """Return the recordId of an existing Registry record named ``agent_id``.
+
+    Idempotency support for ``store_agent_config_registry``: SQS redeliveries
+    and re-triggers must not create duplicate Registry records for the same
+    agent name. Mirrors ``resolveRecordId`` / ``listResources`` in
+    ``backend/src/services/registry-service.ts`` — list CUSTOM records and
+    match on the record name. Uses the server-side ``name`` filter to bound
+    the result set, then verifies an EXACT name match (the filter may be a
+    prefix / substring match) and paginates via ``nextToken``.
+
+    Returns the matched recordId, or ``None`` when no record with that exact
+    name exists. Defensive ``isinstance`` guards keep the loop bounded if the
+    API surfaces an unexpected (non-dict) shape so the caller falls back to
+    the create path rather than hanging or raising.
+    """
+    client = _get_registry_client()
+    next_token = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "registryId": registry_id,
+            "descriptorType": "CUSTOM",
+            "name": agent_id,
+        }
+        if next_token:
+            kwargs["nextToken"] = next_token
+        response = client.list_registry_records(**kwargs)
+        if not isinstance(response, dict):
+            return None
+        for summary in response.get("records", []):
+            if isinstance(summary, dict) and summary.get("name") == agent_id:
+                return summary.get("recordId")
+        next_token = response.get("nextToken")
+        if not isinstance(next_token, str) or not next_token:
+            break
+    return None
+
+
 def _write_app_meta_row(
     record_id: str,
     agent_id: str,
@@ -124,6 +162,90 @@ def _write_app_meta_row(
             f'_write_app_meta_row failed (eventually-consistent, reconciler will recover): {e}'
         )
         return False
+
+# ~7 day TTL (epoch seconds) keeps the fabrication-jobs table self-pruning.
+FABRICATION_JOBS_TTL_SECONDS = 7 * 24 * 60 * 60
+
+
+def _write_fabrication_status(
+    orchestration_id: str,
+    agent_use_id: str,
+    status: str,
+    agent_id: str | None = None,
+    error_message: str | None = None,
+    agent_name: str | None = None,
+) -> bool:
+    """Upsert a per-agent fabrication status row in the durable jobs table.
+
+    Mirrors the ingestion jobs-table pattern: the table
+    (``citadel-fabrication-jobs-${env}``) is keyed by orchestrationId (PK) /
+    agentUseId (SK). process_event calls this at the START (PROCESSING), on
+    SUCCESS (COMPLETED + agentId) and on EXCEPTION (FAILED + errorMessage).
+
+    Backward-compatible and best-effort: when ``FABRICATION_JOBS_TABLE`` is
+    unset the write is skipped (logged); any failure is logged and swallowed
+    so a status-write error NEVER changes fabrication success/failure
+    behavior. Never an empty except.
+
+    Returns True on a successful write, False when skipped or on failure.
+    """
+    table = os.environ.get("FABRICATION_JOBS_TABLE")
+    if not table:
+        logger.info(
+            "_write_fabrication_status: FABRICATION_JOBS_TABLE unset; "
+            "skipping status=%s for %s/%s",
+            status, orchestration_id, agent_use_id,
+        )
+        return False
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    set_parts = ["#status = :status", "#updatedAt = :updatedAt", "#ttl = :ttl"]
+    names = {"#status": "status", "#updatedAt": "updatedAt", "#ttl": "ttl"}
+    import time as _time
+    values: dict[str, Any] = {
+        ":status": {"S": status},
+        ":updatedAt": {"S": now},
+        ":ttl": {"N": str(int(_time.time()) + FABRICATION_JOBS_TTL_SECONDS)},
+    }
+    # submittedAt: stamp the first write with a real submit time so the queue
+    # view never falls back to epoch-0 (1970). if_not_exists preserves a
+    # producer-set value (e.g. the PENDING row) on later writes.
+    set_parts.append("submittedAt = if_not_exists(submittedAt, :submittedAt)")
+    values[":submittedAt"] = {"S": now}
+    # agentName: thread the human-readable name (== agent_use_id for intake)
+    # so the resolver can render it instead of 'Unknown Agent'. if_not_exists
+    # never clobbers a producer-set name (the UI-direct path's PENDING row).
+    if agent_name is not None:
+        set_parts.append("agentName = if_not_exists(agentName, :agentName)")
+        values[":agentName"] = {"S": agent_name}
+    if agent_id is not None:
+        set_parts.append("#agentId = :agentId")
+        names["#agentId"] = "agentId"
+        values[":agentId"] = {"S": agent_id}
+    if error_message is not None:
+        set_parts.append("#errorMessage = :errorMessage")
+        names["#errorMessage"] = "errorMessage"
+        values[":errorMessage"] = {"S": error_message[:1000]}
+
+    try:
+        boto3.client("dynamodb").update_item(
+            TableName=table,
+            Key={
+                "orchestrationId": {"S": orchestration_id},
+                "agentUseId": {"S": agent_use_id},
+            },
+            UpdateExpression="SET " + ", ".join(set_parts),
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 — best-effort: never change outcome
+        logger.warning(
+            "_write_fabrication_status failed (status=%s, %s/%s): %s",
+            status, orchestration_id, agent_use_id, e,
+        )
+        return False
+
 
 # Retry configuration for Bedrock API calls — exponential backoff with jitter
 BEDROCK_RETRY_CONFIG = Config(
@@ -965,6 +1087,7 @@ def store_agent_config_registry(
     app_id: str = None,
     requested_by: str = "fabricator",
     org_id: str = "",
+    source_project_id: str | None = None,
 ) -> bool:
     """Store agent configuration in AgentCore Registry.
 
@@ -974,9 +1097,13 @@ def store_agent_config_registry(
     manifest, categories, state, the requester user id (as ``createdBy``), and
     the caller's organization id (as ``orgId``, Phase 2b) are serialized as JSON
     and stored in the CUSTOM descriptor's inlineContent.
-    After creation the record status is moved to DRAFT so it requires activation
-    before use (DRAFT maps to internal state "inactive" for fabricator-created
-    records, per Requirement 8.3).
+    After creation the record is left in its post-create DRAFT
+    (pending-activation) state so it requires activation before use (DRAFT
+    maps to internal state "inactive" for fabricator-created records, per
+    Requirement 8.3). The Fabricator does NOT call UpdateRegistryRecordStatus
+    to re-assert DRAFT — CreateRegistryRecord already leaves the record in
+    DRAFT, and the registry rejects a DRAFT->DRAFT transition with
+    ValidationException.
 
     Requirements:
     - REGISTRY_ID environment variable must be set with the Registry ID.
@@ -1033,6 +1160,25 @@ def store_agent_config_registry(
             f"{type(llm_tool_schema)}"
         )
 
+        # Source-project tagging (identifiability): when a real source project
+        # id is supplied, append a ' (Project: <id>)' suffix to the human
+        # description so the catalog can attribute the fabricated agent to the
+        # intake session it came from, and stash the raw id in custom metadata
+        # for grouping. '0'/empty/None are treated as "no project" so legacy
+        # / UI-direct fabrications stay unchanged. The suffix is idempotent —
+        # never duplicated if the description already carries it.
+        base_description = agent_description or ""
+        display_description = base_description
+        normalized_project_id = (
+            source_project_id
+            if source_project_id and source_project_id != "0"
+            else None
+        )
+        if normalized_project_id:
+            suffix = f" (Project: {normalized_project_id})"
+            if not display_description.endswith(suffix):
+                display_description = f"{display_description}{suffix}"
+
         # Executable agent config — stashed under custom metadata so the cache
         # sync / resolvers can parse it verbatim without colliding with the
         # human description.
@@ -1041,7 +1187,7 @@ def store_agent_config_registry(
             "filename": file_name.split('/')[-1],
             "schema": llm_tool_schema,
             "version": 1,
-            "description": agent_description,
+            "description": display_description,
             "action": {
                 "type": "sqs",
                 "target": os.environ.get("WORKER_QUEUE_URL", "MISSING"),
@@ -1051,14 +1197,16 @@ def store_agent_config_registry(
         # Auto-generate agent manifest.
         manifest = {
             "name": agent_id,
-            "description": agent_description,
+            "description": display_description,
             "version": 1,
             "tools": [],
         }
 
         # Custom metadata — serialized into the CUSTOM descriptor inlineContent.
-        # state is recorded as "inactive" to match Requirement 8.3; status is
-        # set to DRAFT below via UpdateRegistryRecordStatus. The full ``config``
+        # state is recorded as "inactive" to match Requirement 8.3; the record
+        # is left in its post-create DRAFT (pending-activation) state — no
+        # UpdateRegistryRecordStatus call is made (a DRAFT->DRAFT transition is
+        # rejected by the registry). The full ``config``
         # dict and requester ``createdBy`` are preserved here so that moving
         # the executable config out of the top-level description doesn't lose
         # information (QB-013-2 post-boto3-1.42 refactor). Phase 2b stamps the
@@ -1074,11 +1222,36 @@ def store_agent_config_registry(
         }
         if app_id:
             custom_metadata["appId"] = app_id
+        if normalized_project_id:
+            custom_metadata["sourceProjectId"] = normalized_project_id
 
         print(
             f"[store_agent_config_registry] Creating Registry record for agent: "
             f"{agent_id}"
         )
+
+        # Idempotency guard (pipeline-reliability hardening): SQS redeliveries
+        # and re-triggers must NOT create a duplicate Registry record for the
+        # same agent name. Look the name up first (mirrors resolveRecordId /
+        # listResources in backend/src/services/registry-service.ts). When a
+        # record already exists we SKIP CreateRegistryRecord, still refresh the
+        # AppsTable #META mirror for that existing record, and return True so
+        # the re-trigger is a no-op rather than a duplicate fabrication.
+        existing_record_id = _find_existing_record_id(registry_id, agent_id)
+        if existing_record_id is not None:
+            print(
+                f"[store_agent_config_registry] Record with name '{agent_id}' "
+                f"already exists (recordId={existing_record_id}); skipping "
+                f"CreateRegistryRecord to keep fabrication idempotent"
+            )
+            _write_app_meta_row(
+                record_id=existing_record_id,
+                agent_id=agent_id,
+                agent_description=display_description,
+                requested_by=requested_by,
+                org_id=org_id,
+            )
+            return True
 
         # CreateRegistryRecord does NOT accept a recordId — the service generates
         # one. We use the agentId as the record name so records can be located
@@ -1086,7 +1259,7 @@ def store_agent_config_registry(
         response = _get_registry_client().create_registry_record(
             registryId=registry_id,
             name=agent_id,
-            description=agent_description or "",
+            description=display_description,
             descriptorType="CUSTOM",
             descriptors={
                 "custom": {
@@ -1107,25 +1280,26 @@ def store_agent_config_registry(
         _write_app_meta_row(
             record_id=record_id,
             agent_id=agent_id,
-            agent_description=agent_description,
+            agent_description=display_description,
             requested_by=requested_by,
             org_id=org_id,
         )
 
         print(
-            f"[store_agent_config_registry] Record created (recordId={record_id}), "
-            f"setting status to DRAFT"
+            f"[store_agent_config_registry] Record created (recordId={record_id}); "
+            f"leaving record in its post-create DRAFT (pending-activation) state"
         )
 
-        # Draft status => internal state "inactive" for fabricator-created agents
-        # (Requirement 8.3). Records require activation via the catalog before
-        # the Supervisor will route tasks to them.
-        _get_registry_client().update_registry_record_status(
-            registryId=registry_id,
-            recordId=record_id,
-            status="DRAFT",
-            statusReason="Initial status set by Fabricator",
-        )
+        # No status update here: CreateRegistryRecord already leaves the record
+        # in DRAFT (the pre-activation state), which is the intended
+        # 'requires activation before use' behavior for fabricator-created
+        # agents (Requirement 8.3; DRAFT maps to internal state "inactive").
+        # The AgentCore registry REJECTS a redundant DRAFT->DRAFT transition
+        # with ValidationException ('Invalid target status: DRAFT'), so calling
+        # UpdateRegistryRecordStatus(status="DRAFT") here would make this
+        # function raise and publish agent.fabrication.failed even though the
+        # record was created successfully. The record is therefore left as-is;
+        # activation to a usable state happens later via the catalog.
 
         print(f"[store_agent_config_registry] SUCCESS - Registry response: {response}")
         return True
@@ -1536,6 +1710,12 @@ def process_event(event, context, request_type=None):
         raise
 
     try:
+        # Durable status: mark this agent PROCESSING at the start. Best-effort
+        # — a status-write failure never changes fabrication behavior.
+        _write_fabrication_status(
+            orchestration_id, agent_use_id, "PROCESSING", agent_name=agent_use_id
+        )
+
         # since this needs variable injection, keep within handler method scope.
         @tool
         def complete_task():
@@ -1671,6 +1851,7 @@ def process_event(event, context, request_type=None):
                     app_id=app_id,
                     requested_by=requested_by,
                     org_id=org_id,
+                    source_project_id=orchestration_id,
                 )
 
             # Create the Agent Fabricator with access to create_custom_tool
@@ -1679,9 +1860,22 @@ def process_event(event, context, request_type=None):
                 store_agent_tool=store_agent_config_registry_bound,
             )
             agent_fabricator(TASK)
-    
+
+        # Durable status: fabrication dispatch completed without raising — mark
+        # COMPLETED and stamp the agent name/recordId. Best-effort.
+        _write_fabrication_status(
+            orchestration_id, agent_use_id, "COMPLETED",
+            agent_id=agent_use_id, agent_name=agent_use_id
+        )
+
     except Exception as e:
         print(f"Fabrication failed: {str(e)}")
+        # Durable status: mark FAILED + errorMessage before re-raising. The
+        # status write is best-effort and must not mask the original error.
+        _write_fabrication_status(
+            orchestration_id, agent_use_id, "FAILED",
+            error_message=str(e), agent_name=agent_use_id
+        )
         # Publish intake progress failure
         publish_intake_progress(orchestration_id, agent_index, total_agents, agent_use_id, failed=True)
         # Publish fabrication failure event

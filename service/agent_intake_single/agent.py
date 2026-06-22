@@ -205,10 +205,8 @@ def get_agent(session_id: str) -> Agent:
             f"Current phase: {state['phase']} | "
             f"Assessment: {state['assessment_progress']}% | "
             f"Design: {state['design_progress']}% | "
-            f"Resourcing: {state.get('resourcing_progress', 0)}% | "
-            f"Business plan: {state.get('business_plan_progress', 0)}% | "
-            f"Commercial plan: {state.get('commercial_plan_progress', 0)}% | "
-            f"Fabrication: {state.get('fabrication_progress', 0)}%"
+            f"Planning: {state['planning_progress']}% | "
+            f"Implementation: {state['implementation_progress']}%"
         )
         _agent_cache[session_id] = Agent(
             model=AGENT_MODEL,

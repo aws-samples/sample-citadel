@@ -1,68 +1,104 @@
-import { SQSClient, ReceiveMessageCommand } from '@aws-sdk/client-sqs';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  QueryCommand,
+  ScanCommand,
+} from '@aws-sdk/lib-dynamodb';
 import { AppSyncResolverEvent } from 'aws-lambda';
 
-const sqs = new SQSClient({});
-const FABRICATOR_QUEUE_URL = process.env.FABRICATOR_QUEUE_URL!;
+const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+// Durable per-agent fabrication status table (citadel-fabrication-jobs-${env}).
+// Read at call-time so unit tests can toggle it per case.
+function getFabricationJobsTable(): string | undefined {
+  return process.env.FABRICATION_JOBS_TABLE;
+}
+
+// Upper bound on rows returned by the unfiltered (Scan) path so the queue
+// view stays cheap regardless of table size.
+const SCAN_LIMIT = 100;
+
+type FabricationStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
 
 interface FabricationQueueItem {
   requestId: string;
   agentName: string;
   taskDescription: string;
-  status: 'PENDING' | 'PROCESSING';
+  status: FabricationStatus;
   submittedAt: string;
+  errorMessage?: string;
   metadata?: Record<string, any>;
 }
 
+/**
+ * Map a fabrication-jobs DynamoDB row to the GraphQL FabricationQueueItem the
+ * frontend drawer already renders. agentUseId is the per-request key the UI
+ * uses as requestId; orchestrationId + agentId travel in metadata.
+ */
+function mapRow(item: Record<string, any>): FabricationQueueItem {
+  return {
+    requestId: item.agentUseId,
+    agentName: item.agentName || item.agentId || item.agentUseId || 'Unknown Agent',
+    taskDescription: item.taskDescription || 'No description',
+    status: (item.status as FabricationStatus) || 'PENDING',
+    submittedAt: item.submittedAt || item.updatedAt || new Date(0).toISOString(),
+    errorMessage: item.errorMessage,
+    metadata: {
+      orchestrationId: item.orchestrationId,
+      agentId: item.agentId,
+    },
+  };
+}
+
+/**
+ * Read the durable fabrication-jobs table as the source of truth for per-agent
+ * fabrication status. Replaces the previous SQS ReceiveMessage approach, which
+ * was unreliable and competed with the fabricator consumer for messages.
+ *
+ * - With projectId: Query PK=orchestrationId (the intake session/project id).
+ * - Without projectId: Scan with a bounded Limit.
+ * Rows are sorted by submittedAt descending. On any error (or when the table
+ * env var is unset) returns [] to preserve the resolver's existing contract.
+ */
 export const handler = async (
-  event: AppSyncResolverEvent<any>
+  event: AppSyncResolverEvent<{ projectId?: string }>,
 ): Promise<FabricationQueueItem[]> => {
-  console.log('Querying fabricator queue:', JSON.stringify(event, null, 2));
+  const table = getFabricationJobsTable();
+  if (!table) {
+    console.warn('FABRICATION_JOBS_TABLE unset; returning empty fabricator queue');
+    return [];
+  }
+
+  const projectId = event.arguments?.projectId;
 
   try {
-    // Receive messages from SQS without removing them
-    const command = new ReceiveMessageCommand({
-      QueueUrl: FABRICATOR_QUEUE_URL,
-      MaxNumberOfMessages: 10,
-      VisibilityTimeout: 0, // Don't hide messages
-      AttributeNames: ['All'],
-    });
+    let items: Record<string, any>[] = [];
+    if (projectId) {
+      const response = await docClient.send(
+        new QueryCommand({
+          TableName: table,
+          KeyConditionExpression: 'orchestrationId = :pk',
+          ExpressionAttributeValues: { ':pk': projectId },
+        }),
+      );
+      items = response.Items || [];
+    } else {
+      const response = await docClient.send(
+        new ScanCommand({
+          TableName: table,
+          Limit: SCAN_LIMIT,
+        }),
+      );
+      items = response.Items || [];
+    }
 
-    const response = await sqs.send(command);
-    const messages = response.Messages || [];
-
-    console.log(`Retrieved ${messages.length} messages from queue`);
-
-    // Parse and format queue items
-    const queueItems: FabricationQueueItem[] = messages.map(message => {
-      const body = JSON.parse(message.Body || '{}');
-      const agentInput = body.agent_input || {};
-      const sentTimestamp = message.Attributes?.SentTimestamp;
-      const receiveCount = parseInt(message.Attributes?.ApproximateReceiveCount || '0');
-
-      // Extract agent name from task details (first word or fallback)
-      const taskDetails = agentInput.taskDetails || '';
-      const agentName = taskDetails.split(' ')[0] || 'Unknown Agent';
-
-      return {
-        requestId: body.orchestration_id || message.MessageId || '',
-        agentName,
-        taskDescription: taskDetails || 'No description',
-        status: receiveCount > 0 ? 'PROCESSING' : 'PENDING',
-        submittedAt: sentTimestamp 
-          ? new Date(parseInt(sentTimestamp)).toISOString()
-          : new Date().toISOString(),
-        metadata: {
-          messageId: message.MessageId,
-          receiveCount,
-        },
-      };
-    });
-
-    console.log(`Formatted ${queueItems.length} queue items`);
+    const queueItems = items.map(mapRow);
+    queueItems.sort((a, b) => (a.submittedAt < b.submittedAt ? 1 : -1));
+    console.log(`Returning ${queueItems.length} fabrication queue items`);
     return queueItems;
   } catch (error) {
-    console.error('Error querying fabricator queue:', error);
-    // Return empty array on failure as per requirements
+    console.error('Error reading fabrication-jobs table:', error);
+    // Preserve the existing contract: empty array on failure.
     return [];
   }
 };

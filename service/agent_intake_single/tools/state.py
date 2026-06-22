@@ -111,7 +111,9 @@ def get_intake_state(session_id: str) -> str:
         session_id: The session ID
 
     Returns:
-        JSON with current phase and progress per phase.
+        JSON with current phase and progress per phase. The progress keys
+        mirror PHASES exactly (assessment, design, planning, implementation) —
+        i.e. the '<phase>_progress' fields the write path actually stores.
     """
     try:
         resp = _table().get_item(Key={'p_key': session_id, 's_key': 'intake:latest'})
@@ -121,7 +123,8 @@ def get_intake_state(session_id: str) -> str:
                 'phase': item.get('phase', 'assessment'),
                 'assessment_progress': int(item.get('assessment_progress', 0)),
                 'design_progress': int(item.get('design_progress', 0)),
-                'delivery_plan_progress': int(item.get('delivery_plan_progress', 0)),
+                'planning_progress': int(item.get('planning_progress', 0)),
+                'implementation_progress': int(item.get('implementation_progress', 0)),
                 'last_updated': int(item.get('last_updated', 0)),
             })
     except Exception as e:
@@ -131,7 +134,8 @@ def get_intake_state(session_id: str) -> str:
         'phase': 'assessment',
         'assessment_progress': 0,
         'design_progress': 0,
-        'delivery_plan_progress': 0,
+        'planning_progress': 0,
+        'implementation_progress': 0,
         'last_updated': 0,
     })
 
@@ -163,7 +167,7 @@ def update_intake_progress(session_id: str, phase: str, progress: int, change_su
 
     Args:
         session_id: The session ID
-        phase: One of: assessment, technical_design, delivery_plan
+        phase: One of: assessment, design, planning, implementation
         progress: Completion percentage (0-100)
         change_summary: Brief description of what changed
 

@@ -30,7 +30,7 @@ type Query {
   generateReportDownloadUrl(projectId: ID!): ReportDownloadUrl
   listIntegrations(orgId: String!, integrationType: IntegrationType, status: IntegrationStatus): [Integration]
   getIntegration(integrationId: ID!): Integration
-  getFabricatorQueue: [FabricationQueueItem]
+  getFabricatorQueue(projectId: ID): [FabricationQueueItem]
   listDataStores(orgId: String!, category: DataStoreCategory): [DataStore]
   getDataStore(dataStoreId: ID!): DataStore
   getDataStoreStats(orgId: String!): DataStoreStats
@@ -128,13 +128,12 @@ type Mutation {
   publishConversationMessage(input: PublishMessageInput!): ConversationMessage
     @aws_iam
   generateDocumentUploadUrl(input: GenerateUploadUrlInput!): DocumentUploadUrl
-  ingestDocument(projectId: ID!, documentKey: String!): IngestDocumentResult
-  notifyDocumentReady(projectId: ID!, documentKey: String!, fileName: String!, fileSize: Int!, fileType: String!): NotifyDocumentReadyResult
   deleteDocument(projectId: ID!, documentKey: String!): DocumentDeleteResult
   generateDocumentPdf(projectId: ID!, documentKey: String!): ReportDownloadUrl
   updateAgentConfig(input: UpdateAgentConfigInput!): AgentConfig
   createAgentConfig(input: CreateAgentConfigInput!): AgentConfig
   deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
+  activateProjectAgents(projectId: ID!): ActivateAgentsResult
   updateAgentCode(input: UpdateAgentCodeInput!): AgentCode
   updateToolConfig(input: UpdateToolConfigInput!): ToolConfig
   createToolConfig(input: CreateToolConfigInput!): ToolConfig
@@ -411,20 +410,11 @@ type DocumentUploadUrl {
   expiresIn: Int!
 }
 
-type IngestDocumentResult {
-  documentKey: String!
-  status: String!
-}
-
 type DocumentIngestionStatus {
   documentKey: String!
   status: String!
   statusReason: String
   updatedAt: String
-}
-
-type NotifyDocumentReadyResult {
-  success: Boolean!
 }
 
 type DocumentDeleteResult {
@@ -437,6 +427,8 @@ type ProjectDocumentItem {
   fileName: String!
   size: Int!
   lastModified: String!
+  status: String
+  statusReason: String
 }
 
 type ProjectDocument {
@@ -468,6 +460,12 @@ type AgentConfig {
 type DeleteAgentConfigResult {
   success: Boolean!
   message: String
+}
+
+type ActivateAgentsResult {
+  activated: [String!]!
+  failed: [String!]!
+  alreadyActive: [String!]!
 }
 
 type AgentCode {

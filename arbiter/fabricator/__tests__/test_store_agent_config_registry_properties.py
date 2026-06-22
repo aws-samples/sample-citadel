@@ -3,7 +3,12 @@ Property-based tests for store_agent_config_registry.
 
 Covers task 9.1 of the agentcore-registry-migration spec:
   - Calls CreateRegistryRecord with agent metadata and custom metadata
-  - Sets initial status to DRAFT (maps to inactive state)
+  - Leaves the freshly created record in its post-create DRAFT
+    (pending-activation) state — the Fabricator does NOT call
+    UpdateRegistryRecordStatus(status="DRAFT"). The AgentCore registry
+    rejects a DRAFT->DRAFT transition with ValidationException
+    ('Invalid target status: DRAFT'), which previously caused fabrication
+    to fail even though the record had been created.
   - On failure: logs error and publishes agent.fabrication.failed event
     to EventBridge
 
@@ -282,18 +287,29 @@ class TestCreateResourceCall:
 
 
 # ---------------------------------------------------------------------------
-# Requirement 8.3: initial status is DRAFT (maps to inactive)
+# Requirement 8.3: record is LEFT in its post-create DRAFT (pending-activation)
+# state — the Fabricator must NOT call UpdateRegistryRecordStatus("DRAFT").
 # ---------------------------------------------------------------------------
 
 class TestInitialStatusDraft:
-    """Verify records are created with DRAFT status / state inactive.
+    """Verify the freshly created record is left in DRAFT WITHOUT a redundant
+    UpdateRegistryRecordStatus(status="DRAFT") call.
+
+    CreateRegistryRecord already leaves the record in DRAFT (the
+    pre-activation state). The AgentCore registry rejects a DRAFT->DRAFT
+    transition with ValidationException ('Invalid target status: DRAFT'),
+    so re-asserting DRAFT after create is both redundant AND invalid — it
+    previously made store_agent_config_registry raise and publish
+    agent.fabrication.failed even though the record was created.
 
     **Validates: Requirements 8.3**
     """
 
     @given(agent_id=agent_ids, schema=tool_schemas)
     @settings(max_examples=20)
-    def test_status_update_called_with_draft(self, agent_id, schema):
+    def test_status_update_not_called_after_create(self, agent_id, schema):
+        """No UpdateRegistryRecordStatus call at all on the happy path — the
+        record is left in its post-create DRAFT state."""
         client = _make_registry_mock(record_id="rec-123")
         with patch("index._get_registry_client", return_value=client):
             store_agent_config_registry(
@@ -303,12 +319,72 @@ class TestInitialStatusDraft:
                 agent_description="desc",
             )
 
-        assert client.update_registry_record_status.called
-        kwargs = client.update_registry_record_status.call_args.kwargs
-        assert kwargs["status"] == "DRAFT"
-        assert kwargs["registryId"] == os.environ["REGISTRY_ID"]
-        # recordId is extracted from the create response ARN
-        assert kwargs["recordId"] == "rec-123"
+        assert not client.update_registry_record_status.called
+
+    @given(agent_id=agent_ids, schema=tool_schemas)
+    @settings(max_examples=20)
+    def test_status_update_never_called_with_draft(self, agent_id, schema):
+        """Regression for the ValidationException bug: even hypothetically, the
+        record status is NEVER re-asserted to DRAFT after create. Capturing the
+        invalid DRAFT->DRAFT transition would make the registry raise and
+        fabrication would fail."""
+        client = _make_registry_mock(record_id="rec-123")
+        with patch("index._get_registry_client", return_value=client):
+            store_agent_config_registry(
+                file_name=f"/tmp/{agent_id}.py",
+                agent_id=agent_id,
+                llm_tool_schema=schema,
+                agent_description="desc",
+            )
+
+        for call in client.update_registry_record_status.call_args_list:
+            assert call.kwargs.get("status") != "DRAFT"
+
+    @given(agent_id=agent_ids, schema=tool_schemas)
+    @settings(max_examples=20)
+    def test_create_registry_record_called_exactly_once(self, agent_id, schema):
+        client = _make_registry_mock(record_id="rec-123")
+        with patch("index._get_registry_client", return_value=client):
+            store_agent_config_registry(
+                file_name=f"/tmp/{agent_id}.py",
+                agent_id=agent_id,
+                llm_tool_schema=schema,
+                agent_description="desc",
+            )
+
+        assert client.create_registry_record.call_count == 1
+
+    @given(agent_id=agent_ids, schema=tool_schemas)
+    @settings(max_examples=20)
+    def test_returns_true_on_happy_path(self, agent_id, schema):
+        client = _make_registry_mock(record_id="rec-123")
+        with patch("index._get_registry_client", return_value=client):
+            result = store_agent_config_registry(
+                file_name=f"/tmp/{agent_id}.py",
+                agent_id=agent_id,
+                llm_tool_schema=schema,
+                agent_description="desc",
+            )
+
+        assert result is True
+
+    @given(agent_id=agent_ids, schema=tool_schemas)
+    @settings(max_examples=20)
+    def test_no_fabrication_failed_event_on_happy_path(self, agent_id, schema):
+        """The successful create path must not publish agent.fabrication.failed.
+        Before the fix, the invalid DRAFT->DRAFT update raised and this event
+        was published despite the record having been created."""
+        client = _make_registry_mock(record_id="rec-123")
+        with patch("index._get_registry_client", return_value=client), \
+             patch("index.publish_fabrication_event") as mock_publish:
+            store_agent_config_registry(
+                file_name=f"/tmp/{agent_id}.py",
+                agent_id=agent_id,
+                llm_tool_schema=schema,
+                agent_description="desc",
+            )
+
+        assert not mock_publish.called
 
     @given(agent_id=agent_ids, schema=tool_schemas)
     @settings(max_examples=20)
