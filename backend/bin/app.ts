@@ -39,6 +39,10 @@ const servicesStack = new ServicesStack(app, `citadel-services-${environment}`, 
   description: `Agent services for Citadel - ${environment}`,
   agentEventBus: backendStack.agentEventBus,
   documentBucket: backendStack.documentBucket,
+  // Registry handles so the intake runtime can read the factory catalog from
+  // the AgentCore Registry (conditionally wired in the stack).
+  registryArn: backendStack.registryArn,
+  registryId: backendStack.registryId,
 });
 
 // Governance stack — AI-Accelerated Modernization Governance.
@@ -241,6 +245,12 @@ if (app.node.tryGetContext('nag')!== 'false') {
               [servicesStack, 'HldPdfCreatedNotifierV2/ServiceRole/DefaultPolicy/Resource'],
               [servicesStack, 'HealthMonitorFunction/ServiceRole/DefaultPolicy/Resource'],
               [servicesStack, 'ToolSandboxFunction/ServiceRole/DefaultPolicy/Resource'],
+              // Phase 1 server-side ingestion: residual Resource::* is only the
+              // un-scopable xray:Put* (tracing ACTIVE) + cloudwatch:PutMetricData
+              // (namespace-conditioned to Citadel/DocumentIngestion). All
+              // bedrock/dynamodb/events/ssm grants are resource-scoped.
+              [servicesStack, 'DocumentIngestStartFunction/ServiceRole/DefaultPolicy/Resource'],
+              [servicesStack, 'DocumentIngestPollerFunction/ServiceRole/DefaultPolicy/Resource'],
               [servicesStack, 'AgentIntakeSingleRuntime/ExecutionRole/DefaultPolicy/Resource'],
               [arbiterStack, 'AgentCredentialVender/ServiceRole/DefaultPolicy/Resource'],
               [arbiterStack, 'WorkerAgentWrapper/ServiceRole/DefaultPolicy/Resource'],
@@ -293,6 +303,7 @@ if (app.node.tryGetContext('nag')!== 'false') {
                 [arbiterStack, 'GovernanceUiResolverFn/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'RegistryAgentRecordResolverFunction/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'ReconcileAppsMetaScheduledFunction/ServiceRole/DefaultPolicy/Resource'],
+                [servicesStack, 'AgentIntakeSingleRuntime/ExecutionRole/DefaultPolicy/Resource'],
               ];
               for (const [stack, path] of registryArnPaths) {
                 NagSuppressions.addResourceSuppressionsByPath(stack, `/${stack.stackName}/${path}`, registryArnSuppression);

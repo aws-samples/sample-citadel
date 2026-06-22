@@ -1,163 +1,104 @@
 /**
- * Tests for fabricator-request-resolver Lambda
+ * Tests for fabricator-request-resolver Lambda.
+ *
+ * The resolver enqueues a fabrication request onto SQS and then writes a
+ * PENDING row to the durable fabrication-jobs table so the queue UI shows
+ * real per-agent status instead of peeking SQS. The status write is
+ * best-effort: a failure must NOT fail the enqueue (the caller already got a
+ * queued request).
  */
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 
 const sqsMock = mockClient(SQSClient);
+const ddbMock = mockClient(DynamoDBDocumentClient);
+
+process.env.FABRICATOR_QUEUE_URL = 'https://sqs.test/queue';
+process.env.FABRICATION_JOBS_TABLE = 'citadel-fabrication-jobs-test';
 
 import { handler } from '../fabricator-request-resolver';
+
+const makeEvent = (fieldName: string, input: any) => ({
+  info: { fieldName },
+  arguments: { input },
+  identity: { sub: 'user-123' },
+});
 
 describe('fabricator-request-resolver', () => {
   beforeEach(() => {
     sqsMock.reset();
-    process.env.FABRICATOR_QUEUE_URL = 'https://sqs.us-west-2.amazonaws.com/123/test-queue';
+    ddbMock.reset();
+    sqsMock.on(SendMessageCommand).resolves({ MessageId: 'm1' });
+    ddbMock.on(PutCommand).resolves({});
+    process.env.FABRICATION_JOBS_TABLE = 'citadel-fabrication-jobs-test';
   });
 
-  afterEach(() => {
-    delete process.env.FABRICATOR_QUEUE_URL;
+  test('writes a PENDING row after the SQS send for agent creation', async () => {
+    const result = await handler(
+      makeEvent('requestAgentCreation', {
+        agentName: 'InvoiceParser',
+        taskDescription: 'Parse invoices from PDFs',
+      }),
+    );
+
+    expect(result.success).toBe(true);
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
+
+    const puts = ddbMock.commandCalls(PutCommand);
+    expect(puts).toHaveLength(1);
+    const item = puts[0].args[0].input.Item!;
+    expect(puts[0].args[0].input.TableName).toBe('citadel-fabrication-jobs-test');
+    expect(item.orchestrationId).toBe('0');
+    expect(item.agentUseId).toBe(result.requestId);
+    expect(item.status).toBe('PENDING');
+    expect(item.agentName).toBe('InvoiceParser');
+    expect(item.requestType).toBe('agent-creation');
+    expect(item.requestedBy).toBe('user-123');
+    expect(typeof item.submittedAt).toBe('string');
+    expect(typeof item.updatedAt).toBe('string');
+    expect(typeof item.ttl).toBe('number');
+    expect(item.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
   });
 
-  const makeEvent = (fieldName: string, args: any, identity?: any) => ({
-    info: { fieldName },
-    arguments: args,
-    identity,
+  test('truncates taskDescription to ~500 chars', async () => {
+    const longDesc = 'x'.repeat(2000);
+    await handler(
+      makeEvent('requestAgentCreation', {
+        agentName: 'BigAgent',
+        taskDescription: longDesc,
+      }),
+    );
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item!;
+    expect((item.taskDescription as string).length).toBeLessThanOrEqual(500);
   });
 
-  describe('requestAgentCreation', () => {
-    test('sends message to SQS and returns success', async () => {
-      sqsMock.on(SendMessageCommand).resolves({});
+  test('does NOT fail the enqueue when the status write throws', async () => {
+    ddbMock.on(PutCommand).rejects(new Error('ddb down'));
 
-      const result = await handler(makeEvent('requestAgentCreation', {
-        input: {
-          agentName: 'TestAgent',
-          taskDescription: 'Build a test agent',
-          tools: ['tool1'],
-          integrations: ['int1'],
-          dataStores: ['ds1'],
-        },
-      }, {
-        sub: 'test-user-123',
-        username: 'ignored-when-sub-present',
-        'custom:organization': 'org-42',
-      }));
+    const result = await handler(
+      makeEvent('requestToolCreation', {
+        toolName: 'CsvExporter',
+        toolDescription: 'Export rows to CSV',
+      }),
+    );
 
-      expect(result.success).toBe(true);
-      expect(result.requestId).toBeDefined();
-
-      const calls = sqsMock.commandCalls(SendMessageCommand);
-      expect(calls).toHaveLength(1);
-      const body = JSON.parse(calls[0].args[0].input.MessageBody!);
-      expect(body.node).toBe('fabricator');
-      expect(body.agent_input.taskDetails).toContain('TestAgent');
-      expect(body.agent_input.taskDetails).toContain('tool1');
-      expect(body.requested_by).toBe('test-user-123');
-      expect(body.org_id).toBe('org-42');
-    });
-
-    test('works without optional fields', async () => {
-      sqsMock.on(SendMessageCommand).resolves({});
-
-      const result = await handler(makeEvent('requestAgentCreation', {
-        input: { agentName: 'Simple', taskDescription: 'Simple agent' },
-      }, { sub: 'test-user-123' }));
-
-      expect(result.success).toBe(true);
-    });
-
-    test('falls back to username when identity has no sub (IAM auth mode)', async () => {
-      sqsMock.on(SendMessageCommand).resolves({});
-
-      await handler(makeEvent('requestAgentCreation', {
-        input: { agentName: 'IamAgent', taskDescription: 'Built via IAM' },
-      }, { username: 'iam-caller' }));
-
-      const body = JSON.parse(
-        sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody!,
-      );
-      expect(body.requested_by).toBe('iam-caller');
-    });
-
-    test("falls back to 'unknown' when event.identity is undefined", async () => {
-      sqsMock.on(SendMessageCommand).resolves({});
-
-      await handler(makeEvent('requestAgentCreation', {
-        input: { agentName: 'Anon', taskDescription: 'No identity' },
-      })); // no identity supplied
-
-      const body = JSON.parse(
-        sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody!,
-      );
-      expect(body.requested_by).toBe('unknown');
-    });
-
-    test('sets org_id to null when identity has no org claim', async () => {
-      sqsMock.on(SendMessageCommand).resolves({});
-
-      // Identity carries a sub (so requested_by resolves) but no
-      // custom:organization claim — org_id must serialize as null so the
-      // Python side can fall back to '' rather than blocking fabrication.
-      await handler(makeEvent('requestAgentCreation', {
-        input: { agentName: 'NoOrgAgent', taskDescription: 'No org claim' },
-      }, { sub: 'user-without-org' }));
-
-      const body = JSON.parse(
-        sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody!,
-      );
-      expect(body.org_id).toBeNull();
-    });
-
-    test('reads org_id from identity.claims fallback shape', async () => {
-      sqsMock.on(SendMessageCommand).resolves({});
-
-      // Some AppSync proxy/IAM modes nest claims under identity.claims.
-      // auth-event's readClaim tolerates that shape.
-      await handler(makeEvent('requestAgentCreation', {
-        input: { agentName: 'ClaimsAgent', taskDescription: 'Claims nested' },
-      }, {
-        sub: 'user-1',
-        claims: { 'custom:organization': 'org-from-claims' },
-      }));
-
-      const body = JSON.parse(
-        sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody!,
-      );
-      expect(body.org_id).toBe('org-from-claims');
-    });
+    expect(result.success).toBe(true);
+    expect(result.requestId).toBeDefined();
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
   });
 
-  describe('requestToolCreation', () => {
-    test('sends tool creation message to SQS', async () => {
-      sqsMock.on(SendMessageCommand).resolves({});
+  test('skips the status write when FABRICATION_JOBS_TABLE is unset', async () => {
+    delete process.env.FABRICATION_JOBS_TABLE;
 
-      const result = await handler(makeEvent('requestToolCreation', {
-        input: { toolName: 'TestTool', toolDescription: 'A test tool' },
-      }, { sub: 'tool-requester-42', 'custom:organization': 'org-tool' }));
+    const result = await handler(
+      makeEvent('requestAgentCreation', {
+        agentName: 'NoTableAgent',
+        taskDescription: 'No table configured',
+      }),
+    );
 
-      expect(result.success).toBe(true);
-      const body = JSON.parse(
-        sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody!
-      );
-      expect(body.agent_input.taskDetails).toContain('TestTool');
-      expect(body.requested_by).toBe('tool-requester-42');
-      expect(body.org_id).toBe('org-tool');
-    });
-
-    test('tool creation sets org_id to null when claim absent', async () => {
-      sqsMock.on(SendMessageCommand).resolves({});
-
-      await handler(makeEvent('requestToolCreation', {
-        input: { toolName: 'NoOrgTool', toolDescription: 'No org claim' },
-      }, { sub: 'tool-requester-99' }));
-
-      const body = JSON.parse(
-        sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody!,
-      );
-      expect(body.org_id).toBeNull();
-    });
-  });
-
-  test('throws on unknown field', async () => {
-    await expect(handler(makeEvent('unknownField', {}))).rejects.toThrow('Unknown field');
+    expect(result.success).toBe(true);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 });

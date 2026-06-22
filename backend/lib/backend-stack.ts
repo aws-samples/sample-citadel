@@ -668,6 +668,14 @@ export class BackendStack extends cdk.Stack {
           KB_ID_PARAM: `/citadel/knowledge-base-id-${props.environment}`,
           DS_ID_PARAM: `/citadel/knowledge-base-datasource-id-${props.environment}`,
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          // Source-of-truth jobs table (created in ServicesStack). Referenced by
+          // deterministic name — NOT a cross-stack construct import — because
+          // ServicesStack already depends ON BackendStack (it consumes
+          // props.documentBucket / props.agentEventBus); importing the table
+          // construct here would create a circular stack dependency. The
+          // resolver reads this table first and degrades to a Bedrock KB query
+          // if the var/table is absent.
+          INGESTION_TABLE: `citadel-document-ingestion-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'DocumentUploadResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -750,6 +758,7 @@ export class BackendStack extends cdk.Stack {
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
+          FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'FabricatorRequestResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -765,6 +774,7 @@ export class BackendStack extends cdk.Stack {
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
+          FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'FabricatorQueueResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -791,7 +801,7 @@ export class BackendStack extends cdk.Stack {
     this.documentBucket.grantRead(documentUploadResolverFunction);
     this.documentBucket.grantDelete(documentUploadResolverFunction);
     documentUploadResolverFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['bedrock:IngestKnowledgeBaseDocuments', 'bedrock:StartIngestionJob', 'bedrock:GetKnowledgeBaseDocuments', 'bedrock:DeleteKnowledgeBaseDocuments'],
+      actions: ['bedrock:GetKnowledgeBaseDocuments', 'bedrock:DeleteKnowledgeBaseDocuments'],
       resources: ['*'],
     }));
     documentUploadResolverFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -802,6 +812,60 @@ export class BackendStack extends cdk.Stack {
       ],
     }));
     this.agentEventBus.grantPutEventsTo(documentUploadResolverFunction);
+
+    // Read-only access to the authoritative document-ingestion jobs table
+    // (source of truth for per-document ingestion status). The resolver only
+    // READS this table (GetItem on the base table, Query on the base table /
+    // status-index GSI), so grant the minimum required actions. ARNs are built
+    // from account/region/name rather than importing the ServicesStack table
+    // construct, which would create a circular stack dependency (ServicesStack
+    // already depends ON BackendStack).
+    const ingestionTableName = `citadel-document-ingestion-${props.environment}`;
+    const ingestionTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/${ingestionTableName}`;
+    documentUploadResolverFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+      resources: [ingestionTableArn, `${ingestionTableArn}/index/status-index`],
+    }));
+
+    // ── Durable fabrication-jobs status table ────────────────────────────────
+    // Source of truth for per-agent fabrication status, replacing the old
+    // SQS-peek queue read. Owned HERE in BackendStack because it is the
+    // dependency root (services→backend, arbiter→services→backend): owning it
+    // here lets the two fabricator resolvers below use scoped grants, ensures
+    // the table is provisioned before any cross-stack writer (the services
+    // intake runtime and the arbiter fabricator Lambda) deploys, and makes a
+    // circular stack dependency impossible because those stacks reference the
+    // table only by deterministic name + constructed ARN.
+    // PK orchestrationId (intake session id, or '0' for direct UI requests) /
+    // SK agentUseId (agent name / requestId). On-demand + PITR per conventions;
+    // a `ttl` attribute (epoch seconds, ~7 days) keeps the table self-pruning.
+    new dynamodb.Table(this, 'FabricationJobsTable', {
+      tableName: `citadel-fabrication-jobs-${props.environment}`,
+      partitionKey: { name: 'orchestrationId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'agentUseId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // Grants use the deterministic name + constructed ARN so the wiring is
+    // uniform with the cross-stack writers in ServicesStack / ArbiterStack,
+    // which cannot import this construct without a circular dependency. Least
+    // privilege: the request resolver only writes PENDING rows; the queue
+    // resolver only reads (Query for a given project, Scan otherwise).
+    const fabricationJobsTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-fabrication-jobs-${props.environment}`;
+    fabricatorRequestResolverFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:PutItem'],
+      resources: [fabricationJobsTableArn],
+    }));
+    fabricatorQueueResolverFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:Query', 'dynamodb:Scan'],
+      resources: [fabricationJobsTableArn],
+    }));
 
     // Grant S3 + Lambda permissions for document resolver
     const sessionBucketArn = `arn:aws:s3:::citadel-sessions-${props.environment}-${this.account}-${this.region}`;
@@ -2200,13 +2264,6 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    documentUploadLambdaDataSource.createResolver("IngestDocumentResolver", {
-      typeName: "Mutation",
-      fieldName: "ingestDocument",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
     documentUploadLambdaDataSource.createResolver("GetDocumentIngestionStatusResolver", {
       typeName: "Query",
       fieldName: "getDocumentIngestionStatus",
@@ -2217,13 +2274,6 @@ export class BackendStack extends cdk.Stack {
     documentUploadLambdaDataSource.createResolver("ListProjectDocumentsResolver", {
       typeName: "Query",
       fieldName: "listProjectDocuments",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentUploadLambdaDataSource.createResolver("NotifyDocumentReadyResolver", {
-      typeName: "Mutation",
-      fieldName: "notifyDocumentReady",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
@@ -2280,6 +2330,13 @@ export class BackendStack extends cdk.Stack {
     agentConfigLambdaDataSource.createResolver("DeleteAgentConfigResolver", {
       typeName: "Mutation",
       fieldName: "deleteAgentConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentConfigLambdaDataSource.createResolver("ActivateProjectAgentsResolver", {
+      typeName: "Mutation",
+      fieldName: "activateProjectAgents",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });

@@ -389,7 +389,22 @@ export class ArbiterStack extends cdk.Stack {
 
         const fabricatorQueue = new Queue(this, `fabricatorQueue`, {
           queueName: `citadel-fabricator-queue-${props.environment}`,
-          visibilityTimeout: cdk.Duration.minutes(15),
+          // Reliability hardening: visibilityTimeout MUST strictly exceed the
+          // FabricatorAgent Lambda timeout (15 min, below). When they are
+          // equal, an invocation that runs near the function timeout causes
+          // SQS to redeliver the same message — stacking duplicate
+          // fabrications and prematurely draining the DLQ. AWS guidance for
+          // SQS->Lambda is visibilityTimeout >= 6x the function timeout to
+          // absorb retries/throttling, i.e. 6 x 15 min = 90 min. With
+          // batchSize=1 (see SqsEventSource below) each invocation handles a
+          // single fabrication (~11 min observed worst case), so the message
+          // is well within one visibility window. Tradeoff: a genuinely
+          // poison message takes up to maxReceiveCount(3) x 90 min before it
+          // lands in the DLQ — acceptable because real fabrication failures
+          // surface via the agent.fabrication.failed event and the
+          // FabricatorErrorAlarm, not via DLQ latency. Never set this equal
+          // to (or below) the function timeout.
+          visibilityTimeout: cdk.Duration.minutes(90),
           retentionPeriod: cdk.Duration.days(7),
           enforceSSL: true,
           deadLetterQueue: {
@@ -413,6 +428,10 @@ export class ArbiterStack extends cdk.Stack {
         TOOL_CONFIG_TABLE: toolsConfigTable.tableName,
         AGENT_BUCKET_NAME: props.codeBucket.bucketName,
         WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
+        // Durable per-agent fabrication status table (owned by BackendStack).
+        // The consumer writes PROCESSING/COMPLETED/FAILED transitions. Empty
+        // string keeps the write a no-op when the table isn't provisioned.
+        FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
         CODE_VERSION: '2', // Force Lambda code update
         // QT3-6: fabrication-time spec status validation.
         EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
@@ -450,6 +469,18 @@ export class ArbiterStack extends cdk.Stack {
     // assert_spec_approved can verify the bound spec_id is APPROVED.
     props.executionSpecificationsTable.grantReadData(fabricatorLambda);
 
+    // PutItem/UpdateItem on the durable fabrication-jobs table (owned by
+    // BackendStack) so the consumer can upsert PROCESSING/COMPLETED/FAILED
+    // status. Referenced by deterministic name + constructed ARN — importing
+    // the BackendStack table construct here would create a circular dependency
+    // (ArbiterStack already depends ON ServicesStack which depends ON
+    // BackendStack). Least privilege: PutItem + UpdateItem only.
+    fabricatorLambda.addToRolePolicy(new PolicyStatement({
+      effect: Effect.ALLOW,
+      actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+      resources: [`arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-fabrication-jobs-${props.environment}`],
+    }));
+
     // Phase 3 Step 2: write-only grant on AppsTable so the fabricator can
     // synchronously mirror new Registry agent records into the #META row
     // consumed by listApps via OrgIndex. Eventually-consistent — failures
@@ -485,7 +516,12 @@ export class ArbiterStack extends cdk.Stack {
       );
     }
 
-    fabricatorLambda.addEventSource(new SqsEventSource(fabricatorQueue));
+    // Reliability hardening: batchSize=1 so each Lambda invocation processes
+    // exactly ONE fabrication message. The SQS default (up to 10) lets a
+    // single invocation stack many agents and blow past the 15-min function
+    // timeout, triggering redelivery + duplicate fabrication. One message per
+    // invocation bounds the invocation to a single agent fabrication.
+    fabricatorLambda.addEventSource(new SqsEventSource(fabricatorQueue, { batchSize: 1 }));
 
     // Grant scoped SQS permissions to Supervisor (S-02 fix)
     supervisorLambda.addToRolePolicy(new PolicyStatement({

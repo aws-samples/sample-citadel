@@ -20,10 +20,35 @@ import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
 import { NagSuppressions } from 'cdk-nag';
 import * as path from 'path';
 
+/**
+ * Derive the Bedrock cross-region inference-profile prefix for a region.
+ *
+ * Mirrors arbiter/supervisor/index.py::_cross_region_prefix EXACTLY so the
+ * TypeScript (CDK) and Python (runtime) sides stay consistent. The 'au.'
+ * profile only exists in ap-southeast-2; every other region resolves to its
+ * geographic code, defaulting to 'us' (valid in us-west-2).
+ */
+export function crossRegionPrefix(region: string): string {
+  if (region.startsWith('us-')) return 'us';
+  if (region.startsWith('eu-')) return 'eu';
+  if (region === 'ap-southeast-2') return 'au';
+  if (region.startsWith('ap-')) return 'apac';
+  if (region.startsWith('me-')) return 'me';
+  if (region.startsWith('ca-')) return 'ca';
+  if (region.startsWith('sa-')) return 'sa';
+  return 'us';
+}
+
 export interface ServicesStackProps extends cdk.StackProps {
   environment: string;
   agentEventBus: events.EventBus;
   documentBucket: s3.Bucket;
+  // Optional AgentCore Registry handles so the intake runtime can read the
+  // factory catalog (fabricated agents live in the Registry, not DynamoDB).
+  // Optional + conditionally wired — mirrors the fabricator in arbiter-stack.ts
+  // — so test paths that construct ServicesStack without a registry still work.
+  registryArn?: string;
+  registryId?: string;
 }
 
 export class ServicesStack extends cdk.Stack {
@@ -553,6 +578,152 @@ def handler(event, context):
         { suffix: '/design/high_level_design.pdf' }
       );
 
+      // ── Server-side Document Ingestion (Phase 1) ────────────────────────────
+      // Authoritative jobs table tracking each document's ingestion lifecycle.
+      // PK projectId / SK documentKey; GSI 'status-index' lets the poller find
+      // non-terminal rows by status. On-demand billing + PITR per conventions.
+      const ingestionTable = new dynamodb.Table(this, 'DocumentIngestionTable', {
+        tableName: `citadel-document-ingestion-${props.environment}`,
+        partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
+        sortKey: { name: 'documentKey', type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+      ingestionTable.addGlobalSecondaryIndex({
+        indexName: 'status-index',
+        partitionKey: { name: 'status', type: dynamodb.AttributeType.STRING },
+        sortKey: { name: 'updatedAt', type: dynamodb.AttributeType.STRING },
+      });
+
+      // Publish the table name for cross-stack consumers (the document-upload
+      // resolver in BackendStack reads it as source of truth in a later phase).
+      new ssm.StringParameter(this, 'DocumentIngestionTableParam', {
+        parameterName: `/citadel/document-ingestion-table-${props.environment}`,
+        stringValue: ingestionTable.tableName,
+      });
+
+      const kbIdParamName = `/citadel/knowledge-base-id-${props.environment}`;
+      const dsIdParamName = `/citadel/knowledge-base-datasource-id-${props.environment}`;
+      const ssmParamArns = [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${kbIdParamName}`,
+        `arn:aws:ssm:${this.region}:${this.account}:parameter${dsIdParamName}`,
+      ];
+
+      // ingest-start: S3 ObjectCreated -> create jobs row + start Bedrock ingestion.
+      const ingestStartFunction = new lambda.Function(this, 'DocumentIngestStartFunction', {
+        functionName: `citadel-document-ingest-start-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: 'document-ingestion-start.handler',
+        code: lambda.Code.fromAsset('dist/lambda'),
+        environment: {
+          INGESTION_TABLE: ingestionTable.tableName,
+          KB_ID_PARAM: kbIdParamName,
+          DS_ID_PARAM: dsIdParamName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          DOCUMENT_BUCKET: props.documentBucket.bucketName,
+          POWERTOOLS_SERVICE_NAME: 'citadel',
+          POWERTOOLS_LOG_LEVEL: 'INFO',
+        },
+        timeout: cdk.Duration.minutes(2),
+        memorySize: 256,
+        tracing: lambda.Tracing.ACTIVE,
+      });
+
+      // ingest-start writes the jobs row...
+      ingestionTable.grantWriteData(ingestStartFunction);
+      // ...and starts/reads Bedrock ingestion on the session KB (explicitly scoped).
+      ingestStartFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['bedrock:IngestKnowledgeBaseDocuments', 'bedrock:StartIngestionJob', 'bedrock:GetKnowledgeBaseDocuments'],
+        resources: [sessionKb.attrKnowledgeBaseArn],
+      }));
+      ingestStartFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: ssmParamArns,
+      }));
+      props.documentBucket.grantRead(ingestStartFunction);
+
+      // Cross-stack S3 notification choice:
+      // props.documentBucket is owned by BackendStack and ServicesStack already
+      // depends on BackendStack. Calling addEventNotification on the concrete
+      // (BackendStack-owned) Bucket would make BackendStack reference this
+      // stack's Lambda ARN, creating a circular stack dependency. To avoid that
+      // we wire the notification through an IMPORTED reference (fromBucketName),
+      // which provisions a BucketNotifications custom resource in THIS stack
+      // that calls PutBucketNotificationConfiguration at deploy time — no CFN
+      // cross-stack cycle. Caveat: the imported-bucket notifier manages the
+      // bucket's notification config; this is safe here because DocumentBucket
+      // currently has no other event notifications. If notifications are later
+      // added in BackendStack, move this wiring there instead.
+      // S3 prefix/suffix filters cannot express the design/planning excludes, so
+      // we subscribe to all OBJECT_CREATED events and filter in shouldProcessKey.
+      const importedDocumentBucket = s3.Bucket.fromBucketName(
+        this,
+        'ImportedDocumentBucketForIngest',
+        props.documentBucket.bucketName,
+      );
+      importedDocumentBucket.addEventNotification(
+        s3.EventType.OBJECT_CREATED,
+        new s3n.LambdaDestination(ingestStartFunction),
+      );
+
+      // poller: scheduled detection of INDEXED/FAILED + exactly-once trigger.
+      const ingestPollerFunction = new lambda.Function(this, 'DocumentIngestPollerFunction', {
+        functionName: `citadel-document-ingest-poller-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: 'document-ingestion-poller.handler',
+        code: lambda.Code.fromAsset('dist/lambda'),
+        environment: {
+          INGESTION_TABLE: ingestionTable.tableName,
+          KB_ID_PARAM: kbIdParamName,
+          DS_ID_PARAM: dsIdParamName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          DOCUMENT_BUCKET: props.documentBucket.bucketName,
+          MAX_AGE_MS: String(10 * 60 * 1000),
+          START_GRACE_MS: String(2 * 60 * 1000),
+          ENVIRONMENT: props.environment,
+          POWERTOOLS_SERVICE_NAME: 'citadel',
+          POWERTOOLS_LOG_LEVEL: 'INFO',
+        },
+        timeout: cdk.Duration.minutes(2),
+        memorySize: 256,
+        tracing: lambda.Tracing.ACTIVE,
+      });
+
+      // poller reads/updates jobs rows (table + GSI), reads Bedrock status,
+      // emits trigger/failure events, and publishes a failure metric.
+      ingestionTable.grantReadWriteData(ingestPollerFunction);
+      ingestPollerFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['bedrock:IngestKnowledgeBaseDocuments', 'bedrock:StartIngestionJob', 'bedrock:GetKnowledgeBaseDocuments'],
+        resources: [sessionKb.attrKnowledgeBaseArn],
+      }));
+      ingestPollerFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: ssmParamArns,
+      }));
+      ingestPollerFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: { StringEquals: { 'cloudwatch:namespace': 'Citadel/DocumentIngestion' } },
+      }));
+      props.agentEventBus.grantPutEventsTo(ingestPollerFunction);
+
+      // Scheduled poll every minute (resilient to closed tabs/timeouts).
+      const ingestPollRule = new events.Rule(this, 'DocumentIngestPollRule', {
+        ruleName: `citadel-document-ingest-poll-${props.environment}`,
+        description: 'Polls Bedrock ingestion status and fires the assessment trigger exactly once',
+        schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
+      });
+      ingestPollRule.addTarget(new targets.LambdaFunction(ingestPollerFunction, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.minutes(5),
+      }));
+
       // --- Health Monitor Lambda (DS-10) ---
       // EventBridge scheduled rule triggers health checks on CONNECTED/ERROR data stores
       const healthMonitorFunction = new lambda.Function(this, 'HealthMonitorFunction', {
@@ -700,11 +871,16 @@ def handler(event, context):
           KNOWLEDGE_BASE_ID: sessionKb.attrKnowledgeBaseId,
           INLINE_DATA_SOURCE_ID: sessionKbDataSource.attrDataSourceId,
           FABRICATOR_QUEUE_URL: `https://sqs.${cdk.Stack.of(this).region}.amazonaws.com/${cdk.Stack.of(this).account}/citadel-fabricator-queue-${props.environment}`,
+          FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
           AGENT_CONFIG_TABLE: `citadel-agents-${props.environment}`,
           PROJECTS_TABLE: `citadel-projects-${props.environment}`,
           CONVERSATIONS_TABLE: `citadel-conversations-${props.environment}`,
-          AGENT_MODEL: process.env.AGENT_MODEL || 'au.anthropic.claude-sonnet-4-6',
-          EXTRACTION_MODEL: process.env.EXTRACTION_MODEL || 'au.anthropic.claude-haiku-4-5-20251001-v1:0',
+          // Registry id so the intake catalog (list_factory_agents /
+          // plan_fabrication) can read fabricated agents from the AgentCore
+          // Registry. Conditionally wired, mirroring the fabricator.
+          ...(props.registryId && { REGISTRY_ID: props.registryId }),
+          AGENT_MODEL: process.env.AGENT_MODEL || `${crossRegionPrefix(this.region)}.anthropic.claude-sonnet-4-6`,
+          EXTRACTION_MODEL: process.env.EXTRACTION_MODEL || `${crossRegionPrefix(this.region)}.anthropic.claude-haiku-4-5-20251001-v1:0`,
           LANGFUSE_SECRET_KEY: '',
           LANGFUSE_PUBLIC_KEY: '',
           LANGFUSE_BASE_URL: '',
@@ -755,6 +931,32 @@ def handler(event, context):
         actions: ['dynamodb:Scan'],
         resources: [`arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/citadel-agents-${props.environment}`],
       }));
+
+      // PutItem on the durable fabrication-jobs table (owned by BackendStack)
+      // so the intake runtime can write a PENDING row per build agent it
+      // enqueues. Referenced by deterministic name + constructed ARN — NOT a
+      // cross-stack construct import — because importing the BackendStack table
+      // here is unnecessary (deterministic name) and keeps wiring uniform with
+      // the other writers. Least privilege: PutItem only.
+      agentIntakeSingleRuntime.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:PutItem'],
+        resources: [`arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/citadel-fabrication-jobs-${props.environment}`],
+      }));
+
+      // Least-privilege read access to the AgentCore Registry so the intake
+      // runtime can list/get fabricated agent records for the factory catalog
+      // (list_factory_agents / plan_fabrication). Mirrors the fabricator's
+      // registry grant scope in arbiter-stack.ts (ARN + its /* sub-resources).
+      // Conditional on props.registryArn — wired only when a registry exists.
+      if (props.registryArn) {
+        agentIntakeSingleRuntime.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
+          actions: [
+            'bedrock-agentcore:ListRegistryRecords',
+            'bedrock-agentcore:GetRegistryRecord',
+          ],
+          resources: [props.registryArn, `${props.registryArn}/*`],
+        }));
+      }
 
       // ── Outputs ──────────────────────────────────────────────────────────────
 

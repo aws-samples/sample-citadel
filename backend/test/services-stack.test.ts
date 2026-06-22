@@ -25,7 +25,7 @@ for (const dockerDir of [
   if (!fs.existsSync(df)) fs.writeFileSync(df, dockerStub);
 }
 
-import { ServicesStack } from '../lib/services-stack';
+import { ServicesStack, crossRegionPrefix } from '../lib/services-stack';
 
 describe('ServicesStack', () => {
   let app: cdk.App;
@@ -162,5 +162,187 @@ describe('ServicesStack', () => {
     // AWS::Logs::LogGroup resource rather than a Custom::LogRetention resource.
     const customLogRetention = template.findResources('Custom::LogRetention');
     expect(Object.keys(customLogRetention)).toHaveLength(0);
+  });
+
+  describe('server-side document ingestion (Phase 1)', () => {
+    test('creates the document-ingestion jobs table with status-index GSI', () => {
+      template.hasResourceProperties('AWS::DynamoDB::Table', {
+        TableName: 'citadel-document-ingestion-test',
+        BillingMode: 'PAY_PER_REQUEST',
+        PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+        KeySchema: [
+          { AttributeName: 'projectId', KeyType: 'HASH' },
+          { AttributeName: 'documentKey', KeyType: 'RANGE' },
+        ],
+        GlobalSecondaryIndexes: [
+          {
+            IndexName: 'status-index',
+            KeySchema: [
+              { AttributeName: 'status', KeyType: 'HASH' },
+              { AttributeName: 'updatedAt', KeyType: 'RANGE' },
+            ],
+          },
+        ],
+      });
+    });
+
+    test('creates the ingest-start Lambda', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Handler: 'document-ingestion-start.handler',
+        Runtime: 'nodejs24.x',
+      });
+    });
+
+    test('creates the poller Lambda', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Handler: 'document-ingestion-poller.handler',
+        Runtime: 'nodejs24.x',
+      });
+    });
+
+    test('schedules the poller every minute', () => {
+      template.hasResourceProperties('AWS::Events::Rule', {
+        ScheduleExpression: 'rate(1 minute)',
+        State: 'ENABLED',
+      });
+    });
+
+    test('publishes the ingestion table name to SSM', () => {
+      template.hasResourceProperties('AWS::SSM::Parameter', {
+        Name: '/citadel/document-ingestion-table-test',
+      });
+    });
+
+    test('grants ingestion lambdas scoped Bedrock KB access', () => {
+      // Both lambdas get a policy statement allowing GetKnowledgeBaseDocuments
+      // on the KB ARN (ingest-start also gets Ingest).
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: cdk.assertions.Match.arrayWith([
+            cdk.assertions.Match.objectLike({
+              Action: cdk.assertions.Match.arrayWith(['bedrock:GetKnowledgeBaseDocuments']),
+            }),
+          ]),
+        },
+      });
+    });
+
+    test('grants both ingestion lambdas StartIngestionJob + Ingest scoped to the KB ARN', () => {
+      // IngestKnowledgeBaseDocuments authorizes against bedrock:StartIngestionJob,
+      // so both the ingest-start role and the poller role (stale-row re-kick)
+      // must carry the full action set, scoped to the KB ARN (never '*').
+      const policies = template.findResources('AWS::IAM::Policy');
+      const matching = Object.values(policies).filter((policy) => {
+        const statements: Array<Record<string, unknown>> =
+          (policy.Properties as { PolicyDocument?: { Statement?: unknown[] } } | undefined)
+            ?.PolicyDocument?.Statement as Array<Record<string, unknown>> ?? [];
+        return statements.some((stmt) => {
+          const rawAction = stmt.Action;
+          const actions: string[] = Array.isArray(rawAction)
+            ? (rawAction as string[])
+            : [rawAction as string];
+          const resource = stmt.Resource;
+          const scopedToKb =
+            resource !== '*' &&
+            !(Array.isArray(resource) && (resource as unknown[]).includes('*'));
+          return (
+            scopedToKb &&
+            actions.includes('bedrock:IngestKnowledgeBaseDocuments') &&
+            actions.includes('bedrock:StartIngestionJob') &&
+            actions.includes('bedrock:GetKnowledgeBaseDocuments')
+          );
+        });
+      });
+      // ingest-start role + poller role each carry the full KB-scoped action set.
+      expect(matching.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+});
+
+describe('crossRegionPrefix', () => {
+  // Mirrors arbiter/supervisor/index.py::_cross_region_prefix exactly.
+  test('us-* regions map to "us"', () => {
+    expect(crossRegionPrefix('us-west-2')).toBe('us');
+    expect(crossRegionPrefix('us-east-1')).toBe('us');
+  });
+
+  test('eu-* regions map to "eu"', () => {
+    expect(crossRegionPrefix('eu-west-1')).toBe('eu');
+    expect(crossRegionPrefix('eu-central-1')).toBe('eu');
+  });
+
+  test('ap-southeast-2 maps to "au" (special case before the ap-* fallback)', () => {
+    expect(crossRegionPrefix('ap-southeast-2')).toBe('au');
+  });
+
+  test('other ap-* regions map to "apac"', () => {
+    expect(crossRegionPrefix('ap-southeast-1')).toBe('apac');
+    expect(crossRegionPrefix('ap-northeast-1')).toBe('apac');
+  });
+
+  test('me-/ca-/sa- regions map to their codes', () => {
+    expect(crossRegionPrefix('me-south-1')).toBe('me');
+    expect(crossRegionPrefix('ca-central-1')).toBe('ca');
+    expect(crossRegionPrefix('sa-east-1')).toBe('sa');
+  });
+
+  test('unknown regions default to "us"', () => {
+    expect(crossRegionPrefix('xx-unknown-9')).toBe('us');
+  });
+});
+
+describe('AgentIntakeSingle runtime model identifiers (us-west-2 dev stack)', () => {
+  let template: cdk.assertions.Template;
+  let savedAgentModel: string | undefined;
+  let savedExtractionModel: string | undefined;
+
+  beforeAll(() => {
+    // Ensure no process.env override masks the region-derived default.
+    savedAgentModel = process.env.AGENT_MODEL;
+    savedExtractionModel = process.env.EXTRACTION_MODEL;
+    delete process.env.AGENT_MODEL;
+    delete process.env.EXTRACTION_MODEL;
+
+    const app = new cdk.App();
+    const prereq = new cdk.Stack(app, 'ModelPrereq', {
+      env: { account: '123456789012', region: 'us-west-2' },
+    });
+    const bus = new events.EventBus(prereq, 'ModelBus', { eventBusName: 'model-bus' });
+    const bucket = new s3.Bucket(prereq, 'ModelDocBucket');
+
+    const stack = new ServicesStack(app, 'citadel-services-dev', {
+      environment: 'dev',
+      agentEventBus: bus,
+      documentBucket: bucket,
+      env: { account: '123456789012', region: 'us-west-2' },
+    });
+    template = cdk.assertions.Template.fromStack(stack);
+  });
+
+  afterAll(() => {
+    if (savedAgentModel !== undefined) process.env.AGENT_MODEL = savedAgentModel;
+    if (savedExtractionModel !== undefined) process.env.EXTRACTION_MODEL = savedExtractionModel;
+  });
+
+  test('AGENT_MODEL/EXTRACTION_MODEL use the us. prefix (no au. prefix) in us-west-2', () => {
+    template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+      EnvironmentVariables: cdk.assertions.Match.objectLike({
+        AGENT_MODEL: 'us.anthropic.claude-sonnet-4-6',
+        EXTRACTION_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      }),
+    });
+  });
+
+  test('no runtime EnvironmentVariables retains the invalid au. inference-profile prefix', () => {
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    for (const runtime of Object.values(runtimes)) {
+      const env = ((runtime.Properties as { EnvironmentVariables?: Record<string, unknown> } | undefined)
+        ?.EnvironmentVariables) ?? {};
+      for (const value of Object.values(env)) {
+        if (typeof value === 'string') {
+          expect(value.startsWith('au.')).toBe(false);
+        }
+      }
+    }
   });
 });

@@ -1,6 +1,6 @@
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { randomUUID } from 'crypto';
 import type { RegistryRecord } from '../services/registry-service';
 import { extractOrgFromEvent } from '../utils/auth-event';
@@ -17,6 +17,79 @@ const FABRICATOR_QUEUE_URL = process.env.FABRICATOR_QUEUE_URL!;
 // time) so unit tests can toggle the env var per case.
 function getAppsTable(): string | undefined {
   return process.env.APPS_TABLE;
+}
+
+// Durable per-agent fabrication status table (citadel-fabrication-jobs-${env}).
+// Read at call-time (not module-load) so unit tests can toggle the env var per
+// case. When unset, the status write is skipped entirely so the resolver stays
+// backward-compatible in environments that haven't wired the table yet.
+function getFabricationJobsTable(): string | undefined {
+  return process.env.FABRICATION_JOBS_TABLE;
+}
+
+// ~7 day TTL in epoch seconds — keeps the queue table self-pruning so old
+// terminal rows don't accumulate. DynamoDB TTL deletes are best-effort/async.
+const FABRICATION_JOBS_TTL_SECONDS = 7 * 24 * 60 * 60;
+// DynamoDB row stores at most this many chars of the task description so the
+// UI has enough context without bloating the item.
+const TASK_DESCRIPTION_MAX = 500;
+
+/**
+ * Derive a human-readable agent/tool name from the composed taskDetails block.
+ * The resolver builds taskDetails with an "Agent Name:" / "Tool Name:" line,
+ * so we prefer that; otherwise fall back to the first non-empty line.
+ */
+function deriveAgentName(taskDetails: string): string {
+  const match = taskDetails.match(/(?:Agent|Tool) Name:\s*(.+)/);
+  if (match && match[1].trim()) {
+    return match[1].trim();
+  }
+  const firstLine = taskDetails.split('\n').find((l) => l.trim().length > 0);
+  return firstLine ? firstLine.trim() : 'Unknown Agent';
+}
+
+/**
+ * Best-effort PENDING-row write to the durable fabrication-jobs table.
+ *
+ * Mirrors the UI producer path: orchestrationId is '0' (direct request, not
+ * part of an intake orchestration) and agentUseId is the generated requestId.
+ * A status-write failure NEVER fails the enqueue — the SQS message is already
+ * accepted, so we log and swallow rather than re-raising.
+ */
+async function writePendingFabricationStatus(
+  requestId: string,
+  taskDetails: string,
+  requestType: 'agent-creation' | 'tool-creation',
+  requestedBy: string,
+): Promise<void> {
+  const table = getFabricationJobsTable();
+  if (!table) {
+    console.log('FABRICATION_JOBS_TABLE unset; skipping fabrication status write');
+    return;
+  }
+  const now = new Date().toISOString();
+  try {
+    await docClient.send(
+      new PutCommand({
+        TableName: table,
+        Item: {
+          orchestrationId: '0',
+          agentUseId: requestId,
+          status: 'PENDING',
+          agentName: deriveAgentName(taskDetails),
+          taskDescription: taskDetails.slice(0, TASK_DESCRIPTION_MAX),
+          requestType,
+          requestedBy: requestedBy || 'unknown',
+          submittedAt: now,
+          updatedAt: now,
+          ttl: Math.floor(Date.now() / 1000) + FABRICATION_JOBS_TTL_SECONDS,
+        },
+      }),
+    );
+  } catch (error) {
+    // Eventually-consistent: never block the enqueue on a status-write error.
+    console.error('Failed to write PENDING fabrication status (continuing):', error);
+  }
 }
 
 /**
@@ -168,6 +241,11 @@ async function sendToFabricatorQueue(
     console.error('Error sending message to Fabricator queue:', error);
     throw new Error(`Failed to send request to Fabricator: ${error}`);
   }
+
+  // Durable PENDING status row so the queue UI reflects this request even
+  // after the consumer pulls the SQS message. Best-effort — never fails the
+  // enqueue.
+  await writePendingFabricationStatus(requestId, taskDetails, requestType, requestedBy);
 }
 
 /**
