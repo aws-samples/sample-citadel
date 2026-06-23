@@ -55,27 +55,27 @@ export function sanitizeString(input: string, maxLength: number = 1000): string 
     return '';
   }
 
-  // Strip dangerous markup, producing plain text. Two passes are each applied
-  // repeatedly to a fixed point so a replacement cannot re-introduce a stripped
-  // construct via nesting/overlap (e.g. "<scr<script>ipt>") — this is the
-  // CodeQL js/incomplete-multi-character-sanitization remediation:
-  //   1. Drop <script>…</script> blocks together with their text content. The
-  //      closing tag tolerates trailing junk ("</script foo>") and the body
-  //      uses [\s\S] so a newline or malformed end tag cannot bypass it
-  //      (js/bad-tag-filter remediation).
-  //   2. Remove any remaining HTML tag. A bare "<" with no closing ">" is left
-  //      intact, matching the prior behaviour (no benign text is dropped).
-  const SCRIPT_BLOCK_RE = /<\s*script\b[^>]*>[\s\S]*?<\s*\/\s*script\b[^>]*>/gi;
-  const HTML_TAG_RE = /<[^>]*>/g;
+  // Neutralise HTML/script markup by escaping the characters that can open or
+  // close a tag, rather than stripping multi-character tokens.
+  //
+  // CodeQL js/incomplete-multi-character-sanitization remediation: any
+  // strip-based approach — even one looped to a fixed point — can be defeated
+  // by interleaved input. For example "<scr<script></script>ipt" reassembles
+  // into a bare "<script" once the inner block is removed; because that residue
+  // has no closing ">", no tag regex matches it and the fixed point still
+  // contains live markup. Escaping is immune to this entire bypass class: each
+  // character is rewritten independently, so there is no removal step that can
+  // splice neighbouring characters into a new tag. The result contains no
+  // literal "<" or ">" at all.
+  //
+  // Order matters — "&" must be escaped first so the entities introduced for
+  // "<" and ">" are not themselves double-escaped.
+  const escaped = input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 
-  let sanitized = input;
-  let previous: string;
-  do {
-    previous = sanitized;
-    sanitized = sanitized.replace(SCRIPT_BLOCK_RE, '').replace(HTML_TAG_RE, '');
-  } while (sanitized !== previous);
-
-  return sanitized.trim().substring(0, maxLength);
+  return escaped.trim().substring(0, maxLength);
 }
 
 export function validatePaginationInput(input: any): void {
