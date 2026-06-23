@@ -7,7 +7,9 @@ well-formed JSON with all required fields.
 
 import sys
 import os
+import io
 import json
+from contextlib import redirect_stdout
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -269,3 +271,86 @@ class TestCfnResponseSend:
 
         body = json.loads(captured_body["value"])
         assert body["Reason"] == reason
+
+
+# ---------------------------------------------------------------------------
+# send() clear-text logging redaction (security regression)
+# ---------------------------------------------------------------------------
+
+class TestCfnResponseRedaction:
+    """Regression tests for the clear-text secret logging remediation.
+
+    send() must still POST the full body (including Data) to CloudFormation,
+    but it must NOT print raw responseData values to stdout/CloudWatch, since
+    Data can carry generated secrets, passwords, or ARNs. Only non-sensitive
+    metadata (status, ids, the Data *keys*) may be logged.
+    """
+
+    _EVENT = {
+        "ResponseURL": "https://cfn-response.example.com/callback",
+        "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/test",
+        "RequestId": "req-0001",
+        "LogicalResourceId": "MyResource",
+    }
+
+    def _capture_stdout(self, data, **kwargs):
+        context = type("Context", (), {"log_stream_name": "log-stream-1"})()
+        mock_http = MagicMock()
+        mock_http.request.return_value = MagicMock(status=200)
+        buf = io.StringIO()
+        with patch("cfnresponse.http", mock_http), redirect_stdout(buf):
+            send(self._EVENT, context, SUCCESS, data, **kwargs)
+        return buf.getvalue()
+
+    def test_secret_values_are_not_logged(self):
+        """Raw responseData values (secrets) must never appear in stdout."""
+        secret = "SUPER_SECRET_VALUE_8f3a2b"
+        data = {"Password": secret, "AdminToken": "tok_" + secret}
+
+        output = self._capture_stdout(data)
+
+        assert secret not in output, (
+            "responseData value was logged in clear text"
+        )
+
+    def test_full_json_body_is_not_logged(self):
+        """The serialized response body must not be dumped to stdout."""
+        secret = "another_secret_value_d4e5f6"
+        data = {"DbPassword": secret}
+
+        output = self._capture_stdout(data)
+
+        assert json.dumps({"DbPassword": secret}) not in output
+        assert secret not in output
+
+    def test_data_keys_are_logged_as_metadata(self):
+        """Non-sensitive Data *keys* are still logged for debuggability."""
+        data = {"Password": "ROTATED_SECRET", "Endpoint": "db.example.com"}
+
+        output = self._capture_stdout(data)
+
+        # Key names are safe to log...
+        assert "Password" in output
+        assert "Endpoint" in output
+        # ...but their values are not.
+        assert "ROTATED_SECRET" not in output
+
+    def test_full_body_still_sent_to_cloudformation(self):
+        """Redaction affects logging only: the PUT body still carries Data."""
+        secret = "value_sent_but_not_logged_99"
+        data = {"Password": secret}
+        captured = {}
+
+        context = type("Context", (), {"log_stream_name": "log-stream-1"})()
+        mock_http = MagicMock()
+
+        def capture_request(method, url, headers, body):
+            captured["body"] = body
+            return MagicMock(status=200)
+
+        mock_http.request = capture_request
+        with patch("cfnresponse.http", mock_http):
+            send(self._EVENT, context, SUCCESS, data)
+
+        body = json.loads(captured["body"])
+        assert body["Data"] == data
