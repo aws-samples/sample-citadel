@@ -12,7 +12,7 @@ http = urllib3.PoolManager()
 def send(event, context, responseStatus, responseData, physicalResourceId=None, noEcho=False, reason=None):
     responseUrl = event['ResponseURL']
 
-    print(responseUrl)
+    print("Sending response to CloudFormation")
 
     responseBody = {
         'Status': responseStatus,
@@ -28,16 +28,18 @@ def send(event, context, responseStatus, responseData, physicalResourceId=None, 
     json_responseBody = json.dumps(responseBody)
 
     # Do not log the full response body: the 'Data' field may contain sensitive
-    # values (generated secrets, passwords, ARNs). Log only non-sensitive metadata.
+    # values (generated secrets, passwords, ARNs). Log only non-sensitive metadata
+    # and the Data key *count* (never key names/values, and never read back through
+    # responseBody, which embeds the sensitive Data field).
     print(
         "Response status: {}; physicalResourceId={}; stackId={}; requestId={}; "
-        "logicalResourceId={}; dataKeys={}".format(
+        "logicalResourceId={}; dataKeyCount={}".format(
             responseStatus,
-            responseBody['PhysicalResourceId'],
+            physicalResourceId or context.log_stream_name,
             event['StackId'],
             event['RequestId'],
             event['LogicalResourceId'],
-            list(responseData.keys()) if isinstance(responseData, dict) else [],
+            len(responseData) if isinstance(responseData, dict) else 0,
         )
     )
 

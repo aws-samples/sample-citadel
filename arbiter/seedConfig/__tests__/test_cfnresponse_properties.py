@@ -323,16 +323,23 @@ class TestCfnResponseRedaction:
         assert json.dumps({"DbPassword": secret}) not in output
         assert secret not in output
 
-    def test_data_keys_are_logged_as_metadata(self):
-        """Non-sensitive Data *keys* are still logged for debuggability."""
+    def test_data_key_count_is_logged_not_names(self):
+        """Only the Data key *count* is logged for debuggability.
+
+        Taint-breaking fix (CodeQL py/clear-text-logging-sensitive-data):
+        key names are no longer logged (they can hint at secret structure and
+        flow from the sensitive responseData), only the integer count.
+        """
         data = {"Password": "ROTATED_SECRET", "Endpoint": "db.example.com"}
 
         output = self._capture_stdout(data)
 
-        # Key names are safe to log...
-        assert "Password" in output
-        assert "Endpoint" in output
-        # ...but their values are not.
+        # The non-sensitive key *count* is logged...
+        assert "dataKeyCount=2" in output
+        # ...but key names are not...
+        assert "Password" not in output
+        assert "Endpoint" not in output
+        # ...and values are never logged.
         assert "ROTATED_SECRET" not in output
 
     def test_full_body_still_sent_to_cloudformation(self):
