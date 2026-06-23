@@ -91,5 +91,10 @@
             "test": "jest",
             "test:integration": "./scripts/run-integration-tests.sh",
             "generate-aws-exports": "node scripts/generate-aws-exports.js"
+      },
+      "overrides": {
+            "dompurify": "^3.4.11",
+            "form-data": "^4.0.6",
+            "js-yaml": "^4.2.0"
       }
 }
