@@ -8,6 +8,7 @@ module.exports = {
       tsconfig: 'tsconfig.jest.json',
     }],
   },
+  coverageProvider: 'v8',
   collectCoverageFrom: [
     'src/**/*.ts',
     '!src/**/*.d.ts',
