@@ -28,9 +28,9 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -55,8 +55,8 @@ jobs:
       - name: Build CDK
         run: npm run build
 
-      - name: CDK synth (validate templates)
-        run: npx cdk synth --quiet
+      - name: CDK synth (validate all templates)
+        run: npx cdk synth --all --quiet
         env:
           ENVIRONMENT: test
           CDK_DEFAULT_ACCOUNT: "000000000000"
@@ -73,9 +73,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -102,9 +102,9 @@ jobs:
     name: Arbiter
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -115,14 +115,35 @@ jobs:
       - name: Run tests
         run: pytest arbiter/ -v --tb=short
 
+  # ── Service (Python): agent intake + pdf generator tests ──
+  service:
+    name: Service
+    runs-on: ubuntu-latest
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install pytest hypothesis boto3 strands-agents strands-agents-tools
+          pip install -r service/agent_intake_single/requirements.txt
+
+      - name: Run tests
+        run: pytest service/ -v --tb=short
+
   # ── Security scanning ──
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
 
