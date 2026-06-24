@@ -110,7 +110,7 @@ export async function executeTool(
     let code: string;
     try {
       code = await deps.loadToolCode(toolId);
-    } catch (err: any) {
+    } catch (err: unknown) {
       return {
         success: false,
         error: 'Tool code not found',
@@ -125,10 +125,10 @@ export async function executeTool(
         integrationBindings: toolConfig.integrationBindings || [],
         dataStoreBindings: toolConfig.dataStoreBindings || [],
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       return {
         success: false,
-        error: `Credential resolution failed: ${err.message}`,
+        error: `Credential resolution failed: ${err instanceof Error ? err.message : String(err)}`,
         executionTimeMs: Date.now() - startTime,
       };
     }
@@ -149,11 +149,11 @@ export async function executeTool(
       output: result.output,
       executionTimeMs: Date.now() - startTime,
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     const elapsed = Date.now() - startTime;
 
     // Timeout error (Req 7.8)
-    if (err.message && err.message.includes('timed out')) {
+    if (err instanceof Error && err.message.includes('timed out')) {
       return {
         success: false,
         error: 'Execution timed out after 30 seconds',
@@ -164,7 +164,7 @@ export async function executeTool(
     // Runtime error in tool code
     return {
       success: false,
-      error: err.message || 'Unknown runtime error',
+      error: (err instanceof Error ? err.message : '') || 'Unknown runtime error',
       executionTimeMs: elapsed,
     };
   }

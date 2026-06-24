@@ -35,7 +35,7 @@ export const handler = async (event: AppSyncResolverEvent<any>) => {
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error(`Error in ${fieldName}:`, error);
     throw error;
   }
@@ -81,8 +81,8 @@ async function getAgentCode(args: GetAgentCodeArgs) {
       version: s3Response.VersionId,
       lastModified: s3Response.LastModified?.toISOString(),
     };
-  } catch (error: any) {
-    if (error.name === 'NoSuchKey') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'NoSuchKey') {
       // Return default code if file doesn't exist
       return {
         agentId,
@@ -152,8 +152,8 @@ async function updateAgentCode(args: UpdateAgentCodeArgs) {
       version: s3Response.VersionId,
       lastModified: new Date().toISOString(),
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error updating agent code:', error);
-    throw new Error(`Failed to update agent code: ${error.message}`);
+    throw new Error(`Failed to update agent code: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

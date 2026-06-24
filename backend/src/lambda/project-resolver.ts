@@ -442,8 +442,8 @@ async function updateProject(id: string, input: any, userId: string, event: any)
     });
 
     return normaliseArchetype(result.Attributes as Project) as Project;
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       throw new Error(`Conflict: project ${id} was modified concurrently. Please retry.`);
     }
     throw error;

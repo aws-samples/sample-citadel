@@ -246,8 +246,8 @@ async function ensureAccessLogGroup(
 ): Promise<string> {
   try {
     await cwLogsClient.send(new CreateLogGroupCommand({ logGroupName }));
-  } catch (error: any) {
-    if (error.name !== 'ResourceAlreadyExistsException') {
+  } catch (error: unknown) {
+    if (!(error instanceof Error) || error.name !== 'ResourceAlreadyExistsException') {
       throw error;
     }
   }
@@ -597,8 +597,8 @@ export async function unpublishApp(
   if (metadata.apiId) {
     try {
       await deps.apiGwClient.send(new DeleteApiCommand({ ApiId: metadata.apiId }));
-    } catch (error: any) {
-      warnings.push(`Failed to delete API Gateway: ${error.message}`);
+    } catch (error: unknown) {
+      warnings.push(`Failed to delete API Gateway: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -616,16 +616,16 @@ export async function unpublishApp(
           ':now': new Date().toISOString(),
         },
       }));
-    } catch (error: any) {
-      warnings.push(`Failed to revoke key ${key.keyId}: ${error.message}`);
+    } catch (error: unknown) {
+      warnings.push(`Failed to revoke key ${key.keyId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   // 5. Best-effort teardown: delete scoped IAM role
   try {
     await deps.policyManager.deleteRole(appId, 'agent');
-  } catch (error: any) {
-    warnings.push(`Failed to delete IAM role: ${error.message}`);
+  } catch (error: unknown) {
+    warnings.push(`Failed to delete IAM role: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // 6. Update app metadata: status=DRAFT, remove endpointUrl and apiId

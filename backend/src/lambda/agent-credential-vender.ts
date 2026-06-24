@@ -62,11 +62,11 @@ export async function handler(event: VendCredentialsEvent): Promise<VendCredenti
         sessionToken: credentials.sessionToken,
       },
     };
-  } catch (error: any) {
-    console.error('Failed to vend agent credentials:', { agentId, error: error.message });
+  } catch (error: unknown) {
+    console.error('Failed to vend agent credentials:', { agentId, error: error instanceof Error ? error.message : String(error) });
     return {
       credentials: null,
-      error: error.message,
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 }

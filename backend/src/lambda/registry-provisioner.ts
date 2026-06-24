@@ -61,8 +61,8 @@ export async function handler(event: CloudFormationCustomResourceEvent): Promise
             }),
           );
           registryArn = result.registryArn!;
-        } catch (createErr: any) {
-          if (createErr.name === 'ConflictException' || createErr.name === 'ResourceAlreadyExistsException') {
+        } catch (createErr: unknown) {
+          if (createErr instanceof Error && (createErr.name === 'ConflictException' || createErr.name === 'ResourceAlreadyExistsException')) {
             console.log('Registry already exists, looking it up...');
             const list = await client.send(new ListRegistriesCommand({}));
             const existing = list.registries?.find(r => r.name === registryName);
@@ -100,8 +100,8 @@ export async function handler(event: CloudFormationCustomResourceEvent): Promise
               new CreateRegistryCommand({ name: registryName, description, approvalConfiguration: { autoApproval } }),
             );
             registryArn = result.registryArn!;
-          } catch (createErr: any) {
-            if (createErr.name === 'ConflictException' || createErr.name === 'ResourceAlreadyExistsException') {
+          } catch (createErr: unknown) {
+            if (createErr instanceof Error && (createErr.name === 'ConflictException' || createErr.name === 'ResourceAlreadyExistsException')) {
               const list = await client.send(new ListRegistriesCommand({}));
               const found = list.registries?.find(r => r.name === registryName);
               if (!found?.registryArn) throw new Error(`Registry ${registryName} conflict but not found`);
@@ -126,10 +126,10 @@ export async function handler(event: CloudFormationCustomResourceEvent): Promise
 
         try {
           await client.send(new DeleteRegistryCommand({ registryId }));
-        } catch (err: any) {
+        } catch (err: unknown) {
           // Ignore if already deleted
-          if (err.name !== 'ResourceNotFoundException') {
-            console.warn('Delete registry error (non-fatal):', err.message);
+          if (!(err instanceof Error) || err.name !== 'ResourceNotFoundException') {
+            console.warn('Delete registry error (non-fatal):', err instanceof Error ? err.message : String(err));
           }
         }
 
@@ -137,14 +137,14 @@ export async function handler(event: CloudFormationCustomResourceEvent): Promise
         break;
       }
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Registry provisioner error:', err);
     await sendResponse(
       event,
       'FAILED',
       {},
       (event as any).PhysicalResourceId ?? event.LogicalResourceId,
-      err.message,
+      err instanceof Error ? err.message : String(err),
     );
   }
 }

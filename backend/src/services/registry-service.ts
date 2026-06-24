@@ -267,7 +267,7 @@ export class RegistryService {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         return await operation();
-      } catch (err: any) {
+      } catch (err: unknown) {
         lastError = err;
         const isTransient = this.isTransientError(err);
         if (!isTransient || attempt === maxAttempts) {
@@ -276,7 +276,7 @@ export class RegistryService {
         const delayMs = Math.pow(2, attempt - 1) * 100; // 100ms, 200ms, 400ms…
         console.warn(
           `Transient error on attempt ${attempt}/${maxAttempts}, retrying in ${delayMs}ms: ${
-            err.message ?? err
+            err instanceof Error ? err.message : err
           }`,
         );
         await this.sleep(delayMs);

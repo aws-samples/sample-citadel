@@ -321,7 +321,7 @@ export async function handler(event: AppSyncEvent) {
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Integration resolver error:', error);
     throw error;
   }
@@ -397,11 +397,11 @@ async function createIntegration(input: any, createdBy: string) {
         credentialProviderArn = provision.credentialProviderArn;
         credentialProviderType = provision.credentialProviderType;
         agentCoreCallbackUrl = provision.agentCoreCallbackUrl;
-      } catch (provisionErr: any) {
+      } catch (provisionErr: unknown) {
         console.error('Credential provider provisioning failed:', {
           integrationId,
           integrationType: input.integrationType,
-          error: provisionErr?.message,
+          error: provisionErr instanceof Error ? provisionErr.message : String(provisionErr),
         });
         // Best-effort secret cleanup.
         try {
@@ -412,7 +412,7 @@ async function createIntegration(input: any, createdBy: string) {
           console.warn('Failed to clean up secret after provision failure:', cleanupErr);
         }
         throw new Error(
-          `Failed to provision credential provider: ${provisionErr?.message ?? String(provisionErr)}`,
+          `Failed to provision credential provider: ${provisionErr instanceof Error ? provisionErr.message : String(provisionErr)}`,
         );
       }
     }
@@ -475,13 +475,13 @@ async function createIntegration(input: any, createdBy: string) {
           ...(credentialProviderArn ? { credentialProviderArn } : {}),
           ...(credentialProviderType ? { credentialProviderType } : {}),
         });
-      } catch (eventErr: any) {
+      } catch (eventErr: unknown) {
         // Event-emit failure is non-fatal: the user can call
         // connectIntegration to retry the publication. The DDB record is
         // already in `PENDING` state.
         console.warn('Failed to publish integration.connect.requested:', {
           integrationId,
-          error: eventErr?.message,
+          error: eventErr instanceof Error ? eventErr.message : String(eventErr),
         });
       }
     }
@@ -495,11 +495,11 @@ async function createIntegration(input: any, createdBy: string) {
     });
 
     return sanitizeIntegrationForResponse(integration);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Integration creation failed:', {
       integrationId,
       integrationType: input.integrationType,
-      error: error.message,
+      error: error instanceof Error ? error.message : String(error),
     });
     throw error;
   }
@@ -600,8 +600,8 @@ async function updateIntegration(input: any) {
         },
       }),
     );
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       throw new Error(
         `Conflict: integration ${input.integrationId} was modified concurrently. Please retry.`,
       );
@@ -647,8 +647,8 @@ async function testIntegration(integrationId: string) {
 
           const configKey = paramName.replace(/-([a-z])/g, g => g[1].toUpperCase());
           config[configKey] = param.Parameter?.Value;
-        } catch (error: any) {
-          console.warn(`Failed to retrieve SSM parameter ${paramName}:`, error.message);
+        } catch (error: unknown) {
+          console.warn(`Failed to retrieve SSM parameter ${paramName}:`, error instanceof Error ? error.message : String(error));
         }
       }
     }
@@ -685,16 +685,16 @@ async function testIntegration(integrationId: string) {
     });
 
     return testResult;
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Test integration error:', {
       integrationId,
       integrationType: integration.integrationType,
-      error: error.message,
+      error: error instanceof Error ? error.message : String(error),
     });
     return {
       success: false,
-      message: `Connection error: ${error.message}`,
-      details: { error: error.toString() },
+      message: `Connection error: ${error instanceof Error ? error.message : String(error)}`,
+      details: { error: String(error) },
     };
   }
 }
@@ -752,13 +752,13 @@ async function connectIntegration(integrationId: string) {
       hasAuthorizationUrl: Boolean(integration.authorizationUrl),
     });
     return sanitizeIntegrationForResponse(integration);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Failed to publish connect event:', error);
 
     try {
       validateTransition(integration.status as IntegrationStatus, 'CONNECTION_FAILED');
       integration.status = 'CONNECTION_FAILED';
-      integration.errorMessage = `Failed to initiate connection: ${error.message}`;
+      integration.errorMessage = `Failed to initiate connection: ${error instanceof Error ? error.message : String(error)}`;
       integration.updatedAt = new Date().toISOString();
 
       await dynamodb.send(
@@ -819,7 +819,7 @@ async function disconnectIntegration(integrationId: string) {
       status: integration.status,
     });
     return sanitizeIntegrationForResponse(integration);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Failed to publish disconnect event:', error);
     throw error;
   }
@@ -939,11 +939,11 @@ async function deleteIntegration(integrationId: string) {
       success: true,
       message: 'Integration deletion scheduled',
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Integration deletion failed:', {
       integrationId,
       integrationType: integration.integrationType,
-      error: error.message,
+      error: error instanceof Error ? error.message : String(error),
     });
     throw error;
   }

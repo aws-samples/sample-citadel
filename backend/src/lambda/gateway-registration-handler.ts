@@ -118,7 +118,7 @@ export async function handler(event: EventBridgeEvent<string, IntegrationEvent>)
       } else if (detailType === 'integration.disconnect.requested') {
         await handleDisconnect(detail);
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Gateway registration error:', error);
       throw error;
     }
@@ -233,8 +233,8 @@ async function registerConfluence(detail: IntegrationEvent): Promise<void> {
       true,
       response.targetId,
     );
-  } catch (error: any) {
-    if (error.name === 'ConflictException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConflictException') {
       console.log('CONFLUENCE target already exists, reconciling state');
       const existing = await getIntegration(detail.integrationId);
       if (existing?.gatewayTargetId) {
@@ -262,7 +262,7 @@ async function registerConfluence(detail: IntegrationEvent): Promise<void> {
         'CONNECTION_FAILED',
         false,
         undefined,
-        error.message,
+        error instanceof Error ? error.message : String(error),
       );
       throw error;
     }
@@ -411,8 +411,8 @@ async function sendCreateGatewayTargetAndPersist(
         targetStatus: targetStatus ?? 'READY',
       });
     }
-  } catch (error: any) {
-    if (error.name === 'ConflictException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConflictException') {
       console.log('Gateway target already exists, reconciling state');
       const existing = await getIntegration(detail.integrationId);
       if (existing?.gatewayTargetId) {
@@ -440,7 +440,7 @@ async function sendCreateGatewayTargetAndPersist(
         'CONNECTION_FAILED',
         false,
         undefined,
-        error.message,
+        error instanceof Error ? error.message : String(error),
       );
       throw error;
     }
@@ -487,8 +487,8 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
         }),
       );
       console.log('Gateway target deleted:', { integrationId: detail.integrationId, targetId });
-    } catch (error: any) {
-      if (error?.name === 'ResourceNotFoundException') {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === 'ResourceNotFoundException') {
         console.info('Gateway target already absent — idempotent delete', {
           integrationId: detail.integrationId,
           targetId,
@@ -497,7 +497,7 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
         console.error('Failed to delete gateway target — aborting cleanup', {
           integrationId: detail.integrationId,
           targetId,
-          error: error?.message,
+          error: error instanceof Error ? error.message : String(error),
         });
         throw error;
       }
@@ -520,14 +520,14 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
         integrationId: detail.integrationId,
         credentialProviderType,
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Provider delete failure: log + emit metric; do NOT abort, secret
       // and DDB cleanup still need to run so the user isn't stuck with a
       // half-deleted record. Ops can retry provider deletion separately.
       console.error('Failed to deprovision credential provider — continuing teardown', {
         integrationId: detail.integrationId,
         credentialProviderType,
-        error: error?.message,
+        error: error instanceof Error ? error.message : String(error),
       });
       console.log(
         JSON.stringify({

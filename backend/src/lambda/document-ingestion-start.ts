@@ -178,8 +178,8 @@ async function processRecord(record: S3EventRecord): Promise<void> {
       },
       ConditionExpression: 'attribute_not_exists(projectId) AND attribute_not_exists(documentKey)',
     }));
-  } catch (err: any) {
-    if (err?.name !== 'ConditionalCheckFailedException') {
+  } catch (err: unknown) {
+    if (!(err instanceof Error) || err.name !== 'ConditionalCheckFailedException') {
       console.error('ingest-start: failed to create jobs row', { documentKey, err });
       throw err;
     }
@@ -219,8 +219,8 @@ async function processRecord(record: S3EventRecord): Promise<void> {
           ...(statusGuardSet ? { ':expected': existingStatus } : {}),
         },
       }));
-    } catch (resetErr: any) {
-      if (resetErr?.name === 'ConditionalCheckFailedException') {
+    } catch (resetErr: unknown) {
+      if (resetErr instanceof Error && resetErr.name === 'ConditionalCheckFailedException') {
         // Lost the race: another invocation already claimed/changed the row.
         console.log('ingest-start: reset lost race, another invocation handling retry', { documentKey });
         return;

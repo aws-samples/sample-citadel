@@ -647,8 +647,8 @@ async function updateAgentConfig(input: any): Promise<AgentConfig> {
         },
       })
     );
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       throw new Error(`Conflict: agent config ${input.agentId} was modified concurrently. Please retry.`);
     }
     throw error;

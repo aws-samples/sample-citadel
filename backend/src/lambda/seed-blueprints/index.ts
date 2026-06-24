@@ -234,8 +234,8 @@ export const handler: CloudFormationCustomResourceHandler = async (event, contex
           }),
         );
         console.log(`✓ Created blueprint: ${blueprint.name}`);
-      } catch (err: any) {
-        if (err.name === 'ConditionalCheckFailedException') {
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
           console.log(`⊘ Blueprint already exists, skipping: ${blueprint.name}`);
           continue;
         }
@@ -247,9 +247,9 @@ export const handler: CloudFormationCustomResourceHandler = async (event, contex
       Message: 'Blueprints seeded successfully',
       Count: SEED_BLUEPRINTS.length,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Error seeding blueprints:', err);
-    await sendCfnResponse(event, context, 'FAILED', { Message: err.message });
+    await sendCfnResponse(event, context, 'FAILED', { Message: err instanceof Error ? err.message : String(err) });
     throw err;
   }
 };

@@ -460,9 +460,9 @@ export const handler = async (event: RegistryEvent): Promise<void> => {
       default:
         console.warn(`Unhandled eventType: ${eventType}`);
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     // Swallow ConditionalCheckFailedException — idempotency, record already current
-    if (err.name === 'ConditionalCheckFailedException') {
+    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
       console.log(
         `Conditional check failed for ${resourceType} "${resourceId}" — record already current, skipping`,
       );
@@ -471,7 +471,7 @@ export const handler = async (event: RegistryEvent): Promise<void> => {
 
     // DynamoDB write failure — route to DLQ and emit metric, then re-throw
     console.error(`DynamoDB write failure for ${resourceType} "${resourceId}":`, err);
-    await sendToDlq(event, `DynamoDB write failure: ${err.message}`);
+    await sendToDlq(event, `DynamoDB write failure: ${err instanceof Error ? err.message : String(err)}`);
     await emitSyncFailureMetric();
     throw err;
   }

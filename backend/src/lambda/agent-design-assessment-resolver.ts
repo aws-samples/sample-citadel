@@ -342,10 +342,10 @@ export const handler = async (event: any): Promise<unknown> => {
       default:
         throw new Error(`Unknown fieldName: ${fieldName}`);
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('agent-design-assessment-resolver error', {
       fieldName,
-      message: err?.message,
+      message: err instanceof Error ? err.message : undefined,
       args: sanitizeForLog(event?.arguments),
     });
     throw err;

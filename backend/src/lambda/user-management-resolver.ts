@@ -416,11 +416,11 @@ async function changePassword(event: any, input: ChangePasswordInput) {
       success: true,
       message: 'Password changed successfully',
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error changing password:', error);
     return {
       success: false,
-      message: error.message || 'Failed to change password',
+      message: (error instanceof Error ? error.message : '') || 'Failed to change password',
     };
   }
 }
@@ -457,11 +457,11 @@ async function adminResetUserPassword(event: any, userId: string) {
       success: true,
       message: `Password reset successfully. Temporary password: ${tempPassword}`,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error resetting password:', error);
     return {
       success: false,
-      message: error.message || 'Failed to reset password',
+      message: (error instanceof Error ? error.message : '') || 'Failed to reset password',
     };
   }
 }
@@ -507,10 +507,10 @@ async function adminCreateUser(event: any, input: AdminCreateUserInput) {
       success: true,
       message: `User ${email} created successfully. An invitation email with temporary password has been sent to their email address.`,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error creating user:', error);
     
-    if (error.name === 'UsernameExistsException') {
+    if (error instanceof Error && error.name === 'UsernameExistsException') {
       return {
         success: false,
         message: 'A user with this email already exists',
@@ -519,7 +519,7 @@ async function adminCreateUser(event: any, input: AdminCreateUserInput) {
     
     return {
       success: false,
-      message: error.message || 'Failed to create user',
+      message: (error instanceof Error ? error.message : '') || 'Failed to create user',
     };
   }
 }
@@ -556,11 +556,11 @@ async function adminResendInvitation(event: any, userId: string) {
       success: true,
       message: `Invitation resent. Temporary password: ${tempPassword}`,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error resending invitation:', error);
     return {
       success: false,
-      message: error.message || 'Failed to resend invitation',
+      message: (error instanceof Error ? error.message : '') || 'Failed to resend invitation',
     };
   }
 }

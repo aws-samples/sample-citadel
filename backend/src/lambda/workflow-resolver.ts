@@ -266,8 +266,8 @@ async function updateWorkflow(input: any, userId: string, event: any): Promise<a
     });
 
     return result.Attributes;
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       throw new Error('Conflict: workflow was modified concurrently. Please retry.');
     }
     throw error;
@@ -494,8 +494,8 @@ async function updateWorkflowConfiguration(
     });
 
     return result.Attributes;
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       throw new Error('Conflict: workflow was modified concurrently. Please retry.');
     }
     throw error;

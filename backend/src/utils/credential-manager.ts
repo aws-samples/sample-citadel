@@ -402,9 +402,9 @@ export async function retrieveConfiguration(
           config[paramName] = response.Parameter.Value;
         }
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Parameter might not exist, which is okay for optional parameters
-      if (error.name !== 'ParameterNotFound') {
+      if (!(error instanceof Error) || error.name !== 'ParameterNotFound') {
         throw error;
       }
     }
@@ -433,9 +433,9 @@ export async function deleteConfiguration(
       await ssm.send(new DeleteParameterCommand({
         Name: `${ssmParameterPrefix}/${paramName}`
       }));
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Parameter might not exist, which is okay
-      if (error.name !== 'ParameterNotFound') {
+      if (!(error instanceof Error) || error.name !== 'ParameterNotFound') {
         console.warn(`Failed to delete SSM parameter ${paramName}:`, error);
       }
     }

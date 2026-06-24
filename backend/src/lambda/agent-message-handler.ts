@@ -468,12 +468,12 @@ export const handler = async (
     console.log(
       `Successfully processed message for agent ${agentId} for project ${projectId}`
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error processing message:", error);
 
     // Store error as agent response so frontend gets notified
     try {
-      const errorMessage = `⚠️ Sorry, I encountered an error processing your request. Please try again.\n\n_Error: ${error?.message || 'Unknown error'}_`;
+      const errorMessage = `⚠️ Sorry, I encountered an error processing your request. Please try again.\n\n_Error: ${(error instanceof Error ? error.message : '') || 'Unknown error'}_`;
       const errorRecord = await storeAgentResponse(
         projectId,
         agentId,

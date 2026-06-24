@@ -365,10 +365,10 @@ export const handler = async (event: any): Promise<unknown> => {
       default:
         throw new Error(`Unsupported field: ${fieldName}`);
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('interrogation-round-resolver error', {
       fieldName,
-      message: err?.message,
+      message: err instanceof Error ? err.message : undefined,
       args: sanitizeForLog(event?.arguments),
     });
     throw err;

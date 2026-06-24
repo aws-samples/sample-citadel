@@ -120,7 +120,7 @@ export async function handler(event: AppSyncEvent) {
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('DataStore resolver error:', error);
     throw error;
   }
@@ -393,8 +393,8 @@ async function createDataStore(input: any, createdBy: string) {
         ConditionExpression: 'attribute_not_exists(dataStoreId)',
       })
     );
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       throw new ConflictError(
         `Data store with ID ${dataStoreId} already exists`
       );
@@ -578,8 +578,8 @@ async function updateDataStore(input: any) {
     );
 
     return result.Attributes;
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       throw new ConflictError(
         'Version conflict: data store was modified concurrently'
       );
@@ -746,8 +746,8 @@ async function connectDataStore(dataStoreId: string) {
       );
 
       return result.Attributes;
-    } catch (error: any) {
-      if (error.name === 'ConditionalCheckFailedException') {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
         throw new ConflictError(
           'Version conflict: data store was modified concurrently'
         );
@@ -797,8 +797,8 @@ async function disconnectDataStore(dataStoreId: string) {
       );
 
       return result.Attributes;
-    } catch (error: any) {
-      if (error.name === 'ConditionalCheckFailedException') {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
         throw new ConflictError(
           'Version conflict: data store was modified concurrently'
         );

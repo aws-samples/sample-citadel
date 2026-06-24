@@ -148,9 +148,9 @@ export async function processHealthChecks(
                 sessionToken: assumeResult.Credentials.SessionToken,
               };
             }
-          } catch (roleError: any) {
+          } catch (roleError: unknown) {
             // Role may not exist (e.g. CONNECT_EXISTING without scoped role) — fall through to default creds
-            console.log(JSON.stringify({ level: 'DEBUG', component: 'HealthMonitor', message: `No scoped role for ${store.dataStoreId}, using default creds`, error: roleError.name }));
+            console.log(JSON.stringify({ level: 'DEBUG', component: 'HealthMonitor', message: `No scoped role for ${store.dataStoreId}, using default creds`, error: roleError instanceof Error ? roleError.name : String(roleError) }));
           }
 
           const testResult = await adapter.testConnection(config, scopedCreds);
@@ -200,7 +200,7 @@ export async function processHealthChecks(
             logHealthCheckResult(result);
             return result;
           }
-        } catch (error: any) {
+        } catch (error: unknown) {
           // Check if the exception is a permission error
           if (isPermissionError(undefined, error)) {
             // Permission error: preserve current status
@@ -215,7 +215,7 @@ export async function processHealthChecks(
           }
 
           // Adapter threw a genuine exception — treat as unhealthy (Req 10.3)
-          const errorMessage = error.message || 'Unknown error during health check';
+          const errorMessage = (error instanceof Error ? error.message : '') || 'Unknown error during health check';
           await updateStoreFn(store.dataStoreId, 'ERROR', errorMessage);
 
           const result: HealthCheckResult = {
