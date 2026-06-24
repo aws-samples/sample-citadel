@@ -703,7 +703,7 @@ export function validateManifest(manifest: any): { valid: boolean; errors: strin
 
 // ─── Publish Agent Manifest ──────────────────────────────────
 
-async function publishAgentManifest(agentId: string, manifestStr: string): Promise<any> {
+async function publishAgentManifest(agentId: string, manifestStr: string): Promise<unknown> {
   // Parse the AWSJSON manifest string
   let manifest: any;
   try {

@@ -177,7 +177,7 @@ async function provisionProviderForIntegration(
  */
 async function emitIntegrationEvent(
   detailType: 'integration.connect.requested' | 'integration.disconnect.requested',
-  detail: Record<string, any>,
+  detail: Record<string, unknown>,
 ): Promise<void> {
   await eventBridge.send(
     new PutEventsCommand({
@@ -206,7 +206,7 @@ interface AppSyncEvent extends Omit<AppSyncResolverEvent<any>, 'identity'> {
  * Sanitize event arguments before logging to prevent credential leakage
  * Redacts all sensitive credential fields including IAM role ARNs
  */
-function sanitizeEventForLogging(event: AppSyncEvent): any {
+function sanitizeEventForLogging(event: AppSyncEvent): unknown {
   const sensitiveFields = [
     'apitoken',
     'password',
@@ -250,7 +250,7 @@ function sanitizeEventForLogging(event: AppSyncEvent): any {
  * Sanitize Integration object for API response
  * Removes all sensitive credential fields from config
  */
-function sanitizeIntegrationForResponse(integration: any): any {
+function sanitizeIntegrationForResponse(integration: any): unknown {
   const sensitiveConfigFields = [
     'apiToken',
     'password',

@@ -14,7 +14,7 @@ const WORKFLOWS_TABLE = process.env.WORKFLOWS_TABLE!;
 const APPS_TABLE = process.env.APPS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
 
-export const handler: AppSyncResolverHandler<any, any> = async (event) => {
+export const handler: AppSyncResolverHandler<any, unknown> = async (event) => {
   console.log('Workflow resolver event:', JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
@@ -81,7 +81,7 @@ async function listWorkflows(
   status: string | undefined,
   userId: string,
   event: any,
-): Promise<{ items: any[]; nextToken?: string }> {
+): Promise<{ items: unknown[]; nextToken?: string }> {
   const userOrg = await extractOrgFromEvent(event);
   const queryOrgId = userOrg || orgId;
 
@@ -109,7 +109,7 @@ async function listWorkflows(
 
 async function listBlueprints(
   category?: string,
-): Promise<{ items: any[]; nextToken?: string }> {
+): Promise<{ items: unknown[]; nextToken?: string }> {
   const params: any = {
     TableName: WORKFLOWS_TABLE,
     IndexName: 'BlueprintIndex',
@@ -140,7 +140,7 @@ async function listBlueprints(
   };
 }
 
-async function createWorkflow(input: any, userId: string): Promise<any> {
+async function createWorkflow(input: any, userId: string): Promise<unknown> {
   const now = new Date().toISOString();
   const workflowId = uuidv4();
 
@@ -184,7 +184,7 @@ async function createWorkflow(input: any, userId: string): Promise<any> {
   return workflow;
 }
 
-async function updateWorkflow(input: any, userId: string, event: any): Promise<any> {
+async function updateWorkflow(input: any, userId: string, event: any): Promise<unknown> {
   // Verify org access first
   const existing = await getWorkflow(input.workflowId, userId, event);
   if (!existing) {
@@ -274,7 +274,7 @@ async function updateWorkflow(input: any, userId: string, event: any): Promise<a
   }
 }
 
-async function deleteWorkflow(workflowId: string, userId: string, event: any): Promise<any> {
+async function deleteWorkflow(workflowId: string, userId: string, event: any): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
     throw new Error('Workflow not found');
@@ -407,7 +407,7 @@ function validateDefinition(definitionJson: string): { valid: boolean; errors: s
   return { valid: errors.length === 0, errors };
 }
 
-async function publishWorkflow(workflowId: string, userId: string, event: any): Promise<any> {
+async function publishWorkflow(workflowId: string, userId: string, event: any): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
     throw new Error('Workflow not found');
@@ -451,7 +451,7 @@ async function updateWorkflowConfiguration(
   version: number,
   userId: string,
   event: any,
-): Promise<any> {
+): Promise<unknown> {
   const existing = await getWorkflow(workflowId, userId, event);
   if (!existing) {
     throw new Error('Workflow not found');
@@ -508,7 +508,7 @@ async function importBlueprint(
   name: string | undefined,
   userId: string,
   event: any,
-): Promise<any> {
+): Promise<unknown> {
   // Get the blueprint
   const blueprintResult = await docClient.send(new GetCommand({
     TableName: WORKFLOWS_TABLE,
@@ -598,7 +598,7 @@ async function importBlueprint(
   return workflow;
 }
 
-async function importWorkflowFn(input: any, userId: string): Promise<any> {
+async function importWorkflowFn(input: any, userId: string): Promise<unknown> {
   const { orgId, workflowJson, name } = input;
 
   let parsed: any;
@@ -642,7 +642,7 @@ async function importWorkflowFn(input: any, userId: string): Promise<any> {
   return workflow;
 }
 
-async function exportWorkflow(workflowId: string, userId: string, event: any): Promise<any> {
+async function exportWorkflow(workflowId: string, userId: string, event: any): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
     throw new Error('Workflow not found');
@@ -664,7 +664,7 @@ async function getWorkflowVersion(
   version: number,
   userId: string,
   event: any,
-): Promise<any> {
+): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
     throw new Error('Workflow not found');
@@ -689,7 +689,7 @@ async function getWorkflowVersion(
   };
 }
 
-async function listAppWorkflows(appId: string, userId: string, event: any): Promise<any[]> {
+async function listAppWorkflows(appId: string, userId: string, event: any): Promise<unknown[]> {
   // Get the app first
   const appResult = await docClient.send(new GetCommand({
     TableName: APPS_TABLE,
@@ -726,7 +726,7 @@ async function listAppWorkflows(appId: string, userId: string, event: any): Prom
   return result.Responses?.[tableName] || [];
 }
 
-async function emitEvent(eventType: string, detail: any): Promise<void> {
+async function emitEvent(eventType: string, detail: unknown): Promise<void> {
   await eventBridgeClient.send(new PutEventsCommand({
     Entries: [
       {
