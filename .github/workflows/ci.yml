@@ -95,6 +95,10 @@ jobs:
       - name: Build CDK
         run: npm run build
 
+      - name: Build frontend (required for FrontendStack CDK asset)
+        run: npm run build --workspace=frontend
+        working-directory: ${{ github.workspace }}
+
       - name: CDK synth (validate all templates)
         run: npx cdk synth --all --quiet
         env:
@@ -133,6 +137,10 @@ jobs:
 
       - name: Build CDK
         run: npm run build
+
+      - name: Build frontend (required for FrontendStack CDK asset)
+        run: npm run build --workspace=frontend
+        working-directory: ${{ github.workspace }}
 
       - name: CDK synth (governance stack)
         run: npx cdk synth citadel-governance-test --quiet
