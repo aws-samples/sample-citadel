@@ -79,8 +79,8 @@ describe('SnowflakeAdapter', () => {
     });
 
     it('returns success when SDK connect succeeds', async () => {
-      mockConnect.mockImplementation((cb: Function) => cb(null));
-      mockDestroy.mockImplementation((cb: Function) => cb(null));
+      mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(null));
+      mockDestroy.mockImplementation((cb: (err: unknown) => void) => cb(null));
 
       const result = await adapter.testConnection(validConfig);
       expect(result.success).toBe(true);
@@ -91,8 +91,8 @@ describe('SnowflakeAdapter', () => {
     });
 
     it('passes correct options to createConnection', async () => {
-      mockConnect.mockImplementation((cb: Function) => cb(null));
-      mockDestroy.mockImplementation((cb: Function) => cb(null));
+      mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(null));
+      mockDestroy.mockImplementation((cb: (err: unknown) => void) => cb(null));
 
       await adapter.testConnection(validConfig);
       expect(mockCreateConnection).toHaveBeenCalledWith(
@@ -109,7 +109,7 @@ describe('SnowflakeAdapter', () => {
     it('wraps authentication errors in PermissionError', async () => {
       const sdkError = new Error('Incorrect username or password');
       (sdkError as any).code = '390100';
-      mockConnect.mockImplementation((cb: Function) => cb(sdkError));
+      mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(sdkError));
 
       try {
         await adapter.testConnection(validConfig);
@@ -122,7 +122,7 @@ describe('SnowflakeAdapter', () => {
 
     it('wraps other SDK errors in ConnectionError with cause', async () => {
       const sdkError = new Error('Network timeout');
-      mockConnect.mockImplementation((cb: Function) => cb(sdkError));
+      mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(sdkError));
 
       try {
         await adapter.testConnection(validConfig);
@@ -135,7 +135,7 @@ describe('SnowflakeAdapter', () => {
 
     it('wraps SDK errors as DataStoreError subclass', async () => {
       const sdkError = new Error('Something went wrong');
-      mockConnect.mockImplementation((cb: Function) => cb(sdkError));
+      mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(sdkError));
 
       try {
         await adapter.testConnection(validConfig);
@@ -147,8 +147,8 @@ describe('SnowflakeAdapter', () => {
     });
 
     it('uses credentials parameter over config for username/password', async () => {
-      mockConnect.mockImplementation((cb: Function) => cb(null));
-      mockDestroy.mockImplementation((cb: Function) => cb(null));
+      mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(null));
+      mockDestroy.mockImplementation((cb: (err: unknown) => void) => cb(null));
 
       await adapter.testConnection(
         { accountIdentifier: 'acct', warehouse: 'WH', database: 'DB' },
@@ -165,15 +165,15 @@ describe('SnowflakeAdapter', () => {
 
   describe('connect', () => {
     it('succeeds when testConnection returns success', async () => {
-      mockConnect.mockImplementation((cb: Function) => cb(null));
-      mockDestroy.mockImplementation((cb: Function) => cb(null));
+      mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(null));
+      mockDestroy.mockImplementation((cb: (err: unknown) => void) => cb(null));
 
       await expect(adapter.connect(validConfig)).resolves.toBeUndefined();
     });
 
     it('throws ConnectionError when SDK connect fails', async () => {
       const sdkError = new Error('Connection refused');
-      mockConnect.mockImplementation((cb: Function) => cb(sdkError));
+      mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(sdkError));
 
       await expect(adapter.connect(validConfig)).rejects.toThrow(ConnectionError);
     });

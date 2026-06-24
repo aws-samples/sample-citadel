@@ -183,9 +183,9 @@ describe('apps-table-meta helpers', () => {
       const ok = await updateAppMetaFields(TABLE, 'app-1', {
         // @ts-expect-error — forcibly pass disallowed keys at runtime
         appId: 'OTHER',
-        // @ts-expect-error
+        // @ts-expect-error — createdAt is a disallowed immutable field; passed at runtime to assert it is stripped
         createdAt: '1999-01-01T00:00:00.000Z',
-        // @ts-expect-error
+        // @ts-expect-error — createdBy is a disallowed immutable field; passed at runtime to assert it is stripped
         createdBy: 'attacker',
         name: 'Allowed',
       } as any);
@@ -208,9 +208,9 @@ describe('apps-table-meta helpers', () => {
 
     it('returns true with no SDK call when partial contains only disallowed keys', async () => {
       const ok = await updateAppMetaFields(TABLE, 'app-1', {
-        // @ts-expect-error
+        // @ts-expect-error — appId is a disallowed immutable field; passed at runtime to assert it is ignored
         appId: 'X',
-        // @ts-expect-error
+        // @ts-expect-error — createdBy is a disallowed immutable field; passed at runtime to assert it is ignored
         createdBy: 'Y',
       } as any);
 
