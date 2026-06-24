@@ -10,7 +10,6 @@ import {
 import {
   SSMClient,
   PutParameterCommand,
-  DeleteParameterCommand,
   GetParameterCommand,
 } from '@aws-sdk/client-ssm';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
@@ -315,9 +314,10 @@ export async function handler(event: AppSyncEvent) {
           event.arguments.integrationType,
           event.arguments.status,
         );
-      case 'getIntegration':
+      case 'getIntegration': {
         const integration = await getIntegration(event.arguments.integrationId);
         return sanitizeIntegrationForResponse(integration);
+      }
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
@@ -631,7 +631,7 @@ async function testIntegration(integrationId: string) {
   );
   const credentials = JSON.parse(secret.SecretString!);
 
-  let config = integration.config || {};
+  const config = integration.config || {};
   const isAgentCore = isAgentCoreType(integration.integrationType);
 
   if (isAgentCore && integration.ssmParameterPrefix) {

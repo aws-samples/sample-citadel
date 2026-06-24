@@ -9,8 +9,7 @@ import {
   testApiKeyConnection,
   testBasicAuthConnection,
   testOAuth2Connection,
-  testBearerTokenConnection,
-  TestResult
+  testBearerTokenConnection
 } from '../connection-tester';
 import { getConnectorSpec } from '../connector-registry';
 import { NotImplementedError } from '../../adapters/errors';

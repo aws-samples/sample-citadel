@@ -66,8 +66,6 @@ const executionScenarioArb = fc.record({
 
 // ---- Mock dependency builders ----
 
-const TIMEOUT_MS = 30000;
-
 /** Test timeout — use a short value for fast tests */
 const TEST_TIMEOUT_MS = 500;
 

@@ -45,7 +45,6 @@ export async function storeCredentials(
   
   // For IAM_ROLE authentication, only executionRoleArn is required
   // For CONFIGURABLE authentication (MCP_SERVER), fields are conditionally required
-  const isIAMRole = spec.authentication.method === 'IAM_ROLE';
   const isConfigurable = spec.authentication.method === 'CONFIGURABLE';
   
   // Validate and add authentication fields to secret

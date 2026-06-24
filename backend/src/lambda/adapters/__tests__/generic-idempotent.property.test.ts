@@ -138,12 +138,6 @@ jest.mock('@aws-sdk/client-sts', () => ({
   GetCallerIdentityCommand: jest.fn(),
 }));
 
-function makeAlreadyExistsError(name: string): Error {
-  const err = new Error(`${name}: resource already exists`);
-  (err as any).name = name;
-  return err;
-}
-
 const allMocks = [
   mockS3Send, mockDdbSend, mockRdsSend, mockRedshiftSend, mockOssSend,
   mockNeptuneSend, mockTimestreamSend, mockElastiCacheSend, mockKeyspacesSend,

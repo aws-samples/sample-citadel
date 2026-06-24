@@ -92,7 +92,7 @@ export class S3Adapter implements ConnectorAdapter {
 
     // S3 bucket names must be lowercase, 3-63 chars, no uppercase
     const bucketName = rawBucketName.toLowerCase();
-    if (!/^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$/.test(bucketName)) {
+    if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucketName)) {
       throw new ProvisioningError(
         `Invalid bucket name "${rawBucketName}": must be 3-63 characters, lowercase letters, numbers, hyphens, and periods only`
       );

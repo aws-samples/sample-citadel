@@ -1,4 +1,4 @@
-import { getDashboardMetrics, DashboardMetricsResult } from '../app-metrics-handler';
+import { getDashboardMetrics } from '../app-metrics-handler';
 
 // Mock DynamoDB
 const mockSend = jest.fn();

@@ -6,7 +6,7 @@
  *
  * Validates: Requirements 5.1, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9
  */
-import { createHash, randomBytes } from 'crypto';
+import { createHash } from 'crypto';
 import { DynamoDBDocumentClient, QueryCommand, PutCommand, UpdateCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';

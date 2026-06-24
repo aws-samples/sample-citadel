@@ -7,10 +7,8 @@ import {
   ListUsersCommand,
   AdminListGroupsForUserCommand,
   ListGroupsCommand,
-  ChangePasswordCommand,
   AdminSetUserPasswordCommand,
   AdminCreateUserCommand,
-  MessageActionType,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import * as crypto from 'crypto';
@@ -488,7 +486,7 @@ async function adminCreateUser(event: any, input: AdminCreateUserInput) {
   try {
     // Create user with email as username
     // Cognito will send an email with temporary password automatically
-    const response = await cognitoClient.send(
+    await cognitoClient.send(
       new AdminCreateUserCommand({
         UserPoolId: USER_POOL_ID,
         Username: email,

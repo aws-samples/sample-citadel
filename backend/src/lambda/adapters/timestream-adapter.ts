@@ -70,7 +70,7 @@ export class TimestreamAdapter implements ConnectorAdapter {
         new CreateDatabaseCommand({ DatabaseName: databaseName })
       );
 
-      let resourceArn =
+      const resourceArn =
         dbResult.Database?.Arn ??
         `arn:aws:timestream:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:database/${databaseName}`;
 

@@ -12,15 +12,11 @@ import { mockClient } from 'aws-sdk-client-mock';
 
 import {
   autoAssignOwner,
-  grantAppAccess,
   revokeAppAccess,
   checkOperationAccess,
-  hasMinimumRole,
-  isAdmin,
-  getRequiredRole,
 } from '../app-access-control';
 
-import type { AppRole, CallerContext } from '../app-access-control';
+import type { CallerContext } from '../app-access-control';
 
 // ── Mocks ───────────────────────────────────────────────────
 
@@ -37,7 +33,6 @@ function makeDeps() {
 
 const appIdArb = fc.stringMatching(/^[a-zA-Z0-9_-]{3,30}$/);
 const userIdArb = fc.stringMatching(/^[a-zA-Z0-9_-]{3,30}$/);
-const roleArb = fc.constantFrom<AppRole>('owner', 'editor', 'viewer');
 
 /** All operations from the mutation gating table */
 const viewerOps = ['getApp', 'listApps', 'getAppMetrics', 'listAppApiKeys', 'listAppAccessEntries'] as const;

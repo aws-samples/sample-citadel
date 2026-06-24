@@ -380,7 +380,7 @@ function validateDefinition(definitionJson: string): { valid: boolean; errors: s
     const visited = new Set<string>();
     const inStack = new Set<string>();
 
-    function hasCycle(nodeId: string): boolean {
+    const hasCycle = (nodeId: string): boolean => {
       visited.add(nodeId);
       inStack.add(nodeId);
       for (const neighbor of adjacency.get(nodeId) || []) {
@@ -392,7 +392,7 @@ function validateDefinition(definitionJson: string): { valid: boolean; errors: s
       }
       inStack.delete(nodeId);
       return false;
-    }
+    };
 
     for (const node of nodes) {
       if (!visited.has(node.id)) {

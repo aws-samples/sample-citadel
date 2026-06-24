@@ -122,30 +122,6 @@ function seedApp(
   });
 }
 
-function seedAgentApp(appId: string, orgId: string, name: string) {
-  seedMockRegistry('agent', appId, {
-    name,
-    description: `${name} description`,
-    status: 'DRAFT',
-    customDescriptorContent: JSON.stringify({
-      appId,
-      manifest: {
-        orgId,
-        version: 1,
-        status: 'DRAFT',
-        workflowIds: [],
-        agentBindings: [],
-        permissions: [],
-        configSchema: null,
-        configValues: null,
-        authConfig: null,
-        access: {},
-        routingConfig: null,
-      },
-    }),
-  });
-}
-
 describe('registry-agent-record-resolver — CRUD', () => {
   beforeEach(() => {
     resetMockRegistry();

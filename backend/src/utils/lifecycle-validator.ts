@@ -99,7 +99,7 @@ export function getValidNextStatuses(
  * @returns The status to set after successful test
  */
 export function getStatusAfterSuccessfulTest(
-  currentStatus: IntegrationStatus
+  _currentStatus: IntegrationStatus
 ): IntegrationStatus {
   // After successful test, status should be TESTED
   return 'TESTED';

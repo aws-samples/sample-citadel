@@ -130,7 +130,7 @@ export async function handler(event: AppSyncEvent) {
 
 async function persistErrorState(
   dataStoreId: string,
-  error: unknown
+  _error: unknown
 ): Promise<void> {
   try {
     // Clean up the failed entry so stale records don't accumulate in the UI

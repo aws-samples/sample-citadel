@@ -49,19 +49,6 @@ function makeLogEntry(overrides: Partial<AccessLogEntry> = {}): AccessLogEntry {
   };
 }
 
-function makeRawLogEvent(entries: AccessLogEntry[]): any {
-  // CloudWatch Logs subscription filter event format
-  const logEvents = entries.map((entry, i) => ({
-    id: `event-${i}`,
-    timestamp: Date.now(),
-    message: JSON.stringify(entry),
-  }));
-  return {
-    logGroup: '/aws/apigateway/citadel-app-test',
-    logStream: 'stream-001',
-    logEvents,
-  };
-}
 
 // ── Setup / Teardown ────────────────────────────────────────
 
@@ -248,8 +235,6 @@ describe('processMetricsEvent', () => {
 
     const deps = makeDeps();
     await processMetricsEvent(entries, deps);
-
-    const firstCallCount = ddbMock.commandCalls(UpdateCommand).length;
 
     // Reset and simulate second call: req-1 already processed
     ddbMock.reset();

@@ -1,7 +1,6 @@
 import * as fc from 'fast-check';
-import { PolicyManager, ScopedCredentials } from '../../../utils/policy-manager';
+import { PolicyManager } from '../../../utils/policy-manager';
 import { PolicyStatement } from '../../../adapters/base';
-import { PermissionError } from '../errors';
 
 // ---- Generators ----
 

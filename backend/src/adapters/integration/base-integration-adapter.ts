@@ -18,8 +18,6 @@ import {
 import { NotImplementedError } from '../errors';
 import { computeIntegrationPolicies } from '../../utils/policy-helpers';
 
-const AGENTCORE_TYPES = ['AWS_LAMBDA', 'AWS_SMITHY', 'MCP_SERVER'];
-
 export class BaseIntegrationAdapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = 'integration';
   readonly spec: ConnectorSpec;
@@ -66,13 +64,13 @@ export class BaseIntegrationAdapter implements ConnectorAdapter {
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    _config: Record<string, any>,
+    _credentials?: Record<string, any>
   ): Promise<void> {
     // Default no-op; integrations connect via EventBridge events
   }
 
-  async disconnect(config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, any>): Promise<void> {
     // Default no-op
   }
 

@@ -4,7 +4,7 @@
  * When a DynamoDB data store is deleted and was provisioned (CREATE_NEW mode),
  * the underlying DynamoDB table should be deleted.
  */
-import { DynamoDBClient, DeleteTableCommand, DescribeTableCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, DeleteTableCommand } from '@aws-sdk/client-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 
 const dynamoMock = mockClient(DynamoDBClient);

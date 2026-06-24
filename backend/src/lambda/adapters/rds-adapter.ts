@@ -3,7 +3,6 @@ import {
   CreateDBInstanceCommand,
   DeleteDBInstanceCommand,
   DescribeDBInstancesCommand,
-  AddTagsToResourceCommand,
 } from '@aws-sdk/client-rds';
 import {
   ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod,

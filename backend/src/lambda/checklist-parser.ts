@@ -169,7 +169,7 @@ export function parseChecklist(markdown: string): ChecklistQuestion[] {
       const proseScanEnd =
         evidenceLineIdx >= 0 ? evidenceLineIdx: bodyLines.length;
       let questionText = '';
-      let paragraph: string[] = [];
+      const paragraph: string[] = [];
       for (let k = 0; k < proseScanEnd; k++) {
         const pLine = bodyLines[k];
         if (ANY_HEADING_RE.test(pLine)) {

@@ -136,7 +136,7 @@ describe('Integration Resolver - Property-Based Tests', () => {
                 };
                 break;
                 
-              case 'MCP_SERVER':
+              case 'MCP_SERVER': {
                 const authMethod = fc.sample(fc.constantFrom('API_KEY', 'OAUTH2', 'CUSTOM'), 1)[0];
                 config = {
                   serverUrl: `https://mcp-${integrationId}.example.com`
@@ -159,6 +159,7 @@ describe('Integration Resolver - Property-Based Tests', () => {
                   };
                 }
                 break;
+              }
             }
             
             // Create integration

@@ -26,8 +26,6 @@ import {
   validatePublishPreconditions,
   provisionApiGateway,
   publishApp,
-  deriveApiGatewayName,
-  ACCESS_LOG_FORMAT,
   AppMetadata,
   ComponentItem,
 } from '../app-publish-handler';

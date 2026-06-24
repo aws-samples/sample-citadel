@@ -1,5 +1,4 @@
 import { CognitoIdentityProviderClient, GetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
-import * as jwt from 'jsonwebtoken';
 import { AuthContext } from '../types';
 
 const cognitoClient = new CognitoIdentityProviderClient({});

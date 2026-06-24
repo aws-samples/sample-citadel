@@ -6,7 +6,7 @@ import { STSClient } from '@aws-sdk/client-sts';
 import { mockClient } from 'aws-sdk-client-mock';
 
 // Import the testable health check logic (to be implemented)
-import { processHealthChecks, HealthCheckResult } from '../health-monitor';
+import { processHealthChecks } from '../health-monitor';
 
 // processHealthChecks assumes a scoped STS role per store (GetCallerIdentity +
 // AssumeRole). With no real AWS credentials in the test environment, the
@@ -89,20 +89,6 @@ function buildMockDeps(
   for (const [store] of entries) {
     storeState.set(store.dataStoreId, { ...store });
   }
-
-  // Mock getAdapterFn: returns an adapter whose testConnection result is deterministic
-  const getAdapterFn = (_type: string) => ({
-    testConnection: async (_config: any, _creds?: any) => {
-      // We look up the store being tested via closure — the health-monitor
-      // passes config which includes our marker. But since the function
-      // processes stores one at a time, we use a different approach:
-      // We return a function that the test wires per-store.
-      // Actually, the processHealthChecks function passes the store to
-      // getAdapter, so we can key off the type. But multiple stores may
-      // share a type. Instead, we'll use a per-store adapter approach.
-      throw new Error('Should not be called directly');
-    },
-  });
 
   // Per-store adapter factory
   const perStoreGetAdapter = (store: MockDataStore) => {

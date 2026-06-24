@@ -480,7 +480,7 @@ describe('Property 1: Usage Field Round-Trip', () => {
     return fc.assert(
       fc.asyncProperty(
         usageArb,
-        usageArb.filter((u) => true), // second usage value (may be same or different)
+        usageArb.filter((_u) => true), // second usage value (may be same or different)
         async (initialUsage, newUsage) => {
           mockDynamoSend.mockReset();
 

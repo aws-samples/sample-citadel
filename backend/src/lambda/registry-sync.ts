@@ -22,7 +22,6 @@ import { CloudWatchClient, PutMetricDataCommand } from '@aws-sdk/client-cloudwat
 
 const AGENT_CONFIG_TABLE = process.env.AGENT_CONFIG_TABLE!;
 const TOOLS_CONFIG_TABLE = process.env.TOOLS_CONFIG_TABLE!;
-const REGISTRY_ID = process.env.REGISTRY_ID!;
 const DLQ_URL = process.env.DLQ_URL!;
 
 // ---------------------------------------------------------------------------

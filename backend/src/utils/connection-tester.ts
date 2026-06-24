@@ -231,7 +231,7 @@ export async function testBasicAuthConnection(
 export async function testOAuth2Connection(
   connectorType: string,
   credentials: any,
-  spec: ConnectorSpec
+  _spec: ConnectorSpec
 ): Promise<TestResult> {
   // Validate required OAuth2 fields are present
   const missingFields: string[] = [];

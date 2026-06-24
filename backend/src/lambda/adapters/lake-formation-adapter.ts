@@ -183,7 +183,7 @@ export class LakeFormationAdapter implements ConnectorAdapter {
   }
 
   async getMetrics(
-    config: Record<string, any>,
+    _config: Record<string, any>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     const client = this.makeClient();
