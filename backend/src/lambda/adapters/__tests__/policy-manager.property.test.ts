@@ -236,37 +236,51 @@ describe('Property 4: Retry mechanism correctness', () => {
   });
 
   it('delay between attempt i and i+1 is baseDelayMs * 2^i', () => {
-    fc.assert(
+    return fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 1, max: 3 }),   // maxRetries
         fc.integer({ min: 50, max: 100 }), // baseDelayMs
         async (maxRetries, baseDelayMs) => {
-          const timestamps: number[] = [];
-          let attempts = 0;
+          // Capture the delay values the implementation schedules via setTimeout
+          // and resolve them immediately. This asserts the COMPUTED exponential
+          // backoff sequence rather than measured wall-clock elapsed time, which
+          // is flaky under CI event-loop contention (a backoff callback firing
+          // late pushed measured elapsed time past the fixed absolute upper bound).
+          const scheduledDelays: number[] = [];
+          const setTimeoutSpy = jest
+            .spyOn(global, 'setTimeout')
+            .mockImplementation(((cb: (...args: unknown[]) => void, ms?: number) => {
+              scheduledDelays.push(Number(ms) || 0);
+              queueMicrotask(() => cb());
+              return 0 as unknown as NodeJS.Timeout;
+            }) as unknown as typeof setTimeout);
 
-          const fn = async () => {
-            timestamps.push(Date.now());
-            attempts++;
-            if (attempts <= maxRetries) {
-              throw new Error(`Attempt ${attempts} failed`);
-            }
-            return 'success';
-          };
+          try {
+            let attempts = 0;
+            const fn = async () => {
+              attempts++;
+              if (attempts <= maxRetries) {
+                throw new Error(`Attempt ${attempts} failed`);
+              }
+              return 'success';
+            };
 
-          const pm = new PolicyManager({} as any, {} as any);
-          await pm.retryWithBackoff(fn, maxRetries, baseDelayMs);
+            const pm = new PolicyManager({} as any, {} as any);
+            const result = await pm.retryWithBackoff(fn, maxRetries, baseDelayMs);
 
-          // Verify delays are approximately correct (with tolerance for timing)
-          for (let i = 0; i < timestamps.length - 1; i++) {
-            const actualDelay = timestamps[i + 1] - timestamps[i];
-            const expectedDelay = baseDelayMs * Math.pow(2, i);
-            // Allow 50ms tolerance for timer imprecision
-            expect(actualDelay).toBeGreaterThanOrEqual(expectedDelay - 50);
-            expect(actualDelay).toBeLessThan(expectedDelay + 200);
+            expect(result).toBe('success');
+            // Exactly one backoff sleep is scheduled before each retry.
+            expect(scheduledDelays).toHaveLength(maxRetries);
+            // Exponential doubling: delay i equals baseDelayMs * 2^i (exact integers).
+            scheduledDelays.forEach((delay, i) => {
+              expect(delay).toBe(baseDelayMs * Math.pow(2, i));
+            });
+          } finally {
+            setTimeoutSpy.mockRestore();
           }
         }
       ),
-      { numRuns: 20 } // Fewer runs since this involves real delays
+      { numRuns: 100 }
     );
   });
 });
