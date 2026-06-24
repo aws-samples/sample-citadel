@@ -1,0 +1,82 @@
+# Citadel Rollback — Redeploy a prior git ref
+#
+# CDK has no native "rollback" command: it deploys whatever templates the
+# checked-out source produces. This workflow rolls back by checking out an
+# earlier SHA/tag and re-running `cdk deploy --all` against the target
+# environment, so the live stacks converge back to that prior revision.
+#
+# Triggers:
+#   - Manual dispatch only (workflow_dispatch)
+#
+# Prerequisites:
+#   - OIDC identity provider configured in AWS for GitHub Actions
+#   - IAM role with CDK deploy permissions
+#   - GitHub environment secrets: AWS_ROLE_ARN, CDK_DEFAULT_ACCOUNT
+#   - GitHub environment variables: ENVIRONMENT, CDK_DEFAULT_REGION
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: dev
+        type: choice
+        options: [dev, staging, prod]
+      git_ref:
+        description: "Git ref (SHA or tag) to redeploy"
+        required: true
+        type: string
+
+concurrency:
+  group: rollback-${{ inputs.environment }}
+  cancel-in-progress: false  # Never cancel an in-progress rollback
+
+permissions:
+  id-token: write   # OIDC
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  # ── Redeploy the requested git ref to the target environment ──
+  rollback:
+    name: Rollback (${{ inputs.environment }} → ${{ inputs.git_ref }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      ENVIRONMENT: ${{ vars.ENVIRONMENT || inputs.environment }}
+      CDK_DEFAULT_REGION: ${{ vars.CDK_DEFAULT_REGION || 'us-east-1' }}
+      CDK_DEFAULT_ACCOUNT: ${{ secrets.CDK_DEFAULT_ACCOUNT }}
+    steps:
+      - name: Checkout target git ref
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.git_ref }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.CDK_DEFAULT_REGION || 'us-east-1' }}
+
+      - name: Install backend dependencies
+        run: npm ci
+
+      - name: Build Lambda bundles
+        run: npm run build:lambda
+
+      - name: Build CDK
+        run: npm run build
+
+      - name: CDK deploy all stacks (redeploy prior ref)
+        run: npx cdk deploy --all --require-approval never
