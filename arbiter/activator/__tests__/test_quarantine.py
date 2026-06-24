@@ -39,7 +39,20 @@ os.environ.setdefault("AGENT_CONFIG_TABLE", "fake-quarantine-table")
 # 1. Regression: fabricator writes state='inactive' exactly once.
 # ---------------------------------------------------------------------------
 def test_fabricator_writes_state_inactive_exactly_once():
-    """Guard against accidental removal of the quarantine default."""
+    """Guard against accidental removal of the quarantine default.
+
+    The fabricator persists a new agent-config record through two intentional,
+    independently tested storage paths, and BOTH must default to
+    ``state='inactive'`` so a fabricated agent is quarantined until explicitly
+    activated (Requirement 8.3):
+      * ``store_agent_config_dynamo``   — legacy DynamoDB item write.
+      * ``store_agent_config_registry`` — canonical AgentCore Registry write
+        (state recorded in the CUSTOM descriptor's custom_metadata).
+    Both have existed since the initial commit, so exactly two writes are
+    expected. An exact count (not ``>= 1``) still fails loudly if either
+    quarantine default is removed (-> 1) or an accidental extra one is
+    introduced (-> 3).
+    """
     fabricator_src = (_REPO_ROOT / "arbiter" / "fabricator" / "index.py").read_text()
     # Accept either single or double quotes to be resilient to formatting.
     patterns = [
@@ -48,9 +61,10 @@ def test_fabricator_writes_state_inactive_exactly_once():
     total = 0
     for pat in patterns:
         total += len(pat.findall(fabricator_src))
-    assert total == 1, (
-        f"Expected exactly 1 `'state': 'inactive'` write in fabricator "
-        f"index.py, found {total}. Quarantine default must not be removed "
+    assert total == 2, (
+        f"Expected exactly 2 `'state': 'inactive'` writes in fabricator "
+        f"index.py (the legacy DynamoDB path and the canonical Registry "
+        f"path), found {total}. Each quarantine default must not be removed "
         f"or duplicated (US-ARB-010)."
     )
 
