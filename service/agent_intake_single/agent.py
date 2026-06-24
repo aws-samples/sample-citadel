@@ -197,6 +197,18 @@ class LRUCache(OrderedDict):
 _agent_cache = LRUCache(maxsize=100)
 
 
+def invalidate_agent_cache(session_id: str) -> None:
+    """Evict a session's cached Agent so its baked-in state summary is rebuilt.
+
+    ``get_agent`` bakes the session's phase/progress into the Agent system
+    prompt, so a progress change must drop the stale entry to force a rebuild on
+    next use. May raise if the cache misbehaves (e.g. a concurrent delete);
+    callers invalidate best-effort.
+    """
+    if session_id in _agent_cache:
+        del _agent_cache[session_id]
+
+
 def get_agent(session_id: str) -> Agent:
     if session_id not in _agent_cache:
         # Load current state to bake into system prompt

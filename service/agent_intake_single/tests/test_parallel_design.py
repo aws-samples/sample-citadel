@@ -6,6 +6,7 @@ import pytest
 
 def _mock_template():
     return {
+        'document_title': 'Technical Design',
         'sections': [
             {'id': '1', 'title': 'Overview', 'description': 'desc', 'required_content': ['a']},
             {'id': '2', 'title': 'Agents', 'description': 'desc', 'required_content': ['b']},
