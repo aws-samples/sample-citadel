@@ -6,6 +6,7 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -33,9 +34,11 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: backend/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      - run: npm ci
+      - name: Install workspaces (root lockfile)
+        run: npm ci
+        working-directory: ${{ github.workspace }}
 
       - name: Lint
         run: npm run lint
@@ -123,14 +126,8 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Backend audit
-        working-directory: backend
-        run: |
-          npm ci
-          npm audit --audit-level=high || true
+      - name: Install workspaces (root lockfile)
+        run: npm ci
 
-      - name: Frontend audit
-        working-directory: frontend
-        run: |
-          npm ci
-          npm audit --audit-level=high || true
+      - name: Audit dependencies (all workspaces)
+        run: npm audit --audit-level=high || true
