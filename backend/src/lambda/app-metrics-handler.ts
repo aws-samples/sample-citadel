@@ -11,6 +11,7 @@
 import { DynamoDBDocumentClient, UpdateCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { gunzipSync } from 'zlib';
+import { computeCost, microUsdToUsd } from './cost-model';
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -21,6 +22,12 @@ export interface AccessLogEntry {
   status: number;
   latency: number;
   timestamp: string;
+  /** LLM model id used to serve the request (optional; older logs omit it). */
+  model?: string;
+  /** Input/prompt tokens consumed (optional; defaults to 0 when absent). */
+  inputTokens?: number;
+  /** Output/completion tokens produced (optional; defaults to 0 when absent). */
+  outputTokens?: number;
 }
 
 export interface AggregatedMetrics {
@@ -31,6 +38,12 @@ export interface AggregatedMetrics {
   p50Latency: number;
   p95Latency: number;
   p99Latency: number;
+  /** Total input/prompt tokens across the entries. */
+  totalInputTokens: number;
+  /** Total output/completion tokens across the entries. */
+  totalOutputTokens: number;
+  /** Attributed cost in integer micro-USD (millionths of a dollar). */
+  totalCostMicroUsd: number;
 }
 
 export interface MetricsDeps {
@@ -63,6 +76,9 @@ export function parseAccessLogEntries(messages: string[]): AccessLogEntry[] {
           status: parsed.status,
           latency: parsed.latency,
           timestamp: parsed.timestamp,
+          model: typeof parsed.model === 'string' ? parsed.model : undefined,
+          inputTokens: typeof parsed.inputTokens === 'number' ? parsed.inputTokens : undefined,
+          outputTokens: typeof parsed.outputTokens === 'number' ? parsed.outputTokens : undefined,
         });
       }
     } catch {
@@ -113,12 +129,18 @@ export function computeMetrics(entries: AccessLogEntry[]): AggregatedMetrics {
       p50Latency: 0,
       p95Latency: 0,
       p99Latency: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCostMicroUsd: 0,
     };
   }
 
   let successCount = 0;
   let clientErrorCount = 0;
   let serverErrorCount = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let totalCostMicroUsd = 0;
   const latencies: number[] = [];
 
   for (const entry of entries) {
@@ -127,6 +149,12 @@ export function computeMetrics(entries: AccessLogEntry[]): AggregatedMetrics {
     else if (statusClass === 4) clientErrorCount++;
     else if (statusClass === 5) serverErrorCount++;
     latencies.push(entry.latency);
+
+    const inTok = entry.inputTokens ?? 0;
+    const outTok = entry.outputTokens ?? 0;
+    totalInputTokens += inTok > 0 ? inTok : 0;
+    totalOutputTokens += outTok > 0 ? outTok : 0;
+    totalCostMicroUsd += computeCost(entry.model, inTok, outTok).costMicroUsd;
   }
 
   latencies.sort((a, b) => a - b);
@@ -139,6 +167,9 @@ export function computeMetrics(entries: AccessLogEntry[]): AggregatedMetrics {
     p50Latency: percentile(latencies, 50),
     p95Latency: percentile(latencies, 95),
     p99Latency: percentile(latencies, 99),
+    totalInputTokens,
+    totalOutputTokens,
+    totalCostMicroUsd,
   };
 }
 
@@ -189,7 +220,10 @@ async function upsertMetrics(
       ADD totalRequests :totalRequests,
           successCount :successCount,
           clientErrorCount :clientErrorCount,
-          serverErrorCount :serverErrorCount
+          serverErrorCount :serverErrorCount,
+          totalInputTokens :totalInputTokens,
+          totalOutputTokens :totalOutputTokens,
+          totalCostMicroUsd :totalCostMicroUsd
       SET groupId = :groupId,
           sortId = :sortId,
           p50Latency = :p50Latency,
@@ -203,6 +237,9 @@ async function upsertMetrics(
       ':successCount': metrics.successCount,
       ':clientErrorCount': metrics.clientErrorCount,
       ':serverErrorCount': metrics.serverErrorCount,
+      ':totalInputTokens': metrics.totalInputTokens,
+      ':totalOutputTokens': metrics.totalOutputTokens,
+      ':totalCostMicroUsd': metrics.totalCostMicroUsd,
       ':groupId': `APP#${appId}`,
       ':sortId': `METRICS#${hourBucket}`,
       ':p50Latency': metrics.p50Latency,
@@ -253,6 +290,12 @@ export interface AppMetricsResult {
   p50Latency: number;
   p95Latency: number;
   p99Latency: number;
+  /** Total input/prompt tokens over the queried range. */
+  totalInputTokens: number;
+  /** Total output/completion tokens over the queried range. */
+  totalOutputTokens: number;
+  /** Attributed cost over the queried range, in USD. */
+  totalCostUsd: number;
   timeSeries: AppMetricsBucket[];
 }
 
@@ -261,6 +304,12 @@ export interface AppMetricsBucket {
   requestCount: number;
   errorCount: number;
   avgLatency: number;
+  /** Input/prompt tokens in this bucket. */
+  inputTokens: number;
+  /** Output/completion tokens in this bucket. */
+  outputTokens: number;
+  /** Attributed cost for this bucket, in USD. */
+  costUsd: number;
 }
 
 /**
@@ -315,6 +364,9 @@ export async function getAppMetrics(
       p50Latency: 0,
       p95Latency: 0,
       p99Latency: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCostUsd: 0,
       timeSeries: [],
     };
   }
@@ -326,6 +378,9 @@ export async function getAppMetrics(
   let weightedP50 = 0;
   let weightedP95 = 0;
   let weightedP99 = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let totalCostMicroUsd = 0;
 
   const timeSeries: AppMetricsBucket[] = [];
 
@@ -339,6 +394,13 @@ export async function getAppMetrics(
     weightedP95 += (item.p95Latency || 0) * bucketRequests;
     weightedP99 += (item.p99Latency || 0) * bucketRequests;
 
+    const bucketInputTokens = item.totalInputTokens || 0;
+    const bucketOutputTokens = item.totalOutputTokens || 0;
+    const bucketCostMicroUsd = item.totalCostMicroUsd || 0;
+    totalInputTokens += bucketInputTokens;
+    totalOutputTokens += bucketOutputTokens;
+    totalCostMicroUsd += bucketCostMicroUsd;
+
     // Extract hour bucket from sortId: "METRICS#yyyy-MM-dd-HH"
     const bucket = item.sortId.replace('METRICS#', '');
     timeSeries.push({
@@ -346,6 +408,9 @@ export async function getAppMetrics(
       requestCount: bucketRequests,
       errorCount: (item.clientErrorCount || 0) + (item.serverErrorCount || 0),
       avgLatency: item.p50Latency || 0,
+      inputTokens: bucketInputTokens,
+      outputTokens: bucketOutputTokens,
+      costUsd: microUsdToUsd(bucketCostMicroUsd),
     });
   }
 
@@ -357,6 +422,9 @@ export async function getAppMetrics(
     p50Latency: totalRequests > 0 ? weightedP50 / totalRequests : 0,
     p95Latency: totalRequests > 0 ? weightedP95 / totalRequests : 0,
     p99Latency: totalRequests > 0 ? weightedP99 / totalRequests : 0,
+    totalInputTokens,
+    totalOutputTokens,
+    totalCostUsd: microUsdToUsd(totalCostMicroUsd),
     timeSeries,
   };
 }
