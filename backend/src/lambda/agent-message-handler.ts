@@ -19,6 +19,20 @@ import {
   InvokeAgentRuntimeCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 import { IdempotencyGuard } from "../utils/idempotency";
+import { RegistryService } from "../services/registry-service";
+import type {
+  AgentCustomMetadata,
+  AgentInvocationBlock,
+  AgentOrigin,
+} from "../services/registry-service";
+import { UnknownProtocolError } from "../adapters/agent-source/base";
+import type {
+  AgentCapabilityDescriptor,
+  AgentSourceAdapter,
+  AgentSourceAdapterRegistry,
+  InvokeRequest,
+} from "../adapters/agent-source/base";
+import { buildDefaultAgentSourceRegistry } from "../adapters/agent-source/registry-factory";
 
 const ssmClient = new SSMClient({});
 const dynamoClient = new DynamoDBClient({});
@@ -35,9 +49,26 @@ const SSM_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 // ── SigV4 Credential Cache (per invocation) ─────────────────────────
 let _cachedCredentials: any = null;
 
+// ── Agent-source adapter registry (import dispatch) ─────────────────
+// Lazily built so the legacy path pays nothing when import is disabled.
+let _agentSourceRegistry: AgentSourceAdapterRegistry | null = null;
+
+function getAgentSourceRegistry(): AgentSourceAdapterRegistry {
+  if (!_agentSourceRegistry) {
+    _agentSourceRegistry = buildDefaultAgentSourceRegistry();
+  }
+  return _agentSourceRegistry;
+}
+
+/** True only when the agent-import dispatcher is explicitly enabled. */
+export function isImportEnabled(): boolean {
+  return process.env.IMPORT_ENABLED === "true";
+}
+
 export function _resetCaches(): void {
   _agentConfigCache = {};
   _cachedCredentials = null;
+  _agentSourceRegistry = null;
 }
 
 export async function getCredentials(): Promise<any> {
@@ -380,6 +411,168 @@ async function triggerAppSyncMutation(messageRecord: any): Promise<void> {
   console.log("AppSync mutation triggered successfully");
 }
 
+// ── Imported-invocation dispatch (additive + gated) ───────────────────────
+// Safe metadata defaults for deserializing an agent's Registry record. Records
+// that predate the import feature carry no `invocation` block and are treated
+// as legacy AGENTCORE_RUNTIME agents (back-compat).
+const IMPORT_AGENT_META_DEFAULTS: AgentCustomMetadata = {
+  categories: [],
+  icon: "",
+  state: "active",
+};
+
+/**
+ * Build the minimal capability descriptor an adapter needs to invoke an
+ * imported agent. Only the invocation/origin blocks are meaningful here; the
+ * descriptive fields are placeholders until describe() is implemented.
+ */
+function buildImportedDescriptor(
+  name: string,
+  invocation: AgentInvocationBlock,
+  origin: AgentOrigin | undefined
+): AgentCapabilityDescriptor {
+  return {
+    name,
+    description: "",
+    version: "1.0.0",
+    skills: [],
+    categories: [],
+    inputSchema: {},
+    outputSchema: {},
+    invocation,
+    origin:
+      origin ?? {
+        substrate: invocation.protocol,
+        discoveredAt: new Date().toISOString(),
+        ownership: "external",
+      },
+  };
+}
+
+/**
+ * Additively dispatch a message to an imported agent when (a) IMPORT_ENABLED is
+ * on, (b) REGISTRY_ID is configured, and (c) the agent's Registry record
+ * carries an `invocation` block. On success it stores + publishes the response
+ * exactly as the legacy path does and returns `true`.
+ *
+ * Returns `false` (caller falls back to the UNCHANGED SSM -> InvokeAgentRuntime
+ * path) when import is disabled, REGISTRY_ID is missing, the record/invocation
+ * is absent, or the Registry read throws.
+ *
+ * Throws when the invocation block names an unregistered protocol — an explicit
+ * but unknown protocol is a real configuration error, NOT a legacy agent, so it
+ * must NOT silently fall through to the legacy path.
+ */
+async function dispatchImportedInvocation(
+  projectId: string,
+  agentId: string,
+  message: string,
+  userId: string,
+  messageId: string,
+  metadata: Record<string, unknown> | undefined
+): Promise<boolean> {
+  if (!isImportEnabled()) return false;
+
+  const registryId = process.env.REGISTRY_ID;
+  if (!registryId) return false;
+
+  let invocation: AgentInvocationBlock | undefined;
+  let origin: AgentOrigin | undefined;
+  let descriptorName = agentId;
+  try {
+    const region = process.env.AWS_REGION || "ap-southeast-2";
+    const registryService = new RegistryService({ registryId, region });
+    const record = await registryService.getResource("agent", agentId);
+    if (!record) return false;
+    const meta = registryService.deserializeCustomMetadata<AgentCustomMetadata>(
+      record.customDescriptorContent ?? null,
+      IMPORT_AGENT_META_DEFAULTS
+    );
+    invocation = meta.invocation;
+    origin = meta.origin;
+    descriptorName = record.name || agentId;
+  } catch (error) {
+    // A Registry read failure must not break an import-unaware agent.
+    console.error(
+      JSON.stringify({
+        level: "warn",
+        msg: "import-dispatch: registry read failed; falling back to legacy AgentCore path",
+        agentId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
+    return false;
+  }
+
+  // No invocation block => legacy agent. Fall back unchanged.
+  if (!invocation) return false;
+
+  // Explicit invocation block: resolve the protocol adapter. An unknown
+  // protocol is a real configuration error, so log a structured error and
+  // rethrow — we must NOT fall back to the legacy path.
+  let adapter: AgentSourceAdapter;
+  try {
+    adapter = getAgentSourceRegistry().resolve(invocation.protocol);
+  } catch (error) {
+    if (error instanceof UnknownProtocolError) {
+      console.error(
+        JSON.stringify({
+          level: "error",
+          msg: "import-dispatch: unknown invocation protocol; not falling back to legacy path",
+          agentId,
+          protocol: invocation.protocol,
+          error: error.message,
+        })
+      );
+    }
+    throw error;
+  }
+
+  const sessionId = projectId;
+  const sessionAttributes: Record<string, unknown> = {
+    projectId,
+    userId,
+    messageId,
+    ...(metadata && { metadata }),
+  };
+
+  const descriptor = buildImportedDescriptor(descriptorName, invocation, origin);
+  const req: InvokeRequest = {
+    prompt: message,
+    sessionId,
+    attributes: sessionAttributes,
+  };
+
+  // Notify the frontend, invoke via the adapter, then store + publish exactly
+  // as the legacy path does.
+  await sendProgressUpdate(
+    projectId,
+    agentId,
+    "Agent is processing your request...",
+    messageId
+  );
+
+  const response = await adapter.invoke(req, descriptor);
+
+  console.log(
+    `Imported agent ${agentId} responded via ${invocation.protocol} adapter`
+  );
+
+  const responseRecord = await storeAgentResponse(
+    projectId,
+    agentId,
+    response.output,
+    messageId,
+    metadata
+  );
+  await triggerAppSyncMutation(responseRecord);
+
+  console.log(
+    `Successfully processed imported message for agent ${agentId} for project ${projectId}`
+  );
+  return true;
+}
+
 /**
  * Lambda handler for EventBridge events
  */
@@ -412,6 +605,27 @@ export const handler = async (
       console.log(
         `Processing message for project ${projectId}, agent ${agentId}`
       );
+
+    // ── Imported-invocation dispatch (additive + gated) ──────────────────
+    // When IMPORT_ENABLED and the agent's Registry record carries an
+    // `invocation` block, route through the protocol adapter registry and
+    // store the response exactly as the legacy path does. Returns false to
+    // fall back to the UNCHANGED AgentCore path below (flag off, no
+    // REGISTRY_ID, no record/invocation, or a Registry read error). An unknown
+    // protocol throws and is handled by the surrounding catch — it must NOT
+    // fall through to the legacy path.
+    if (
+      await dispatchImportedInvocation(
+        projectId,
+        agentId,
+        message,
+        userId,
+        messageId,
+        metadata
+      )
+    ) {
+      return;
+    }
 
     // Get agent configuration from SSM
     const agentConfig = await getAgentConfig(agentId);
