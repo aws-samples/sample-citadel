@@ -422,11 +422,11 @@ describe('Property 4: Direction Field Backward Compatibility', () => {
 
           // Simulate legacy DynamoDB item — bindings have NO direction field
           const legacyIntBindings = integrationBindings.map((b) => {
-            const { direction, ...rest } = b as any;
+            const { direction: _direction, ...rest } = b as any;
             return rest;
           });
           const legacyDsBindings = dataStoreBindings.map((b) => {
-            const { direction, ...rest } = b as any;
+            const { direction: _direction, ...rest } = b as any;
             return rest;
           });
 

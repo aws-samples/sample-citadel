@@ -8,26 +8,17 @@
 import * as fc from 'fast-check';
 import {
   storeCredentials,
-  retrieveCredentials,
-  updateCredentials,
-  deleteCredentials,
-  storeConfiguration,
-  retrieveConfiguration,
-  deleteConfiguration
+  retrieveCredentials
 } from '../credential-manager';
 import { getConnectorSpec, getAllConnectorTypes } from '../connector-registry';
 import { 
   SecretsManagerClient, 
   CreateSecretCommand,
   GetSecretValueCommand, 
-  UpdateSecretCommand,
-  DeleteSecretCommand 
 } from '@aws-sdk/client-secrets-manager';
-import { 
-  SSMClient, 
+import {
+  SSMClient,
   PutParameterCommand,
-  GetParameterCommand,
-  DeleteParameterCommand 
 } from '@aws-sdk/client-ssm';
 import { mockClient } from 'aws-sdk-client-mock';
 

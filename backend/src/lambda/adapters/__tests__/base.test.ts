@@ -54,7 +54,7 @@ describe('DataStoreError hierarchy', () => {
     },
   ];
 
-  describe.each(errorClasses)('$name', ({ Class, name, code, retryable, make }) => {
+  describe.each(errorClasses)('$name', ({ Class: _Class, name, code, retryable, make }) => {
     it('is instanceof DataStoreError', () => {
       expect(make('test')).toBeInstanceOf(DataStoreError);
     });

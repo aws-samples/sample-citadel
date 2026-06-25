@@ -8,7 +8,7 @@
 import { IAMClient, CreateRoleCommand, PutRolePolicyCommand, DeleteRolePolicyCommand, DeleteRoleCommand } from '@aws-sdk/client-iam';
 import { STSClient, GetCallerIdentityCommand, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import { mockClient } from 'aws-sdk-client-mock';
-import { PolicyManager, PolicyScope } from '../../utils/policy-manager';
+import { PolicyManager } from '../../utils/policy-manager';
 
 const iamMock = mockClient(IAMClient);
 const stsMock = mockClient(STSClient);
@@ -120,7 +120,7 @@ describe('PolicyManager', () => {
         },
       });
 
-      const creds = await manager.assumeScopedRole('int-456', '123456789012', 'integration');
+      await manager.assumeScopedRole('int-456', '123456789012', 'integration');
       const assumeCalls = stsMock.commandCalls(AssumeRoleCommand);
       expect(assumeCalls[0].args[0].input.RoleArn).toContain('citadel-int-int-456');
     });

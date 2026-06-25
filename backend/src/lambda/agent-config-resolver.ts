@@ -647,8 +647,8 @@ async function updateAgentConfig(input: any): Promise<AgentConfig> {
         },
       })
     );
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       throw new Error(`Conflict: agent config ${input.agentId} was modified concurrently. Please retry.`);
     }
     throw error;
@@ -703,7 +703,7 @@ export function validateManifest(manifest: any): { valid: boolean; errors: strin
 
 // ─── Publish Agent Manifest ──────────────────────────────────
 
-async function publishAgentManifest(agentId: string, manifestStr: string): Promise<any> {
+async function publishAgentManifest(agentId: string, manifestStr: string): Promise<unknown> {
   // Parse the AWSJSON manifest string
   let manifest: any;
   try {

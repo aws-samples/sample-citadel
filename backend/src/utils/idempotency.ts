@@ -44,8 +44,8 @@ export class IdempotencyGuard {
         },
         ConditionExpression: 'attribute_not_exists(eventId)',
       }));
-    } catch (error: any) {
-      if (error.name === 'ConditionalCheckFailedException') {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
         console.log(`Idempotency: skipping duplicate event ${eventId}`);
         return { executed: false };
       }

@@ -9,7 +9,6 @@ import {
   BedrockAgentClient,
   CreateKnowledgeBaseCommand,
   DeleteKnowledgeBaseCommand,
-  GetKnowledgeBaseCommand,
 } from '@aws-sdk/client-bedrock-agent';
 import { mockClient } from 'aws-sdk-client-mock';
 

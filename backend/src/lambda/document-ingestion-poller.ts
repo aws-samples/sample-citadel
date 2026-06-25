@@ -91,8 +91,8 @@ async function markSuccessAndTrigger(tableName: string, job: JobRow, status: str
         ':now': new Date().toISOString(),
       },
     }));
-  } catch (err: any) {
-    if (err?.name === 'ConditionalCheckFailedException') {
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
       console.log('poller: trigger already claimed by a concurrent poll, no-op', {
         documentKey: job.documentKey,
       });

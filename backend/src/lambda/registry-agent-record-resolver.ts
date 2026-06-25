@@ -444,7 +444,7 @@ export function validatePermissionActions(
   return { valid: errors.length === 0, errors };
 }
 
-async function emitEvent(eventType: string, detail: any): Promise<void> {
+async function emitEvent(eventType: string, detail: unknown): Promise<void> {
   await getEventBridgeClient().send(new PutEventsCommand({
     Entries: [
       {
@@ -461,7 +461,7 @@ async function emitEvent(eventType: string, detail: any): Promise<void> {
 // Entry point — single handler dispatched on event.info.fieldName
 // ---------------------------------------------------------------------------
 
-export const handler: AppSyncResolverHandler<any, any> = async (event) => {
+export const handler: AppSyncResolverHandler<any, unknown> = async (event) => {
   console.log('Registry agent record resolver event:', JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
@@ -540,7 +540,7 @@ export const handler: AppSyncResolverHandler<any, any> = async (event) => {
 // Registry-backed (AgentApp-shape) handlers
 // ===========================================================================
 
-async function getApp(appId: string, _userId: string): Promise<any> {
+async function getApp(appId: string, _userId: string): Promise<unknown> {
   let record;
   try {
     record = await getRegistryService().getResource('agent', appId);
@@ -583,7 +583,7 @@ async function listApps(
   orgId: string,
   _userId: string,
   event: any,
-): Promise<{ items: any[]; nextToken: string | null }> {
+): Promise<{ items: unknown[]; nextToken: string | null }> {
   const isAllOrgsRequest = !orgId || orgId === 'All Organizations';
   if (isAllOrgsRequest && !isAdminFromEvent(event)) {
     throw new Error('Only admins may list apps across all organizations');
@@ -608,8 +608,8 @@ async function listApps(
  */
 async function queryAppsViaOrgIndex(
   orgId: string,
-): Promise<{ items: any[]; nextToken: string | null }> {
-  const items: any[] = [];
+): Promise<{ items: unknown[]; nextToken: string | null }> {
+  const items: unknown[] = [];
   let nextToken: any = undefined;
   do {
     const result = await getDocClient().send(
@@ -635,10 +635,10 @@ async function queryAppsViaOrgIndex(
  * etc.) sharing the same table are excluded.
  */
 async function scanAllAppsViaMeta(): Promise<{
-  items: any[];
+  items: unknown[];
   nextToken: string | null;
 }> {
-  const items: any[] = [];
+  const items: unknown[] = [];
   let nextToken: any = undefined;
   do {
     const result = await getDocClient().send(
@@ -660,7 +660,7 @@ async function scanAllAppsViaMeta(): Promise<{
  * used by listApps. Field defaults match the Registry-backed projection so
  * callers see no behavioural difference between the two read paths.
  */
-function metaRowToAppShape(row: Record<string, any>): any {
+function metaRowToAppShape(row: Record<string, unknown>): Record<string, unknown> {
   return {
     appId: row.appId,
     orgId: row.orgId ?? '',
@@ -676,7 +676,7 @@ function metaRowToAppShape(row: Record<string, any>): any {
   };
 }
 
-async function createApp(input: any, userId: string): Promise<any> {
+async function createApp(input: any, userId: string): Promise<unknown> {
   const now = new Date().toISOString();
   const appId = uuidv4();
 
@@ -757,7 +757,7 @@ async function createApp(input: any, userId: string): Promise<any> {
   return projectAgentApp(record);
 }
 
-async function updateApp(input: any, userId: string): Promise<any> {
+async function updateApp(input: any, userId: string): Promise<unknown> {
   const existing = await getRegistryService().getResource('agent', input.appId);
   if (!existing) {
     throw new Error('App not found');
@@ -871,7 +871,7 @@ async function updateApp(input: any, userId: string): Promise<any> {
   return projectAgentApp(record);
 }
 
-async function deleteApp(appId: string, userId: string): Promise<any> {
+async function deleteApp(appId: string, userId: string): Promise<unknown> {
   const existing = await getRegistryService().getResource('agent', appId);
   if (!existing) {
     throw new Error('App not found');
@@ -904,7 +904,7 @@ async function bindWorkflowToApp(
   appId: string,
   workflowId: string,
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', appId);
   if (!record) {
     throw new Error('App not found');
@@ -934,7 +934,7 @@ async function unbindWorkflowFromApp(
   appId: string,
   workflowId: string,
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', appId);
   if (!record) {
     throw new Error('App not found');
@@ -966,7 +966,7 @@ async function updateAgentBinding(
     status?: string;
   },
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', input.appId);
   if (!record) {
     throw new Error('App not found');
@@ -1047,7 +1047,7 @@ async function addAppComponent(
   appId: string,
   component: { type: string; data: string },
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', appId);
   if (!record) {
     throw new Error('App not found');
@@ -1131,7 +1131,7 @@ async function removeAppComponent(
   componentType: string,
   componentId: string,
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', appId);
   if (!record) {
     throw new Error('App not found');
@@ -1174,7 +1174,7 @@ async function setAppConfigSchema(
   schemaInput: string | object,
   version: number,
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', appId);
   if (!record) {
     throw new Error('App not found');
@@ -1216,7 +1216,7 @@ async function setAppConfigValues(
   valuesInput: string | object,
   version: number,
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', appId);
   if (!record) {
     throw new Error('App not found');
@@ -1264,7 +1264,7 @@ async function setAppAuthConfig(
   appId: string,
   authConfigInput: string | object,
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', appId);
   if (!record) {
     throw new Error('App not found');
@@ -1294,7 +1294,7 @@ async function grantAppAccess(
   targetUserId: string,
   role: string,
   grantingUserId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', appId);
   if (!record) {
     throw new Error('App not found');
@@ -1330,7 +1330,7 @@ async function revokeAppAccess(
   appId: string,
   targetUserId: string,
   revokingUserId: string,
-): Promise<any> {
+): Promise<unknown> {
   const record = await getRegistryService().getResource('agent', appId);
   if (!record) {
     throw new Error('App not found');
@@ -1360,11 +1360,11 @@ async function revokeAppAccess(
 // Non-AgentApp handlers — preserved DDB / EventBridge paths
 // ===========================================================================
 
-async function listAppApiKeys(appId: string): Promise<any> {
+async function listAppApiKeys(appId: string): Promise<unknown> {
   return listAppApiKeysImpl(appId, getSharedDeps());
 }
 
-async function listAppAccessEntries(appId: string): Promise<any> {
+async function listAppAccessEntries(appId: string): Promise<unknown> {
   return listAppAccessEntriesImpl(appId, getSharedDeps());
 }
 
@@ -1372,7 +1372,7 @@ async function getAppMetrics(
   appId: string,
   startTime: string,
   endTime: string,
-): Promise<any> {
+): Promise<unknown> {
   return getAppMetricsImpl(appId, startTime, endTime, getSharedDeps());
 }
 
@@ -1381,7 +1381,7 @@ async function publishAppStatusEvent(input: {
   previousStatus: string;
   newStatus: string;
   timestamp: string;
-}): Promise<any> {
+}): Promise<unknown> {
   // IAM-authed passthrough: emit a structured event to the shared bus and
   // echo the payload so AppSync subscriptions receive a deterministic shape.
   // No registry interaction — matches the "existing EventBridge put preserved"
@@ -1400,7 +1400,7 @@ async function createAppApiKey(
   name: string,
   expiresIn: number | undefined,
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const result = await createAppApiKeyImpl(appId, name, userId, getSharedDeps(), expiresIn);
   // Shape to the AppApiKeyWithPlaintext GraphQL type — plaintext is returned
   // exactly once here at creation and is never persisted in retrievable form.
@@ -1420,7 +1420,7 @@ async function revokeAppApiKey(
   appId: string,
   keyId: string,
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   return revokeAppApiKeyImpl(appId, keyId, userId, getSharedDeps());
 }
 
@@ -1428,7 +1428,7 @@ async function rotateAppApiKey(
   appId: string,
   keyId: string,
   userId: string,
-): Promise<any> {
+): Promise<unknown> {
   const result = await rotateAppApiKeyImpl(appId, keyId, userId, getSharedDeps());
   // Shape to AppApiKeyWithPlaintext — flatten result.newKey to the top level
   // and drop revokedKeyId. Plaintext is returned exactly once on rotation.

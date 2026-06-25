@@ -86,8 +86,8 @@ export async function grantFabricatorAuthority(appId: string): Promise<void> {
       },
       ConditionExpression: 'attribute_not_exists(unitId)',
     }));
-  } catch (err: any) {
-    if (err?.name === 'ConditionalCheckFailedException') {
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
       console.warn('Authority unit already exists for app', appId);
       return;
     }
@@ -114,8 +114,8 @@ export async function revokeFabricatorAuthority(appId: string): Promise<void> {
       },
       ConditionExpression: 'attribute_exists(unitId) AND revoked = :false',
     }));
-  } catch (err: any) {
-    if (err?.name === 'ConditionalCheckFailedException') {
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
       console.warn('Authority unit not found or already revoked for app', appId);
       return;
     }

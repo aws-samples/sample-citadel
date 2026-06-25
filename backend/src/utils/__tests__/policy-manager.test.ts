@@ -4,12 +4,12 @@
  * computeAgentPolicies and computeIntegrationPolicies helpers work.
  */
 
-import { IAMClient, CreateRoleCommand, PutRolePolicyCommand, DeleteRolePolicyCommand, DeleteRoleCommand } from '@aws-sdk/client-iam';
-import { STSClient, GetCallerIdentityCommand, AssumeRoleCommand } from '@aws-sdk/client-sts';
+import { IAMClient, CreateRoleCommand, PutRolePolicyCommand } from '@aws-sdk/client-iam';
+import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { mockClient } from 'aws-sdk-client-mock';
 
 // Import from the NEW promoted location
-import { PolicyManager, type PolicyScope } from '../policy-manager';
+import { PolicyManager } from '../policy-manager';
 import { computeIntegrationPolicies } from '../policy-helpers';
 import { computeAgentPolicies } from '../policy-helpers';
 

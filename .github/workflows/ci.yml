@@ -6,6 +6,7 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -19,23 +20,25 @@ env:
   PYTHON_VERSION: "3.14"
 
 jobs:
-  # ── Backend: lint, type-check, unit tests ──
-  backend:
-    name: Backend
+  # ── Backend static analysis: lint + type-check ──
+  backend-static:
+    name: Backend Static
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: backend/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      - run: npm ci
+      - name: Install workspaces (root lockfile)
+        run: npm ci
+        working-directory: ${{ github.workspace }}
 
       - name: Lint
         run: npm run lint
@@ -43,8 +46,48 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+  # ── Backend unit tests + coverage ──
+  backend-test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install workspaces (root lockfile)
+        run: npm ci
+        working-directory: ${{ github.workspace }}
+
       - name: Unit tests
         run: npm test -- --ci --coverage
+
+  # ── Backend build + synth (all stacks) ──
+  backend-build:
+    name: Backend Build + Synth
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install workspaces (root lockfile)
+        run: npm ci
+        working-directory: ${{ github.workspace }}
 
       - name: Build Lambda bundles
         run: npm run build:lambda
@@ -52,15 +95,59 @@ jobs:
       - name: Build CDK
         run: npm run build
 
-      - name: CDK synth (validate templates)
-        run: npx cdk synth --quiet
+      - name: Build frontend (required for FrontendStack CDK asset)
+        run: npm run build --workspace=frontend
+        working-directory: ${{ github.workspace }}
+
+      - name: CDK synth (validate all templates)
+        run: npx cdk synth --all --quiet
         env:
           ENVIRONMENT: test
           CDK_DEFAULT_ACCOUNT: "000000000000"
           CDK_DEFAULT_REGION: us-east-1
 
-      - name: Audit dependencies
-        run: npm audit --audit-level=high || true
+  # ── Governance: backend resolver tests + governance stack synth ──
+  # Frontend governance-engine tests run in the Frontend job; arbiter
+  # governance tests run in the Arbiter job. This job covers the backend
+  # governance resolvers and the citadel-governance-test stack template.
+  governance:
+    name: Governance
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install workspaces (root lockfile)
+        run: npm ci
+        working-directory: ${{ github.workspace }}
+
+      - name: Governance resolver tests
+        run: npm test -- --ci --testPathPattern governance
+
+      - name: Build Lambda bundles
+        run: npm run build:lambda
+
+      - name: Build CDK
+        run: npm run build
+
+      - name: Build frontend (required for FrontendStack CDK asset)
+        run: npm run build --workspace=frontend
+        working-directory: ${{ github.workspace }}
+
+      - name: CDK synth (governance stack)
+        run: npx cdk synth citadel-governance-test --quiet
+        env:
+          ENVIRONMENT: test
+          CDK_DEFAULT_ACCOUNT: "000000000000"
+          CDK_DEFAULT_REGION: us-east-1
 
   # ── Frontend: lint, unit tests, build ──
   frontend:
@@ -70,9 +157,9 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -99,9 +186,9 @@ jobs:
     name: Arbiter
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -112,25 +199,40 @@ jobs:
       - name: Run tests
         run: pytest arbiter/ -v --tb=short
 
+  # ── Service (Python): agent intake + pdf generator tests ──
+  service:
+    name: Service
+    runs-on: ubuntu-latest
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install pytest hypothesis boto3 strands-agents strands-agents-tools
+          pip install -r service/agent_intake_single/requirements.txt
+
+      - name: Run tests
+        run: pytest service/ -v --tb=short
+
   # ── Security scanning ──
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Backend audit
-        working-directory: backend
-        run: |
-          npm ci
-          npm audit --audit-level=high || true
+      - name: Install workspaces (root lockfile)
+        run: npm ci
 
-      - name: Frontend audit
-        working-directory: frontend
-        run: |
-          npm ci
-          npm audit --audit-level=high || true
+      - name: Audit dependencies (all workspaces)
+        run: npm audit --audit-level=high || true

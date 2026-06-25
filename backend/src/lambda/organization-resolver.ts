@@ -44,7 +44,7 @@ export const handler = async (event: any): Promise<any> => {
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error(`Error in ${fieldName}:`, error);
     throw error;
   }

@@ -70,12 +70,12 @@ export async function testConnection(
           details: {}
         };
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error(`Connection test error for ${connectorType}:`, error);
     return {
       success: false,
-      message: `Connection error: ${error.message}`,
-      details: { error: error.toString() }
+      message: `Connection error: ${error instanceof Error ? error.message : String(error)}`,
+      details: { error: String(error) }
     };
   }
 }
@@ -159,13 +159,13 @@ export async function testApiKeyConnection(
         }
       };
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error(`Fetch error:`, error);
     return {
       success: false,
-      message: `Connection error: ${error.message}`,
+      message: `Connection error: ${error instanceof Error ? error.message : String(error)}`,
       details: { 
-        error: error.toString(),
+        error: String(error),
         testUrl: testUrl.replace(/\/\/[^:]+:[^@]+@/, '//***:***@')
       }
     };
@@ -231,7 +231,7 @@ export async function testBasicAuthConnection(
 export async function testOAuth2Connection(
   connectorType: string,
   credentials: any,
-  spec: ConnectorSpec
+  _spec: ConnectorSpec
 ): Promise<TestResult> {
   // Validate required OAuth2 fields are present
   const missingFields: string[] = [];

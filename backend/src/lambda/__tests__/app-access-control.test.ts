@@ -12,7 +12,6 @@ import {
   grantAppAccess,
   revokeAppAccess,
   listAppAccessEntries,
-  checkAppAccess,
   checkOperationAccess,
   hasMinimumRole,
   isAdmin,

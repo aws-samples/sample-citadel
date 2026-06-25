@@ -42,8 +42,8 @@ export const handler = async (event: any) => {
           ':now': new Date().toISOString(),
         },
       }));
-    } catch (err: any) {
-      if (err.name === 'ConditionalCheckFailedException') {
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
         console.log(`Skipping stale progress: ${phase}=${completionPercentage}% (already higher)`);
         return;
       }

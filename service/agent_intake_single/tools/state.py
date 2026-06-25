@@ -160,6 +160,21 @@ def _internal_update_progress(session_id: str, phase: str, progress: int, change
     return f"{phase} progress: {progress}%"
 
 
+def _invalidate_agent_cache(session_id: str) -> None:
+    """Evict the session's cached Agent so its baked-in progress is rebuilt.
+
+    ``agent.py`` runs as ``__main__`` in the container (``CMD python agent.py``)
+    but is imported as ``agent`` under test, so resolve whichever module holds
+    the live cache rather than re-importing it — a fresh ``import agent`` would
+    spin up a second, empty cache and leave the running one stale.
+    """
+    import sys
+    mod = sys.modules.get('agent') or sys.modules.get('__main__')
+    invalidate = getattr(mod, 'invalidate_agent_cache', None)
+    if invalidate is not None:
+        invalidate(session_id)
+
+
 @tool
 def update_intake_progress(session_id: str, phase: str, progress: int, change_summary: str) -> str:
     """Update progress for a phase and publish a UI progress event.
@@ -174,5 +189,13 @@ def update_intake_progress(session_id: str, phase: str, progress: int, change_su
     Returns:
         Confirmation.
     """
-    return _internal_update_progress(session_id, phase, progress, change_summary)
+    result = _internal_update_progress(session_id, phase, progress, change_summary)
+    # A progress change makes the cached Agent's baked-in system prompt stale, so
+    # evict it. Best-effort: the DynamoDB write above is the committed unit of
+    # work, so a cache failure is logged and swallowed, not surfaced to the user.
+    try:
+        _invalidate_agent_cache(session_id)
+    except Exception as e:
+        logger.warning('Cache invalidation failed for session %s: %s', session_id, e)
+    return result
 

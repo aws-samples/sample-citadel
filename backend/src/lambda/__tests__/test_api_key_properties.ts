@@ -215,7 +215,7 @@ describe('Property 7: API key authorization correctness', () => {
 
 // ── Imports for Properties 2, 10, 11, 12 ────────────────────
 
-import { createHash, randomBytes } from 'crypto';
+import { createHash } from 'crypto';
 import { DynamoDBDocumentClient, QueryCommand, PutCommand, UpdateCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
@@ -253,9 +253,6 @@ const keyNameArb = fc.string({ minLength: 1, maxLength: 40 })
 
 /** Arbitrary user ID */
 const userIdArb = fc.stringMatching(/^[a-zA-Z0-9_-]{3,30}$/);
-
-/** Arbitrary count of active keys (0-15 to test both sides of the limit) */
-const activeKeyCountArb = fc.integer({ min: 0, max: 15 });
 
 // ── Property 2 Tests ────────────────────────────────────────
 

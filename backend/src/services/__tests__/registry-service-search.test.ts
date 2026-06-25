@@ -14,7 +14,7 @@ import {
   DescriptorType,
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import { mockClient } from 'aws-sdk-client-mock';
-import { RegistryService, RegistryRecord } from '../registry-service';
+import { RegistryService } from '../registry-service';
 
 const sdkMock = mockClient(BedrockAgentCoreControlClient);
 

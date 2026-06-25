@@ -9,7 +9,6 @@ import {
   ConnectorAdapter,
   ConnectorCategory,
   ConnectorSpec,
-  PolicyStatement,
   RequiredPolicies,
   ConnectionTestResult,
   MetricsResult,
@@ -39,8 +38,8 @@ class TestDataStoreAdapter implements ConnectorAdapter {
 
   requiredPolicies(
     config: Record<string, any>,
-    accountId: string,
-    region: string
+    _accountId: string,
+    _region: string
   ): RequiredPolicies {
     return {
       provision: [{ actions: ['s3:CreateBucket'], resources: [`arn:aws:s3:::${config.bucketName}`] }],
@@ -49,23 +48,23 @@ class TestDataStoreAdapter implements ConnectorAdapter {
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    _config: Record<string, any>,
+    _credentials?: Record<string, any>
   ): Promise<ConnectionTestResult> {
     return { success: true, message: 'Connected' };
   }
 
-  async connect(config: Record<string, any>, credentials?: Record<string, any>): Promise<void> {}
-  async disconnect(config: Record<string, any>): Promise<void> {}
+  async connect(_config: Record<string, any>, _credentials?: Record<string, any>): Promise<void> {}
+  async disconnect(_config: Record<string, any>): Promise<void> {}
 
   async provision(
     config: Record<string, any>,
-    credentials?: Record<string, any>
+    _credentials?: Record<string, any>
   ): Promise<ProvisionResult> {
     return { resourceArn: `arn:aws:s3:::${config.bucketName}` };
   }
 
-  async getMetrics(config: Record<string, any>): Promise<MetricsResult> {
+  async getMetrics(_config: Record<string, any>): Promise<MetricsResult> {
     return { size: '10 MB', records: 100 };
   }
 
@@ -100,14 +99,14 @@ class TestIntegrationAdapter implements ConnectorAdapter {
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    _config: Record<string, any>,
+    _credentials?: Record<string, any>
   ): Promise<ConnectionTestResult> {
     return { success: true, message: 'API reachable' };
   }
 
-  async connect(config: Record<string, any>, credentials?: Record<string, any>): Promise<void> {}
-  async disconnect(config: Record<string, any>): Promise<void> {}
+  async connect(_config: Record<string, any>, _credentials?: Record<string, any>): Promise<void> {}
+  async disconnect(_config: Record<string, any>): Promise<void> {}
 
   validate(credentials: any, config: any): { valid: boolean; errors: string[] } {
     const errors: string[] = [];

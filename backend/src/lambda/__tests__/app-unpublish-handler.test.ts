@@ -176,7 +176,7 @@ describe('unpublishApp — full teardown', () => {
       Items: [makePublishedApp()],
     });
 
-    const result = await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    await unpublishApp('app-1', 'user-1', makeDefaultDeps());
 
     // Verify the metadata update removes endpointUrl and apiId
     const updateCalls = ddbMock.commandCalls(UpdateCommand);

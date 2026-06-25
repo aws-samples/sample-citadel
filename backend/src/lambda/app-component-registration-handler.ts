@@ -51,8 +51,8 @@ export async function handler(
     }));
 
     console.log(`Registered ${prefix}#${componentId} under app ${appId}`);
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       console.log(`Component ${prefix}#${componentId} already registered under app ${appId}, skipping`);
       return;
     }

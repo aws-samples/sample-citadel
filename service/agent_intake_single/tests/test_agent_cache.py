@@ -15,6 +15,7 @@ if 'bedrock_agentcore' not in sys.modules:
 
     class _StubApp:
         def __init__(self, *a, **kw): pass
+        def add_middleware(self, *a, **kw): pass  # real app registers CORS at import time
         def entrypoint(self, fn):
             return fn  # passthrough decorator
 

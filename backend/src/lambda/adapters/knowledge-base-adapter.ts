@@ -441,10 +441,8 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
       const tempCollectionArn = `arn:aws:aoss:${region}:${accountId}:collection/*`;
 
       let roleArn = config.roleArn;
-      let serviceRoleName: string | undefined;
       if (!roleArn) {
         roleArn = await this.createServiceRole(name, tempCollectionArn);
-        serviceRoleName = roleArn.split('/').pop();
         await new Promise((resolve) => setTimeout(resolve, this.roleCreationDelayMs));
       }
 
@@ -495,10 +493,8 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
 
     // Path for caller-provided storage config or collectionArn
     let roleArn = config.roleArn;
-    let serviceRoleName: string | undefined;
     if (!roleArn) {
       roleArn = await this.createServiceRole(name, collectionArn);
-      serviceRoleName = roleArn.split('/').pop();
       await new Promise((resolve) => setTimeout(resolve, this.roleCreationDelayMs));
     }
 

@@ -11,10 +11,10 @@ const mockSetTimeout = jest.fn();
 
 jest.mock('net', () => ({
   Socket: jest.fn().mockImplementation(() => {
-    const handlers: Record<string, Function> = {};
+    const handlers: Record<string, (...args: unknown[]) => void> = {};
     const instance = {
       setTimeout: mockSetTimeout,
-      once: (event: string, cb: Function) => {
+      once: (event: string, cb: (...args: unknown[]) => void) => {
         handlers[event] = cb;
         mockOn(event, cb);
       },

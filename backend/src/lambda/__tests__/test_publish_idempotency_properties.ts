@@ -17,10 +17,10 @@ import {
   CreateAuthorizerCommand,
   DeleteApiCommand,
 } from '@aws-sdk/client-apigatewayv2';
-import { DynamoDBDocumentClient, QueryCommand, UpdateCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
-import { IAMClient, CreateRoleCommand, PutRolePolicyCommand } from '@aws-sdk/client-iam';
+import { STSClient } from '@aws-sdk/client-sts';
+import { IAMClient } from '@aws-sdk/client-iam';
 import { mockClient } from 'aws-sdk-client-mock';
 
 import { publishApp, unpublishApp, AppMetadata } from '../app-publish-handler';

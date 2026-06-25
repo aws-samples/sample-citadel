@@ -25,9 +25,6 @@ const appIdArb = fc.string({ minLength: 1, maxLength: 36 })
 const agentIdArb = fc.string({ minLength: 1, maxLength: 36 })
   .filter(s => /^[a-zA-Z0-9_-]+$/.test(s));
 
-const toolIdArb = fc.string({ minLength: 1, maxLength: 36 })
-  .filter(s => /^[a-zA-Z0-9_-]+$/.test(s));
-
 /** N repetitions: 1..5 */
 const repeatCountArb = fc.integer({ min: 1, max: 5 });
 

@@ -11,7 +11,7 @@
 import * as fc from 'fast-check';
 import { STSClient } from '@aws-sdk/client-sts';
 import { mockClient } from 'aws-sdk-client-mock';
-import { processHealthChecks, HealthCheckResult } from '../health-monitor';
+import { processHealthChecks } from '../health-monitor';
 
 // processHealthChecks assumes a scoped STS role per store (GetCallerIdentity +
 // AssumeRole). With no real AWS credentials in the test environment, the

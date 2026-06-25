@@ -68,7 +68,7 @@ function normaliseArchetype<T extends Partial<Project> | null | undefined>(proje
   return project;
 }
 
-export const handler: AppSyncResolverHandler<any, any> = async (event) => {
+export const handler: AppSyncResolverHandler<any, unknown> = async (event) => {
   console.log('Project resolver event:', JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
@@ -442,15 +442,15 @@ async function updateProject(id: string, input: any, userId: string, event: any)
     });
 
     return normaliseArchetype(result.Attributes as Project) as Project;
-  } catch (error: any) {
-    if (error.name === 'ConditionalCheckFailedException') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
       throw new Error(`Conflict: project ${id} was modified concurrently. Please retry.`);
     }
     throw error;
   }
 }
 
-async function uploadDocument(projectId: string, file: any, userId: string, event: any): Promise<any> {
+async function uploadDocument(projectId: string, file: any, userId: string, event: any): Promise<unknown> {
   // Check if user has access to this project
   const project = await getProject(projectId, userId, event);
   if (!project) {
@@ -477,7 +477,7 @@ async function uploadDocument(projectId: string, file: any, userId: string, even
   };
 }
 
-async function emitEvent(eventType: string, detail: any): Promise<void> {
+async function emitEvent(eventType: string, detail: unknown): Promise<void> {
   const command = new PutEventsCommand({
     Entries: [
       {

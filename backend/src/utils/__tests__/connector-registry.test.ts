@@ -6,7 +6,6 @@
 
 import * as fc from 'fast-check';
 import {
-  BACKEND_CONNECTOR_REGISTRY,
   getConnectorSpec,
   validateCredentials,
   validateConfiguration,

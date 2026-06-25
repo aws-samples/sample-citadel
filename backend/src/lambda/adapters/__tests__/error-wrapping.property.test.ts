@@ -275,7 +275,7 @@ describe('Property 1: Adapter SDK error wrapping', () => {
     await fc.assert(
       fc.asyncProperty(sdkErrorNameArb, sdkErrorMessageArb, async (errName, errMsg) => {
         const sdkError = makeSdkError(errName, errMsg);
-        mockSnowflakeConnect.mockImplementation((cb: Function) => cb(sdkError));
+        mockSnowflakeConnect.mockImplementation((cb: (err: unknown) => void) => cb(sdkError));
         try {
           await adapter.testConnection(config);
         } catch (thrown: any) {

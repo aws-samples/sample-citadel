@@ -102,7 +102,7 @@ export function validateS3Object(s3Object: any): void {
   }
 
   // Validate S3 key format
-  const keyRegex = /^[a-zA-Z0-9!_.*'()-\/]+$/;
+  const keyRegex = /^[a-zA-Z0-9!_.*'()-/]+$/;
   if (!keyRegex.test(s3Object.key)) {
     throw new ValidationError('Invalid S3 key format', 'key');
   }

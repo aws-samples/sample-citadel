@@ -6,7 +6,7 @@
  *
  * Requirements: 3.1, 3.5, 3.6, 3.7
  */
-import { DynamoDBDocumentClient, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 
 export interface AuthConfigDeps {
   docClient: DynamoDBDocumentClient;

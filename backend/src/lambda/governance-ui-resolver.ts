@@ -612,7 +612,7 @@ export function buildSteps(
 
   // Default: all steps skipped.
   let s1: DecisionTraceStepStatus = 'skipped';
-  let s2: DecisionTraceStepStatus = 'pass-through';
+  const s2: DecisionTraceStepStatus = 'pass-through';
   let s3: DecisionTraceStepStatus = 'skipped';
   let s4: DecisionTraceStepStatus = 'skipped';
   let s5: DecisionTraceStepStatus = 'skipped';
@@ -2585,9 +2585,6 @@ interface SetGovernanceModeResult {
 // contract bug — the modal also enforces this string client-side.
 const MODE_FLIP_ACKNOWLEDGEMENT_TEXT =
   'I understand this affects production governance enforcement';
-
-const VALID_TARGET_MODES: ReadonlySet<'permissive' | 'shadow' | 'strict'> =
-  new Set(['permissive', 'shadow', 'strict']);
 
 type GovernanceMode = 'permissive' | 'shadow' | 'strict';
 

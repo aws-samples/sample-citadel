@@ -438,9 +438,13 @@ def test_app_id_is_forwarded_to_load_governance_state(monkeypatch):
          patch.object(supervisor_mod, "process_agent_call", return_value=None):
         MockEngine.return_value.evaluate.return_value = finding
 
+        # The wrapper's public parameter is ``app_id``; it forwards that value
+        # to ``load_governance_state`` under that function's own ``registry_id``
+        # parameter name (see index.py:315). The assertion below therefore
+        # checks ``registry_id`` even though the call passes ``app_id``.
         supervisor_mod.governed_process_agent_call(
             _AGENTS_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
-            registry_id="app-42",
+            app_id="app-42",
         )
 
     mock_load.assert_called_once_with(registry_id="app-42")
