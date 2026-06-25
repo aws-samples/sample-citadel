@@ -1,6 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, DeleteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { RegistryService, RegistryRecordStatusValues } from '../services/registry-service';
+import type { AgentInvocationProtocol } from '../services/registry-service';
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
 
 const client = new DynamoDBClient({});
@@ -696,6 +697,75 @@ export function validateManifest(manifest: any): { valid: boolean; errors: strin
   }
   if (typeof manifest.version !== 'string' || manifest.version.trim() === '') {
     errors.push('version is required and must be a non-empty string');
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+// ─── Import Descriptor Validation (US-IMP-001) ───────────────
+
+/**
+ * The nine invocation protocols recognised by the import pipeline. Typed as
+ * AgentInvocationProtocol[] so every entry must be a valid protocol and the
+ * list stays in lock-step with the union in registry-service.ts.
+ */
+const IMPORT_INVOCATION_PROTOCOLS: readonly AgentInvocationProtocol[] = [
+  'AGENTCORE_RUNTIME',
+  'BEDROCK_AGENT',
+  'LAMBDA_INVOKE',
+  'HTTP_ENDPOINT',
+  'MCP',
+  'A2A',
+  'STEP_FUNCTIONS',
+  'SAGEMAKER_ENDPOINT',
+  'SQS_ASYNC',
+];
+
+/** Narrowing helper: true when `value` is a non-null, non-array object. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validates the invocation + origin blocks of an agent import descriptor
+ * (US-IMP-001). Sits beside validateManifest and follows the same
+ * `{ valid, errors }` contract.
+ *
+ * Requires:
+ *   - `invocation.protocol` is one of the nine AgentInvocationProtocol values
+ *   - `invocation.target` is a non-empty string
+ *   - `origin.ownership === 'external'`
+ *
+ * Each missing/invalid field contributes a specific, field-naming error so
+ * callers (and the UI) can pinpoint exactly what is wrong. Accepts `unknown`
+ * and narrows internally — never throws on malformed input.
+ */
+export function validateImportDescriptor(
+  descriptor: unknown,
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  const root = isPlainObject(descriptor) ? descriptor : {};
+  const invocation = isPlainObject(root.invocation) ? root.invocation : undefined;
+  const origin = isPlainObject(root.origin) ? root.origin : undefined;
+
+  const protocol = invocation?.protocol;
+  if (
+    typeof protocol !== 'string' ||
+    !IMPORT_INVOCATION_PROTOCOLS.includes(protocol as AgentInvocationProtocol)
+  ) {
+    errors.push(
+      `invocation.protocol is required and must be one of: ${IMPORT_INVOCATION_PROTOCOLS.join(', ')}`,
+    );
+  }
+
+  const target = invocation?.target;
+  if (typeof target !== 'string' || target.trim() === '') {
+    errors.push('invocation.target is required and must be a non-empty string');
+  }
+
+  if (origin?.ownership !== 'external') {
+    errors.push("origin.ownership is required and must be 'external'");
   }
 
   return { valid: errors.length === 0, errors };

@@ -64,6 +64,76 @@ export interface DataStoreBinding {
   direction?: BindingDirection;
 }
 
+// ---------------------------------------------------------------------------
+// Agent import: invocation + origin descriptor blocks (US-IMP-001)
+//
+// These extend the agent descriptor stored in customDescriptorContent so an
+// imported (externally-owned) agent records HOW it is invoked and WHERE it
+// came from. Both blocks are optional — records that predate the import
+// feature carry neither and are treated as protocol=AGENTCORE_RUNTIME with
+// zero behaviour change (back-compat invariant 6).
+// ---------------------------------------------------------------------------
+
+/**
+ * Transport/protocol used to invoke an agent. The legacy AgentCore-only path
+ * is represented by AGENTCORE_RUNTIME, which is also the back-compat default
+ * for records with no invocation block.
+ */
+export type AgentInvocationProtocol =
+  | 'AGENTCORE_RUNTIME'
+  | 'BEDROCK_AGENT'
+  | 'LAMBDA_INVOKE'
+  | 'HTTP_ENDPOINT'
+  | 'MCP'
+  | 'A2A'
+  | 'STEP_FUNCTIONS'
+  | 'SAGEMAKER_ENDPOINT'
+  | 'SQS_ASYNC';
+
+/** Authentication mode used when reaching an invocation target. */
+export type AgentInvocationAuthMode =
+  | 'SIGV4'
+  | 'API_KEY'
+  | 'OAUTH2'
+  | 'COGNITO'
+  | 'NONE';
+
+/** Synchronous request/response vs. asynchronous callback delivery. */
+export type AgentInvocationMode = 'sync' | 'async_callback';
+
+/**
+ * How to reach and invoke an agent. `target` is protocol-specific (an ARN, an
+ * HTTPS URL, an MCP endpoint, ...). Secrets are never inlined here — only a
+ * `secretRef` pointing at Secrets Manager (RD1, least-privilege invariant 2).
+ */
+export interface AgentInvocationBlock {
+  protocol: AgentInvocationProtocol;
+  target: string;
+  auth: {
+    mode: AgentInvocationAuthMode;
+    secretRef?: string;
+  };
+  mode: AgentInvocationMode;
+  region?: string;
+  account?: string;
+  roleArn?: string;
+  externalId?: string;
+}
+
+/**
+ * Provenance for an imported agent. `ownership` is fixed at 'external' —
+ * Citadel orchestrates imported agents but never owns, redeploys, or scales
+ * the customer's infrastructure (invariant 1).
+ */
+export interface AgentOrigin {
+  sourceArn?: string;
+  account?: string;
+  region?: string;
+  substrate: string;
+  discoveredAt: string;
+  ownership: 'external';
+}
+
 export interface AgentCustomMetadata {
   categories: string[];
   icon: string;
@@ -71,6 +141,22 @@ export interface AgentCustomMetadata {
   appId?: string;
   manifest?: Record<string, any>;
   orgId?: string;
+  /** Present only on imported agents (US-IMP-001). Absent ⇒ AGENTCORE_RUNTIME. */
+  invocation?: AgentInvocationBlock;
+  /** Present only on imported agents (US-IMP-001). */
+  origin?: AgentOrigin;
+}
+
+/**
+ * Returns the invocation protocol for an agent's metadata, defaulting to
+ * AGENTCORE_RUNTIME for legacy records that carry no invocation block
+ * (back-compat invariant 6). Accepts any object exposing an optional
+ * `invocation` so callers can pass a full AgentCustomMetadata or a partial.
+ */
+export function getInvocationProtocol(meta: {
+  invocation?: AgentInvocationBlock;
+}): AgentInvocationProtocol {
+  return meta.invocation?.protocol ?? 'AGENTCORE_RUNTIME';
 }
 
 export interface ToolCustomMetadata {
@@ -865,6 +951,8 @@ export class RegistryService {
     appId: undefined,
     manifest: undefined,
     orgId: undefined,
+    invocation: undefined,
+    origin: undefined,
   };
 
   private static readonly TOOL_METADATA_DEFAULTS: ToolCustomMetadata = {
