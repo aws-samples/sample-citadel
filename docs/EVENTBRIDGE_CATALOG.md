@@ -300,6 +300,77 @@ Each invocation also emits exactly one `CitadelGovernance/OffFrontierEscalations
 
 `governance.adr.reopen.attempted` and `governance.specification.rejected` follow the **audit-before-auth** ordering (QT3-3). The EventBridge emission happens regardless of auth outcome. The `detail.authResult` field carries `"ALLOWED"` or `"DENIED"` so auditors can reconstruct rejected attempts.
 
+## Agent Import Events (source: `citadel.backend`)
+
+Best-effort lifecycle events emitted by `backend/src/lambda/agent-import-resolver.ts` via the shared `backend/src/utils/events.ts` `publishEvent` helper. Emission is **best-effort**: a publish failure is logged and swallowed and NEVER fails (or alters the result of) the underlying `importAgent` mutation or the `discoverAgents` / `describeAgentCandidate` queries. Every event carries a `correlationId` (UUID, generated per call — no request id is exposed on the AppSync event) and an ISO 8601 `timestamp`. The import-specific fields live under `detail.payload`, consistent with the Backend Events envelope above (`projectId` is unused and emitted as `""`).
+
+### Event Types
+
+| DetailType | Producer | Consumer | Description |
+|------------|----------|----------|-------------|
+| `agent.import.discovered` | agent-import-resolver.discoverAgents | SIEM / audit, telemetry | Exactly one summary event per discovery call (SCAN / PASTE / MANIFEST) |
+| `agent.import.registered` | agent-import-resolver.importAgent | SIEM / audit, telemetry | An external agent was registered into the Registry on a CREATE, REPLACE, or COPY. NOT emitted on a no-op link or an unresolved conflict |
+| `agent.import.failed` | agent-import-resolver (import / discover / describe catch) | SIEM / audit | An import / discover / describe operation threw; emitted before the original error is rethrown |
+
+### Event Schemas
+
+#### agent.import.discovered
+
+```json
+{
+  "source": "citadel.backend",
+  "detail-type": "agent.import.discovered",
+  "detail": {
+    "projectId": "",
+    "payload": {
+      "source": "string (SCAN | PASTE | MANIFEST | null)",
+      "candidateCount": "number",
+      "substrates": "string[] (unique substrates in the result)"
+    },
+    "correlationId": "string (UUID, required)",
+    "timestamp": "ISO 8601 (required)"
+  }
+}
+```
+
+#### agent.import.registered
+
+```json
+{
+  "source": "citadel.backend",
+  "detail-type": "agent.import.registered",
+  "detail": {
+    "projectId": "",
+    "payload": {
+      "agentId": "string (Registry recordId)",
+      "sourceArn": "string | null",
+      "substrate": "string | null",
+      "orgId": "string (derived from the caller identity, never the input)"
+    },
+    "correlationId": "string (UUID, required)",
+    "timestamp": "ISO 8601 (required)"
+  }
+}
+```
+
+#### agent.import.failed
+
+```json
+{
+  "source": "citadel.backend",
+  "detail-type": "agent.import.failed",
+  "detail": {
+    "projectId": "",
+    "payload": {
+      "operation": "import | discover | describe",
+      "message": "string (original error message)"
+    },
+    "correlationId": "string (UUID, required)",
+    "timestamp": "ISO 8601 (required)"
+  }
+}
+```
+
 ## Execution Control Events
 
 These events control workflow execution lifecycle. They are published by the Execution Resolver and consumed by the Step Runner.

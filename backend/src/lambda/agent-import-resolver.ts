@@ -25,6 +25,9 @@
  */
 import { getRegistryService, validateImportDescriptor } from './agent-config-resolver';
 import { extractOrgFromEvent, isAdminFromEvent, hasRoleFromEvent } from '../utils/auth-event';
+import { v4 as uuidv4 } from 'uuid';
+import { publishEvent, EventTypes } from '../utils/events';
+import type { AgentEvent } from '../types';
 import {
   resolveSourceRef,
   tagScanDiscover,
@@ -123,6 +126,47 @@ function asStringArray(value: unknown): string[] | undefined {
 
 function isConflictResolution(value: unknown): value is ImportConflictResolution {
   return value === 'link' || value === 'replace' || value === 'copy';
+}
+
+// --- Best-effort import lifecycle event emission ---------------------------
+
+/**
+ * Emits an import lifecycle event (`agent.import.{registered,discovered,failed}`)
+ * through the shared {@link publishEvent} helper (source `citadel.backend`,
+ * bus from `EVENT_BUS_NAME`). BEST-EFFORT by contract: any failure is logged
+ * and swallowed so a telemetry outage can NEVER fail — or alter the result
+ * of — the underlying import mutation/query.
+ *
+ * The fixed `AgentEvent` envelope carries `correlationId` + ISO `timestamp`;
+ * the import-specific fields live in `payload` (consistent with the existing
+ * backend event schema). A `correlationId` is generated here when the caller
+ * does not supply one (no request id is exposed on the AppSync event).
+ */
+async function emitImportEvent(
+  eventType: string,
+  payload: Record<string, unknown>,
+  correlationId: string = uuidv4(),
+): Promise<void> {
+  try {
+    const event: AgentEvent = {
+      eventType,
+      projectId: '',
+      payload,
+      timestamp: new Date().toISOString(),
+      correlationId,
+    };
+    await publishEvent(event);
+  } catch (err) {
+    console.error(
+      `agent-import-resolver: best-effort emit of ${eventType} failed (swallowed):`,
+      err,
+    );
+  }
+}
+
+/** Unique substrates present in a discovery result, for the summary event. */
+function uniqueSubstrates(candidates: FlatAgentCandidate[]): string[] {
+  return [...new Set(candidates.map((c) => c.substrate))];
 }
 
 /**
@@ -269,6 +313,9 @@ export const handler = async (
   event: ImportAgentEvent,
 ): Promise<ImportAgentResult | FlatAgentCandidate[] | string> => {
   const fieldName = event.info?.fieldName;
+  // One correlationId per resolver invocation, shared by the discovery summary
+  // event and the failure event for this call.
+  const correlationId = uuidv4();
   try {
     switch (fieldName) {
       case 'importAgent': {
@@ -279,7 +326,16 @@ export const handler = async (
       case 'discoverAgents': {
         requireAuthenticated(event);
         requireDiscoveryRole(event);
-        return await discoverAgents(event.arguments?.input);
+        const input = event.arguments?.input;
+        const candidates = await discoverAgents(input);
+        // Best-effort discovery summary — exactly one event per discovery call.
+        const source = isRecord(input) ? asNonEmptyString(input.source) ?? null : null;
+        await emitImportEvent(
+          EventTypes.AGENT_IMPORT_DISCOVERED,
+          { source, candidateCount: candidates.length, substrates: uniqueSubstrates(candidates) },
+          correlationId,
+        );
+        return candidates;
       }
       case 'describeAgentCandidate': {
         requireAuthenticated(event);
@@ -295,6 +351,24 @@ export const handler = async (
     }
   } catch (error) {
     console.error('agent-import-resolver error:', error);
+    // Best-effort failure telemetry, emitted BEFORE rethrowing. The original
+    // error is always what propagates to the caller — emission never alters it.
+    const operation =
+      fieldName === 'importAgent'
+        ? 'import'
+        : fieldName === 'discoverAgents'
+          ? 'discover'
+          : fieldName === 'describeAgentCandidate'
+            ? 'describe'
+            : undefined;
+    if (operation) {
+      const message = error instanceof Error ? error.message : String(error);
+      await emitImportEvent(
+        EventTypes.AGENT_IMPORT_FAILED,
+        { operation, message },
+        correlationId,
+      );
+    }
     // Surface discovery errors (unsupported substrate / unparseable ref) as
     // clean GraphQL errors — message only, no internal stack — so the caller
     // gets an actionable message instead of an opaque failure.
@@ -556,6 +630,18 @@ export async function importAgent(
   );
 
   const inputSourceArn = asNonEmptyString((root.origin as Record<string, unknown>).sourceArn);
+  const inputSubstrate = asNonEmptyString((root.origin as Record<string, unknown>).substrate);
+
+  // Best-effort `agent.import.registered` emission for the paths that CREATE,
+  // REPLACE, or COPY a record (never on a no-op link or unresolved conflict).
+  const emitRegistered = (config: AgentConfig): Promise<void> =>
+    emitImportEvent(EventTypes.AGENT_IMPORT_REGISTERED, {
+      agentId: config.agentId,
+      sourceArn: inputSourceArn ?? null,
+      substrate: inputSubstrate ?? null,
+      orgId,
+    });
+
   let match: RegistryRecord | undefined;
   let reason: ImportConflictReason | undefined;
 
@@ -598,7 +684,9 @@ export async function importAgent(
         description: buildConfigDescription(name, manifest, invocation, origin),
         customMetadata,
       });
-      return registryService.mapToAgentConfig(replaced);
+      const config = registryService.mapToAgentConfig(replaced);
+      await emitRegistered(config);
+      return config;
     }
     // copy → create a new record under a non-colliding suffixed name.
     if (onConflict === 'copy') {
@@ -609,7 +697,9 @@ export async function importAgent(
         description: buildConfigDescription(copyName, manifest, invocation, origin),
         customMetadata,
       });
-      return registryService.mapToAgentConfig(copied);
+      const config = registryService.mapToAgentConfig(copied);
+      await emitRegistered(config);
+      return config;
     }
   }
 
@@ -620,7 +710,9 @@ export async function importAgent(
     description: buildConfigDescription(name, manifest, invocation, origin),
     customMetadata,
   });
-  return registryService.mapToAgentConfig(created);
+  const config = registryService.mapToAgentConfig(created);
+  await emitRegistered(config);
+  return config;
 }
 
 /** Deserializes a record's custom metadata against the agent defaults. */

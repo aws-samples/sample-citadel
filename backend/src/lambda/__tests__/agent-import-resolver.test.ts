@@ -84,6 +84,19 @@ jest.mock('../../adapters/agent-source/registry-factory', () => ({
   buildDefaultAgentSourceRegistry: jest.fn(() => ({ resolve: mockResolveAdapter })),
 }));
 
+// ── Mock the events publish helper (KEEP the real EventTypes constants so the
+//    resolver emits the correct detail-type strings, and the EventBridge client
+//    is never constructed/contacted) ──────────────────────────────────────
+const mockPublishEvent = jest.fn();
+jest.mock('../../utils/events', () => {
+  const actual = jest.requireActual('../../utils/events');
+  return {
+    __esModule: true,
+    ...actual,
+    publishEvent: (...args: unknown[]) => mockPublishEvent(...args),
+  };
+});
+
 import {
   importAgent,
   handler,
@@ -98,6 +111,7 @@ import type {
   FlatAgentCandidate,
 } from '../agent-import-resolver';
 import { UnsupportedSourceError, InvalidSourceRefError } from '../../services/agent-discovery';
+import { EventTypes } from '../../utils/events';
 
 // ── Fixtures ────────────────────────────────────────────────────────────
 const ORG = 'test-org-a';
@@ -899,5 +913,232 @@ describe('handler — describeAgentCandidate authorization', () => {
     await expect(handler(describeEvent())).rejects.toThrow(/admin or architect/i);
     expect(mockResolveSourceRef).not.toHaveBeenCalled();
     expect(mockDescribe).not.toHaveBeenCalled();
+  });
+});
+
+// ── Import lifecycle events (best-effort EventBridge emission) ───────────
+// The resolver additively emits agent.import.{registered,discovered,failed}
+// via the shared events.ts publishEvent helper. Emission is BEST-EFFORT: it
+// is wrapped in try/catch, logged on failure, and must NEVER fail (or alter)
+// the underlying mutation/query. Every event carries a correlationId and an
+// ISO timestamp.
+describe('import lifecycle events', () => {
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  interface CapturedEvent {
+    eventType: string;
+    projectId: string;
+    agentId?: string;
+    payload: Record<string, unknown>;
+    timestamp: string;
+    correlationId?: string;
+  }
+
+  /** All events of a given detail-type passed to the (mocked) publishEvent. */
+  const emitted = (type: string): CapturedEvent[] =>
+    (mockPublishEvent.mock.calls as unknown[][])
+      .map((c) => c[0] as CapturedEvent)
+      .filter((e) => e.eventType === type);
+
+  beforeEach(() => {
+    // Isolate the publish mock from other describes (clearAllMocks only clears
+    // call data, not queued implementations). Default to a successful publish.
+    mockPublishEvent.mockReset();
+    mockPublishEvent.mockResolvedValue(undefined);
+    mockTagScanDiscover.mockReset();
+    mockResolveSourceRef.mockReset();
+    mockResolveAdapter.mockReset();
+    mockResolveAdapter.mockReturnValue({ describe: mockDescribe });
+    mockDescribe.mockReset();
+  });
+
+  describe('agent.import.registered', () => {
+    it('emits exactly once on a create, with payload, correlationId, and ISO timestamp', async () => {
+      mockCreateResource.mockResolvedValue(
+        existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+      );
+
+      await importAgent(validInput(), eventWithOrg);
+
+      const regs = emitted(EventTypes.AGENT_IMPORT_REGISTERED);
+      expect(regs).toHaveLength(1);
+      expect(regs[0].correlationId).toEqual(expect.any(String));
+      expect(regs[0].correlationId).toBeTruthy();
+      expect(regs[0].timestamp).toMatch(ISO);
+      expect(regs[0].payload).toEqual(
+        expect.objectContaining({
+          agentId: 'rec-1',
+          sourceArn: SOURCE_ARN,
+          substrate: 'agentcore_runtime',
+          orgId: ORG,
+        }),
+      );
+    });
+
+    it('emits on a replace (onConflict="replace")', async () => {
+      const existing = existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN });
+      mockListResources.mockResolvedValue([existing]);
+      mockUpdateResource.mockResolvedValue(existing);
+
+      await importAgent(validInput({ onConflict: 'replace' }), eventWithOrg);
+
+      expect(emitted(EventTypes.AGENT_IMPORT_REGISTERED)).toHaveLength(1);
+    });
+
+    it('emits on a copy (onConflict="copy")', async () => {
+      const existing = existingRecord({ recordId: 'rec-existing', name: 'PaymentsAgent', sourceArn: SOURCE_ARN });
+      mockListResources.mockResolvedValue([existing]);
+      mockCreateResource.mockResolvedValue(
+        existingRecord({ recordId: 'rec-copy', name: 'PaymentsAgent (imported copy)', sourceArn: SOURCE_ARN }),
+      );
+
+      await importAgent(validInput({ onConflict: 'copy' }), eventWithOrg);
+
+      expect(emitted(EventTypes.AGENT_IMPORT_REGISTERED)).toHaveLength(1);
+    });
+
+    it('does NOT emit on a no-op link (onConflict="link")', async () => {
+      const existing = existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN });
+      mockListResources.mockResolvedValue([existing]);
+
+      await importAgent(validInput({ onConflict: 'link' }), eventWithOrg);
+
+      expect(emitted(EventTypes.AGENT_IMPORT_REGISTERED)).toHaveLength(0);
+    });
+
+    it('does NOT emit on an unresolved conflict (no onConflict supplied)', async () => {
+      mockListResources.mockResolvedValue([
+        existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN }),
+      ]);
+
+      const result = await importAgent(validInput(), eventWithOrg);
+
+      expect(result).toEqual(expect.objectContaining({ conflict: true }));
+      expect(emitted(EventTypes.AGENT_IMPORT_REGISTERED)).toHaveLength(0);
+    });
+  });
+
+  describe('agent.import.discovered', () => {
+    it('emits once per discovery call with source, candidateCount, substrates, correlationId, timestamp', async () => {
+      mockIsAdminFromEvent.mockReturnValue(true);
+      const scannedArn = 'arn:aws:lambda:us-east-1:111122223333:function:scanned';
+      mockTagScanDiscover.mockResolvedValue([
+        {
+          origin: {
+            sourceArn: scannedArn,
+            substrate: 'lambda',
+            region: 'us-east-1',
+            account: '111122223333',
+            discoveredAt: '2026-06-26T00:00:00.000Z',
+            ownership: 'external',
+          },
+          displayName: 'scanned',
+          reference: scannedArn,
+        },
+      ]);
+
+      await handler({
+        info: { fieldName: 'discoverAgents' },
+        arguments: { input: { source: 'SCAN' } },
+        identity: eventWithOrg.identity,
+      });
+
+      const discs = emitted(EventTypes.AGENT_IMPORT_DISCOVERED);
+      expect(discs).toHaveLength(1);
+      expect(discs[0].payload).toEqual(
+        expect.objectContaining({ source: 'SCAN', candidateCount: 1, substrates: ['lambda'] }),
+      );
+      expect(discs[0].correlationId).toBeTruthy();
+      expect(discs[0].timestamp).toMatch(ISO);
+    });
+  });
+
+  describe('agent.import.failed', () => {
+    it('emits operation="import" and still propagates the original error', async () => {
+      // org cannot be resolved → importAgent throws before any create.
+      mockExtractOrgFromEvent.mockResolvedValue(null);
+
+      await expect(
+        handler({
+          info: { fieldName: 'importAgent' },
+          arguments: { input: validFlatInput() },
+          identity: eventWithOrg.identity,
+        }),
+      ).rejects.toThrow(/organization/i);
+
+      const fails = emitted(EventTypes.AGENT_IMPORT_FAILED);
+      expect(fails).toHaveLength(1);
+      expect(fails[0].payload).toEqual(expect.objectContaining({ operation: 'import' }));
+      expect(fails[0].payload.message).toEqual(expect.any(String));
+      expect(fails[0].correlationId).toBeTruthy();
+      expect(fails[0].timestamp).toMatch(ISO);
+      // A failed import never also reports a registration.
+      expect(emitted(EventTypes.AGENT_IMPORT_REGISTERED)).toHaveLength(0);
+    });
+
+    it('emits operation="discover" and still propagates the original error', async () => {
+      mockIsAdminFromEvent.mockReturnValue(true);
+      mockTagScanDiscover.mockRejectedValue(new Error('scan boom'));
+
+      await expect(
+        handler({
+          info: { fieldName: 'discoverAgents' },
+          arguments: { input: { source: 'SCAN' } },
+          identity: eventWithOrg.identity,
+        }),
+      ).rejects.toThrow('scan boom');
+
+      const fails = emitted(EventTypes.AGENT_IMPORT_FAILED);
+      expect(fails).toHaveLength(1);
+      expect(fails[0].payload).toEqual(expect.objectContaining({ operation: 'discover' }));
+    });
+
+    it('emits operation="describe" and still propagates the original error', async () => {
+      mockIsAdminFromEvent.mockReturnValue(true);
+      const arn = 'arn:aws:lambda:us-east-1:111122223333:function:pay';
+      mockResolveSourceRef.mockReturnValue({ protocol: 'LAMBDA_INVOKE', substrate: 'lambda', target: arn });
+      mockResolveAdapter.mockReturnValue({ describe: mockDescribe });
+      mockDescribe.mockRejectedValue(new Error('describe boom'));
+
+      await expect(
+        handler({
+          info: { fieldName: 'describeAgentCandidate' },
+          arguments: { ref: arn },
+          identity: eventWithOrg.identity,
+        }),
+      ).rejects.toThrow('describe boom');
+
+      const fails = emitted(EventTypes.AGENT_IMPORT_FAILED);
+      expect(fails).toHaveLength(1);
+      expect(fails[0].payload).toEqual(expect.objectContaining({ operation: 'describe' }));
+    });
+  });
+
+  describe('best-effort emission', () => {
+    it('a publish failure does NOT fail importAgent — the created record is still returned', async () => {
+      mockCreateResource.mockResolvedValue(
+        existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+      );
+      mockPublishEvent.mockRejectedValue(new Error('eventbridge down'));
+
+      const result = await importAgent(validInput(), eventWithOrg);
+
+      expect(result).toEqual(expect.objectContaining({ agentId: 'rec-1' }));
+      expect(mockPublishEvent).toHaveBeenCalled(); // emission was attempted
+    });
+
+    it('a publish failure does NOT fail discoverAgents — candidates are still returned', async () => {
+      mockIsAdminFromEvent.mockReturnValue(true);
+      mockTagScanDiscover.mockResolvedValue([]);
+      mockPublishEvent.mockRejectedValue(new Error('eventbridge down'));
+
+      const res = await handler({
+        info: { fieldName: 'discoverAgents' },
+        arguments: { input: { source: 'SCAN' } },
+        identity: eventWithOrg.identity,
+      });
+
+      expect(res).toEqual([]);
+    });
   });
 });

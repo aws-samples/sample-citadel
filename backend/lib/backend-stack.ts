@@ -730,11 +730,18 @@ export class BackendStack extends cdk.Stack {
           AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
           REGISTRY_ENABLED: 'true',
           REGISTRY_ID: registryId,
+          // Best-effort agent.import.{discovered,registered,failed} emission via
+          // backend/src/utils/events.ts (source citadel.backend). Scoped grant below.
+          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'AgentImportResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
       }
     );
+
+    // Least-privilege: events:PutEvents scoped to the shared agent event bus
+    // ARN, mirroring the other emitting resolvers.
+    this.agentEventBus.grantPutEventsTo(agentImportResolverFunction);
 
     // Agent Code Resolver - for reading/writing agent code from S3
     const agentCodeResolverFunction = new lambda.Function(
