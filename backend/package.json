@@ -48,6 +48,7 @@
     "@aws-sdk/client-opensearchserverless": "^3.1007.0",
     "@aws-sdk/client-rds": "^3.1007.0",
     "@aws-sdk/client-redshift": "^3.1007.0",
+    "@aws-sdk/client-resource-groups-tagging-api": "3.1071.0",
     "@aws-sdk/client-s3": "^3.1070.0",
     "@aws-sdk/client-s3tables": "^3.1007.0",
     "@aws-sdk/client-sagemaker": "^3.1007.0",
