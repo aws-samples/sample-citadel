@@ -19,6 +19,7 @@ import {
   InvokeAgentRuntimeCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 import { IdempotencyGuard } from "../utils/idempotency";
+import { sanitizeUntrustedAgentOutput } from "../utils/sanitize-agent-output";
 import { RegistryService } from "../services/registry-service";
 import type {
   AgentCustomMetadata,
@@ -554,6 +555,27 @@ async function dispatchImportedInvocation(
 
   const response = await adapter.invoke(req, descriptor);
 
+  // ── Untrusted-output boundary ───────────────────────────────────────────
+  // A FOREIGN (imported) agent's response re-enters Citadel orchestration
+  // here, so it is untrusted data. Neutralize prompt-injection / instruction-
+  // like content BEFORE it is stored or published downstream. The trusted
+  // legacy AgentCore path (below) is intentionally NOT sanitized.
+  const { sanitized, modified, matches } = sanitizeUntrustedAgentOutput(
+    response.output
+  );
+  if (modified) {
+    // Log the matched pattern IDS only — never the raw (untrusted) payload.
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        msg: "import-dispatch: sanitized untrusted imported-agent output before store/publish",
+        agentId,
+        protocol: invocation.protocol,
+        matches,
+      })
+    );
+  }
+
   console.log(
     `Imported agent ${agentId} responded via ${invocation.protocol} adapter`
   );
@@ -561,7 +583,7 @@ async function dispatchImportedInvocation(
   const responseRecord = await storeAgentResponse(
     projectId,
     agentId,
-    response.output,
+    sanitized,
     messageId,
     metadata
   );
