@@ -11,7 +11,7 @@ import {
   CognitoIdentityProviderClient,
   AdminGetUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { extractOrgFromEvent, isAdminFromEvent } from '../auth-event';
+import { extractOrgFromEvent, isAdminFromEvent, hasRoleFromEvent } from '../auth-event';
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
 
@@ -199,6 +199,52 @@ describe('auth-event', () => {
         identity: { 'custom:role': 'admin', 'cognito:groups': [] },
       };
       expect(isAdminFromEvent(event)).toBe(true);
+    });
+  });
+
+  describe('hasRoleFromEvent', () => {
+    test('returns true when identity["custom:role"] equals the requested role', () => {
+      const event = { identity: { 'custom:role': 'architect' } };
+      expect(hasRoleFromEvent(event, 'architect')).toBe(true);
+    });
+
+    test('returns true when identity.claims["custom:role"] equals the requested role', () => {
+      const event = { identity: { claims: { 'custom:role': 'architect' } } };
+      expect(hasRoleFromEvent(event, 'architect')).toBe(true);
+    });
+
+    test('returns false when custom:role is a different role', () => {
+      const event = { identity: { 'custom:role': 'developer' } };
+      expect(hasRoleFromEvent(event, 'architect')).toBe(false);
+    });
+
+    test('returns true when cognito:groups array contains the requested role', () => {
+      const event = { identity: { 'cognito:groups': ['architect', 'user'] } };
+      expect(hasRoleFromEvent(event, 'architect')).toBe(true);
+    });
+
+    test('returns true when cognito:groups is a comma-separated string containing the role', () => {
+      const event = { identity: { 'cognito:groups': 'user,architect' } };
+      expect(hasRoleFromEvent(event, 'architect')).toBe(true);
+    });
+
+    test('honours cognito:groups at identity.claims["cognito:groups"] (proxy/IAM mode)', () => {
+      const event = { identity: { claims: { 'cognito:groups': ['architect'] } } };
+      expect(hasRoleFromEvent(event, 'architect')).toBe(true);
+    });
+
+    test('returns false when neither custom:role nor cognito:groups include the role', () => {
+      const event = { identity: { 'cognito:groups': ['user', 'developer'] } };
+      expect(hasRoleFromEvent(event, 'architect')).toBe(false);
+    });
+
+    test('returns false when event has no identity', () => {
+      expect(hasRoleFromEvent({}, 'architect')).toBe(false);
+    });
+
+    test('does not treat an admin caller as holding other roles', () => {
+      const event = { identity: { 'custom:role': 'admin' } };
+      expect(hasRoleFromEvent(event, 'architect')).toBe(false);
     });
   });
 });

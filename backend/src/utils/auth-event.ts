@@ -76,3 +76,38 @@ export function isAdminFromEvent(event: any): boolean {
 
   return false;
 }
+
+/**
+ * True when the caller holds the given (non-admin) role. Mirrors
+ * {@link isAdminFromEvent}'s claim-reading so role checks stay consistent
+ * across AppSync auth modes:
+ *  1. JWT claim `custom:role === <role>`.
+ *  2. Cognito group membership `<role>` via the `cognito:groups` claim.
+ *
+ * As with {@link isAdminFromEvent}, the `cognito:groups` claim is tolerated
+ * both as a JS array and as a comma-separated string, and both the direct
+ * (`identity[...]`) and nested (`identity.claims[...]`) shapes are honoured.
+ *
+ * This intentionally does NOT treat 'admin' as a super-role. Callers wanting
+ * "admin OR <role>" semantics should compose
+ * `isAdminFromEvent(event) || hasRoleFromEvent(event, role)`.
+ */
+export function hasRoleFromEvent(event: any, role: string): boolean {
+  // Path 1: explicit custom:role claim equals the requested role.
+  if (readClaim(event, 'custom:role') === role) return true;
+
+  // Path 2: cognito:groups membership includes the requested role. Tolerate
+  // both the array and comma-separated-string shapes (see isAdminFromEvent).
+  const groups = readClaim(event, 'cognito:groups');
+  if (Array.isArray(groups)) {
+    return groups.some((g) => typeof g === 'string' && g === role);
+  }
+  if (typeof groups === 'string') {
+    return groups
+      .split(',')
+      .map((s) => s.trim())
+      .includes(role);
+  }
+
+  return false;
+}

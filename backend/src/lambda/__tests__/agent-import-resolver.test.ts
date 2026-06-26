@@ -53,9 +53,11 @@ jest.mock('../../services/registry-service', () => ({
 // ── Mock auth-event ─────────────────────────────────────────────────────
 const mockExtractOrgFromEvent = jest.fn();
 const mockIsAdminFromEvent = jest.fn(() => false);
+const mockHasRoleFromEvent = jest.fn(() => false);
 jest.mock('../../utils/auth-event', () => ({
   extractOrgFromEvent: (...args: unknown[]) => mockExtractOrgFromEvent(...args),
   isAdminFromEvent: (...args: unknown[]) => mockIsAdminFromEvent(...args),
+  hasRoleFromEvent: (...args: unknown[]) => mockHasRoleFromEvent(...args),
 }));
 
 // ── Mock agent-discovery (functions only; KEEP the real typed errors so the
@@ -175,6 +177,10 @@ beforeEach(() => {
   _resetRegistryService();
   jest.clearAllMocks();
   mockExtractOrgFromEvent.mockResolvedValue(ORG);
+  // Discovery authz: deny by default each test (clearAllMocks preserves a
+  // prior test's mockReturnValue, so re-establish the safe default here).
+  mockIsAdminFromEvent.mockReturnValue(false);
+  mockHasRoleFromEvent.mockReturnValue(false);
   mockListResources.mockResolvedValue([]);
   mockCreateResource.mockImplementation(async (_type: string, id: string) =>
     existingRecord({ recordId: 'rec-new', name: id, sourceArn: SOURCE_ARN }),
@@ -557,6 +563,9 @@ describe('handler — discoverAgents', () => {
     mockResolveAdapter.mockReset();
     mockResolveAdapter.mockReturnValue({ describe: mockDescribe });
     mockDescribe.mockReset();
+    // These tests exercise discovery LOGIC, so run as an authorized (admin)
+    // caller. The role gate itself is covered in the authorization describe.
+    mockIsAdminFromEvent.mockReturnValue(true);
   });
 
   it('SCAN maps internal (origin-nested) candidates to the flat GraphQL shape', async () => {
@@ -724,6 +733,9 @@ describe('handler — describeAgentCandidate', () => {
     mockResolveAdapter.mockReset();
     mockResolveAdapter.mockReturnValue({ describe: mockDescribe });
     mockDescribe.mockReset();
+    // Logic tests run as an authorized (admin) caller; the role gate is
+    // covered in the dedicated authorization describe.
+    mockIsAdminFromEvent.mockReturnValue(true);
   });
 
   it('resolves the ref, dispatches to the protocol adapter, and returns the descriptor as a JSON string', async () => {
@@ -795,5 +807,97 @@ describe('handler — describeAgentCandidate', () => {
       handler({ info: { fieldName: 'describeAgentCandidate' }, arguments: { ref: arn } }),
     ).rejects.toThrow(/authenticated/i);
     expect(mockResolveSourceRef).not.toHaveBeenCalled();
+  });
+});
+
+// ── handler — discovery authorization gate (admin | architect only) ──────
+// discoverAgents/describeAgentCandidate enumerate/inspect the customer's AWS
+// account, so authentication alone is insufficient: only admin or architect
+// may run them. importAgent is intentionally NOT gated by this check.
+describe('handler — discoverAgents authorization', () => {
+  const scanEvent = () => ({
+    info: { fieldName: 'discoverAgents' },
+    arguments: { input: { source: 'SCAN' } },
+    identity: eventWithOrg.identity,
+  });
+
+  beforeEach(() => {
+    mockTagScanDiscover.mockReset();
+    // Let an authorized caller fall through to (mocked) discovery logic.
+    mockTagScanDiscover.mockResolvedValue([]);
+  });
+
+  it('allows a caller with role admin (reaches discovery logic)', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockHasRoleFromEvent.mockReturnValue(false);
+
+    await expect(handler(scanEvent())).resolves.toEqual([]);
+    expect(mockTagScanDiscover).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a caller with role architect (reaches discovery logic)', async () => {
+    mockIsAdminFromEvent.mockReturnValue(false);
+    mockHasRoleFromEvent.mockReturnValue(true);
+
+    await expect(handler(scanEvent())).resolves.toEqual([]);
+    expect(mockTagScanDiscover).toHaveBeenCalledTimes(1);
+    // The gate must check specifically for the architect role.
+    expect(mockHasRoleFromEvent).toHaveBeenCalledWith(expect.anything(), 'architect');
+  });
+
+  it('denies a caller with role developer (authenticated but neither admin nor architect)', async () => {
+    mockIsAdminFromEvent.mockReturnValue(false);
+    mockHasRoleFromEvent.mockReturnValue(false);
+
+    await expect(handler(scanEvent())).rejects.toThrow(/admin or architect/i);
+    expect(mockTagScanDiscover).not.toHaveBeenCalled();
+  });
+});
+
+describe('handler — describeAgentCandidate authorization', () => {
+  const arn = 'arn:aws:lambda:us-east-1:111122223333:function:pay';
+  const describeEvent = () => ({
+    info: { fieldName: 'describeAgentCandidate' },
+    arguments: { ref: arn },
+    identity: eventWithOrg.identity,
+  });
+
+  beforeEach(() => {
+    mockResolveSourceRef.mockReset();
+    mockResolveSourceRef.mockReturnValue({
+      protocol: 'LAMBDA_INVOKE',
+      substrate: 'lambda',
+      target: arn,
+    });
+    mockResolveAdapter.mockReset();
+    mockResolveAdapter.mockReturnValue({ describe: mockDescribe });
+    mockDescribe.mockReset();
+    mockDescribe.mockResolvedValue({ name: 'pay' });
+  });
+
+  it('allows a caller with role admin (reaches the protocol adapter)', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockHasRoleFromEvent.mockReturnValue(false);
+
+    await expect(handler(describeEvent())).resolves.toBe(JSON.stringify({ name: 'pay' }));
+    expect(mockDescribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a caller with role architect (reaches the protocol adapter)', async () => {
+    mockIsAdminFromEvent.mockReturnValue(false);
+    mockHasRoleFromEvent.mockReturnValue(true);
+
+    await expect(handler(describeEvent())).resolves.toBe(JSON.stringify({ name: 'pay' }));
+    expect(mockDescribe).toHaveBeenCalledTimes(1);
+    expect(mockHasRoleFromEvent).toHaveBeenCalledWith(expect.anything(), 'architect');
+  });
+
+  it('denies a caller with role developer (authenticated but neither admin nor architect)', async () => {
+    mockIsAdminFromEvent.mockReturnValue(false);
+    mockHasRoleFromEvent.mockReturnValue(false);
+
+    await expect(handler(describeEvent())).rejects.toThrow(/admin or architect/i);
+    expect(mockResolveSourceRef).not.toHaveBeenCalled();
+    expect(mockDescribe).not.toHaveBeenCalled();
   });
 });

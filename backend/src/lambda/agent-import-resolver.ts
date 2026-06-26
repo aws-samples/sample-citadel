@@ -24,7 +24,7 @@
  * so import and create stay in lock-step.
  */
 import { getRegistryService, validateImportDescriptor } from './agent-config-resolver';
-import { extractOrgFromEvent } from '../utils/auth-event';
+import { extractOrgFromEvent, isAdminFromEvent, hasRoleFromEvent } from '../utils/auth-event';
 import {
   resolveSourceRef,
   tagScanDiscover,
@@ -259,9 +259,11 @@ export function toImportAgentResult(
  *   - `discoverAgents` (Query)         → flat {@link FlatAgentCandidate}[]
  *   - `describeAgentCandidate` (Query) → AWSJSON string (serialized descriptor)
  *
- * The two discovery queries are account-level enumeration: they require an
- * authenticated caller but are NEVER org-filtered. `UnsupportedSourceError` /
- * `InvalidSourceRefError` are surfaced as clean GraphQL errors (message only).
+ * The two discovery queries are account-level enumeration: they require a
+ * caller holding the `admin` or `architect` role (they enumerate/inspect the
+ * customer's AWS account, so authentication alone is insufficient) and are
+ * NEVER org-filtered. `UnsupportedSourceError` / `InvalidSourceRefError` are
+ * surfaced as clean GraphQL errors (message only).
  */
 export const handler = async (
   event: ImportAgentEvent,
@@ -276,10 +278,12 @@ export const handler = async (
       }
       case 'discoverAgents': {
         requireAuthenticated(event);
+        requireDiscoveryRole(event);
         return await discoverAgents(event.arguments?.input);
       }
       case 'describeAgentCandidate': {
         requireAuthenticated(event);
+        requireDiscoveryRole(event);
         const ref = asNonEmptyString(event.arguments?.ref);
         if (!ref) {
           throw new InvalidSourceRefError('describeAgentCandidate: ref is required');
@@ -333,6 +337,24 @@ function requireAuthenticated(event: ImportAgentEvent): void {
   if (!identity || typeof identity !== 'object' || Object.keys(identity).length === 0) {
     throw new Error('Unauthenticated: discovery queries require an authenticated caller');
   }
+}
+
+/**
+ * Authorization gate for the discovery queries (`discoverAgents`,
+ * `describeAgentCandidate`). These enumerate/inspect the customer's AWS
+ * ACCOUNT infrastructure, so authentication alone is insufficient — only the
+ * `admin` or `architect` roles may run them. Admin is recognised via
+ * {@link isAdminFromEvent} (custom:role or cognito:groups); architect via
+ * {@link hasRoleFromEvent}. Throws an authorization error otherwise.
+ *
+ * `importAgent` is intentionally NOT gated by this check — it keeps its
+ * existing org-scoped flow (tenant derived from the caller's identity).
+ */
+function requireDiscoveryRole(event: ImportAgentEvent): void {
+  if (isAdminFromEvent(event) || hasRoleFromEvent(event, 'architect')) {
+    return;
+  }
+  throw new Error('Unauthorized: discovery queries require the admin or architect role');
 }
 
 /** Maps an internal (origin-nested) {@link AgentCandidate} to the flat GraphQL shape. */
