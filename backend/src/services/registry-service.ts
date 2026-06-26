@@ -156,6 +156,13 @@ export interface AgentCustomMetadata {
     enforcementMode: string;
     authorityRequested: boolean;
     requestedAt: string;
+    /**
+     * Id of the system-generated Architecture Decision Record recorded when the
+     * agent was imported (US-IMP ADR-on-import). Additive and best-effort:
+     * absent when the import ADR write failed, and on every record that predates
+     * ADR-on-import.
+     */
+    adrId?: string;
   };
 }
 

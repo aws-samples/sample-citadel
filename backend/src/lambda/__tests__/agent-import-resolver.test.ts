@@ -113,6 +113,15 @@ jest.mock('../../utils/governance-flag', () => ({
   getGovernanceEnforce: (...args: unknown[]) => mockGetGovernanceEnforce(...args),
 }));
 
+// ── Mock the ADR resolver's createADR (the reusable "ADR write fn"; writes to
+//    DynamoDB, never AWS). The import path records a system-generated ADR keyed
+//    to the synthetic GLOBAL import project. ─────────────────────────────────
+const mockCreateADR = jest.fn();
+jest.mock('../adr-resolver', () => ({
+  __esModule: true,
+  createADR: (...args: unknown[]) => mockCreateADR(...args),
+}));
+
 import {
   importAgent,
   handler,
@@ -120,6 +129,7 @@ import {
   buildImportDescriptor,
   toImportAgentResult,
   _resetRegistryService,
+  SYNTHETIC_IMPORT_PROJECT_ID,
 } from '../agent-import-resolver';
 import type {
   ImportConflictResult,
@@ -222,6 +232,8 @@ beforeEach(() => {
   // rollout flag has a deterministic default; individual tests override.
   mockGrantFabricatorAuthority.mockResolvedValue(undefined);
   mockGetGovernanceEnforce.mockResolvedValue('permissive');
+  // ADR-on-import: the reusable ADR write resolves to a stable adrId by default.
+  mockCreateADR.mockResolvedValue({ adrId: 'adr-import-1' });
 });
 
 // ── importAgent: create (no conflict) ───────────────────────────────────
@@ -501,6 +513,142 @@ describe('importAgent — governance attestation', () => {
     expect(result).toEqual(expect.objectContaining({ conflict: true }));
     expect(mockGrantFabricatorAuthority).not.toHaveBeenCalled();
     expect(mockSerializeCustomMetadata).not.toHaveBeenCalled();
+  });
+});
+
+// ── importAgent: ADR-on-import (system-generated Architecture Decision Record)
+// On a record-creating import (create / replace / copy) the resolver records a
+// system-generated ADR keyed to the synthetic GLOBAL import project, then stamps
+// the resulting adrId into governanceAttestation.adrId. The ADR write is the
+// reusable createADR, invoked with a SYSTEM principal — the import path is itself
+// the authorized governance trigger, so it must NOT require the importing caller
+// to hold adr:create (architect/admin). BEST-EFFORT: a failed ADR write is logged
+// and swallowed and NEVER fails the import. A no-op link or unresolved conflict
+// records NO ADR.
+describe('importAgent — ADR-on-import', () => {
+  it('records exactly one system ADR keyed to the synthetic import project, titled for the agent, on create', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput(), eventWithOrg);
+
+    expect(mockCreateADR).toHaveBeenCalledTimes(1);
+    const adrInput = mockCreateADR.mock.calls[0][0];
+    expect(adrInput).toEqual(
+      expect.objectContaining({
+        projectId: SYNTHETIC_IMPORT_PROJECT_ID,
+        title: expect.stringContaining('PaymentsAgent'),
+      }),
+    );
+    // createADR validates these as arrays / non-empty strings — supply them.
+    expect(Array.isArray(adrInput.constraints)).toBe(true);
+    expect(Array.isArray(adrInput.alternativesConsidered)).toBe(true);
+    expect(Array.isArray(adrInput.revisitConditions)).toBe(true);
+    expect(Array.isArray(adrInput.sourceRoundIds)).toBe(true);
+    expect(typeof adrInput.decision).toBe('string');
+    expect(adrInput.decision.length).toBeGreaterThan(0);
+    expect(typeof adrInput.reasoning).toBe('string');
+    expect(adrInput.reasoning.length).toBeGreaterThan(0);
+  });
+
+  it('invokes createADR with a SYSTEM principal — not the importing caller (no architect/admin required)', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    // eventWithOrg's identity is a plain authenticated user (sub 'user-1', no
+    // role) with NO adr:create permission. The ADR is still recorded because the
+    // import path — not the caller's role — is the authorized trigger.
+    await importAgent(validInput(), eventWithOrg);
+
+    expect(mockCreateADR).toHaveBeenCalledTimes(1);
+    const authCtx = mockCreateADR.mock.calls[0][1] as { userId: string; roles?: string[] };
+    expect(authCtx.userId).not.toBe('user-1');
+    expect(authCtx.userId).toMatch(/^system:/);
+    // The system principal is itself authorized for adr:create (admin satisfies it).
+    expect(authCtx.roles).toEqual(expect.arrayContaining(['admin']));
+  });
+
+  it('stamps the created adrId onto governanceAttestation.adrId (single metadata write)', async () => {
+    mockCreateADR.mockResolvedValue({ adrId: 'adr-xyz' });
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput(), eventWithOrg);
+
+    expect(mockSerializeCustomMetadata).toHaveBeenCalledWith(
+      expect.objectContaining({
+        governanceAttestation: expect.objectContaining({ adrId: 'adr-xyz', status: 'pending' }),
+      }),
+    );
+  });
+
+  it('still succeeds and stamps NO adrId when the ADR write throws (best-effort, logged)', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+    mockCreateADR.mockRejectedValue(new Error('adrs table down'));
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await importAgent(validInput(), eventWithOrg);
+
+    expect(result).toEqual(expect.objectContaining({ agentId: 'rec-1' }));
+    expect(errSpy).toHaveBeenCalled();
+    // The record is still created exactly once and carries a pending attestation,
+    // just without an adrId.
+    expect(mockCreateResource).toHaveBeenCalledTimes(1);
+    const meta = mockSerializeCustomMetadata.mock.calls[0][0] as {
+      governanceAttestation: { adrId?: string; status: string };
+    };
+    expect(meta.governanceAttestation.status).toBe('pending');
+    expect(meta.governanceAttestation.adrId).toBeUndefined();
+    errSpy.mockRestore();
+  });
+
+  it('records the ADR on replace WITHOUT adding a second updateResource (preserves replace count)', async () => {
+    const existing = existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN });
+    mockListResources.mockResolvedValue([existing]);
+    mockUpdateResource.mockResolvedValue(existing);
+
+    await importAgent(validInput({ onConflict: 'replace' }), eventWithOrg);
+
+    expect(mockCreateADR).toHaveBeenCalledTimes(1);
+    expect(mockUpdateResource).toHaveBeenCalledTimes(1);
+    expect(mockCreateResource).not.toHaveBeenCalled();
+  });
+
+  it('records the ADR on copy', async () => {
+    const existing = existingRecord({ recordId: 'rec-existing', name: 'PaymentsAgent', sourceArn: SOURCE_ARN });
+    mockListResources.mockResolvedValue([existing]);
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-copy', name: 'PaymentsAgent (imported copy)', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput({ onConflict: 'copy' }), eventWithOrg);
+
+    expect(mockCreateADR).toHaveBeenCalledTimes(1);
+  });
+
+  it('records NO ADR on a no-op link', async () => {
+    const existing = existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN });
+    mockListResources.mockResolvedValue([existing]);
+
+    await importAgent(validInput({ onConflict: 'link' }), eventWithOrg);
+
+    expect(mockCreateADR).not.toHaveBeenCalled();
+  });
+
+  it('records NO ADR on an unresolved conflict', async () => {
+    mockListResources.mockResolvedValue([
+      existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN }),
+    ]);
+
+    const result = await importAgent(validInput(), eventWithOrg);
+
+    expect(result).toEqual(expect.objectContaining({ conflict: true }));
+    expect(mockCreateADR).not.toHaveBeenCalled();
   });
 });
 

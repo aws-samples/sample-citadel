@@ -3616,6 +3616,17 @@ export class BackendStack extends cdk.Stack {
     this.adrsTable.grantReadData(projectResolverFunction);
     this.executionSpecificationsTable.grantReadData(projectResolverFunction);
     this.agentDesignAssessmentsTable.grantReadData(projectResolverFunction);
+
+    // ADR-on-import (US-IMP): the agent import resolver records a
+    // system-generated ADR keyed to the synthetic GLOBAL import project. Write-
+    // only grant — it creates ADRs (createADR → PutItem) and never reads them.
+    // Deferred to here, mirroring projectResolverFunction's ADRS_TABLE wiring,
+    // because adrsTable is instantiated later in the constructor than the
+    // function. Same-stack reference (ADRsTable lives in this BackendStack); the
+    // resulting GSI /index/* wildcard is covered by the stack-level
+    // AwsSolutions-IAM5 suppression in bin/app.ts.
+    agentImportResolverFunction.addEnvironment('ADRS_TABLE', this.adrsTable.tableName);
+    this.adrsTable.grantWriteData(agentImportResolverFunction);
   }
 
   /**

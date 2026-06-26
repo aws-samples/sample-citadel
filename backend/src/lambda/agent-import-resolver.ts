@@ -24,12 +24,13 @@
  * so import and create stay in lock-step.
  */
 import { getRegistryService, validateImportDescriptor } from './agent-config-resolver';
+import { createADR } from './adr-resolver';
 import { extractOrgFromEvent, isAdminFromEvent, hasRoleFromEvent } from '../utils/auth-event';
 import { v4 as uuidv4 } from 'uuid';
 import { publishEvent, EventTypes } from '../utils/events';
 import { grantFabricatorAuthority } from './registry-agent-authority-lifecycle';
 import { getGovernanceEnforce } from '../utils/governance-flag';
-import type { AgentEvent } from '../types';
+import type { AgentEvent, AuthContext } from '../types';
 import {
   resolveSourceRef,
   tagScanDiscover,
@@ -89,6 +90,34 @@ const AGENT_METADATA_DEFAULTS: AgentCustomMetadata = {
   categories: [],
   icon: '',
   state: 'inactive',
+};
+
+/**
+ * Synthetic GLOBAL project that every import-triggered Architecture Decision
+ * Record is keyed to. An agent import is an account/org-level governance event
+ * with no owning Citadel project, so its ADRs need a stable, well-known
+ * `projectId`. createADR stores `projectId` as a plain attribute (no
+ * foreign-key / existence check), so a synthetic constant is safe; it is kept
+ * human-readable rather than a UUID because createADR does not validate
+ * `projectId` as a UUID.
+ */
+export const SYNTHETIC_IMPORT_PROJECT_ID = 'citadel-imports-global';
+
+/**
+ * System principal under which import-triggered ADRs are written. The import
+ * path is ITSELF the authorized governance trigger: the ADR is system-generated,
+ * not a user `adr:create` action, so recording it must NOT require the importing
+ * caller to hold the architect/admin role. createADR enforces `adr:create` and
+ * performs its DynamoDB write inline (there is no lower-level write export to
+ * call instead), so that check is satisfied with this dedicated, clearly
+ * non-human system context rather than the caller's identity. The `system:`
+ * userId becomes the ADR's `createdBy`, yielding a clean audit trail.
+ */
+const SYSTEM_IMPORT_ADR_AUTHOR: AuthContext = {
+  userId: 'system:agent-import',
+  username: 'system:agent-import',
+  groups: [],
+  roles: ['admin'],
 };
 
 /** Imported-agent metadata: standard agent metadata plus the importer identity. */
@@ -671,14 +700,21 @@ export async function importAgent(
   // ENVIRONMENT; the reader fails-open to 'permissive' internally and never
   // throws). Built lazily so attestation is stamped only when a record is
   // actually written.
-  const buildStampedCustomMetadata = async (): Promise<string> => {
+  const buildStampedCustomMetadata = async (adrId?: string): Promise<string> => {
     const enforcementMode = await getGovernanceEnforce(process.env.ENVIRONMENT || 'unknown');
-    const governanceAttestation = {
-      status: 'pending' as const,
+    const governanceAttestation: NonNullable<
+      AgentCustomMetadata['governanceAttestation']
+    > = {
+      status: 'pending',
       enforcementMode,
       authorityRequested: true,
       requestedAt: new Date().toISOString(),
     };
+    // Additive: stamped only once the system-generated import ADR is recorded.
+    // On a best-effort ADR failure adrId is undefined and the field is omitted.
+    if (adrId) {
+      governanceAttestation.adrId = adrId;
+    }
     return registryService.serializeCustomMetadata(
       buildImportedMetadata({
         categories,
@@ -707,6 +743,51 @@ export async function importAgent(
     }
   };
 
+  // Records a system-generated Architecture Decision Record for this import,
+  // keyed to the synthetic GLOBAL import project. Returns the new adrId, or
+  // undefined when the ADR write fails (logged + swallowed — an ADR/governance
+  // outage must NEVER fail the import). Created BEFORE the record write so the
+  // adrId is stamped into the SAME customMetadata write (no follow-up
+  // updateResource); this keeps the replace path a single in-place update and
+  // preserves the existing create/replace/copy write counts. Reuses the ADR
+  // resolver's createADR via SYSTEM_IMPORT_ADR_AUTHOR (see its docblock) so the
+  // write does not require the importing caller to hold adr:create.
+  const createImportAdrBestEffort = async (): Promise<string | undefined> => {
+    try {
+      const adr = await createADR(
+        {
+          projectId: SYNTHETIC_IMPORT_PROJECT_ID,
+          title: `Import external agent: ${name}`,
+          decision:
+            `Registered externally-owned agent "${name}" as a DRAFT/inactive ` +
+            `Registry record (substrate=${inputSubstrate ?? 'unknown'}, ` +
+            `sourceArn=${inputSourceArn ?? 'none'}, orgId=${orgId}). Ownership is ` +
+            `external and the agent is never auto-activated by import.`,
+          reasoning:
+            'System-generated governance record: importing an externally-owned ' +
+            'agent introduces third-party execution surface into the organization, ' +
+            'so it is tracked as an architecture decision for audit and for the ' +
+            'later DRAFT→APPROVED activation review.',
+          constraints: [],
+          alternativesConsidered: [],
+          revisitConditions: [],
+          severity: 'LOW',
+          affectsModules: ['agent-registry'],
+          reviewers: [],
+          sourceRoundIds: [],
+        },
+        SYSTEM_IMPORT_ADR_AUTHOR,
+      );
+      return adr.adrId;
+    } catch (err) {
+      console.error(
+        'agent-import-resolver: best-effort import ADR creation failed (swallowed):',
+        err,
+      );
+      return undefined;
+    }
+  };
+
   if (match && reason) {
     // Conflict detected but no resolution chosen → ask the caller to pick.
     if (!onConflict) {
@@ -723,10 +804,11 @@ export async function importAgent(
     }
     // replace → overwrite the existing record in place (preserve its recordId).
     if (onConflict === 'replace') {
+      const adrId = await createImportAdrBestEffort();
       const replaced = await registryService.updateResource('agent', match.recordId, {
         name,
         description: buildConfigDescription(name, manifest, invocation, origin),
-        customMetadata: await buildStampedCustomMetadata(),
+        customMetadata: await buildStampedCustomMetadata(adrId),
       });
       const config = registryService.mapToAgentConfig(replaced);
       await grantAuthorityBestEffort(replaced.recordId);
@@ -737,10 +819,11 @@ export async function importAgent(
     if (onConflict === 'copy') {
       const taken = new Set(orgRecords.map((r) => r.name));
       const copyName = buildImportCopyName(name, taken);
+      const adrId = await createImportAdrBestEffort();
       const copied = await registryService.createResource('agent', copyName, {
         name: copyName,
         description: buildConfigDescription(copyName, manifest, invocation, origin),
-        customMetadata: await buildStampedCustomMetadata(),
+        customMetadata: await buildStampedCustomMetadata(adrId),
       });
       const config = registryService.mapToAgentConfig(copied);
       await grantAuthorityBestEffort(copied.recordId);
@@ -751,10 +834,11 @@ export async function importAgent(
 
   // 4. No conflict (or no match for a supplied onConflict) → create a fresh
   //    DRAFT/inactive record. Never auto-activate.
+  const adrId = await createImportAdrBestEffort();
   const created = await registryService.createResource('agent', name, {
     name,
     description: buildConfigDescription(name, manifest, invocation, origin),
-    customMetadata: await buildStampedCustomMetadata(),
+    customMetadata: await buildStampedCustomMetadata(adrId),
   });
   const config = registryService.mapToAgentConfig(created);
   await grantAuthorityBestEffort(created.recordId);
