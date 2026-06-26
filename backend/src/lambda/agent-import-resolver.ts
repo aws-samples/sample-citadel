@@ -1,11 +1,11 @@
 /**
  * Agent Import Resolver (US-IMP) — registration with conflict resolution.
  *
- * TODO(agent-import): wire in AppSync + CDK at infra checkpoint
- *
- * This increment is the resolver HANDLER LOGIC only. The AppSync schema +
- * CDK wiring and the companion `discoverAgents` / `describeAgentCandidate`
- * queries are a deliberately deferred follow-up.
+ * In addition to the `importAgent` mutation, this resolver now serves the
+ * account-level discovery queries `discoverAgents` (SCAN / PASTE / MANIFEST)
+ * and `describeAgentCandidate`, dispatched by {@link handler} on the AppSync
+ * field name. Discovery is read-only and NEVER org-filtered (it enumerates the
+ * customer's account); `importAgent` remains org-scoped.
  *
  * `importAgent` registers an externally-owned agent into the Registry as a
  * DRAFT/inactive record. Invariants enforced here:
@@ -25,6 +25,15 @@
  */
 import { getRegistryService, validateImportDescriptor } from './agent-config-resolver';
 import { extractOrgFromEvent } from '../utils/auth-event';
+import {
+  resolveSourceRef,
+  tagScanDiscover,
+  candidateFromManifest,
+  UnsupportedSourceError,
+  InvalidSourceRefError,
+} from '../services/agent-discovery';
+import { buildDefaultAgentSourceRegistry } from '../adapters/agent-source/registry-factory';
+import type { AgentCandidate } from '../adapters/agent-source/types';
 import type {
   AgentConfig,
   AgentCustomMetadata,
@@ -92,7 +101,7 @@ interface ImportEventIdentity {
 
 interface ImportAgentEvent {
   info?: { fieldName?: string };
-  arguments?: { input?: unknown };
+  arguments?: { input?: unknown; ref?: unknown };
   identity?: ImportEventIdentity;
 }
 
@@ -244,15 +253,19 @@ export function toImportAgentResult(
 }
 
 /**
- * AppSync entry point for the `importAgent` mutation. Maps the flat
- * `ImportAgentInput` into the internal descriptor, delegates to
- * {@link importAgent}, and ALWAYS returns the flat {@link ImportAgentResult}
- * shape. The deferred `discoverAgents` / `describeAgentCandidate` queries are
- * not wired yet (see TODO at the top of this file).
+ * AppSync entry point for the agent-import surface. Dispatches on the AppSync
+ * field name:
+ *   - `importAgent` (Mutation)         → flat {@link ImportAgentResult}
+ *   - `discoverAgents` (Query)         → flat {@link FlatAgentCandidate}[]
+ *   - `describeAgentCandidate` (Query) → AWSJSON string (serialized descriptor)
+ *
+ * The two discovery queries are account-level enumeration: they require an
+ * authenticated caller but are NEVER org-filtered. `UnsupportedSourceError` /
+ * `InvalidSourceRefError` are surfaced as clean GraphQL errors (message only).
  */
 export const handler = async (
   event: ImportAgentEvent,
-): Promise<ImportAgentResult> => {
+): Promise<ImportAgentResult | FlatAgentCandidate[] | string> => {
   const fieldName = event.info?.fieldName;
   try {
     switch (fieldName) {
@@ -261,14 +274,202 @@ export const handler = async (
         const result = await importAgent(descriptor, event);
         return toImportAgentResult(result);
       }
+      case 'discoverAgents': {
+        requireAuthenticated(event);
+        return await discoverAgents(event.arguments?.input);
+      }
+      case 'describeAgentCandidate': {
+        requireAuthenticated(event);
+        const ref = asNonEmptyString(event.arguments?.ref);
+        if (!ref) {
+          throw new InvalidSourceRefError('describeAgentCandidate: ref is required');
+        }
+        return await describeAgentCandidate(ref);
+      }
       default:
         throw new Error(`Unknown field: ${String(fieldName)}`);
     }
   } catch (error) {
     console.error('agent-import-resolver error:', error);
+    // Surface discovery errors (unsupported substrate / unparseable ref) as
+    // clean GraphQL errors — message only, no internal stack — so the caller
+    // gets an actionable message instead of an opaque failure.
+    if (error instanceof UnsupportedSourceError || error instanceof InvalidSourceRefError) {
+      throw new Error(error.message);
+    }
     throw error;
   }
 };
+
+// ===========================================================================
+// Discovery queries: discoverAgents + describeAgentCandidate
+// ===========================================================================
+
+/**
+ * Flat GraphQL `AgentCandidate` shape returned by `discoverAgents`. The
+ * internal {@link AgentCandidate} nests provenance under `origin`; AppSync
+ * exposes it flattened, so {@link toFlatCandidate} maps between the two.
+ */
+export interface FlatAgentCandidate {
+  displayName: string;
+  reference: string;
+  substrate: string;
+  sourceArn: string | null;
+  region: string | null;
+  account: string | null;
+  ownership: string;
+  discoveredAt: string;
+}
+
+/**
+ * Guards the discovery queries: they enumerate the customer ACCOUNT (not a
+ * single org), so they require an authenticated caller but are never
+ * org-filtered. AppSync enforces the API auth mode before the resolver runs;
+ * this is a defence-in-depth check that some principal is present, rejecting a
+ * wholly anonymous invocation.
+ */
+function requireAuthenticated(event: ImportAgentEvent): void {
+  const identity = event.identity;
+  if (!identity || typeof identity !== 'object' || Object.keys(identity).length === 0) {
+    throw new Error('Unauthenticated: discovery queries require an authenticated caller');
+  }
+}
+
+/** Maps an internal (origin-nested) {@link AgentCandidate} to the flat GraphQL shape. */
+function toFlatCandidate(candidate: AgentCandidate): FlatAgentCandidate {
+  const { origin } = candidate;
+  return {
+    displayName: candidate.displayName,
+    reference: candidate.reference,
+    substrate: origin.substrate,
+    sourceArn: origin.sourceArn ?? null,
+    region: origin.region ?? null,
+    account: origin.account ?? null,
+    ownership: origin.ownership,
+    discoveredAt: origin.discoveredAt,
+  };
+}
+
+/** Standard ARN field extraction: `arn:partition:service:region:account:…`. */
+function parseArnFields(arn: string): { region?: string; account?: string } {
+  const parts = arn.split(':');
+  if (parts[0] !== 'arn' || parts.length < 6) return {};
+  return { region: parts[3] || undefined, account: parts[4] || undefined };
+}
+
+/**
+ * Human-readable display name derived from a ref: the trailing segment of an
+ * ARN resource or the last URL path segment, falling back to the ref itself.
+ * Mirrors the (private) helper in agent-discovery.ts so SCAN and PASTE produce
+ * consistent display names.
+ */
+function deriveDisplayName(ref: string): string {
+  if (ref.startsWith('arn:')) {
+    const parts = ref.split(':');
+    const resource = parts.length >= 6 ? parts.slice(5).join(':') : ref;
+    const tail = resource.split(/[/:]/).filter((s) => s.length > 0).pop();
+    return tail ?? ref;
+  }
+  try {
+    const url = new URL(ref);
+    const seg = url.pathname.split('/').filter((s) => s.length > 0).pop();
+    return seg ?? url.host ?? ref;
+  } catch {
+    return ref;
+  }
+}
+
+/** Narrows an AWSJSON `manifest` argument (string or object) for candidateFromManifest. */
+function asManifestInput(value: unknown): string | Record<string, unknown> {
+  if (typeof value === 'string' && value.trim() !== '') return value;
+  if (isRecord(value)) return value;
+  throw new InvalidSourceRefError('manifest is required when source is MANIFEST');
+}
+
+/**
+ * `discoverAgents` query: enumerate importable candidates by source.
+ *   - SCAN     → Resource Groups Tagging API scan ({@link tagScanDiscover})
+ *   - PASTE    → resolve a single pasted ARN/URL ref ({@link resolveSourceRef})
+ *   - MANIFEST → validate a pasted manifest ({@link candidateFromManifest})
+ * Returns the FLAT GraphQL candidate shape in every case. Throws
+ * `InvalidSourceRefError` for a missing/unrecognised source or PASTE ref (the
+ * handler surfaces it as a clean GraphQL error).
+ */
+async function discoverAgents(input: unknown): Promise<FlatAgentCandidate[]> {
+  const flat = isRecord(input) ? input : {};
+  const source = asNonEmptyString(flat.source);
+
+  switch (source) {
+    case 'SCAN': {
+      const candidates = await tagScanDiscover({
+        region: asNonEmptyString(flat.region),
+        tagKey: asNonEmptyString(flat.tagKey),
+        tagValue: asNonEmptyString(flat.tagValue),
+      });
+      return candidates.map(toFlatCandidate);
+    }
+    case 'PASTE': {
+      const ref = asNonEmptyString(flat.ref);
+      if (!ref) {
+        throw new InvalidSourceRefError('discoverAgents: ref is required when source is PASTE');
+      }
+      const { substrate } = resolveSourceRef(ref);
+      const isArn = ref.startsWith('arn:');
+      const arnFields = isArn ? parseArnFields(ref) : {};
+      return [
+        {
+          displayName: deriveDisplayName(ref),
+          reference: ref,
+          substrate,
+          sourceArn: isArn ? ref : null,
+          region: arnFields.region ?? null,
+          account: arnFields.account ?? null,
+          ownership: 'external',
+          discoveredAt: new Date().toISOString(),
+        },
+      ];
+    }
+    case 'MANIFEST': {
+      const { candidate } = candidateFromManifest(asManifestInput(flat.manifest));
+      return [toFlatCandidate(candidate)];
+    }
+    default:
+      throw new InvalidSourceRefError(
+        `discoverAgents: unsupported source '${String(flat.source)}' (expected SCAN | PASTE | MANIFEST)`,
+      );
+  }
+}
+
+/**
+ * `describeAgentCandidate` query: resolve a pasted ref to its protocol, build a
+ * minimal candidate, and delegate to the per-protocol adapter's `describe()`.
+ * Returns the capability descriptor serialized as an AWSJSON string. Adapter
+ * signatures are unchanged — a candidate is constructed and passed in.
+ */
+async function describeAgentCandidate(ref: string): Promise<string> {
+  const { protocol, substrate, target } = resolveSourceRef(ref);
+  const isArn = ref.startsWith('arn:');
+  const arnFields = isArn ? parseArnFields(ref) : {};
+
+  const origin: AgentOrigin = {
+    substrate,
+    discoveredAt: new Date().toISOString(),
+    ownership: 'external',
+  };
+  if (isArn) origin.sourceArn = ref;
+  if (arnFields.region) origin.region = arnFields.region;
+  if (arnFields.account) origin.account = arnFields.account;
+
+  const candidate: AgentCandidate = {
+    origin,
+    displayName: deriveDisplayName(ref),
+    reference: target,
+  };
+
+  const adapter = buildDefaultAgentSourceRegistry().resolve(protocol);
+  const descriptor = await adapter.describe(candidate);
+  return JSON.stringify(descriptor);
+}
 
 /**
  * Registers an externally-owned agent into the Registry, resolving collisions

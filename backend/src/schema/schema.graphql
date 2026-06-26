@@ -9,6 +9,11 @@ type Query {
   listAgentConfigs: [AgentConfig]
   getAgentConfig(agentId: String!): AgentConfig
   getAgentCode(agentId: String!): AgentCode
+  # Agent import (US-IMP) — account-level discovery. Same auth as the
+  # neighbouring agent queries (default API auth); results are account-wide
+  # and NOT org-filtered.
+  discoverAgents(input: DiscoverAgentsInput!): [AgentCandidate!]!
+  describeAgentCandidate(ref: String!): AWSJSON!
   listToolConfigs: [ToolConfig]
   getToolConfig(toolId: String!): ToolConfig
   listUsers: [User]
@@ -494,6 +499,40 @@ type ImportAgentResult {
   existingId: ID
   reason: String
   options: [String!]
+}
+
+# Agent import (US-IMP) — discovery. `discoverAgents` enumerates importable
+# agents three ways (account tag scan, a single pasted ref, or a pasted
+# manifest); `describeAgentCandidate` resolves one ref to a capability
+# descriptor returned as AWSJSON.
+enum DiscoverySource {
+  SCAN
+  PASTE
+  MANIFEST
+}
+
+# SCAN uses region/tagKey/tagValue; PASTE uses ref; MANIFEST uses manifest.
+input DiscoverAgentsInput {
+  source: DiscoverySource!
+  region: String
+  tagKey: String
+  tagValue: String
+  ref: String
+  manifest: AWSJSON
+}
+
+# Flat discovered-agent candidate (provenance flattened from the internal
+# origin block). `ownership` is always 'external' — Citadel never owns an
+# imported agent's infrastructure.
+type AgentCandidate {
+  displayName: String!
+  reference: String!
+  substrate: String!
+  sourceArn: String
+  region: String
+  account: String
+  ownership: String!
+  discoveredAt: String!
 }
 
 type DeleteAgentConfigResult {

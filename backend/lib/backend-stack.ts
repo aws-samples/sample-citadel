@@ -19,6 +19,7 @@ import { Construct } from "constructs";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import { CustomResource, Duration } from "aws-cdk-lib";
 import { NagSuppressions } from "cdk-nag";
+import { buildImportDiscoveryPolicy } from "../src/utils/agent-import-policy";
 
 interface BackendStackProps extends cdk.StackProps {
   environment: string;
@@ -940,6 +941,23 @@ export class BackendStack extends cdk.Stack {
         resources: [registryArn, `${registryArn}/*`],
       }),
     );
+
+    // Grant read-only discovery permissions for the discoverAgents /
+    // describeAgentCandidate queries. buildImportDiscoveryPolicy() is the
+    // single source of truth for the List/Describe/Get actions across the
+    // phase-1 substrates (lambda, bedrock, bedrock-agentcore, ecs, ec2, eks,
+    // apigateway, tag). These are read-only and use Resource '*' (List/Describe
+    // has no resource-level scoping); the cdk-nag IAM5 finding on this role's
+    // DefaultPolicy is suppressed with that justification in bin/app.ts.
+    for (const statement of buildImportDiscoveryPolicy().Statement) {
+      agentImportResolverFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: statement.Action,
+          resources: statement.Resource,
+        }),
+      );
+    }
 
     // Grant S3 permissions for agent code
     // The bucket is created in the arbiter stack, so we grant permissions by ARN
@@ -2366,6 +2384,20 @@ export class BackendStack extends cdk.Stack {
     agentImportLambdaDataSource.createResolver("ImportAgentResolver", {
       typeName: "Mutation",
       fieldName: "importAgent",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("DiscoverAgentsResolver", {
+      typeName: "Query",
+      fieldName: "discoverAgents",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("DescribeAgentCandidateResolver", {
+      typeName: "Query",
+      fieldName: "describeAgentCandidate",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });

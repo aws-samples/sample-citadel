@@ -58,6 +58,30 @@ jest.mock('../../utils/auth-event', () => ({
   isAdminFromEvent: (...args: unknown[]) => mockIsAdminFromEvent(...args),
 }));
 
+// ── Mock agent-discovery (functions only; KEEP the real typed errors so the
+//    resolver's `instanceof` checks and our thrown fixtures share one class) ─
+const mockResolveSourceRef = jest.fn();
+const mockTagScanDiscover = jest.fn();
+const mockCandidateFromManifest = jest.fn();
+jest.mock('../../services/agent-discovery', () => {
+  const actual = jest.requireActual('../../services/agent-discovery');
+  return {
+    __esModule: true,
+    ...actual,
+    resolveSourceRef: (...args: unknown[]) => mockResolveSourceRef(...args),
+    tagScanDiscover: (...args: unknown[]) => mockTagScanDiscover(...args),
+    candidateFromManifest: (...args: unknown[]) => mockCandidateFromManifest(...args),
+  };
+});
+
+// ── Mock the agent-source registry factory (adapter.describe() hits AWS) ──
+const mockDescribe = jest.fn();
+const mockResolveAdapter = jest.fn(() => ({ describe: mockDescribe }));
+jest.mock('../../adapters/agent-source/registry-factory', () => ({
+  __esModule: true,
+  buildDefaultAgentSourceRegistry: jest.fn(() => ({ resolve: mockResolveAdapter })),
+}));
+
 import {
   importAgent,
   handler,
@@ -66,7 +90,12 @@ import {
   toImportAgentResult,
   _resetRegistryService,
 } from '../agent-import-resolver';
-import type { ImportConflictResult, ImportAgentResult } from '../agent-import-resolver';
+import type {
+  ImportConflictResult,
+  ImportAgentResult,
+  FlatAgentCandidate,
+} from '../agent-import-resolver';
+import { UnsupportedSourceError, InvalidSourceRefError } from '../../services/agent-discovery';
 
 // ── Fixtures ────────────────────────────────────────────────────────────
 const ORG = 'test-org-a';
@@ -423,11 +452,11 @@ describe('handler', () => {
     mockCreateResource.mockResolvedValue(
       existingRecord({ recordId: 'rec-h', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
     );
-    const res: ImportAgentResult = await handler({
+    const res = (await handler({
       info: { fieldName: 'importAgent' },
       arguments: { input: validFlatInput() },
       identity: eventWithOrg.identity,
-    });
+    })) as ImportAgentResult;
     expect(res).toEqual({
       agent: expect.objectContaining({ agentId: 'rec-h' }),
       conflict: false,
@@ -441,11 +470,11 @@ describe('handler', () => {
     mockListResources.mockResolvedValue([
       existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN }),
     ]);
-    const res: ImportAgentResult = await handler({
+    const res = (await handler({
       info: { fieldName: 'importAgent' },
       arguments: { input: validFlatInput() },
       identity: eventWithOrg.identity,
-    });
+    })) as ImportAgentResult;
     expect(res).toEqual({
       agent: null,
       conflict: true,
@@ -508,5 +537,263 @@ describe('importAgent — idempotence property', () => {
       ),
       { numRuns: 25 },
     );
+  });
+});
+
+// ── handler — discoverAgents query (SCAN / PASTE / MANIFEST) ─────────────
+describe('handler — discoverAgents', () => {
+  const authedEvent = (input: Record<string, unknown>) => ({
+    info: { fieldName: 'discoverAgents' },
+    arguments: { input },
+    identity: eventWithOrg.identity,
+  });
+
+  beforeEach(() => {
+    // File-level beforeEach only clears call data; reset impls so a fixture
+    // from one discovery test cannot leak into the next.
+    mockResolveSourceRef.mockReset();
+    mockTagScanDiscover.mockReset();
+    mockCandidateFromManifest.mockReset();
+    mockResolveAdapter.mockReset();
+    mockResolveAdapter.mockReturnValue({ describe: mockDescribe });
+    mockDescribe.mockReset();
+  });
+
+  it('SCAN maps internal (origin-nested) candidates to the flat GraphQL shape', async () => {
+    const scannedArn = 'arn:aws:lambda:us-east-1:111122223333:function:scanned';
+    mockTagScanDiscover.mockResolvedValue([
+      {
+        origin: {
+          sourceArn: scannedArn,
+          substrate: 'lambda',
+          region: 'us-east-1',
+          account: '111122223333',
+          discoveredAt: '2026-06-26T00:00:00.000Z',
+          ownership: 'external',
+        },
+        displayName: 'scanned',
+        reference: scannedArn,
+      },
+    ]);
+
+    const res = (await handler(
+      authedEvent({ source: 'SCAN', tagKey: 'citadel:agent', tagValue: 'true' }),
+    )) as FlatAgentCandidate[];
+
+    expect(mockTagScanDiscover).toHaveBeenCalledWith({
+      region: undefined,
+      tagKey: 'citadel:agent',
+      tagValue: 'true',
+    });
+    expect(res).toEqual([
+      {
+        displayName: 'scanned',
+        reference: scannedArn,
+        substrate: 'lambda',
+        sourceArn: scannedArn,
+        region: 'us-east-1',
+        account: '111122223333',
+        ownership: 'external',
+        discoveredAt: '2026-06-26T00:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('PASTE builds a single flat candidate from a resolved ARN ref', async () => {
+    const arn = 'arn:aws:lambda:us-west-2:444455556666:function:pay';
+    mockResolveSourceRef.mockReturnValue({
+      protocol: 'LAMBDA_INVOKE',
+      substrate: 'lambda',
+      target: arn,
+    });
+
+    const res = (await handler(authedEvent({ source: 'PASTE', ref: arn }))) as FlatAgentCandidate[];
+
+    expect(mockResolveSourceRef).toHaveBeenCalledWith(arn);
+    expect(res).toHaveLength(1);
+    expect(res[0]).toEqual(
+      expect.objectContaining({
+        displayName: 'pay',
+        reference: arn,
+        substrate: 'lambda',
+        sourceArn: arn,
+        region: 'us-west-2',
+        account: '444455556666',
+        ownership: 'external',
+      }),
+    );
+    expect(typeof res[0].discoveredAt).toBe('string');
+  });
+
+  it('PASTE sets sourceArn/region/account to null for a non-ARN (URL) ref', async () => {
+    const url = 'https://agent.example.com/svc';
+    mockResolveSourceRef.mockReturnValue({
+      protocol: 'HTTP_ENDPOINT',
+      substrate: 'http',
+      target: url,
+    });
+
+    const res = (await handler(authedEvent({ source: 'PASTE', ref: url }))) as FlatAgentCandidate[];
+
+    expect(res[0]).toEqual(
+      expect.objectContaining({
+        reference: url,
+        substrate: 'http',
+        sourceArn: null,
+        region: null,
+        account: null,
+        ownership: 'external',
+      }),
+    );
+  });
+
+  it('throws when PASTE is missing its ref', async () => {
+    await expect(handler(authedEvent({ source: 'PASTE' }))).rejects.toThrow(/ref is required/i);
+    expect(mockResolveSourceRef).not.toHaveBeenCalled();
+  });
+
+  it('MANIFEST maps the candidate from candidateFromManifest to the flat shape', async () => {
+    mockCandidateFromManifest.mockReturnValue({
+      candidate: {
+        origin: {
+          substrate: 'mcp',
+          discoveredAt: '2026-06-26T00:00:00.000Z',
+          ownership: 'external',
+        },
+        displayName: 'ManifestAgent',
+        reference: 'https://m.example.com',
+      },
+      descriptor: { name: 'ManifestAgent' },
+    });
+
+    const res = (await handler(
+      authedEvent({ source: 'MANIFEST', manifest: '{"name":"ManifestAgent"}' }),
+    )) as FlatAgentCandidate[];
+
+    expect(mockCandidateFromManifest).toHaveBeenCalledWith('{"name":"ManifestAgent"}');
+    expect(res).toEqual([
+      {
+        displayName: 'ManifestAgent',
+        reference: 'https://m.example.com',
+        substrate: 'mcp',
+        sourceArn: null,
+        region: null,
+        account: null,
+        ownership: 'external',
+        discoveredAt: '2026-06-26T00:00:00.000Z',
+      },
+    ]);
+  });
+
+  it('surfaces InvalidSourceRefError from a bad PASTE ref as a clean GraphQL error', async () => {
+    mockResolveSourceRef.mockImplementation(() => {
+      throw new InvalidSourceRefError('unrecognised source ref: nonsense');
+    });
+
+    await expect(handler(authedEvent({ source: 'PASTE', ref: 'nonsense' }))).rejects.toThrow(
+      /unrecognised source ref/,
+    );
+  });
+
+  it('surfaces UnsupportedSourceError (e.g. an unsupported substrate) as a clean GraphQL error', async () => {
+    mockTagScanDiscover.mockRejectedValue(new UnsupportedSourceError('ecs'));
+
+    await expect(handler(authedEvent({ source: 'SCAN' }))).rejects.toThrow(
+      /ecs not supported in phase 1/,
+    );
+  });
+
+  it('rejects an unrecognised discovery source', async () => {
+    await expect(handler(authedEvent({ source: 'BOGUS' }))).rejects.toThrow(/unsupported source/i);
+  });
+
+  it('rejects an unauthenticated caller (no identity)', async () => {
+    await expect(
+      handler({ info: { fieldName: 'discoverAgents' }, arguments: { input: { source: 'SCAN' } } }),
+    ).rejects.toThrow(/authenticated/i);
+    expect(mockTagScanDiscover).not.toHaveBeenCalled();
+  });
+});
+
+// ── handler — describeAgentCandidate query ──────────────────────────────
+describe('handler — describeAgentCandidate', () => {
+  const arn = 'arn:aws:lambda:us-east-1:111122223333:function:pay';
+
+  beforeEach(() => {
+    mockResolveSourceRef.mockReset();
+    mockResolveAdapter.mockReset();
+    mockResolveAdapter.mockReturnValue({ describe: mockDescribe });
+    mockDescribe.mockReset();
+  });
+
+  it('resolves the ref, dispatches to the protocol adapter, and returns the descriptor as a JSON string', async () => {
+    mockResolveSourceRef.mockReturnValue({
+      protocol: 'LAMBDA_INVOKE',
+      substrate: 'lambda',
+      target: arn,
+    });
+    const descriptor = {
+      name: 'pay',
+      description: 'Handles payments',
+      version: '1.0.0',
+      skills: [],
+    };
+    mockDescribe.mockResolvedValue(descriptor);
+
+    const res = (await handler({
+      info: { fieldName: 'describeAgentCandidate' },
+      arguments: { ref: arn },
+      identity: eventWithOrg.identity,
+    })) as string;
+
+    expect(mockResolveSourceRef).toHaveBeenCalledWith(arn);
+    expect(mockResolveAdapter).toHaveBeenCalledWith('LAMBDA_INVOKE');
+    expect(typeof res).toBe('string');
+    expect(JSON.parse(res)).toEqual(descriptor);
+    // The constructed candidate carries the resolved target + external ownership.
+    const passedCandidate = mockDescribe.mock.calls[0][0];
+    expect(passedCandidate).toEqual(
+      expect.objectContaining({
+        reference: arn,
+        displayName: 'pay',
+        origin: expect.objectContaining({
+          substrate: 'lambda',
+          sourceArn: arn,
+          ownership: 'external',
+        }),
+      }),
+    );
+  });
+
+  it('surfaces InvalidSourceRefError for an unparseable ref as a clean GraphQL error', async () => {
+    mockResolveSourceRef.mockImplementation(() => {
+      throw new InvalidSourceRefError('malformed ARN: arn:bogus');
+    });
+
+    await expect(
+      handler({
+        info: { fieldName: 'describeAgentCandidate' },
+        arguments: { ref: 'arn:bogus' },
+        identity: eventWithOrg.identity,
+      }),
+    ).rejects.toThrow(/malformed ARN/);
+    expect(mockDescribe).not.toHaveBeenCalled();
+  });
+
+  it('throws when ref is missing', async () => {
+    await expect(
+      handler({
+        info: { fieldName: 'describeAgentCandidate' },
+        arguments: {},
+        identity: eventWithOrg.identity,
+      }),
+    ).rejects.toThrow(/ref is required/);
+  });
+
+  it('rejects an unauthenticated caller', async () => {
+    await expect(
+      handler({ info: { fieldName: 'describeAgentCandidate' }, arguments: { ref: arn } }),
+    ).rejects.toThrow(/authenticated/i);
+    expect(mockResolveSourceRef).not.toHaveBeenCalled();
   });
 });

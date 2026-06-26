@@ -309,4 +309,20 @@ if (app.node.tryGetContext('nag')!== 'false') {
               for (const [stack, path] of registryArnPaths) {
                 NagSuppressions.addResourceSuppressionsByPath(stack, `/${stack.stackName}/${path}`, registryArnSuppression);
               }
+
+              // IAM5 — AgentImportResolverFunction discovery policy
+              // (buildImportDiscoveryPolicy) grants read-only List/Describe/Get
+              // across the phase-1 substrates with Resource '*', which those
+              // List/Describe APIs do not support resource-level scoping for.
+              // Additive to the registry-ARN suppression already registered for
+              // this role above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason: 'read-only discovery list/describe requires * resource',
+                  appliesTo: ['Resource::*'],
+                }],
+              );
 }
