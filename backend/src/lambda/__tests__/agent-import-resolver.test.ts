@@ -97,6 +97,22 @@ jest.mock('../../utils/events', () => {
   };
 });
 
+// ── Mock the fabricator-authority lifecycle (writes to DynamoDB; never AWS).
+//    Governance attestation grants one authority unit per imported record. ──
+const mockGrantFabricatorAuthority = jest.fn();
+jest.mock('../registry-agent-authority-lifecycle', () => ({
+  __esModule: true,
+  grantFabricatorAuthority: (...args: unknown[]) => mockGrantFabricatorAuthority(...args),
+}));
+
+// ── Mock the governance rollout flag reader (reads SSM; never AWS). The
+//    import stamps the resolved enforcement mode into the attestation. ──
+const mockGetGovernanceEnforce = jest.fn();
+jest.mock('../../utils/governance-flag', () => ({
+  __esModule: true,
+  getGovernanceEnforce: (...args: unknown[]) => mockGetGovernanceEnforce(...args),
+}));
+
 import {
   importAgent,
   handler,
@@ -202,6 +218,10 @@ beforeEach(() => {
   mockUpdateResource.mockImplementation(async (_type: string, id: string) =>
     existingRecord({ recordId: id, name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
   );
+  // Governance attestation: the authority grant resolves cleanly and the
+  // rollout flag has a deterministic default; individual tests override.
+  mockGrantFabricatorAuthority.mockResolvedValue(undefined);
+  mockGetGovernanceEnforce.mockResolvedValue('permissive');
 });
 
 // ── importAgent: create (no conflict) ───────────────────────────────────
@@ -365,6 +385,122 @@ describe('importAgent — conflict resolution', () => {
 
     expect(mockCreateResource).toHaveBeenCalledTimes(1);
     expect(mockCreateResource.mock.calls[0][1]).toBe('PaymentsAgent (imported copy)');
+  });
+});
+
+// ── importAgent: governance attestation (US governance retrofit) ─────────
+// On a record-creating import (create / replace / copy) the resolver stamps a
+// 'pending' governanceAttestation into the customMetadata AND best-effort
+// grants exactly one fabricator authority unit for the new recordId. A no-op
+// link or unresolved conflict (neither creates a record) does NEITHER.
+describe('importAgent — governance attestation', () => {
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  /** The metadata object handed to serializeCustomMetadata (pre-stringify). */
+  const stampedMeta = (): Record<string, unknown> | undefined => {
+    const call = mockSerializeCustomMetadata.mock.calls[0];
+    return call ? (call[0] as Record<string, unknown>) : undefined;
+  };
+
+  it('stamps a pending governanceAttestation with the resolved enforcement mode on create', async () => {
+    mockGetGovernanceEnforce.mockResolvedValue('shadow');
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput(), eventWithOrg);
+
+    expect(mockSerializeCustomMetadata).toHaveBeenCalledWith(
+      expect.objectContaining({
+        governanceAttestation: expect.objectContaining({
+          status: 'pending',
+          enforcementMode: 'shadow',
+          authorityRequested: true,
+          requestedAt: expect.stringMatching(ISO),
+        }),
+      }),
+    );
+  });
+
+  it('grants exactly one fabricator authority unit for the created recordId', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput(), eventWithOrg);
+
+    expect(mockGrantFabricatorAuthority).toHaveBeenCalledTimes(1);
+    expect(mockGrantFabricatorAuthority).toHaveBeenCalledWith('rec-1');
+  });
+
+  it('still returns the created agent when grantFabricatorAuthority throws (best-effort, logged)', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+    mockGrantFabricatorAuthority.mockRejectedValue(new Error('authority-units table down'));
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = await importAgent(validInput(), eventWithOrg);
+
+    expect(result).toEqual(expect.objectContaining({ agentId: 'rec-1' }));
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it('stamps attestation and grants authority on replace (existing recordId)', async () => {
+    const existing = existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN });
+    mockListResources.mockResolvedValue([existing]);
+    mockUpdateResource.mockResolvedValue(existing);
+
+    await importAgent(validInput({ onConflict: 'replace' }), eventWithOrg);
+
+    expect(stampedMeta()).toEqual(
+      expect.objectContaining({
+        governanceAttestation: expect.objectContaining({ status: 'pending', authorityRequested: true }),
+      }),
+    );
+    expect(mockGrantFabricatorAuthority).toHaveBeenCalledTimes(1);
+    expect(mockGrantFabricatorAuthority).toHaveBeenCalledWith('rec-existing');
+  });
+
+  it('stamps attestation and grants authority on copy (new recordId)', async () => {
+    const existing = existingRecord({ recordId: 'rec-existing', name: 'PaymentsAgent', sourceArn: SOURCE_ARN });
+    mockListResources.mockResolvedValue([existing]);
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-copy', name: 'PaymentsAgent (imported copy)', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput({ onConflict: 'copy' }), eventWithOrg);
+
+    expect(stampedMeta()).toEqual(
+      expect.objectContaining({ governanceAttestation: expect.objectContaining({ status: 'pending' }) }),
+    );
+    expect(mockGrantFabricatorAuthority).toHaveBeenCalledTimes(1);
+    expect(mockGrantFabricatorAuthority).toHaveBeenCalledWith('rec-copy');
+  });
+
+  it('does NOT grant authority or stamp attestation on a no-op link', async () => {
+    const existing = existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN });
+    mockListResources.mockResolvedValue([existing]);
+
+    await importAgent(validInput({ onConflict: 'link' }), eventWithOrg);
+
+    expect(mockGrantFabricatorAuthority).not.toHaveBeenCalled();
+    expect(mockSerializeCustomMetadata).not.toHaveBeenCalled();
+    expect(mockCreateResource).not.toHaveBeenCalled();
+    expect(mockUpdateResource).not.toHaveBeenCalled();
+  });
+
+  it('does NOT grant authority or stamp attestation on an unresolved conflict', async () => {
+    mockListResources.mockResolvedValue([
+      existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN }),
+    ]);
+
+    const result = await importAgent(validInput(), eventWithOrg);
+
+    expect(result).toEqual(expect.objectContaining({ conflict: true }));
+    expect(mockGrantFabricatorAuthority).not.toHaveBeenCalled();
+    expect(mockSerializeCustomMetadata).not.toHaveBeenCalled();
   });
 });
 

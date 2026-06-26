@@ -27,6 +27,8 @@ import { getRegistryService, validateImportDescriptor } from './agent-config-res
 import { extractOrgFromEvent, isAdminFromEvent, hasRoleFromEvent } from '../utils/auth-event';
 import { v4 as uuidv4 } from 'uuid';
 import { publishEvent, EventTypes } from '../utils/events';
+import { grantFabricatorAuthority } from './registry-agent-authority-lifecycle';
+import { getGovernanceEnforce } from '../utils/governance-flag';
 import type { AgentEvent } from '../types';
 import {
   resolveSourceRef,
@@ -659,9 +661,51 @@ export async function importAgent(
     }
   }
 
-  const customMetadata = registryService.serializeCustomMetadata(
-    buildImportedMetadata({ categories, manifest, invocation, origin, orgId, createdBy }),
-  );
+  // Governance attestation + fabricator-authority grant apply ONLY on the
+  // record-creating paths (create / replace / copy) — never a no-op link or an
+  // unresolved conflict. Both are produced per-branch (lazily) so neither can
+  // leak onto a path that does not write a record.
+
+  // Serialised custom metadata carrying a fresh 'pending' governance attestation.
+  // enforcementMode comes from the governance rollout flag (env name from
+  // ENVIRONMENT; the reader fails-open to 'permissive' internally and never
+  // throws). Built lazily so attestation is stamped only when a record is
+  // actually written.
+  const buildStampedCustomMetadata = async (): Promise<string> => {
+    const enforcementMode = await getGovernanceEnforce(process.env.ENVIRONMENT || 'unknown');
+    const governanceAttestation = {
+      status: 'pending' as const,
+      enforcementMode,
+      authorityRequested: true,
+      requestedAt: new Date().toISOString(),
+    };
+    return registryService.serializeCustomMetadata(
+      buildImportedMetadata({
+        categories,
+        manifest,
+        invocation,
+        origin,
+        orgId,
+        createdBy,
+        governanceAttestation,
+      }),
+    );
+  };
+
+  // Grants exactly one fabricator authority unit for the new record. The
+  // lifecycle helper is itself idempotent and WARN-skips when
+  // AUTHORITY_UNITS_TABLE is unset (partial-deploy safe); we additionally guard
+  // BEST-EFFORT so a thrown error is logged and NEVER fails the import.
+  const grantAuthorityBestEffort = async (recordId: string): Promise<void> => {
+    try {
+      await grantFabricatorAuthority(recordId);
+    } catch (err) {
+      console.error(
+        `agent-import-resolver: best-effort grantFabricatorAuthority for ${recordId} failed (swallowed):`,
+        err,
+      );
+    }
+  };
 
   if (match && reason) {
     // Conflict detected but no resolution chosen → ask the caller to pick.
@@ -673,7 +717,7 @@ export async function importAgent(
         options: [...CONFLICT_OPTIONS],
       };
     }
-    // link → idempotent: return the existing record, no mutation.
+    // link → idempotent: return the existing record, no mutation (no stamp/grant).
     if (onConflict === 'link') {
       return registryService.mapToAgentConfig(match);
     }
@@ -682,9 +726,10 @@ export async function importAgent(
       const replaced = await registryService.updateResource('agent', match.recordId, {
         name,
         description: buildConfigDescription(name, manifest, invocation, origin),
-        customMetadata,
+        customMetadata: await buildStampedCustomMetadata(),
       });
       const config = registryService.mapToAgentConfig(replaced);
+      await grantAuthorityBestEffort(replaced.recordId);
       await emitRegistered(config);
       return config;
     }
@@ -695,9 +740,10 @@ export async function importAgent(
       const copied = await registryService.createResource('agent', copyName, {
         name: copyName,
         description: buildConfigDescription(copyName, manifest, invocation, origin),
-        customMetadata,
+        customMetadata: await buildStampedCustomMetadata(),
       });
       const config = registryService.mapToAgentConfig(copied);
+      await grantAuthorityBestEffort(copied.recordId);
       await emitRegistered(config);
       return config;
     }
@@ -708,9 +754,10 @@ export async function importAgent(
   const created = await registryService.createResource('agent', name, {
     name,
     description: buildConfigDescription(name, manifest, invocation, origin),
-    customMetadata,
+    customMetadata: await buildStampedCustomMetadata(),
   });
   const config = registryService.mapToAgentConfig(created);
+  await grantAuthorityBestEffort(created.recordId);
   await emitRegistered(config);
   return config;
 }
@@ -733,8 +780,9 @@ function buildImportedMetadata(args: {
   origin: AgentOrigin;
   orgId: string;
   createdBy: string;
+  governanceAttestation?: AgentCustomMetadata['governanceAttestation'];
 }): ImportedAgentMetadata {
-  return {
+  const meta: ImportedAgentMetadata = {
     categories: args.categories,
     icon: '',
     state: 'inactive',
@@ -744,6 +792,11 @@ function buildImportedMetadata(args: {
     orgId: args.orgId,
     createdBy: args.createdBy,
   };
+  // Additive: only present on the record-creating import paths.
+  if (args.governanceAttestation) {
+    meta.governanceAttestation = args.governanceAttestation;
+  }
+  return meta;
 }
 
 function buildConfigDescription(

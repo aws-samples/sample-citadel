@@ -733,6 +733,11 @@ export class BackendStack extends cdk.Stack {
           // Best-effort agent.import.{discovered,registered,failed} emission via
           // backend/src/utils/events.ts (source citadel.backend). Scoped grant below.
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          // Governance attestation: imported agents request one fabricator
+          // authority unit. AuthorityUnitsTable lives on ArbiterStack; we use the
+          // deterministic table name to avoid a circular cross-stack dep (mirrors
+          // RegistryAgentRecordResolverFunction). Scoped IAM grant below.
+          AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'AgentImportResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -742,6 +747,21 @@ export class BackendStack extends cdk.Stack {
     // Least-privilege: events:PutEvents scoped to the shared agent event bus
     // ARN, mirroring the other emitting resolvers.
     this.agentEventBus.grantPutEventsTo(agentImportResolverFunction);
+
+    // Governance attestation: Write access (PutItem/UpdateItem) to the per-env
+    // AuthorityUnitsTable owned by ArbiterStack so an import can grant its
+    // fabricator authority unit. Referenced by explicit ARN pattern to avoid the
+    // circular cross-stack dependency a Table.grantWriteData would introduce —
+    // identical to RegistryAgentRecordResolverFunction's grant.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        resources: [
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-authority-units-${props.environment}`,
+        ],
+      })
+    );
 
     // Agent Code Resolver - for reading/writing agent code from S3
     const agentCodeResolverFunction = new lambda.Function(

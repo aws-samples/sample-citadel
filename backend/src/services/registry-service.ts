@@ -145,6 +145,18 @@ export interface AgentCustomMetadata {
   invocation?: AgentInvocationBlock;
   /** Present only on imported agents (US-IMP-001). */
   origin?: AgentOrigin;
+  /**
+   * Governance attestation stamped when an externally-owned agent is imported.
+   * Additive: absent on every record that predates the governance retrofit and
+   * on all non-import create paths. `status` advances 'pending' → 'attested'
+   * once governance has acknowledged the requested authority grant.
+   */
+  governanceAttestation?: {
+    status: 'pending' | 'attested';
+    enforcementMode: string;
+    authorityRequested: boolean;
+    requestedAt: string;
+  };
 }
 
 /**
@@ -953,6 +965,7 @@ export class RegistryService {
     orgId: undefined,
     invocation: undefined,
     origin: undefined,
+    governanceAttestation: undefined,
   };
 
   private static readonly TOOL_METADATA_DEFAULTS: ToolCustomMetadata = {
