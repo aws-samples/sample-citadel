@@ -715,6 +715,26 @@ export class BackendStack extends cdk.Stack {
       }
     );
 
+    // Agent Import Resolver - registers externally-owned agents (importAgent
+    // mutation). Same runtime/bundling/env as the agent-config resolver; it
+    // reuses that resolver's RegistryService + import-descriptor validator.
+    const agentImportResolverFunction = new lambda.Function(
+      this,
+      "AgentImportResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "agent-import-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
+          REGISTRY_ENABLED: 'true',
+          REGISTRY_ID: registryId,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, 'AgentImportResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
+      }
+    );
+
     // Agent Code Resolver - for reading/writing agent code from S3
     const agentCodeResolverFunction = new lambda.Function(
       this,
@@ -887,6 +907,25 @@ export class BackendStack extends cdk.Stack {
 
     // Grant agent-config-resolver permission to call Registry APIs
     agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:CreateRegistryRecord',
+          'bedrock-agentcore:UpdateRegistryRecord',
+          'bedrock-agentcore:UpdateRegistryRecordStatus',
+          'bedrock-agentcore:SubmitRegistryRecordForApproval',
+          'bedrock-agentcore:DeleteRegistryRecord',
+          'bedrock-agentcore:GetRegistryRecord',
+          'bedrock-agentcore:ListRegistryRecords',
+        ],
+        resources: [registryArn, `${registryArn}/*`],
+      }),
+    );
+
+    // Grant permissions for agent import (same DynamoDB + Registry grants as
+    // agent-config-resolver; the import resolver reuses RegistryService).
+    this.agentConfigTable.grantReadWriteData(agentImportResolverFunction);
+    agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
@@ -2121,6 +2160,10 @@ export class BackendStack extends cdk.Stack {
       "AgentConfigLambdaDataSource",
       agentConfigResolverFunction
     );
+    const agentImportLambdaDataSource = this.appSyncApi.addLambdaDataSource(
+      "AgentImportLambdaDataSource",
+      agentImportResolverFunction
+    );
     const agentCodeLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentCodeLambdaDataSource",
       agentCodeResolverFunction
@@ -2316,6 +2359,13 @@ export class BackendStack extends cdk.Stack {
     agentConfigLambdaDataSource.createResolver("CreateAgentConfigResolver", {
       typeName: "Mutation",
       fieldName: "createAgentConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("ImportAgentResolver", {
+      typeName: "Mutation",
+      fieldName: "importAgent",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });

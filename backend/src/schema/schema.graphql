@@ -132,6 +132,7 @@ type Mutation {
   generateDocumentPdf(projectId: ID!, documentKey: String!): ReportDownloadUrl
   updateAgentConfig(input: UpdateAgentConfigInput!): AgentConfig
   createAgentConfig(input: CreateAgentConfigInput!): AgentConfig
+  importAgent(input: ImportAgentInput!): ImportAgentResult!
   deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
   activateProjectAgents(projectId: ID!): ActivateAgentsResult
   updateAgentCode(input: UpdateAgentCodeInput!): AgentCode
@@ -455,6 +456,44 @@ type AgentConfig {
   createdAt: AWSDateTime
   updatedAt: AWSDateTime
   manifest: AgentManifest
+}
+
+# --- Agent import (US-IMP) -------------------------------------------------
+# Conflict resolution strategy when an imported agent collides with an
+# existing record (by sourceArn, then display name) in the caller's org.
+enum ImportConflictPolicy {
+  LINK
+  REPLACE
+  COPY
+}
+
+# Flat, typed import descriptor. `manifest` is AWSJSON (nested JSON object);
+# everything else is flat + typed. The resolver nests these into the internal
+# invocation/origin descriptor and forces origin.ownership to 'external'.
+input ImportAgentInput {
+  name: String!
+  manifest: AWSJSON
+  invocationProtocol: String!
+  invocationTarget: String!
+  invocationAuthMode: String
+  invocationSecretRef: String
+  invocationMode: String
+  region: String
+  account: String
+  sourceArn: String
+  substrate: String!
+  categories: [String!]
+  onConflict: ImportConflictPolicy
+}
+
+# On success: { agent, conflict: false }. On an unresolved collision:
+# { agent: null, conflict: true, existingId, reason, options }.
+type ImportAgentResult {
+  agent: AgentConfig
+  conflict: Boolean!
+  existingId: ID
+  reason: String
+  options: [String!]
 }
 
 type DeleteAgentConfigResult {

@@ -55,6 +55,20 @@ export interface ImportConflictResult {
   options: ImportConflictResolution[];
 }
 
+/**
+ * Flat result shape returned by the AppSync `importAgent` mutation (and the
+ * {@link handler}). Always present: on success `agent` is populated and
+ * `conflict` is false; on an unresolved collision `agent` is null and the
+ * conflict fields ({@link ImportConflictResult}) are surfaced to the caller.
+ */
+export interface ImportAgentResult {
+  agent: AgentConfig | null;
+  conflict: boolean;
+  existingId: string | null;
+  reason: string | null;
+  options: string[] | null;
+}
+
 const CONFLICT_OPTIONS: readonly ImportConflictResolution[] = ['link', 'replace', 'copy'];
 
 const AGENT_METADATA_DEFAULTS: AgentCustomMetadata = {
@@ -116,19 +130,137 @@ export function buildImportCopyName(baseName: string, takenNames: Set<string>): 
   return `${baseName} (imported copy ${n})`;
 }
 
+// --- AppSync flat input → internal import descriptor -----------------------
+
 /**
- * AppSync-style entry point. Routes `importAgent`; the deferred
- * `discoverAgents` / `describeAgentCandidate` queries are not wired yet
- * (see TODO at the top of this file).
+ * Maps the GraphQL `ImportConflictPolicy` enum (uppercase LINK/REPLACE/COPY)
+ * onto the internal lower-case {@link ImportConflictResolution}. Returns
+ * undefined for any absent/unrecognised value so the caller is re-prompted.
+ */
+function mapConflictPolicy(value: unknown): ImportConflictResolution | undefined {
+  if (typeof value !== 'string') return undefined;
+  const lowered = value.toLowerCase();
+  return isConflictResolution(lowered) ? lowered : undefined;
+}
+
+/**
+ * Parses an AWSJSON `manifest`, which AppSync may deliver either as a JSON
+ * string or as an already-parsed object. Falls back to `{}` when absent or
+ * unparseable so imported records always classify as agents (not tools).
+ */
+function parseManifestInput(value: unknown): Record<string, unknown> {
+  if (isRecord(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (isRecord(parsed)) return parsed;
+    } catch {
+      // fall through to the empty-manifest default
+    }
+  }
+  return {};
+}
+
+/**
+ * Maps the flat AppSync `ImportAgentInput` into the nested import descriptor
+ * consumed by {@link importAgent}: `{ name, manifest, invocation:{ protocol,
+ * target, auth:{ mode, secretRef }, mode, region, account }, origin:{ sourceArn,
+ * account, region, substrate, ownership:'external' }, categories, onConflict }`.
+ *
+ * `ownership` is forced to 'external' and `discoveredAt` is stamped at import
+ * time. Validation stays the sole responsibility of `validateImportDescriptor`
+ * inside {@link importAgent}, so malformed inputs (e.g. a missing protocol)
+ * flow through unchanged and are rejected there with a field-specific error.
+ */
+export function buildImportDescriptor(input: unknown): Record<string, unknown> {
+  const flat = isRecord(input) ? input : {};
+
+  const auth: Record<string, unknown> = {
+    mode: asNonEmptyString(flat.invocationAuthMode) ?? 'NONE',
+  };
+  const secretRef = asNonEmptyString(flat.invocationSecretRef);
+  if (secretRef) auth.secretRef = secretRef;
+
+  const region = asNonEmptyString(flat.region);
+  const account = asNonEmptyString(flat.account);
+
+  const invocation: Record<string, unknown> = {
+    protocol: flat.invocationProtocol,
+    target: flat.invocationTarget,
+    auth,
+    mode: asNonEmptyString(flat.invocationMode) ?? 'sync',
+  };
+  if (region) invocation.region = region;
+  if (account) invocation.account = account;
+
+  const origin: Record<string, unknown> = {
+    substrate: flat.substrate,
+    discoveredAt: new Date().toISOString(),
+    ownership: 'external',
+  };
+  const sourceArn = asNonEmptyString(flat.sourceArn);
+  if (sourceArn) origin.sourceArn = sourceArn;
+  if (account) origin.account = account;
+  if (region) origin.region = region;
+
+  const descriptor: Record<string, unknown> = {
+    name: flat.name,
+    manifest: parseManifestInput(flat.manifest),
+    invocation,
+    origin,
+    categories: asStringArray(flat.categories) ?? [],
+  };
+  const onConflict = mapConflictPolicy(flat.onConflict);
+  if (onConflict) descriptor.onConflict = onConflict;
+  return descriptor;
+}
+
+/** Type guard distinguishing an unresolved conflict from a mapped AgentConfig. */
+function isConflictResult(
+  value: AgentConfig | ImportConflictResult,
+): value is ImportConflictResult {
+  return (value as Partial<ImportConflictResult>).conflict === true;
+}
+
+/**
+ * Wraps {@link importAgent}'s union return into the flat {@link ImportAgentResult}
+ * shape expected by the GraphQL `ImportAgentResult` type: a mapped AgentConfig
+ * becomes `{ agent, conflict:false }`; an {@link ImportConflictResult} becomes
+ * `{ agent:null, conflict:true, existingId, reason, options }`.
+ */
+export function toImportAgentResult(
+  result: AgentConfig | ImportConflictResult,
+): ImportAgentResult {
+  if (isConflictResult(result)) {
+    return {
+      agent: null,
+      conflict: true,
+      existingId: result.existingId,
+      reason: result.reason,
+      options: [...result.options],
+    };
+  }
+  return { agent: result, conflict: false, existingId: null, reason: null, options: null };
+}
+
+/**
+ * AppSync entry point for the `importAgent` mutation. Maps the flat
+ * `ImportAgentInput` into the internal descriptor, delegates to
+ * {@link importAgent}, and ALWAYS returns the flat {@link ImportAgentResult}
+ * shape. The deferred `discoverAgents` / `describeAgentCandidate` queries are
+ * not wired yet (see TODO at the top of this file).
  */
 export const handler = async (
   event: ImportAgentEvent,
-): Promise<AgentConfig | ImportConflictResult> => {
+): Promise<ImportAgentResult> => {
   const fieldName = event.info?.fieldName;
   try {
     switch (fieldName) {
-      case 'importAgent':
-        return await importAgent(event.arguments?.input, event);
+      case 'importAgent': {
+        const descriptor = buildImportDescriptor(event.arguments?.input);
+        const result = await importAgent(descriptor, event);
+        return toImportAgentResult(result);
+      }
       default:
         throw new Error(`Unknown field: ${String(fieldName)}`);
     }

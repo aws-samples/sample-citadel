@@ -296,6 +296,7 @@ if (app.node.tryGetContext('nag')!== 'false') {
               const registryArnPaths: Array<[cdk.Stack, string]> = [
                 [backendStack, 'RegistrySyncLambda/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'AgentConfigResolverFunction/ServiceRole/DefaultPolicy/Resource'],
+                [backendStack, 'AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'ToolConfigResolverFunction/ServiceRole/DefaultPolicy/Resource'],
                 [arbiterStack, 'FabricatorAgent/ServiceRole/DefaultPolicy/Resource'],
                 [arbiterStack, 'SupervisorAgent/ServiceRole/DefaultPolicy/Resource'],

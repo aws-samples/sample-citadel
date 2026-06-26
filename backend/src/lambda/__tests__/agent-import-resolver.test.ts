@@ -62,9 +62,11 @@ import {
   importAgent,
   handler,
   buildImportCopyName,
+  buildImportDescriptor,
+  toImportAgentResult,
   _resetRegistryService,
 } from '../agent-import-resolver';
-import type { ImportConflictResult } from '../agent-import-resolver';
+import type { ImportConflictResult, ImportAgentResult } from '../agent-import-resolver';
 
 // ── Fixtures ────────────────────────────────────────────────────────────
 const ORG = 'test-org-a';
@@ -91,6 +93,26 @@ function validInput(overrides: Overrides = {}): Record<string, unknown> {
       discoveredAt: '2026-06-26T00:00:00.000Z',
       ownership: 'external',
     },
+    categories: ['payments'],
+    ...overrides,
+  };
+}
+
+/**
+ * Flat AppSync `ImportAgentInput` fixture (what the resolver receives over the
+ * wire) — mirrors {@link validInput} but with the invocation/origin fields
+ * flattened, to exercise the handler's flat → nested mapping.
+ */
+function validFlatInput(overrides: Overrides = {}): Record<string, unknown> {
+  return {
+    name: 'PaymentsAgent',
+    manifest: { name: 'PaymentsAgent', description: 'Handles payments', version: '1.0.0' },
+    invocationProtocol: 'AGENTCORE_RUNTIME',
+    invocationTarget: SOURCE_ARN,
+    invocationAuthMode: 'SIGV4',
+    invocationMode: 'sync',
+    sourceArn: SOURCE_ARN,
+    substrate: 'agentcore_runtime',
     categories: ['payments'],
     ...overrides,
   };
@@ -309,18 +331,129 @@ describe('buildImportCopyName', () => {
   });
 });
 
+// ── buildImportDescriptor: flat AppSync input → nested descriptor ────────
+describe('buildImportDescriptor', () => {
+  it('nests flat invocation/origin fields and forces external ownership', () => {
+    const d = buildImportDescriptor(validFlatInput());
+    expect(d).toEqual(
+      expect.objectContaining({
+        name: 'PaymentsAgent',
+        invocation: expect.objectContaining({
+          protocol: 'AGENTCORE_RUNTIME',
+          target: SOURCE_ARN,
+          auth: { mode: 'SIGV4' },
+          mode: 'sync',
+        }),
+        origin: expect.objectContaining({
+          sourceArn: SOURCE_ARN,
+          substrate: 'agentcore_runtime',
+          ownership: 'external',
+        }),
+      }),
+    );
+  });
+
+  it('parses an AWSJSON manifest delivered as a JSON string', () => {
+    const d = buildImportDescriptor(validFlatInput({ manifest: '{"name":"X"}' }));
+    expect(d.manifest).toEqual({ name: 'X' });
+  });
+
+  it('maps secretRef/region/account into invocation and origin', () => {
+    const d = buildImportDescriptor(
+      validFlatInput({
+        invocationSecretRef: 'secret-1',
+        region: 'us-west-2',
+        account: '111122223333',
+      }),
+    );
+    expect(d).toEqual(
+      expect.objectContaining({
+        invocation: expect.objectContaining({
+          auth: { mode: 'SIGV4', secretRef: 'secret-1' },
+          region: 'us-west-2',
+          account: '111122223333',
+        }),
+        origin: expect.objectContaining({ region: 'us-west-2', account: '111122223333' }),
+      }),
+    );
+  });
+
+  it('lowercases the ImportConflictPolicy enum (REPLACE → replace)', () => {
+    expect(buildImportDescriptor(validFlatInput({ onConflict: 'REPLACE' })).onConflict).toBe(
+      'replace',
+    );
+    // Absent policy → omitted entirely (caller is re-prompted on conflict).
+    expect('onConflict' in buildImportDescriptor(validFlatInput())).toBe(false);
+  });
+});
+
+// ── toImportAgentResult: union → flat result shape ──────────────────────
+describe('toImportAgentResult', () => {
+  it('wraps a mapped AgentConfig as { agent, conflict:false }', () => {
+    const agent = { agentId: 'rec-1', orgId: ORG, config: '{}', state: 'inactive' };
+    expect(toImportAgentResult(agent)).toEqual({
+      agent,
+      conflict: false,
+      existingId: null,
+      reason: null,
+      options: null,
+    });
+  });
+
+  it('wraps a conflict as { agent:null, conflict:true, existingId, reason, options }', () => {
+    const conflict: ImportConflictResult = {
+      conflict: true,
+      existingId: 'rec-existing',
+      reason: 'sourceArn',
+      options: ['link', 'replace', 'copy'],
+    };
+    expect(toImportAgentResult(conflict)).toEqual({
+      agent: null,
+      conflict: true,
+      existingId: 'rec-existing',
+      reason: 'sourceArn',
+      options: ['link', 'replace', 'copy'],
+    });
+  });
+});
+
 // ── handler dispatch ────────────────────────────────────────────────────
 describe('handler', () => {
-  it('routes importAgent to the importAgent function', async () => {
+  it('maps flat input, routes importAgent, and returns the success ImportAgentResult shape', async () => {
     mockCreateResource.mockResolvedValue(
       existingRecord({ recordId: 'rec-h', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
     );
-    const res = await handler({
+    const res: ImportAgentResult = await handler({
       info: { fieldName: 'importAgent' },
-      arguments: { input: validInput() },
+      arguments: { input: validFlatInput() },
       identity: eventWithOrg.identity,
     });
-    expect(res).toEqual(expect.objectContaining({ agentId: 'rec-h' }));
+    expect(res).toEqual({
+      agent: expect.objectContaining({ agentId: 'rec-h' }),
+      conflict: false,
+      existingId: null,
+      reason: null,
+      options: null,
+    });
+  });
+
+  it('returns the conflict ImportAgentResult shape (agent null) on a sourceArn match', async () => {
+    mockListResources.mockResolvedValue([
+      existingRecord({ recordId: 'rec-existing', name: 'OldPay', sourceArn: SOURCE_ARN }),
+    ]);
+    const res: ImportAgentResult = await handler({
+      info: { fieldName: 'importAgent' },
+      arguments: { input: validFlatInput() },
+      identity: eventWithOrg.identity,
+    });
+    expect(res).toEqual({
+      agent: null,
+      conflict: true,
+      existingId: 'rec-existing',
+      reason: 'sourceArn',
+      options: expect.arrayContaining(['link', 'replace', 'copy']),
+    });
+    expect(mockCreateResource).not.toHaveBeenCalled();
   });
 
   it('throws on an unknown field', async () => {
