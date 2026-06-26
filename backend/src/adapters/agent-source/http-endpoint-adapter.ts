@@ -1,30 +1,42 @@
 /**
  * HTTP_ENDPOINT adapter.
  *
- * POSTs a JSON body to `descriptor.invocation.target`. When auth.mode is
- * SIGV4 the request is signed with SignatureV4 (the same approach the legacy
- * handler uses for AppSync) before sending; otherwise it is sent as-is.
- * API_KEY / OAUTH2 secret resolution is a TODO stub for a later story.
- * Only invoke() is implemented for now.
+ * invoke() POSTs a JSON body to `descriptor.invocation.target`. When auth.mode
+ * is SIGV4 the request is signed with SignatureV4 before sending; otherwise it
+ * is sent as-is. API_KEY / OAUTH2 secret resolution is a TODO stub for a later
+ * story.
+ *
+ * discover/describe/healthCheck (US-IMP-011) work by PASTED ENDPOINT (no AWS
+ * SDK): discover wraps a single endpoint into a candidate; describe attempts an
+ * OpenAPI fetch (GET <url>/openapi.json) and maps it into the descriptor when
+ * present; healthCheck does a lightweight GET. global.fetch is injected as a
+ * fake in tests.
  */
 import { SignatureV4 } from '@aws-sdk/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { HttpRequest } from '@smithy/protocol-http';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
-import type { AgentSourceAdapter } from './base';
+import type { AgentSourceAdapter, AgentRef } from './base';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
+  AgentInvocationBlock,
   AgentInvocationProtocol,
+  AgentOrigin,
+  Confidence,
   HealthCheckResult,
   InvokeRequest,
   InvokeResponse,
+  JsonSchema,
   VendedCredentials,
 } from './base';
 import { NotImplementedError } from './not-implemented';
 import { NO_RESPONSE_TEXT, extractTextOutput } from './invoke-support';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
+
+/** The auth sub-block of an invocation descriptor. */
+type AuthBlock = AgentInvocationBlock['auth'];
 
 /** Minimal signer surface so tests can inject a double. */
 export interface HttpSigner {
@@ -35,6 +47,9 @@ export type HttpSignerFactory = (region: string) => HttpSigner;
 export interface HttpEndpointAdapterDeps {
   fetchFn?: typeof fetch;
   signerFactory?: HttpSignerFactory;
+  /** Auth applied to the describe() invocation block (from the import scope). */
+  auth?: AuthBlock;
+  defaultRegion?: string;
 }
 
 const defaultSignerFactory: HttpSignerFactory = (region: string): HttpSigner => {
@@ -52,7 +67,7 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
   private readonly fetchFn: typeof fetch;
   private readonly signerFactory: HttpSignerFactory;
 
-  constructor(deps: HttpEndpointAdapterDeps = {}) {
+  constructor(private readonly deps: HttpEndpointAdapterDeps = {}) {
     // Late-bind to the current global fetch so test stubs are honoured.
     this.fetchFn = deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
     this.signerFactory = deps.signerFactory ?? defaultSignerFactory;
@@ -103,16 +118,234 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
     return { output: extractTextOutput(text) || NO_RESPONSE_TEXT, raw: text };
   }
 
-  async discover(_scope: unknown): Promise<AgentCandidate[]> {
+  /**
+   * Discovery is by PASTED ENDPOINT: wrap a single endpoint from the scope into
+   * a candidate (substrate 'http', no sourceArn). Returns [] when the scope
+   * carries no endpoint.
+   */
+  async discover(scope: unknown): Promise<AgentCandidate[]> {
+    const s = readEndpointScope(scope);
+    if (!s.endpoint) return [];
+    const origin: AgentOrigin = {
+      substrate: 'http',
+      discoveredAt: new Date().toISOString(),
+      ownership: 'external',
+    };
+    return [{ origin, displayName: s.name ?? s.endpoint, reference: s.endpoint }];
+  }
+
+  /**
+   * Tier-0 descriptor for a pasted HTTP endpoint. Attempts GET
+   * <url>/openapi.json; when an OpenAPI doc is available its info + path schemas
+   * populate the descriptor at confidence 'high'. Otherwise a minimal descriptor
+   * with empty schemas is returned at confidence 'low'.
+   */
+  async describe(ref: AgentRef): Promise<AgentCapabilityDescriptor> {
+    const url = refToString(ref);
+    const auth = resolveHttpAuth(this.deps.auth);
+    const doc = await this.fetchOpenApi(url);
+
+    let name: string;
+    let description: string;
+    let version: string;
+    let skills: string[];
+    let inputSchema: JsonSchema;
+    let outputSchema: JsonSchema;
+    let confidence: Confidence;
+
+    if (doc) {
+      const info = isObject(doc.info) ? doc.info : {};
+      name = typeof info.title === 'string' ? info.title : hostnameOf(url);
+      description = typeof info.description === 'string' ? info.description : '';
+      version = typeof info.version === 'string' ? info.version : '1.0.0';
+      const { inputs, outputs, ops } = collectOpenApi(doc);
+      inputSchema = Object.keys(inputs).length > 0 ? { type: 'object', properties: inputs } : {};
+      outputSchema = Object.keys(outputs).length > 0 ? { type: 'object', properties: outputs } : {};
+      skills = ops;
+      confidence = 'high';
+    } else {
+      name = hostnameOf(url);
+      description = '';
+      version = '1.0.0';
+      skills = [];
+      inputSchema = {};
+      outputSchema = {};
+      confidence = 'low';
+    }
+
+    const invocation: AgentInvocationBlock = {
+      protocol: 'HTTP_ENDPOINT',
+      target: url,
+      auth,
+      mode: 'sync',
+    };
+    if (auth.mode === 'SIGV4') {
+      invocation.region = this.deps.defaultRegion ?? DEFAULT_REGION;
+    }
+    const origin: AgentOrigin = {
+      substrate: 'http',
+      discoveredAt: new Date().toISOString(),
+      ownership: 'external',
+    };
+    const fieldConfidence: Record<string, Confidence> = {
+      name: confidence,
+      description: confidence,
+      version: confidence,
+      skills: confidence,
+      inputSchema: confidence,
+      outputSchema: confidence,
+    };
+
+    return {
+      name,
+      description,
+      version,
+      skills,
+      categories: [],
+      inputSchema,
+      outputSchema,
+      invocation,
+      origin,
+      fieldConfidence,
+    };
+  }
+
+  /**
+   * Lightweight reachability probe: GET the endpoint. A 2xx -> reachable; a
+   * non-2xx or a network error -> { reachable: false, detail } WITHOUT throwing.
+   */
+  async healthCheck(ref: AgentRef): Promise<HealthCheckResult> {
+    const url = refToString(ref);
+    try {
+      const res = await this.fetchFn(url, { method: 'GET' });
+      if (res.ok) return { reachable: true };
+      return { reachable: false, detail: `HTTP ${res.status}` };
+    } catch (err) {
+      return { reachable: false, detail: errMessage(err) };
+    }
+  }
+
+  async vendCredentials(_ref: AgentRef): Promise<VendedCredentials> {
     throw new NotImplementedError();
   }
-  async describe(_ref: AgentCandidate | string): Promise<AgentCapabilityDescriptor> {
-    throw new NotImplementedError();
+
+  /** Fetch + parse <url>/openapi.json; undefined when unavailable/unparseable. */
+  private async fetchOpenApi(url: string): Promise<Record<string, unknown> | undefined> {
+    try {
+      const res = await this.fetchFn(openApiUrl(url), { method: 'GET' });
+      if (!res.ok) return undefined;
+      const parsed = tryParseJson(await res.text());
+      return isObject(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
   }
-  async healthCheck(_ref: AgentCandidate | string): Promise<HealthCheckResult> {
-    throw new NotImplementedError();
+}
+
+// --- pasted-endpoint helpers (scope / auth / OpenAPI / errors) -------------
+
+function readEndpointScope(scope: unknown): { endpoint?: string; name?: string } {
+  if (!isObject(scope)) return {};
+  const endpoint =
+    typeof scope.endpoint === 'string' && scope.endpoint.length > 0 ? scope.endpoint : undefined;
+  const name = typeof scope.name === 'string' ? scope.name : undefined;
+  return { endpoint, name };
+}
+
+function refToString(ref: AgentRef): string {
+  return typeof ref === 'string' ? ref : ref.reference;
+}
+
+/**
+ * Resolve the invocation auth from the import scope. Defaults to SIGV4 (the
+ * common AWS API Gateway case, which needs no secret); a provided secretRef is
+ * carried through (e.g. for API_KEY).
+ */
+function resolveHttpAuth(auth?: AuthBlock): AuthBlock {
+  const mode = auth?.mode ?? 'SIGV4';
+  return auth?.secretRef ? { mode, secretRef: auth.secretRef } : { mode };
+}
+
+function openApiUrl(base: string): string {
+  return `${base.replace(/\/+$/, '')}/openapi.json`;
+}
+
+function hostnameOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
   }
-  async vendCredentials(_ref: AgentCandidate | string): Promise<VendedCredentials> {
-    throw new NotImplementedError();
+}
+
+function tryParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
   }
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Collect operation-level request/response JSON schemas from an OpenAPI doc,
+ * keyed by operationId (falling back to "METHOD /path").
+ */
+function collectOpenApi(doc: unknown): {
+  inputs: Record<string, JsonSchema>;
+  outputs: Record<string, JsonSchema>;
+  ops: string[];
+} {
+  const inputs: Record<string, JsonSchema> = {};
+  const outputs: Record<string, JsonSchema> = {};
+  const ops: string[] = [];
+  if (!isObject(doc) || !isObject(doc.paths)) return { inputs, outputs, ops };
+  for (const [path, item] of Object.entries(doc.paths)) {
+    if (!isObject(item)) continue;
+    for (const [method, op] of Object.entries(item)) {
+      if (!isObject(op)) continue;
+      const opKey =
+        typeof op.operationId === 'string' && op.operationId.length > 0
+          ? op.operationId
+          : `${method.toUpperCase()} ${path}`;
+      ops.push(opKey);
+      const req = requestJsonSchema(op.requestBody);
+      if (req) inputs[opKey] = req;
+      const res = responseJsonSchema(op.responses);
+      if (res) outputs[opKey] = res;
+    }
+  }
+  return { inputs, outputs, ops };
+}
+
+function requestJsonSchema(requestBody: unknown): JsonSchema | undefined {
+  if (!isObject(requestBody) || !isObject(requestBody.content)) return undefined;
+  const aj = requestBody.content['application/json'];
+  return isObject(aj) && isObject(aj.schema) ? aj.schema : undefined;
+}
+
+function responseJsonSchema(responses: unknown): JsonSchema | undefined {
+  if (!isObject(responses)) return undefined;
+  const pick = (code: string): JsonSchema | undefined => {
+    const r = responses[code];
+    if (!isObject(r) || !isObject(r.content)) return undefined;
+    const aj = r.content['application/json'];
+    return isObject(aj) && isObject(aj.schema) ? aj.schema : undefined;
+  };
+  const direct = pick('200');
+  if (direct) return direct;
+  for (const code of Object.keys(responses)) {
+    if (code.startsWith('2')) {
+      const s = pick(code);
+      if (s) return s;
+    }
+  }
+  return undefined;
+}
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

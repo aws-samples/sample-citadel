@@ -61,29 +61,16 @@ describe('NotImplementedError', () => {
 });
 
 describe('adapter unimplemented capabilities reject with NotImplementedError', () => {
-  // HTTP/Bedrock/MCP still implement ONLY invoke(); all four other
-  // capabilities remain stubs filled in by later stories.
-  const fullyStubbed: AgentSourceAdapter[] = [
-    new HttpEndpointAdapter(),
-    new BedrockAgentAdapter(),
-    new McpAdapter(),
-  ];
-
-  for (const adapter of fullyStubbed) {
-    it(`${adapter.protocol}: discover/describe/healthCheck/vendCredentials are not implemented`, async () => {
-      await expect(adapter.discover(undefined)).rejects.toBeInstanceOf(NotImplementedError);
-      await expect(adapter.describe('ref')).rejects.toBeInstanceOf(NotImplementedError);
-      await expect(adapter.healthCheck('ref')).rejects.toBeInstanceOf(NotImplementedError);
-      await expect(adapter.vendCredentials('ref')).rejects.toBeInstanceOf(NotImplementedError);
-    });
-  }
-
-  // AgentCore (US-IMP-008) and Lambda (US-IMP-010) now implement
-  // discover/describe/healthCheck (covered in their dedicated discovery test
-  // files); only vendCredentials remains a stub.
+  // All five per-protocol adapters now implement discover/describe/healthCheck
+  // (AgentCore US-IMP-008, Lambda US-IMP-010, Bedrock US-IMP-009, HTTP/MCP
+  // US-IMP-011 — each covered in its dedicated discovery test file); only
+  // vendCredentials remains a stub filled in by a later story.
   const vendOnlyStub: AgentSourceAdapter[] = [
     new AgentCoreRuntimeAdapter({ send: jest.fn() }),
     new LambdaInvokeAdapter({ send: jest.fn() }),
+    new HttpEndpointAdapter(),
+    new BedrockAgentAdapter(),
+    new McpAdapter(),
   ];
 
   for (const adapter of vendOnlyStub) {
