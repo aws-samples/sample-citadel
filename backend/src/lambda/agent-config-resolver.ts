@@ -3,6 +3,8 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, DeleteComm
 import { RegistryService, RegistryRecordStatusValues } from '../services/registry-service';
 import type { AgentInvocationProtocol } from '../services/registry-service';
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
+import { getGovernanceEnforce } from '../utils/governance-flag';
+import { publishEvent } from '../utils/events';
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -276,6 +278,80 @@ export async function createAgentConfigRegistry(input: any, event?: any): Promis
 }
 
 /**
+ * Governance activation gate for imported agents (US-IMP governance retrofit).
+ *
+ * Applied at the APPROVED (activation) transition for an IMPORTED, not-yet-
+ * attested Registry record. An imported record is one whose deserialized
+ * customMetadata carries a `governanceAttestation` block (stamped by the import
+ * resolver); non-imported agents never have it, so the gate is a pure no-op for
+ * them.
+ *
+ * Trigger — ALL of:
+ *   (i)   target status is APPROVED  → enforced by the CALL-SITE (this helper is
+ *         only invoked on the APPROVED transition), so it assumes (i) holds.
+ *   (ii)  record is imported          → `governanceAttestation` present.
+ *   (iii) not yet attested            → `governanceAttestation.status !== 'attested'`.
+ *
+ * On trigger:
+ *   - strict              → THROW before the caller writes APPROVED status.
+ *   - shadow | permissive → best-effort "would-block" telemetry event, then
+ *                           return so the caller proceeds with activation.
+ *
+ * When NOT triggered (no attestation, or already attested) this returns
+ * immediately WITHOUT reading the governance flag or emitting any event, so the
+ * behaviour of every non-imported / already-attested activation is byte-
+ * identical to the pre-gate code path.
+ *
+ * `getGovernanceEnforce` fails open to 'permissive' internally (never throws),
+ * so an absent/unreadable SSM parameter can never hard-fail an activation.
+ */
+async function enforceImportActivationGate(
+  registryService: RegistryService,
+  agentId: string,
+  customDescriptorContent: string | undefined,
+): Promise<void> {
+  const meta = registryService.deserializeCustomMetadata<{
+    governanceAttestation?: { status: 'pending' | 'attested' };
+  }>(customDescriptorContent ?? null, { governanceAttestation: undefined });
+
+  const attestation = meta.governanceAttestation;
+  // (ii) not imported, or (iii) already attested → no-op.
+  if (!attestation || attestation.status === 'attested') {
+    return;
+  }
+
+  const mode = await getGovernanceEnforce(process.env.ENVIRONMENT || 'unknown');
+  if (mode === 'strict') {
+    throw new Error(
+      `Activation blocked: governance attestation pending for imported agent ${agentId}`,
+    );
+  }
+
+  // shadow | permissive → emit best-effort telemetry that the gate WOULD have
+  // blocked this activation, then proceed. A telemetry outage must never fail
+  // (or alter the result of) the activation, so the emit is swallowed on error.
+  try {
+    await publishEvent({
+      eventType: 'agent.import.activation_gate',
+      projectId: '',
+      agentId,
+      payload: {
+        agentId,
+        attestationStatus: attestation.status,
+        mode,
+        wouldBlock: true,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error(
+      `agent-config-resolver: best-effort activation-gate event for ${agentId} failed (swallowed):`,
+      err,
+    );
+  }
+}
+
+/**
  * Registry-backed update: updates the Registry resource with new metadata.
  * If state is being changed, also updates the Registry status via toRegistryStatus.
  * Returns the mapped AgentConfig.
@@ -362,6 +438,17 @@ export async function updateAgentConfigRegistry(input: any, event?: any): Promis
     ? registryService.toRegistryStatus(input.state)
     : undefined;
   if (input.state && desiredRegistryStatus && desiredRegistryStatus !== existing.status) {
+    // Governance activation gate (US-IMP): runs ONLY on the APPROVED transition
+    // for an imported, unattested record. A no-op for every other record and
+    // transition, so all non-activation / non-imported update paths are
+    // unchanged. In strict mode it throws here, BEFORE the APPROVED status write.
+    if (desiredRegistryStatus === RegistryRecordStatusValues.APPROVED) {
+      await enforceImportActivationGate(
+        registryService,
+        input.agentId,
+        existing.customDescriptorContent ?? undefined,
+      );
+    }
     await registryService.updateResourceStatus('agent', input.agentId, desiredRegistryStatus);
     // Re-fetch after status transition so the returned state reflects the
     // post-SubmitForApproval record (PENDING_APPROVAL or APPROVED) rather
@@ -522,6 +609,15 @@ export async function activateProjectAgents(projectId: string): Promise<Activate
     }
 
     try {
+      // Governance activation gate (US-IMP): strict-blocks imported, unattested
+      // agents BEFORE the APPROVED write. The throw is caught below so a blocked
+      // agent lands in `failed` without aborting activation of the rest of the
+      // batch; shadow/permissive emits telemetry and proceeds as before.
+      await enforceImportActivationGate(
+        registryService,
+        record.recordId,
+        record.customDescriptorContent ?? undefined,
+      );
       await registryService.updateResourceStatus('agent', record.recordId, RegistryRecordStatusValues.APPROVED);
       result.activated.push(name);
     } catch (err) {

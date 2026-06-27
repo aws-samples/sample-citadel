@@ -11,11 +11,23 @@ const dynamoMock = mockClient(DynamoDBDocumentClient);
 // tests never construct a RegistryService, so this mock does not affect them.
 const mockListResources = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
+// Faithful to the real registry-service: the activation gate (US-IMP) added to
+// activateProjectAgents reads customMetadata via deserializeCustomMetadata.
+// These records carry no governanceAttestation, so the gate is a no-op here.
+const mockDeserializeCustomMetadata = jest.fn((json: string | null, defaults: any) => {
+  if (!json) return defaults;
+  try {
+    return { ...defaults, ...JSON.parse(json) };
+  } catch {
+    return defaults;
+  }
+});
 
 jest.mock('../../services/registry-service', () => ({
   RegistryService: jest.fn().mockImplementation(() => ({
     listResources: mockListResources,
     updateResourceStatus: mockUpdateResourceStatus,
+    deserializeCustomMetadata: mockDeserializeCustomMetadata,
   })),
   RegistryRecordStatusValues: {
     DRAFT: 'DRAFT',

@@ -710,6 +710,13 @@ export class BackendStack extends cdk.Stack {
           AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
           REGISTRY_ENABLED: 'true',
           REGISTRY_ID: registryId,
+          // Governance activation gate (US-IMP): ENVIRONMENT selects the
+          // governance rollout SSM parameter path (getGovernanceEnforce);
+          // EVENT_BUS_NAME targets the shared bus for best-effort gate
+          // telemetry. Both mirror the agent-import resolver. Scoped IAM
+          // grants below; getGovernanceEnforce fails open to 'permissive'.
+          ENVIRONMENT: props.environment,
+          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'AgentConfigResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -947,6 +954,26 @@ export class BackendStack extends cdk.Stack {
           'bedrock-agentcore:ListRegistryRecords',
         ],
         resources: [registryArn, `${registryArn}/*`],
+      }),
+    );
+
+    // Governance activation gate (US-IMP): the agent-config-resolver now reads
+    // the governance rollout flag and emits best-effort "would-block" telemetry
+    // on the imported-agent activation path. Mirror the import/event-emitting
+    // consumers with the minimal scoped grants:
+    //   • events:PutEvents on the shared agent event bus (gate telemetry event)
+    //   • ssm:GetParameter on the two governance rollout parameters only
+    // getGovernanceEnforce fails open to 'permissive' internally, so a missing
+    // parameter or denied read can never hard-fail an activation.
+    this.agentEventBus.grantPutEventsTo(agentConfigResolverFunction);
+    agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
       }),
     );
 
