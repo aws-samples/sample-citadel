@@ -263,6 +263,30 @@ if (app.node.tryGetContext('nag')!== 'false') {
                 NagSuppressions.addResourceSuppressionsByPath(stack, `/${stack.stackName}/${path}`, resourceStarSuppression);
               }
 
+              // IAM5 — US-IMP lazy trust-path. The agent-config-resolver performs
+              // READ-ONLY IAM introspection of an imported agent's operator-supplied
+              // invocation.roleArn during activation. That role is not citadel-prefixed
+              // (and may be cross-account), so the grants are scoped to THIS account's
+              // role/* and policy/* IAM namespace (account-scoped, never bare Resource::*).
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentConfigResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'Lazy trust-path activation issues read-only IAM introspection ' +
+                    '(iam:GetRole/GetRolePolicy/ListRolePolicies/ListAttachedRolePolicies/' +
+                    'GetPolicy/GetPolicyVersion) on an imported agent\'s operator-supplied ' +
+                    'invocation.roleArn, which is not citadel-prefixed. Scoped to this ' +
+                    'account\'s role/* and policy/* namespace (account-scoped, not bare *); ' +
+                    'no write or assume granted. Tracked: AAF-NAG-IAM5-trustpath.',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:iam::.*:role\\/\\*$/g' },
+                    { regex: '/^Resource::arn:aws:iam::.*:policy\\/\\*$/g' },
+                  ],
+                }],
+              );
+
               // CloudFront — partial hardening. TLS 1.2 and access logging applied; the
               // rest require follow-up work.
               NagSuppressions.addResourceSuppressionsByPath(frontendStack, `/${frontendStack.stackName}/FrontendDistribution`, [

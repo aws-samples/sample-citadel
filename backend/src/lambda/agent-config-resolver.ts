@@ -1,10 +1,34 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, DeleteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { RegistryService, RegistryRecordStatusValues } from '../services/registry-service';
-import type { AgentInvocationProtocol } from '../services/registry-service';
+import type {
+  AgentInvocationProtocol,
+  AgentCustomMetadata,
+  AgentInvocationBlock,
+  AgentOrigin,
+} from '../services/registry-service';
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
 import { getGovernanceEnforce } from '../utils/governance-flag';
 import { publishEvent } from '../utils/events';
+import { computeTrustPath } from '../utils/trust-path';
+
+/** Trust-path summary persisted into governanceAttestation by the activation path. */
+interface TrustPathAttestationSummary {
+  checkedAt: string;
+  clean: boolean;
+  findings: string[];
+}
+
+/**
+ * The registry-service governanceAttestation shape augmented with the additive
+ * `trustPath` summary stamped by the lazy activation-time IAM trust-path check.
+ * Declared locally (NOT in registry-service) so that module stays unchanged;
+ * the extra field is serialized verbatim via serializeCustomMetadata.
+ */
+type GovernanceAttestationWithTrustPath =
+  NonNullable<AgentCustomMetadata['governanceAttestation']> & {
+    trustPath?: TrustPathAttestationSummary;
+  };
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -412,15 +436,98 @@ export async function updateAgentConfigRegistry(input: any, event?: any): Promis
   const preservedOrgId = existingMeta.orgId
     ?? (event !== undefined ? (await extractOrgFromEvent(event)) ?? undefined : undefined);
 
-  // Merge custom metadata
-  const updatedMeta = registryService.serializeCustomMetadata({
+  // Desired Registry status computed up-front: the lazy trust-path attestation
+  // below only fires on the APPROVED (activation) transition, and the gate
+  // further down consumes the same value.
+  const desiredRegistryStatus = input.state
+    ? registryService.toRegistryStatus(input.state)
+    : undefined;
+
+  // US-IMP lazy IAM trust-path attestation. On the APPROVED activation of an
+  // IMPORTED (governanceAttestation present), still-'pending' record whose
+  // invocation.roleArn is set, inspect that role's IAM trust path in-process
+  // and — when it is clean — auto-attest so the activation gate passes in this
+  // same request. Best-effort: any failure (unresolvable / cross-account role,
+  // IAM denial) is logged and swallowed, leaving the attestation 'pending' so
+  // the gate governs unchanged. Roleless-imported and non-imported records
+  // never reach computeTrustPath, so their behaviour is byte-identical.
+  const importView = registryService.deserializeCustomMetadata<{
+    governanceAttestation?: GovernanceAttestationWithTrustPath;
+    invocation?: AgentInvocationBlock;
+    origin?: AgentOrigin;
+  }>(existing.customDescriptorContent ?? null, {
+    governanceAttestation: undefined,
+    invocation: undefined,
+    origin: undefined,
+  });
+
+  let importAttestationToPersist: GovernanceAttestationWithTrustPath | undefined;
+  let gateContentOverride: string | undefined;
+  const existingAttestation = importView.governanceAttestation;
+  const invocationRoleArn = importView.invocation?.roleArn;
+  if (
+    input.state &&
+    desiredRegistryStatus === RegistryRecordStatusValues.APPROVED &&
+    desiredRegistryStatus !== existing.status &&
+    existingAttestation &&
+    existingAttestation.status === 'pending' &&
+    typeof invocationRoleArn === 'string' &&
+    invocationRoleArn.length > 0
+  ) {
+    try {
+      const tp = await computeTrustPath(invocationRoleArn);
+      const summary: TrustPathAttestationSummary = {
+        checkedAt: new Date().toISOString(),
+        clean: tp.clean,
+        findings: tp.findings,
+      };
+      importAttestationToPersist = tp.clean
+        ? {
+            ...existingAttestation,
+            status: 'attested',
+            attestedBy: 'system:trust-path',
+            attestedAt: summary.checkedAt,
+            trustPath: summary,
+          }
+        : { ...existingAttestation, trustPath: summary };
+    } catch (err) {
+      // Best-effort: leave the attestation 'pending' and let the gate govern.
+      console.error(
+        `agent-config-resolver: trust-path attestation for ${input.agentId} failed ` +
+          `(best-effort, leaving 'pending'):`,
+        err,
+      );
+    }
+  }
+
+  // Merge custom metadata. The 6-field base is byte-identical to the pre-US-IMP
+  // path; the imported governance blocks (invocation / origin /
+  // governanceAttestation) are folded back in ONLY when the trust-path
+  // attestation actually ran, so every non-imported / roleless / non-activation
+  // update persists exactly the same metadata as before.
+  const baseMeta = {
     categories: input.categories !== undefined ? input.categories : existingMeta.categories,
     icon: input.icon !== undefined ? input.icon : existingMeta.icon,
     state: input.state || existingMeta.state,
     appId: input.appId !== undefined ? input.appId : existingMeta.appId,
     manifest: existingMeta.manifest,
     orgId: preservedOrgId,
-  });
+  };
+  const updatedMeta = registryService.serializeCustomMetadata(
+    (importAttestationToPersist
+      ? {
+          ...baseMeta,
+          invocation: importView.invocation,
+          origin: importView.origin,
+          governanceAttestation: importAttestationToPersist,
+        }
+      : baseMeta) as AgentCustomMetadata,
+  );
+  if (importAttestationToPersist) {
+    // The gate reads attestation status from this content; hand it the freshly
+    // attested view so a same-request auto-attest lets activation proceed.
+    gateContentOverride = updatedMeta;
+  }
 
   const record = await registryService.updateResource('agent', input.agentId, {
     name: parsedNewConfig.name || existing.name,
@@ -434,19 +541,18 @@ export async function updateAgentConfigRegistry(input: any, event?: any): Promis
   // to its 'active' default for records missing the field). The user-facing
   // state is derived from record.status via toInternalState, so that's what
   // must change for the toggle to actually take effect.
-  const desiredRegistryStatus = input.state
-    ? registryService.toRegistryStatus(input.state)
-    : undefined;
   if (input.state && desiredRegistryStatus && desiredRegistryStatus !== existing.status) {
     // Governance activation gate (US-IMP): runs ONLY on the APPROVED transition
     // for an imported, unattested record. A no-op for every other record and
     // transition, so all non-activation / non-imported update paths are
     // unchanged. In strict mode it throws here, BEFORE the APPROVED status write.
+    // When the lazy trust-path auto-attested above, gateContentOverride carries
+    // the attested metadata so this gate sees 'attested' and is a no-op.
     if (desiredRegistryStatus === RegistryRecordStatusValues.APPROVED) {
       await enforceImportActivationGate(
         registryService,
         input.agentId,
-        existing.customDescriptorContent ?? undefined,
+        gateContentOverride ?? existing.customDescriptorContent ?? undefined,
       );
     }
     await registryService.updateResourceStatus('agent', input.agentId, desiredRegistryStatus);

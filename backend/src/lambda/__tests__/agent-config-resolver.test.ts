@@ -11,6 +11,16 @@ const dynamoMock = mockClient(DynamoDBDocumentClient);
 // tests never construct a RegistryService, so this mock does not affect them.
 const mockListResources = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
+const mockGetResource = jest.fn();
+const mockUpdateResource = jest.fn();
+const mockMapToAgentConfig = jest.fn((record: any) => ({
+  agentId: record?.recordId,
+  state: 'active',
+}));
+const mockSerializeCustomMetadata = jest.fn((meta: any) => JSON.stringify(meta));
+const mockToRegistryStatus = jest.fn((state: string) =>
+  state === 'active' ? 'APPROVED' : state === 'inactive' ? 'DEPRECATED' : 'DRAFT',
+);
 // Faithful to the real registry-service: the activation gate (US-IMP) added to
 // activateProjectAgents reads customMetadata via deserializeCustomMetadata.
 // These records carry no governanceAttestation, so the gate is a no-op here.
@@ -28,6 +38,11 @@ jest.mock('../../services/registry-service', () => ({
     listResources: mockListResources,
     updateResourceStatus: mockUpdateResourceStatus,
     deserializeCustomMetadata: mockDeserializeCustomMetadata,
+    getResource: mockGetResource,
+    updateResource: mockUpdateResource,
+    serializeCustomMetadata: mockSerializeCustomMetadata,
+    toRegistryStatus: mockToRegistryStatus,
+    mapToAgentConfig: mockMapToAgentConfig,
   })),
   RegistryRecordStatusValues: {
     DRAFT: 'DRAFT',
@@ -40,6 +55,24 @@ jest.mock('../../services/registry-service', () => ({
     CREATE_FAILED: 'CREATE_FAILED',
     UPDATE_FAILED: 'UPDATE_FAILED',
   },
+}));
+
+// Lazy IAM trust-path core — mocked so activation tests drive
+// clean / findings / throw deterministically without touching IAM.
+const mockComputeTrustPath = jest.fn();
+jest.mock('../../utils/trust-path', () => ({
+  computeTrustPath: mockComputeTrustPath,
+}));
+
+// Governance rollout flag + event emitter used by the activation gate.
+const mockGetGovernanceEnforce = jest.fn();
+jest.mock('../../utils/governance-flag', () => ({
+  getGovernanceEnforce: mockGetGovernanceEnforce,
+  getGovernanceEffectiveAt: jest.fn(),
+}));
+const mockPublishEvent = jest.fn();
+jest.mock('../../utils/events', () => ({
+  publishEvent: mockPublishEvent,
 }));
 
 import { handler, _resetRegistryService } from '../agent-config-resolver';
@@ -222,5 +255,169 @@ describe('agent-config-resolver', () => {
 
   test('throws on unknown field', async () => {
     await expect(handler(makeEvent('unknownField', {}))).rejects.toThrow('Unknown field');
+  });
+});
+
+describe('updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)', () => {
+  const AGENT_ID = 'agent-import-1';
+  const ROLE_ARN = 'arn:aws:iam::123456789012:role/imported-agent-role';
+
+  beforeEach(() => {
+    process.env.REGISTRY_ENABLED = 'true';
+    process.env.REGISTRY_ID = 'reg-123';
+    process.env.ENVIRONMENT = 'dev';
+    _resetRegistryService();
+    mockListResources.mockReset();
+    mockUpdateResourceStatus.mockReset().mockResolvedValue({});
+    mockGetResource.mockReset();
+    mockUpdateResource
+      .mockReset()
+      .mockImplementation(async (_type: string, id: string, input: any) => ({
+        recordId: id,
+        name: input.name,
+        description: input.description,
+        status: 'UPDATING',
+        customDescriptorContent: input.customMetadata,
+      }));
+    mockComputeTrustPath.mockReset();
+    mockGetGovernanceEnforce.mockReset().mockResolvedValue('strict');
+    mockPublishEvent.mockReset().mockResolvedValue(undefined);
+    mockMapToAgentConfig.mockClear();
+    mockToRegistryStatus.mockClear();
+    mockSerializeCustomMetadata.mockClear();
+    mockDeserializeCustomMetadata.mockClear();
+  });
+
+  afterEach(() => {
+    delete process.env.REGISTRY_ENABLED;
+    delete process.env.REGISTRY_ID;
+    delete process.env.ENVIRONMENT;
+  });
+
+  // An imported Registry record (governanceAttestation present). orgId is set
+  // so updateAgentConfigRegistry never needs extractOrgFromEvent.
+  function importedRecord(
+    opts: { status?: 'pending' | 'attested'; roleArn?: string; recordStatus?: string } = {},
+  ) {
+    const meta: Record<string, unknown> = {
+      orgId: 'org-1',
+      categories: [],
+      icon: '',
+      state: 'inactive',
+      governanceAttestation: {
+        status: opts.status ?? 'pending',
+        enforcementMode: 'strict',
+        authorityRequested: true,
+        requestedAt: '2026-01-01T00:00:00.000Z',
+      },
+    };
+    if (opts.roleArn !== undefined) {
+      meta.invocation = {
+        protocol: 'AGENTCORE_RUNTIME',
+        target: opts.roleArn,
+        auth: { mode: 'SIGV4' },
+        mode: 'sync',
+        roleArn: opts.roleArn,
+      };
+    }
+    return {
+      recordId: AGENT_ID,
+      name: 'Imported Agent',
+      status: opts.recordStatus ?? 'PENDING_APPROVAL',
+      customDescriptorContent: JSON.stringify(meta),
+    };
+  }
+
+  const approvedRecord = () => ({
+    recordId: AGENT_ID,
+    name: 'Imported Agent',
+    status: 'APPROVED',
+    customDescriptorContent: '{}',
+  });
+
+  const activateEvent = () => ({
+    info: { fieldName: 'updateAgentConfig' },
+    arguments: { input: { agentId: AGENT_ID, state: 'active' } },
+  });
+
+  test('imported+pending+roleArn+clean → auto-attests (system:trust-path) and activation proceeds', async () => {
+    mockGetResource
+      .mockResolvedValueOnce(importedRecord({ roleArn: ROLE_ARN }))
+      .mockResolvedValueOnce(approvedRecord());
+    mockComputeTrustPath.mockResolvedValue({ hops: [], notes: [], findings: [], clean: true });
+
+    await handler(activateEvent());
+
+    expect(mockComputeTrustPath).toHaveBeenCalledWith(ROLE_ARN);
+    const persisted = JSON.parse(mockUpdateResource.mock.calls[0][2].customMetadata);
+    expect(persisted.governanceAttestation.status).toBe('attested');
+    expect(persisted.governanceAttestation.attestedBy).toBe('system:trust-path');
+    expect(persisted.governanceAttestation.attestedAt).toBeDefined();
+    expect(persisted.governanceAttestation.trustPath.clean).toBe(true);
+    // strict mode, yet activation proceeds because the gate now sees 'attested'.
+    expect(mockUpdateResourceStatus).toHaveBeenCalledWith('agent', AGENT_ID, 'APPROVED');
+  });
+
+  test('imported+pending+roleArn+findings → stays pending, findings stored, strict gate blocks', async () => {
+    mockGetResource.mockResolvedValue(importedRecord({ roleArn: ROLE_ARN }));
+    mockComputeTrustPath.mockResolvedValue({
+      hops: [],
+      notes: [],
+      findings: ['over-broad-action: arn:...:role/imported-agent-role'],
+      clean: false,
+    });
+
+    await expect(handler(activateEvent())).rejects.toThrow('Activation blocked');
+
+    expect(mockComputeTrustPath).toHaveBeenCalledWith(ROLE_ARN);
+    const persisted = JSON.parse(mockUpdateResource.mock.calls[0][2].customMetadata);
+    expect(persisted.governanceAttestation.status).toBe('pending');
+    expect(persisted.governanceAttestation.trustPath.clean).toBe(false);
+    expect(persisted.governanceAttestation.trustPath.findings).toEqual([
+      'over-broad-action: arn:...:role/imported-agent-role',
+    ]);
+    expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+  });
+
+  test('trust-path throws → activation not crashed, no auto-attest (permissive proceeds)', async () => {
+    mockGetGovernanceEnforce.mockResolvedValue('permissive');
+    mockGetResource
+      .mockResolvedValueOnce(importedRecord({ roleArn: ROLE_ARN }))
+      .mockResolvedValueOnce(approvedRecord());
+    mockComputeTrustPath.mockRejectedValue(new Error('cross-account role unresolvable'));
+
+    await expect(handler(activateEvent())).resolves.toBeDefined();
+
+    expect(mockComputeTrustPath).toHaveBeenCalledWith(ROLE_ARN);
+    // best-effort skip — no attestation folded into the persisted metadata.
+    const persisted = JSON.parse(mockUpdateResource.mock.calls[0][2].customMetadata);
+    expect(persisted.governanceAttestation).toBeUndefined();
+    // permissive gate proceeds (telemetry only), so activation still happens.
+    expect(mockUpdateResourceStatus).toHaveBeenCalledWith('agent', AGENT_ID, 'APPROVED');
+  });
+
+  test('roleless imported+pending → no trust-path call, gate governs (strict blocks)', async () => {
+    mockGetResource.mockResolvedValue(importedRecord({}));
+
+    await expect(handler(activateEvent())).rejects.toThrow('Activation blocked');
+
+    expect(mockComputeTrustPath).not.toHaveBeenCalled();
+    expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+  });
+
+  test('non-imported record → no trust-path call, activation unchanged', async () => {
+    mockGetResource
+      .mockResolvedValueOnce({
+        recordId: AGENT_ID,
+        name: 'Plain',
+        status: 'DRAFT',
+        customDescriptorContent: JSON.stringify({ orgId: 'org-1', categories: [], state: 'inactive' }),
+      })
+      .mockResolvedValueOnce(approvedRecord());
+
+    await handler(activateEvent());
+
+    expect(mockComputeTrustPath).not.toHaveBeenCalled();
+    expect(mockUpdateResourceStatus).toHaveBeenCalledWith('agent', AGENT_ID, 'APPROVED');
   });
 });

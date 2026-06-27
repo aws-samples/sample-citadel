@@ -977,6 +977,38 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    // US-IMP lazy IAM trust-path: on the APPROVED activation of an imported
+    // agent the resolver calls computeTrustPath (../utils/trust-path), which
+    // performs READ-ONLY IAM introspection of the agent's invocation.roleArn.
+    // computeTrustPath issues iam:GetRole + iam:GetRolePolicy today; the
+    // List*/GetPolicy* actions are granted additively for the richer
+    // attached/managed-policy walk. An imported agent's invocation.roleArn is
+    // operator-supplied and NOT citadel-prefixed (and may be cross-account), so
+    // role/policy reads are scoped to THIS account's IAM namespace rather than a
+    // citadel-* prefix; cross-account / unresolvable roles simply fail GetRole
+    // and are handled best-effort (attestation left 'pending'). No write or
+    // assume is granted. The role/* + policy/* wildcards are suppressed
+    // (AwsSolutions-IAM5) in bin/app.ts with this rationale.
+    agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'iam:GetRole',
+          'iam:GetRolePolicy',
+          'iam:ListRolePolicies',
+          'iam:ListAttachedRolePolicies',
+        ],
+        resources: [`arn:aws:iam::${this.account}:role/*`],
+      }),
+    );
+    agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['iam:GetPolicy', 'iam:GetPolicyVersion'],
+        resources: [`arn:aws:iam::${this.account}:policy/*`],
+      }),
+    );
+
     // Grant permissions for agent import (same DynamoDB + Registry grants as
     // agent-config-resolver; the import resolver reuses RegistryService).
     this.agentConfigTable.grantReadWriteData(agentImportResolverFunction);
