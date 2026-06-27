@@ -30,6 +30,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { publishEvent, EventTypes } from '../utils/events';
 import { grantFabricatorAuthority } from './registry-agent-authority-lifecycle';
 import { getGovernanceEnforce } from '../utils/governance-flag';
+import {
+  storeAgentInvocationSecret,
+  type StoreAgentInvocationSecretResult,
+} from '../utils/credential-manager';
 import type { AgentEvent, AuthContext } from '../types';
 import {
   resolveSourceRef,
@@ -296,6 +300,12 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
   };
   const onConflict = mapConflictPolicy(flat.onConflict);
   if (onConflict) descriptor.onConflict = onConflict;
+  // RAW caller-submitted secret (transient): carried as a top-level field so
+  // importAgent can persist it to Secrets Manager. Deliberately kept OUT of
+  // `invocation`/`origin` so it can never be serialized into the Registry
+  // record (description/customMetadata are built from those two sub-objects).
+  const invocationSecret = asNonEmptyString(flat.invocationSecret);
+  if (invocationSecret) descriptor.invocationSecret = invocationSecret;
   return descriptor;
 }
 
@@ -659,6 +669,11 @@ export async function importAgent(
   const createdBy =
     asNonEmptyString(event.identity?.sub) ?? asNonEmptyString(event.identity?.username) ?? 'import';
   const onConflict = isConflictResolution(root.onConflict) ? root.onConflict : undefined;
+  // RAW caller-submitted invocation secret (transient; see buildImportDescriptor).
+  // Persisted to Secrets Manager on a record-creating path — only the returned
+  // ref is ever written to the record. Read here; consumed by
+  // ensureInvocationSecretStored below.
+  const rawInvocationSecret = asNonEmptyString(root.invocationSecret);
 
   const registryService = getRegistryService();
 
@@ -798,6 +813,41 @@ export async function importAgent(
     }
   };
 
+  // Persist a caller-submitted RAW invocation secret to Secrets Manager and
+  // attach ONLY the returned reference to invocation.auth.secretRef. Memoised so
+  // the single record-creating branch that runs stores at most once, and a no-op
+  // when no raw secret was submitted. Called BEFORE any record write so a store
+  // FAILURE throws ahead of createResource/updateResource — never leaving a
+  // record whose secretRef points at a secret that was never written. This is a
+  // HARD error (unlike the best-effort governance/ADR/authority calls above): an
+  // agent that needs auth must not be half-registered. The raw value is NEVER
+  // logged and NEVER copied into the record/description/customMetadata.
+  let invocationSecretStored = false;
+  const ensureInvocationSecretStored = async (): Promise<void> => {
+    if (invocationSecretStored || !rawInvocationSecret) return;
+    let stored: StoreAgentInvocationSecretResult;
+    try {
+      // Keyed by a fresh UUID under /citadel/agents/{orgId}/{id} so concurrent
+      // imports never collide; the returned ARN becomes the secretRef.
+      stored = await storeAgentInvocationSecret(orgId, uuidv4(), rawInvocationSecret);
+    } catch (err) {
+      // Redaction: the raw secret is never interpolated into the logged or
+      // thrown message — only the (secret-free) underlying error is surfaced.
+      console.error(
+        'agent-import-resolver: failed to store imported-agent invocation secret (raw value not logged):',
+        err,
+      );
+      throw new Error(
+        'Failed to persist invocation secret to Secrets Manager for imported agent',
+      );
+    }
+    // mode is already set from invocationAuthMode by buildImportDescriptor; we
+    // only attach the resolved reference here.
+    invocation.auth.secretRef = stored.secretArn;
+    invocationSecretStored = true;
+    // TODO(agent-import): invoke-side secretRef resolution is a follow-up
+  };
+
   if (match && reason) {
     // Conflict detected but no resolution chosen → ask the caller to pick.
     if (!onConflict) {
@@ -814,6 +864,7 @@ export async function importAgent(
     }
     // replace → overwrite the existing record in place (preserve its recordId).
     if (onConflict === 'replace') {
+      await ensureInvocationSecretStored();
       const adrId = await createImportAdrBestEffort();
       const replaced = await registryService.updateResource('agent', match.recordId, {
         name,
@@ -827,6 +878,7 @@ export async function importAgent(
     }
     // copy → create a new record under a non-colliding suffixed name.
     if (onConflict === 'copy') {
+      await ensureInvocationSecretStored();
       const taken = new Set(orgRecords.map((r) => r.name));
       const copyName = buildImportCopyName(name, taken);
       const adrId = await createImportAdrBestEffort();
@@ -844,6 +896,7 @@ export async function importAgent(
 
   // 4. No conflict (or no match for a supplied onConflict) → create a fresh
   //    DRAFT/inactive record. Never auto-activate.
+  await ensureInvocationSecretStored();
   const adrId = await createImportAdrBestEffort();
   const created = await registryService.createResource('agent', name, {
     name,

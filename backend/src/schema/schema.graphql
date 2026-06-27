@@ -487,6 +487,12 @@ input ImportAgentInput {
   invocationTarget: String!
   invocationAuthMode: String
   invocationSecretRef: String
+  # RAW secret value the caller may submit at import time. When present on a
+  # record-creating import (CREATE/REPLACE/COPY) it is persisted to AWS Secrets
+  # Manager and ONLY the resulting reference is stored on the Registry record
+  # (the raw value never touches the record or its logs). Takes precedence over
+  # invocationSecretRef, which is a pre-existing reference used as-is.
+  invocationSecret: String
   invocationMode: String
   region: String
   account: String

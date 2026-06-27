@@ -770,6 +770,28 @@ export class BackendStack extends cdk.Stack {
       })
     );
 
+    // Import-side auth-secret storage (US-IMP): a caller may submit a RAW
+    // invocation secret with an imported agent. It is persisted to Secrets
+    // Manager via credential-manager.storeAgentInvocationSecret and the Registry
+    // record stores ONLY the returned secretRef (never the raw value). Least
+    // privilege: WRITE-only (CreateSecret/PutSecretValue/TagResource) scoped to
+    // the agent secret-path convention /citadel/agents/*. No GetSecretValue here.
+    // TODO(agent-import): invoke-side secretRef resolution (GetSecretValue) is a
+    // follow-up on the invoke path (agent-message-handler), not this resolver.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'secretsmanager:CreateSecret',
+          'secretsmanager:PutSecretValue',
+          'secretsmanager:TagResource',
+        ],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
+        ],
+      })
+    );
+
     // Agent Code Resolver - for reading/writing agent code from S3
     const agentCodeResolverFunction = new lambda.Function(
       this,

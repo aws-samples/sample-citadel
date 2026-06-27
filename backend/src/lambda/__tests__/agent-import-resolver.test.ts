@@ -122,6 +122,16 @@ jest.mock('../adr-resolver', () => ({
   createADR: (...args: unknown[]) => mockCreateADR(...args),
 }));
 
+// ── Mock credential-manager: the import path persists a caller-submitted RAW
+//    invocation secret to Secrets Manager and stores ONLY the returned ref on
+//    the record. Mocked so no AWS call is made and we can assert the raw value
+//    is handed to the store exactly once (and never leaks into the record). ──
+const mockStoreAgentInvocationSecret = jest.fn();
+jest.mock('../../utils/credential-manager', () => ({
+  __esModule: true,
+  storeAgentInvocationSecret: (...args: unknown[]) => mockStoreAgentInvocationSecret(...args),
+}));
+
 import {
   importAgent,
   attestAgentImport,
@@ -143,6 +153,12 @@ import { EventTypes } from '../../utils/events';
 // ── Fixtures ────────────────────────────────────────────────────────────
 const ORG = 'test-org-a';
 const SOURCE_ARN = 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/pay';
+// Auth-secret storage fixtures (US-IMP): a RAW secret the caller submits, and
+// the Secrets Manager ARN the (mocked) store returns — the ONLY thing that may
+// land on the record as invocation.auth.secretRef.
+const RAW_SECRET = 'sk-live-SUPERSECRET-raw-0123456789-do-not-persist';
+const STORED_SECRET_ARN =
+  'arn:aws:secretsmanager:us-east-1:111122223333:secret:/citadel/agents/test-org-a/abc123-AbCdEf';
 const eventWithOrg = {
   identity: { claims: { 'custom:organization': ORG }, sub: 'user-1' },
 };
@@ -235,6 +251,12 @@ beforeEach(() => {
   mockGetGovernanceEnforce.mockResolvedValue('permissive');
   // ADR-on-import: the reusable ADR write resolves to a stable adrId by default.
   mockCreateADR.mockResolvedValue({ adrId: 'adr-import-1' });
+  // Auth-secret storage: the store resolves to a stable ARN by default. Only
+  // exercised on tests that submit a raw invocationSecret (guarded otherwise).
+  mockStoreAgentInvocationSecret.mockResolvedValue({
+    secretArn: STORED_SECRET_ARN,
+    secretName: '/citadel/agents/test-org-a/abc123',
+  });
 });
 
 // ── importAgent: create (no conflict) ───────────────────────────────────
@@ -398,6 +420,191 @@ describe('importAgent — conflict resolution', () => {
 
     expect(mockCreateResource).toHaveBeenCalledTimes(1);
     expect(mockCreateResource.mock.calls[0][1]).toBe('PaymentsAgent (imported copy)');
+  });
+});
+
+// ── importAgent: invocation auth-secret storage (US-IMP) ─────────────────
+// On a record-creating import (create / replace / copy) a caller-submitted RAW
+// invocationSecret is persisted to Secrets Manager (mocked credential-manager)
+// and ONLY the returned ref is written to invocation.auth.secretRef. The raw
+// value never lands in the record/customMetadata/description and is never
+// logged. A pre-existing invocationSecretRef (no raw) is used as-is with no
+// store call. A store FAILURE is a hard error: the import throws and no record
+// is created. A no-op link never stores (it creates no record).
+describe('importAgent — invocation auth-secret storage', () => {
+  /** The metadata object handed to serializeCustomMetadata (pre-stringify). */
+  const stampedMeta = (): { invocation?: { auth?: { secretRef?: string; mode?: string } } } | undefined => {
+    const call = mockSerializeCustomMetadata.mock.calls[0];
+    return call ? (call[0] as { invocation?: { auth?: { secretRef?: string; mode?: string } } }) : undefined;
+  };
+
+  /** validInput with a fully-specified invocation block (mode + optional secretRef). */
+  const withAuth = (auth: Record<string, unknown>, overrides: Overrides = {}): Record<string, unknown> =>
+    validInput({
+      invocation: { protocol: 'AGENTCORE_RUNTIME', target: SOURCE_ARN, auth, mode: 'sync' },
+      ...overrides,
+    });
+
+  it('stores a raw invocationSecret exactly once with the raw value and the caller org', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(withAuth({ mode: 'API_KEY' }, { invocationSecret: RAW_SECRET }), eventWithOrg);
+
+    expect(mockStoreAgentInvocationSecret).toHaveBeenCalledTimes(1);
+    const args = mockStoreAgentInvocationSecret.mock.calls[0] as [string, string, string];
+    expect(args[0]).toBe(ORG); // path-scoped to the caller's org
+    expect(typeof args[1]).toBe('string'); // a stable, non-empty secret id
+    expect(args[1].length).toBeGreaterThan(0);
+    expect(args[2]).toBe(RAW_SECRET); // the RAW value reaches the store
+  });
+
+  it('writes ONLY the returned ref (and the provided mode) into the persisted customMetadata', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(withAuth({ mode: 'API_KEY' }, { invocationSecret: RAW_SECRET }), eventWithOrg);
+
+    const meta = stampedMeta();
+    expect(meta?.invocation?.auth?.secretRef).toBe(STORED_SECRET_ARN);
+    expect(meta?.invocation?.auth?.mode).toBe('API_KEY');
+  });
+
+  it('NEVER persists the raw secret in customMetadata, description, or any createResource arg', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(withAuth({ mode: 'API_KEY' }, { invocationSecret: RAW_SECRET }), eventWithOrg);
+
+    const serializedMeta = mockSerializeCustomMetadata.mock.results[0].value as string;
+    expect(serializedMeta).not.toContain(RAW_SECRET);
+
+    const payload = mockCreateResource.mock.calls[0][2] as { customMetadata: string; description: string };
+    expect(payload.customMetadata).not.toContain(RAW_SECRET);
+    expect(payload.description).not.toContain(RAW_SECRET);
+    // Belt-and-braces: the raw value appears in NO argument handed to createResource.
+    expect(JSON.stringify(mockCreateResource.mock.calls[0])).not.toContain(RAW_SECRET);
+  });
+
+  it('never logs the raw invocationSecret (console.log/error/warn)', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await importAgent(withAuth({ mode: 'API_KEY' }, { invocationSecret: RAW_SECRET }), eventWithOrg);
+
+    const logged = [...logSpy.mock.calls, ...errSpy.mock.calls, ...warnSpy.mock.calls]
+      .flat()
+      .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
+      .join(' ');
+    expect(logged).not.toContain(RAW_SECRET);
+
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it('uses a pre-existing invocationSecretRef as-is and does NOT call the secret store', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(withAuth({ mode: 'API_KEY', secretRef: 'preexisting-ref-1' }), eventWithOrg);
+
+    expect(mockStoreAgentInvocationSecret).not.toHaveBeenCalled();
+    expect(stampedMeta()?.invocation?.auth?.secretRef).toBe('preexisting-ref-1');
+  });
+
+  it('stores nothing and sets no secretRef when neither raw secret nor ref is provided', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput(), eventWithOrg); // validInput auth = { mode: 'SIGV4' }, no secret/ref
+
+    expect(mockStoreAgentInvocationSecret).not.toHaveBeenCalled();
+    expect(stampedMeta()?.invocation?.auth?.secretRef).toBeUndefined();
+  });
+
+  it('fails the import (no record created) and does not leak the raw secret when the store throws', async () => {
+    mockStoreAgentInvocationSecret.mockRejectedValue(new Error('SecretsManager unavailable'));
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(
+      importAgent(withAuth({ mode: 'API_KEY' }, { invocationSecret: RAW_SECRET }), eventWithOrg),
+    ).rejects.toThrow(/secret/i);
+
+    // No record may be left pointing at a nonexistent secret.
+    expect(mockCreateResource).not.toHaveBeenCalled();
+    expect(mockUpdateResource).not.toHaveBeenCalled();
+    // The failure path must not log the raw value either.
+    const logged = errSpy.mock.calls.flat().map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+    expect(logged).not.toContain(RAW_SECRET);
+    errSpy.mockRestore();
+  });
+
+  it('stores the secret and sets the ref on the REPLACE path', async () => {
+    mockListResources.mockResolvedValue([
+      existingRecord({ recordId: 'rec-existing', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    ]);
+    mockUpdateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-existing', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(
+      withAuth({ mode: 'API_KEY' }, { onConflict: 'replace', invocationSecret: RAW_SECRET }),
+      eventWithOrg,
+    );
+
+    expect(mockStoreAgentInvocationSecret).toHaveBeenCalledTimes(1);
+    expect(stampedMeta()?.invocation?.auth?.secretRef).toBe(STORED_SECRET_ARN);
+  });
+
+  it('stores the secret and sets the ref on the COPY path', async () => {
+    mockListResources.mockResolvedValue([
+      existingRecord({ recordId: 'rec-existing', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    ]);
+    mockCreateResource.mockImplementation(async (_t: string, id: string) =>
+      existingRecord({ recordId: 'rec-copy', name: id, sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(
+      withAuth({ mode: 'API_KEY' }, { onConflict: 'copy', invocationSecret: RAW_SECRET }),
+      eventWithOrg,
+    );
+
+    expect(mockStoreAgentInvocationSecret).toHaveBeenCalledTimes(1);
+    expect(stampedMeta()?.invocation?.auth?.secretRef).toBe(STORED_SECRET_ARN);
+  });
+
+  it('does NOT store a secret on a no-op link (no record is created)', async () => {
+    mockListResources.mockResolvedValue([
+      existingRecord({ recordId: 'rec-existing', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    ]);
+
+    await importAgent(
+      withAuth({ mode: 'API_KEY' }, { onConflict: 'link', invocationSecret: RAW_SECRET }),
+      eventWithOrg,
+    );
+
+    expect(mockStoreAgentInvocationSecret).not.toHaveBeenCalled();
+  });
+
+  it('buildImportDescriptor carries invocationSecret as a transient top-level field, never in invocation/origin', () => {
+    const d = buildImportDescriptor(
+      validFlatInput({ invocationSecret: RAW_SECRET, invocationAuthMode: 'API_KEY' }),
+    );
+    expect(d.invocationSecret).toBe(RAW_SECRET);
+    expect(JSON.stringify(d.invocation)).not.toContain(RAW_SECRET);
+    expect(JSON.stringify(d.origin)).not.toContain(RAW_SECRET);
+    // A raw secret alone yields no secretRef at the mapping layer (storage happens later).
+    expect((d.invocation as { auth: Record<string, unknown> }).auth).toEqual({ mode: 'API_KEY' });
   });
 });
 
