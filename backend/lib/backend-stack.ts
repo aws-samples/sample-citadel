@@ -2442,6 +2442,15 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
+    // Reuses the existing AgentImport data source — the import resolver already
+    // has Registry CRUD + events:PutEvents, so no new Lambda/data source/perms.
+    agentImportLambdaDataSource.createResolver("AttestAgentImportResolver", {
+      typeName: "Mutation",
+      fieldName: "attestAgentImport",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
     agentImportLambdaDataSource.createResolver("DiscoverAgentsResolver", {
       typeName: "Query",
       fieldName: "discoverAgents",

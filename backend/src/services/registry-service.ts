@@ -163,6 +163,17 @@ export interface AgentCustomMetadata {
      * ADR-on-import.
      */
     adrId?: string;
+    /**
+     * Identity (Cognito `sub`, falling back to `username`) of the admin/architect
+     * who attested the import. Additive: set only when `status` advances to
+     * 'attested' via the `attestAgentImport` mutation; absent while 'pending'.
+     */
+    attestedBy?: string;
+    /**
+     * ISO 8601 timestamp at which `status` advanced to 'attested'. Additive:
+     * set alongside {@link attestedBy} on attestation; absent while 'pending'.
+     */
+    attestedAt?: string;
   };
 }
 

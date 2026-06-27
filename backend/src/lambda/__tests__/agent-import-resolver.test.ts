@@ -124,6 +124,7 @@ jest.mock('../adr-resolver', () => ({
 
 import {
   importAgent,
+  attestAgentImport,
   handler,
   buildImportCopyName,
   buildImportDescriptor,
@@ -1424,5 +1425,276 @@ describe('import lifecycle events', () => {
 
       expect(res).toEqual([]);
     });
+  });
+});
+
+// ── attestAgentImport: admin/architect attestation of imported records ──────
+// Flips an imported record's governanceAttestation.status 'pending' → 'attested',
+// stamping attestedBy + attestedAt. Gated to admin OR architect; org-scoped for
+// non-admins (no existence leak); idempotent on an already-attested record;
+// errors when the record carries no attestation; best-effort emits
+// agent.import.attested without ever failing the mutation on an emit error.
+describe('attestAgentImport', () => {
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+  const adminEvent = { identity: { claims: { 'custom:role': 'admin' }, sub: 'admin-1' } };
+  const architectEvent = { identity: { claims: { 'custom:role': 'architect' }, sub: 'arch-1' } };
+  const developerEvent = {
+    identity: { claims: { 'custom:organization': ORG }, sub: 'dev-1' },
+  };
+
+  /** A DRAFT imported agent record carrying a governanceAttestation block. */
+  function importedAgentRecord(opts: {
+    recordId?: string;
+    name?: string;
+    orgId?: string;
+    status?: 'pending' | 'attested';
+    attestedBy?: string;
+    attestedAt?: string;
+  } = {}) {
+    const ga: Record<string, unknown> = {
+      status: opts.status ?? 'pending',
+      enforcementMode: 'shadow',
+      authorityRequested: true,
+      requestedAt: '2026-06-26T00:00:00.000Z',
+      adrId: 'adr-import-1',
+    };
+    if (opts.attestedBy) ga.attestedBy = opts.attestedBy;
+    if (opts.attestedAt) ga.attestedAt = opts.attestedAt;
+    return {
+      recordId: opts.recordId ?? 'rec-imp',
+      name: opts.name ?? 'PaymentsAgent',
+      description: '{"name":"PaymentsAgent"}',
+      status: 'DRAFT',
+      customDescriptorContent: JSON.stringify({
+        orgId: opts.orgId ?? ORG,
+        manifest: {},
+        origin: { sourceArn: SOURCE_ARN, ownership: 'external' },
+        invocation: { protocol: 'AGENTCORE_RUNTIME', target: SOURCE_ARN, auth: { mode: 'SIGV4' }, mode: 'sync' },
+        governanceAttestation: ga,
+      }),
+      createdAt: new Date('2026-01-01'),
+      updatedAt: new Date('2026-01-02'),
+    };
+  }
+
+  /** The merged metadata object handed to serializeCustomMetadata (pre-stringify). */
+  const writtenMeta = (): Record<string, unknown> | undefined => {
+    const call = mockSerializeCustomMetadata.mock.calls[0];
+    return call ? (call[0] as Record<string, unknown>) : undefined;
+  };
+
+  /** All emitted events of the given detail-type (eventType) seen by publishEvent. */
+  const emittedAttested = (): Array<Record<string, unknown>> =>
+    mockPublishEvent.mock.calls
+      .map((c) => c[0] as Record<string, unknown>)
+      .filter((e) => e.eventType === EventTypes.AGENT_IMPORT_ATTESTED);
+
+  it('admin: flips a pending record to attested with attestedBy + attestedAt, writing once', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockGetResource.mockResolvedValue(importedAgentRecord({ status: 'pending' }));
+    mockUpdateResource.mockResolvedValue(
+      importedAgentRecord({ status: 'attested', attestedBy: 'admin-1' }),
+    );
+
+    const result = await attestAgentImport('rec-imp', adminEvent);
+
+    expect(mockUpdateResource).toHaveBeenCalledTimes(1);
+    const [type, id] = mockUpdateResource.mock.calls[0];
+    expect(type).toBe('agent');
+    expect(id).toBe('rec-imp');
+
+    const ga = (writtenMeta()?.governanceAttestation ?? {}) as Record<string, unknown>;
+    expect(ga.status).toBe('attested');
+    expect(ga.attestedBy).toBe('admin-1');
+    expect(ga.attestedAt).toMatch(ISO);
+    // Preserves the pre-existing attestation fields.
+    expect(ga.enforcementMode).toBe('shadow');
+    expect(ga.authorityRequested).toBe(true);
+    expect(ga.requestedAt).toBe('2026-06-26T00:00:00.000Z');
+    expect(ga.adrId).toBe('adr-import-1');
+
+    expect(result).toEqual(expect.objectContaining({ agentId: 'rec-imp' }));
+  });
+
+  it('admin: emits exactly one agent.import.attested with agentId/attestedBy/orgId + ISO timestamp', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockGetResource.mockResolvedValue(importedAgentRecord({ status: 'pending' }));
+    mockUpdateResource.mockResolvedValue(
+      importedAgentRecord({ status: 'attested', attestedBy: 'admin-1' }),
+    );
+
+    await attestAgentImport('rec-imp', adminEvent);
+
+    const atts = emittedAttested();
+    expect(atts).toHaveLength(1);
+    expect(atts[0].timestamp).toMatch(ISO);
+    expect(atts[0].correlationId).toEqual(expect.any(String));
+    expect(atts[0].payload).toEqual(
+      expect.objectContaining({ agentId: 'rec-imp', attestedBy: 'admin-1', orgId: ORG }),
+    );
+  });
+
+  it('architect: allowed to attest a pending record (writes once)', async () => {
+    mockHasRoleFromEvent.mockImplementation((_e: unknown, role: string) => role === 'architect');
+    mockGetResource.mockResolvedValue(importedAgentRecord({ status: 'pending' }));
+    mockUpdateResource.mockResolvedValue(
+      importedAgentRecord({ status: 'attested', attestedBy: 'arch-1' }),
+    );
+
+    const result = await attestAgentImport('rec-imp', architectEvent);
+
+    expect(result).toEqual(expect.objectContaining({ agentId: 'rec-imp' }));
+    expect(mockUpdateResource).toHaveBeenCalledTimes(1);
+    const ga = (writtenMeta()?.governanceAttestation ?? {}) as Record<string, unknown>;
+    expect(ga.status).toBe('attested');
+    expect(ga.attestedBy).toBe('arch-1');
+  });
+
+  it('developer / no privileged role: authorization error, no write, no event', async () => {
+    // mockIsAdminFromEvent + mockHasRoleFromEvent both default to false.
+    mockGetResource.mockResolvedValue(importedAgentRecord({ status: 'pending' }));
+
+    await expect(attestAgentImport('rec-imp', developerEvent)).rejects.toThrow(/unauthor/i);
+
+    expect(mockUpdateResource).not.toHaveBeenCalled();
+    expect(emittedAttested()).toHaveLength(0);
+  });
+
+  it('record with no governanceAttestation: errors (nothing to attest), no write', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    // existingRecord() carries no governanceAttestation block.
+    mockGetResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-plain', name: 'PlainAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await expect(attestAgentImport('rec-plain', adminEvent)).rejects.toThrow(/nothing to attest/i);
+
+    expect(mockUpdateResource).not.toHaveBeenCalled();
+    expect(emittedAttested()).toHaveLength(0);
+  });
+
+  it('already attested: idempotent — returns the agent, no second write, no duplicate event', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockGetResource.mockResolvedValue(
+      importedAgentRecord({ status: 'attested', attestedBy: 'prev-admin', attestedAt: '2026-06-01T00:00:00.000Z' }),
+    );
+
+    const result = await attestAgentImport('rec-imp', adminEvent);
+
+    expect(result).toEqual(expect.objectContaining({ agentId: 'rec-imp' }));
+    expect(mockUpdateResource).not.toHaveBeenCalled();
+    expect(emittedAttested()).toHaveLength(0);
+  });
+
+  it('not found: clean error, no write', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockGetResource.mockResolvedValue(null);
+
+    await expect(attestAgentImport('missing', adminEvent)).rejects.toThrow(/not found/i);
+
+    expect(mockUpdateResource).not.toHaveBeenCalled();
+  });
+
+  it('cross-org non-admin caller: not-found (no write, no existence leak)', async () => {
+    mockHasRoleFromEvent.mockImplementation((_e: unknown, role: string) => role === 'architect');
+    mockExtractOrgFromEvent.mockResolvedValue(ORG);
+    // Record belongs to a different org than the caller's (ORG).
+    mockGetResource.mockResolvedValue(importedAgentRecord({ orgId: 'other-org', status: 'pending' }));
+
+    await expect(attestAgentImport('rec-imp', architectEvent)).rejects.toThrow(/not found/i);
+
+    expect(mockUpdateResource).not.toHaveBeenCalled();
+    expect(emittedAttested()).toHaveLength(0);
+  });
+
+  it('admin bypasses org-scope: attests a record owned by another org', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockExtractOrgFromEvent.mockResolvedValue('admin-home-org');
+    mockGetResource.mockResolvedValue(importedAgentRecord({ orgId: 'other-org', status: 'pending' }));
+    mockUpdateResource.mockResolvedValue(
+      importedAgentRecord({ orgId: 'other-org', status: 'attested', attestedBy: 'admin-1' }),
+    );
+
+    const result = await attestAgentImport('rec-imp', adminEvent);
+
+    expect(result).toEqual(expect.objectContaining({ agentId: 'rec-imp' }));
+    expect(mockUpdateResource).toHaveBeenCalledTimes(1);
+    // Emitted orgId reflects the RECORD's org, not the admin's home org.
+    expect(emittedAttested()[0].payload).toEqual(expect.objectContaining({ orgId: 'other-org' }));
+  });
+
+  it('emit failure does NOT fail the mutation — the attested agent is still returned', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockGetResource.mockResolvedValue(importedAgentRecord({ status: 'pending' }));
+    mockUpdateResource.mockResolvedValue(
+      importedAgentRecord({ status: 'attested', attestedBy: 'admin-1' }),
+    );
+    mockPublishEvent.mockRejectedValue(new Error('eventbridge down'));
+
+    const result = await attestAgentImport('rec-imp', adminEvent);
+
+    expect(result).toEqual(expect.objectContaining({ agentId: 'rec-imp' }));
+    expect(mockUpdateResource).toHaveBeenCalledTimes(1);
+    expect(mockPublishEvent).toHaveBeenCalled(); // emission was attempted
+  });
+});
+
+// ── handler routing: Mutation.attestAgentImport ─────────────────────────────
+describe('handler — attestAgentImport', () => {
+  const adminEvent = { identity: { claims: { 'custom:role': 'admin' }, sub: 'admin-1' } };
+
+  function importedAgentRecord(status: 'pending' | 'attested' = 'pending') {
+    return {
+      recordId: 'rec-imp',
+      name: 'PaymentsAgent',
+      description: '{"name":"PaymentsAgent"}',
+      status: 'DRAFT',
+      customDescriptorContent: JSON.stringify({
+        orgId: ORG,
+        manifest: {},
+        origin: { sourceArn: SOURCE_ARN, ownership: 'external' },
+        governanceAttestation: {
+          status,
+          enforcementMode: 'shadow',
+          authorityRequested: true,
+          requestedAt: '2026-06-26T00:00:00.000Z',
+        },
+      }),
+      createdAt: new Date('2026-01-01'),
+      updatedAt: new Date('2026-01-02'),
+    };
+  }
+
+  it('routes fieldName attestAgentImport and returns the mapped AgentConfig', async () => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockGetResource.mockResolvedValue(importedAgentRecord('pending'));
+    mockUpdateResource.mockResolvedValue(importedAgentRecord('attested'));
+
+    const result = await handler({
+      info: { fieldName: 'attestAgentImport' },
+      arguments: { agentId: 'rec-imp' },
+      identity: adminEvent.identity,
+    });
+
+    expect(result).toEqual(expect.objectContaining({ agentId: 'rec-imp' }));
+  });
+
+  it('rejects an unauthenticated caller (no identity)', async () => {
+    await expect(
+      handler({ info: { fieldName: 'attestAgentImport' }, arguments: { agentId: 'rec-imp' } }),
+    ).rejects.toThrow(/unauthenticated/i);
+    expect(mockUpdateResource).not.toHaveBeenCalled();
+  });
+
+  it('throws when agentId is missing', async () => {
+    await expect(
+      handler({
+        info: { fieldName: 'attestAgentImport' },
+        arguments: {},
+        identity: adminEvent.identity,
+      }),
+    ).rejects.toThrow(/agentId/i);
+    expect(mockUpdateResource).not.toHaveBeenCalled();
   });
 });

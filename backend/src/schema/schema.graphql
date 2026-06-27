@@ -138,6 +138,11 @@ type Mutation {
   updateAgentConfig(input: UpdateAgentConfigInput!): AgentConfig
   createAgentConfig(input: CreateAgentConfigInput!): AgentConfig
   importAgent(input: ImportAgentInput!): ImportAgentResult!
+  # Admin/architect governance action: flips an imported agent's
+  # governanceAttestation.status from 'pending' to 'attested'. Default Cognito
+  # auth (same as the sibling agent mutations); the resolver enforces the
+  # admin/architect role and org-scoping. Idempotent on an already-attested record.
+  attestAgentImport(agentId: ID!): AgentConfig!
   deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
   activateProjectAgents(projectId: ID!): ActivateAgentsResult
   updateAgentCode(input: UpdateAgentCodeInput!): AgentCode

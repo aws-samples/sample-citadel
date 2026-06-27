@@ -135,7 +135,7 @@ interface ImportEventIdentity {
 
 interface ImportAgentEvent {
   info?: { fieldName?: string };
-  arguments?: { input?: unknown; ref?: unknown };
+  arguments?: { input?: unknown; ref?: unknown; agentId?: unknown };
   identity?: ImportEventIdentity;
 }
 
@@ -342,7 +342,7 @@ export function toImportAgentResult(
  */
 export const handler = async (
   event: ImportAgentEvent,
-): Promise<ImportAgentResult | FlatAgentCandidate[] | string> => {
+): Promise<ImportAgentResult | FlatAgentCandidate[] | string | AgentConfig> => {
   const fieldName = event.info?.fieldName;
   // One correlationId per resolver invocation, shared by the discovery summary
   // event and the failure event for this call.
@@ -353,6 +353,16 @@ export const handler = async (
         const descriptor = buildImportDescriptor(event.arguments?.input);
         const result = await importAgent(descriptor, event);
         return toImportAgentResult(result);
+      }
+      case 'attestAgentImport': {
+        // Authentication is required up-front (mirrors the discovery queries);
+        // the admin/architect authorization gate lives inside attestAgentImport.
+        requireAuthenticated(event);
+        const agentId = asNonEmptyString(event.arguments?.agentId);
+        if (!agentId) {
+          throw new Error('attestAgentImport: agentId is required');
+        }
+        return await attestAgentImport(agentId, event, correlationId);
       }
       case 'discoverAgents': {
         requireAuthenticated(event);
@@ -843,6 +853,115 @@ export async function importAgent(
   const config = registryService.mapToAgentConfig(created);
   await grantAuthorityBestEffort(created.recordId);
   await emitRegistered(config);
+  return config;
+}
+
+/**
+ * Attests an imported agent: advances its `governanceAttestation.status` from
+ * 'pending' to 'attested', recording WHO attested (`attestedBy`) and WHEN
+ * (`attestedAt`). This is the explicit governance acknowledgement that an
+ * externally-owned agent's requested authority grant has been reviewed — the
+ * prerequisite the activation gate checks before an imported record may be
+ * activated (APPROVED).
+ *
+ * Authorization mirrors the discovery queries: only the `admin` or `architect`
+ * role may attest (attestation is an account/org-level governance action, not a
+ * tenant self-service operation). Non-admin callers are additionally org-scoped:
+ * the record must belong to the caller's organization, and a mismatch surfaces
+ * the SAME not-found error as a missing record so a cross-tenant probe cannot
+ * tell "exists in another org" apart from "does not exist".
+ *
+ * Idempotent: attesting an already-'attested' record returns the mapped agent
+ * unchanged with no second write and no duplicate event. A record that carries
+ * no `governanceAttestation` (i.e. not an imported agent) is rejected — there is
+ * nothing to attest.
+ *
+ * Emits a BEST-EFFORT {@link EventTypes.AGENT_IMPORT_ATTESTED} event on a real
+ * transition; an emit failure is logged and swallowed and NEVER fails (or alters
+ * the result of) the attestation. The event's `orgId` reflects the RECORD's
+ * organization (the agent being attested), not necessarily the caller's.
+ *
+ * @returns the mapped AgentConfig (attested on a transition, unchanged on a
+ *   no-op idempotent attestation).
+ */
+export async function attestAgentImport(
+  agentId: string,
+  event: ImportAgentEvent,
+  correlationId: string = uuidv4(),
+): Promise<AgentConfig> {
+  // 1. Authorization: admin OR architect only (same gate as discovery).
+  const isAdmin = isAdminFromEvent(event);
+  if (!isAdmin && !hasRoleFromEvent(event, 'architect')) {
+    throw new Error('Unauthorized: attestAgentImport requires the admin or architect role');
+  }
+
+  const registryService = getRegistryService();
+
+  // 2. Load the record. getResource returns null on a 404 → clean not-found.
+  const record = await registryService.getResource('agent', agentId);
+  if (!record) {
+    throw new Error(`Agent not found: ${agentId}`);
+  }
+
+  // 3. Deserialize the stored custom metadata.
+  const meta = readMeta(registryService, record);
+
+  // 4. Org-scope (non-admin only): the record must belong to the caller's org.
+  //    On a mismatch throw the SAME not-found error as a missing record so a
+  //    cross-tenant caller cannot distinguish "exists elsewhere" from "absent"
+  //    (no existence leak). Matches the existing get/update org checks.
+  if (!isAdmin) {
+    const callerOrg = await extractOrgFromEvent(event);
+    if (!callerOrg || meta.orgId !== callerOrg) {
+      throw new Error(`Agent not found: ${agentId}`);
+    }
+  }
+
+  // 5. Only imported agents carry a governanceAttestation block. Absent ⇒ this
+  //    is not an imported record, so there is nothing to attest.
+  const attestation = meta.governanceAttestation;
+  if (!attestation) {
+    throw new Error('not an imported agent: nothing to attest');
+  }
+
+  // 6. Idempotent no-op: already attested → return unchanged (no write/event).
+  if (attestation.status === 'attested') {
+    return registryService.mapToAgentConfig(record);
+  }
+
+  // 7. Advance 'pending' → 'attested', preserving every existing attestation
+  //    field (enforcementMode / authorityRequested / requestedAt / adrId) and
+  //    stamping the attesting identity + ISO timestamp.
+  const attestedBy =
+    asNonEmptyString(event.identity?.sub) ??
+    asNonEmptyString(event.identity?.username) ??
+    'unknown';
+  const updatedAttestation: NonNullable<AgentCustomMetadata['governanceAttestation']> = {
+    ...attestation,
+    status: 'attested',
+    attestedBy,
+    attestedAt: new Date().toISOString(),
+  };
+  const mergedMeta: AgentCustomMetadata = {
+    ...meta,
+    governanceAttestation: updatedAttestation,
+  };
+
+  // Update only the custom metadata in place (recordId preserved); name and
+  // description are intentionally left untouched.
+  const updated = await registryService.updateResource('agent', record.recordId, {
+    customMetadata: registryService.serializeCustomMetadata(mergedMeta),
+  });
+  const config = registryService.mapToAgentConfig(updated);
+
+  // 8. Best-effort lifecycle event — never fails the mutation on emit error.
+  //    orgId reflects the RECORD's org (the agent being attested), not the caller's.
+  await emitImportEvent(
+    EventTypes.AGENT_IMPORT_ATTESTED,
+    { agentId: record.recordId, attestedBy, orgId: meta.orgId ?? null },
+    correlationId,
+  );
+
   return config;
 }
 

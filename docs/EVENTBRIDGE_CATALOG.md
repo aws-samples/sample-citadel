@@ -311,6 +311,8 @@ Best-effort lifecycle events emitted by `backend/src/lambda/agent-import-resolve
 | `agent.import.discovered` | agent-import-resolver.discoverAgents | SIEM / audit, telemetry | Exactly one summary event per discovery call (SCAN / PASTE / MANIFEST) |
 | `agent.import.registered` | agent-import-resolver.importAgent | SIEM / audit, telemetry | An external agent was registered into the Registry on a CREATE, REPLACE, or COPY. NOT emitted on a no-op link or an unresolved conflict |
 | `agent.import.failed` | agent-import-resolver (import / discover / describe catch) | SIEM / audit | An import / discover / describe operation threw; emitted before the original error is rethrown |
+| `agent.import.attested` | agent-import-resolver.attestAgentImport | SIEM / audit, governance | An admin/architect attested an imported agent — `governanceAttestation.status` advanced `pending` → `attested`. Emitted once per real transition; NOT emitted on an idempotent re-attestation of an already-attested record |
+| `agent.import.activation_gate` | agent-config-resolver (APPROVED activation transition) | SIEM / audit, governance | The import activation gate evaluated an imported, not-yet-attested agent at activation. In `shadow`/`permissive` modes a best-effort "would-block" event is emitted and activation proceeds; in `strict` the activation throws instead (no event) |
 
 ### Event Schemas
 
@@ -366,6 +368,47 @@ Best-effort lifecycle events emitted by `backend/src/lambda/agent-import-resolve
       "message": "string (original error message)"
     },
     "correlationId": "string (UUID, required)",
+    "timestamp": "ISO 8601 (required)"
+  }
+}
+```
+
+#### agent.import.attested
+
+```json
+{
+  "source": "citadel.backend",
+  "detail-type": "agent.import.attested",
+  "detail": {
+    "projectId": "",
+    "payload": {
+      "agentId": "string (Registry recordId)",
+      "attestedBy": "string (attesting admin/architect — Cognito sub, or username fallback)",
+      "orgId": "string | null (the RECORD's org — the agent being attested, not necessarily the caller's)"
+    },
+    "correlationId": "string (UUID, required)",
+    "timestamp": "ISO 8601 (required)"
+  }
+}
+```
+
+#### agent.import.activation_gate
+
+Emitted by `backend/src/lambda/agent-config-resolver.ts` (NOT the import resolver) from the import activation gate, on the APPROVED transition of an imported, not-yet-attested agent, in `shadow`/`permissive` modes only (`strict` throws instead). Unlike the other import events this envelope carries `agentId` at the `detail` level and does NOT include a `correlationId`.
+
+```json
+{
+  "source": "citadel.backend",
+  "detail-type": "agent.import.activation_gate",
+  "detail": {
+    "projectId": "",
+    "agentId": "string (Registry recordId)",
+    "payload": {
+      "agentId": "string (Registry recordId)",
+      "attestationStatus": "pending",
+      "mode": "shadow | permissive",
+      "wouldBlock": true
+    },
     "timestamp": "ISO 8601 (required)"
   }
 }
