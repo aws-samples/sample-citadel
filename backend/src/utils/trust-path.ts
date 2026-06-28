@@ -437,6 +437,96 @@ export async function computeTrustPath(
 
 
 // ---------------------------------------------------------------------------
+// assumeRoleCredentials — cross-account RAW temporary-credentials primitive
+// ---------------------------------------------------------------------------
+
+/**
+ * Raw, short-lived AWS credentials returned by {@link assumeRoleCredentials}.
+ * Structurally a subset of the AWS SDK v3 `AwsCredentialIdentity`, so it is
+ * accepted verbatim by any v3 client's `credentials` config (IAM, STS, the
+ * ResourceGroupsTaggingAPI client, …). The secret material is NEVER logged by
+ * this module, and callers are expected to keep it out of logs too.
+ */
+export interface AssumedRoleCredentials {
+  readonly accessKeyId: string;
+  readonly secretAccessKey: string;
+  readonly sessionToken: string;
+  readonly expiration?: Date;
+}
+
+/** Injectable dependencies for {@link assumeRoleCredentials}. */
+export interface AssumeRoleCredentialsDeps {
+  /** Injected STS client. A real `STSClient` is constructed when omitted. */
+  stsClient?: STSClient;
+  /**
+   * CloudTrail-friendly `RoleSessionName` prefix (a random suffix is appended).
+   * Defaults to `import-assume`; callers pick a context-specific prefix
+   * (e.g. `import-tagscan` for a cross-account tag scan, `import-trustpath` for
+   * the analysis-role assume).
+   */
+  sessionNamePrefix?: string;
+}
+
+/**
+ * Assume an operator-supplied role (cross-account, externalId-gated) via STS
+ * and return the RAW temporary credentials. Sibling of
+ * {@link assumeAnalysisRoleClient}: that helper wraps the result in an
+ * `IAMClient`; this one hands back the credentials so a caller can wire ANY
+ * cross-account SDK client — e.g. a `ResourceGroupsTaggingAPIClient` for a
+ * cross-account tag scan — with the assumed identity.
+ *
+ * The `externalId` is threaded into the `AssumeRoleCommand` only when present
+ * (the cross-account confused-deputy control). The STS client is injectable for
+ * testing; production callers omit `deps`.
+ *
+ * Security: the returned credentials are NEVER logged here. They are intended
+ * only to be wired into an SDK client's `credentials` config.
+ *
+ * @throws when STS returns no usable credentials. The caller treats a throw as
+ *   a failed assume (e.g. an empty scan) and must NEVER silently fall back to
+ *   its own identity (which would act in the wrong account).
+ */
+export async function assumeRoleCredentials(
+  roleArn: string,
+  externalId: string | undefined,
+  deps: AssumeRoleCredentialsDeps = {},
+): Promise<AssumedRoleCredentials> {
+  const stsClient = deps.stsClient ?? new STSClient({});
+  const prefix = deps.sessionNamePrefix ?? 'import-assume';
+
+  // Short, CloudTrail-friendly session suffix (RoleSessionName ≤ 64 chars,
+  // [\w+=,.@-]). Random so concurrent assumes don't collide.
+  const sessionSuffix = Math.random().toString(36).slice(2, 10);
+
+  const result = await stsClient.send(
+    new AssumeRoleCommand({
+      RoleArn: roleArn,
+      RoleSessionName: `${prefix}-${sessionSuffix}`,
+      ...(externalId ? { ExternalId: externalId } : {}),
+    }),
+  );
+
+  const creds = result.Credentials;
+  if (
+    !creds ||
+    !creds.AccessKeyId ||
+    !creds.SecretAccessKey ||
+    !creds.SessionToken
+  ) {
+    throw new Error(
+      'assumeRoleCredentials: STS AssumeRole returned no usable credentials',
+    );
+  }
+
+  return {
+    accessKeyId: creds.AccessKeyId,
+    secretAccessKey: creds.SecretAccessKey,
+    sessionToken: creds.SessionToken,
+    ...(creds.Expiration ? { expiration: creds.Expiration } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // assumeAnalysisRoleClient — cross-account read-only analysis-role assume
 // ---------------------------------------------------------------------------
 
@@ -472,37 +562,19 @@ export async function assumeAnalysisRoleClient(
   externalId: string | undefined,
   deps: AssumeAnalysisRoleDeps = {},
 ): Promise<IAMClient> {
-  const stsClient = deps.stsClient ?? new STSClient({});
-
-  // Short, CloudTrail-friendly session suffix (RoleSessionName ≤ 64 chars,
-  // [\w+=,.@-]). Random so concurrent activations don't collide.
-  const sessionSuffix = Math.random().toString(36).slice(2, 10);
-
-  const result = await stsClient.send(
-    new AssumeRoleCommand({
-      RoleArn: analysisRoleArn,
-      RoleSessionName: `import-trustpath-${sessionSuffix}`,
-      ...(externalId ? { ExternalId: externalId } : {}),
-    }),
-  );
-
-  const creds = result.Credentials;
-  if (
-    !creds ||
-    !creds.AccessKeyId ||
-    !creds.SecretAccessKey ||
-    !creds.SessionToken
-  ) {
-    throw new Error(
-      'assumeAnalysisRoleClient: STS AssumeRole returned no usable credentials',
-    );
-  }
+  // Delegate to the shared RAW-credentials primitive (single source of truth
+  // for the STS assume + externalId gating), preserving the `import-trustpath-`
+  // session-name prefix for CloudTrail attribution.
+  const creds = await assumeRoleCredentials(analysisRoleArn, externalId, {
+    stsClient: deps.stsClient,
+    sessionNamePrefix: 'import-trustpath',
+  });
 
   return new IAMClient({
     credentials: {
-      accessKeyId: creds.AccessKeyId,
-      secretAccessKey: creds.SecretAccessKey,
-      sessionToken: creds.SessionToken,
+      accessKeyId: creds.accessKeyId,
+      secretAccessKey: creds.secretAccessKey,
+      sessionToken: creds.sessionToken,
     },
   });
 }

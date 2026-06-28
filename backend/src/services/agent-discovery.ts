@@ -23,6 +23,7 @@ import {
   GetResourcesCommand,
 } from '@aws-sdk/client-resource-groups-tagging-api';
 import type { GetResourcesCommandOutput } from '@aws-sdk/client-resource-groups-tagging-api';
+import type { STSClient } from '@aws-sdk/client-sts';
 import type { CommandSender } from '../adapters/agent-source/invoke-support';
 import type {
   AgentCandidate,
@@ -30,6 +31,7 @@ import type {
   AgentOrigin,
 } from '../adapters/agent-source/base';
 import { validateImportDescriptor } from '../lambda/agent-config-resolver';
+import { assumeRoleCredentials, type AssumedRoleCredentials } from '../utils/trust-path';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
@@ -176,12 +178,35 @@ export interface TagScanScope {
   region?: string;
   tagKey?: string;
   tagValue?: string;
+  /**
+   * Operator-supplied READ-ONLY discovery role in the TARGET account. When set,
+   * {@link tagScanDiscover} assumes it (externalId-gated) and runs the
+   * GetResources scan in THAT account. Absent ⇒ same-account scan under the
+   * caller's identity (byte-identical to the pre-Phase-2 behaviour). The role
+   * must trust Citadel and the external id.
+   */
+  discoveryRoleArn?: string;
+  /** STS ExternalId forwarded when assuming {@link discoveryRoleArn}. */
+  discoveryExternalId?: string;
 }
 
 /** Injectable dependencies (mirrors the adapter testability boundary). */
 export interface TagScanDeps {
   /** Tagging-API sender; tests inject a fake, production builds a client. */
   sender?: CommandSender;
+  /**
+   * Factory building a tagging-API sender, receiving the assumed credentials on
+   * the cross-account path (and `undefined` on the same-account path). Used to
+   * wire a cross-account `ResourceGroupsTaggingAPIClient`; defaults to building
+   * a real client. Takes precedence over `sender` when provided — tests inject
+   * it to observe the credentials handed to the client.
+   */
+  senderFactory?: (
+    region: string,
+    credentials?: AssumedRoleCredentials,
+  ) => CommandSender;
+  /** STS client for the cross-account assume; tests inject a fake. */
+  stsClient?: STSClient;
   /** Clock for `discoveredAt`; defaults to `() => new Date()`. */
   now?: () => Date;
   /** Logger for skipped (unsupported) resources; defaults to `console`. */
@@ -189,23 +214,57 @@ export interface TagScanDeps {
 }
 
 /**
- * Enumerate importable agent candidates by scanning the account via the
+ * Enumerate importable agent candidates by scanning an account via the
  * Resource Groups Tagging API `GetResources`, filtered to a single tag
  * (default `citadel:agent=true`). Each returned `ResourceARN` is mapped through
  * {@link resolveSourceRef}; resources on a substrate unsupported in phase 1 are
  * logged and skipped (never fatal). Pagination follows `PaginationToken` (the
  * API returns an empty-string token on the final page).
+ *
+ * CROSS-ACCOUNT (Phase-2): when `scope.discoveryRoleArn` is set, an
+ * operator-supplied READ-ONLY discovery role in the TARGET account is assumed
+ * (externalId-gated via {@link assumeRoleCredentials}) and the tagging-API
+ * client is built WITH those temporary credentials, so the scan runs in the
+ * target account. When absent the behaviour is EXACTLY as before: the default
+ * client under the caller's (Lambda) identity. A failed assume yields an empty
+ * result with a credential-free warning rather than crashing the caller; the
+ * assumed credentials are never logged.
  */
 export async function tagScanDiscover(
   scope: TagScanScope,
   deps: TagScanDeps = {},
 ): Promise<AgentCandidate[]> {
   const region = scope.region ?? DEFAULT_REGION;
-  const sender: CommandSender =
-    deps.sender ??
-    (new ResourceGroupsTaggingAPIClient({ region }) as unknown as CommandSender);
   const now = deps.now ?? ((): Date => new Date());
   const logger = deps.logger ?? console;
+
+  // Cross-account: assume the operator-supplied READ-ONLY discovery role in the
+  // TARGET account (externalId-gated) so the scan runs THERE. Absent ⇒ same
+  // account: no assume, no credentials — byte-identical to the prior behaviour.
+  let credentials: AssumedRoleCredentials | undefined;
+  if (scope.discoveryRoleArn) {
+    try {
+      credentials = await assumeRoleCredentials(
+        scope.discoveryRoleArn,
+        scope.discoveryExternalId,
+        { stsClient: deps.stsClient, sessionNamePrefix: 'import-tagscan' },
+      );
+    } catch (err) {
+      // A failed cross-account assume yields an EMPTY scan rather than crashing
+      // the resolver. The warning names the role (NEVER the credentials) so the
+      // misconfiguration is diagnosable.
+      logger.warn(
+        `agent-discovery: cross-account discovery-role assume failed for ${scope.discoveryRoleArn}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return [];
+    }
+  }
+
+  const sender: CommandSender = deps.senderFactory
+    ? deps.senderFactory(region, credentials)
+    : deps.sender ?? buildTaggingSender(region, credentials);
 
   const tagKey = scope.tagKey ?? 'citadel:agent';
   const values = scope.tagValue ? [scope.tagValue] : ['true'];
@@ -346,6 +405,31 @@ export function candidateFromManifest(manifestJson: string | object): ManifestCa
 // ---------------------------------------------------------------------------
 // shared helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Build the ResourceGroupsTaggingAPI sender. On the same-account path
+ * (`credentials` undefined) the client config is exactly `{ region }` —
+ * byte-identical to the pre-Phase-2 client. On the cross-account path the
+ * assumed temporary credentials are wired in so `GetResources` runs in the
+ * target account. The credentials are passed straight to the SDK client config
+ * and are never logged.
+ */
+function buildTaggingSender(
+  region: string,
+  credentials?: AssumedRoleCredentials,
+): CommandSender {
+  const client = credentials
+    ? new ResourceGroupsTaggingAPIClient({
+        region,
+        credentials: {
+          accessKeyId: credentials.accessKeyId,
+          secretAccessKey: credentials.secretAccessKey,
+          sessionToken: credentials.sessionToken,
+        },
+      })
+    : new ResourceGroupsTaggingAPIClient({ region });
+  return client as unknown as CommandSender;
+}
 
 /** Standard ARN field extraction: `arn:partition:service:region:account:…`. */
 function parseArnFields(arn: string): { region?: string; account?: string } {

@@ -7,6 +7,7 @@
  * adapters (see lambda-invoke-adapter.discovery.test.ts).
  */
 import fc from 'fast-check';
+import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import {
   resolveSourceRef,
   tagScanDiscover,
@@ -265,6 +266,206 @@ describe('tagScanDiscover', () => {
     });
     const candidates = await tagScanDiscover({}, { sender });
     expect(candidates).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tagScanDiscover — cross-account (Phase-2)
+//
+// When scope.discoveryRoleArn is set, assume that operator-supplied read-only
+// role in the TARGET account (externalId-gated) and build the tagging-API
+// client WITH the assumed credentials, then run the existing GetResources
+// scan THERE. Same-account (no discoveryRoleArn) stays byte-identical: no
+// AssumeRole, default/injected client. The STS client + sender factory are
+// injectable so no test reaches live AWS, and the assumed credentials are
+// never logged.
+// ---------------------------------------------------------------------------
+
+describe('tagScanDiscover cross-account', () => {
+  const fixedNow = (): Date => new Date('2026-06-26T00:00:00.000Z');
+  const DISCOVERY_ROLE_ARN = 'arn:aws:iam::222233334444:role/citadel-readonly-discovery';
+  const EXTERNAL_ID = 'citadel-ext-scan-1';
+  const CREDS = {
+    AccessKeyId: 'AKIA_SCAN_EXAMPLE',
+    SecretAccessKey: 'super-secret-scan-key',
+    SessionToken: 'scan-session-token',
+    Expiration: new Date('2030-01-01T00:00:00.000Z'),
+  };
+
+  function stsStub(creds: unknown = CREDS): { client: STSClient; send: jest.Mock } {
+    const send = jest.fn(async (command: unknown) => {
+      if (command instanceof AssumeRoleCommand) {
+        return { Credentials: creds };
+      }
+      throw new Error('unexpected STS command');
+    });
+    return { client: { send } as unknown as STSClient, send };
+  }
+
+  it('assumes the discovery role (role + ExternalId) and scans with the assumed credentials', async () => {
+    const { client, send } = stsStub();
+    const sender = taggingSenderDouble({
+      GetResourcesCommand: () => ({
+        ResourceTagMappingList: [{ ResourceARN: LAMBDA_ARN }],
+        PaginationToken: '',
+      }),
+    });
+    const captured: { region?: string; credentials?: unknown } = {};
+
+    const candidates = await tagScanDiscover(
+      {
+        region: 'us-east-1',
+        discoveryRoleArn: DISCOVERY_ROLE_ARN,
+        discoveryExternalId: EXTERNAL_ID,
+      },
+      {
+        stsClient: client,
+        // Inline factory: contextually typed from TagScanDeps so the assumed
+        // creds reach the (would-be) tagging client and we can assert them.
+        senderFactory: (region, credentials) => {
+          captured.region = region;
+          captured.credentials = credentials;
+          return sender;
+        },
+        now: fixedNow,
+      },
+    );
+
+    // AssumeRole called once with the role + external id.
+    expect(send).toHaveBeenCalledTimes(1);
+    const command = send.mock.calls[0][0] as AssumeRoleCommand;
+    expect(command).toBeInstanceOf(AssumeRoleCommand);
+    expect(command.input.RoleArn).toBe(DISCOVERY_ROLE_ARN);
+    expect(command.input.ExternalId).toBe(EXTERNAL_ID);
+
+    // Tagging client built WITH the assumed credentials, in the target region.
+    expect(captured.region).toBe('us-east-1');
+    expect(captured.credentials).toEqual({
+      accessKeyId: CREDS.AccessKeyId,
+      secretAccessKey: CREDS.SecretAccessKey,
+      sessionToken: CREDS.SessionToken,
+      expiration: CREDS.Expiration,
+    });
+
+    // Candidates returned from the cross-account scan.
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].reference).toBe(LAMBDA_ARN);
+    expect(candidates[0].origin.ownership).toBe('external');
+  });
+
+  it('paginates and maps resolveSourceRef candidates across the cross-account scan', async () => {
+    const { client } = stsStub();
+    const pages: Record<string, unknown>[] = [
+      {
+        ResourceTagMappingList: [
+          { ResourceARN: LAMBDA_ARN },
+          { ResourceARN: 'arn:aws:ecs:us-east-1:222233334444:task/abc' }, // skipped
+        ],
+        PaginationToken: 'page2',
+      },
+      {
+        ResourceTagMappingList: [{ ResourceARN: BEDROCK_AGENT_ARN }],
+        PaginationToken: '',
+      },
+    ];
+    let call = 0;
+    const sender = taggingSenderDouble({ GetResourcesCommand: () => pages[call++] });
+    const warn = jest.fn();
+
+    const candidates = await tagScanDiscover(
+      {
+        region: 'us-east-1',
+        discoveryRoleArn: DISCOVERY_ROLE_ARN,
+        discoveryExternalId: EXTERNAL_ID,
+      },
+      { stsClient: client, senderFactory: () => sender, now: fixedNow, logger: { warn } },
+    );
+
+    expect(candidates.map((c) => c.origin.substrate)).toEqual(['lambda', 'bedrock_agent']);
+    expect(sender.send).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(1); // the unsupported ECS arn
+  });
+
+  it('does NOT assume a role when discoveryRoleArn is absent (same-account, unchanged)', async () => {
+    const { client, send } = stsStub();
+    const sender = taggingSenderDouble({
+      GetResourcesCommand: () => ({
+        ResourceTagMappingList: [{ ResourceARN: LAMBDA_ARN }],
+        PaginationToken: '',
+      }),
+    });
+
+    const candidates = await tagScanDiscover(
+      { region: 'us-east-1' }, // no discoveryRoleArn
+      { stsClient: client, sender, now: fixedNow },
+    );
+
+    expect(send).not.toHaveBeenCalled(); // no AssumeRole on the same-account path
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].reference).toBe(LAMBDA_ARN);
+  });
+
+  it('returns an empty result and warns (no crash) when the cross-account assume fails', async () => {
+    const send = jest.fn(async () => {
+      throw new Error('AccessDenied: not authorized to perform sts:AssumeRole');
+    });
+    const client = { send } as unknown as STSClient;
+    const warn = jest.fn();
+
+    const candidates = await tagScanDiscover(
+      {
+        region: 'us-east-1',
+        discoveryRoleArn: DISCOVERY_ROLE_ARN,
+        discoveryExternalId: EXTERNAL_ID,
+      },
+      {
+        stsClient: client,
+        senderFactory: () => {
+          throw new Error('sender factory must not be reached when the assume fails');
+        },
+        logger: { warn },
+      },
+    );
+
+    expect(candidates).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain(DISCOVERY_ROLE_ARN);
+  });
+
+  it('never logs the assumed credentials', async () => {
+    const { client } = stsStub();
+    const sender = taggingSenderDouble({
+      GetResourcesCommand: () => ({
+        ResourceTagMappingList: [{ ResourceARN: LAMBDA_ARN }],
+        PaginationToken: '',
+      }),
+    });
+    const spies = [
+      jest.spyOn(console, 'log').mockImplementation(() => {}),
+      jest.spyOn(console, 'warn').mockImplementation(() => {}),
+      jest.spyOn(console, 'error').mockImplementation(() => {}),
+    ];
+
+    try {
+      await tagScanDiscover(
+        {
+          region: 'us-east-1',
+          discoveryRoleArn: DISCOVERY_ROLE_ARN,
+          discoveryExternalId: EXTERNAL_ID,
+        },
+        { stsClient: client, senderFactory: () => sender },
+      );
+      const logged = spies
+        .flatMap((s) => s.mock.calls)
+        .map((args) =>
+          args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '),
+        )
+        .join('\n');
+      expect(logged).not.toContain(CREDS.SecretAccessKey);
+      expect(logged).not.toContain(CREDS.SessionToken);
+    } finally {
+      spies.forEach((s) => s.mockRestore());
+    }
   });
 });
 

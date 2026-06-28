@@ -641,10 +641,17 @@ async function discoverAgents(input: unknown): Promise<FlatAgentCandidate[]> {
 
   switch (source) {
     case 'SCAN': {
+      // Cross-account discovery: when discoveryRoleArn is supplied,
+      // tagScanDiscover assumes that READ-ONLY role in the TARGET account
+      // (externalId-gated) and scans THERE; absent ⇒ same-account scan under
+      // this Lambda's identity (unchanged).
+      // TODO(agent-import): cross-account describe of scanned candidates
       const candidates = await tagScanDiscover({
         region: asNonEmptyString(flat.region),
         tagKey: asNonEmptyString(flat.tagKey),
         tagValue: asNonEmptyString(flat.tagValue),
+        discoveryRoleArn: asNonEmptyString(flat.discoveryRoleArn),
+        discoveryExternalId: asNonEmptyString(flat.discoveryExternalId),
       });
       return candidates.map(toFlatCandidate);
     }

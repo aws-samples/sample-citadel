@@ -1310,6 +1310,44 @@ describe('handler — discoverAgents', () => {
     ]);
   });
 
+  it('SCAN threads discoveryRoleArn/discoveryExternalId into the tagScanDiscover scope', async () => {
+    const scannedArn = 'arn:aws:lambda:us-east-1:222233334444:function:xacct';
+    mockTagScanDiscover.mockResolvedValue([
+      {
+        origin: {
+          sourceArn: scannedArn,
+          substrate: 'lambda',
+          region: 'us-east-1',
+          account: '222233334444',
+          discoveredAt: '2026-06-26T00:00:00.000Z',
+          ownership: 'external',
+        },
+        displayName: 'xacct',
+        reference: scannedArn,
+      },
+    ]);
+
+    const res = (await handler(
+      authedEvent({
+        source: 'SCAN',
+        tagKey: 'citadel:agent',
+        tagValue: 'true',
+        discoveryRoleArn: 'arn:aws:iam::222233334444:role/citadel-readonly-discovery',
+        discoveryExternalId: 'citadel-ext-scan-1',
+      }),
+    )) as FlatAgentCandidate[];
+
+    expect(mockTagScanDiscover).toHaveBeenCalledWith({
+      region: undefined,
+      tagKey: 'citadel:agent',
+      tagValue: 'true',
+      discoveryRoleArn: 'arn:aws:iam::222233334444:role/citadel-readonly-discovery',
+      discoveryExternalId: 'citadel-ext-scan-1',
+    });
+    expect(res).toHaveLength(1);
+    expect(res[0].account).toBe('222233334444');
+  });
+
   it('PASTE builds a single flat candidate from a resolved ARN ref', async () => {
     const arn = 'arn:aws:lambda:us-west-2:444455556666:function:pay';
     mockResolveSourceRef.mockReturnValue({

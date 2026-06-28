@@ -601,6 +601,9 @@ enum DiscoverySource {
 }
 
 # SCAN uses region/tagKey/tagValue; PASTE uses ref; MANIFEST uses manifest.
+# For a CROSS-ACCOUNT scan, also supply discoveryRoleArn (+ discoveryExternalId):
+# a read-only role in the TARGET account that Citadel assumes (with the external
+# id) to tag-scan there. The role must trust Citadel and the external id.
 input DiscoverAgentsInput {
   source: DiscoverySource!
   region: String
@@ -608,6 +611,14 @@ input DiscoverAgentsInput {
   tagValue: String
   ref: String
   manifest: AWSJSON
+  # Optional CROSS-ACCOUNT SCAN: a READ-ONLY discovery role in the TARGET
+  # account that Citadel assumes (externalId-gated) to run the tag scan there.
+  # The role's trust policy must allow Citadel + the external id. Absent ⇒
+  # same-account scan under Citadel's own identity.
+  discoveryRoleArn: String
+  # STS ExternalId forwarded when assuming discoveryRoleArn (confused-deputy
+  # guard). The discovery role's trust policy must require this external id.
+  discoveryExternalId: String
 }
 
 # Flat discovered-agent candidate (provenance flattened from the internal
