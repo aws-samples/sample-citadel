@@ -48,7 +48,7 @@ function computeGrowthData(agents: any[]) {
   });
 }
 
-function MetricCard({ label, value, loading, error, icon, borderClass, iconBgClass, subtitle, delta }: {
+function MetricCard({ label, value, loading, error: _error, icon, borderClass, iconBgClass, subtitle, delta }: {
   label: string; value: number; loading: boolean; error: string | null;
   icon: React.ReactNode; borderClass: string; iconBgClass: string;
   subtitle: string; delta: number;
