@@ -29,6 +29,8 @@ import type {
   AgentCapabilityDescriptor,
   DiscoverAgentsInput,
   ImportAgentInput,
+  ImportTestResult,
+  TestImportedAgentInput,
 } from '../../types/agentImport';
 
 const query = serverService.query as jest.Mock;
@@ -253,6 +255,61 @@ describe('agentImportService', () => {
 
       await expect(agentImportService.attestAgentImport('agent-1')).rejects.toThrow(
         'Forbidden'
+      );
+    });
+  });
+
+  describe('testImportedAgent', () => {
+    const input: TestImportedAgentInput = {
+      invocationProtocol: 'HTTP_ENDPOINT',
+      invocationTarget: 'https://api.example.com/agent',
+      invocationAuthMode: 'API_KEY',
+      invocationAuthHeader: 'x-api-key',
+      invocationSecret: 'sk-test-123',
+      invocationMode: 'sync',
+      region: 'us-west-2',
+      account: '111122223333',
+      prompt: 'ping',
+    };
+
+    it('sends the testImportedAgent mutation with the input and returns the typed result', async () => {
+      const result: ImportTestResult = {
+        ok: true,
+        output: 'pong: {"status":"ok"}',
+        error: null,
+        latencyMs: 142,
+      };
+      mutate.mockResolvedValue({ testImportedAgent: result });
+
+      const out = await agentImportService.testImportedAgent(input);
+
+      expect(mutate).toHaveBeenCalledWith(
+        expect.stringContaining('testImportedAgent'),
+        { input }
+      );
+      expect(out).toEqual(result);
+    });
+
+    it('returns an ok:false result verbatim (a reachability failure is not thrown)', async () => {
+      const result: ImportTestResult = {
+        ok: false,
+        output: null,
+        error: 'Endpoint returned 403 Forbidden',
+        latencyMs: 60,
+      };
+      mutate.mockResolvedValue({ testImportedAgent: result });
+
+      const out = await agentImportService.testImportedAgent(input);
+
+      expect(out.ok).toBe(false);
+      expect(out.error).toBe('Endpoint returned 403 Forbidden');
+    });
+
+    it('surfaces GraphQL/transport errors', async () => {
+      mutate.mockRejectedValue(new Error('NetworkError: connection reset'));
+
+      await expect(agentImportService.testImportedAgent(input)).rejects.toThrow(
+        'NetworkError: connection reset'
       );
     });
   });

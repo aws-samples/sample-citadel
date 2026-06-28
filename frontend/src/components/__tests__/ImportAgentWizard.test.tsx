@@ -22,6 +22,7 @@ jest.mock('../../services/agentImportService', () => ({
     describeAgentCandidate: jest.fn(),
     importAgent: jest.fn(),
     attestAgentImport: jest.fn(),
+    testImportedAgent: jest.fn(),
   },
 }));
 
@@ -67,6 +68,7 @@ import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
   ImportAgentResult,
+  ImportTestResult,
 } from '../../types/agentImport';
 
 const svc = agentImportService as unknown as {
@@ -74,6 +76,7 @@ const svc = agentImportService as unknown as {
   describeAgentCandidate: jest.Mock;
   importAgent: jest.Mock;
   attestAgentImport: jest.Mock;
+  testImportedAgent: jest.Mock;
 };
 
 const candidate: AgentCandidate = {
@@ -132,6 +135,20 @@ const conflictResult: ImportAgentResult = {
   options: ['LINK', 'REPLACE', 'COPY'],
 };
 
+const testOk: ImportTestResult = {
+  ok: true,
+  output: 'pong: {"status":"ok"}',
+  error: null,
+  latencyMs: 142,
+};
+
+const testFail: ImportTestResult = {
+  ok: false,
+  output: null,
+  error: 'Endpoint returned 403 Forbidden',
+  latencyMs: 88,
+};
+
 type User = ReturnType<typeof userEvent.setup>;
 
 function renderWizard() {
@@ -169,10 +186,23 @@ async function gotoConfigure(user: User): Promise<void> {
 
 async function gotoRegister(user: User): Promise<void> {
   await gotoConfigure(user);
+  svc.testImportedAgent.mockResolvedValue(testOk);
   await user.click(screen.getByRole('button', { name: /test connection/i }));
   await screen.findByText(/connection verified/i);
   await user.click(nextBtn());
   await screen.findByRole('button', { name: /register agent/i });
+}
+
+// The shadcn Select is flattened to a native <select> (role "combobox") whose
+// label association is lost through the mock, so locate the auth-mode select
+// structurally: it is the one carrying a "BEARER" option.
+function authModeSelect(): HTMLSelectElement {
+  const selects = screen.getAllByRole('combobox') as HTMLSelectElement[];
+  const found = selects.find((s) =>
+    Array.from(s.options).some((o) => o.value === 'BEARER'),
+  );
+  if (!found) throw new Error('auth-mode <select> not found');
+  return found;
 }
 
 describe('ImportAgentWizard — step 1 (Source)', () => {
@@ -277,30 +307,149 @@ describe('ImportAgentWizard — step 3 (Review descriptor)', () => {
 describe('ImportAgentWizard — step 4 (Configure + Test)', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('shows a secret field for API_KEY auth and gates advancing on a successful Test connection', async () => {
+  it('runs a real test-invoke: ok:true calls testImportedAgent with the assembled input, shows the output preview + latency, and enables Next', async () => {
     const user = userEvent.setup();
     renderWizard();
     await gotoConfigure(user);
 
-    // API_KEY auth → secret field is present and labeled
+    // API_KEY auth → secret field + optional header-name input present
     expect(screen.getByLabelText(/invocation secret/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/header name/i)).toBeInTheDocument();
 
-    // cannot advance until tested
+    // cannot advance until a successful test
     expect(nextBtn()).toBeDisabled();
 
-    svc.describeAgentCandidate.mockClear();
+    svc.testImportedAgent.mockResolvedValue(testOk);
     await user.click(screen.getByRole('button', { name: /test connection/i }));
 
-    await waitFor(() =>
-      expect(svc.describeAgentCandidate).toHaveBeenCalledWith('ref-orders-1'),
+    await waitFor(() => expect(svc.testImportedAgent).toHaveBeenCalledTimes(1));
+    const input = svc.testImportedAgent.mock.calls[0][0];
+    expect(input).toEqual(
+      expect.objectContaining({
+        invocationProtocol: 'HTTP_ENDPOINT',
+        invocationTarget: 'https://api.example.com/agent',
+        invocationAuthMode: 'API_KEY',
+        invocationMode: 'sync',
+        prompt: expect.any(String),
+      }),
     );
+    // a non-empty test prompt is sent
+    expect(input.prompt.length).toBeGreaterThan(0);
+
+    // success state: verified + latency + a short output preview
     expect(await screen.findByText(/connection verified/i)).toBeInTheDocument();
+    expect(screen.getByText(/142 ms/)).toBeInTheDocument();
+    expect(screen.getByText(/pong/i)).toBeInTheDocument();
     expect(nextBtn()).not.toBeDisabled();
+  });
+
+  it('ok:false surfaces the returned error and keeps Next disabled', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    svc.testImportedAgent.mockResolvedValue(testFail);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+
+    expect(await screen.findByText(/403 forbidden/i)).toBeInTheDocument();
+    expect(screen.queryByText(/connection verified/i)).not.toBeInTheDocument();
+    expect(nextBtn()).toBeDisabled();
+  });
+
+  it('surfaces a thrown transport error and keeps Next disabled', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    svc.testImportedAgent.mockRejectedValue(new Error('network down'));
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+
+    expect(await screen.findByText(/network down/i)).toBeInTheDocument();
+    expect(nextBtn()).toBeDisabled();
+  });
+
+  it('BEARER auth uses a secret value (no header-name input) and sends invocationAuthMode BEARER', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    await user.selectOptions(authModeSelect(), 'BEARER');
+
+    // BEARER → secret value field, but no API-key header-name input
+    expect(screen.getByLabelText(/invocation secret/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/header name/i)).not.toBeInTheDocument();
+
+    svc.testImportedAgent.mockResolvedValue(testOk);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+
+    await waitFor(() => expect(svc.testImportedAgent).toHaveBeenCalledTimes(1));
+    expect(svc.testImportedAgent.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ invocationAuthMode: 'BEARER' }),
+    );
+  });
+
+  it('API_KEY with a custom header name sends invocationAuthHeader in the test input', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    await user.type(screen.getByLabelText(/header name/i), 'x-api-key');
+
+    svc.testImportedAgent.mockResolvedValue(testOk);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+
+    await waitFor(() => expect(svc.testImportedAgent).toHaveBeenCalledTimes(1));
+    expect(svc.testImportedAgent.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        invocationAuthMode: 'API_KEY',
+        invocationAuthHeader: 'x-api-key',
+      }),
+    );
+  });
+
+  it('invalidates a prior passing test when an input changes, re-disabling Next', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    svc.testImportedAgent.mockResolvedValue(testOk);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+    await screen.findByText(/connection verified/i);
+    expect(nextBtn()).not.toBeDisabled();
+
+    // editing the target invalidates the prior result
+    await user.type(screen.getByLabelText(/invocation target/i), '/v2');
+    expect(screen.queryByText(/connection verified/i)).not.toBeInTheDocument();
+    expect(nextBtn()).toBeDisabled();
   });
 });
 
 describe('ImportAgentWizard — step 5 (Governance & register)', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  it('forwards a custom API_KEY header (invocationAuthHeader) into the importAgent input', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    await user.type(screen.getByLabelText(/header name/i), 'x-api-key');
+    svc.testImportedAgent.mockResolvedValue(testOk);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+    await screen.findByText(/connection verified/i);
+    await user.click(nextBtn());
+    await screen.findByRole('button', { name: /register agent/i });
+
+    svc.importAgent.mockResolvedValue(successResult);
+    await user.click(screen.getByRole('button', { name: /register agent/i }));
+
+    await waitFor(() => expect(svc.importAgent).toHaveBeenCalledTimes(1));
+    expect(svc.importAgent.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        invocationAuthMode: 'API_KEY',
+        invocationAuthHeader: 'x-api-key',
+      }),
+    );
+  });
 
   it('imports with the assembled input, surfaces the DRAFT/attestation notice, then calls onComplete', async () => {
     const user = userEvent.setup();

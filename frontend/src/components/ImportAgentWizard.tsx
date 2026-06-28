@@ -38,6 +38,8 @@ import type {
   ImportAgentInput,
   ImportAgentResult,
   ImportConflictPolicy,
+  ImportTestResult,
+  TestImportedAgentInput,
 } from '../types/agentImport';
 
 interface ImportAgentWizardProps {
@@ -71,6 +73,7 @@ const AUTH_MODE_OPTIONS: AgentInvocationAuthMode[] = [
   'NONE',
   'SIGV4',
   'API_KEY',
+  'BEARER',
   'OAUTH2',
   'COGNITO',
 ];
@@ -80,12 +83,17 @@ const MODE_OPTIONS: { value: AgentInvocationMode; label: string }[] = [
   { value: 'async_callback', label: 'Asynchronous (callback)' },
 ];
 
-// Auth modes that require a caller-supplied secret at import time.
+// Auth modes that require a caller-supplied secret value at import/test time.
 const AUTH_MODES_NEEDING_SECRET: AgentInvocationAuthMode[] = [
   'API_KEY',
+  'BEARER',
   'OAUTH2',
   'COGNITO',
 ];
+
+// Small fixed prompt sent by the pre-activation test-invoke. Kept minimal — the
+// test only proves reachability + a well-formed response, not agent quality.
+const TEST_PROMPT = 'ping: reply to confirm reachability';
 
 const CONFLICT_OPTIONS: {
   value: ImportConflictPolicy;
@@ -152,10 +160,12 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
   const [protocol, setProtocol] = useState<AgentInvocationProtocol>('HTTP_ENDPOINT');
   const [target, setTarget] = useState('');
   const [authMode, setAuthMode] = useState<AgentInvocationAuthMode>('NONE');
+  const [authHeader, setAuthHeader] = useState('');
   const [secret, setSecret] = useState('');
   const [invocationMode, setInvocationMode] = useState<AgentInvocationMode>('sync');
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'pass' | 'fail'>('idle');
   const [testError, setTestError] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<ImportTestResult | null>(null);
 
   // Step 5 — Governance & register
   const [registering, setRegistering] = useState(false);
@@ -190,6 +200,7 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
   const invalidateTest = (): void => {
     setTestStatus('idle');
     setTestError(null);
+    setTestResult(null);
   };
 
   const runDiscovery = async (): Promise<void> => {
@@ -233,6 +244,7 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
       setTarget(d.invocation.target);
       setAuthMode(d.invocation.auth.mode);
       setInvocationMode(d.invocation.mode);
+      setAuthHeader('');
       setSecret('');
       invalidateTest();
     } catch (err) {
@@ -243,16 +255,40 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
     }
   };
 
+  const buildTestInput = (): TestImportedAgentInput => {
+    const origin = descriptor?.origin;
+    return {
+      invocationProtocol: protocol,
+      invocationTarget: target.trim(),
+      invocationAuthMode: authMode,
+      invocationAuthHeader:
+        authMode === 'API_KEY' && authHeader.trim() ? authHeader.trim() : undefined,
+      invocationSecretRef: descriptor?.invocation.auth.secretRef,
+      invocationSecret: authNeedsSecret && secret.trim() ? secret.trim() : undefined,
+      invocationMode,
+      region: origin?.region,
+      account: origin?.account,
+      prompt: TEST_PROMPT,
+    };
+  };
+
   const testConnection = async (): Promise<void> => {
-    if (!activeRef) return;
+    if (target.trim() === '') return;
     setTestStatus('testing');
     setTestError(null);
+    setTestResult(null);
     try {
-      await agentImportService.describeAgentCandidate(activeRef);
-      setTestStatus('pass');
+      const result = await agentImportService.testImportedAgent(buildTestInput());
+      setTestResult(result);
+      if (result.ok) {
+        setTestStatus('pass');
+      } else {
+        setTestStatus('fail');
+        setTestError(result.error ?? 'Test invocation failed');
+      }
     } catch (err) {
       setTestStatus('fail');
-      setTestError(errorMessage(err, 'Connection test failed'));
+      setTestError(errorMessage(err, 'Test invocation failed'));
     }
   };
 
@@ -268,6 +304,8 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
       invocationProtocol: protocol,
       invocationTarget: target.trim(),
       invocationAuthMode: authMode,
+      invocationAuthHeader:
+        authMode === 'API_KEY' && authHeader.trim() ? authHeader.trim() : undefined,
       invocationSecretRef: descriptor?.invocation.auth.secretRef,
       invocationSecret: authNeedsSecret && secret.trim() ? secret.trim() : undefined,
       invocationMode,
@@ -819,30 +857,74 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
         </div>
       )}
 
-      <div className="flex items-center gap-3">
-        <Button
-          type="button"
-          variant="outline"
-          onClick={testConnection}
-          disabled={testStatus === 'testing' || target.trim() === ''}
-          className="cursor-pointer"
-        >
-          {testStatus === 'testing' ? (
-            <Loader2 className="size-4 mr-2 animate-spin" />
-          ) : null}
-          Test connection
-        </Button>
+      {authMode === 'API_KEY' && (
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="invocation-auth-header">Header name (optional)</Label>
+          <Input
+            id="invocation-auth-header"
+            value={authHeader}
+            onChange={(e) => {
+              setAuthHeader(e.target.value);
+              invalidateTest();
+            }}
+            placeholder="Authorization"
+          />
+          <p className="text-xs text-muted-foreground">
+            Request header the API key is sent in. Defaults to{' '}
+            <code className="font-mono">Authorization</code>.
+          </p>
+        </div>
+      )}
 
-        {testStatus === 'pass' && (
-          <span className="flex items-center gap-1.5 text-sm text-chart-2">
-            <CheckCircle2 className="size-4" />
-            Connection verified
-          </span>
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={testConnection}
+            disabled={testStatus === 'testing' || target.trim() === ''}
+            className="cursor-pointer"
+          >
+            {testStatus === 'testing' ? (
+              <Loader2 className="size-4 mr-2 animate-spin" />
+            ) : null}
+            Test connection
+          </Button>
+          {testStatus === 'testing' && (
+            <span className="text-sm text-muted-foreground">
+              Running test invocation…
+            </span>
+          )}
+        </div>
+
+        {testStatus === 'pass' && testResult && (
+          <div
+            role="status"
+            className="flex flex-col gap-2 rounded-lg border border-chart-2/40 bg-chart-2/5 p-3"
+          >
+            <div className="flex items-center gap-2">
+              <span className="flex items-center gap-1.5 text-sm font-medium text-chart-2">
+                <CheckCircle2 className="size-4" />
+                Connection verified
+              </span>
+              {typeof testResult.latencyMs === 'number' && (
+                <span className="text-xs text-muted-foreground">
+                  {testResult.latencyMs} ms
+                </span>
+              )}
+            </div>
+            {testResult.output && (
+              <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-background/60 p-2 text-xs text-muted-foreground">
+                {testResult.output.slice(0, 500)}
+              </pre>
+            )}
+          </div>
         )}
+
         {testStatus === 'fail' && (
           <span role="alert" className="flex items-center gap-1.5 text-sm text-destructive">
             <XCircle className="size-4" />
-            {testError ?? 'Connection test failed'}
+            {testError ?? 'Test invocation failed'}
           </span>
         )}
       </div>

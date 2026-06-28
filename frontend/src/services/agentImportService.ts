@@ -20,6 +20,8 @@ import type {
   DiscoverAgentsInput,
   ImportAgentInput,
   ImportAgentResult,
+  ImportTestResult,
+  TestImportedAgentInput,
 } from '../types/agentImport';
 
 const discoverAgentsQuery = `
@@ -75,6 +77,19 @@ const attestAgentImportMutation = `
       categories
       createdAt
       updatedAt
+    }
+  }
+`;
+
+// Pre-activation TEST-INVOKE. Returns a plain ImportTestResult (no AWSJSON / no
+// sub-record) — a reachability failure surfaces as `ok: false`, not an error.
+const testImportedAgentMutation = `
+  mutation TestImportedAgent($input: TestImportedAgentInput!) {
+    testImportedAgent(input: $input) {
+      ok
+      output
+      error
+      latencyMs
     }
   }
 `;
@@ -201,6 +216,26 @@ export const agentImportService = {
       return agent;
     } catch (error) {
       console.error('Error attesting agent import:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Pre-activation test-invoke of a candidate's assembled invocation config.
+   * Returns the typed result verbatim: `ok: true` carries a sanitized `output`
+   * (+ `latencyMs`); `ok: false` carries the `error`. A reachability failure is
+   * a normal `ok: false` result — only transport/GraphQL faults reject.
+   */
+  async testImportedAgent(input: TestImportedAgentInput): Promise<ImportTestResult> {
+    try {
+      const response = await serverService.mutate<{ testImportedAgent: ImportTestResult }>(
+        testImportedAgentMutation,
+        { input }
+      );
+
+      return response.testImportedAgent;
+    } catch (error) {
+      console.error('Error testing imported agent:', error);
       throw error;
     }
   },

@@ -39,6 +39,7 @@ export type AgentInvocationProtocol =
 export type AgentInvocationAuthMode =
   | 'SIGV4'
   | 'API_KEY'
+  | 'BEARER'
   | 'OAUTH2'
   | 'COGNITO'
   | 'NONE';
@@ -149,6 +150,12 @@ export interface ImportAgentInput {
   invocationAuthMode?: string;
   invocationSecretRef?: string;
   /**
+   * Optional custom request-header name for the resolved API_KEY secret (e.g.
+   * 'x-api-key'). Only meaningful for `invocationAuthMode: 'API_KEY'`; absent ⇒
+   * the secret is applied as `Authorization: <value>` (back-compat default).
+   */
+  invocationAuthHeader?: string;
+  /**
    * Raw secret value the caller may submit at import time. On a record-creating
    * import the backend persists it to Secrets Manager and stores only the
    * resulting reference — the raw value never lands on the record or its logs.
@@ -175,4 +182,37 @@ export interface ImportAgentResult {
   existingId?: string | null;
   reason?: string | null;
   options?: string[] | null;
+}
+
+/**
+ * Input for the pre-activation `testImportedAgent` mutation. Carries ONLY the
+ * invocation-bearing fields needed to reach and call a candidate (no name /
+ * manifest / origin — a test-invoke never creates a record). `invocationSecret`
+ * is a RAW secret used for THIS test only: the backend resolves it transiently
+ * in-memory and never persists it. Mirrors the GraphQL `TestImportedAgentInput`.
+ */
+export interface TestImportedAgentInput {
+  invocationProtocol: string;
+  invocationTarget: string;
+  invocationAuthMode?: string;
+  invocationAuthHeader?: string;
+  invocationSecretRef?: string;
+  invocationSecret?: string;
+  invocationMode?: string;
+  region?: string;
+  account?: string;
+  prompt?: string;
+}
+
+/**
+ * Result of a pre-activation test-invoke. `ok: true` ⇒ the candidate was
+ * reached and `output` carries the SANITIZED response; `ok: false` ⇒ `error`
+ * explains the failure (a normal result, NOT a thrown GraphQL error).
+ * `latencyMs` is the wall-clock duration of the attempt.
+ */
+export interface ImportTestResult {
+  ok: boolean;
+  output?: string | null;
+  error?: string | null;
+  latencyMs?: number | null;
 }
