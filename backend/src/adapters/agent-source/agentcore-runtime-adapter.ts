@@ -40,6 +40,7 @@ import {
   isAsyncIterable,
   vendImportCredentials,
 } from './invoke-support';
+import type { AdapterCredentialProvider } from './invoke-support';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
@@ -61,6 +62,13 @@ export interface AgentCoreRuntimeAdapterDeps {
   registry?: Pick<RegistryService, 'listResources' | 'deserializeCustomMetadata'>;
   defaultRegion?: string;
   defaultAccount?: string;
+  /**
+   * Cross-account invoke-role credentials (Phase 2, agent-import). When set,
+   * invoke() builds its data-plane BedrockAgentCoreClient with these credentials
+   * instead of the handler's own identity. Absent ⇒ the default provider chain
+   * (same-account behaviour, byte-identical to today).
+   */
+  credentialProvider?: AdapterCredentialProvider;
 }
 
 export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
@@ -98,7 +106,11 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
 
     const response = this.sender
       ? await this.sender.send(command)
-      : await new BedrockAgentCoreClient({ region: region || DEFAULT_REGION }).send(command);
+      : await new BedrockAgentCoreClient(
+          this.deps.credentialProvider
+            ? { region: region || DEFAULT_REGION, credentials: this.deps.credentialProvider }
+            : { region: region || DEFAULT_REGION },
+        ).send(command);
 
     return { output: await parseRuntimeResponse(response), raw: response };
   }

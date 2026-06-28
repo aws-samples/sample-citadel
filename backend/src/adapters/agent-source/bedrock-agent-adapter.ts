@@ -58,6 +58,7 @@ import {
   isAsyncIterable,
   vendImportCredentials,
 } from './invoke-support';
+import type { AdapterCredentialProvider } from './invoke-support';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 const MODULE_NAME = '@aws-sdk/client-bedrock-agent-runtime';
@@ -69,7 +70,10 @@ interface AgentRuntimeSender {
 
 /** Minimal shape of the parts of the SDK module this adapter needs. */
 interface BedrockAgentRuntimeModule {
-  BedrockAgentRuntimeClient: new (config: { region?: string }) => AgentRuntimeSender;
+  BedrockAgentRuntimeClient: new (config: {
+    region?: string;
+    credentials?: AdapterCredentialProvider;
+  }) => AgentRuntimeSender;
   InvokeAgentCommand: new (input: Record<string, unknown>) => unknown;
 }
 
@@ -83,6 +87,13 @@ export interface BedrockAgentAdapterDeps {
   controlSender?: CommandSender;
   defaultRegion?: string;
   defaultAccount?: string;
+  /**
+   * Cross-account invoke-role credentials (Phase 2, agent-import). When set,
+   * invoke() builds its lazily-loaded BedrockAgentRuntimeClient with these
+   * credentials instead of the handler's own identity. Absent ⇒ the default
+   * provider chain (same-account behaviour, byte-identical to today).
+   */
+  credentialProvider?: AdapterCredentialProvider;
 }
 
 /** Optional discovery scope for {@link BedrockAgentAdapter.discover}. */
@@ -129,7 +140,13 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
     let createCommand = this.deps.createCommand;
     if (!client || !createCommand) {
       const mod = (this.deps.loadModule ?? loadBedrockAgentRuntime)();
-      client = client ?? new mod.BedrockAgentRuntimeClient({ region: region || DEFAULT_REGION });
+      client =
+        client ??
+        new mod.BedrockAgentRuntimeClient(
+          this.deps.credentialProvider
+            ? { region: region || DEFAULT_REGION, credentials: this.deps.credentialProvider }
+            : { region: region || DEFAULT_REGION },
+        );
       createCommand = createCommand ?? ((i) => new mod.InvokeAgentCommand(i));
     }
 

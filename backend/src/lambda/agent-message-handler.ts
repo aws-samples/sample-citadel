@@ -34,6 +34,12 @@ import type {
   InvokeRequest,
 } from "../adapters/agent-source/base";
 import { buildDefaultAgentSourceRegistry } from "../adapters/agent-source/registry-factory";
+import { isCrossAccountRoleArn } from "../utils/trust-path";
+import {
+  vendImportCredentials,
+  toInvokeCredentials,
+} from "../adapters/agent-source/invoke-support";
+import type { InvokeCredentials } from "../adapters/agent-source/invoke-support";
 
 const ssmClient = new SSMClient({});
 const dynamoClient = new DynamoDBClient({});
@@ -56,21 +62,95 @@ let _agentSourceRegistry: AgentSourceAdapterRegistry | null = null;
 
 function getAgentSourceRegistry(): AgentSourceAdapterRegistry {
   if (!_agentSourceRegistry) {
-    // Invoke-side auth resolver, wired lazily. credential-manager is required
-    // HERE (not at module load) so its module-scope SDK-client construction
-    // stays OFF the legacy AgentCore cold-start path — the legacy path loads it
-    // only if/when an imported agent is actually dispatched. The HTTP + MCP
-    // adapters use this to turn an invocation `auth.secretRef`
-    // (API_KEY / OAUTH2 / COGNITO) into the request Authorization header, run
-    // under THIS handler Lambda's identity (secretsmanager:GetSecretValue on
-    // /citadel/agents/*).
-    const { getAgentInvocationSecret } =
-      require("../utils/credential-manager") as typeof import("../utils/credential-manager");
-    _agentSourceRegistry = buildDefaultAgentSourceRegistry({
-      resolveSecret: (ref: string) => getAgentInvocationSecret(ref),
-    });
+    _agentSourceRegistry = buildImportRegistry();
   }
   return _agentSourceRegistry;
+}
+
+/**
+ * Build an agent-source registry wired with the invoke-side secret resolver
+ * and, optionally, CROSS-ACCOUNT invoke credentials threaded into the AWS-native
+ * adapters (AGENTCORE_RUNTIME / LAMBDA_INVOKE / BEDROCK_AGENT).
+ *
+ * credential-manager is required HERE (not at module load) so its module-scope
+ * SDK-client construction stays OFF the legacy AgentCore cold-start path — the
+ * legacy path loads it only if/when an imported agent is actually dispatched.
+ * The HTTP + MCP adapters use the resolver to turn an invocation `auth.secretRef`
+ * (API_KEY / OAUTH2 / COGNITO) into the request Authorization header, run under
+ * THIS handler Lambda's identity (secretsmanager:GetSecretValue on
+ * /citadel/agents/*). When `credentialProvider` is set (cross-account invoke),
+ * the AWS-native adapters build their protocol SDK client with those assumed
+ * credentials instead of the handler's identity.
+ */
+function buildImportRegistry(
+  credentialProvider?: InvokeCredentials,
+): AgentSourceAdapterRegistry {
+  const { getAgentInvocationSecret } =
+    require("../utils/credential-manager") as typeof import("../utils/credential-manager");
+  return buildDefaultAgentSourceRegistry({
+    resolveSecret: (ref: string) => getAgentInvocationSecret(ref),
+    credentialProvider,
+  });
+}
+
+/**
+ * Choose the adapter registry for an imported invocation.
+ *
+ * CROSS-ACCOUNT (invocation.roleArn's account != ACCOUNT_ID): assume the
+ * customer-provided invoke role via {@link vendImportCredentials} (externalId-
+ * gated) and build a fresh registry whose AWS-native adapters use the assumed
+ * credentials. If the assume FAILS (or yields no usable credentials) for a
+ * cross-account target, THROW — we must NOT silently fall back to the handler's
+ * own identity, which would invoke with the wrong account's credentials. The
+ * assumed credentials are NEVER logged.
+ *
+ * SAME-ACCOUNT (or no roleArn): return the cached default registry — the
+ * handler's own identity, byte-identical to today.
+ */
+async function resolveImportRegistry(
+  invocation: AgentInvocationBlock,
+  agentId: string,
+): Promise<AgentSourceAdapterRegistry> {
+  const roleArn = invocation.roleArn;
+  if (!roleArn || !isCrossAccountRoleArn(roleArn, process.env.ACCOUNT_ID)) {
+    return getAgentSourceRegistry();
+  }
+
+  let credentialProvider: InvokeCredentials | undefined;
+  try {
+    const vended = await vendImportCredentials(invocation);
+    credentialProvider = toInvokeCredentials(vended);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(
+      JSON.stringify({
+        level: "error",
+        msg: "import-dispatch: cross-account invoke-role assume failed; not falling back to handler identity",
+        agentId,
+        protocol: invocation.protocol,
+        error: message,
+      })
+    );
+    throw new Error(
+      `Cross-account invoke-role assume failed for imported agent ${agentId}: ${message}`
+    );
+  }
+
+  if (!credentialProvider) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        msg: "import-dispatch: cross-account invoke-role assume produced no credentials; not falling back to handler identity",
+        agentId,
+        protocol: invocation.protocol,
+      })
+    );
+    throw new Error(
+      `Cross-account invoke-role assume produced no credentials for imported agent ${agentId}`
+    );
+  }
+
+  return buildImportRegistry(credentialProvider);
 }
 
 /** True only when the agent-import dispatcher is explicitly enabled. */
@@ -520,12 +600,26 @@ async function dispatchImportedInvocation(
   // No invocation block => legacy agent. Fall back unchanged.
   if (!invocation) return false;
 
+  // ── Cross-account invoke selection (Phase 2, agent-import) ────────────────
+  // CROSS-ACCOUNT (invocation.roleArn account != ACCOUNT_ID) => assume the
+  // invoke role (externalId-gated) and build the AWS-native adapters with the
+  // assumed credentials; a failed assume FAILS the invoke (handled by the
+  // surrounding catch) rather than silently falling back to the handler
+  // identity. SAME-ACCOUNT (or no roleArn) => the cached registry + handler
+  // identity, byte-identical to today.
+  //
+  // TODO(agent-import): only the AWS-native protocol invoke consumes the
+  // assumed credentials here. Cross-account wiring for the test-invoke
+  // (testImportedAgent), cross-account discovery, and HTTP/MCP SIGV4
+  // cross-account signing are deliberate follow-ups.
+  const registry = await resolveImportRegistry(invocation, agentId);
+
   // Explicit invocation block: resolve the protocol adapter. An unknown
   // protocol is a real configuration error, so log a structured error and
   // rethrow — we must NOT fall back to the legacy path.
   let adapter: AgentSourceAdapter;
   try {
-    adapter = getAgentSourceRegistry().resolve(invocation.protocol);
+    adapter = registry.resolve(invocation.protocol);
   } catch (error) {
     if (error instanceof UnknownProtocolError) {
       console.error(

@@ -2003,6 +2003,12 @@ export class BackendStack extends cdk.Stack {
           APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
           ENVIRONMENT: props.environment,
           IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
+          // Deployment account id — read by the import-dispatch path via
+          // isCrossAccountRoleArn(invocation.roleArn, process.env.ACCOUNT_ID)
+          // so a CROSS-ACCOUNT imported invoke assumes the operator-supplied
+          // invoke role (externalId-gated) instead of using the handler
+          // identity. Same-account invokes are unaffected.
+          ACCOUNT_ID: this.account,
         },
         timeout: cdk.Duration.minutes(15), // Max timeout for agent interactions (extraction can be slow)
         logGroup: new logs.LogGroup(this, 'AgentMessageHandlerFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -2036,6 +2042,25 @@ export class BackendStack extends cdk.Stack {
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
         ],
+      })
+    );
+
+    // Cross-account invoke-role assume for IMPORTED agents (Phase 2,
+    // agent-import). When an imported agent's invocation.roleArn is in a
+    // DIFFERENT account, the handler assumes that operator-supplied invoke role
+    // (reusing vendImportCredentials) and runs the AWS-native protocol invoke
+    // under the assumed credentials. The invoke role is operator-supplied and
+    // may live in ANY account, so the assume cannot be account-scoped; it is
+    // scoped to the cross-account IAM role namespace (arn:aws:iam::*:role/*).
+    // The runtime confused-deputy control is the externalId threaded into the
+    // AssumeRole call — the target role must trust Citadel under sts:ExternalId.
+    // Same-account invokes never assume. The role/* wildcard is suppressed
+    // (AwsSolutions-IAM5) in bin/app.ts.
+    agentMessageHandlerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sts:AssumeRole"],
+        resources: ["arn:aws:iam::*:role/*"],
       })
     );
 

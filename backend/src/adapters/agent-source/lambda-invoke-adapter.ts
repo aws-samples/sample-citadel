@@ -45,6 +45,7 @@ import {
   extractTextOutput,
   vendImportCredentials,
 } from './invoke-support';
+import type { AdapterCredentialProvider } from './invoke-support';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
@@ -70,6 +71,13 @@ export interface LambdaInvokeAdapterDeps {
   defaultAccount?: string;
   /** Override the Timeout(s) threshold that flips mode to async_callback. */
   asyncTimeoutThresholdSeconds?: number;
+  /**
+   * Cross-account invoke-role credentials (Phase 2, agent-import). When set,
+   * invoke() builds its data-plane LambdaClient with these credentials instead
+   * of the handler's own identity. Absent ⇒ the default provider chain
+   * (same-account behaviour, byte-identical to today).
+   */
+  credentialProvider?: AdapterCredentialProvider;
 }
 
 export class LambdaInvokeAdapter implements AgentSourceAdapter {
@@ -105,7 +113,11 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
 
     const response = this.sender
       ? await this.sender.send(command)
-      : await new LambdaClient({ region: region || DEFAULT_REGION }).send(command);
+      : await new LambdaClient(
+          this.deps.credentialProvider
+            ? { region: region || DEFAULT_REGION, credentials: this.deps.credentialProvider }
+            : { region: region || DEFAULT_REGION },
+        ).send(command);
 
     // Async ('Event') invocations return no payload (HTTP 202); the real
     // result arrives later out-of-band, so there is no synchronous text.

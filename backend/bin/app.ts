@@ -310,6 +310,29 @@ if (app.node.tryGetContext('nag')!== 'false') {
                 }],
               );
 
+              // IAM5 — Phase-2 cross-account INVOKE. When an imported agent's
+              // invocation.roleArn is cross-account, the agent-message-handler
+              // assumes that operator-supplied invoke role (externalId-gated) and
+              // runs the AWS-native protocol invoke under the assumed credentials.
+              // The invoke role is operator-supplied and may live in ANY account,
+              // so sts:AssumeRole is scoped to the cross-account IAM role namespace
+              // (arn:aws:iam::*:role/*) rather than this account; the externalId is
+              // the runtime confused-deputy control. Additive to the Resource::*
+              // suppression already registered for this role above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentMessageHandlerFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'cross-account invoke-role assume for imported agents; externalId-gated; ' +
+                    'operator-supplied target role must trust Citadel',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:iam::\\*:role\\/\\*$/g' },
+                  ],
+                }],
+              );
+
               // CloudFront — partial hardening. TLS 1.2 and access logging applied; the
               // rest require follow-up work.
               NagSuppressions.addResourceSuppressionsByPath(frontendStack, `/${frontendStack.stackName}/FrontendDistribution`, [

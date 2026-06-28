@@ -11,6 +11,7 @@ import { LambdaInvokeAdapter } from './lambda-invoke-adapter';
 import { HttpEndpointAdapter } from './http-endpoint-adapter';
 import { BedrockAgentAdapter } from './bedrock-agent-adapter';
 import { McpAdapter } from './mcp-adapter';
+import type { AdapterCredentialProvider } from './invoke-support';
 
 export { NotImplementedError } from './not-implemented';
 
@@ -22,16 +23,29 @@ export interface AgentSourceRegistryDeps {
    * omitted, those adapters invoke without an auth header (back-compat).
    */
   resolveSecret?: (secretRef: string) => Promise<string>;
+  /**
+   * Cross-account invoke-role credentials (Phase 2, agent-import) threaded into
+   * the AWS-native adapters (AGENTCORE_RUNTIME / LAMBDA_INVOKE / BEDROCK_AGENT)
+   * so they build their protocol SDK client with the assumed credentials rather
+   * than the handler's identity. When omitted, those adapters use the default
+   * provider chain (same-account behaviour, byte-identical to today). Not
+   * applied to HTTP_ENDPOINT / MCP — those are not AWS-native protocol invokes.
+   */
+  credentialProvider?: AdapterCredentialProvider;
 }
 
 export function buildDefaultAgentSourceRegistry(
   deps: AgentSourceRegistryDeps = {},
 ): AgentSourceAdapterRegistry {
   const registry = new AgentSourceAdapterRegistry();
-  registry.register(new AgentCoreRuntimeAdapter());
-  registry.register(new LambdaInvokeAdapter());
+  registry.register(
+    new AgentCoreRuntimeAdapter(undefined, { credentialProvider: deps.credentialProvider }),
+  );
+  registry.register(
+    new LambdaInvokeAdapter(undefined, { credentialProvider: deps.credentialProvider }),
+  );
   registry.register(new HttpEndpointAdapter({ resolveSecret: deps.resolveSecret }));
-  registry.register(new BedrockAgentAdapter());
+  registry.register(new BedrockAgentAdapter({ credentialProvider: deps.credentialProvider }));
   registry.register(new McpAdapter({ resolveSecret: deps.resolveSecret }));
   return registry;
 }

@@ -177,6 +177,64 @@ export function authHeaderScheme(
   }
 }
 
+// --- cross-account invoke credentials (shared by the AWS-native adapters) ----
+
+/**
+ * Static AWS credentials handed to an AWS-native adapter (AgentCore / Lambda /
+ * Bedrock Agent) so it builds its protocol SDK client with cross-account
+ * invoke-role credentials instead of the handler Lambda's own identity.
+ *
+ * Structurally a subset of the AWS SDK v3 `AwsCredentialIdentity` (only
+ * `accessKeyId` + `secretAccessKey` are required; the rest are optional), so it
+ * is accepted verbatim by every v3 client's `credentials` config. Undefined on
+ * the same-account path ⇒ the client uses the default provider chain (the
+ * handler's identity), byte-identical to today.
+ */
+export interface InvokeCredentials {
+  readonly accessKeyId: string;
+  readonly secretAccessKey: string;
+  readonly sessionToken?: string;
+  readonly expiration?: Date;
+}
+
+/**
+ * What an AWS-native adapter accepts as its optional `credentialProvider` dep:
+ * either pre-resolved static {@link InvokeCredentials} or an async provider
+ * resolving them. Both shapes are natively accepted by the AWS SDK v3 client
+ * `credentials` config, so the adapter passes it straight through.
+ */
+export type AdapterCredentialProvider =
+  | InvokeCredentials
+  | (() => Promise<InvokeCredentials>);
+
+/**
+ * Map the {@link VendedCredentials} returned by {@link vendImportCredentials}
+ * onto the static {@link InvokeCredentials} an adapter hands to its SDK client.
+ *
+ * Returns `undefined` when no usable access key/secret pair is present (i.e. no
+ * assume happened, or it returned a partial result). A cross-account caller
+ * treats `undefined` as a FAILURE — it must never silently fall back to the
+ * handler identity with the wrong account's creds. Pure; never logs.
+ */
+export function toInvokeCredentials(
+  vended: VendedCredentials,
+): InvokeCredentials | undefined {
+  const accessKeyId = vended.accessKeyId;
+  const secretAccessKey = vended.secretAccessKey;
+  const sessionToken = vended.sessionToken;
+  if (typeof accessKeyId !== 'string' || typeof secretAccessKey !== 'string') {
+    return undefined;
+  }
+  return {
+    accessKeyId,
+    secretAccessKey,
+    ...(typeof sessionToken === 'string' ? { sessionToken } : {}),
+    ...(typeof vended.expiresAt === 'string'
+      ? { expiration: new Date(vended.expiresAt) }
+      : {}),
+  };
+}
+
 // --- cross-account credential vending (shared by every agent-source adapter) -
 
 /**
