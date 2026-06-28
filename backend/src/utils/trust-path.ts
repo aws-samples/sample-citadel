@@ -28,6 +28,7 @@ import {
   type GetRoleCommandOutput,
   type GetRolePolicyCommandOutput,
 } from '@aws-sdk/client-iam';
+import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 
 /** Inline policy name the scoped citadel roles carry (PolicyManager convention). */
 export const TRUST_PATH_INLINE_POLICY_NAME = 'DataStoreAccess';
@@ -432,4 +433,76 @@ export async function computeTrustPath(
   }
 
   return { hops, notes, findings, clean: findings.length === 0 };
+}
+
+
+// ---------------------------------------------------------------------------
+// assumeAnalysisRoleClient — cross-account read-only analysis-role assume
+// ---------------------------------------------------------------------------
+
+/** Injectable dependencies for {@link assumeAnalysisRoleClient}. */
+export interface AssumeAnalysisRoleDeps {
+  /** Injected STS client. A real `STSClient` is constructed when omitted. */
+  stsClient?: STSClient;
+}
+
+/**
+ * Assume an operator-supplied READ-ONLY analysis role in the TARGET account of
+ * a cross-account imported-agent `roleArn`, and return an {@link IAMClient}
+ * wired with the returned temporary credentials. The returned client can then
+ * be handed to {@link computeTrustPath} via `{ iamClient }` so its
+ * `iam:GetRole`/`GetRolePolicy` reads run in the target account.
+ *
+ * The cross-account confused-deputy control is the caller-supplied
+ * `externalId`, threaded into the `AssumeRoleCommand` only when present
+ * (mirroring PolicyManager.assumeScopedRole). The session name is prefixed
+ * `import-trustpath-` for CloudTrail attribution.
+ *
+ * Security:
+ *   - Read-only: the assumed role is expected to grant only IAM read actions;
+ *     this helper itself never writes.
+ *   - The raw temporary credentials never leave this function except wired into
+ *     the IAM client config — they are NEVER logged or returned to the caller.
+ *
+ * Throws if STS returns no usable credentials; the caller (activation path)
+ * treats any throw as best-effort and leaves the attestation 'pending'.
+ */
+export async function assumeAnalysisRoleClient(
+  analysisRoleArn: string,
+  externalId: string | undefined,
+  deps: AssumeAnalysisRoleDeps = {},
+): Promise<IAMClient> {
+  const stsClient = deps.stsClient ?? new STSClient({});
+
+  // Short, CloudTrail-friendly session suffix (RoleSessionName ≤ 64 chars,
+  // [\w+=,.@-]). Random so concurrent activations don't collide.
+  const sessionSuffix = Math.random().toString(36).slice(2, 10);
+
+  const result = await stsClient.send(
+    new AssumeRoleCommand({
+      RoleArn: analysisRoleArn,
+      RoleSessionName: `import-trustpath-${sessionSuffix}`,
+      ...(externalId ? { ExternalId: externalId } : {}),
+    }),
+  );
+
+  const creds = result.Credentials;
+  if (
+    !creds ||
+    !creds.AccessKeyId ||
+    !creds.SecretAccessKey ||
+    !creds.SessionToken
+  ) {
+    throw new Error(
+      'assumeAnalysisRoleClient: STS AssumeRole returned no usable credentials',
+    );
+  }
+
+  return new IAMClient({
+    credentials: {
+      accessKeyId: creds.AccessKeyId,
+      secretAccessKey: creds.SecretAccessKey,
+      sessionToken: creds.SessionToken,
+    },
+  });
 }

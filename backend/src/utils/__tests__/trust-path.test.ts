@@ -10,8 +10,9 @@
 import {
   GetRoleCommand,
   GetRolePolicyCommand,
-  type IAMClient,
+  IAMClient,
 } from '@aws-sdk/client-iam';
+import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
 import {
   parseTrustPolicyPrincipals,
   projectInlinePolicyDocument,
@@ -21,6 +22,7 @@ import {
   isCrossAccountRoleArn,
   fetchTrustPathHop,
   computeTrustPath,
+  assumeAnalysisRoleClient,
 } from '../trust-path';
 
 // ---------------------------------------------------------------------------
@@ -387,5 +389,108 @@ describe('computeTrustPath', () => {
     expect(result.hops).toHaveLength(2);
     expect(result.hops[1].scope).toBe('cross-account');
     expect(send).toHaveBeenCalledTimes(4); // 2 commands per hop
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// assumeAnalysisRoleClient — Phase-2 cross-account analysis-role assume.
+//
+// Given an operator-supplied read-only analysis role in the TARGET account,
+// this assumes it (externalId-gated) and returns an IAM client wired with the
+// returned temporary credentials so computeTrustPath can run iam:GetRole there.
+// The STS client is injectable so no test reaches live AWS.
+// ---------------------------------------------------------------------------
+
+describe('assumeAnalysisRoleClient', () => {
+  const ANALYSIS_ROLE_ARN = 'arn:aws:iam::222233334444:role/citadel-readonly-analysis';
+  const EXTERNAL_ID = 'citadel-ext-abc123';
+  const CREDS = {
+    AccessKeyId: 'AKIA_X_ACCT_EXAMPLE',
+    SecretAccessKey: 'super-secret-x-acct-key',
+    SessionToken: 'x-acct-session-token',
+    Expiration: new Date('2030-01-01T00:00:00.000Z'),
+  };
+
+  function stsStub(creds: unknown = CREDS): { client: STSClient; send: jest.Mock } {
+    const send = jest.fn(async (command: unknown) => {
+      if (command instanceof AssumeRoleCommand) {
+        return { Credentials: creds };
+      }
+      throw new Error('unexpected STS command');
+    });
+    return { client: { send } as unknown as STSClient, send };
+  }
+
+  it('assumes the analysis role with the supplied ExternalId + an import-trustpath session name', async () => {
+    const { client, send } = stsStub();
+
+    await assumeAnalysisRoleClient(ANALYSIS_ROLE_ARN, EXTERNAL_ID, { stsClient: client });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const command = send.mock.calls[0][0] as AssumeRoleCommand;
+    expect(command).toBeInstanceOf(AssumeRoleCommand);
+    expect(command.input.RoleArn).toBe(ANALYSIS_ROLE_ARN);
+    expect(command.input.ExternalId).toBe(EXTERNAL_ID);
+    expect(command.input.RoleSessionName).toMatch(/^import-trustpath-/);
+  });
+
+  it('returns an IAMClient wired with the returned temporary credentials', async () => {
+    const { client } = stsStub();
+
+    const iamClient = await assumeAnalysisRoleClient(ANALYSIS_ROLE_ARN, EXTERNAL_ID, {
+      stsClient: client,
+    });
+
+    expect(iamClient).toBeInstanceOf(IAMClient);
+    const resolved = await (
+      iamClient.config.credentials as () => Promise<{
+        accessKeyId: string;
+        secretAccessKey: string;
+        sessionToken?: string;
+      }>
+    )();
+    expect(resolved.accessKeyId).toBe(CREDS.AccessKeyId);
+    expect(resolved.secretAccessKey).toBe(CREDS.SecretAccessKey);
+    expect(resolved.sessionToken).toBe(CREDS.SessionToken);
+  });
+
+  it('omits ExternalId from the AssumeRole call when none is supplied', async () => {
+    const { client, send } = stsStub();
+
+    await assumeAnalysisRoleClient(ANALYSIS_ROLE_ARN, undefined, { stsClient: client });
+
+    const command = send.mock.calls[0][0] as AssumeRoleCommand;
+    expect('ExternalId' in (command.input as object)).toBe(false);
+  });
+
+  it('never logs the temporary credentials', async () => {
+    const { client } = stsStub();
+    const spies = [
+      jest.spyOn(console, 'log').mockImplementation(() => {}),
+      jest.spyOn(console, 'warn').mockImplementation(() => {}),
+      jest.spyOn(console, 'error').mockImplementation(() => {}),
+    ];
+
+    try {
+      await assumeAnalysisRoleClient(ANALYSIS_ROLE_ARN, EXTERNAL_ID, { stsClient: client });
+      const logged = spies
+        .flatMap((s) => s.mock.calls)
+        .map((args) =>
+          args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '),
+        )
+        .join('\n');
+      expect(logged).not.toContain(CREDS.SecretAccessKey);
+      expect(logged).not.toContain(CREDS.SessionToken);
+    } finally {
+      spies.forEach((s) => s.mockRestore());
+    }
+  });
+
+  it('throws when STS returns no usable credentials', async () => {
+    const { client } = stsStub({});
+    await expect(
+      assumeAnalysisRoleClient(ANALYSIS_ROLE_ARN, EXTERNAL_ID, { stsClient: client }),
+    ).rejects.toThrow();
   });
 });

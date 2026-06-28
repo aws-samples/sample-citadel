@@ -10,7 +10,7 @@ import type {
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
 import { getGovernanceEnforce } from '../utils/governance-flag';
 import { publishEvent } from '../utils/events';
-import { computeTrustPath, isCrossAccountRoleArn } from '../utils/trust-path';
+import { computeTrustPath, isCrossAccountRoleArn, assumeAnalysisRoleClient } from '../utils/trust-path';
 
 /** Trust-path summary persisted into governanceAttestation by the activation path. */
 interface TrustPathAttestationSummary {
@@ -484,24 +484,77 @@ export async function updateAgentConfigRegistry(input: any, event?: any): Promis
     // Phase-2 cross-account awareness. When invocation.roleArn lives in a
     // DIFFERENT account than this deployment (ACCOUNT_ID), the same-account,
     // in-process computeTrustPath cannot introspect it — its GetRole runs in the
-    // home account and would just fail. Skip the IAM call, stamp a crossAccount
-    // trust-path summary with a manual-attestation finding, and LEAVE the
-    // attestation 'pending' so the activation gate governs (strict blocks; an
-    // operator must run attestAgentImport / full cross-account introspection is
-    // a deferred follow-up). Detection is best-effort: when ACCOUNT_ID is not
-    // configured (or the role ARN account is unparseable) isCrossAccountRoleArn
-    // returns false and the same-account branch below runs byte-identically to
-    // Phase-1, so same-account behaviour is unchanged.
+    // home account and would just fail. Detection is best-effort: when
+    // ACCOUNT_ID is not configured (or the role ARN account is unparseable)
+    // isCrossAccountRoleArn returns false and the same-account branch below runs
+    // byte-identically to Phase-1, so same-account behaviour is unchanged.
     if (isCrossAccountRoleArn(invocationRoleArn, process.env.ACCOUNT_ID)) {
-      const summary: TrustPathAttestationSummary = {
-        checkedAt: new Date().toISOString(),
-        clean: false,
-        crossAccount: true,
-        findings: [
-          'cross-account-role: automated trust-path unavailable; manual attestation required',
-        ],
-      };
-      importAttestationToPersist = { ...existingAttestation, trustPath: summary };
+      // Phase-2 cross-account FULL introspection. When the operator supplied a
+      // READ-ONLY analysisRoleArn in the TARGET account, assume it
+      // (externalId-gated) to obtain a cross-account IAM client and run the SAME
+      // trust-path check there — then behave exactly like the same-account
+      // success path (auto-attest clean / pending+findings). With NO
+      // analysisRoleArn, keep the original 276ea59 manual-attestation finding.
+      // Either way the summary carries crossAccount:true. BEST-EFFORT: any
+      // assume / introspection failure records a finding and leaves the
+      // attestation 'pending' so the gate governs — activation is NEVER crashed,
+      // and the temporary credentials never reach this scope (the helper
+      // encapsulates them) so they cannot be logged.
+      const analysisRoleArn = importView.invocation?.analysisRoleArn;
+      if (typeof analysisRoleArn === 'string' && analysisRoleArn.length > 0) {
+        try {
+          const crossAccountIamClient = await assumeAnalysisRoleClient(
+            analysisRoleArn,
+            importView.invocation?.externalId,
+          );
+          const tp = await computeTrustPath(invocationRoleArn, {
+            iamClient: crossAccountIamClient,
+          });
+          const summary: TrustPathAttestationSummary = {
+            checkedAt: new Date().toISOString(),
+            clean: tp.clean,
+            crossAccount: true,
+            findings: tp.findings,
+          };
+          importAttestationToPersist = tp.clean
+            ? {
+                ...existingAttestation,
+                status: 'attested',
+                attestedBy: 'system:trust-path',
+                attestedAt: summary.checkedAt,
+                trustPath: summary,
+              }
+            : { ...existingAttestation, trustPath: summary };
+        } catch (err) {
+          // Best-effort: never log credentials (none reach this scope — the
+          // helper owns the STS temp creds). Record a finding and leave
+          // 'pending' for the gate / manual attestation.
+          console.error(
+            `agent-config-resolver: cross-account analysis-role trust-path for ` +
+              `${input.agentId} failed (best-effort, leaving 'pending'):`,
+            err instanceof Error ? err.message : String(err),
+          );
+          const summary: TrustPathAttestationSummary = {
+            checkedAt: new Date().toISOString(),
+            clean: false,
+            crossAccount: true,
+            findings: [
+              'cross-account analysis-role assume failed; manual attestation required',
+            ],
+          };
+          importAttestationToPersist = { ...existingAttestation, trustPath: summary };
+        }
+      } else {
+        const summary: TrustPathAttestationSummary = {
+          checkedAt: new Date().toISOString(),
+          clean: false,
+          crossAccount: true,
+          findings: [
+            'cross-account-role: automated trust-path unavailable; manual attestation required',
+          ],
+        };
+        importAttestationToPersist = { ...existingAttestation, trustPath: summary };
+      }
     } else {
       try {
         const tp = await computeTrustPath(invocationRoleArn);

@@ -287,6 +287,29 @@ if (app.node.tryGetContext('nag')!== 'false') {
                 }],
               );
 
+              // IAM5 — Phase-2 cross-account trust-path. When an imported agent's
+              // invocation.roleArn is cross-account and the operator supplied a
+              // READ-ONLY invocation.analysisRoleArn, the agent-config-resolver
+              // assumes that analysis role to run read-only IAM introspection in
+              // the role's home account. The analysis role is operator-supplied
+              // and may live in ANY account, so sts:AssumeRole is scoped to the
+              // cross-account IAM role namespace (arn:aws:iam::*:role/*) rather
+              // than this account; the externalId is the runtime confused-deputy
+              // control. Additive to the read-only introspection suppression above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentConfigResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'cross-account read-only analysis-role assume for trust-path; ' +
+                    'externalId-gated; target role is operator-supplied and must trust Citadel',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:iam::\\*:role\\/\\*$/g' },
+                  ],
+                }],
+              );
+
               // CloudFront — partial hardening. TLS 1.2 and access logging applied; the
               // rest require follow-up work.
               NagSuppressions.addResourceSuppressionsByPath(frontendStack, `/${frontendStack.stackName}/FrontendDistribution`, [

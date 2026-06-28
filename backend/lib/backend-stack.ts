@@ -717,6 +717,11 @@ export class BackendStack extends cdk.Stack {
           // grants below; getGovernanceEnforce fails open to 'permissive'.
           ENVIRONMENT: props.environment,
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          // Phase-2 cross-account trust-path: the deploying account id powers
+          // isCrossAccountRoleArn so the resolver can tell when an imported
+          // agent's invocation.roleArn lives in a DIFFERENT account and route to
+          // the operator analysis-role assume path (sts:AssumeRole grant below).
+          ACCOUNT_ID: this.account,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'AgentConfigResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -1065,6 +1070,26 @@ export class BackendStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['iam:GetPolicy', 'iam:GetPolicyVersion'],
         resources: [`arn:aws:iam::${this.account}:policy/*`],
+      }),
+    );
+
+    // Phase-2 cross-account trust-path: when an imported agent's
+    // invocation.roleArn is in a DIFFERENT account and the operator supplied a
+    // READ-ONLY invocation.analysisRoleArn in that target account, the resolver
+    // assumes that analysis role to run read-only iam:GetRole/GetRolePolicy in
+    // the role's home account (assumeAnalysisRoleClient → computeTrustPath). The
+    // analysis role is operator-supplied and may live in ANY account, so the
+    // assume cannot be account-scoped; it is scoped to the cross-account IAM
+    // role namespace (arn:aws:iam::*:role/*). The runtime confused-deputy
+    // control is the externalId threaded into every AssumeRole call (the target
+    // role must trust Citadel under sts:ExternalId). No write/assume beyond
+    // this; failures are handled best-effort (attestation left 'pending'). The
+    // role/* wildcard is suppressed (AwsSolutions-IAM5) in bin/app.ts.
+    agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sts:AssumeRole'],
+        resources: ['arn:aws:iam::*:role/*'],
       }),
     );
 

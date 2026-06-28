@@ -63,9 +63,11 @@ jest.mock('../../services/registry-service', () => ({
 // implementations via requireActual so cross-account detection is exercised
 // for real, driven by process.env.ACCOUNT_ID.
 const mockComputeTrustPath = jest.fn();
+const mockAssumeAnalysisRoleClient = jest.fn();
 jest.mock('../../utils/trust-path', () => ({
   ...jest.requireActual('../../utils/trust-path'),
   computeTrustPath: mockComputeTrustPath,
+  assumeAnalysisRoleClient: mockAssumeAnalysisRoleClient,
 }));
 
 // Governance rollout flag + event emitter used by the activation gate.
@@ -284,6 +286,7 @@ describe('updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)'
         customDescriptorContent: input.customMetadata,
       }));
     mockComputeTrustPath.mockReset();
+    mockAssumeAnalysisRoleClient.mockReset();
     mockGetGovernanceEnforce.mockReset().mockResolvedValue('strict');
     mockPublishEvent.mockReset().mockResolvedValue(undefined);
     mockMapToAgentConfig.mockClear();
@@ -302,7 +305,13 @@ describe('updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)'
   // An imported Registry record (governanceAttestation present). orgId is set
   // so updateAgentConfigRegistry never needs extractOrgFromEvent.
   function importedRecord(
-    opts: { status?: 'pending' | 'attested'; roleArn?: string; recordStatus?: string } = {},
+    opts: {
+      status?: 'pending' | 'attested';
+      roleArn?: string;
+      recordStatus?: string;
+      analysisRoleArn?: string;
+      externalId?: string;
+    } = {},
   ) {
     const meta: Record<string, unknown> = {
       orgId: 'org-1',
@@ -323,6 +332,8 @@ describe('updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)'
         auth: { mode: 'SIGV4' },
         mode: 'sync',
         roleArn: opts.roleArn,
+        ...(opts.analysisRoleArn !== undefined ? { analysisRoleArn: opts.analysisRoleArn } : {}),
+        ...(opts.externalId !== undefined ? { externalId: opts.externalId } : {}),
       };
     }
     return {
@@ -474,5 +485,101 @@ describe('updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)'
     expect(persisted.governanceAttestation.attestedBy).toBe('system:trust-path');
     expect(persisted.governanceAttestation.trustPath.crossAccount).toBeUndefined();
     expect(mockUpdateResourceStatus).toHaveBeenCalledWith('agent', AGENT_ID, 'APPROVED');
+  });
+
+  // ─── Phase-2: CROSS-ACCOUNT FULL introspection via operator analysis role ───
+  // When the invoke role is cross-account AND the operator supplied a read-only
+  // analysisRoleArn, the resolver assumes that role (externalId-gated), builds a
+  // cross-account IAM client, and runs computeTrustPath against it — then behaves
+  // like the same-account success path (auto-attest clean / pending+findings).
+  const ANALYSIS_ROLE_ARN = 'arn:aws:iam::123456789012:role/citadel-readonly-analysis';
+  const EXTERNAL_ID = 'citadel-ext-xyz789';
+
+  test('CROSS-ACCOUNT + analysisRoleArn + clean → assumes analysis role w/ ExternalId, computeTrustPath uses x-acct client, auto-attests (crossAccount summary)', async () => {
+    process.env.ACCOUNT_ID = CROSS_ACCOUNT_DEPLOYMENT;
+    const fakeIamClient = { __brand: 'x-acct-iam-client' };
+    mockAssumeAnalysisRoleClient.mockResolvedValue(fakeIamClient);
+    mockComputeTrustPath.mockResolvedValue({ hops: [], notes: [], findings: [], clean: true });
+    mockGetResource
+      .mockResolvedValueOnce(
+        importedRecord({ roleArn: ROLE_ARN, analysisRoleArn: ANALYSIS_ROLE_ARN, externalId: EXTERNAL_ID }),
+      )
+      .mockResolvedValueOnce(approvedRecord());
+
+    await handler(activateEvent());
+
+    expect(mockAssumeAnalysisRoleClient).toHaveBeenCalledWith(ANALYSIS_ROLE_ARN, EXTERNAL_ID);
+    expect(mockComputeTrustPath).toHaveBeenCalledWith(ROLE_ARN, { iamClient: fakeIamClient });
+    const persisted = JSON.parse(mockUpdateResource.mock.calls[0][2].customMetadata);
+    expect(persisted.governanceAttestation.status).toBe('attested');
+    expect(persisted.governanceAttestation.attestedBy).toBe('system:trust-path');
+    expect(persisted.governanceAttestation.attestedAt).toBeDefined();
+    expect(persisted.governanceAttestation.trustPath.crossAccount).toBe(true);
+    expect(persisted.governanceAttestation.trustPath.clean).toBe(true);
+    expect(mockUpdateResourceStatus).toHaveBeenCalledWith('agent', AGENT_ID, 'APPROVED');
+  });
+
+  test('CROSS-ACCOUNT + analysisRoleArn + findings → stays pending with findings, strict gate blocks', async () => {
+    process.env.ACCOUNT_ID = CROSS_ACCOUNT_DEPLOYMENT;
+    mockAssumeAnalysisRoleClient.mockResolvedValue({ __brand: 'x-acct-iam-client' });
+    mockComputeTrustPath.mockResolvedValue({
+      hops: [],
+      notes: [],
+      findings: ['over-broad-action: arn:aws:iam::123456789012:role/imported-agent-role'],
+      clean: false,
+    });
+    mockGetResource.mockResolvedValue(
+      importedRecord({ roleArn: ROLE_ARN, analysisRoleArn: ANALYSIS_ROLE_ARN, externalId: EXTERNAL_ID }),
+    );
+
+    await expect(handler(activateEvent())).rejects.toThrow('Activation blocked');
+
+    expect(mockAssumeAnalysisRoleClient).toHaveBeenCalledWith(ANALYSIS_ROLE_ARN, EXTERNAL_ID);
+    expect(mockComputeTrustPath).toHaveBeenCalledWith(ROLE_ARN, { iamClient: expect.anything() });
+    const persisted = JSON.parse(mockUpdateResource.mock.calls[0][2].customMetadata);
+    expect(persisted.governanceAttestation.status).toBe('pending');
+    expect(persisted.governanceAttestation.trustPath.crossAccount).toBe(true);
+    expect(persisted.governanceAttestation.trustPath.clean).toBe(false);
+    expect(persisted.governanceAttestation.trustPath.findings).toEqual([
+      'over-broad-action: arn:aws:iam::123456789012:role/imported-agent-role',
+    ]);
+    expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+  });
+
+  test('CROSS-ACCOUNT + analysisRoleArn but assume THROWS → finding recorded, pending, NOT crashed (permissive proceeds), no computeTrustPath, creds not logged', async () => {
+    process.env.ACCOUNT_ID = CROSS_ACCOUNT_DEPLOYMENT;
+    mockGetGovernanceEnforce.mockResolvedValue('permissive');
+    mockAssumeAnalysisRoleClient.mockRejectedValue(new Error('AccessDenied: not authorized to sts:AssumeRole'));
+    mockGetResource
+      .mockResolvedValueOnce(
+        importedRecord({ roleArn: ROLE_ARN, analysisRoleArn: ANALYSIS_ROLE_ARN, externalId: EXTERNAL_ID }),
+      )
+      .mockResolvedValueOnce(approvedRecord());
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await expect(handler(activateEvent())).resolves.toBeDefined();
+
+      expect(mockAssumeAnalysisRoleClient).toHaveBeenCalledWith(ANALYSIS_ROLE_ARN, EXTERNAL_ID);
+      // Assume failed → introspection never attempted.
+      expect(mockComputeTrustPath).not.toHaveBeenCalled();
+      const persisted = JSON.parse(mockUpdateResource.mock.calls[0][2].customMetadata);
+      expect(persisted.governanceAttestation.status).toBe('pending');
+      expect(persisted.governanceAttestation.trustPath.crossAccount).toBe(true);
+      expect(persisted.governanceAttestation.trustPath.clean).toBe(false);
+      expect(persisted.governanceAttestation.trustPath.findings).toEqual([
+        'cross-account analysis-role assume failed; manual attestation required',
+      ]);
+      // permissive gate proceeds (telemetry only), so activation still happens.
+      expect(mockUpdateResourceStatus).toHaveBeenCalledWith('agent', AGENT_ID, 'APPROVED');
+      // The externalId (and any creds, which never reach this scope) must never
+      // appear in a log line.
+      const logged = errorSpy.mock.calls
+        .map((args) => args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '))
+        .join('\n');
+      expect(logged).not.toContain(EXTERNAL_ID);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

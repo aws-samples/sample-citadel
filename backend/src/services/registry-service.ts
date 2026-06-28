@@ -126,6 +126,16 @@ export interface AgentInvocationBlock {
   account?: string;
   roleArn?: string;
   externalId?: string;
+  /**
+   * Operator-supplied READ-ONLY analysis role in the TARGET account of a
+   * cross-account `roleArn` (US-IMP Phase-2). When present, the activation
+   * trust-path path assumes this role (externalId-gated) to run read-only
+   * `iam:GetRole`/`GetRolePolicy` against `roleArn` in its home account, then
+   * attests like the same-account path. Absent ⇒ a cross-account `roleArn`
+   * falls back to the manual-attestation finding. Never carries a secret — the
+   * role must trust Citadel and is gated by {@link externalId}.
+   */
+  analysisRoleArn?: string;
 }
 
 /**
