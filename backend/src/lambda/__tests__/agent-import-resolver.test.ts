@@ -163,6 +163,16 @@ const STORED_SECRET_ARN =
 // stamped onto invocation.analysisRoleArn so the activation cross-account
 // trust-path can assume it. Not a secret — persisted verbatim.
 const ANALYSIS_ROLE_ARN = 'arn:aws:iam::111122223333:role/citadel-analysis-readonly';
+// Operator-supplied CROSS-ACCOUNT INVOKE role + STS external id (US-IMP Phase-2
+// keystone): the role Citadel assumes — externalId-gated — to INVOKE a
+// cross-account imported agent. Stamped onto invocation.roleArn /
+// invocation.externalId of the persisted record so the activation trust-path +
+// invoke paths can detect and assume it. Not a secret — persisted verbatim.
+// INVOKE_ROLE_ARN shares the source account; CROSS_ACCOUNT_INVOKE_ROLE_ARN lives
+// in a DIFFERENT account to prove cross-account reachability is persisted.
+const INVOKE_ROLE_ARN = 'arn:aws:iam::111122223333:role/citadel-invoke';
+const INVOKE_EXTERNAL_ID = 'ext-invoke-1';
+const CROSS_ACCOUNT_INVOKE_ROLE_ARN = 'arn:aws:iam::999988887777:role/citadel-invoke-cross';
 const eventWithOrg = {
   identity: { claims: { 'custom:organization': ORG }, sub: 'user-1' },
 };
@@ -664,6 +674,91 @@ describe('importAgent — invocation analysisRoleArn', () => {
   });
 });
 
+// ── importAgent: invocation roleArn / externalId (cross-account invoke) ───
+// US-IMP Phase-2 KEYSTONE: an operator may supply the CROSS-ACCOUNT INVOKE role
+// (+ STS external id) at import time. When present they are stamped onto the
+// persisted record's invocation.roleArn / invocation.externalId so the
+// activation trust-path + invoke paths can DETECT a cross-account target and
+// assume it (externalId-gated). Omitted ⇒ unset (back-compat: same-account
+// invoke unchanged). Not a secret — persisted verbatim. Mirrors analysisRoleArn.
+describe('importAgent — invocation roleArn / externalId', () => {
+  /** The invocation block within the metadata handed to serializeCustomMetadata. */
+  const stampedInvocation = (): { roleArn?: string; externalId?: string } | undefined => {
+    const call = mockSerializeCustomMetadata.mock.calls[0];
+    return call
+      ? (call[0] as { invocation?: { roleArn?: string; externalId?: string } }).invocation
+      : undefined;
+  };
+
+  it('stamps invocation.roleArn + externalId into the persisted customMetadata when provided', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(
+      validInput({ invocationRoleArn: INVOKE_ROLE_ARN, invocationExternalId: INVOKE_EXTERNAL_ID }),
+      eventWithOrg,
+    );
+
+    expect(stampedInvocation()?.roleArn).toBe(INVOKE_ROLE_ARN);
+    expect(stampedInvocation()?.externalId).toBe(INVOKE_EXTERNAL_ID);
+  });
+
+  it('leaves invocation.roleArn + externalId unset when not provided', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput(), eventWithOrg);
+
+    const invocation = stampedInvocation() ?? {};
+    expect(invocation.roleArn).toBeUndefined();
+    expect(invocation.externalId).toBeUndefined();
+    expect('roleArn' in invocation).toBe(false);
+    expect('externalId' in invocation).toBe(false);
+  });
+
+  it('handler: flat invocationRoleArn + invocationExternalId flow end-to-end into persisted invocation', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-h', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await handler({
+      info: { fieldName: 'importAgent' },
+      arguments: {
+        input: validFlatInput({
+          invocationRoleArn: INVOKE_ROLE_ARN,
+          invocationExternalId: INVOKE_EXTERNAL_ID,
+        }),
+      },
+      identity: eventWithOrg.identity,
+    });
+
+    expect(stampedInvocation()?.roleArn).toBe(INVOKE_ROLE_ARN);
+    expect(stampedInvocation()?.externalId).toBe(INVOKE_EXTERNAL_ID);
+  });
+
+  it('END-TO-END cross-account: a CROSS-ACCOUNT invocationRoleArn is persisted on invocation.roleArn (activation can now detect it)', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-x', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(
+      validInput({
+        invocationRoleArn: CROSS_ACCOUNT_INVOKE_ROLE_ARN,
+        invocationExternalId: INVOKE_EXTERNAL_ID,
+      }),
+      eventWithOrg,
+    );
+
+    // The persisted invocation carries the cross-account role verbatim, so the
+    // activation trust-path + invoke paths (isCrossAccountRoleArn vs ACCOUNT_ID)
+    // can now detect the cross-account target and assume it.
+    expect(stampedInvocation()?.roleArn).toBe(CROSS_ACCOUNT_INVOKE_ROLE_ARN);
+    expect(stampedInvocation()?.externalId).toBe(INVOKE_EXTERNAL_ID);
+  });
+});
+
 // ── importAgent: governance attestation (US governance retrofit) ─────────
 // On a record-creating import (create / replace / copy) the resolver stamps a
 // 'pending' governanceAttestation into the customMetadata AND best-effort
@@ -1007,6 +1102,25 @@ describe('buildImportDescriptor', () => {
     expect((withArn.invocation as { analysisRoleArn?: string }).analysisRoleArn).toBeUndefined();
     // Absent ⇒ no top-level key at all (back-compat: existing imports unaffected).
     expect('invocationAnalysisRoleArn' in buildImportDescriptor(validFlatInput())).toBe(false);
+  });
+
+  it('carries invocationRoleArn + invocationExternalId as top-level descriptor fields (and omits when absent)', () => {
+    const withRole = buildImportDescriptor(
+      validFlatInput({
+        invocationRoleArn: INVOKE_ROLE_ARN,
+        invocationExternalId: INVOKE_EXTERNAL_ID,
+      }),
+    );
+    expect(withRole.invocationRoleArn).toBe(INVOKE_ROLE_ARN);
+    expect(withRole.invocationExternalId).toBe(INVOKE_EXTERNAL_ID);
+    // Not pre-nested into invocation at the mapping layer — importAgent stamps it.
+    const inv = withRole.invocation as { roleArn?: string; externalId?: string };
+    expect(inv.roleArn).toBeUndefined();
+    expect(inv.externalId).toBeUndefined();
+    // Absent ⇒ no top-level keys at all (back-compat: existing imports unaffected).
+    const bare = buildImportDescriptor(validFlatInput());
+    expect('invocationRoleArn' in bare).toBe(false);
+    expect('invocationExternalId' in bare).toBe(false);
   });
 });
 

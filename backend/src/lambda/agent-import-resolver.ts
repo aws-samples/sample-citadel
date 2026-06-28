@@ -377,6 +377,16 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
   // invocation here so the flat→nested stamp stays single-sourced in importAgent.
   const invocationAnalysisRoleArn = asNonEmptyString(flat.invocationAnalysisRoleArn);
   if (invocationAnalysisRoleArn) descriptor.invocationAnalysisRoleArn = invocationAnalysisRoleArn;
+  // Optional operator-supplied CROSS-ACCOUNT INVOKE role + STS external id
+  // (US-IMP Phase-2 keystone). Carried as top-level descriptor fields — mirroring
+  // invocationAnalysisRoleArn — so importAgent can stamp them onto
+  // invocation.roleArn / invocation.externalId. Kept OFF the nested invocation
+  // here so the flat→nested stamp stays single-sourced in importAgent. Neither is
+  // sensitive (the role must trust Citadel and is externalId-gated).
+  const invocationRoleArn = asNonEmptyString(flat.invocationRoleArn);
+  if (invocationRoleArn) descriptor.invocationRoleArn = invocationRoleArn;
+  const invocationExternalId = asNonEmptyString(flat.invocationExternalId);
+  if (invocationExternalId) descriptor.invocationExternalId = invocationExternalId;
   return descriptor;
 }
 
@@ -750,6 +760,24 @@ export async function importAgent(
   const analysisRoleArn = asNonEmptyString(root.invocationAnalysisRoleArn);
   if (analysisRoleArn) {
     invocation.analysisRoleArn = analysisRoleArn;
+  }
+  // Optional operator-supplied CROSS-ACCOUNT INVOKE role + STS external id
+  // (US-IMP Phase-2 keystone). When the caller provides them at import time,
+  // stamp them onto the invocation block so the persisted record carries the
+  // cross-account target: the later activation trust-path + invoke paths read
+  // invocation.roleArn (isCrossAccountRoleArn vs ACCOUNT_ID) to detect and
+  // assume it (externalId-gated). Omitted ⇒ left unset (back-compat: existing
+  // same-account imports unchanged). Not secrets — the role must trust Citadel
+  // and is externalId-gated — so both are persisted verbatim alongside the
+  // other invocation fields. (testImportedAgent/probe map these via
+  // buildTestInvocationDescriptor; this is the record-persisting counterpart.)
+  const invokeRoleArn = asNonEmptyString(root.invocationRoleArn);
+  if (invokeRoleArn) {
+    invocation.roleArn = invokeRoleArn;
+  }
+  const invokeExternalId = asNonEmptyString(root.invocationExternalId);
+  if (invokeExternalId) {
+    invocation.externalId = invokeExternalId;
   }
   const origin = {
     ...(root.origin as Record<string, unknown>),

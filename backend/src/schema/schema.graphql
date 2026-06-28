@@ -520,6 +520,18 @@ input ImportAgentInput {
   # assume it (externalId-gated). Not a secret — persisted verbatim. Absent ⇒
   # a cross-account roleArn falls back to manual attestation.
   invocationAnalysisRoleArn: String
+  # Optional operator-supplied CROSS-ACCOUNT INVOKE role ARN (US-IMP Phase-2):
+  # the IAM role Citadel assumes — gated by invocationExternalId — to INVOKE a
+  # cross-account imported agent. When present it is stamped onto the persisted
+  # record's invocation.roleArn so the activation trust-path + invoke paths
+  # detect the cross-account target and assume it. The role MUST trust Citadel
+  # and the external id. Not a secret — persisted verbatim. Absent ⇒ same-account
+  # invoke (unchanged).
+  invocationRoleArn: String
+  # STS ExternalId forwarded when assuming invocationRoleArn (confused-deputy
+  # protection). Stamped onto the persisted record's invocation.externalId so the
+  # invoke-time assume presents it. Absent ⇒ no external id is sent.
+  invocationExternalId: String
   invocationMode: String
   region: String
   account: String
@@ -553,6 +565,17 @@ input TestImportedAgentInput {
   invocationMode: String
   region: String
   account: String
+  # Optional operator-supplied CROSS-ACCOUNT INVOKE role ARN (US-IMP Phase-2):
+  # the IAM role Citadel assumes — gated by invocationExternalId — to run THIS
+  # test-invoke against a cross-account candidate. When set and in a DIFFERENT
+  # account than the deployment, the dry-run is performed under the assumed
+  # target-account credentials. The role MUST trust Citadel and the external id.
+  # Not a secret — never persisted (a test-invoke creates no record). Absent ⇒
+  # same-account test-invoke (unchanged).
+  invocationRoleArn: String
+  # STS ExternalId forwarded when assuming invocationRoleArn (confused-deputy
+  # protection). Absent ⇒ no external id is sent.
+  invocationExternalId: String
   prompt: String
 }
 
