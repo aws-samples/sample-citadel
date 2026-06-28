@@ -37,21 +37,29 @@ export interface McpAdapterDeps {
   fetchFn?: typeof fetch;
   /** Auth applied to the describe() invocation block (from the import scope). */
   auth?: AuthBlock;
+  /**
+   * Invoke-side resolver turning an invocation `auth.secretRef` into its raw
+   * value (Secrets Manager GetSecretValue, run under the caller's identity).
+   * When omitted, secret-backed auth modes invoke without an auth header.
+   */
+  resolveSecret?: (secretRef: string) => Promise<string>;
 }
 
 export class McpAdapter implements AgentSourceAdapter {
   public readonly protocol: AgentInvocationProtocol = 'MCP';
   private readonly fetchFn: typeof fetch;
+  private readonly resolveSecret?: (secretRef: string) => Promise<string>;
 
   constructor(private readonly deps: McpAdapterDeps = {}) {
     this.fetchFn = deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
+    this.resolveSecret = deps.resolveSecret;
   }
 
   async invoke(
     req: InvokeRequest,
     descriptor: AgentCapabilityDescriptor,
   ): Promise<InvokeResponse> {
-    const { target } = descriptor.invocation;
+    const { target, auth } = descriptor.invocation;
     const rpc = {
       jsonrpc: '2.0',
       id: 1,
@@ -66,13 +74,41 @@ export class McpAdapter implements AgentSourceAdapter {
       },
     };
 
+    // Secret-backed auth (API_KEY / OAUTH2 / COGNITO): resolve the secretRef and
+    // attach the Authorization header on the JSON-RPC POST. Unchanged (no
+    // header) when no resolver is wired, no secretRef is set, or mode is NONE.
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    const authHeader = await this.resolveAuthHeader(auth);
+    if (authHeader) headers.authorization = authHeader;
+
     const response = await this.fetchFn(target, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify(rpc),
     });
     const text = await response.text();
     return { output: parseJsonRpcResult(text), raw: text };
+  }
+
+  /**
+   * Resolve the Authorization header value for a secret-backed auth mode.
+   * Returns undefined (no header) when no resolver is wired, no secretRef is
+   * set, or the mode needs no resolved secret (NONE / SIGV4). The resolved
+   * secret value is NEVER logged — only that auth was applied, and the mode.
+   */
+  private async resolveAuthHeader(auth: AuthBlock): Promise<string | undefined> {
+    if (!this.resolveSecret || !auth.secretRef) return undefined;
+    const scheme = authHeaderScheme(auth.mode);
+    if (!scheme) return undefined;
+    const value = await this.resolveSecret(auth.secretRef);
+    console.log(
+      JSON.stringify({
+        level: 'info',
+        msg: 'mcp-adapter: applied invocation auth header',
+        mode: auth.mode,
+      }),
+    );
+    return scheme === 'bearer' ? `Bearer ${value}` : value;
   }
 
   /**
@@ -255,6 +291,32 @@ function refToString(ref: AgentRef): string {
 function resolveMcpAuth(auth?: AuthBlock): AuthBlock {
   if (auth?.secretRef) return { mode: auth.mode ?? 'OAUTH2', secretRef: auth.secretRef };
   return { mode: auth?.mode ?? 'NONE' };
+}
+
+/** How a resolved secret value is applied to the Authorization header. */
+type AuthScheme = 'raw' | 'bearer';
+
+/**
+ * Map a secret-backed auth mode to its Authorization-header scheme. API_KEY is
+ * sent verbatim (`Authorization: <value>`); the bearer-token modes (OAUTH2,
+ * COGNITO) are sent as `Authorization: Bearer <value>`. SIGV4 and NONE need no
+ * resolved secret here and map to undefined.
+ *
+ * NOTE: the import spec's "BEARER" mode is realized by the OAUTH2/COGNITO
+ * bearer modes — the AgentInvocationAuthMode union (registry-service, out of
+ * scope to modify) has no BEARER literal. Kept local to this adapter because
+ * the shared invoke-support module is out of scope for this change.
+ */
+function authHeaderScheme(mode: AuthBlock['mode']): AuthScheme | undefined {
+  switch (mode) {
+    case 'API_KEY':
+      return 'raw';
+    case 'OAUTH2':
+    case 'COGNITO':
+      return 'bearer';
+    default:
+      return undefined; // SIGV4 / NONE — no secret-derived header
+  }
 }
 
 function hostnameOf(url: string): string {

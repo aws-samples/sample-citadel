@@ -56,7 +56,19 @@ let _agentSourceRegistry: AgentSourceAdapterRegistry | null = null;
 
 function getAgentSourceRegistry(): AgentSourceAdapterRegistry {
   if (!_agentSourceRegistry) {
-    _agentSourceRegistry = buildDefaultAgentSourceRegistry();
+    // Invoke-side auth resolver, wired lazily. credential-manager is required
+    // HERE (not at module load) so its module-scope SDK-client construction
+    // stays OFF the legacy AgentCore cold-start path — the legacy path loads it
+    // only if/when an imported agent is actually dispatched. The HTTP + MCP
+    // adapters use this to turn an invocation `auth.secretRef`
+    // (API_KEY / OAUTH2 / COGNITO) into the request Authorization header, run
+    // under THIS handler Lambda's identity (secretsmanager:GetSecretValue on
+    // /citadel/agents/*).
+    const { getAgentInvocationSecret } =
+      require("../utils/credential-manager") as typeof import("../utils/credential-manager");
+    _agentSourceRegistry = buildDefaultAgentSourceRegistry({
+      resolveSecret: (ref: string) => getAgentInvocationSecret(ref),
+    });
   }
   return _agentSourceRegistry;
 }

@@ -8,7 +8,8 @@
 import * as fc from 'fast-check';
 import {
   storeCredentials,
-  retrieveCredentials
+  retrieveCredentials,
+  getAgentInvocationSecret
 } from '../credential-manager';
 import { getConnectorSpec, getAllConnectorTypes } from '../connector-registry';
 import { 
@@ -1478,3 +1479,49 @@ describe('Credential Manager - Property-Based Tests', () => {
       );
     });
   });
+
+/**
+ * Additive READ counterpart of storeAgentInvocationSecret: resolve a single
+ * RAW invocation secret for an imported agent via Secrets Manager
+ * GetSecretValue. Used by the invoke path (agent-message-handler) to turn an
+ * invocation auth.secretRef into a request auth header.
+ */
+describe('getAgentInvocationSecret', () => {
+  beforeEach(() => {
+    secretsManagerMock.reset();
+  });
+
+  it('resolves the raw secret string for the given secretRef', async () => {
+    const secretRef =
+      'arn:aws:secretsmanager:us-east-1:123456789012:secret:/citadel/agents/org-1/abc';
+    secretsManagerMock.on(GetSecretValueCommand).resolves({
+      SecretString: 'raw-invocation-secret',
+    });
+
+    const value = await getAgentInvocationSecret(secretRef);
+
+    expect(value).toBe('raw-invocation-secret');
+    const calls = secretsManagerMock.commandCalls(GetSecretValueCommand);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args[0].input).toEqual({ SecretId: secretRef });
+  });
+
+  it('returns the secret verbatim (opaque scalar, NOT JSON-parsed)', async () => {
+    secretsManagerMock.on(GetSecretValueCommand).resolves({
+      // A value that happens to look like JSON must come back unchanged.
+      SecretString: '{"not":"parsed"}',
+    });
+
+    const value = await getAgentInvocationSecret('secret/opaque');
+
+    expect(value).toBe('{"not":"parsed"}');
+  });
+
+  it('throws when the secret has no string value (binary-only / empty)', async () => {
+    secretsManagerMock.on(GetSecretValueCommand).resolves({});
+
+    await expect(getAgentInvocationSecret('secret/missing')).rejects.toThrow(
+      /no string value/i,
+    );
+  });
+});

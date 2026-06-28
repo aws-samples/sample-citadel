@@ -50,6 +50,12 @@ export interface HttpEndpointAdapterDeps {
   /** Auth applied to the describe() invocation block (from the import scope). */
   auth?: AuthBlock;
   defaultRegion?: string;
+  /**
+   * Invoke-side resolver turning an invocation `auth.secretRef` into its raw
+   * value (Secrets Manager GetSecretValue, run under the caller's identity).
+   * When omitted, secret-backed auth modes invoke without an auth header.
+   */
+  resolveSecret?: (secretRef: string) => Promise<string>;
 }
 
 const defaultSignerFactory: HttpSignerFactory = (region: string): HttpSigner => {
@@ -66,11 +72,13 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
   public readonly protocol: AgentInvocationProtocol = 'HTTP_ENDPOINT';
   private readonly fetchFn: typeof fetch;
   private readonly signerFactory: HttpSignerFactory;
+  private readonly resolveSecret?: (secretRef: string) => Promise<string>;
 
   constructor(private readonly deps: HttpEndpointAdapterDeps = {}) {
     // Late-bind to the current global fetch so test stubs are honoured.
     this.fetchFn = deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
     this.signerFactory = deps.signerFactory ?? defaultSignerFactory;
+    this.resolveSecret = deps.resolveSecret;
   }
 
   async invoke(
@@ -103,10 +111,14 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
       });
       const signed = await this.signerFactory(region || DEFAULT_REGION).sign(request);
       requestHeaders = signed.headers;
-    } else if (auth.secretRef) {
-      // TODO(import-auth): resolve auth.secretRef from Secrets Manager and
-      // attach the API_KEY / OAUTH2 credential header here. Sent unauthenticated
-      // for now (handled in a later import story).
+    } else {
+      // Secret-backed auth (API_KEY / OAUTH2 / COGNITO): resolve the secretRef
+      // and attach the Authorization header. Unchanged (no header) when no
+      // resolver is wired, no secretRef is set, or the mode needs no secret.
+      const authHeader = await this.resolveAuthHeader(auth);
+      if (authHeader) {
+        requestHeaders = { ...headers, authorization: authHeader };
+      }
     }
 
     const response = await this.fetchFn(target, {
@@ -116,6 +128,27 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
     });
     const text = await response.text();
     return { output: extractTextOutput(text) || NO_RESPONSE_TEXT, raw: text };
+  }
+
+  /**
+   * Resolve the Authorization header value for a secret-backed auth mode.
+   * Returns undefined (no header) when no resolver is wired, no secretRef is
+   * set, or the mode needs no resolved secret (NONE / SIGV4). The resolved
+   * secret value is NEVER logged — only that auth was applied, and the mode.
+   */
+  private async resolveAuthHeader(auth: AuthBlock): Promise<string | undefined> {
+    if (!this.resolveSecret || !auth.secretRef) return undefined;
+    const scheme = authHeaderScheme(auth.mode);
+    if (!scheme) return undefined;
+    const value = await this.resolveSecret(auth.secretRef);
+    console.log(
+      JSON.stringify({
+        level: 'info',
+        msg: 'http-adapter: applied invocation auth header',
+        mode: auth.mode,
+      }),
+    );
+    return scheme === 'bearer' ? `Bearer ${value}` : value;
   }
 
   /**
@@ -264,6 +297,33 @@ function refToString(ref: AgentRef): string {
 function resolveHttpAuth(auth?: AuthBlock): AuthBlock {
   const mode = auth?.mode ?? 'SIGV4';
   return auth?.secretRef ? { mode, secretRef: auth.secretRef } : { mode };
+}
+
+/** How a resolved secret value is applied to the Authorization header. */
+type AuthScheme = 'raw' | 'bearer';
+
+/**
+ * Map a secret-backed auth mode to its Authorization-header scheme. API_KEY is
+ * sent verbatim (`Authorization: <value>`; header-name customization is a
+ * future option); the bearer-token modes (OAUTH2, COGNITO) are sent as
+ * `Authorization: Bearer <value>`. SIGV4 (request signing) and NONE need no
+ * resolved secret here and map to undefined.
+ *
+ * NOTE: the import spec's "BEARER" mode is realized by the OAUTH2/COGNITO
+ * bearer modes — the AgentInvocationAuthMode union (registry-service, out of
+ * scope to modify) has no BEARER literal. Kept local to this adapter because
+ * the shared invoke-support module is out of scope for this change.
+ */
+function authHeaderScheme(mode: AuthBlock['mode']): AuthScheme | undefined {
+  switch (mode) {
+    case 'API_KEY':
+      return 'raw';
+    case 'OAUTH2':
+    case 'COGNITO':
+      return 'bearer';
+    default:
+      return undefined; // SIGV4 / NONE — no secret-derived header
+  }
 }
 
 function openApiUrl(base: string): string {

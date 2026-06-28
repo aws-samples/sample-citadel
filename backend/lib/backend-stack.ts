@@ -1960,6 +1960,23 @@ export class BackendStack extends cdk.Stack {
       })
     );
 
+    // Invoke-side auth-secret resolution for IMPORTED agents: the handler
+    // resolves an imported agent's invocation `auth.secretRef`
+    // (API_KEY / OAUTH2 / COGNITO) to apply the request Authorization header.
+    // Least privilege: READ-only GetSecretValue scoped to the agent secret-path
+    // convention /citadel/agents/* (the WRITE-only counterpart —
+    // CreateSecret/PutSecretValue/TagResource — lives on the import resolver).
+    // The legacy AgentCore path uses no secret and is unaffected.
+    agentMessageHandlerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["secretsmanager:GetSecretValue"],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
+        ],
+      })
+    );
+
     // Grant permissions to invoke Bedrock AgentCore Runtime
     agentMessageHandlerFunction.addToRolePolicy(
       new iam.PolicyStatement({

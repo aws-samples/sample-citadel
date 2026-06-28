@@ -145,6 +145,36 @@ export async function storeAgentInvocationSecret(
 }
 
 /**
+ * Resolve a single RAW invocation secret previously persisted by
+ * {@link storeAgentInvocationSecret} — the additive READ counterpart. Given the
+ * `secretRef` stored on an imported agent's Registry record
+ * (`invocation.auth.secretRef`, a Secrets Manager ARN or path-style name),
+ * fetch the opaque scalar secret string via GetSecretValue so the invoke path
+ * (agent-message-handler) can apply it as a request auth header.
+ *
+ * Mirrors the GetSecretValue client/usage style of {@link retrieveCredentials}
+ * but, like {@link storeAgentInvocationSecret}, treats the secret as an opaque
+ * scalar (NOT JSON-parsed) and is decoupled from the connector registry, so it
+ * serves arbitrary imported-agent auth material (API key, OAuth/bearer token).
+ *
+ * The returned value is sensitive: callers MUST NOT log it.
+ *
+ * @param secretRef - the Secrets Manager ARN or name from the Registry record.
+ * @returns the raw secret string.
+ * @throws if the secret has no string value (binary-only or empty) — the caller
+ *   treats this as a hard failure rather than invoking unauthenticated.
+ */
+export async function getAgentInvocationSecret(secretRef: string): Promise<string> {
+  const response = await secretsManager.send(new GetSecretValueCommand({
+    SecretId: secretRef,
+  }));
+  if (!response.SecretString) {
+    throw new Error(`Agent invocation secret ${secretRef} has no string value`);
+  }
+  return response.SecretString;
+}
+
+/**
  * Detect if credentials are in old format (pre-multi-connector)
  * Old format detection heuristics:
  * - May have different field names or structure
