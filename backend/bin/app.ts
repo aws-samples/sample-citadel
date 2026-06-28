@@ -421,4 +421,29 @@ if (app.node.tryGetContext('nag')!== 'false') {
                   ],
                 }],
               );
+
+              // IAM5 — Phase-2 cross-account INVOKE for the import resolver. When
+              // an import candidate's invocation.roleArn is cross-account, the
+              // admin/architect-gated testImportedAgent / probeAgentCandidate
+              // dry-run assumes that operator-supplied invoke role (externalId-
+              // gated) and runs the AWS-native protocol invoke under the assumed
+              // credentials. The invoke role is operator-supplied and may live in
+              // ANY account, so sts:AssumeRole is scoped to the cross-account IAM
+              // role namespace (arn:aws:iam::*:role/*) rather than this account;
+              // the externalId is the runtime confused-deputy control. Additive to
+              // the discovery + test-invoke suppressions already registered for
+              // this role above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'cross-account invoke-role assume for imported-agent test/probe; ' +
+                    'externalId-gated; operator-supplied target role must trust Citadel',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:iam::\\*:role\\/\\*$/g' },
+                  ],
+                }],
+              );
 }

@@ -750,6 +750,13 @@ export class BackendStack extends cdk.Stack {
           // deterministic table name to avoid a circular cross-stack dep (mirrors
           // RegistryAgentRecordResolverFunction). Scoped IAM grant below.
           AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
+          // Phase-2 cross-account INVOKE: the deploying account id powers
+          // isCrossAccountRoleArn so the test-invoke/probe paths detect when an
+          // import candidate's invocation.roleArn lives in a DIFFERENT account and
+          // assume the operator-supplied invoke role (sts:AssumeRole grant below)
+          // instead of using this Lambda's identity. Mirrors the
+          // agent-message-handler + agent-config-resolver.
+          ACCOUNT_ID: this.account,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'AgentImportResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -831,6 +838,25 @@ export class BackendStack extends cdk.Stack {
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
         ],
+      })
+    );
+
+    // Phase-2 cross-account INVOKE (testImportedAgent / probeAgentCandidate):
+    // when an import candidate's invocation.roleArn is in a DIFFERENT account,
+    // the admin/architect-gated dry-run assumes that operator-supplied invoke
+    // role (reusing vendImportCredentials) and runs the AWS-native protocol
+    // invoke under the assumed credentials. The invoke role is operator-supplied
+    // and may live in ANY account, so the assume cannot be account-scoped; it is
+    // scoped to the cross-account IAM role namespace (arn:aws:iam::*:role/*). The
+    // runtime confused-deputy control is the externalId threaded into the
+    // AssumeRole call — the target role must trust Citadel under sts:ExternalId.
+    // Same-account invokes never assume. The role/* wildcard is suppressed
+    // (AwsSolutions-IAM5) in bin/app.ts. Mirrors the agent-message-handler grant.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sts:AssumeRole'],
+        resources: ['arn:aws:iam::*:role/*'],
       })
     );
 

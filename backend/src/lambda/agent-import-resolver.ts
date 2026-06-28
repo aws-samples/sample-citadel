@@ -45,6 +45,12 @@ import {
   InvalidSourceRefError,
 } from '../services/agent-discovery';
 import { buildDefaultAgentSourceRegistry } from '../adapters/agent-source/registry-factory';
+import { isCrossAccountRoleArn } from '../utils/trust-path';
+import {
+  vendImportCredentials,
+  toInvokeCredentials,
+} from '../adapters/agent-source/invoke-support';
+import type { InvokeCredentials } from '../adapters/agent-source/invoke-support';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -116,6 +122,15 @@ export interface TestImportedAgentInput {
   invocationMode?: string;
   region?: string;
   account?: string;
+  /**
+   * Operator-supplied CROSS-ACCOUNT invoke role ARN (US-IMP Phase-2). When set
+   * and in a DIFFERENT account than ACCOUNT_ID, the INVOKE paths assume it
+   * (externalId-gated) so the dry-run runs under the target account's
+   * credentials. Not a secret — the role must trust Citadel.
+   */
+  invocationRoleArn?: string;
+  /** STS ExternalId forwarded when assuming {@link invocationRoleArn}. */
+  invocationExternalId?: string;
   prompt?: string;
 }
 
@@ -1141,6 +1156,15 @@ function buildTestInvocationDescriptor(
   const account = asNonEmptyString(flat.account);
   if (region) invocation.region = region;
   if (account) invocation.account = account;
+  // Optional operator-supplied CROSS-ACCOUNT invoke role (US-IMP Phase-2).
+  // Carried onto the invocation block so the INVOKE paths can detect a
+  // cross-account target (isCrossAccountRoleArn vs ACCOUNT_ID) and assume it
+  // (externalId-gated, via vendImportCredentials). Absent ⇒ same-account
+  // behaviour, unchanged. Never a secret — the role must trust Citadel.
+  const roleArn = asNonEmptyString(flat.invocationRoleArn);
+  const externalId = asNonEmptyString(flat.invocationExternalId);
+  if (roleArn) invocation.roleArn = roleArn;
+  if (externalId) invocation.externalId = externalId;
 
   const origin: AgentOrigin = {
     substrate: 'test-invoke',
@@ -1161,6 +1185,52 @@ function buildTestInvocationDescriptor(
     invocation,
     origin,
   };
+}
+
+/**
+ * Cross-account-aware adapter-registry builder for the INVOKE paths
+ * ({@link testImportedAgent} + {@link probeAgentCandidate}). Mirrors the message
+ * handler's `resolveImportRegistry` (agent-message-handler.ts, commit 345f157):
+ *
+ *   - CROSS-ACCOUNT (`invocation.roleArn`'s account != `process.env.ACCOUNT_ID`,
+ *     per {@link isCrossAccountRoleArn}, and present): assume the operator-supplied
+ *     invoke role via {@link vendImportCredentials} (externalId-gated), map it
+ *     through {@link toInvokeCredentials}, and build the registry whose AWS-native
+ *     adapters use those assumed credentials. If the assume FAILS, or yields no
+ *     usable credentials, THROW — we must NEVER silently fall back to this
+ *     Lambda's own identity (which would invoke with the wrong account's
+ *     credentials). The assumed credentials are NEVER logged.
+ *   - SAME-ACCOUNT (or no `roleArn`): build the registry with NO
+ *     `credentialProvider` — byte-identical to today (this Lambda's identity),
+ *     the `resolveSecret` closure threaded through unchanged.
+ *
+ * UNLIKE the message handler (a void EventBridge handler whose throw becomes a
+ * stored error response), the INVOKE paths are RESULT-RETURNING: each caller
+ * invokes this INSIDE its existing try/catch so a cross-account assume failure
+ * surfaces as the NORMAL failure result (testImportedAgent → `{ ok:false, error }`;
+ * probeAgentCandidate → describe-only + `probeNote`), never a thrown 500.
+ */
+async function buildInvokeRegistryFor(
+  invocation: AgentInvocationBlock,
+  resolveSecret: ((ref: string) => Promise<string>) | undefined,
+): Promise<ReturnType<typeof buildDefaultAgentSourceRegistry>> {
+  const roleArn = invocation.roleArn;
+  if (!roleArn || !isCrossAccountRoleArn(roleArn, process.env.ACCOUNT_ID)) {
+    // Same-account (or no role) — current behaviour, no assumed credentials.
+    return buildDefaultAgentSourceRegistry({ resolveSecret });
+  }
+
+  // Cross-account: assume the operator-supplied invoke role (externalId-gated).
+  // A throw here propagates to the caller's try/catch and becomes a normal
+  // failure result. The vended/assumed credentials are NEVER logged.
+  const vended = await vendImportCredentials(invocation);
+  const credentialProvider: InvokeCredentials | undefined = toInvokeCredentials(vended);
+  if (!credentialProvider) {
+    // Assume produced no usable credentials — do NOT fall back to this Lambda's
+    // identity (it would invoke with the wrong account's credentials).
+    throw new Error('Cross-account invoke-role assume produced no usable credentials');
+  }
+  return buildDefaultAgentSourceRegistry({ resolveSecret, credentialProvider });
 }
 
 /**
@@ -1216,8 +1286,15 @@ export async function testImportedAgent(
       resolveSecret = (ref: string) => getAgentInvocationSecret(ref);
     }
 
-    const registry = buildDefaultAgentSourceRegistry({ resolveSecret });
+    // Build the candidate's invocation descriptor first so its (possibly
+    // cross-account) invocation.roleArn is available to select the registry.
     const descriptor = buildTestInvocationDescriptor(flat, Boolean(rawSecret));
+    // Cross-account-aware: a cross-account invocation.roleArn assumes the
+    // operator-supplied invoke role (externalId-gated) and builds the registry
+    // with the assumed credentials; otherwise it is the current same-account
+    // registry. A cross-account assume failure THROWS and is caught below as a
+    // normal { ok:false, error } result (never a thrown 500).
+    const registry = await buildInvokeRegistryFor(descriptor.invocation, resolveSecret);
     const adapter = registry.resolve(descriptor.invocation.protocol);
     const resp = await adapter.invoke(
       { prompt: asNonEmptyString(flat.prompt) ?? 'ping', sessionId: `import-test-${uuidv4()}` },
@@ -1350,9 +1427,13 @@ export async function probeAgentCandidate(
     resolveSecret = (ref: string) => getAgentInvocationSecret(ref);
   }
 
-  // One registry + one adapter instance, reused for describe() AND invoke().
-  const registry = buildDefaultAgentSourceRegistry({ resolveSecret });
-  const adapter = registry.resolve(protocol as AgentInvocationProtocol);
+  // Base registry for the static describe() — runs under this Lambda's identity.
+  // The cross-account assume is scoped to the DRY-RUN below (the credentialProvider
+  // is for INVOKING the target, not describing it); resolveSecret is threaded so
+  // secret-backed describe()s still resolve.
+  const adapter = buildDefaultAgentSourceRegistry({ resolveSecret }).resolve(
+    protocol as AgentInvocationProtocol,
+  );
 
   // 1. Static describe() — the Tier-0/1 capability descriptor.
   const descriptor = await adapter.describe(buildProbeCandidate(flat, target));
@@ -1381,7 +1462,14 @@ export async function probeAgentCandidate(
   };
 
   try {
-    const resp = await adapter.invoke(
+    // Cross-account-aware registry for the DRY-RUN: a cross-account
+    // probeInvocation.roleArn assumes the operator-supplied invoke role
+    // (externalId-gated) so the dry-run runs under the assumed credentials. The
+    // assume is INSIDE this existing try/catch, so a failure is BEST-EFFORT — it
+    // maps to the describe-only + probeNote result below, never a thrown 500.
+    const invokeRegistry = await buildInvokeRegistryFor(probeInvocation, resolveSecret);
+    const invokeAdapter = invokeRegistry.resolve(probeInvocation.protocol);
+    const resp = await invokeAdapter.invoke(
       {
         prompt: asNonEmptyString(flat.prompt) ?? PROBE_PROMPT,
         sessionId: `import-probe-${uuidv4()}`,
