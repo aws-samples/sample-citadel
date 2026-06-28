@@ -102,6 +102,45 @@ describe('McpAdapter.invoke — secret-backed auth headers', () => {
     expect(initOf(fetchFn).headers?.authorization).toBe(SECRET_VALUE);
   });
 
+  it('BEARER + secretRef: applies Authorization: Bearer <value> on the JSON-RPC POST', async () => {
+    const resolveSecret = jest.fn(async () => SECRET_VALUE);
+    const fetchFn = makeFetch();
+    const adapter = new McpAdapter({ fetchFn: asFetch(fetchFn), resolveSecret });
+
+    await adapter.invoke(
+      baseReq,
+      descriptorFor({
+        protocol: 'MCP',
+        target: TARGET,
+        auth: { mode: 'BEARER', secretRef: 'secret/bearer' },
+        mode: 'sync',
+      }),
+    );
+
+    expect(resolveSecret).toHaveBeenCalledWith('secret/bearer');
+    expect(initOf(fetchFn).headers?.authorization).toBe(`Bearer ${SECRET_VALUE}`);
+  });
+
+  it('API_KEY + custom header: applies the custom header name carrying the raw value', async () => {
+    const resolveSecret = jest.fn(async () => SECRET_VALUE);
+    const fetchFn = makeFetch();
+    const adapter = new McpAdapter({ fetchFn: asFetch(fetchFn), resolveSecret });
+
+    await adapter.invoke(
+      baseReq,
+      descriptorFor({
+        protocol: 'MCP',
+        target: TARGET,
+        auth: { mode: 'API_KEY', secretRef: 'secret/key', header: 'x-api-key' },
+        mode: 'sync',
+      }),
+    );
+
+    const headers = initOf(fetchFn).headers ?? {};
+    expect(headers['x-api-key']).toBe(SECRET_VALUE);
+    expect(headers.authorization).toBeUndefined();
+  });
+
   it('NONE: does not resolve a secret and sends no Authorization header', async () => {
     const resolveSecret = jest.fn(async () => SECRET_VALUE);
     const fetchFn = makeFetch();

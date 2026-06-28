@@ -134,30 +134,44 @@ function responseJsonSchema(responses: unknown): JsonSchema | undefined {
 
 // --- auth header scheme (shared by HTTP_ENDPOINT + MCP) ----------------------
 
-/** How a resolved secret value is applied to the Authorization header. */
-export type AuthScheme = 'raw' | 'bearer';
+/** A concrete request header (name + value) derived from a resolved secret. */
+export interface AuthHeader {
+  name: string;
+  value: string;
+}
 
 /**
- * Map a secret-backed auth mode to its Authorization-header scheme. API_KEY is
- * sent verbatim (`Authorization: <value>`; header-name customization is a
- * future option); the bearer-token modes (OAUTH2, COGNITO) are sent as
- * `Authorization: Bearer <value>`. SIGV4 (request signing) and NONE need no
- * resolved secret here and map to undefined.
+ * Resolve a secret-backed auth mode + already-resolved secret value into the
+ * concrete request header to apply, or `null` when the mode needs no
+ * secret-derived header:
  *
- * NOTE: the import spec's "BEARER" mode is realized by the OAUTH2/COGNITO
- * bearer modes — the AgentInvocationAuthMode union (registry-service) has no
- * BEARER literal.
+ *   - BEARER | OAUTH2 | COGNITO → `Authorization: Bearer <secret>`
+ *   - API_KEY                   → `<customHeader|Authorization>: <secret>`
+ *       (the secret is sent verbatim; a non-blank `customHeader` overrides the
+ *        default `Authorization` header name, e.g. `x-api-key`)
+ *   - SIGV4 | NONE              → null (request signing / no auth)
+ *
+ * Pure and side-effect-free: callers resolve the secret first, then apply the
+ * returned {name,value}. The secret value is never logged here. Adapters
+ * normalise the header name (lower-case) when writing it onto the request,
+ * matching HTTP's case-insensitive header semantics.
  */
 export function authHeaderScheme(
   mode: AgentInvocationBlock['auth']['mode'],
-): AuthScheme | undefined {
+  secret: string,
+  customHeader?: string,
+): AuthHeader | null {
   switch (mode) {
-    case 'API_KEY':
-      return 'raw';
+    case 'BEARER':
     case 'OAUTH2':
     case 'COGNITO':
-      return 'bearer';
+      return { name: 'Authorization', value: `Bearer ${secret}` };
+    case 'API_KEY':
+      return {
+        name: customHeader && customHeader.trim() ? customHeader : 'Authorization',
+        value: secret,
+      };
     default:
-      return undefined; // SIGV4 / NONE — no secret-derived header
+      return null; // SIGV4 / NONE — no secret-derived header
   }
 }

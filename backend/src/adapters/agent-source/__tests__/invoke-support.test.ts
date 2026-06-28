@@ -74,17 +74,30 @@ describe('collectOpenApi (shared BEDROCK_AGENT + HTTP_ENDPOINT mapping)', () => 
 });
 
 describe('authHeaderScheme (shared HTTP_ENDPOINT + MCP mapping)', () => {
-  it('maps API_KEY to the raw scheme', () => {
-    expect(authHeaderScheme('API_KEY')).toBe('raw');
+  const SECRET = 'resolved-secret-value';
+
+  // mode → resolved {name,value} header (or null when the mode needs no
+  // secret-derived header). BEARER joins the existing bearer-token modes;
+  // API_KEY honours an optional custom header name.
+  it.each([
+    ['BEARER', undefined, { name: 'Authorization', value: `Bearer ${SECRET}` }],
+    ['OAUTH2', undefined, { name: 'Authorization', value: `Bearer ${SECRET}` }],
+    ['COGNITO', undefined, { name: 'Authorization', value: `Bearer ${SECRET}` }],
+    ['API_KEY', undefined, { name: 'Authorization', value: SECRET }],
+    ['API_KEY', 'x-api-key', { name: 'x-api-key', value: SECRET }],
+  ] as const)('mode %s (customHeader=%s) → resolved header', (mode, customHeader, expected) => {
+    expect(authHeaderScheme(mode, SECRET, customHeader)).toEqual(expected);
   });
 
-  it('maps OAUTH2 and COGNITO to the bearer scheme', () => {
-    expect(authHeaderScheme('OAUTH2')).toBe('bearer');
-    expect(authHeaderScheme('COGNITO')).toBe('bearer');
+  it('falls back to Authorization when the API_KEY custom header is blank/whitespace', () => {
+    expect(authHeaderScheme('API_KEY', SECRET, '   ')).toEqual({
+      name: 'Authorization',
+      value: SECRET,
+    });
   });
 
-  it('maps NONE (and SIGV4) to undefined — no secret-derived header', () => {
-    expect(authHeaderScheme('NONE')).toBeUndefined();
-    expect(authHeaderScheme('SIGV4')).toBeUndefined();
+  it('returns null for SIGV4 and NONE — no secret-derived header', () => {
+    expect(authHeaderScheme('NONE', SECRET)).toBeNull();
+    expect(authHeaderScheme('SIGV4', SECRET)).toBeNull();
   });
 });

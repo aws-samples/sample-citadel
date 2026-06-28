@@ -926,6 +926,21 @@ describe('buildImportDescriptor', () => {
     // Absent policy → omitted entirely (caller is re-prompted on conflict).
     expect('onConflict' in buildImportDescriptor(validFlatInput())).toBe(false);
   });
+
+  it('maps invocationAuthHeader into invocation.auth.header (and omits it when absent)', () => {
+    const withHeader = buildImportDescriptor(
+      validFlatInput({ invocationAuthMode: 'API_KEY', invocationAuthHeader: 'x-api-key' }),
+    );
+    expect((withHeader.invocation as { auth: Record<string, unknown> }).auth).toEqual({
+      mode: 'API_KEY',
+      header: 'x-api-key',
+    });
+    // Absent → no `header` key at all (back-compat: existing imports unaffected).
+    const withoutHeader = buildImportDescriptor(validFlatInput({ invocationAuthMode: 'API_KEY' }));
+    expect(
+      'header' in (withoutHeader.invocation as { auth: Record<string, unknown> }).auth,
+    ).toBe(false);
+  });
 });
 
 // ── toImportAgentResult: union → flat result shape ──────────────────────

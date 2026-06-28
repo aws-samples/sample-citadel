@@ -37,6 +37,7 @@ import {
   collectOpenApi,
   extractTextOutput,
 } from './invoke-support';
+import type { AuthHeader } from './invoke-support';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
@@ -122,7 +123,7 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
       // resolver is wired, no secretRef is set, or the mode needs no secret.
       const authHeader = await this.resolveAuthHeader(auth);
       if (authHeader) {
-        requestHeaders = { ...headers, authorization: authHeader };
+        requestHeaders = { ...headers, [authHeader.name.toLowerCase()]: authHeader.value };
       }
     }
 
@@ -136,15 +137,18 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
   }
 
   /**
-   * Resolve the Authorization header value for a secret-backed auth mode.
-   * Returns undefined (no header) when no resolver is wired, no secretRef is
-   * set, or the mode needs no resolved secret (NONE / SIGV4). The resolved
-   * secret value is NEVER logged — only that auth was applied, and the mode.
+   * Resolve the request auth header ({name,value}) for a secret-backed auth
+   * mode, or undefined (no header) when no resolver is wired, no secretRef is
+   * set, or the mode needs no resolved secret (NONE / SIGV4). The header name is
+   * `Authorization` for the bearer-token modes and the API_KEY default, or the
+   * invocation's custom `auth.header` (e.g. `x-api-key`) for API_KEY. The
+   * resolved secret value is NEVER logged — only that auth was applied, and the
+   * mode.
    */
-  private async resolveAuthHeader(auth: AuthBlock): Promise<string | undefined> {
+  private async resolveAuthHeader(auth: AuthBlock): Promise<AuthHeader | undefined> {
     if (!this.resolveSecret || !auth.secretRef) return undefined;
-    const scheme = authHeaderScheme(auth.mode);
-    if (!scheme) return undefined;
+    // SIGV4 / NONE need no secret-derived header — skip the GetSecretValue.
+    if (!authHeaderScheme(auth.mode, '', auth.header)) return undefined;
     const value = await this.resolveSecret(auth.secretRef);
     console.log(
       JSON.stringify({
@@ -153,7 +157,7 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
         mode: auth.mode,
       }),
     );
-    return scheme === 'bearer' ? `Bearer ${value}` : value;
+    return authHeaderScheme(auth.mode, value, auth.header) ?? undefined;
   }
 
   /**

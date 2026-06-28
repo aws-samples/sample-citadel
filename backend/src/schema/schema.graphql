@@ -487,6 +487,10 @@ input ImportAgentInput {
   invocationTarget: String!
   invocationAuthMode: String
   invocationSecretRef: String
+  # Optional custom request-header name for the resolved API_KEY secret (e.g.
+  # "x-api-key"). Only meaningful for invocationAuthMode API_KEY; absent ⇒ the
+  # secret is applied as `Authorization: <value>` (back-compat default).
+  invocationAuthHeader: String
   # RAW secret value the caller may submit at import time. When present on a
   # record-creating import (CREATE/REPLACE/COPY) it is persisted to AWS Secrets
   # Manager and ONLY the resulting reference is stored on the Registry record

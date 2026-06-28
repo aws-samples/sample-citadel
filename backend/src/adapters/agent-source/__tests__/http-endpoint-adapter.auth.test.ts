@@ -117,6 +117,46 @@ describe('HttpEndpointAdapter.invoke — secret-backed auth headers', () => {
     expect(headersOf(fetchFn).authorization).toBe(`Bearer ${SECRET_VALUE}`);
   });
 
+  it('BEARER + secretRef: resolves the secret and sends Authorization: Bearer <value>', async () => {
+    const resolveSecret = jest.fn(async () => SECRET_VALUE);
+    const fetchFn = makeFetch();
+    const adapter = new HttpEndpointAdapter({ fetchFn: asFetch(fetchFn), resolveSecret });
+
+    await adapter.invoke(
+      baseReq,
+      descriptorFor({
+        protocol: 'HTTP_ENDPOINT',
+        target: TARGET,
+        auth: { mode: 'BEARER', secretRef: 'secret/bearer' },
+        mode: 'sync',
+      }),
+    );
+
+    expect(resolveSecret).toHaveBeenCalledWith('secret/bearer');
+    expect(headersOf(fetchFn).authorization).toBe(`Bearer ${SECRET_VALUE}`);
+  });
+
+  it('API_KEY + custom header: applies the custom header name carrying the raw value', async () => {
+    const resolveSecret = jest.fn(async () => SECRET_VALUE);
+    const fetchFn = makeFetch();
+    const adapter = new HttpEndpointAdapter({ fetchFn: asFetch(fetchFn), resolveSecret });
+
+    await adapter.invoke(
+      baseReq,
+      descriptorFor({
+        protocol: 'HTTP_ENDPOINT',
+        target: TARGET,
+        auth: { mode: 'API_KEY', secretRef: 'secret/key', header: 'x-api-key' },
+        mode: 'sync',
+      }),
+    );
+
+    const headers = headersOf(fetchFn);
+    expect(headers['x-api-key']).toBe(SECRET_VALUE);
+    // The default Authorization header is NOT set when a custom header is used.
+    expect(headers.authorization).toBeUndefined();
+  });
+
   it('mode NONE: does not resolve a secret and sends no Authorization header', async () => {
     const resolveSecret = jest.fn(async () => SECRET_VALUE);
     const fetchFn = makeFetch();

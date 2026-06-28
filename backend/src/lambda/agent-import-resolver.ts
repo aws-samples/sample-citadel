@@ -268,6 +268,10 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
   };
   const secretRef = asNonEmptyString(flat.invocationSecretRef);
   if (secretRef) auth.secretRef = secretRef;
+  // Optional custom API-key header name (e.g. 'x-api-key'); set ONLY when
+  // provided so existing imports keep an unchanged { mode[, secretRef] } auth.
+  const authHeader = asNonEmptyString(flat.invocationAuthHeader);
+  if (authHeader) auth.header = authHeader;
 
   const region = asNonEmptyString(flat.region);
   const account = asNonEmptyString(flat.account);

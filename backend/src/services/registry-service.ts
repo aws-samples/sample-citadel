@@ -96,7 +96,8 @@ export type AgentInvocationAuthMode =
   | 'API_KEY'
   | 'OAUTH2'
   | 'COGNITO'
-  | 'NONE';
+  | 'NONE'
+  | 'BEARER';
 
 /** Synchronous request/response vs. asynchronous callback delivery. */
 export type AgentInvocationMode = 'sync' | 'async_callback';
@@ -112,6 +113,13 @@ export interface AgentInvocationBlock {
   auth: {
     mode: AgentInvocationAuthMode;
     secretRef?: string;
+    /**
+     * Custom request-header name for the resolved API_KEY secret (e.g.
+     * 'x-api-key'). Optional and only meaningful for mode API_KEY; absent ⇒ the
+     * secret is sent as `Authorization: <value>` (back-compat default). Ignored
+     * by the bearer-token modes (BEARER/OAUTH2/COGNITO) and by SIGV4/NONE.
+     */
+    header?: string;
   };
   mode: AgentInvocationMode;
   region?: string;
