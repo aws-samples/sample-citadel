@@ -25,7 +25,7 @@ import type {
   VendedCredentials,
 } from './base';
 import { NotImplementedError } from './not-implemented';
-import { NO_RESPONSE_TEXT } from './invoke-support';
+import { NO_RESPONSE_TEXT, authHeaderScheme } from './invoke-support';
 
 /** MCP protocol version advertised during the describe() handshake. */
 const MCP_PROTOCOL_VERSION = '2024-11-05';
@@ -291,32 +291,6 @@ function refToString(ref: AgentRef): string {
 function resolveMcpAuth(auth?: AuthBlock): AuthBlock {
   if (auth?.secretRef) return { mode: auth.mode ?? 'OAUTH2', secretRef: auth.secretRef };
   return { mode: auth?.mode ?? 'NONE' };
-}
-
-/** How a resolved secret value is applied to the Authorization header. */
-type AuthScheme = 'raw' | 'bearer';
-
-/**
- * Map a secret-backed auth mode to its Authorization-header scheme. API_KEY is
- * sent verbatim (`Authorization: <value>`); the bearer-token modes (OAUTH2,
- * COGNITO) are sent as `Authorization: Bearer <value>`. SIGV4 and NONE need no
- * resolved secret here and map to undefined.
- *
- * NOTE: the import spec's "BEARER" mode is realized by the OAUTH2/COGNITO
- * bearer modes — the AgentInvocationAuthMode union (registry-service, out of
- * scope to modify) has no BEARER literal. Kept local to this adapter because
- * the shared invoke-support module is out of scope for this change.
- */
-function authHeaderScheme(mode: AuthBlock['mode']): AuthScheme | undefined {
-  switch (mode) {
-    case 'API_KEY':
-      return 'raw';
-    case 'OAUTH2':
-    case 'COGNITO':
-      return 'bearer';
-    default:
-      return undefined; // SIGV4 / NONE — no secret-derived header
-  }
 }
 
 function hostnameOf(url: string): string {

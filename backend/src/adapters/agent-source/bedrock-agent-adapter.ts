@@ -52,7 +52,7 @@ import type {
 } from './base';
 import { NotImplementedError } from './not-implemented';
 import type { CommandSender } from './invoke-support';
-import { NO_RESPONSE_TEXT, bytesToString, isAsyncIterable } from './invoke-support';
+import { NO_RESPONSE_TEXT, bytesToString, collectOpenApi, isAsyncIterable } from './invoke-support';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 const MODULE_NAME = '@aws-sdk/client-bedrock-agent-runtime';
@@ -433,62 +433,6 @@ function tryParseJson(text: string): unknown {
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-/**
- * Collect operation-level request/response JSON schemas from an OpenAPI doc,
- * keyed by operationId (falling back to "METHOD /path").
- */
-function collectOpenApi(doc: unknown): {
-  inputs: Record<string, JsonSchema>;
-  outputs: Record<string, JsonSchema>;
-  ops: string[];
-} {
-  const inputs: Record<string, JsonSchema> = {};
-  const outputs: Record<string, JsonSchema> = {};
-  const ops: string[] = [];
-  if (!isObject(doc) || !isObject(doc.paths)) return { inputs, outputs, ops };
-  for (const [path, item] of Object.entries(doc.paths)) {
-    if (!isObject(item)) continue;
-    for (const [method, op] of Object.entries(item)) {
-      if (!isObject(op)) continue;
-      const opKey =
-        typeof op.operationId === 'string' && op.operationId.length > 0
-          ? op.operationId
-          : `${method.toUpperCase()} ${path}`;
-      ops.push(opKey);
-      const req = requestJsonSchema(op.requestBody);
-      if (req) inputs[opKey] = req;
-      const res = responseJsonSchema(op.responses);
-      if (res) outputs[opKey] = res;
-    }
-  }
-  return { inputs, outputs, ops };
-}
-
-function requestJsonSchema(requestBody: unknown): JsonSchema | undefined {
-  if (!isObject(requestBody) || !isObject(requestBody.content)) return undefined;
-  const aj = requestBody.content['application/json'];
-  return isObject(aj) && isObject(aj.schema) ? aj.schema : undefined;
-}
-
-function responseJsonSchema(responses: unknown): JsonSchema | undefined {
-  if (!isObject(responses)) return undefined;
-  const pick = (code: string): JsonSchema | undefined => {
-    const r = responses[code];
-    if (!isObject(r) || !isObject(r.content)) return undefined;
-    const aj = r.content['application/json'];
-    return isObject(aj) && isObject(aj.schema) ? aj.schema : undefined;
-  };
-  const direct = pick('200');
-  if (direct) return direct;
-  for (const code of Object.keys(responses)) {
-    if (code.startsWith('2')) {
-      const s = pick(code);
-      if (s) return s;
-    }
-  }
-  return undefined;
 }
 
 function functionParamsSchema(fn: {

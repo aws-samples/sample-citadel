@@ -31,7 +31,12 @@ import type {
   VendedCredentials,
 } from './base';
 import { NotImplementedError } from './not-implemented';
-import { NO_RESPONSE_TEXT, extractTextOutput } from './invoke-support';
+import {
+  NO_RESPONSE_TEXT,
+  authHeaderScheme,
+  collectOpenApi,
+  extractTextOutput,
+} from './invoke-support';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
@@ -299,33 +304,6 @@ function resolveHttpAuth(auth?: AuthBlock): AuthBlock {
   return auth?.secretRef ? { mode, secretRef: auth.secretRef } : { mode };
 }
 
-/** How a resolved secret value is applied to the Authorization header. */
-type AuthScheme = 'raw' | 'bearer';
-
-/**
- * Map a secret-backed auth mode to its Authorization-header scheme. API_KEY is
- * sent verbatim (`Authorization: <value>`; header-name customization is a
- * future option); the bearer-token modes (OAUTH2, COGNITO) are sent as
- * `Authorization: Bearer <value>`. SIGV4 (request signing) and NONE need no
- * resolved secret here and map to undefined.
- *
- * NOTE: the import spec's "BEARER" mode is realized by the OAUTH2/COGNITO
- * bearer modes — the AgentInvocationAuthMode union (registry-service, out of
- * scope to modify) has no BEARER literal. Kept local to this adapter because
- * the shared invoke-support module is out of scope for this change.
- */
-function authHeaderScheme(mode: AuthBlock['mode']): AuthScheme | undefined {
-  switch (mode) {
-    case 'API_KEY':
-      return 'raw';
-    case 'OAUTH2':
-    case 'COGNITO':
-      return 'bearer';
-    default:
-      return undefined; // SIGV4 / NONE — no secret-derived header
-  }
-}
-
 function openApiUrl(base: string): string {
   return `${base.replace(/\/+$/, '')}/openapi.json`;
 }
@@ -348,62 +326,6 @@ function tryParseJson(text: string): unknown {
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-/**
- * Collect operation-level request/response JSON schemas from an OpenAPI doc,
- * keyed by operationId (falling back to "METHOD /path").
- */
-function collectOpenApi(doc: unknown): {
-  inputs: Record<string, JsonSchema>;
-  outputs: Record<string, JsonSchema>;
-  ops: string[];
-} {
-  const inputs: Record<string, JsonSchema> = {};
-  const outputs: Record<string, JsonSchema> = {};
-  const ops: string[] = [];
-  if (!isObject(doc) || !isObject(doc.paths)) return { inputs, outputs, ops };
-  for (const [path, item] of Object.entries(doc.paths)) {
-    if (!isObject(item)) continue;
-    for (const [method, op] of Object.entries(item)) {
-      if (!isObject(op)) continue;
-      const opKey =
-        typeof op.operationId === 'string' && op.operationId.length > 0
-          ? op.operationId
-          : `${method.toUpperCase()} ${path}`;
-      ops.push(opKey);
-      const req = requestJsonSchema(op.requestBody);
-      if (req) inputs[opKey] = req;
-      const res = responseJsonSchema(op.responses);
-      if (res) outputs[opKey] = res;
-    }
-  }
-  return { inputs, outputs, ops };
-}
-
-function requestJsonSchema(requestBody: unknown): JsonSchema | undefined {
-  if (!isObject(requestBody) || !isObject(requestBody.content)) return undefined;
-  const aj = requestBody.content['application/json'];
-  return isObject(aj) && isObject(aj.schema) ? aj.schema : undefined;
-}
-
-function responseJsonSchema(responses: unknown): JsonSchema | undefined {
-  if (!isObject(responses)) return undefined;
-  const pick = (code: string): JsonSchema | undefined => {
-    const r = responses[code];
-    if (!isObject(r) || !isObject(r.content)) return undefined;
-    const aj = r.content['application/json'];
-    return isObject(aj) && isObject(aj.schema) ? aj.schema : undefined;
-  };
-  const direct = pick('200');
-  if (direct) return direct;
-  for (const code of Object.keys(responses)) {
-    if (code.startsWith('2')) {
-      const s = pick(code);
-      if (s) return s;
-    }
-  }
-  return undefined;
 }
 
 function errMessage(err: unknown): string {
