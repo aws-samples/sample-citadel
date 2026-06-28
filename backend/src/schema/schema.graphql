@@ -514,6 +514,12 @@ input ImportAgentInput {
   # (the raw value never touches the record or its logs). Takes precedence over
   # invocationSecretRef, which is a pre-existing reference used as-is.
   invocationSecret: String
+  # Optional operator-supplied TARGET-account read-only ANALYSIS role ARN
+  # (US-IMP Phase-2). When present it is stamped onto the persisted record's
+  # invocation.analysisRoleArn so the activation cross-account trust-path can
+  # assume it (externalId-gated). Not a secret — persisted verbatim. Absent ⇒
+  # a cross-account roleArn falls back to manual attestation.
+  invocationAnalysisRoleArn: String
   invocationMode: String
   region: String
   account: String

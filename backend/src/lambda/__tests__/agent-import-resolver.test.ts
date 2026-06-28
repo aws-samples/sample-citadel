@@ -159,6 +159,10 @@ const SOURCE_ARN = 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/pay
 const RAW_SECRET = 'sk-live-SUPERSECRET-raw-0123456789-do-not-persist';
 const STORED_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:111122223333:secret:/citadel/agents/test-org-a/abc123-AbCdEf';
+// Operator-supplied TARGET-account read-only ANALYSIS role (US-IMP Phase-2):
+// stamped onto invocation.analysisRoleArn so the activation cross-account
+// trust-path can assume it. Not a secret — persisted verbatim.
+const ANALYSIS_ROLE_ARN = 'arn:aws:iam::111122223333:role/citadel-analysis-readonly';
 const eventWithOrg = {
   identity: { claims: { 'custom:organization': ORG }, sub: 'user-1' },
 };
@@ -608,6 +612,58 @@ describe('importAgent — invocation auth-secret storage', () => {
   });
 });
 
+// ── importAgent: invocation analysisRoleArn (cross-account trust-path) ────
+// US-IMP Phase-2: an operator may supply the TARGET-account read-only ANALYSIS
+// role at import time. When present it is stamped onto invocation.analysisRoleArn
+// of the persisted record so the later activation cross-account trust-path
+// (which reads invocation.analysisRoleArn) can assume it. Omitted ⇒ unset
+// (back-compat: existing imports unchanged). Not a secret — persisted verbatim.
+describe('importAgent — invocation analysisRoleArn', () => {
+  /** The invocation block within the metadata handed to serializeCustomMetadata. */
+  const stampedInvocation = (): { analysisRoleArn?: string } | undefined => {
+    const call = mockSerializeCustomMetadata.mock.calls[0];
+    return call
+      ? (call[0] as { invocation?: { analysisRoleArn?: string } }).invocation
+      : undefined;
+  };
+
+  it('stamps invocation.analysisRoleArn into the persisted customMetadata when provided', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput({ invocationAnalysisRoleArn: ANALYSIS_ROLE_ARN }), eventWithOrg);
+
+    expect(stampedInvocation()?.analysisRoleArn).toBe(ANALYSIS_ROLE_ARN);
+  });
+
+  it('leaves invocation.analysisRoleArn unset when not provided', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-1', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await importAgent(validInput(), eventWithOrg);
+
+    const invocation = stampedInvocation() ?? {};
+    expect(invocation.analysisRoleArn).toBeUndefined();
+    expect('analysisRoleArn' in invocation).toBe(false);
+  });
+
+  it('handler: a flat invocationAnalysisRoleArn flows end-to-end into persisted invocation.analysisRoleArn', async () => {
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: 'rec-h', name: 'PaymentsAgent', sourceArn: SOURCE_ARN }),
+    );
+
+    await handler({
+      info: { fieldName: 'importAgent' },
+      arguments: { input: validFlatInput({ invocationAnalysisRoleArn: ANALYSIS_ROLE_ARN }) },
+      identity: eventWithOrg.identity,
+    });
+
+    expect(stampedInvocation()?.analysisRoleArn).toBe(ANALYSIS_ROLE_ARN);
+  });
+});
+
 // ── importAgent: governance attestation (US governance retrofit) ─────────
 // On a record-creating import (create / replace / copy) the resolver stamps a
 // 'pending' governanceAttestation into the customMetadata AND best-effort
@@ -940,6 +996,17 @@ describe('buildImportDescriptor', () => {
     expect(
       'header' in (withoutHeader.invocation as { auth: Record<string, unknown> }).auth,
     ).toBe(false);
+  });
+
+  it('carries invocationAnalysisRoleArn as a top-level descriptor field (and omits when absent)', () => {
+    const withArn = buildImportDescriptor(
+      validFlatInput({ invocationAnalysisRoleArn: ANALYSIS_ROLE_ARN }),
+    );
+    expect(withArn.invocationAnalysisRoleArn).toBe(ANALYSIS_ROLE_ARN);
+    // Not pre-nested into invocation at the mapping layer — importAgent stamps it.
+    expect((withArn.invocation as { analysisRoleArn?: string }).analysisRoleArn).toBeUndefined();
+    // Absent ⇒ no top-level key at all (back-compat: existing imports unaffected).
+    expect('invocationAnalysisRoleArn' in buildImportDescriptor(validFlatInput())).toBe(false);
   });
 });
 

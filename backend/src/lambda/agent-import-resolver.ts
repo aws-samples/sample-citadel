@@ -354,6 +354,14 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
   // record (description/customMetadata are built from those two sub-objects).
   const invocationSecret = asNonEmptyString(flat.invocationSecret);
   if (invocationSecret) descriptor.invocationSecret = invocationSecret;
+  // Optional operator-supplied TARGET-account read-only ANALYSIS role ARN
+  // (US-IMP Phase-2). Carried as a top-level descriptor field — mirroring
+  // invocationSecret — so importAgent can stamp it onto invocation.analysisRoleArn.
+  // Unlike a secret it is NOT sensitive (the role must trust Citadel and is
+  // externalId-gated), so it is persisted verbatim; it is kept OFF the nested
+  // invocation here so the flat→nested stamp stays single-sourced in importAgent.
+  const invocationAnalysisRoleArn = asNonEmptyString(flat.invocationAnalysisRoleArn);
+  if (invocationAnalysisRoleArn) descriptor.invocationAnalysisRoleArn = invocationAnalysisRoleArn;
   return descriptor;
 }
 
@@ -718,6 +726,16 @@ export async function importAgent(
   // protocol ∈ enum and target is a non-empty string; preserve the customer's
   // invocation block verbatim. Ownership is force-set to 'external'.
   const invocation = root.invocation as unknown as AgentInvocationBlock;
+  // Optional operator-supplied TARGET-account read-only ANALYSIS role. When the
+  // caller provides it at import time, stamp it onto the invocation block so the
+  // later activation cross-account trust-path (which reads invocation.analysisRoleArn)
+  // can assume it. Omitted ⇒ left unset (back-compat: existing imports unchanged).
+  // Not a secret — the role must trust Citadel and is externalId-gated — so it is
+  // persisted verbatim alongside the other invocation fields.
+  const analysisRoleArn = asNonEmptyString(root.invocationAnalysisRoleArn);
+  if (analysisRoleArn) {
+    invocation.analysisRoleArn = analysisRoleArn;
+  }
   const origin = {
     ...(root.origin as Record<string, unknown>),
     ownership: 'external',
