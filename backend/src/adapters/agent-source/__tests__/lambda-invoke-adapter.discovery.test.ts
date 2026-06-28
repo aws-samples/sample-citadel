@@ -3,7 +3,7 @@
  * (US-IMP-010). The LambdaClient is injected as a fake — no AWS calls.
  */
 import { LambdaInvokeAdapter } from '../lambda-invoke-adapter';
-import { NotImplementedError } from '../not-implemented';
+import type { AgentInvocationBlock } from '../base';
 
 interface SentCommand {
   constructor: { name: string };
@@ -204,13 +204,17 @@ describe('LambdaInvokeAdapter.healthCheck (US-IMP-010)', () => {
   });
 });
 
-describe('LambdaInvokeAdapter.vendCredentials (still a stub)', () => {
-  it('throws NotImplementedError', async () => {
+describe('LambdaInvokeAdapter.vendCredentials', () => {
+  it('returns minimal credentials (no roleArn ⇒ no assume) instead of throwing', async () => {
     const adapter = new LambdaInvokeAdapter(undefined, {
       controlSender: { send: jest.fn() },
     });
-    await expect(adapter.vendCredentials(FN_ARN)).rejects.toBeInstanceOf(
-      NotImplementedError,
-    );
+    const invocation: AgentInvocationBlock = {
+      protocol: 'LAMBDA_INVOKE',
+      target: FN_ARN,
+      auth: { mode: 'NONE' },
+      mode: 'sync',
+    };
+    await expect(adapter.vendCredentials(invocation)).resolves.toEqual({});
   });
 });

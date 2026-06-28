@@ -3,7 +3,8 @@
  * implementations. Kept substrate-agnostic (type-only imports, erased at
  * compile time) so each adapter stays minimal and free of duplicated logic.
  */
-import type { AgentInvocationBlock, JsonSchema } from './base';
+import type { AgentInvocationBlock, JsonSchema, VendedCredentials } from './base';
+import { PolicyManager } from '../../utils/policy-manager';
 
 /** Placeholder returned when a substrate yields no usable response text. */
 export const NO_RESPONSE_TEXT = 'Agent processing completed (no response text)';
@@ -174,4 +175,70 @@ export function authHeaderScheme(
     default:
       return null; // SIGV4 / NONE — no secret-derived header
   }
+}
+
+// --- cross-account credential vending (shared by every agent-source adapter) -
+
+/**
+ * Extract the IAM role name (last path segment) from a role ARN, e.g.
+ * `arn:aws:iam::123456789012:role/path/MyRole` -> `MyRole`. Returns undefined
+ * when the input is not a role ARN.
+ */
+function roleNameFromArn(arn: string): string | undefined {
+  const match = /:role\/(?:.*\/)?([^/]+)$/.exec(arn);
+  return match ? match[1] : undefined;
+}
+
+/** Extract the 12-digit account id from any ARN, when present. */
+function accountFromArn(arn: string): string | undefined {
+  const parts = arn.split(':');
+  return parts.length >= 5 && /^\d{12}$/.test(parts[4]) ? parts[4] : undefined;
+}
+
+/**
+ * Vend short-lived, least-privilege credentials for invoking an imported
+ * (possibly cross-account) agent — the single helper every agent-source
+ * adapter's `vendCredentials` delegates to.
+ *
+ *   - `invocation.roleArn` set  → assume that customer-provided role via
+ *     {@link PolicyManager.assumeScopedRole} under the `agent` scope, forwarding
+ *     `invocation.externalId` as the STS ExternalId (cross-account
+ *     confused-deputy guard) and `invocation.account` as the target account.
+ *     The assumed credentials are mapped onto a {@link VendedCredentials}.
+ *   - no `roleArn`              → the caller invokes under its own (task/Lambda)
+ *     identity; return a minimal descriptor carrying no separate credentials.
+ *
+ * The {@link PolicyManager} is injectable for testing; production callers omit
+ * `deps`. NOTE: this helper is not yet wired into the discover/invoke call
+ * paths — the consumer lands in a later increment.
+ */
+export async function vendImportCredentials(
+  invocation: AgentInvocationBlock,
+  deps: { policyManager?: PolicyManager } = {},
+): Promise<VendedCredentials> {
+  const roleArn = invocation.roleArn;
+  if (!roleArn) {
+    // No cross-account role configured — nothing to assume.
+    return {};
+  }
+
+  const policyManager = deps.policyManager ?? new PolicyManager();
+  const account = invocation.account ?? accountFromArn(roleArn) ?? '';
+  const resourceId = roleNameFromArn(roleArn) ?? 'imported-agent';
+
+  const creds = await policyManager.assumeScopedRole(
+    resourceId,
+    account,
+    'agent',
+    roleArn,
+    invocation.externalId,
+  );
+
+  return {
+    roleArn,
+    expiresAt: creds.expiresAt,
+    accessKeyId: creds.accessKeyId,
+    secretAccessKey: creds.secretAccessKey,
+    sessionToken: creds.sessionToken,
+  };
 }

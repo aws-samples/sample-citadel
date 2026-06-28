@@ -4,7 +4,7 @@
  * tools/list. Global fetch is injected as a fake — no live network.
  */
 import { McpAdapter } from '../mcp-adapter';
-import { NotImplementedError } from '../not-implemented';
+import type { AgentInvocationBlock } from '../base';
 
 const URL_ = 'https://mcp.example.com/rpc';
 
@@ -158,9 +158,15 @@ describe('McpAdapter.healthCheck (US-IMP-011)', () => {
   });
 });
 
-describe('McpAdapter.vendCredentials (still a stub)', () => {
-  it('throws NotImplementedError', async () => {
+describe('McpAdapter.vendCredentials', () => {
+  it('returns minimal credentials (no roleArn ⇒ no assume) instead of throwing', async () => {
     const adapter = new McpAdapter();
-    await expect(adapter.vendCredentials(URL_)).rejects.toBeInstanceOf(NotImplementedError);
+    const invocation: AgentInvocationBlock = {
+      protocol: 'MCP',
+      target: URL_,
+      auth: { mode: 'NONE' },
+      mode: 'sync',
+    };
+    await expect(adapter.vendCredentials(invocation)).resolves.toEqual({});
   });
 });

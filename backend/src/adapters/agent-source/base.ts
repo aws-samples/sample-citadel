@@ -11,7 +11,10 @@
  * (the single source of truth) and re-exported for convenience — they are not
  * redefined here.
  */
-import type { AgentInvocationProtocol } from '../../services/registry-service';
+import type {
+  AgentInvocationProtocol,
+  AgentInvocationBlock,
+} from '../../services/registry-service';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -62,8 +65,13 @@ export interface AgentSourceAdapter {
   /** Confirm the target is reachable without invoking it. */
   healthCheck(ref: AgentRef): Promise<HealthCheckResult>;
 
-  /** Vend short-lived, least-privilege credentials for the target. */
-  vendCredentials(ref: AgentRef): Promise<VendedCredentials>;
+  /**
+   * Vend short-lived, least-privilege credentials for invoking the target,
+   * derived from its invocation block (cross-account role + optional
+   * ExternalId). Unused by the dispatch paths today — wired in a later
+   * increment.
+   */
+  vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials>;
 
   /** Invoke the agent with a normalized request and return a normalized response. */
   invoke(

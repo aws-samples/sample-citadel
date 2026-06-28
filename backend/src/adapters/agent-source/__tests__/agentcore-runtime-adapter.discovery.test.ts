@@ -4,7 +4,8 @@
  * fakes — these tests never reach AWS.
  */
 import { AgentCoreRuntimeAdapter } from '../agentcore-runtime-adapter';
-import { NotImplementedError } from '../not-implemented';
+import * as invokeSupport from '../invoke-support';
+import type { AgentInvocationBlock } from '../base';
 
 interface SentCommand {
   constructor: { name: string };
@@ -228,13 +229,48 @@ describe('AgentCoreRuntimeAdapter.healthCheck (US-IMP-008)', () => {
   });
 });
 
-describe('AgentCoreRuntimeAdapter.vendCredentials (still a stub)', () => {
-  it('throws NotImplementedError', async () => {
+describe('AgentCoreRuntimeAdapter.vendCredentials', () => {
+  it('returns minimal credentials and does not assume when the invocation has no roleArn', async () => {
     const adapter = new AgentCoreRuntimeAdapter(undefined, {
       controlSender: { send: jest.fn() },
     });
-    await expect(adapter.vendCredentials(RUNTIME_ARN)).rejects.toBeInstanceOf(
-      NotImplementedError,
-    );
+    const invocation: AgentInvocationBlock = {
+      protocol: 'AGENTCORE_RUNTIME',
+      target: RUNTIME_ARN,
+      auth: { mode: 'SIGV4' },
+      mode: 'sync',
+    };
+    await expect(adapter.vendCredentials(invocation)).resolves.toEqual({});
+  });
+
+  it('delegates to the shared vendImportCredentials helper, forwarding the invocation', async () => {
+    const vended = {
+      roleArn: 'arn:aws:iam::222233334444:role/Cust',
+      accessKeyId: 'AKIA',
+    };
+    const spy = jest
+      .spyOn(invokeSupport, 'vendImportCredentials')
+      .mockResolvedValue(vended);
+    try {
+      const adapter = new AgentCoreRuntimeAdapter(undefined, {
+        controlSender: { send: jest.fn() },
+      });
+      const invocation: AgentInvocationBlock = {
+        protocol: 'AGENTCORE_RUNTIME',
+        target: RUNTIME_ARN,
+        auth: { mode: 'SIGV4' },
+        mode: 'sync',
+        roleArn: 'arn:aws:iam::222233334444:role/Cust',
+        externalId: 'ext-1',
+        account: '222233334444',
+      };
+
+      const out = await adapter.vendCredentials(invocation);
+
+      expect(spy).toHaveBeenCalledWith(invocation);
+      expect(out).toEqual(vended);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

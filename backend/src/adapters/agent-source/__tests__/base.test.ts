@@ -16,6 +16,7 @@ import {
   type InvokeRequest,
   type InvokeResponse,
   type AgentInvocationProtocol,
+  type AgentInvocationBlock,
 } from '../base';
 
 /**
@@ -73,7 +74,7 @@ class FakeAdapter implements AgentSourceAdapter {
     return { reachable: true };
   }
 
-  async vendCredentials(_ref: AgentCandidate | string): Promise<VendedCredentials> {
+  async vendCredentials(_invocation: AgentInvocationBlock): Promise<VendedCredentials> {
     return { roleArn: 'arn:aws:iam::123456789012:role/fake' };
   }
 
@@ -145,7 +146,13 @@ describe('AgentSourceAdapterRegistry (US-IMP-002)', () => {
     expect(descriptor.invocation.protocol).toBe('AGENTCORE_RUNTIME');
 
     expect(await resolved.healthCheck('ref')).toEqual({ reachable: true });
-    expect((await resolved.vendCredentials('ref')).roleArn).toContain('role/fake');
+    const vendInvocation: AgentInvocationBlock = {
+      protocol: 'AGENTCORE_RUNTIME',
+      target: 'fake-target',
+      auth: { mode: 'NONE' },
+      mode: 'sync',
+    };
+    expect((await resolved.vendCredentials(vendInvocation)).roleArn).toContain('role/fake');
 
     const response = await resolved.invoke({ prompt: 'hi' }, descriptor);
     expect(response.output).toBe('echo:hi');

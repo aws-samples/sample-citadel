@@ -4,7 +4,7 @@
  * fake — no live network.
  */
 import { HttpEndpointAdapter } from '../http-endpoint-adapter';
-import { NotImplementedError } from '../not-implemented';
+import type { AgentInvocationBlock } from '../base';
 
 const URL_ = 'https://api.example.com/agent';
 
@@ -136,9 +136,15 @@ describe('HttpEndpointAdapter.healthCheck (US-IMP-011)', () => {
   });
 });
 
-describe('HttpEndpointAdapter.vendCredentials (still a stub)', () => {
-  it('throws NotImplementedError', async () => {
+describe('HttpEndpointAdapter.vendCredentials', () => {
+  it('returns minimal credentials (no roleArn ⇒ no assume) instead of throwing', async () => {
     const adapter = new HttpEndpointAdapter();
-    await expect(adapter.vendCredentials(URL_)).rejects.toBeInstanceOf(NotImplementedError);
+    const invocation: AgentInvocationBlock = {
+      protocol: 'HTTP_ENDPOINT',
+      target: URL_,
+      auth: { mode: 'NONE' },
+      mode: 'sync',
+    };
+    await expect(adapter.vendCredentials(invocation)).resolves.toEqual({});
   });
 });

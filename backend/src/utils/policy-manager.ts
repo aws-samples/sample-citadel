@@ -26,6 +26,11 @@ export interface ScopedCredentials {
   accessKeyId: string;
   secretAccessKey: string;
   sessionToken: string;
+  /**
+   * ISO 8601 expiry of the assumed credentials, when STS returns one. Additive
+   * and optional: existing callers that ignore it are unaffected.
+   */
+  expiresAt?: string;
 }
 
 const SCOPE_PREFIXES: Record<PolicyScope, string> = {
@@ -62,7 +67,8 @@ export class PolicyManager {
     accountId: string,
     scopeOrCrossAccountArn?: PolicyScope | string,
     crossAccountRoleArn?: string,
-    additionalTrustedPrincipals?: string[]
+    additionalTrustedPrincipals?: string[],
+    externalId?: string
   ): Promise<void> {
     // Backward compat: if 4th arg looks like an ARN, treat it as crossAccountRoleArn
     let scope: PolicyScope = 'datastore';
@@ -94,13 +100,21 @@ export class PolicyManager {
       }
     }
 
+    const trustStatement: Record<string, unknown> = {
+      Effect: 'Allow',
+      Principal: { AWS: principals.length === 1 ? principals[0] : principals },
+      Action: 'sts:AssumeRole',
+    };
+    // Additive: only constrain the trust with an sts:ExternalId condition when
+    // an externalId is supplied (cross-account confused-deputy guard). Absent ⇒
+    // the statement is byte-for-byte what it was before this change.
+    if (externalId) {
+      trustStatement.Condition = { StringEquals: { 'sts:ExternalId': externalId } };
+    }
+
     const trustPolicy = {
       Version: '2012-10-17',
-      Statement: [{
-        Effect: 'Allow',
-        Principal: { AWS: principals.length === 1 ? principals[0] : principals },
-        Action: 'sts:AssumeRole',
-      }],
+      Statement: [trustStatement],
     };
 
     try {
@@ -135,7 +149,8 @@ export class PolicyManager {
     resourceId: string,
     accountId: string,
     scopeOrCrossAccountArn?: PolicyScope | string,
-    crossAccountRoleArn?: string
+    crossAccountRoleArn?: string,
+    externalId?: string
   ): Promise<ScopedCredentials> {
     // Backward compat: if 3rd arg looks like an ARN, treat it as crossAccountRoleArn
     let scope: PolicyScope = 'datastore';
@@ -158,6 +173,7 @@ export class PolicyManager {
         const result = await this.stsClient.send(new AssumeRoleCommand({
           RoleArn: crossArn,
           RoleSessionName: `citadel-cross-${resourceId}`,
+          ...(externalId ? { ExternalId: externalId } : {}),
         }));
         return result.Credentials!;
       }, 3, 1000);
@@ -175,6 +191,7 @@ export class PolicyManager {
       const result = await stsClient.send(new AssumeRoleCommand({
         RoleArn: roleArn,
         RoleSessionName: `citadel-${scope}-${resourceId}`,
+        ...(externalId ? { ExternalId: externalId } : {}),
       }));
       return result.Credentials!;
     }, 3, 2000);
@@ -183,6 +200,9 @@ export class PolicyManager {
       accessKeyId: credentials.AccessKeyId!,
       secretAccessKey: credentials.SecretAccessKey!,
       sessionToken: credentials.SessionToken!,
+      expiresAt: credentials.Expiration
+        ? credentials.Expiration.toISOString()
+        : undefined,
     };
   }
 

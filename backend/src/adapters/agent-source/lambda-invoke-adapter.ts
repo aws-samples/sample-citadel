@@ -38,9 +38,13 @@ import type {
   VendedCredentials,
 } from './base';
 import type { AgentInvocationMode } from '../../services/registry-service';
-import { NotImplementedError } from './not-implemented';
 import type { CommandSender } from './invoke-support';
-import { NO_RESPONSE_TEXT, bytesToString, extractTextOutput } from './invoke-support';
+import {
+  NO_RESPONSE_TEXT,
+  bytesToString,
+  extractTextOutput,
+  vendImportCredentials,
+} from './invoke-support';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
@@ -270,8 +274,8 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
     }
   }
 
-  async vendCredentials(_ref: AgentRef): Promise<VendedCredentials> {
-    throw new NotImplementedError();
+  async vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials> {
+    return vendImportCredentials(invocation);
   }
 
   // --- management-path helpers ---------------------------------------------

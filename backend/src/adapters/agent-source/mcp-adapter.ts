@@ -24,8 +24,7 @@ import type {
   JsonSchema,
   VendedCredentials,
 } from './base';
-import { NotImplementedError } from './not-implemented';
-import { NO_RESPONSE_TEXT, authHeaderScheme } from './invoke-support';
+import { NO_RESPONSE_TEXT, authHeaderScheme, vendImportCredentials } from './invoke-support';
 import type { AuthHeader } from './invoke-support';
 
 /** MCP protocol version advertised during the describe() handshake. */
@@ -223,8 +222,8 @@ export class McpAdapter implements AgentSourceAdapter {
     }
   }
 
-  async vendCredentials(_ref: AgentRef): Promise<VendedCredentials> {
-    throw new NotImplementedError();
+  async vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials> {
+    return vendImportCredentials(invocation);
   }
 
   /** POST a JSON-RPC request and return its `result` object ({} on any miss). */

@@ -50,9 +50,14 @@ import type {
   JsonSchema,
   VendedCredentials,
 } from './base';
-import { NotImplementedError } from './not-implemented';
 import type { CommandSender } from './invoke-support';
-import { NO_RESPONSE_TEXT, bytesToString, collectOpenApi, isAsyncIterable } from './invoke-support';
+import {
+  NO_RESPONSE_TEXT,
+  bytesToString,
+  collectOpenApi,
+  isAsyncIterable,
+  vendImportCredentials,
+} from './invoke-support';
 
 const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 const MODULE_NAME = '@aws-sdk/client-bedrock-agent-runtime';
@@ -325,8 +330,8 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
     }
   }
 
-  async vendCredentials(_ref: AgentRef): Promise<VendedCredentials> {
-    throw new NotImplementedError();
+  async vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials> {
+    return vendImportCredentials(invocation);
   }
 
   /** Resolve the control-plane sender, building a real client when none injected. */

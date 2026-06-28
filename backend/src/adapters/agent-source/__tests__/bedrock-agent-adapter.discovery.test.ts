@@ -4,7 +4,7 @@
  * injected as a fake — these tests never reach AWS.
  */
 import { BedrockAgentAdapter } from '../bedrock-agent-adapter';
-import { NotImplementedError } from '../not-implemented';
+import type { AgentInvocationBlock } from '../base';
 
 interface SentCommand {
   constructor: { name: string };
@@ -260,11 +260,15 @@ describe('BedrockAgentAdapter.healthCheck (US-IMP-009)', () => {
   });
 });
 
-describe('BedrockAgentAdapter.vendCredentials (still a stub)', () => {
-  it('throws NotImplementedError', async () => {
+describe('BedrockAgentAdapter.vendCredentials', () => {
+  it('returns minimal credentials (no roleArn ⇒ no assume) instead of throwing', async () => {
     const adapter = new BedrockAgentAdapter();
-    await expect(adapter.vendCredentials('AGENT123/ALIAS1')).rejects.toBeInstanceOf(
-      NotImplementedError,
-    );
+    const invocation: AgentInvocationBlock = {
+      protocol: 'BEDROCK_AGENT',
+      target: 'AGENT123/ALIAS1',
+      auth: { mode: 'SIGV4' },
+      mode: 'sync',
+    };
+    await expect(adapter.vendCredentials(invocation)).resolves.toEqual({});
   });
 });

@@ -30,12 +30,12 @@ import type {
   JsonSchema,
   VendedCredentials,
 } from './base';
-import { NotImplementedError } from './not-implemented';
 import {
   NO_RESPONSE_TEXT,
   authHeaderScheme,
   collectOpenApi,
   extractTextOutput,
+  vendImportCredentials,
 } from './invoke-support';
 import type { AuthHeader } from './invoke-support';
 
@@ -267,8 +267,8 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
     }
   }
 
-  async vendCredentials(_ref: AgentRef): Promise<VendedCredentials> {
-    throw new NotImplementedError();
+  async vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials> {
+    return vendImportCredentials(invocation);
   }
 
   /** Fetch + parse <url>/openapi.json; undefined when unavailable/unparseable. */

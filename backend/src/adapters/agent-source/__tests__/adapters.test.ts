@@ -60,12 +60,12 @@ describe('NotImplementedError', () => {
   });
 });
 
-describe('adapter unimplemented capabilities reject with NotImplementedError', () => {
-  // All five per-protocol adapters now implement discover/describe/healthCheck
-  // (AgentCore US-IMP-008, Lambda US-IMP-010, Bedrock US-IMP-009, HTTP/MCP
-  // US-IMP-011 — each covered in its dedicated discovery test file); only
-  // vendCredentials remains a stub filled in by a later story.
-  const vendOnlyStub: AgentSourceAdapter[] = [
+describe('adapter vendCredentials delegates to the shared vend helper', () => {
+  // vendCredentials is now implemented on every adapter (Phase 2, agent-import):
+  // each delegates to the shared vendImportCredentials helper. With no roleArn on
+  // the invocation the helper assumes nothing and returns minimal creds, so these
+  // prove the delegation path is wired and no longer throws NotImplementedError.
+  const adapters: AgentSourceAdapter[] = [
     new AgentCoreRuntimeAdapter({ send: jest.fn() }),
     new LambdaInvokeAdapter({ send: jest.fn() }),
     new HttpEndpointAdapter(),
@@ -73,9 +73,15 @@ describe('adapter unimplemented capabilities reject with NotImplementedError', (
     new McpAdapter(),
   ];
 
-  for (const adapter of vendOnlyStub) {
-    it(`${adapter.protocol}: only vendCredentials is not implemented`, async () => {
-      await expect(adapter.vendCredentials('ref')).rejects.toBeInstanceOf(NotImplementedError);
+  for (const adapter of adapters) {
+    it(`${adapter.protocol}: returns minimal credentials (no roleArn ⇒ no assume)`, async () => {
+      const invocation: AgentInvocationBlock = {
+        protocol: adapter.protocol,
+        target: 'target',
+        auth: { mode: 'NONE' },
+        mode: 'sync',
+      };
+      await expect(adapter.vendCredentials(invocation)).resolves.toEqual({});
     });
   }
 });
