@@ -147,6 +147,45 @@ export function roleNameFromArn(arn: string): string {
 }
 
 /**
+ * Parse the account-id segment from an AWS ARN
+ * (`arn:partition:service:region:ACCOUNT:resource…`). Returns `null` when the
+ * input is not a string, is not an ARN, or carries an empty account segment
+ * (IAM/S3 ARNs legitimately omit it). Pure — never issues an IAM call.
+ */
+export function accountIdFromArn(arn: string | null | undefined): string | null {
+  if (typeof arn !== 'string') return null;
+  const segments = arn.split(':');
+  // arn : partition : service : region : account : resource…
+  if (segments.length < 6 || segments[0] !== 'arn') return null;
+  const account = segments[4];
+  return account.length > 0 ? account : null;
+}
+
+/**
+ * True when `roleArn` resolves to an AWS account that differs from
+ * `deploymentAccountId` — the account whose IAM the in-process
+ * {@link computeTrustPath} can introspect (its `GetRole` runs in the home
+ * account). Used by the imported-agent activation path to skip a same-account
+ * trust-path check that could only fail for a cross-account role.
+ *
+ * Conservative by design: returns `false` whenever the comparison cannot be
+ * made with confidence — a missing/blank `deploymentAccountId` or an
+ * unparseable role-ARN account — so the caller stays on the unchanged
+ * same-account path. Pure — never issues an IAM call.
+ */
+export function isCrossAccountRoleArn(
+  roleArn: string | null | undefined,
+  deploymentAccountId: string | null | undefined,
+): boolean {
+  if (typeof deploymentAccountId !== 'string' || deploymentAccountId.length === 0) {
+    return false;
+  }
+  const roleAccount = accountIdFromArn(roleArn);
+  if (roleAccount === null) return false;
+  return roleAccount !== deploymentAccountId;
+}
+
+/**
  * Best-effort extraction of the optional `crossAccountRoleArn` field
  * from a resource record. Datastores and integrations store
  * configuration in a `config` blob; agents may surface it via

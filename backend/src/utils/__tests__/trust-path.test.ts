@@ -17,6 +17,8 @@ import {
   projectInlinePolicyDocument,
   roleNameFromArn,
   extractCrossAccountRoleArn,
+  accountIdFromArn,
+  isCrossAccountRoleArn,
   fetchTrustPathHop,
   computeTrustPath,
 } from '../trust-path';
@@ -160,6 +162,60 @@ describe('extractCrossAccountRoleArn', () => {
     expect(extractCrossAccountRoleArn(null)).toBeNull();
     expect(extractCrossAccountRoleArn({})).toBeNull();
     expect(extractCrossAccountRoleArn({ customDescriptorContent: '{bad' })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// accountIdFromArn / isCrossAccountRoleArn (Phase-2 cross-account detection)
+// ---------------------------------------------------------------------------
+
+describe('accountIdFromArn', () => {
+  it('extracts the 12-digit account segment from a role ARN', () => {
+    expect(accountIdFromArn('arn:aws:iam::123456789012:role/citadel-agent-a1')).toBe(
+      '123456789012',
+    );
+  });
+
+  it('extracts the account from an ARN with a pathed role name', () => {
+    expect(accountIdFromArn('arn:aws:iam::999988887777:role/path/to/Role')).toBe('999988887777');
+  });
+
+  it('returns null for a non-string input', () => {
+    expect(accountIdFromArn(undefined)).toBeNull();
+    expect(accountIdFromArn(null)).toBeNull();
+  });
+
+  it('returns null for a malformed / non-ARN string', () => {
+    expect(accountIdFromArn('not-an-arn')).toBeNull();
+    expect(accountIdFromArn('arn:aws:iam')).toBeNull();
+  });
+
+  it('returns null when the account segment is empty (e.g. an S3 ARN)', () => {
+    expect(accountIdFromArn('arn:aws:s3:::bucket/key')).toBeNull();
+  });
+});
+
+describe('isCrossAccountRoleArn', () => {
+  const SAME_ACCOUNT = 'arn:aws:iam::111111111111:role/citadel-agent';
+  const OTHER_ACCOUNT = 'arn:aws:iam::222222222222:role/external-agent';
+
+  it('returns false when the role ARN lives in the deployment account', () => {
+    expect(isCrossAccountRoleArn(SAME_ACCOUNT, '111111111111')).toBe(false);
+  });
+
+  it('returns true when the role ARN lives in a different account', () => {
+    expect(isCrossAccountRoleArn(OTHER_ACCOUNT, '111111111111')).toBe(true);
+  });
+
+  it('returns false (cannot determine) when the deployment account is missing or blank', () => {
+    expect(isCrossAccountRoleArn(OTHER_ACCOUNT, undefined)).toBe(false);
+    expect(isCrossAccountRoleArn(OTHER_ACCOUNT, null)).toBe(false);
+    expect(isCrossAccountRoleArn(OTHER_ACCOUNT, '')).toBe(false);
+  });
+
+  it('returns false (cannot determine) when the role ARN account is unparseable', () => {
+    expect(isCrossAccountRoleArn('not-an-arn', '111111111111')).toBe(false);
+    expect(isCrossAccountRoleArn(undefined, '111111111111')).toBe(false);
   });
 });
 

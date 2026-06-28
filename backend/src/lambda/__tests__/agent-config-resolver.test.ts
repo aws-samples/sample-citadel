@@ -57,10 +57,14 @@ jest.mock('../../services/registry-service', () => ({
   },
 }));
 
-// Lazy IAM trust-path core — mocked so activation tests drive
-// clean / findings / throw deterministically without touching IAM.
+// Lazy IAM trust-path core — only computeTrustPath is mocked so activation
+// tests drive clean / findings / throw deterministically without touching IAM.
+// The pure helpers (isCrossAccountRoleArn, accountIdFromArn) keep their real
+// implementations via requireActual so cross-account detection is exercised
+// for real, driven by process.env.ACCOUNT_ID.
 const mockComputeTrustPath = jest.fn();
 jest.mock('../../utils/trust-path', () => ({
+  ...jest.requireActual('../../utils/trust-path'),
   computeTrustPath: mockComputeTrustPath,
 }));
 
@@ -292,6 +296,7 @@ describe('updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)'
     delete process.env.REGISTRY_ENABLED;
     delete process.env.REGISTRY_ID;
     delete process.env.ENVIRONMENT;
+    delete process.env.ACCOUNT_ID;
   });
 
   // An imported Registry record (governanceAttestation present). orgId is set
@@ -418,6 +423,56 @@ describe('updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)'
     await handler(activateEvent());
 
     expect(mockComputeTrustPath).not.toHaveBeenCalled();
+    expect(mockUpdateResourceStatus).toHaveBeenCalledWith('agent', AGENT_ID, 'APPROVED');
+  });
+
+  // ─── Phase-2: cross-account roleArn awareness ──────────────────────────────
+  // ROLE_ARN lives in account 123456789012. A deployment ACCOUNT_ID that differs
+  // makes the invocation.roleArn cross-account: the in-process, same-account
+  // computeTrustPath cannot introspect it (GetRole runs in the home account), so
+  // the check is skipped and the attestation stays 'pending' for the gate.
+  const CROSS_ACCOUNT_DEPLOYMENT = '999999999999';
+
+  test('imported+pending+CROSS-ACCOUNT roleArn → skips computeTrustPath, records crossAccount, stays pending, strict gate blocks (not crashed)', async () => {
+    process.env.ACCOUNT_ID = CROSS_ACCOUNT_DEPLOYMENT;
+    mockGetResource.mockResolvedValue(importedRecord({ roleArn: ROLE_ARN }));
+    // strict is the beforeEach default — the gate must block on the still-pending record.
+
+    await expect(handler(activateEvent())).rejects.toThrow('Activation blocked');
+
+    // The same-account IAM check is never attempted for a cross-account role.
+    expect(mockComputeTrustPath).not.toHaveBeenCalled();
+
+    // The crossAccount trust-path summary IS persisted (updateResource runs before
+    // the gate throws), leaving the attestation 'pending' with a manual finding.
+    const persisted = JSON.parse(mockUpdateResource.mock.calls[0][2].customMetadata);
+    expect(persisted.governanceAttestation.status).toBe('pending');
+    expect(persisted.governanceAttestation.trustPath.crossAccount).toBe(true);
+    expect(persisted.governanceAttestation.trustPath.clean).toBe(false);
+    expect(persisted.governanceAttestation.trustPath.findings).toEqual([
+      'cross-account-role: automated trust-path unavailable; manual attestation required',
+    ]);
+
+    // Gated: the APPROVED status write never happened.
+    expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+  });
+
+  test('REGRESSION: imported+pending+SAME-ACCOUNT roleArn (ACCOUNT_ID set) + clean → computeTrustPath runs and auto-attests', async () => {
+    // Deployment account matches the role's account → NOT cross-account, so the
+    // Phase-1 same-account path runs byte-identically.
+    process.env.ACCOUNT_ID = '123456789012';
+    mockGetResource
+      .mockResolvedValueOnce(importedRecord({ roleArn: ROLE_ARN }))
+      .mockResolvedValueOnce(approvedRecord());
+    mockComputeTrustPath.mockResolvedValue({ hops: [], notes: [], findings: [], clean: true });
+
+    await handler(activateEvent());
+
+    expect(mockComputeTrustPath).toHaveBeenCalledWith(ROLE_ARN);
+    const persisted = JSON.parse(mockUpdateResource.mock.calls[0][2].customMetadata);
+    expect(persisted.governanceAttestation.status).toBe('attested');
+    expect(persisted.governanceAttestation.attestedBy).toBe('system:trust-path');
+    expect(persisted.governanceAttestation.trustPath.crossAccount).toBeUndefined();
     expect(mockUpdateResourceStatus).toHaveBeenCalledWith('agent', AGENT_ID, 'APPROVED');
   });
 });
