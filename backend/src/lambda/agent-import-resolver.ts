@@ -45,7 +45,7 @@ import {
   InvalidSourceRefError,
 } from '../services/agent-discovery';
 import { buildDefaultAgentSourceRegistry } from '../adapters/agent-source/registry-factory';
-import { isCrossAccountRoleArn } from '../utils/trust-path';
+import { assumeRoleCredentials, isCrossAccountRoleArn } from '../utils/trust-path';
 import {
   vendImportCredentials,
   toInvokeCredentials,
@@ -198,7 +198,13 @@ interface ImportEventIdentity {
 
 interface ImportAgentEvent {
   info?: { fieldName?: string };
-  arguments?: { input?: unknown; ref?: unknown; agentId?: unknown };
+  arguments?: {
+    input?: unknown;
+    ref?: unknown;
+    agentId?: unknown;
+    discoveryRoleArn?: unknown;
+    discoveryExternalId?: unknown;
+  };
   identity?: ImportEventIdentity;
 }
 
@@ -488,7 +494,14 @@ export const handler = async (
         if (!ref) {
           throw new InvalidSourceRefError('describeAgentCandidate: ref is required');
         }
-        return await describeAgentCandidate(ref);
+        // Optional CROSS-ACCOUNT describe (US-IMP Phase-2): when a discovery
+        // role is supplied, the describe runs in the TARGET account under that
+        // assumed READ-ONLY role (externalId-gated); absent ⇒ same-account.
+        return await describeAgentCandidate(
+          ref,
+          asNonEmptyString(event.arguments?.discoveryRoleArn),
+          asNonEmptyString(event.arguments?.discoveryExternalId),
+        );
       }
       default:
         throw new Error(`Unknown field: ${String(fieldName)}`);
@@ -688,12 +701,77 @@ async function discoverAgents(input: unknown): Promise<FlatAgentCandidate[]> {
 }
 
 /**
+ * Cross-account-aware adapter-registry builder for the DESCRIBE path. Sibling of
+ * {@link buildInvokeRegistryFor}, but keyed on an explicit operator-supplied
+ * READ-ONLY discovery role (not an invocation block):
+ *
+ *   - CROSS-ACCOUNT (`discoveryRoleArn` supplied): assume that role in the
+ *     TARGET account via {@link assumeRoleCredentials} (externalId-gated), map
+ *     the raw temp credentials onto {@link InvokeCredentials} reusing the SAME
+ *     {@link toInvokeCredentials} mapper the invoke paths use, and build the
+ *     registry whose AWS-native adapters describe with those assumed credentials
+ *     (the adapter's SDK client serves describe + invoke alike, so a
+ *     credentialProvider makes describe's List/Get calls run in the target
+ *     account). A failed assume THROWS — describe is error-shaped, so the throw
+ *     propagates to the handler as a clean GraphQL error; we NEVER fall back to
+ *     this Lambda's identity (which would describe in the wrong account).
+ *   - SAME-ACCOUNT (no `discoveryRoleArn`): the default registry, byte-identical
+ *     to today (this Lambda's caller identity).
+ *
+ * The assumed/raw credentials are NEVER logged.
+ */
+async function buildDescribeRegistryFor(
+  discoveryRoleArn: string | undefined,
+  discoveryExternalId: string | undefined,
+): Promise<ReturnType<typeof buildDefaultAgentSourceRegistry>> {
+  if (!discoveryRoleArn) {
+    // Same-account — current behaviour, no assumed credentials.
+    return buildDefaultAgentSourceRegistry();
+  }
+
+  // Cross-account: assume the operator-supplied READ-ONLY discovery role
+  // (externalId-gated). A throw here propagates to the caller (the handler),
+  // surfacing a clean GraphQL error. The assumed credentials are NEVER logged.
+  const assumed = await assumeRoleCredentials(discoveryRoleArn, discoveryExternalId);
+  // Map the raw temp credentials onto the invoke-credentials shape with the SAME
+  // mapper the invoke paths use. toInvokeCredentials consumes the
+  // VendedCredentials shape (expiry as an ISO string), so the Date expiration is
+  // serialized; only the access-key/secret/token are required.
+  const credentialProvider: InvokeCredentials | undefined = toInvokeCredentials({
+    accessKeyId: assumed.accessKeyId,
+    secretAccessKey: assumed.secretAccessKey,
+    sessionToken: assumed.sessionToken,
+    ...(assumed.expiration ? { expiresAt: assumed.expiration.toISOString() } : {}),
+  });
+  if (!credentialProvider) {
+    // Assume produced no usable credentials — do NOT fall back to this Lambda's
+    // identity (it would describe in the wrong account).
+    throw new Error(
+      'describeAgentCandidate: cross-account discovery-role assume produced no usable credentials',
+    );
+  }
+  return buildDefaultAgentSourceRegistry({ credentialProvider });
+}
+
+/**
  * `describeAgentCandidate` query: resolve a pasted ref to its protocol, build a
  * minimal candidate, and delegate to the per-protocol adapter's `describe()`.
  * Returns the capability descriptor serialized as an AWSJSON string. Adapter
  * signatures are unchanged — a candidate is constructed and passed in.
+ *
+ * CROSS-ACCOUNT (US-IMP Phase-2): when `discoveryRoleArn` is supplied, the
+ * adapter registry is built with credentials assumed from that READ-ONLY role
+ * in the TARGET account (externalId-gated; see {@link buildDescribeRegistryFor})
+ * so the describe's List/Get calls run THERE. Absent ⇒ EXACTLY today's
+ * behaviour (default registry, this Lambda's caller identity). A failed
+ * cross-account assume throws (describe is error-shaped, unlike the
+ * result-returning invoke paths); the assumed credentials are NEVER logged.
  */
-async function describeAgentCandidate(ref: string): Promise<string> {
+async function describeAgentCandidate(
+  ref: string,
+  discoveryRoleArn?: string,
+  discoveryExternalId?: string,
+): Promise<string> {
   const { protocol, substrate, target } = resolveSourceRef(ref);
   const isArn = ref.startsWith('arn:');
   const arnFields = isArn ? parseArnFields(ref) : {};
@@ -713,7 +791,12 @@ async function describeAgentCandidate(ref: string): Promise<string> {
     reference: target,
   };
 
-  const adapter = buildDefaultAgentSourceRegistry().resolve(protocol);
+  // Cross-account-aware: a supplied discoveryRoleArn assumes the READ-ONLY
+  // discovery role (externalId-gated) and builds the registry with the assumed
+  // credentials so describe runs in the target account; otherwise the default
+  // same-account registry (unchanged).
+  const registry = await buildDescribeRegistryFor(discoveryRoleArn, discoveryExternalId);
+  const adapter = registry.resolve(protocol);
   const descriptor = await adapter.describe(candidate);
   return JSON.stringify(descriptor);
 }

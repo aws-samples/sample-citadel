@@ -13,7 +13,16 @@ type Query {
   # neighbouring agent queries (default API auth); results are account-wide
   # and NOT org-filtered.
   discoverAgents(input: DiscoverAgentsInput!): [AgentCandidate!]!
-  describeAgentCandidate(ref: String!): AWSJSON!
+  # `describeAgentCandidate` resolves one ref to a capability descriptor. For a
+  # CROSS-ACCOUNT candidate, also supply discoveryRoleArn (+ discoveryExternalId):
+  # a READ-ONLY role in the TARGET account that Citadel assumes (with the external
+  # id) so the describe's List/Get calls run there. The role must trust Citadel
+  # and the external id. Absent ⇒ same-account describe under the caller identity.
+  describeAgentCandidate(
+    ref: String!
+    discoveryRoleArn: String
+    discoveryExternalId: String
+  ): AWSJSON!
   listToolConfigs: [ToolConfig]
   getToolConfig(toolId: String!): ToolConfig
   listUsers: [User]
