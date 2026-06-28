@@ -15,14 +15,9 @@ import { cn } from '../components/ui/utils';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { PageContainer } from '../components/PageContainer';
 import { SearchInput } from '../components/SearchInput';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '../components/ui/tooltip';
+import { ImportAgentWizard } from '../components/ImportAgentWizard';
 
-type SubView = 'catalog' | 'details' | 'create';
+type SubView = 'catalog' | 'details' | 'create' | 'import';
 type TabView = 'agents' | 'supervisor';
 
 // Icon mapping for categories
@@ -101,15 +96,10 @@ export function AgentCatalog() {
     setSubView('create');
   };
 
-  // Import Agent is BLOCKED pending product spec for import payload format,
-  // duplicate-agentId conflict policy, file-vs-paste source, and downstream
-  // resource (tools/integrations) handling. The button is rendered disabled
-  // with a "Coming soon" tooltip so the feature surface stays visible.
   const handleImportAgent = () => {
-    // No-op until import flow is specified.
+    setSelectedAgentId(null);
+    setSubView('import');
   };
-  const importComingSoonText =
-    'Coming soon — pending product spec for import format and conflict handling';
 
   const handleBackToCatalog = () => {
     setSelectedAgentId(null);
@@ -191,6 +181,15 @@ export function AgentCatalog() {
     );
   }
 
+  if (subView === 'import') {
+    return (
+      <ImportAgentWizard
+        onBack={handleBackToCatalog}
+        onComplete={handleBackToCatalog}
+      />
+    );
+  }
+
   const tabs = [
     { id: 'agents' as TabView, label: 'Agent Catalog', icon: Bot },
     { id: 'supervisor' as TabView, label: 'Supervisor', icon: Users },
@@ -251,24 +250,13 @@ export function AgentCatalog() {
               <Save className="size-4 mr-2" />
               Create Worker
             </Button>
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex">
-                    <Button
-                      variant="outline" className="gap-1 text-xs py-1 px-2 h-7"
-                      onClick={handleImportAgent}
-                      disabled={true}
-                      aria-disabled={true}
-                    >
-                      <Download className="size-4 mr-2" />
-                      Import Agent
-                    </Button>
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>{importComingSoonText}</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+            <Button
+              variant="outline" className="gap-1 text-xs py-1 px-2 h-7 cursor-pointer"
+              onClick={handleImportAgent}
+            >
+              <Download className="size-4 mr-2" />
+              Import Agent
+            </Button>
           </div>
         </div>
 
@@ -357,25 +345,14 @@ export function AgentCatalog() {
                 <Save className="size-4 mr-2" />
                 Create Worker
               </Button>
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="inline-flex">
-                      <Button
-                        variant="outline"
-                        className="border-border text-foreground hover:bg-accent"
-                        onClick={handleImportAgent}
-                        disabled={true}
-                        aria-disabled={true}
-                      >
-                        <Download className="size-4 mr-2" />
-                        Import Agent
-                      </Button>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>{importComingSoonText}</TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <Button
+                variant="outline"
+                className="border-border text-foreground hover:bg-accent cursor-pointer"
+                onClick={handleImportAgent}
+              >
+                <Download className="size-4 mr-2" />
+                Import Agent
+              </Button>
             </div>
           </div>
         ) : (
