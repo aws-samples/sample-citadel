@@ -143,6 +143,13 @@ type Mutation {
   # auth (same as the sibling agent mutations); the resolver enforces the
   # admin/architect role and org-scoping. Idempotent on an already-attested record.
   attestAgentImport(agentId: ID!): AgentConfig!
+  # Admin/architect pre-activation TEST-INVOKE: actually invokes an import
+  # candidate through the existing per-protocol adapters and returns a SANITIZED
+  # result WITHOUT persisting anything (no Registry record, no stored secret).
+  # Default Cognito auth (same as the sibling agent mutations); the resolver
+  # enforces the admin/architect role. A failed invoke is a normal
+  # { ok:false, error } result, not an error.
+  testImportedAgent(input: TestImportedAgentInput!): ImportTestResult!
   deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
   activateProjectAgents(projectId: ID!): ActivateAgentsResult
   updateAgentCode(input: UpdateAgentCodeInput!): AgentCode
@@ -514,6 +521,34 @@ type ImportAgentResult {
   existingId: ID
   reason: String
   options: [String!]
+}
+
+# Pre-activation TEST-INVOKE (US-IMP). Carries only the invocation-bearing
+# fields needed to reach + call a candidate (no name/manifest/origin — a
+# test-invoke never creates a record). `invocationSecret` is a RAW secret used
+# for THIS test only: it is resolved transiently in-memory and NEVER persisted.
+input TestImportedAgentInput {
+  invocationProtocol: String!
+  invocationTarget: String!
+  invocationAuthMode: String
+  invocationAuthHeader: String
+  invocationSecretRef: String
+  invocationSecret: String
+  invocationMode: String
+  region: String
+  account: String
+  prompt: String
+}
+
+# Result of a pre-activation test-invoke. `ok` true ⇒ the candidate was reached
+# and `output` carries the SANITIZED response; `ok` false ⇒ `error` explains the
+# failure (a normal result, not a GraphQL error). `latencyMs` is the wall-clock
+# duration of the attempt.
+type ImportTestResult {
+  ok: Boolean!
+  output: String
+  error: String
+  latencyMs: Int
 }
 
 # Agent import (US-IMP) — discovery. `discoverAgents` enumerates importable

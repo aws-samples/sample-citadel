@@ -32,8 +32,10 @@ import { grantFabricatorAuthority } from './registry-agent-authority-lifecycle';
 import { getGovernanceEnforce } from '../utils/governance-flag';
 import {
   storeAgentInvocationSecret,
+  getAgentInvocationSecret,
   type StoreAgentInvocationSecretResult,
 } from '../utils/credential-manager';
+import { sanitizeUntrustedAgentOutput } from '../utils/sanitize-agent-output';
 import type { AgentEvent, AuthContext } from '../types';
 import {
   resolveSourceRef,
@@ -43,11 +45,14 @@ import {
   InvalidSourceRefError,
 } from '../services/agent-discovery';
 import { buildDefaultAgentSourceRegistry } from '../adapters/agent-source/registry-factory';
-import type { AgentCandidate } from '../adapters/agent-source/types';
+import type { AgentCandidate, AgentCapabilityDescriptor } from '../adapters/agent-source/types';
 import type {
   AgentConfig,
   AgentCustomMetadata,
   AgentInvocationBlock,
+  AgentInvocationProtocol,
+  AgentInvocationAuthMode,
+  AgentInvocationMode,
   AgentOrigin,
   RegistryRecord,
 } from '../services/registry-service';
@@ -86,6 +91,40 @@ export interface ImportAgentResult {
   existingId: string | null;
   reason: string | null;
   options: string[] | null;
+}
+
+/**
+ * Flat AppSync input for the pre-activation TEST-INVOKE
+ * ({@link testImportedAgent}). Mirrors the invocation-bearing fields of
+ * {@link buildImportDescriptor}'s input, plus an optional `prompt`. There is no
+ * `name`/`manifest`/`origin` because a test-invoke never creates a record — it
+ * only needs enough to reach and call the candidate.
+ */
+export interface TestImportedAgentInput {
+  invocationProtocol: string;
+  invocationTarget: string;
+  invocationAuthMode?: string;
+  invocationAuthHeader?: string;
+  invocationSecretRef?: string;
+  /** RAW secret used for THIS test only — resolved transiently, never persisted. */
+  invocationSecret?: string;
+  invocationMode?: string;
+  region?: string;
+  account?: string;
+  prompt?: string;
+}
+
+/**
+ * Result of a pre-activation test-invoke. A reachable candidate returns
+ * `{ ok:true, output:<sanitized> }`; an unreachable/erroring candidate returns
+ * `{ ok:false, error }` — a failed invoke is a NORMAL result, not a thrown
+ * error. `latencyMs` is always the wall-clock duration of the attempt.
+ */
+export interface ImportTestResult {
+  ok: boolean;
+  output: string | null;
+  error: string | null;
+  latencyMs: number;
 }
 
 const CONFLICT_OPTIONS: readonly ImportConflictResolution[] = ['link', 'replace', 'copy'];
@@ -356,7 +395,7 @@ export function toImportAgentResult(
  */
 export const handler = async (
   event: ImportAgentEvent,
-): Promise<ImportAgentResult | FlatAgentCandidate[] | string | AgentConfig> => {
+): Promise<ImportAgentResult | FlatAgentCandidate[] | string | AgentConfig | ImportTestResult> => {
   const fieldName = event.info?.fieldName;
   // One correlationId per resolver invocation, shared by the discovery summary
   // event and the failure event for this call.
@@ -377,6 +416,12 @@ export const handler = async (
           throw new Error('attestAgentImport: agentId is required');
         }
         return await attestAgentImport(agentId, event, correlationId);
+      }
+      case 'testImportedAgent': {
+        // Authentication is required up-front (mirrors attestAgentImport); the
+        // admin/architect authorization gate lives inside testImportedAgent.
+        requireAuthenticated(event);
+        return await testImportedAgent(event.arguments?.input, event);
       }
       case 'discoverAgents': {
         requireAuthenticated(event);
@@ -1020,6 +1065,149 @@ export async function attestAgentImport(
   );
 
   return config;
+}
+
+/**
+ * Sentinel `auth.secretRef` used for a TEST-INVOKE that carries a RAW
+ * `invocationSecret` but no pre-existing reference. The HTTP/MCP adapters only
+ * call the injected `resolveSecret` when `auth.secretRef` is set, so a transient
+ * placeholder is attached to trigger resolution; the resolver closure returns
+ * the raw value verbatim and ignores the ref. NEVER persisted.
+ */
+const TRANSIENT_TEST_SECRET_REF = 'inline-test-invocation-secret';
+
+/**
+ * Builds the minimal {@link AgentCapabilityDescriptor} a TEST-INVOKE needs. Only
+ * the `invocation` block is meaningful (the adapters read it for invoke);
+ * name/description/schemas are inert placeholders. The invocation is assembled
+ * from the flat input (protocol/target/auth{mode,header,secretRef}/mode/region/
+ * account). When a raw secret was submitted, a transient secretRef is attached
+ * so secret-backed adapters (HTTP/MCP) resolve it.
+ */
+function buildTestInvocationDescriptor(
+  flat: Record<string, unknown>,
+  hasRawSecret: boolean,
+): AgentCapabilityDescriptor {
+  const auth: AgentInvocationBlock['auth'] = {
+    mode: (asNonEmptyString(flat.invocationAuthMode) ?? 'NONE') as AgentInvocationAuthMode,
+  };
+  const authHeader = asNonEmptyString(flat.invocationAuthHeader);
+  if (authHeader) auth.header = authHeader;
+  const secretRef = asNonEmptyString(flat.invocationSecretRef);
+  if (hasRawSecret) {
+    // Transient ref so the adapter calls resolveSecret (which returns the raw
+    // value). Prefer a supplied ref name; else a clearly-labelled sentinel.
+    auth.secretRef = secretRef ?? TRANSIENT_TEST_SECRET_REF;
+  } else if (secretRef) {
+    auth.secretRef = secretRef;
+  }
+
+  const invocation: AgentInvocationBlock = {
+    protocol: flat.invocationProtocol as AgentInvocationProtocol,
+    target: flat.invocationTarget as string,
+    auth,
+    mode: (asNonEmptyString(flat.invocationMode) ?? 'sync') as AgentInvocationMode,
+  };
+  const region = asNonEmptyString(flat.region);
+  const account = asNonEmptyString(flat.account);
+  if (region) invocation.region = region;
+  if (account) invocation.account = account;
+
+  const origin: AgentOrigin = {
+    substrate: 'test-invoke',
+    discoveredAt: new Date().toISOString(),
+    ownership: 'external',
+  };
+  if (region) origin.region = region;
+  if (account) origin.account = account;
+
+  return {
+    name: 'import-test-candidate',
+    description: '',
+    version: '0.0.0',
+    skills: [],
+    categories: [],
+    inputSchema: {},
+    outputSchema: {},
+    invocation,
+    origin,
+  };
+}
+
+/**
+ * Pre-activation TEST-INVOKE for an import candidate. Actually invokes the
+ * operator-supplied target through the existing per-protocol agent-source
+ * adapters and returns a SANITIZED result WITHOUT persisting anything (no
+ * Registry record, no stored secret) — it is the dry-run that precedes the
+ * DRAFT→APPROVED activation review.
+ *
+ * Authorization mirrors the discovery/attest gate: only the `admin` or
+ * `architect` role may run a test-invoke (it executes operator-supplied,
+ * arbitrary invocation paths against the customer account). A non-privileged
+ * caller gets an authorization error — the ONLY outcome that THROWS. Every
+ * other outcome, including an unreachable target, an unknown protocol, or an
+ * adapter error, is a NORMAL result: `{ ok:false, error }` with the latency.
+ *
+ * Secret handling is TRANSIENT (RD1, least-privilege invariant 2): a RAW
+ * `invocationSecret` is resolved by an in-memory closure that returns it
+ * verbatim and is discarded when the call returns; a pre-existing
+ * `invocationSecretRef` is resolved on demand via {@link getAgentInvocationSecret}.
+ * Nothing is written to Secrets Manager or the Registry. The raw value is NEVER
+ * logged, and the candidate's UNTRUSTED output is ALWAYS passed through
+ * {@link sanitizeUntrustedAgentOutput} before it is returned.
+ */
+export async function testImportedAgent(
+  input: unknown,
+  event: ImportAgentEvent,
+): Promise<ImportTestResult> {
+  // Authorization: admin OR architect only (same gate as discovery/attest).
+  // This is the ONLY path that throws — every invoke outcome is a normal result.
+  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, 'architect')) {
+    throw new Error('Unauthorized: testImportedAgent requires the admin or architect role');
+  }
+
+  const flat = isRecord(input) ? input : {};
+  const rawSecret = asNonEmptyString(flat.invocationSecret);
+  const secretRef = asNonEmptyString(flat.invocationSecretRef);
+
+  const start = Date.now();
+  try {
+    const protocol = asNonEmptyString(flat.invocationProtocol);
+    const target = asNonEmptyString(flat.invocationTarget);
+    if (!protocol) throw new Error('testImportedAgent: invocationProtocol is required');
+    if (!target) throw new Error('testImportedAgent: invocationTarget is required');
+
+    // Transient secret resolver — NEVER persisted. A RAW secret is returned
+    // verbatim (ref ignored); else a provided ref is fetched on demand; else no
+    // resolver is wired (the adapter invokes without an auth header).
+    let resolveSecret: ((ref: string) => Promise<string>) | undefined;
+    if (rawSecret) {
+      resolveSecret = async () => rawSecret;
+    } else if (secretRef) {
+      resolveSecret = (ref: string) => getAgentInvocationSecret(ref);
+    }
+
+    const registry = buildDefaultAgentSourceRegistry({ resolveSecret });
+    const descriptor = buildTestInvocationDescriptor(flat, Boolean(rawSecret));
+    const adapter = registry.resolve(descriptor.invocation.protocol);
+    const resp = await adapter.invoke(
+      { prompt: asNonEmptyString(flat.prompt) ?? 'ping', sessionId: `import-test-${uuidv4()}` },
+      descriptor,
+    );
+    // The candidate is an UNTRUSTED foreign agent — neutralize injection markers
+    // in its output before it re-enters our flow / reaches the caller.
+    const sanitized = sanitizeUntrustedAgentOutput(resp.output);
+    return { ok: true, output: sanitized.sanitized, error: null, latencyMs: Date.now() - start };
+  } catch (err) {
+    // A failed test-invoke is a NORMAL result (NOT a thrown error). The raw
+    // secret is never interpolated into the message — only the underlying error.
+    return {
+      ok: false,
+      output: null,
+      error: err instanceof Error ? err.message : String(err),
+      latencyMs: Date.now() - start,
+    };
+  }
 }
 
 /** Deserializes a record's custom metadata against the agent defaults. */

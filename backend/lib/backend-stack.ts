@@ -792,6 +792,43 @@ export class BackendStack extends cdk.Stack {
       })
     );
 
+    // Pre-activation TEST-INVOKE (testImportedAgent): the admin/architect-gated
+    // dry-run actually invokes an operator-supplied import CANDIDATE through the
+    // existing per-protocol adapters and returns a sanitized result WITHOUT
+    // persisting anything. Because the target is operator-supplied/arbitrary,
+    // the invoke actions are scoped to THIS ACCOUNT (never bare '*' where an
+    // account-scoped ARN exists). The residual ':*'/'/*' wildcards are suppressed
+    // (AwsSolutions-IAM5) in bin/app.ts with this justification.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:InvokeAgentRuntime',
+          'lambda:InvokeFunction',
+          'bedrock:InvokeAgent',
+          'execute-api:Invoke',
+        ],
+        resources: [
+          `arn:aws:bedrock-agentcore:*:${this.account}:runtime/*`,
+          `arn:aws:lambda:*:${this.account}:function:*`,
+          `arn:aws:bedrock:*:${this.account}:agent-alias/*`,
+          `arn:aws:execute-api:*:${this.account}:*`,
+        ],
+      })
+    );
+    // READ a pre-existing invocation secret for the test-invoke. Scoped to the
+    // agent secret-path convention /citadel/agents/* (the same scope as the
+    // import-time write grant above). A raw inline secret needs no AWS read.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
+        ],
+      })
+    );
+
     // Agent Code Resolver - for reading/writing agent code from S3
     const agentCodeResolverFunction = new lambda.Function(
       this,
@@ -2532,6 +2569,16 @@ export class BackendStack extends cdk.Stack {
     agentImportLambdaDataSource.createResolver("DescribeAgentCandidateResolver", {
       typeName: "Query",
       fieldName: "describeAgentCandidate",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // Pre-activation test-invoke. Reuses the existing AgentImport data source —
+    // the import resolver now also carries the account-scoped invoke +
+    // GetSecretValue grants needed to invoke an operator-supplied candidate.
+    agentImportLambdaDataSource.createResolver("TestImportedAgentResolver", {
+      typeName: "Mutation",
+      fieldName: "testImportedAgent",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });

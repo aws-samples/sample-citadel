@@ -349,4 +349,30 @@ if (app.node.tryGetContext('nag')!== 'false') {
                   appliesTo: ['Resource::*'],
                 }],
               );
+
+              // IAM5 — AgentImportResolverFunction pre-activation TEST-INVOKE
+              // (testImportedAgent). The admin/architect-gated dry-run invokes an
+              // operator-supplied import candidate; the target is arbitrary, so
+              // the invoke actions are scoped to THIS ACCOUNT (lambda function:*,
+              // bedrock agent-alias/*, execute-api) rather than bare Resource::*.
+              // The bedrock-agentcore runtime/* and /citadel/agents/* (GetSecretValue)
+              // wildcards are already covered by the stack-level IAM5 suppression.
+              // Additive to the discovery suppression registered just above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'admin/architect-gated pre-activation test-invoke against ' +
+                    'operator-supplied targets; account-scoped (lambda function:*, ' +
+                    'bedrock agent-alias/*, execute-api), never bare Resource::*. ' +
+                    'Tracked: AAF-NAG-IAM5-testinvoke.',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:lambda:\\*:.*:function:\\*$/g' },
+                    { regex: '/^Resource::arn:aws:bedrock:\\*:.*:agent-alias\\/\\*$/g' },
+                    { regex: '/^Resource::arn:aws:execute-api:\\*:.*:\\*$/g' },
+                  ],
+                }],
+              );
 }
