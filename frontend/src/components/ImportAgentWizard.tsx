@@ -190,6 +190,8 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
   const [secret, setSecret] = useState('');
   const [invocationMode, setInvocationMode] = useState<AgentInvocationMode>('sync');
   const [analysisRoleArn, setAnalysisRoleArn] = useState('');
+  const [invocationRoleArn, setInvocationRoleArn] = useState('');
+  const [invocationExternalId, setInvocationExternalId] = useState('');
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'pass' | 'fail'>('idle');
   const [testError, setTestError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<ImportTestResult | null>(null);
@@ -279,6 +281,8 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
       setAuthHeader('');
       setSecret('');
       setAnalysisRoleArn('');
+      setInvocationRoleArn('');
+      setInvocationExternalId('');
       invalidateTest();
     } catch (err) {
       setDescriptor(null);
@@ -299,6 +303,10 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
       invocationSecretRef: descriptor?.invocation.auth.secretRef,
       invocationSecret: authNeedsSecret && secret.trim() ? secret.trim() : undefined,
       invocationMode,
+      invocationRoleArn: invocationRoleArn.trim() ? invocationRoleArn.trim() : undefined,
+      invocationExternalId: invocationExternalId.trim()
+        ? invocationExternalId.trim()
+        : undefined,
       region: origin?.region,
       account: origin?.account,
       prompt: TEST_PROMPT,
@@ -343,6 +351,10 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
       invocationSecret: authNeedsSecret && secret.trim() ? secret.trim() : undefined,
       invocationMode,
       invocationAnalysisRoleArn: analysisRoleArn.trim() ? analysisRoleArn.trim() : undefined,
+      invocationRoleArn: invocationRoleArn.trim() ? invocationRoleArn.trim() : undefined,
+      invocationExternalId: invocationExternalId.trim()
+        ? invocationExternalId.trim()
+        : undefined,
       region: origin?.region,
       account: origin?.account,
       sourceArn: origin?.sourceArn,
@@ -984,6 +996,34 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
           Read-only IAM role in the target AWS account that Citadel assumes (with the
           external ID) to analyze a cross-account invoke role; required only for
           cross-account targets.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="invocation-role-arn">Invoke role ARN (cross-account)</Label>
+        <Input
+          id="invocation-role-arn"
+          value={invocationRoleArn}
+          onChange={(e) => setInvocationRoleArn(e.target.value)}
+          placeholder="arn:aws:iam::<target-account>:role/<invoke-role>"
+        />
+        <p className="text-xs text-muted-foreground">
+          For a cross-account target: the IAM role in the target account that Citadel
+          assumes (with the external ID) to invoke the agent; the role must trust Citadel
+          and the external ID.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="invocation-external-id">External ID</Label>
+        <Input
+          id="invocation-external-id"
+          value={invocationExternalId}
+          onChange={(e) => setInvocationExternalId(e.target.value)}
+          placeholder="external ID required by the invoke role's trust policy"
+        />
+        <p className="text-xs text-muted-foreground">
+          The external ID Citadel presents when assuming the cross-account invoke role.
         </p>
       </div>
 

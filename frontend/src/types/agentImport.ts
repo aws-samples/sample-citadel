@@ -170,6 +170,19 @@ export interface ImportAgentInput {
    * cross-account targets and omitted otherwise.
    */
   invocationAnalysisRoleArn?: string;
+  /**
+   * Optional IAM role ARN in the *target* AWS account that Citadel assumes
+   * (presenting `invocationExternalId`) to INVOKE a cross-account agent. The
+   * role must trust Citadel and require the external ID. Distinct from the
+   * read-only `invocationAnalysisRoleArn` (activation trust-path analysis only).
+   * Operator-supplied; omitted for same-account targets.
+   */
+  invocationRoleArn?: string;
+  /**
+   * Optional external ID Citadel presents when assuming `invocationRoleArn`.
+   * Only meaningful for cross-account targets whose role trust policy requires it.
+   */
+  invocationExternalId?: string;
   region?: string;
   account?: string;
   sourceArn?: string;
@@ -206,6 +219,14 @@ export interface TestImportedAgentInput {
   invocationSecretRef?: string;
   invocationSecret?: string;
   invocationMode?: string;
+  /**
+   * Optional cross-account invoke role ARN (assumed while presenting
+   * `invocationExternalId`) so a pre-activation test-invoke can reach a
+   * cross-account target. Mirrors `ImportAgentInput.invocationRoleArn`.
+   */
+  invocationRoleArn?: string;
+  /** Optional external ID presented when assuming `invocationRoleArn`. */
+  invocationExternalId?: string;
   region?: string;
   account?: string;
   prompt?: string;

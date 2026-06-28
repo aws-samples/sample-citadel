@@ -789,3 +789,90 @@ describe('ImportAgentWizard — Step 4 analysis role ARN (cross-account trust-pa
     ).toBeUndefined();
   });
 });
+
+describe('ImportAgentWizard — Step 4 cross-account invoke role (ARN + external ID)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('renders optional "Invoke role ARN (cross-account)" and "External ID" inputs that do not block Next when left blank', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    // both optional cross-account fields are present in the invocation config
+    expect(screen.getByLabelText(/invoke role arn/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/external id/i)).toBeInTheDocument();
+
+    // leaving them blank does not gate Step 4: a passing reachability test
+    // alone enables Next (the fields are optional — Next never blocks on them)
+    svc.testImportedAgent.mockResolvedValue(testOk);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+    await screen.findByText(/connection verified/i);
+    expect(nextBtn()).not.toBeDisabled();
+  });
+
+  it('threads a filled invoke role ARN + external ID into BOTH the Step-4 test-invoke and the importAgent input', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    const invokeArn = 'arn:aws:iam::444455556666:role/citadel-invoke';
+    const externalId = 'citadel-ext-12345';
+    await user.type(screen.getByLabelText(/invoke role arn/i), invokeArn);
+    await user.type(screen.getByLabelText(/external id/i), externalId);
+
+    // the Step-4 Test connection must carry them so a cross-account target is
+    // reachable before activation
+    svc.testImportedAgent.mockResolvedValue(testOk);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+    await waitFor(() => expect(svc.testImportedAgent).toHaveBeenCalledTimes(1));
+    expect(svc.testImportedAgent.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        invocationRoleArn: invokeArn,
+        invocationExternalId: externalId,
+      }),
+    );
+
+    // …and the eventual import must carry them too
+    await screen.findByText(/connection verified/i);
+    await user.click(nextBtn());
+    await screen.findByRole('button', { name: /register agent/i });
+
+    svc.importAgent.mockResolvedValue(successResult);
+    await user.click(screen.getByRole('button', { name: /register agent/i }));
+    await waitFor(() => expect(svc.importAgent).toHaveBeenCalledTimes(1));
+    expect(svc.importAgent.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        invocationRoleArn: invokeArn,
+        invocationExternalId: externalId,
+      }),
+    );
+  });
+
+  it('omits invocationRoleArn + invocationExternalId (undefined) in BOTH inputs when left blank', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    svc.testImportedAgent.mockResolvedValue(testOk);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+    await waitFor(() => expect(svc.testImportedAgent).toHaveBeenCalledTimes(1));
+    expect(
+      svc.testImportedAgent.mock.calls[0][0].invocationRoleArn,
+    ).toBeUndefined();
+    expect(
+      svc.testImportedAgent.mock.calls[0][0].invocationExternalId,
+    ).toBeUndefined();
+
+    await screen.findByText(/connection verified/i);
+    await user.click(nextBtn());
+    await screen.findByRole('button', { name: /register agent/i });
+
+    svc.importAgent.mockResolvedValue(successResult);
+    await user.click(screen.getByRole('button', { name: /register agent/i }));
+    await waitFor(() => expect(svc.importAgent).toHaveBeenCalledTimes(1));
+    expect(svc.importAgent.mock.calls[0][0].invocationRoleArn).toBeUndefined();
+    expect(
+      svc.importAgent.mock.calls[0][0].invocationExternalId,
+    ).toBeUndefined();
+  });
+});
