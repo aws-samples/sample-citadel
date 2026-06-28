@@ -163,6 +163,13 @@ export interface ImportAgentInput {
    */
   invocationSecret?: string;
   invocationMode?: string;
+  /**
+   * Optional read-only IAM role ARN in the *target* AWS account that Citadel
+   * assumes (with the external ID) to analyze a cross-account invoke role's
+   * trust path during activation. Operator-supplied; only meaningful for
+   * cross-account targets and omitted otherwise.
+   */
+  invocationAnalysisRoleArn?: string;
   region?: string;
   account?: string;
   sourceArn?: string;

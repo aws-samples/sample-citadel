@@ -189,6 +189,7 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
   const [authHeader, setAuthHeader] = useState('');
   const [secret, setSecret] = useState('');
   const [invocationMode, setInvocationMode] = useState<AgentInvocationMode>('sync');
+  const [analysisRoleArn, setAnalysisRoleArn] = useState('');
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'pass' | 'fail'>('idle');
   const [testError, setTestError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<ImportTestResult | null>(null);
@@ -277,6 +278,7 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
       setInvocationMode(d.invocation.mode);
       setAuthHeader('');
       setSecret('');
+      setAnalysisRoleArn('');
       invalidateTest();
     } catch (err) {
       setDescriptor(null);
@@ -340,6 +342,7 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
       invocationSecretRef: descriptor?.invocation.auth.secretRef,
       invocationSecret: authNeedsSecret && secret.trim() ? secret.trim() : undefined,
       invocationMode,
+      invocationAnalysisRoleArn: analysisRoleArn.trim() ? analysisRoleArn.trim() : undefined,
       region: origin?.region,
       account: origin?.account,
       sourceArn: origin?.sourceArn,
@@ -966,6 +969,23 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
           </p>
         </div>
       )}
+
+      <div className="flex flex-col gap-2">
+        <Label htmlFor="invocation-analysis-role">
+          Analysis role ARN (target account)
+        </Label>
+        <Input
+          id="invocation-analysis-role"
+          value={analysisRoleArn}
+          onChange={(e) => setAnalysisRoleArn(e.target.value)}
+          placeholder="arn:aws:iam::<target-account>:role/<read-only-analysis-role>"
+        />
+        <p className="text-xs text-muted-foreground">
+          Read-only IAM role in the target AWS account that Citadel assumes (with the
+          external ID) to analyze a cross-account invoke role; required only for
+          cross-account targets.
+        </p>
+      </div>
 
       <div className="flex flex-col gap-3">
         <div className="flex items-center gap-3">

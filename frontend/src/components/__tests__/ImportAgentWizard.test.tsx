@@ -730,3 +730,62 @@ describe('ImportAgentWizard — manifest file upload (Step 1)', () => {
     expect(nextBtn()).not.toBeDisabled();
   });
 });
+
+describe('ImportAgentWizard — Step 4 analysis role ARN (cross-account trust-path)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('renders an optional "Analysis role ARN" input in Step 4 that does not block Next when left empty', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    // the optional analysis-role input is present in the invocation config
+    expect(screen.getByLabelText(/analysis role arn/i)).toBeInTheDocument();
+
+    // leaving it blank does not gate Step 4: a passing reachability test alone
+    // enables Next (the field is optional — Next is never blocked on it)
+    svc.testImportedAgent.mockResolvedValue(testOk);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+    await screen.findByText(/connection verified/i);
+    expect(nextBtn()).not.toBeDisabled();
+  });
+
+  it('threads a filled analysis role ARN into the importAgent input as invocationAnalysisRoleArn', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoConfigure(user);
+
+    const analysisArn = 'arn:aws:iam::444455556666:role/citadel-analysis-readonly';
+    await user.type(screen.getByLabelText(/analysis role arn/i), analysisArn);
+
+    // filling the analysis role must not disturb the reachability test (it is
+    // consumed only by the activation trust-path, not the test-invoke)
+    svc.testImportedAgent.mockResolvedValue(testOk);
+    await user.click(screen.getByRole('button', { name: /test connection/i }));
+    await screen.findByText(/connection verified/i);
+    await user.click(nextBtn());
+    await screen.findByRole('button', { name: /register agent/i });
+
+    svc.importAgent.mockResolvedValue(successResult);
+    await user.click(screen.getByRole('button', { name: /register agent/i }));
+
+    await waitFor(() => expect(svc.importAgent).toHaveBeenCalledTimes(1));
+    expect(svc.importAgent.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ invocationAnalysisRoleArn: analysisArn }),
+    );
+  });
+
+  it('omits invocationAnalysisRoleArn (undefined) when the analysis role input is left blank', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+    await gotoRegister(user);
+
+    svc.importAgent.mockResolvedValue(successResult);
+    await user.click(screen.getByRole('button', { name: /register agent/i }));
+
+    await waitFor(() => expect(svc.importAgent).toHaveBeenCalledTimes(1));
+    expect(
+      svc.importAgent.mock.calls[0][0].invocationAnalysisRoleArn,
+    ).toBeUndefined();
+  });
+});
