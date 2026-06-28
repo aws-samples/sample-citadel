@@ -150,6 +150,16 @@ type Mutation {
   # enforces the admin/architect role. A failed invoke is a normal
   # { ok:false, error } result, not an error.
   testImportedAgent(input: TestImportedAgentInput!): ImportTestResult!
+  # Admin/architect Tier-2 SANDBOXED PROBE: builds an import candidate's static
+  # capability descriptor (the adapter's describe()) and, when it has GAPS
+  # (empty outputSchema/skills or low/absent field confidence), performs ONE
+  # guarded sandboxed dry-run, sanitizes the untrusted output, and merges it
+  # back CONSERVATIVELY at confidence='medium' (records an outputSample; never
+  # fabricates a full schema). Persists nothing. Reuses TestImportedAgentInput.
+  # Default Cognito auth (same as the sibling agent mutations); the resolver
+  # enforces the admin/architect role. Best-effort: a dry-run that throws yields
+  # the describe-only descriptor with a probe-incomplete note, not an error.
+  probeAgentCandidate(input: TestImportedAgentInput!): AWSJSON!
   deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
   activateProjectAgents(projectId: ID!): ActivateAgentsResult
   updateAgentCode(input: UpdateAgentCodeInput!): AgentCode

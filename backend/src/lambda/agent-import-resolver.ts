@@ -45,7 +45,12 @@ import {
   InvalidSourceRefError,
 } from '../services/agent-discovery';
 import { buildDefaultAgentSourceRegistry } from '../adapters/agent-source/registry-factory';
-import type { AgentCandidate, AgentCapabilityDescriptor } from '../adapters/agent-source/types';
+import type {
+  AgentCandidate,
+  AgentCapabilityDescriptor,
+  Confidence,
+  JsonSchema,
+} from '../adapters/agent-source/types';
 import type {
   AgentConfig,
   AgentCustomMetadata,
@@ -422,6 +427,12 @@ export const handler = async (
         // admin/architect authorization gate lives inside testImportedAgent.
         requireAuthenticated(event);
         return await testImportedAgent(event.arguments?.input, event);
+      }
+      case 'probeAgentCandidate': {
+        // Authentication is required up-front (mirrors testImportedAgent); the
+        // admin/architect authorization gate lives inside probeAgentCandidate.
+        requireAuthenticated(event);
+        return await probeAgentCandidate(event.arguments?.input, event);
       }
       case 'discoverAgents': {
         requireAuthenticated(event);
@@ -1207,6 +1218,186 @@ export async function testImportedAgent(
       error: err instanceof Error ? err.message : String(err),
       latencyMs: Date.now() - start,
     };
+  }
+}
+
+/**
+ * Default handshake prompt for a Tier-2 probe dry-run when the caller does not
+ * supply one. Deliberately neutral and non-destructive — the probe only needs
+ * to observe the candidate's response SHAPE, not perform real work.
+ */
+const PROBE_PROMPT = 'Capability probe: reply with a short example of your normal output.';
+
+/**
+ * A capability descriptor enriched by a Tier-2 probe. ADDITIVE to
+ * {@link AgentCapabilityDescriptor}: the probe records a sanitized
+ * `outputSample` (a minimal observed-shape hint, NOT a fabricated schema) and,
+ * on a dry-run that could not complete, a `probeNote`. Kept local to the
+ * resolver — the adapter `types.ts` is the static-describe contract and is not
+ * modified by this enrichment step.
+ */
+type ProbedDescriptor = AgentCapabilityDescriptor & {
+  outputSample?: string;
+  probeNote?: string;
+};
+
+/** True when a JSON Schema document is missing or carries no keys. */
+function isEmptySchema(schema: JsonSchema | undefined): boolean {
+  return !schema || Object.keys(schema).length === 0;
+}
+
+/**
+ * True when an inferred field's confidence is a GAP for probing purposes:
+ * explicitly 'low' or entirely absent. 'medium'/'high' are not gaps.
+ */
+function isLowOrAbsentConfidence(confidence: Confidence | undefined): boolean {
+  return confidence === undefined || confidence === 'low';
+}
+
+/**
+ * Builds the minimal {@link AgentCandidate} the adapter's `describe()` needs:
+ * the operator-supplied target becomes the candidate `reference` (the opaque
+ * handle describe() resolves). region/account are carried onto the origin when
+ * present; ownership is always 'external' (Citadel never owns the target).
+ */
+function buildProbeCandidate(flat: Record<string, unknown>, target: string): AgentCandidate {
+  const origin: AgentOrigin = {
+    substrate: 'import-probe',
+    discoveredAt: new Date().toISOString(),
+    ownership: 'external',
+  };
+  const region = asNonEmptyString(flat.region);
+  const account = asNonEmptyString(flat.account);
+  if (region) origin.region = region;
+  if (account) origin.account = account;
+  return { origin, displayName: deriveDisplayName(target), reference: target };
+}
+
+/**
+ * Tier-2 SANDBOXED PROBE (US-IMP-021). Enriches an import candidate's STATIC
+ * capability descriptor (the adapter's `describe()`, Tier-0/1) with an active
+ * handshake/dry-run when the descriptor has GAPS, merging the observed result
+ * back CONSERVATIVELY at confidence='medium'.
+ *
+ * Flow:
+ *   1. describe() the candidate (static capability).
+ *   2. Detect gaps: an empty `outputSchema`/`skills`, or a field whose
+ *      `fieldConfidence` is low/absent.
+ *   3. No gaps → return the static descriptor unchanged (high-confidence fields
+ *      stay 'high'; NO dry-run).
+ *   4. Gaps → ONE guarded `adapter.invoke` dry-run, reusing the SAME
+ *      transient/secretRef resolution as {@link testImportedAgent}. The
+ *      UNTRUSTED output is ALWAYS run through {@link sanitizeUntrustedAgentOutput}
+ *      before merge. The sanitized text is recorded as an `outputSample` and
+ *      `fieldConfidence.outputSchema` is raised to 'medium'. A real, populated
+ *      high-confidence field is not a gap, so it is never reached/downgraded
+ *      here. A full schema is NOT fabricated (Tier-3 LLM, out of scope).
+ *   5. BEST-EFFORT: a dry-run that THROWS does not fail the probe — the
+ *      describe-only descriptor is returned with a `probeNote`.
+ *
+ * Authorization mirrors the discovery/test-invoke gate: only `admin` or
+ * `architect` may probe (it executes an operator-supplied invocation against
+ * the customer account). A non-privileged caller is the ONLY outcome that
+ * THROWS. Nothing is persisted (no Registry record, no stored secret); the raw
+ * secret is NEVER logged.
+ *
+ * @returns the (possibly enriched) capability descriptor serialized as AWSJSON.
+ */
+export async function probeAgentCandidate(
+  input: unknown,
+  event: ImportAgentEvent,
+): Promise<string> {
+  // Authorization: admin OR architect only (same gate as test-invoke). This is
+  // the ONLY path that throws — every dry-run outcome is a normal result.
+  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, 'architect')) {
+    throw new Error('Unauthorized: probeAgentCandidate requires the admin or architect role');
+  }
+
+  const flat = isRecord(input) ? input : {};
+  const protocol = asNonEmptyString(flat.invocationProtocol);
+  const target = asNonEmptyString(flat.invocationTarget);
+  if (!protocol) throw new Error('probeAgentCandidate: invocationProtocol is required');
+  if (!target) throw new Error('probeAgentCandidate: invocationTarget is required');
+
+  const rawSecret = asNonEmptyString(flat.invocationSecret);
+  const secretRef = asNonEmptyString(flat.invocationSecretRef);
+
+  // Transient secret resolver — NEVER persisted (identical to testImportedAgent):
+  // a RAW secret is returned verbatim (ref ignored); else a provided ref is
+  // fetched on demand; else no resolver is wired.
+  let resolveSecret: ((ref: string) => Promise<string>) | undefined;
+  if (rawSecret) {
+    resolveSecret = async () => rawSecret;
+  } else if (secretRef) {
+    resolveSecret = (ref: string) => getAgentInvocationSecret(ref);
+  }
+
+  // One registry + one adapter instance, reused for describe() AND invoke().
+  const registry = buildDefaultAgentSourceRegistry({ resolveSecret });
+  const adapter = registry.resolve(protocol as AgentInvocationProtocol);
+
+  // 1. Static describe() — the Tier-0/1 capability descriptor.
+  const descriptor = await adapter.describe(buildProbeCandidate(flat, target));
+
+  // 2. Gap detection. A field is a gap when empty OR low/absent confidence.
+  const outputSchemaGap =
+    isEmptySchema(descriptor.outputSchema) ||
+    isLowOrAbsentConfidence(descriptor.fieldConfidence?.outputSchema);
+  const skillsGap =
+    descriptor.skills.length === 0 ||
+    isLowOrAbsentConfidence(descriptor.fieldConfidence?.skills);
+
+  // 3. No gaps → static descriptor unchanged (high-confidence fields stay high).
+  if (!outputSchemaGap && !skillsGap) {
+    return JSON.stringify(descriptor);
+  }
+
+  // 4. ONE guarded dry-run. The invoke descriptor reuses the static capability
+  //    fields but overlays the operator-supplied invocation block (built by the
+  //    shared test-invoke helper) so the SAME transient/secretRef resolution
+  //    applies and the dry-run reaches the operator's target with their auth.
+  const probeInvocation = buildTestInvocationDescriptor(flat, Boolean(rawSecret)).invocation;
+  const invokeDescriptor: AgentCapabilityDescriptor = {
+    ...descriptor,
+    invocation: probeInvocation,
+  };
+
+  try {
+    const resp = await adapter.invoke(
+      {
+        prompt: asNonEmptyString(flat.prompt) ?? PROBE_PROMPT,
+        sessionId: `import-probe-${uuidv4()}`,
+      },
+      invokeDescriptor,
+    );
+    // The candidate is an UNTRUSTED foreign agent — neutralize injection markers
+    // in its output BEFORE it is merged into / returned from the descriptor.
+    const sanitized = sanitizeUntrustedAgentOutput(resp.output);
+
+    // CONSERVATIVE merge at confidence='medium': record the sanitized response
+    // as an observed-shape hint and bump ONLY a gap field's confidence. A real
+    // high-confidence field is not a gap, so it is never reached here.
+    const fieldConfidence: Record<string, Confidence> = {
+      ...(descriptor.fieldConfidence ?? {}),
+    };
+    if (outputSchemaGap) {
+      fieldConfidence.outputSchema = 'medium';
+    }
+    const merged: ProbedDescriptor = {
+      ...descriptor,
+      fieldConfidence,
+      outputSample: sanitized.sanitized,
+    };
+    return JSON.stringify(merged);
+  } catch (err) {
+    // 5. BEST-EFFORT: a failed dry-run never fails the probe. The raw secret is
+    //    never interpolated — only the (secret-free) underlying error message.
+    const detail = err instanceof Error ? err.message : String(err);
+    const merged: ProbedDescriptor = {
+      ...descriptor,
+      probeNote: `probe dry-run could not complete: ${detail}`,
+    };
+    return JSON.stringify(merged);
   }
 }
 

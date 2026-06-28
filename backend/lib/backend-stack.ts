@@ -2583,6 +2583,18 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
+    // Tier-2 sandboxed probe (probeAgentCandidate): describe() + a single
+    // guarded dry-run that enriches the descriptor at confidence='medium'.
+    // Reuses the existing AgentImport data source — the import resolver already
+    // carries the account-scoped invoke + GetSecretValue grants (test-invoke),
+    // so no new Lambda/data source/perms are required.
+    agentImportLambdaDataSource.createResolver("ProbeAgentCandidateResolver", {
+      typeName: "Mutation",
+      fieldName: "probeAgentCandidate",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
     agentConfigLambdaDataSource.createResolver("UpdateAgentConfigResolver", {
       typeName: "Mutation",
       fieldName: "updateAgentConfig",
