@@ -62,7 +62,7 @@ jest.mock('../ui/checkbox', () => ({
     }),
 }));
 
-import { ImportAgentWizard } from '../ImportAgentWizard';
+import { ImportAgentWizard, substrateToProtocol } from '../ImportAgentWizard';
 import { agentImportService } from '../../services/agentImportService';
 import type {
   AgentCandidate,
@@ -147,6 +147,40 @@ const testFail: ImportTestResult = {
   output: null,
   error: 'Endpoint returned 403 Forbidden',
   latencyMs: 88,
+};
+
+// Multi-candidate SCAN fixtures for batch draft-import. Substrate values match
+// what the discovery adapters actually emit (agentcore_runtime / lambda / http).
+const batchA: AgentCandidate = {
+  displayName: 'Orders Agent',
+  reference: 'ref-a',
+  substrate: 'agentcore_runtime',
+  sourceArn: 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/orders',
+  region: 'us-east-1',
+  account: '111122223333',
+  ownership: 'external',
+  discoveredAt: '2026-06-28T00:00:00Z',
+};
+
+const batchB: AgentCandidate = {
+  displayName: 'Billing Agent',
+  reference: 'ref-b',
+  substrate: 'lambda',
+  sourceArn: 'arn:aws:lambda:us-east-1:111122223333:function:billing',
+  region: 'us-east-1',
+  account: '111122223333',
+  ownership: 'external',
+  discoveredAt: '2026-06-28T00:00:00Z',
+};
+
+const batchC: AgentCandidate = {
+  displayName: 'Search Agent',
+  reference: 'ref-c',
+  substrate: 'http',
+  region: 'us-east-1',
+  account: '111122223333',
+  ownership: 'external',
+  discoveredAt: '2026-06-28T00:00:00Z',
 };
 
 type User = ReturnType<typeof userEvent.setup>;
@@ -530,5 +564,169 @@ describe('ImportAgentWizard — accessibility', () => {
 
     const card = await screen.findByRole('button', { name: /orders agent/i });
     expect(card.className).toMatch(/cursor-pointer/);
+  });
+});
+
+describe('substrateToProtocol (substrate → invocation protocol map)', () => {
+  it('maps each known discovery substrate to its invocation protocol', () => {
+    expect(substrateToProtocol('agentcore_runtime')).toBe('AGENTCORE_RUNTIME');
+    expect(substrateToProtocol('lambda')).toBe('LAMBDA_INVOKE');
+    expect(substrateToProtocol('bedrock_agent')).toBe('BEDROCK_AGENT');
+    expect(substrateToProtocol('http')).toBe('HTTP_ENDPOINT');
+    expect(substrateToProtocol('mcp')).toBe('MCP');
+  });
+
+  it('falls back to HTTP_ENDPOINT for an unrecognized substrate', () => {
+    expect(substrateToProtocol('something-else')).toBe('HTTP_ENDPOINT');
+  });
+});
+
+describe('ImportAgentWizard — batch draft-import (Step 2)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('imports each selected candidate as a draft with the substrate-mapped protocol, renders per-candidate results, then completes', async () => {
+    const user = userEvent.setup();
+    svc.discoverAgents.mockResolvedValue([batchA, batchB, batchC]);
+    const { onComplete } = renderWizard();
+
+    await gotoCandidates(user);
+    await screen.findByText('Orders Agent');
+
+    // select all three discovered candidates
+    await user.click(screen.getByRole('button', { name: /orders agent/i }));
+    await user.click(screen.getByRole('button', { name: /billing agent/i }));
+    await user.click(screen.getByRole('button', { name: /search agent/i }));
+
+    // one success, one conflict, one error — exercised in selection order
+    svc.importAgent
+      .mockResolvedValueOnce(successResult)
+      .mockResolvedValueOnce(conflictResult)
+      .mockRejectedValueOnce(new Error('boom'));
+
+    await user.click(screen.getByRole('button', { name: /import 3 as drafts/i }));
+
+    await waitFor(() => expect(svc.importAgent).toHaveBeenCalledTimes(3));
+
+    // each call carries the candidate-derived input + substrate-mapped protocol
+    expect(svc.importAgent.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        name: 'Orders Agent',
+        invocationTarget: 'ref-a',
+        substrate: 'agentcore_runtime',
+        invocationProtocol: 'AGENTCORE_RUNTIME',
+        invocationMode: 'sync',
+        invocationAuthMode: 'NONE',
+        region: 'us-east-1',
+        account: '111122223333',
+        sourceArn: 'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/orders',
+      }),
+    );
+    expect(svc.importAgent.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
+        substrate: 'lambda',
+        invocationProtocol: 'LAMBDA_INVOKE',
+        invocationTarget: 'ref-b',
+      }),
+    );
+    expect(svc.importAgent.mock.calls[2][0]).toEqual(
+      expect.objectContaining({
+        substrate: 'http',
+        invocationProtocol: 'HTTP_ENDPOINT',
+        invocationTarget: 'ref-c',
+      }),
+    );
+
+    // per-candidate results: success + conflict (with existing id) + error
+    expect(await screen.findByText('Orders Agent')).toBeInTheDocument();
+    expect(screen.getByText('Billing Agent')).toBeInTheDocument();
+    expect(screen.getByText('Search Agent')).toBeInTheDocument();
+    expect(screen.getByText(/draft created/i)).toBeInTheDocument();
+    expect(screen.getByText(/conflict/i)).toBeInTheDocument();
+    expect(screen.getByText(/agent-existing-9/)).toBeInTheDocument();
+    expect(screen.getByText(/failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/boom/i)).toBeInTheDocument();
+
+    // the DRAFT / skip-per-candidate-test note is surfaced
+    expect(screen.getByText(/attested before activation/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^done$/i }));
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer the batch action for a single selection and keeps the review path intact', async () => {
+    const user = userEvent.setup();
+    svc.discoverAgents.mockResolvedValue([batchA, batchB]);
+    svc.describeAgentCandidate.mockResolvedValue(descriptor);
+    renderWizard();
+
+    await gotoCandidates(user);
+    await screen.findByText('Orders Agent');
+
+    await user.click(screen.getByRole('button', { name: /orders agent/i }));
+
+    // exactly one selected → no batch affordance, and importAgent is untouched
+    expect(
+      screen.queryByRole('button', { name: /import .* as drafts/i }),
+    ).not.toBeInTheDocument();
+    expect(svc.importAgent).not.toHaveBeenCalled();
+
+    // the single-candidate path still advances into the review step
+    await user.click(nextBtn());
+    expect(await screen.findByLabelText(/agent name/i)).toBeInTheDocument();
+  });
+});
+
+describe('ImportAgentWizard — manifest file upload (Step 1)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  async function gotoManifestSource(user: User): Promise<void> {
+    renderWizard();
+    await user.click(screen.getByRole('button', { name: /provide a manifest/i }));
+    await screen.findByLabelText(/agent manifest/i);
+  }
+
+  it('reads a chosen .json file into the manifest field and enables Next', async () => {
+    const user = userEvent.setup();
+    await gotoManifestSource(user);
+
+    const file = new File(['{"agents":[{"name":"x"}]}'], 'manifest.json', {
+      type: 'application/json',
+    });
+    await user.upload(screen.getByLabelText(/upload manifest file/i), file);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/agent manifest/i)).toHaveValue(
+        '{"agents":[{"name":"x"}]}',
+      ),
+    );
+    expect(nextBtn()).not.toBeDisabled();
+  });
+
+  it('shows a parse error when the chosen file is not valid JSON', async () => {
+    const user = userEvent.setup();
+    await gotoManifestSource(user);
+
+    const file = new File(['{ oops'], 'bad.json', {
+      type: 'application/json',
+    });
+    await user.upload(screen.getByLabelText(/upload manifest file/i), file);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/agent manifest/i)).toHaveValue('{ oops'),
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent(/manifest is not valid json/i);
+    expect(nextBtn()).toBeDisabled();
+  });
+
+  it('still accepts a pasted manifest (paste path unchanged)', async () => {
+    const user = userEvent.setup();
+    await gotoManifestSource(user);
+
+    const textarea = screen.getByLabelText(/agent manifest/i);
+    await user.click(textarea);
+    await user.paste('{"agents":[]}');
+
+    expect(textarea).toHaveValue('{"agents":[]}');
+    expect(nextBtn()).not.toBeDisabled();
   });
 });

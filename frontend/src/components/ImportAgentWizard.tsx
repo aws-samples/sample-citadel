@@ -117,6 +117,32 @@ const CONFLICT_OPTIONS: {
   },
 ];
 
+// Maps a discovered candidate's `substrate` (the discovery adapters emit
+// 'agentcore_runtime' | 'lambda' | 'bedrock_agent' | 'http' | 'mcp') to the
+// invocation protocol stamped on the import record. Unknown substrates fall
+// back to HTTP_ENDPOINT — a batch draft is created inactive, and its protocol
+// is re-confirmed during governance attestation before it can be activated.
+const SUBSTRATE_PROTOCOL_MAP: Record<string, AgentInvocationProtocol> = {
+  agentcore_runtime: 'AGENTCORE_RUNTIME',
+  lambda: 'LAMBDA_INVOKE',
+  bedrock_agent: 'BEDROCK_AGENT',
+  http: 'HTTP_ENDPOINT',
+  mcp: 'MCP',
+};
+
+export const substrateToProtocol = (substrate: string): AgentInvocationProtocol =>
+  SUBSTRATE_PROTOCOL_MAP[substrate.trim().toLowerCase()] ?? 'HTTP_ENDPOINT';
+
+// Per-candidate outcome of a batch draft-import. Each imported agent is created
+// as an inactive DRAFT, so a collision or a failure for one candidate never
+// blocks the others — every result is surfaced in the summary.
+interface BatchImportResult {
+  candidate: AgentCandidate;
+  status: 'imported' | 'conflict' | 'error';
+  existingId?: string | null;
+  message?: string;
+}
+
 const errorMessage = (err: unknown, fallback: string): string =>
   err instanceof Error ? err.message : fallback;
 
@@ -173,6 +199,11 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
   const [conflict, setConflict] = useState<ImportAgentResult | null>(null);
   const [conflictChoice, setConflictChoice] = useState<ImportConflictPolicy | null>(null);
   const [registered, setRegistered] = useState(false);
+
+  // Batch draft-import (when multiple candidates are selected). `batchResults`
+  // being non-null switches the wizard into its results view.
+  const [batchImporting, setBatchImporting] = useState(false);
+  const [batchResults, setBatchResults] = useState<BatchImportResult[] | null>(null);
 
   const activeRef = selectedRefs[0] ?? null;
   const fieldConfidence = descriptor?.fieldConfidence ?? {};
@@ -340,6 +371,48 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
     setSelectedRefs((prev) =>
       prev.includes(ref) ? prev.filter((r) => r !== ref) : [...prev, ref],
     );
+  };
+
+  // Assemble a minimal import input directly from a discovered candidate — no
+  // descriptor fetch, no test-invoke. Auth defaults to NONE; the protocol is
+  // inferred from the substrate. The record lands as an inactive DRAFT.
+  const buildBatchImportInput = (c: AgentCandidate): ImportAgentInput => ({
+    name: c.displayName,
+    invocationProtocol: substrateToProtocol(c.substrate),
+    invocationTarget: c.reference,
+    invocationAuthMode: 'NONE',
+    invocationMode: 'sync',
+    region: c.region,
+    account: c.account,
+    sourceArn: c.sourceArn,
+    substrate: c.substrate,
+  });
+
+  // Import every selected candidate as a DRAFT, sequentially, collecting a
+  // per-candidate outcome. One conflict/failure never aborts the batch.
+  const handleBatchImport = async (): Promise<void> => {
+    setBatchImporting(true);
+    const results: BatchImportResult[] = [];
+    for (const ref of selectedRefs) {
+      const c = candidates.find((x) => x.reference === ref);
+      if (!c) continue;
+      try {
+        const result = await agentImportService.importAgent(buildBatchImportInput(c));
+        results.push(
+          result.conflict
+            ? { candidate: c, status: 'conflict', existingId: result.existingId ?? null }
+            : { candidate: c, status: 'imported' },
+        );
+      } catch (err) {
+        results.push({
+          candidate: c,
+          status: 'error',
+          message: errorMessage(err, 'Failed to import agent'),
+        });
+      }
+    }
+    setBatchResults(results);
+    setBatchImporting(false);
   };
 
   const canProceed = (): boolean => {
@@ -538,9 +611,27 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
       <div>
         <h2 className="text-lg font-semibold text-foreground">Discovered candidates</h2>
         <p className="text-sm text-muted-foreground">
-          Select an agent to import. Multiple may be selected; the first is imported now.
+          Select one agent to review and configure in detail, or select several to import
+          them all as inactive drafts.
         </p>
       </div>
+
+      {!candidatesLoading && !candidatesError && selectedRefs.length >= 2 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/5 p-3">
+          <span className="text-sm text-foreground">
+            {selectedRefs.length} candidates selected
+          </span>
+          <Button
+            type="button"
+            onClick={handleBatchImport}
+            disabled={batchImporting}
+            className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
+          >
+            {batchImporting ? <Loader2 className="size-4 mr-2 animate-spin" /> : null}
+            {batchImporting ? 'Importing…' : `Import ${selectedRefs.length} as drafts`}
+          </Button>
+        </div>
+      )}
 
       {candidatesLoading && (
         <div className="flex items-center gap-2 text-muted-foreground py-8 justify-center">
@@ -931,6 +1022,92 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
     </div>
   );
 
+  const renderBatchStatusBadge = (status: BatchImportResult['status']) => {
+    if (status === 'imported') {
+      return (
+        <Badge className="shrink-0 border border-chart-2/40 bg-chart-2/15 text-chart-2">
+          <CheckCircle2 className="size-3 mr-1" />
+          Draft created
+        </Badge>
+      );
+    }
+    if (status === 'conflict') {
+      return (
+        <Badge className="shrink-0 border border-chart-3/40 bg-chart-3/15 text-chart-3">
+          <AlertTriangle className="size-3 mr-1" />
+          Conflict
+        </Badge>
+      );
+    }
+    return (
+      <Badge className="shrink-0 border border-destructive/40 bg-destructive/15 text-destructive">
+        <XCircle className="size-3 mr-1" />
+        Failed
+      </Badge>
+    );
+  };
+
+  const renderBatchResults = () => {
+    const results = batchResults ?? [];
+    const importedCount = results.filter((r) => r.status === 'imported').length;
+    return (
+      <div className="flex flex-col gap-4">
+        <div>
+          <h2 className="text-lg font-semibold text-foreground">Draft import results</h2>
+          <p className="text-sm text-muted-foreground">
+            {importedCount} of {results.length} agents imported as drafts.
+          </p>
+        </div>
+
+        <div
+          role="note"
+          className="flex items-start gap-2 rounded-lg border border-chart-3/40 bg-chart-3/5 p-3 text-sm text-muted-foreground"
+        >
+          <ShieldCheck className="size-4 mt-0.5 text-chart-3" />
+          <span>
+            Batch drafts skip the per-agent reachability test. Each agent is created as a{' '}
+            <span className="font-medium text-foreground">DRAFT</span> and must be tested
+            and attested before activation.
+          </span>
+        </div>
+
+        <ul className="flex flex-col gap-2">
+          {results.map((r) => (
+            <li
+              key={r.candidate.reference}
+              className="flex flex-col gap-1 rounded-lg border border-border bg-card p-3"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="secondary">{r.candidate.substrate}</Badge>
+                    <span className="text-sm font-medium text-foreground">
+                      {r.candidate.displayName}
+                    </span>
+                  </div>
+                  <span className="text-xs text-muted-foreground break-all">
+                    {r.candidate.reference}
+                  </span>
+                </div>
+                {renderBatchStatusBadge(r.status)}
+              </div>
+              {r.status === 'conflict' && r.existingId && (
+                <span className="text-xs text-muted-foreground">
+                  Existing: {r.existingId}
+                </span>
+              )}
+              {r.status === 'error' && r.message && (
+                <span role="alert" className="text-xs text-destructive">
+                  {r.message}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+
   const renderRegisterStep = () => {
     if (registered) {
       return (
@@ -1091,55 +1268,75 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
 
       {/* Step content */}
       <div className="min-h-[18rem]">
-        {currentStep === 'source' && renderSourceStep()}
-        {currentStep === 'candidates' && renderCandidatesStep()}
-        {currentStep === 'review' && renderReviewStep()}
-        {currentStep === 'configure' && renderConfigureStep()}
-        {currentStep === 'register' && renderRegisterStep()}
+        {batchResults !== null ? (
+          renderBatchResults()
+        ) : (
+          <>
+            {currentStep === 'source' && renderSourceStep()}
+            {currentStep === 'candidates' && renderCandidatesStep()}
+            {currentStep === 'review' && renderReviewStep()}
+            {currentStep === 'configure' && renderConfigureStep()}
+            {currentStep === 'register' && renderRegisterStep()}
+          </>
+        )}
       </div>
 
       {/* Footer */}
       <div className="flex items-center justify-between border-t border-border pt-4">
-        <Button
-          variant="outline"
-          onClick={handlePrevious}
-          disabled={currentIndex === 0 || registering}
-          className="cursor-pointer"
-        >
-          Previous
-        </Button>
-
-        {currentStep !== 'register' ? (
-          <Button
-            onClick={handleNext}
-            disabled={!canProceed()}
-            className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
-          >
-            Next
-          </Button>
-        ) : registered ? (
-          <Button
-            onClick={onComplete}
-            className="bg-chart-2 text-foreground hover:bg-chart-2/90 cursor-pointer"
-          >
-            Done
-          </Button>
-        ) : conflict ? (
-          <Button
-            onClick={() => handleRegister(conflictChoice ?? undefined)}
-            disabled={registering || !conflictChoice}
-            className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
-          >
-            {registering ? 'Resubmitting…' : 'Resubmit import'}
-          </Button>
+        {batchResults !== null ? (
+          <>
+            <span aria-hidden="true" />
+            <Button
+              onClick={onComplete}
+              className="bg-chart-2 text-foreground hover:bg-chart-2/90 cursor-pointer"
+            >
+              Done
+            </Button>
+          </>
         ) : (
-          <Button
-            onClick={() => handleRegister()}
-            disabled={registering}
-            className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
-          >
-            {registering ? 'Registering…' : 'Register agent'}
-          </Button>
+          <>
+            <Button
+              variant="outline"
+              onClick={handlePrevious}
+              disabled={currentIndex === 0 || registering}
+              className="cursor-pointer"
+            >
+              Previous
+            </Button>
+
+            {currentStep !== 'register' ? (
+              <Button
+                onClick={handleNext}
+                disabled={!canProceed()}
+                className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
+              >
+                Next
+              </Button>
+            ) : registered ? (
+              <Button
+                onClick={onComplete}
+                className="bg-chart-2 text-foreground hover:bg-chart-2/90 cursor-pointer"
+              >
+                Done
+              </Button>
+            ) : conflict ? (
+              <Button
+                onClick={() => handleRegister(conflictChoice ?? undefined)}
+                disabled={registering || !conflictChoice}
+                className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
+              >
+                {registering ? 'Resubmitting…' : 'Resubmit import'}
+              </Button>
+            ) : (
+              <Button
+                onClick={() => handleRegister()}
+                disabled={registering}
+                className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
+              >
+                {registering ? 'Registering…' : 'Register agent'}
+              </Button>
+            )}
+          </>
         )}
       </div>
     </div>
