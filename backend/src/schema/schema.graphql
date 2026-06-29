@@ -169,6 +169,29 @@ type Mutation {
   # enforces the admin/architect role. Best-effort: a dry-run that throws yields
   # the describe-only descriptor with a probe-incomplete note, not an error.
   probeAgentCandidate(input: TestImportedAgentInput!): AWSJSON!
+  # Admin/architect Tier-3 ASYNC manifest-proposal REQUEST. Gathers SECRET-FREE
+  # signals (substrate / ARN / display-name / Tier-1 capability NAMES / optional
+  # Tier-2 probe summary) for `ref` by reusing the describe path and enqueues a
+  # manifest-proposal job to the Fabricator. The LLM-proposed manifest returns
+  # ASYNC and is parked on the DRAFT record as proposedManifest (pending review)
+  # by the result handler — this request NEVER mutates the record and NEVER
+  # enqueues a secret VALUE. Default Cognito auth; the resolver enforces the
+  # admin/architect role. For a CROSS-ACCOUNT candidate, supply discoveryRoleArn
+  # (+ discoveryExternalId): a READ-ONLY role in the TARGET account assumed
+  # (externalId-gated) for the signal-gathering describe.
+  proposeAgentManifestTier3(
+    ref: String!
+    discoveryRoleArn: String
+    discoveryExternalId: String
+  ): Tier3ProposalResult!
+  # Admin/architect (human) ACCEPT step — the ONLY path that promotes a pending
+  # proposedManifest.manifest into the record's trusted manifest. It NEVER
+  # changes status/state/governanceAttestation: the record STAYS DRAFT and is
+  # never auto-activated (activation still requires the existing attest +
+  # DRAFT→APPROVED gate). Idempotent: accepting an already-accepted proposal
+  # returns the record unchanged. Default Cognito auth; the resolver enforces the
+  # admin/architect role and org-scoping.
+  acceptProposedManifestTier3(importId: String!): AgentConfig!
   deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
   activateProjectAgents(projectId: ID!): ActivateAgentsResult
   updateAgentCode(input: UpdateAgentCodeInput!): AgentCode
@@ -516,6 +539,16 @@ type ProposedManifest {
   sanitized: Boolean
   truncated: Boolean
   error: String
+}
+
+# Result of an async Tier-3 manifest-proposal REQUEST (proposeAgentManifestTier3).
+# The proposal is processed ASYNCHRONOUSLY by the Fabricator; the LLM-proposed
+# manifest is delivered later and parked on the DRAFT record as proposedManifest.
+# `requestId` correlates the async result; `status` is "PENDING" on a successful
+# enqueue.
+type Tier3ProposalResult {
+  requestId: String!
+  status: String!
 }
 
 # --- Agent import (US-IMP) -------------------------------------------------

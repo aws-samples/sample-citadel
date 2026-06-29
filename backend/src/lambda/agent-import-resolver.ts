@@ -23,6 +23,7 @@
  * the shared import-descriptor validator are reused from agent-config-resolver
  * so import and create stay in lock-step.
  */
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { getRegistryService, validateImportDescriptor } from './agent-config-resolver';
 import { createADR } from './adr-resolver';
 import { extractOrgFromEvent, isAdminFromEvent, hasRoleFromEvent } from '../utils/auth-event';
@@ -66,6 +67,7 @@ import type {
   AgentInvocationAuthMode,
   AgentInvocationMode,
   AgentOrigin,
+  ProposedManifestMetadata,
   RegistryRecord,
 } from '../services/registry-service';
 
@@ -156,6 +158,70 @@ const AGENT_METADATA_DEFAULTS: AgentCustomMetadata = {
   state: 'inactive',
 };
 
+// --- Tier-3 manifest proposal (B2): Fabricator-queue enqueue ---------------
+
+/**
+ * SQS client for the Tier-3 manifest-proposal enqueue. Constructed once at
+ * module load (no network I/O); mirrors the fabricator-request-resolver. The
+ * queue URL is read at CALL time (not module load) so unit tests can set it
+ * per case and the resolver stays import-safe when the env var is absent.
+ */
+const sqsClient = new SQSClient({});
+
+/**
+ * Resolve the Fabricator queue URL from the environment at call-time. The CDK
+ * wires {@link process.env.FABRICATOR_QUEUE_URL} to the deterministic
+ * `citadel-fabricator-queue-${env}` URL (the same cross-boundary,
+ * no-cross-stack-ref mechanism the fabricator-request-resolver uses). Throws a
+ * clear error when unset rather than enqueuing to `undefined`.
+ */
+function getFabricatorQueueUrl(): string {
+  const url = process.env.FABRICATOR_QUEUE_URL;
+  if (!url) {
+    throw new Error('FABRICATOR_QUEUE_URL is not configured');
+  }
+  return url;
+}
+
+/**
+ * Result of an async Tier-3 manifest-proposal request. `requestId` correlates
+ * the asynchronous Fabricator result (delivered later as
+ * `agent.import.manifest.proposed`); `status` is 'PENDING' on a successful
+ * enqueue.
+ */
+export interface Tier3ProposalResult {
+  requestId: string;
+  status: string;
+}
+
+/**
+ * SECRET-FREE signal envelope enqueued to the Fabricator for a Tier-3 manifest
+ * proposal. SECURITY INVARIANT 1: it carries ONLY substrate / ARN /
+ * display-name / Tier-1 capability NAMES (and an OPTIONAL Tier-2 probe shape
+ * summary / OpenAPI fragment) — NEVER a secret or credential VALUE. It is
+ * assembled field-by-field from an allow-list (never by spreading the describe
+ * descriptor), so an `invocation.auth.secretRef` / token can never cross the
+ * boundary.
+ */
+interface Tier3ProposalSignals {
+  substrate: string;
+  arn: string | null;
+  displayName: string;
+  tier1Hints: {
+    name?: string;
+    description?: string;
+    version?: string;
+    skills?: unknown;
+    categories?: unknown;
+    inputSchema?: unknown;
+    outputSchema?: unknown;
+    protocol?: string;
+    fieldConfidence?: unknown;
+  };
+  tier2Probe?: string;
+  openApiFragment?: unknown;
+}
+
 /**
  * Synthetic GLOBAL project that every import-triggered Architecture Decision
  * Record is keyed to. An agent import is an account/org-level governance event
@@ -203,6 +269,7 @@ interface ImportAgentEvent {
     input?: unknown;
     ref?: unknown;
     agentId?: unknown;
+    importId?: unknown;
     discoveryRoleArn?: unknown;
     discoveryExternalId?: unknown;
   };
@@ -440,7 +507,14 @@ export function toImportAgentResult(
  */
 export const handler = async (
   event: ImportAgentEvent,
-): Promise<ImportAgentResult | FlatAgentCandidate[] | string | AgentConfig | ImportTestResult> => {
+): Promise<
+  | ImportAgentResult
+  | FlatAgentCandidate[]
+  | string
+  | AgentConfig
+  | ImportTestResult
+  | Tier3ProposalResult
+> => {
   const fieldName = event.info?.fieldName;
   // One correlationId per resolver invocation, shared by the discovery summary
   // event and the failure event for this call.
@@ -473,6 +547,34 @@ export const handler = async (
         // admin/architect authorization gate lives inside probeAgentCandidate.
         requireAuthenticated(event);
         return await probeAgentCandidate(event.arguments?.input, event);
+      }
+      case 'proposeAgentManifestTier3': {
+        // Authentication is required up-front (mirrors the sibling import
+        // mutations); the admin/architect authorization gate lives inside
+        // proposeAgentManifestTier3.
+        requireAuthenticated(event);
+        const ref = asNonEmptyString(event.arguments?.ref);
+        if (!ref) {
+          throw new InvalidSourceRefError('proposeAgentManifestTier3: ref is required');
+        }
+        return await proposeAgentManifestTier3(
+          ref,
+          event,
+          asNonEmptyString(event.arguments?.discoveryRoleArn),
+          asNonEmptyString(event.arguments?.discoveryExternalId),
+          correlationId,
+        );
+      }
+      case 'acceptProposedManifestTier3': {
+        // Authentication is required up-front (mirrors the sibling import
+        // mutations); the admin/architect (human) gate lives inside
+        // acceptProposedManifestTier3.
+        requireAuthenticated(event);
+        const importId = asNonEmptyString(event.arguments?.importId);
+        if (!importId) {
+          throw new Error('acceptProposedManifestTier3: importId is required');
+        }
+        return await acceptProposedManifestTier3(importId, event);
       }
       case 'discoverAgents': {
         requireAuthenticated(event);
@@ -1644,6 +1746,268 @@ export async function probeAgentCandidate(
     };
     return JSON.stringify(merged);
   }
+}
+
+/**
+ * A describe descriptor plus the OPTIONAL Tier-2/Tier-3 signal fields the
+ * propose path may forward. ADDITIVE to {@link AgentCapabilityDescriptor}; kept
+ * local to the resolver.
+ */
+type DescribedDescriptor = AgentCapabilityDescriptor & {
+  outputSample?: unknown;
+  openApiFragment?: unknown;
+};
+
+/**
+ * Assemble the SECRET-FREE {@link Tier3ProposalSignals} from a describe
+ * descriptor. Allow-lists ONLY name-level capability hints — the entire
+ * `invocation` block is dropped except `protocol`, so an `auth.secretRef` /
+ * token / target can never cross to the Fabricator (security invariant 1).
+ * `substrate`/`arn` are re-derived from `ref` (never from the descriptor).
+ */
+function buildTier3ProposalSignals(
+  ref: string,
+  descriptor: DescribedDescriptor,
+): Tier3ProposalSignals {
+  const { substrate } = resolveSourceRef(ref);
+  const isArn = ref.startsWith('arn:');
+  const signals: Tier3ProposalSignals = {
+    substrate,
+    arn: isArn ? ref : null,
+    displayName: asNonEmptyString(descriptor.name) ?? deriveDisplayName(ref),
+    tier1Hints: {
+      name: descriptor.name,
+      description: descriptor.description,
+      version: descriptor.version,
+      skills: descriptor.skills,
+      categories: descriptor.categories,
+      inputSchema: descriptor.inputSchema,
+      outputSchema: descriptor.outputSchema,
+      protocol: descriptor.invocation?.protocol,
+      fieldConfidence: descriptor.fieldConfidence,
+    },
+  };
+  // OPTIONAL Tier-2 probe summary — included ONLY when the describe output
+  // ALREADY carries a sandboxed-probe shape hint (no new invoke is performed
+  // here). It is a sanitized observed-shape sample, never a secret.
+  if (typeof descriptor.outputSample === 'string') {
+    signals.tier2Probe = descriptor.outputSample;
+  }
+  // OPTIONAL OpenAPI fragment — structural metadata only; forwarded when present.
+  if (descriptor.openApiFragment !== undefined) {
+    signals.openApiFragment = descriptor.openApiFragment;
+  }
+  return signals;
+}
+
+/**
+ * SendMessage the Tier-3 manifest-proposal request to the Fabricator queue.
+ * Body conforms to the B1 result-side contract: `requestId` / `correlationId` /
+ * `importId` flow through so the Fabricator can echo them on the async
+ * `agent.import.manifest.proposed` result and the B1 handler can correlate it
+ * back to the DRAFT record. SECURITY INVARIANT 3/5: logs ONLY secret-free
+ * identifiers — NEVER the body, the signals, or any credential.
+ */
+async function sendManifestProposalToFabricator(
+  requestId: string,
+  correlationId: string,
+  importId: string,
+  signals: Tier3ProposalSignals,
+): Promise<void> {
+  const body = { requestId, correlationId, importId, signals };
+  console.log(
+    JSON.stringify({
+      level: 'info',
+      msg: 'agent-import: enqueuing Tier-3 manifest proposal',
+      requestId,
+      correlationId,
+      importId,
+      substrate: signals.substrate,
+    }),
+  );
+  try {
+    await sqsClient.send(
+      new SendMessageCommand({
+        QueueUrl: getFabricatorQueueUrl(),
+        MessageBody: JSON.stringify(body),
+        MessageAttributes: {
+          requestType: { DataType: 'String', StringValue: 'manifest-proposal' },
+          requestId: { DataType: 'String', StringValue: requestId },
+        },
+      }),
+    );
+  } catch (err) {
+    // The underlying SQS error carries no secret (the signals are secret-free);
+    // log it WITHOUT the body.
+    console.error('agent-import: failed to enqueue Tier-3 manifest proposal:', err);
+    throw new Error(`Failed to send manifest proposal to Fabricator: ${String(err)}`);
+  }
+}
+
+/**
+ * Tier-3 REQUEST step (B2): admin/architect-gated. Gathers SECRET-FREE signals
+ * for `ref` by REUSING the describe path (cross-account aware) and enqueues a
+ * `manifest-proposal` job to the Fabricator. The LLM-proposed manifest returns
+ * ASYNCHRONOUSLY and is parked on the DRAFT import record as `proposedManifest`
+ * (pending review) by the B1 result handler — this request NEVER mutates the
+ * record and NEVER enqueues/logs a secret VALUE.
+ *
+ * Authorization mirrors the discovery/attest gate: only `admin` or `architect`
+ * may propose (it inspects the customer's account via the describe path). For a
+ * CROSS-ACCOUNT candidate, supply `discoveryRoleArn` (+ `discoveryExternalId`):
+ * a READ-ONLY role in the TARGET account assumed (externalId-gated) for the
+ * signal-gathering describe.
+ *
+ * @returns `{ requestId, status: 'PENDING' }` on a successful enqueue.
+ */
+export async function proposeAgentManifestTier3(
+  ref: string,
+  event: ImportAgentEvent,
+  discoveryRoleArn?: string,
+  discoveryExternalId?: string,
+  correlationId: string = uuidv4(),
+): Promise<Tier3ProposalResult> {
+  // 1. Authorization: admin OR architect only (same gate as discovery/attest).
+  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, 'architect')) {
+    throw new Error(
+      'Unauthorized: proposeAgentManifestTier3 requires the admin or architect role',
+    );
+  }
+  if (!ref) {
+    throw new InvalidSourceRefError('proposeAgentManifestTier3: ref is required');
+  }
+
+  // 2. Gather SECRET-FREE signals by REUSING the describe path. describe()
+  //    returns a capability descriptor (no secret VALUES); for a CROSS-ACCOUNT
+  //    candidate describeAgentCandidate assumes the supplied READ-ONLY discovery
+  //    role (externalId-gated) so the describe runs in the target account. We
+  //    additionally allow-list ONLY safe fields into the enqueued signals.
+  const descriptor = JSON.parse(
+    await describeAgentCandidate(ref, discoveryRoleArn, discoveryExternalId),
+  ) as DescribedDescriptor;
+  const signals = buildTier3ProposalSignals(ref, descriptor);
+
+  // 3. Enqueue the proposal request. `importId := ref` flows through to the
+  //    async result so the B1 handler targets the right DRAFT record.
+  const requestId = uuidv4();
+  await sendManifestProposalToFabricator(requestId, correlationId, ref, signals);
+
+  return { requestId, status: 'PENDING' };
+}
+
+/**
+ * The B1 {@link ProposedManifestMetadata} type (owned by registry-service.ts,
+ * out of scope for this increment) types `reviewState` as
+ * 'pending_review' | 'failed'. The accept step advances it to 'accepted' and
+ * stamps `reviewedBy`/`reviewedAt`. This local alias widens the union and adds
+ * the audit fields so the promotion code stays type-safe; those fields are
+ * persisted purely as JSON via `serializeCustomMetadata` (JSON.stringify) and
+ * re-surface on the next deserialize, so the runtime contract holds without
+ * widening the shared type.
+ */
+type ReviewedProposedManifest = Omit<ProposedManifestMetadata, 'reviewState'> & {
+  reviewState: ProposedManifestMetadata['reviewState'] | 'accepted';
+  reviewedBy?: string;
+  reviewedAt?: string;
+};
+
+/**
+ * Tier-3 ACCEPT step (B2): the ONLY (human-gated) path that promotes a parked
+ * `proposedManifest.manifest` into the record's TRUSTED manifest. The proposed
+ * manifest was ALREADY recursively sanitized by the B1 result handler.
+ *
+ * SECURITY INVARIANT 2: this NEVER changes `status` / `state` /
+ * `governanceAttestation` — the record STAYS DRAFT and is NEVER auto-activated.
+ * Activation still requires the existing attest + DRAFT→APPROVED gate.
+ *
+ * Authorization mirrors the attest gate: only `admin` or `architect` (both
+ * human roles) may accept; non-admins are additionally org-scoped with the same
+ * cross-tenant not-found masking as `attestAgentImport`.
+ *
+ * Idempotent: accepting an already-'accepted' proposal is a no-op returning the
+ * record. A missing proposal, or a non-promotable ('failed') marker, is a clear
+ * error.
+ *
+ * @returns the mapped AgentConfig (promoted on a transition; unchanged on a
+ *   no-op idempotent accept).
+ */
+export async function acceptProposedManifestTier3(
+  importId: string,
+  event: ImportAgentEvent,
+): Promise<AgentConfig> {
+  // 1. Authorization: admin OR architect (human) only (same gate as attest).
+  const isAdmin = isAdminFromEvent(event);
+  if (!isAdmin && !hasRoleFromEvent(event, 'architect')) {
+    throw new Error(
+      'Unauthorized: acceptProposedManifestTier3 requires the admin or architect role',
+    );
+  }
+
+  const registryService = getRegistryService();
+
+  // 2. Load the record (null → clean not-found).
+  const record = await registryService.getResource('agent', importId);
+  if (!record) {
+    throw new Error(`Agent not found: ${importId}`);
+  }
+
+  const meta = readMeta(registryService, record);
+
+  // 3. Org-scope (non-admin only): same cross-tenant not-found masking as attest.
+  if (!isAdmin) {
+    const callerOrg = await extractOrgFromEvent(event);
+    if (!callerOrg || meta.orgId !== callerOrg) {
+      throw new Error(`Agent not found: ${importId}`);
+    }
+  }
+
+  // 4. Require a parked proposal (widened locally so 'accepted' is representable).
+  const proposed: ReviewedProposedManifest | undefined = meta.proposedManifest;
+  if (!proposed) {
+    throw new Error('No proposed manifest to accept: nothing is pending review');
+  }
+
+  // 5. Idempotent no-op: already accepted → return the record unchanged.
+  if (proposed.reviewState === 'accepted') {
+    return registryService.mapToAgentConfig(record);
+  }
+
+  // 6. Only a 'pending_review' proposal carrying a manifest body can be
+  //    promoted. A 'failed' marker (no body) is a clear, non-promotable error.
+  if (proposed.reviewState !== 'pending_review' || !proposed.manifest) {
+    throw new Error(
+      `No proposed manifest pending review to accept (reviewState=${proposed.reviewState})`,
+    );
+  }
+
+  // 7. PROMOTE the already-sanitized proposedManifest.manifest into the record's
+  //    trusted manifest. INVARIANT 2: status/state/governanceAttestation are
+  //    NEVER touched (spreading `meta` preserves them byte-for-byte); the update
+  //    sends customMetadata ONLY (no name/status), mirroring attestAgentImport,
+  //    so the record STAYS DRAFT.
+  const reviewedBy =
+    asNonEmptyString(event.identity?.sub) ??
+    asNonEmptyString(event.identity?.username) ??
+    'unknown';
+  const updatedProposed: ReviewedProposedManifest = {
+    ...proposed,
+    reviewState: 'accepted',
+    reviewedBy,
+    reviewedAt: new Date().toISOString(),
+  };
+  const mergedMeta: AgentCustomMetadata = {
+    ...meta,
+    manifest: proposed.manifest,
+    // Single boundary cast: the widened reviewState is not assignable back to
+    // the B1 ProposedManifestMetadata field, but the value is only serialized
+    // (JSON.stringify) here, never structurally consumed, so the cast is safe.
+    proposedManifest: updatedProposed as unknown as ProposedManifestMetadata,
+  };
+
+  const updated = await registryService.updateResource('agent', record.recordId, {
+    customMetadata: registryService.serializeCustomMetadata(mergedMeta),
+  });
+  return registryService.mapToAgentConfig(updated);
 }
 
 /** Deserializes a record's custom metadata against the agent defaults. */

@@ -757,6 +757,13 @@ export class BackendStack extends cdk.Stack {
           // instead of using this Lambda's identity. Mirrors the
           // agent-message-handler + agent-config-resolver.
           ACCOUNT_ID: this.account,
+          // Tier-3 agent-import B2: the import resolver's proposeAgentManifestTier3
+          // mutation enqueues a `manifest-proposal` job to the Fabricator queue.
+          // The queue is owned by ArbiterStack; we use the deterministic URL
+          // (not fabricatorQueue.queueUrl) to avoid a circular cross-stack
+          // dependency — the SAME no-cross-ref mechanism the fabricator-request
+          // resolver uses. Scoped sqs:SendMessage grant below.
+          FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'AgentImportResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -857,6 +864,23 @@ export class BackendStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['sts:AssumeRole'],
         resources: ['arn:aws:iam::*:role/*'],
+      })
+    );
+
+    // Tier-3 agent-import B2 (proposeAgentManifestTier3): enqueue a
+    // `manifest-proposal` job to the Fabricator queue. Least privilege:
+    // sqs:SendMessage ONLY (the URL is constructed, so no GetQueueUrl is
+    // needed), scoped to the single fully-qualified queue ARN (no wildcard ⇒ no
+    // AwsSolutions-IAM5 nag). Mirrors the fabricator-request resolver's grant
+    // and references the queue by ARN string (not arbiter-stack's queueArn) so
+    // no cross-stack dependency cycle is introduced.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sqs:SendMessage'],
+        resources: [
+          `arn:aws:sqs:${this.region}:${this.account}:citadel-fabricator-queue-${props.environment}`,
+        ],
       })
     );
 
@@ -2770,6 +2794,24 @@ export class BackendStack extends cdk.Stack {
     agentImportLambdaDataSource.createResolver("ProbeAgentCandidateResolver", {
       typeName: "Mutation",
       fieldName: "probeAgentCandidate",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // Tier-3 agent-import B2 — manifest-proposal REQUEST + human-gated ACCEPT.
+    // Both reuse the existing AgentImport data source: the import resolver now
+    // also carries the scoped sqs:SendMessage grant (propose) and already has
+    // Registry CRUD (accept), so no new Lambda/data source/perms are required.
+    agentImportLambdaDataSource.createResolver("ProposeAgentManifestTier3Resolver", {
+      typeName: "Mutation",
+      fieldName: "proposeAgentManifestTier3",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("AcceptProposedManifestTier3Resolver", {
+      typeName: "Mutation",
+      fieldName: "acceptProposedManifestTier3",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
