@@ -374,6 +374,11 @@ if (app.node.tryGetContext('nag')!== 'false') {
                 [arbiterStack, 'GovernanceUiResolverFn/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'RegistryAgentRecordResolverFunction/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'ReconcileAppsMetaScheduledFunction/ServiceRole/DefaultPolicy/Resource'],
+                // Tier-3 agent import (B1): the manifest RESULT handler reads the
+                // DRAFT import record and updates only its custom metadata
+                // (GetRegistryRecord + UpdateRegistryRecord), scoped to the
+                // registry ARN + its records (<AgentCoreRegistry.RegistryArn>/*).
+                [backendStack, 'AgentImportManifestResultHandler/ServiceRole/DefaultPolicy/Resource'],
                 [servicesStack, 'AgentIntakeSingleRuntime/ExecutionRole/DefaultPolicy/Resource'],
               ];
               for (const [stack, path] of registryArnPaths) {

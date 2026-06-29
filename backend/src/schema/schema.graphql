@@ -492,6 +492,30 @@ type AgentConfig {
   createdAt: AWSDateTime
   updatedAt: AWSDateTime
   manifest: AgentManifest
+  # UNTRUSTED, LLM-proposed manifest parked for human review (Tier-3 agent
+  # import). READ-only; never an active/trusted manifest. Absent unless a
+  # proposal is pending or failed.
+  proposedManifest: ProposedManifest
+}
+
+# UNTRUSTED, LLM-proposed agent manifest (Tier-3 agent import), surfaced
+# READ-only for review UIs. `manifest` is the sanitized proposed body as AWSJSON
+# (the LLM output shape is open); the scalar fields let the UI render the review
+# gate without parsing the blob. confidence is always "low" and reviewState is
+# "pending_review" (a proposal) or "failed" (a failure marker); source is
+# "llm_tier3". Promotion into the trusted AgentConfig.manifest is a separate,
+# human-gated step.
+type ProposedManifest {
+  manifest: AWSJSON
+  confidence: String
+  reviewState: String
+  source: String
+  fieldConfidence: AWSJSON
+  proposedAt: AWSDateTime
+  correlationId: String
+  sanitized: Boolean
+  truncated: Boolean
+  error: String
 }
 
 # --- Agent import (US-IMP) -------------------------------------------------

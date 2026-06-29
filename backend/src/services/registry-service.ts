@@ -152,6 +152,52 @@ export interface AgentOrigin {
   ownership: 'external';
 }
 
+/**
+ * Confidence level for a proposed/inferred descriptor field, mirroring the
+ * agent-source `Confidence` union. Redeclared locally (rather than imported
+ * from ../adapters/agent-source/types) because that module imports its
+ * invocation/origin types FROM this file — keeping the alias here avoids a
+ * circular module dependency. LLM-proposed manifests are always 'low'.
+ */
+export type ProposedManifestConfidence = 'high' | 'medium' | 'low';
+
+/**
+ * UNTRUSTED, LLM-proposed agent manifest stored on a DRAFT import record
+ * (Tier-3 agent import). It is ingested asynchronously from the Fabricator,
+ * recursively sanitized, and parked here PENDING HUMAN REVIEW — it is NEVER
+ * promoted into the trusted {@link AgentCustomMetadata.manifest}, never alters
+ * {@link AgentCustomMetadata.invocation} / `state` /
+ * {@link AgentCustomMetadata.governanceAttestation}, and never activates the
+ * agent. A separate, human-gated accept step (a later increment) is the ONLY
+ * path from here into the trusted manifest.
+ *
+ * Required fields are always stamped by the result handler; the optional
+ * fields are present on the 'pending_review' (proposed) path and mostly absent
+ * on the minimal 'failed' marker.
+ */
+export interface ProposedManifestMetadata {
+  /** The sanitized LLM-proposed manifest. Untrusted-derived; never auto-trusted. */
+  manifest?: Record<string, unknown>;
+  /** Always 'low' for an LLM proposal (invariant: LLM-inferred ⇒ low). */
+  confidence?: ProposedManifestConfidence;
+  /** Review gate. 'pending_review' on a proposal; 'failed' on the failure marker. */
+  reviewState: 'pending_review' | 'failed';
+  /** Provenance — fixed for the Tier-3 LLM path. */
+  source: 'llm_tier3';
+  /** Per-field confidence for the proposed manifest; all 'low' for an LLM proposal. */
+  fieldConfidence?: Record<string, ProposedManifestConfidence>;
+  /** ISO 8601 timestamp the proposal/marker was stored. */
+  proposedAt: string;
+  /** Correlation id from the proposing event (tracing). */
+  correlationId?: string;
+  /** True once the proposed JSON has passed recursive sanitization. */
+  sanitized?: boolean;
+  /** True iff sanitization hit a structural cap and truncated the payload. */
+  truncated?: boolean;
+  /** Sanitized + length-capped failure detail (failure marker only). */
+  error?: string;
+}
+
 export interface AgentCustomMetadata {
   categories: string[];
   icon: string;
@@ -193,6 +239,15 @@ export interface AgentCustomMetadata {
      */
     attestedAt?: string;
   };
+  /**
+   * UNTRUSTED, LLM-proposed manifest parked for human review (Tier-3 agent
+   * import). Additive and READ-only downstream: written ONLY by the
+   * agent-import-manifest result handler, NEVER promoted automatically into
+   * {@link manifest}, and never alters `invocation` / `state` /
+   * `governanceAttestation`. Absent on every record that has no pending
+   * proposal (the overwhelming majority).
+   */
+  proposedManifest?: ProposedManifestMetadata;
 }
 
 /**
@@ -271,6 +326,12 @@ export interface AgentConfig {
   createdAt?: string;
   updatedAt?: string;
   manifest?: Record<string, any>;
+  /**
+   * UNTRUSTED, LLM-proposed manifest surfaced READ-ONLY for review UIs
+   * (Tier-3 agent import). Present only while a proposal is pending/failed;
+   * absent otherwise. Never a trusted/active manifest.
+   */
+  proposedManifest?: ProposedManifestMetadata;
 }
 
 export interface ToolConfig {
@@ -1002,6 +1063,7 @@ export class RegistryService {
     invocation: undefined,
     origin: undefined,
     governanceAttestation: undefined,
+    proposedManifest: undefined,
   };
 
   private static readonly TOOL_METADATA_DEFAULTS: ToolCustomMetadata = {
@@ -1069,6 +1131,11 @@ export class RegistryService {
       createdAt: record.createdAt?.toISOString(),
       updatedAt: record.updatedAt?.toISOString(),
       manifest: meta.manifest,
+      // Surface the UNTRUSTED proposed manifest READ-ONLY when present so review
+      // UIs can read it. This never promotes it into `manifest` or activates it.
+      ...(meta.proposedManifest
+        ? { proposedManifest: meta.proposedManifest }
+        : {}),
     };
   }
 

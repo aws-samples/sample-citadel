@@ -860,6 +860,76 @@ export class BackendStack extends cdk.Stack {
       })
     );
 
+    // ── Agent Import — Manifest RESULT handler (Tier-3 agent import, B1) ─────
+    // Consumes an ASYNC, LLM-proposed manifest from the Fabricator on the shared
+    // agent bus and parks it on the DRAFT import record as UNTRUSTED /
+    // low-confidence / pending-review (NEVER activated). Mirrors the
+    // EventBridge-triggered handler convention: NODEJS_24_X, dist/lambda esbuild
+    // bundle, idempotency table, scoped Registry perms.
+    const agentImportManifestResultHandler = new lambda.Function(
+      this,
+      'AgentImportManifestResultHandler',
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: 'agent-import-manifest-result-handler.handler',
+        code: lambda.Code.fromAsset('dist/lambda'),
+        environment: {
+          REGISTRY_ENABLED: 'true',
+          REGISTRY_ID: registryId,
+          IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, 'AgentImportManifestResultHandlerLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
+      }
+    );
+
+    // Idempotency table: dedupe on correlationId||requestId (duplicate emits).
+    this.idempotencyTable.grantReadWriteData(agentImportManifestResultHandler);
+
+    // Least privilege: READ the DRAFT import record and UPDATE only its custom
+    // metadata. NO status/approval/delete/create — this handler never activates
+    // an agent; it only parks a pending-review proposal under
+    // customMetadata.proposedManifest. Scoped to the registry + its records. The
+    // residual ${registryArn}/* wildcard is covered by the stack-level
+    // AwsSolutions-IAM5 suppression (citadel-scoped bedrock-agentcore ARNs).
+    agentImportManifestResultHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:GetRegistryRecord',
+          'bedrock-agentcore:UpdateRegistryRecord',
+        ],
+        resources: [registryArn, `${registryArn}/*`],
+      })
+    );
+
+    // EventBridge rule on the shared agent bus: route the proposed/failed
+    // manifest-result detail-types to the handler. Detail-type-only match
+    // mirrors FabricationRegistrationRule. This is the CONTRACT anchor — B2 and
+    // the arbiter Fabricator branch MUST emit these detail-types on this bus.
+    const agentImportManifestResultRule = new events.Rule(
+      this,
+      'AgentImportManifestResultRule',
+      {
+        eventBus: this.agentEventBus,
+        ruleName: `citadel-agent-import-manifest-result-${props.environment}`,
+        description:
+          'Routes async LLM-proposed agent-import manifest results (proposed/failed) to the result handler',
+        eventPattern: {
+          detailType: [
+            'agent.import.manifest.proposed',
+            'agent.import.manifest.failed',
+          ],
+        },
+      }
+    );
+    agentImportManifestResultRule.addTarget(
+      new targets.LambdaFunction(agentImportManifestResultHandler, {
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.hours(2),
+      })
+    );
+
     // Agent Code Resolver - for reading/writing agent code from S3
     const agentCodeResolverFunction = new lambda.Function(
       this,
