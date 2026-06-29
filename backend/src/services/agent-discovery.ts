@@ -32,6 +32,7 @@ import type {
   AgentSourceAdapter,
 } from '../adapters/agent-source/base';
 import { EcsSourceAdapter } from '../adapters/agent-source/ecs-source-adapter';
+import { EksSourceAdapter } from '../adapters/agent-source/eks-source-adapter';
 import type { AdapterCredentialProvider } from '../adapters/agent-source/invoke-support';
 import { validateImportDescriptor } from '../lambda/agent-config-resolver';
 import { assumeRoleCredentials, type AssumedRoleCredentials } from '../utils/trust-path';
@@ -94,15 +95,17 @@ export interface ResolvedSourceRef {
  * | arn:aws:lambda:*:*:function:*                 | LAMBDA_INVOKE     | lambda            |
  * | arn:aws:bedrock:*:*:agent-alias/* | agent/*   | BEDROCK_AGENT     | bedrock_agent     |
  * | arn:aws:ecs:*:*:service/*                     | HTTP_ENDPOINT     | ecs               |
+ * | arn:aws:eks:*:*:cluster/*                     | HTTP_ENDPOINT     | eks               |
  * | mcp://… | mcp+http(s)://…                       | MCP               | mcp               |
  * | http(s)://…                                   | HTTP_ENDPOINT     | http              |
  *
- * ECS is a DISCOVERY SUBSTRATE: a service ARN invokes over HTTP_ENDPOINT, but
- * discover/describe are substrate-specific (resolve the service's endpoint).
+ * ECS and EKS are DISCOVERY SUBSTRATES: a service/cluster ARN invokes over
+ * HTTP_ENDPOINT, but discover/describe are substrate-specific (they resolve the
+ * agent's endpoint; EKS additionally never uses the cluster's k8s API endpoint).
  *
  * @throws {UnsupportedSourceError} a well-formed ARN whose service is not a
- *   phase-1 substrate (EKS/EC2/Step Functions/SageMaker, a non-service ECS ARN,
- *   or any other).
+ *   phase-1 substrate (EC2/Step Functions/SageMaker, a non-service ECS ARN, a
+ *   non-cluster EKS ARN, or any other).
  * @throws {InvalidSourceRefError} a ref that is neither a well-formed ARN nor a
  *   supported URL scheme.
  */
@@ -181,9 +184,20 @@ function resolveArn(arn: string): ResolvedSourceRef {
     return { protocol: 'HTTP_ENDPOINT', substrate: 'ecs', target: arn };
   }
 
-  // Any other AWS service (EKS/EC2/Step Functions/SageMaker, SQS, non-service
-  // ECS, …) is a well-formed but unsupported substrate — typed so tag-scans
-  // skip-and-continue.
+  // EKS is a DISCOVERY SUBSTRATE (US-IMP-019): a CLUSTER ARN resolves to an
+  // HTTP_ENDPOINT invocation — the agent is reached over HTTP, while
+  // discover/describe are substrate-specific (they enumerate clusters and
+  // resolve the agent endpoint via the cluster's `citadel:endpoint` tag or a
+  // cluster-tagged load balancer; the cluster's own `endpoint` is the k8s API
+  // server, never the agent target). Non-cluster EKS ARNs (nodegroup,
+  // fargateprofile) stay unsupported below.
+  if (service === 'eks' && resource.startsWith('cluster/')) {
+    return { protocol: 'HTTP_ENDPOINT', substrate: 'eks', target: arn };
+  }
+
+  // Any other AWS service (EC2/Step Functions/SageMaker, SQS, non-service
+  // ECS, non-cluster EKS, …) is a well-formed but unsupported substrate —
+  // typed so tag-scans skip-and-continue.
   throw new UnsupportedSourceError(service);
 }
 
@@ -512,7 +526,7 @@ export interface DiscoveryAdapterDeps {
  * INVOKES through a standard protocol (HTTP_ENDPOINT for ECS). This is the
  * single substrate→adapter dispatch point so `describeAgentCandidate` can route
  * by substrate; it mirrors the protocol-keyed
- * {@link AgentSourceAdapterRegistry}. Future substrates (EKS/EC2) add a case
+ * {@link AgentSourceAdapterRegistry}. Future substrates (EC2) add a case
  * here.
  */
 export function getDiscoveryAdapterForSubstrate(
@@ -522,6 +536,8 @@ export function getDiscoveryAdapterForSubstrate(
   switch (substrate) {
     case 'ecs':
       return new EcsSourceAdapter({ credentialProvider: deps.credentialProvider });
+    case 'eks':
+      return new EksSourceAdapter({ credentialProvider: deps.credentialProvider });
     default:
       return undefined;
   }

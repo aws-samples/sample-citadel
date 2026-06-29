@@ -81,7 +81,9 @@ describe('resolveSourceRef', () => {
 
   it.each([
     'arn:aws:ecs:us-east-1:123456789012:task/abc',
-    'arn:aws:eks:us-east-1:123456789012:cluster/abc',
+    // EKS CLUSTER ARNs now resolve (US-IMP-019); a non-cluster EKS ARN
+    // (nodegroup/fargateprofile) stays unsupported.
+    'arn:aws:eks:us-east-1:123456789012:nodegroup/my-cluster/my-ng/abc12345',
     'arn:aws:ec2:us-east-1:123456789012:instance/i-abc',
     'arn:aws:states:us-east-1:123456789012:stateMachine:abc',
     'arn:aws:sagemaker:us-east-1:123456789012:endpoint/abc',
@@ -95,7 +97,7 @@ describe('resolveSourceRef', () => {
     );
     const err = (() => {
       try {
-        resolveSourceRef('arn:aws:eks:us-east-1:1:cluster/x');
+        resolveSourceRef('arn:aws:eks:us-east-1:1:nodegroup/c/n/abc12345');
         return undefined;
       } catch (e) {
         return e;

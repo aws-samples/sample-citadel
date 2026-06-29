@@ -1155,22 +1155,28 @@ export class BackendStack extends cdk.Stack {
       );
     }
 
-    // US-IMP-018: the ECS source adapter (a DISCOVERY SUBSTRATE) resolves an ECS
-    // service's HTTP endpoint by following its load balancer
-    // (loadBalancers -> targetGroupArn -> ELBv2 DescribeTargetGroups ->
-    // LoadBalancerArns -> DescribeLoadBalancers -> DNSName). The ECS reads
-    // (ecs:ListClusters/ListServices/DescribeServices/DescribeTaskDefinition) are
-    // ALREADY granted by buildImportDiscoveryPolicy() above; this adds the
-    // companion read-only ELBv2 Describe actions. Both ELBv2 calls are
-    // List/Describe-class reads with no resource-level scoping, so Resource '*'
-    // (the cdk-nag IAM5 finding on this role's DefaultPolicy is suppressed with
-    // the read-only ECS/ELB discovery justification in bin/app.ts).
+    // US-IMP-018 (ECS) + US-IMP-019 (EKS): both DISCOVERY SUBSTRATES resolve an
+    // agent's HTTP endpoint via a load balancer. ECS follows its service's
+    // target group (loadBalancers -> targetGroupArn -> DescribeTargetGroups ->
+    // LoadBalancerArns -> DescribeLoadBalancers -> DNSName); EKS enumerates load
+    // balancers and matches one tagged for the cluster (DescribeLoadBalancers +
+    // DescribeTags -> kubernetes.io/cluster/<name>=owned|shared or
+    // elbv2.k8s.aws/cluster=<name> -> DNSName). The ECS reads
+    // (ecs:ListClusters/ListServices/DescribeServices/DescribeTaskDefinition) and
+    // the EKS reads (eks:ListClusters/eks:DescribeCluster) are ALREADY granted by
+    // buildImportDiscoveryPolicy() above; this adds the companion read-only ELBv2
+    // Describe actions (DescribeTags is required by the EKS LB->cluster match).
+    // All three ELBv2 calls are List/Describe-class reads with no resource-level
+    // scoping, so Resource '*' (the cdk-nag IAM5 finding on this role's
+    // DefaultPolicy is suppressed with the read-only ECS/ELB discovery
+    // justification in bin/app.ts).
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
           'elasticloadbalancing:DescribeTargetGroups',
           'elasticloadbalancing:DescribeLoadBalancers',
+          'elasticloadbalancing:DescribeTags',
         ],
         resources: ['*'],
       }),
