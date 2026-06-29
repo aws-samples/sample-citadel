@@ -69,6 +69,19 @@ export interface DiscoverAgentsInput {
   tagValue?: string;
   ref?: string;
   manifest?: Record<string, unknown>;
+  /**
+   * Optional read-only IAM role ARN in the *target* AWS account that Citadel
+   * assumes (presenting `discoveryExternalId`) to SCAN/DESCRIBE a cross-account
+   * target. Operator-supplied for cross-account discovery; omitted for
+   * same-account scans. Distinct from the import-time `invocationRoleArn`
+   * (cross-account invoke) and `invocationAnalysisRoleArn` (trust-path analysis).
+   */
+  discoveryRoleArn?: string;
+  /**
+   * Optional external ID Citadel presents when assuming `discoveryRoleArn`.
+   * Only meaningful for cross-account discovery whose role trust policy requires it.
+   */
+  discoveryExternalId?: string;
 }
 
 /**

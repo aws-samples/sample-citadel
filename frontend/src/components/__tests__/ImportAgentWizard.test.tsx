@@ -876,3 +876,116 @@ describe('ImportAgentWizard — Step 4 cross-account invoke role (ARN + external
     ).toBeUndefined();
   });
 });
+
+describe('ImportAgentWizard — Step 1 cross-account discovery (SCAN)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const discoveryArn = 'arn:aws:iam::444455556666:role/citadel-discovery-readonly';
+  const discoveryExt = 'citadel-ext-scan-1';
+
+  it('renders optional "Discovery role ARN" + "External ID" inputs in the SCAN sub-form that do not block Next when blank', async () => {
+    const user = userEvent.setup();
+    renderWizard();
+
+    // present in the default SCAN sub-form
+    expect(screen.getByLabelText(/discovery role arn/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/external id/i)).toBeInTheDocument();
+
+    // blank discovery fields never gate Step 1 — region alone enables Next
+    expect(nextBtn()).toBeDisabled();
+    await user.type(screen.getByLabelText(/aws region/i), 'us-east-1');
+    expect(nextBtn()).not.toBeDisabled();
+  });
+
+  it('threads a filled discovery role + external id into BOTH discoverAgents (scan) and describeAgentCandidate (describe)', async () => {
+    const user = userEvent.setup();
+    svc.discoverAgents.mockResolvedValue([candidate]);
+    svc.describeAgentCandidate.mockResolvedValue(descriptor);
+    renderWizard();
+
+    await user.type(screen.getByLabelText(/aws region/i), 'us-east-1');
+    await user.type(screen.getByLabelText(/discovery role arn/i), discoveryArn);
+    await user.type(screen.getByLabelText(/external id/i), discoveryExt);
+    await user.click(nextBtn());
+
+    // the scan carries the discovery role + external id
+    await waitFor(() => expect(svc.discoverAgents).toHaveBeenCalledTimes(1));
+    expect(svc.discoverAgents.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        source: 'SCAN',
+        region: 'us-east-1',
+        discoveryRoleArn: discoveryArn,
+        discoveryExternalId: discoveryExt,
+      }),
+    );
+
+    // describing a scanned candidate forwards the same values
+    await screen.findByText('Orders Agent');
+    await user.click(screen.getByRole('button', { name: /orders agent/i }));
+    await user.click(nextBtn());
+
+    await waitFor(() =>
+      expect(svc.describeAgentCandidate).toHaveBeenCalledTimes(1),
+    );
+    expect(svc.describeAgentCandidate).toHaveBeenCalledWith('ref-orders-1', {
+      discoveryRoleArn: discoveryArn,
+      discoveryExternalId: discoveryExt,
+    });
+  });
+
+  it('omits discovery fields from discoverAgents and the describe call when left blank', async () => {
+    const user = userEvent.setup();
+    svc.discoverAgents.mockResolvedValue([candidate]);
+    svc.describeAgentCandidate.mockResolvedValue(descriptor);
+    renderWizard();
+
+    await user.type(screen.getByLabelText(/aws region/i), 'us-east-1');
+    await user.click(nextBtn());
+
+    await waitFor(() => expect(svc.discoverAgents).toHaveBeenCalledTimes(1));
+    const scanInput = svc.discoverAgents.mock.calls[0][0];
+    expect(scanInput.discoveryRoleArn).toBeUndefined();
+    expect(scanInput.discoveryExternalId).toBeUndefined();
+
+    await screen.findByText('Orders Agent');
+    await user.click(screen.getByRole('button', { name: /orders agent/i }));
+    await user.click(nextBtn());
+
+    await waitFor(() =>
+      expect(svc.describeAgentCandidate).toHaveBeenCalledTimes(1),
+    );
+    // describe called with just the ref — no discovery opts argument
+    expect(svc.describeAgentCandidate).toHaveBeenCalledWith('ref-orders-1');
+    expect(svc.describeAgentCandidate.mock.calls[0][1]).toBeUndefined();
+  });
+
+  it('PASTE describe is unaffected: describeAgentCandidate is called without discovery args', async () => {
+    const user = userEvent.setup();
+    svc.discoverAgents.mockResolvedValue([candidate]);
+    svc.describeAgentCandidate.mockResolvedValue(descriptor);
+    renderWizard();
+
+    // switch to PASTE and provide a ref (the SCAN discovery inputs are hidden)
+    await user.click(screen.getByRole('button', { name: /paste a reference/i }));
+    await user.type(
+      screen.getByLabelText(/agent reference/i),
+      'arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/orders',
+    );
+    await user.click(nextBtn());
+
+    await waitFor(() => expect(svc.discoverAgents).toHaveBeenCalledTimes(1));
+    expect(svc.discoverAgents.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ source: 'PASTE' }),
+    );
+
+    await screen.findByText('Orders Agent');
+    await user.click(screen.getByRole('button', { name: /orders agent/i }));
+    await user.click(nextBtn());
+
+    await waitFor(() =>
+      expect(svc.describeAgentCandidate).toHaveBeenCalledTimes(1),
+    );
+    expect(svc.describeAgentCandidate).toHaveBeenCalledWith('ref-orders-1');
+    expect(svc.describeAgentCandidate.mock.calls[0][1]).toBeUndefined();
+  });
+});

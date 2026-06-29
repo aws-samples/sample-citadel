@@ -167,6 +167,12 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
   const [tagValue, setTagValue] = useState('');
   const [pasteRef, setPasteRef] = useState('');
   const [manifestText, setManifestText] = useState('');
+  // Optional cross-account SCAN discovery: a read-only role (+ external id) in
+  // the target account that Citadel assumes to scan/describe a cross-account
+  // target. Threaded into discoverAgents AND describeAgentCandidate; omitted
+  // when blank. SCAN-only — PASTE/MANIFEST never send these.
+  const [discoveryRoleArn, setDiscoveryRoleArn] = useState('');
+  const [discoveryExternalId, setDiscoveryExternalId] = useState('');
 
   // Step 2 — Candidates
   const [candidates, setCandidates] = useState<AgentCandidate[]>([]);
@@ -250,6 +256,8 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
           region: region.trim() || undefined,
           tagKey: tagKey.trim() || undefined,
           tagValue: tagValue.trim() || undefined,
+          discoveryRoleArn: discoveryRoleArn.trim() || undefined,
+          discoveryExternalId: discoveryExternalId.trim() || undefined,
         };
       } else if (source === 'PASTE') {
         input = { source: 'PASTE', ref: pasteRef.trim() };
@@ -265,11 +273,30 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
     }
   };
 
+  // Cross-account discovery opts for describing a SCAN-discovered candidate.
+  // Returns undefined for non-SCAN sources or when both fields are blank, so
+  // describeAgentCandidate is called with just the ref (back-compat).
+  const describeDiscoveryOpts = ():
+    | { discoveryRoleArn?: string; discoveryExternalId?: string }
+    | undefined => {
+    if (source !== 'SCAN') return undefined;
+    const roleArn = discoveryRoleArn.trim();
+    const extId = discoveryExternalId.trim();
+    if (!roleArn && !extId) return undefined;
+    return {
+      discoveryRoleArn: roleArn || undefined,
+      discoveryExternalId: extId || undefined,
+    };
+  };
+
   const loadDescriptor = async (ref: string): Promise<void> => {
     setDescriptorLoading(true);
     setDescriptorError(null);
     try {
-      const d = await agentImportService.describeAgentCandidate(ref);
+      const opts = describeDiscoveryOpts();
+      const d = opts
+        ? await agentImportService.describeAgentCandidate(ref, opts)
+        : await agentImportService.describeAgentCandidate(ref);
       setDescriptor(d);
       setEditedName(d.name);
       setCategoriesText((d.categories ?? []).join(', '));
@@ -569,6 +596,31 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
                 placeholder="payments"
               />
             </div>
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="discovery-role-arn">
+              Discovery role ARN (target account)
+            </Label>
+            <Input
+              id="discovery-role-arn"
+              value={discoveryRoleArn}
+              onChange={(e) => setDiscoveryRoleArn(e.target.value)}
+              placeholder="arn:aws:iam::<target-account>:role/<read-only-discovery-role>"
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="discovery-external-id">External ID</Label>
+            <Input
+              id="discovery-external-id"
+              value={discoveryExternalId}
+              onChange={(e) => setDiscoveryExternalId(e.target.value)}
+              placeholder="external ID required by the discovery role's trust policy"
+            />
+            <p className="text-xs text-muted-foreground">
+              Optional: a read-only role in the target account that Citadel assumes —
+              with the external id — to scan/describe a cross-account target. Leave
+              blank for same-account discovery.
+            </p>
           </div>
         </div>
       )}

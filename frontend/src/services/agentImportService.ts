@@ -40,10 +40,20 @@ const discoverAgentsQuery = `
 `;
 
 // `describeAgentCandidate` returns the AWSJSON scalar (a JSON string), so the
-// operation has no sub-selection set.
+// operation has no sub-selection set. The optional cross-account discovery
+// variables are nullable — omitting them from the variables object leaves the
+// backend's same-account describe path unchanged (back-compat).
 const describeAgentCandidateQuery = `
-  query DescribeAgentCandidate($ref: String!) {
-    describeAgentCandidate(ref: $ref)
+  query DescribeAgentCandidate(
+    $ref: String!
+    $discoveryRoleArn: String
+    $discoveryExternalId: String
+  ) {
+    describeAgentCandidate(
+      ref: $ref
+      discoveryRoleArn: $discoveryRoleArn
+      discoveryExternalId: $discoveryExternalId
+    )
   }
 `;
 
@@ -163,12 +173,30 @@ export const agentImportService = {
    * Resolve a discovered candidate's opaque `ref` to its capability descriptor.
    * The AWSJSON result is JSON-parsed into a typed descriptor; a malformed
    * payload throws a clear error.
+   *
+   * For a cross-account SCAN-discovered candidate, pass the same read-only
+   * discovery role + external ID used for the scan via `opts`; they are sent as
+   * query variables only when present (existing same-account callers omit them
+   * entirely — back-compat).
    */
-  async describeAgentCandidate(ref: string): Promise<AgentCapabilityDescriptor> {
+  async describeAgentCandidate(
+    ref: string,
+    opts?: { discoveryRoleArn?: string; discoveryExternalId?: string }
+  ): Promise<AgentCapabilityDescriptor> {
     try {
+      const variables: {
+        ref: string;
+        discoveryRoleArn?: string;
+        discoveryExternalId?: string;
+      } = { ref };
+      if (opts?.discoveryRoleArn) variables.discoveryRoleArn = opts.discoveryRoleArn;
+      if (opts?.discoveryExternalId) {
+        variables.discoveryExternalId = opts.discoveryExternalId;
+      }
+
       const response = await serverService.query<{ describeAgentCandidate: string }>(
         describeAgentCandidateQuery,
-        { ref }
+        variables
       );
 
       return parseCapabilityDescriptor(response.describeAgentCandidate);

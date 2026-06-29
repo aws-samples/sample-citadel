@@ -96,6 +96,24 @@ describe('agentImportService', () => {
         agentImportService.discoverAgents({ source: 'SCAN' })
       ).rejects.toThrow('AccessDenied: tagging scan');
     });
+
+    it('forwards cross-account discovery fields (discoveryRoleArn/discoveryExternalId) verbatim in the input', async () => {
+      const input: DiscoverAgentsInput = {
+        source: 'SCAN',
+        region: 'us-west-2',
+        discoveryRoleArn: 'arn:aws:iam::444455556666:role/citadel-discovery-readonly',
+        discoveryExternalId: 'citadel-ext-scan-1',
+      };
+      query.mockResolvedValue({ discoverAgents: [] });
+
+      await agentImportService.discoverAgents(input);
+
+      // discoverAgents passes the whole input through unchanged
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('discoverAgents'),
+        { input }
+      );
+    });
   });
 
   describe('describeAgentCandidate', () => {
@@ -152,6 +170,47 @@ describe('agentImportService', () => {
       await expect(
         agentImportService.describeAgentCandidate('missing')
       ).rejects.toThrow('NotFound: ref');
+    });
+
+    it('sends discoveryRoleArn/discoveryExternalId as query variables when provided (cross-account describe)', async () => {
+      query.mockResolvedValue({ describeAgentCandidate: JSON.stringify(descriptor) });
+
+      const result = await agentImportService.describeAgentCandidate('ref-xacct', {
+        discoveryRoleArn: 'arn:aws:iam::444455556666:role/citadel-discovery-readonly',
+        discoveryExternalId: 'citadel-ext-scan-1',
+      });
+
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('describeAgentCandidate'),
+        {
+          ref: 'ref-xacct',
+          discoveryRoleArn: 'arn:aws:iam::444455556666:role/citadel-discovery-readonly',
+          discoveryExternalId: 'citadel-ext-scan-1',
+        }
+      );
+      expect(result).toEqual(descriptor);
+    });
+
+    it('omits discovery variables entirely when no opts are passed (back-compat: variables are exactly { ref })', async () => {
+      query.mockResolvedValue({ describeAgentCandidate: JSON.stringify(descriptor) });
+
+      await agentImportService.describeAgentCandidate('ref-plain');
+
+      expect(query.mock.calls[0][1]).toEqual({ ref: 'ref-plain' });
+    });
+
+    it('only sends the provided discovery values, omitting blank ones', async () => {
+      query.mockResolvedValue({ describeAgentCandidate: JSON.stringify(descriptor) });
+
+      await agentImportService.describeAgentCandidate('ref-partial', {
+        discoveryRoleArn: 'arn:aws:iam::444455556666:role/r',
+        discoveryExternalId: '',
+      });
+
+      expect(query.mock.calls[0][1]).toEqual({
+        ref: 'ref-partial',
+        discoveryRoleArn: 'arn:aws:iam::444455556666:role/r',
+      });
     });
   });
 
