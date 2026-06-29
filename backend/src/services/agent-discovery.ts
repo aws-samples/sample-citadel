@@ -33,6 +33,7 @@ import type {
 } from '../adapters/agent-source/base';
 import { EcsSourceAdapter } from '../adapters/agent-source/ecs-source-adapter';
 import { EksSourceAdapter } from '../adapters/agent-source/eks-source-adapter';
+import { Ec2SourceAdapter } from '../adapters/agent-source/ec2-source-adapter';
 import type { AdapterCredentialProvider } from '../adapters/agent-source/invoke-support';
 import { validateImportDescriptor } from '../lambda/agent-config-resolver';
 import { assumeRoleCredentials, type AssumedRoleCredentials } from '../utils/trust-path';
@@ -96,6 +97,7 @@ export interface ResolvedSourceRef {
  * | arn:aws:bedrock:*:*:agent-alias/* | agent/*   | BEDROCK_AGENT     | bedrock_agent     |
  * | arn:aws:ecs:*:*:service/*                     | HTTP_ENDPOINT     | ecs               |
  * | arn:aws:eks:*:*:cluster/*                     | HTTP_ENDPOINT     | eks               |
+ * | arn:aws:ec2:*:*:instance/i-*                  | HTTP_ENDPOINT     | ec2               |
  * | mcp://… | mcp+http(s)://…                       | MCP               | mcp               |
  * | http(s)://…                                   | HTTP_ENDPOINT     | http              |
  *
@@ -104,8 +106,8 @@ export interface ResolvedSourceRef {
  * agent's endpoint; EKS additionally never uses the cluster's k8s API endpoint).
  *
  * @throws {UnsupportedSourceError} a well-formed ARN whose service is not a
- *   phase-1 substrate (EC2/Step Functions/SageMaker, a non-service ECS ARN, a
- *   non-cluster EKS ARN, or any other).
+ *   phase-1 substrate (Step Functions/SageMaker, a non-service ECS ARN, a
+ *   non-cluster EKS ARN, a non-instance EC2 ARN, or any other).
  * @throws {InvalidSourceRefError} a ref that is neither a well-formed ARN nor a
  *   supported URL scheme.
  */
@@ -195,9 +197,20 @@ function resolveArn(arn: string): ResolvedSourceRef {
     return { protocol: 'HTTP_ENDPOINT', substrate: 'eks', target: arn };
   }
 
-  // Any other AWS service (EC2/Step Functions/SageMaker, SQS, non-service
-  // ECS, non-cluster EKS, …) is a well-formed but unsupported substrate —
-  // typed so tag-scans skip-and-continue.
+  // EC2 is a DISCOVERY SUBSTRATE (US-IMP-020): an INSTANCE ARN resolves to an
+  // HTTP_ENDPOINT invocation — the agent is reached over HTTP, while
+  // discover/describe are substrate-specific (they enumerate running instances
+  // and resolve the agent endpoint via the instance's `citadel:endpoint` tag, a
+  // load balancer the instance is a registered target of, or the instance's
+  // private DNS/IP). Non-instance EC2 ARNs (vpc, security-group, volume, …) stay
+  // unsupported below.
+  if (service === 'ec2' && resource.startsWith('instance/')) {
+    return { protocol: 'HTTP_ENDPOINT', substrate: 'ec2', target: arn };
+  }
+
+  // Any other AWS service (Step Functions/SageMaker, SQS, non-service ECS,
+  // non-cluster EKS, non-instance EC2, …) is a well-formed but unsupported
+  // substrate — typed so tag-scans skip-and-continue.
   throw new UnsupportedSourceError(service);
 }
 
@@ -526,8 +539,8 @@ export interface DiscoveryAdapterDeps {
  * INVOKES through a standard protocol (HTTP_ENDPOINT for ECS). This is the
  * single substrate→adapter dispatch point so `describeAgentCandidate` can route
  * by substrate; it mirrors the protocol-keyed
- * {@link AgentSourceAdapterRegistry}. Future substrates (EC2) add a case
- * here.
+ * {@link AgentSourceAdapterRegistry}. ECS, EKS, and EC2 are wired here; future
+ * substrates add a case.
  */
 export function getDiscoveryAdapterForSubstrate(
   substrate: string,
@@ -538,6 +551,8 @@ export function getDiscoveryAdapterForSubstrate(
       return new EcsSourceAdapter({ credentialProvider: deps.credentialProvider });
     case 'eks':
       return new EksSourceAdapter({ credentialProvider: deps.credentialProvider });
+    case 'ec2':
+      return new Ec2SourceAdapter({ credentialProvider: deps.credentialProvider });
     default:
       return undefined;
   }

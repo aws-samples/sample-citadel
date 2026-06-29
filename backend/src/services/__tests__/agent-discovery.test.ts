@@ -84,7 +84,9 @@ describe('resolveSourceRef', () => {
     // EKS CLUSTER ARNs now resolve (US-IMP-019); a non-cluster EKS ARN
     // (nodegroup/fargateprofile) stays unsupported.
     'arn:aws:eks:us-east-1:123456789012:nodegroup/my-cluster/my-ng/abc12345',
-    'arn:aws:ec2:us-east-1:123456789012:instance/i-abc',
+    // EC2 INSTANCE ARNs now resolve (US-IMP-020); a non-instance EC2 ARN
+    // (vpc/security-group/volume) stays unsupported.
+    'arn:aws:ec2:us-east-1:123456789012:vpc/vpc-0abc1234',
     'arn:aws:states:us-east-1:123456789012:stateMachine:abc',
     'arn:aws:sagemaker:us-east-1:123456789012:endpoint/abc',
   ])('throws UnsupportedSourceError for %s', (arn) => {

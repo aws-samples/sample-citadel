@@ -1155,26 +1155,32 @@ export class BackendStack extends cdk.Stack {
       );
     }
 
-    // US-IMP-018 (ECS) + US-IMP-019 (EKS): both DISCOVERY SUBSTRATES resolve an
-    // agent's HTTP endpoint via a load balancer. ECS follows its service's
-    // target group (loadBalancers -> targetGroupArn -> DescribeTargetGroups ->
-    // LoadBalancerArns -> DescribeLoadBalancers -> DNSName); EKS enumerates load
-    // balancers and matches one tagged for the cluster (DescribeLoadBalancers +
-    // DescribeTags -> kubernetes.io/cluster/<name>=owned|shared or
-    // elbv2.k8s.aws/cluster=<name> -> DNSName). The ECS reads
-    // (ecs:ListClusters/ListServices/DescribeServices/DescribeTaskDefinition) and
-    // the EKS reads (eks:ListClusters/eks:DescribeCluster) are ALREADY granted by
+    // US-IMP-018 (ECS) + US-IMP-019 (EKS) + US-IMP-020 (EC2): three DISCOVERY
+    // SUBSTRATES that resolve an agent's HTTP endpoint via a load balancer. ECS
+    // follows its service's target group (loadBalancers -> targetGroupArn ->
+    // DescribeTargetGroups -> LoadBalancerArns -> DescribeLoadBalancers ->
+    // DNSName); EKS enumerates load balancers and matches one tagged for the
+    // cluster (DescribeLoadBalancers + DescribeTags -> kubernetes.io/cluster/
+    // <name>=owned|shared or elbv2.k8s.aws/cluster=<name> -> DNSName); EC2
+    // enumerates target groups and matches one the instance is a REGISTERED
+    // target of (DescribeTargetGroups -> DescribeTargetHealth match on the
+    // InstanceId -> DescribeLoadBalancers -> DNSName). The ECS reads
+    // (ecs:ListClusters/ListServices/DescribeServices/DescribeTaskDefinition),
+    // the EKS reads (eks:ListClusters/eks:DescribeCluster) and the EC2 reads
+    // (ec2:DescribeInstances/DescribeTags) are ALREADY granted by
     // buildImportDiscoveryPolicy() above; this adds the companion read-only ELBv2
-    // Describe actions (DescribeTags is required by the EKS LB->cluster match).
-    // All three ELBv2 calls are List/Describe-class reads with no resource-level
-    // scoping, so Resource '*' (the cdk-nag IAM5 finding on this role's
-    // DefaultPolicy is suppressed with the read-only ECS/ELB discovery
-    // justification in bin/app.ts).
+    // Describe actions (DescribeTags is required by the EKS LB->cluster match;
+    // DescribeTargetHealth by the EC2 instance->target-group match). All four
+    // ELBv2 calls are List/Describe-class reads with no resource-level scoping,
+    // so Resource '*' (the cdk-nag IAM5 finding on this role's DefaultPolicy is
+    // suppressed with the read-only ECS/ELB discovery justification in
+    // bin/app.ts).
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
           'elasticloadbalancing:DescribeTargetGroups',
+          'elasticloadbalancing:DescribeTargetHealth',
           'elasticloadbalancing:DescribeLoadBalancers',
           'elasticloadbalancing:DescribeTags',
         ],
