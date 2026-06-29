@@ -198,6 +198,38 @@ export interface ProposedManifestMetadata {
   error?: string;
 }
 
+/**
+ * Classification of a best-effort reachability probe (US-IMP-017b). Redeclared
+ * locally (rather than imported from ../utils/reachability-probe) to keep this
+ * service free of a utility import and consistent with the locally-declared
+ * {@link ProposedManifestConfidence}.
+ */
+export type AgentReachabilityClassification =
+  | 'reachable'
+  | 'unreachable'
+  | 'unverifiable_private'
+  | 'no_endpoint';
+
+/**
+ * Result of a BACKEND-ONLY best-effort reachability probe of an imported
+ * agent's endpoint (US-IMP-017b). Additive and READ-only downstream: written
+ * ONLY by the `probeImportReachability` resolver, NEVER promoted into
+ * {@link AgentCustomMetadata.manifest} / `invocation` / `state` /
+ * {@link AgentCustomMetadata.governanceAttestation}, and never activates the
+ * agent. The import Lambda runs outside any VPC, so a private/cross-account
+ * target is honestly 'unverifiable_private' rather than a false 'unreachable'.
+ */
+export interface AgentReachabilityMetadata {
+  /** True only when an HTTP response was observed from a PUBLIC endpoint. */
+  reachable: boolean;
+  /** How the endpoint was classified by the probe. */
+  classification: AgentReachabilityClassification;
+  /** Short, secret-free detail (e.g. 'HTTP 200', a network error, the VPC note). */
+  detail?: string;
+  /** ISO 8601 timestamp at which the probe ran. */
+  checkedAt: string;
+}
+
 export interface AgentCustomMetadata {
   categories: string[];
   icon: string;
@@ -248,6 +280,13 @@ export interface AgentCustomMetadata {
    * proposal (the overwhelming majority).
    */
   proposedManifest?: ProposedManifestMetadata;
+  /**
+   * BACKEND-ONLY best-effort reachability probe result (US-IMP-017b). Additive
+   * and READ-only downstream: written ONLY by the `probeImportReachability`
+   * resolver, NEVER promoted into {@link manifest} / `invocation` / `state` /
+   * `governanceAttestation`. Absent until a probe has run.
+   */
+  reachability?: AgentReachabilityMetadata;
 }
 
 /**
@@ -332,6 +371,12 @@ export interface AgentConfig {
    * absent otherwise. Never a trusted/active manifest.
    */
   proposedManifest?: ProposedManifestMetadata;
+  /**
+   * BACKEND-ONLY best-effort reachability probe result surfaced READ-ONLY
+   * (US-IMP-017b). Present only once a probe has run; never an active/trusted
+   * field.
+   */
+  reachability?: AgentReachabilityMetadata;
 }
 
 export interface ToolConfig {
@@ -1064,6 +1109,7 @@ export class RegistryService {
     origin: undefined,
     governanceAttestation: undefined,
     proposedManifest: undefined,
+    reachability: undefined,
   };
 
   private static readonly TOOL_METADATA_DEFAULTS: ToolCustomMetadata = {
@@ -1136,6 +1182,9 @@ export class RegistryService {
       ...(meta.proposedManifest
         ? { proposedManifest: meta.proposedManifest }
         : {}),
+      // Surface the best-effort reachability probe result READ-ONLY when present
+      // (US-IMP-017b). Never an active/trusted field.
+      ...(meta.reachability ? { reachability: meta.reachability } : {}),
     };
   }
 

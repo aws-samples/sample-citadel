@@ -192,6 +192,16 @@ type Mutation {
   # returns the record unchanged. Default Cognito auth; the resolver enforces the
   # admin/architect role and org-scoping.
   acceptProposedManifestTier3(importId: String!): AgentConfig!
+  # Admin/architect BACKEND-ONLY best-effort reachability probe (US-IMP-017b).
+  # Loads the DRAFT import record and probes its resolved endpoint
+  # (invocation.target) from the (non-VPC) import Lambda, persisting the result
+  # to customMetadata.reachability ONLY (never manifest/invocation/state/
+  # governanceAttestation — the record STAYS DRAFT). The Lambda runs outside any
+  # VPC, so a private/cross-account target is honestly classified
+  # 'unverifiable_private' (NOT a false 'unreachable'). Default Cognito auth; the
+  # resolver enforces the admin/architect role. Best-effort: a network
+  # error/timeout yields an 'unreachable' result, never a GraphQL error.
+  probeImportReachability(importId: String!): ImportReachabilityResult!
   deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
   activateProjectAgents(projectId: ID!): ActivateAgentsResult
   updateAgentCode(input: UpdateAgentCodeInput!): AgentCode
@@ -519,6 +529,10 @@ type AgentConfig {
   # import). READ-only; never an active/trusted manifest. Absent unless a
   # proposal is pending or failed.
   proposedManifest: ProposedManifest
+  # BACKEND-ONLY best-effort reachability probe result (US-IMP-017b), surfaced
+  # READ-only. Absent until probeImportReachability has run; never an
+  # active/trusted field.
+  reachability: ImportReachability
 }
 
 # UNTRUSTED, LLM-proposed agent manifest (Tier-3 agent import), surfaced
@@ -654,6 +668,29 @@ type ImportTestResult {
   output: String
   error: String
   latencyMs: Int
+}
+
+# Result of a BACKEND-ONLY best-effort reachability probe
+# (probeImportReachability mutation, US-IMP-017b). `reachable` is true only when
+# an HTTP response was observed from a PUBLIC endpoint. `classification` is one
+# of: "reachable" | "unreachable" | "unverifiable_private" (private/cross-account
+# target — honest, not a false "unreachable") | "no_endpoint". `detail` is a
+# short, secret-free note (e.g. "HTTP 200", a network error, or the VPC note);
+# `checkedAt` is the ISO 8601 probe time.
+type ImportReachabilityResult {
+  reachable: Boolean!
+  classification: String!
+  detail: String
+  checkedAt: String!
+}
+
+# READ-only reachability probe result surfaced on AgentConfig (US-IMP-017b).
+# Same shape as ImportReachabilityResult; present only once a probe has run.
+type ImportReachability {
+  reachable: Boolean!
+  classification: String!
+  detail: String
+  checkedAt: String!
 }
 
 # Agent import (US-IMP) — discovery. `discoverAgents` enumerates importable

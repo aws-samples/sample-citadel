@@ -27,6 +27,7 @@ import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { getRegistryService, validateImportDescriptor } from './agent-config-resolver';
 import { createADR } from './adr-resolver';
 import { extractOrgFromEvent, isAdminFromEvent, hasRoleFromEvent } from '../utils/auth-event';
+import { probeReachability } from '../utils/reachability-probe';
 import { v4 as uuidv4 } from 'uuid';
 import { publishEvent, EventTypes } from '../utils/events';
 import { grantFabricatorAuthority } from './registry-agent-authority-lifecycle';
@@ -67,6 +68,7 @@ import type {
   AgentInvocationAuthMode,
   AgentInvocationMode,
   AgentOrigin,
+  AgentReachabilityMetadata,
   ProposedManifestMetadata,
   RegistryRecord,
 } from '../services/registry-service';
@@ -148,6 +150,23 @@ export interface ImportTestResult {
   output: string | null;
   error: string | null;
   latencyMs: number;
+}
+
+/**
+ * Result of a BACKEND-ONLY best-effort reachability probe
+ * ({@link probeImportReachability}). `reachable` is true only when an HTTP
+ * response was observed from a PUBLIC endpoint; a private/cross-account target
+ * is honestly `classification:'unverifiable_private'` (NOT a false
+ * 'unreachable'). `detail` is a short, secret-free note (e.g. 'HTTP 200', a
+ * network error, or the VPC-out-of-scope note); `checkedAt` is the ISO 8601
+ * probe time. Mirrors the persisted {@link AgentReachabilityMetadata} with
+ * `detail` widened to `string | null` for the GraphQL response.
+ */
+export interface ImportReachabilityResult {
+  reachable: boolean;
+  classification: string;
+  detail: string | null;
+  checkedAt: string;
 }
 
 const CONFLICT_OPTIONS: readonly ImportConflictResolution[] = ['link', 'replace', 'copy'];
@@ -513,6 +532,7 @@ export const handler = async (
   | string
   | AgentConfig
   | ImportTestResult
+  | ImportReachabilityResult
   | Tier3ProposalResult
 > => {
   const fieldName = event.info?.fieldName;
@@ -547,6 +567,17 @@ export const handler = async (
         // admin/architect authorization gate lives inside probeAgentCandidate.
         requireAuthenticated(event);
         return await probeAgentCandidate(event.arguments?.input, event);
+      }
+      case 'probeImportReachability': {
+        // Authentication is required up-front (mirrors the sibling import
+        // mutations); the admin/architect authorization gate lives inside
+        // probeImportReachability.
+        requireAuthenticated(event);
+        const importId = asNonEmptyString(event.arguments?.importId);
+        if (!importId) {
+          throw new Error('probeImportReachability: importId is required');
+        }
+        return await probeImportReachability(importId, event);
       }
       case 'proposeAgentManifestTier3': {
         // Authentication is required up-front (mirrors the sibling import
@@ -1350,6 +1381,105 @@ export async function attestAgentImport(
   );
 
   return config;
+}
+
+/**
+ * BACKEND-ONLY best-effort reachability probe for an imported agent
+ * (US-IMP-017b). Loads the DRAFT import record, reads its resolved HTTP endpoint
+ * (`invocation.target`), probes it from THIS (non-VPC) Lambda, and persists the
+ * classified result to `customMetadata.reachability` ONLY.
+ *
+ * Because the import-resolver Lambda runs outside any customer VPC it can only
+ * verify PUBLIC endpoints: a private / cross-account target is honestly
+ * classified 'unverifiable_private' (NOT a false 'unreachable') — a peered-VPC
+ * prober is a deferred add-on. The underlying {@link probeReachability} bounds
+ * the GET with an AbortController so a hanging endpoint cannot stall the Lambda.
+ *
+ * Authorization mirrors the discovery / test-invoke / probe gate: only the
+ * `admin` or `architect` role may run it (it reaches operator-supplied
+ * infrastructure). That gate is the ONLY path that throws. A missing record is
+ * a clean not-found (mirrors {@link attestAgentImport}, incl. the non-admin
+ * cross-tenant not-found mask). Everything else is BEST-EFFORT: the network
+ * probe never throws (a thrown fetch is caught as 'unreachable'), and even a
+ * persistence failure still returns the classified result.
+ *
+ * INVARIANT: the result is written ONLY to `customMetadata.reachability` — never
+ * manifest / invocation / state / governanceAttestation (the update sends
+ * customMetadata only, mirroring {@link attestAgentImport}, so the record STAYS
+ * DRAFT). No secret/credential is logged or returned: the probe issues a plain
+ * unauthenticated GET and never reads the response body.
+ *
+ * @returns the classified {@link ImportReachabilityResult}.
+ */
+export async function probeImportReachability(
+  importId: string,
+  event: ImportAgentEvent,
+): Promise<ImportReachabilityResult> {
+  // 1. Authorization: admin OR architect only (same gate as test-invoke/probe).
+  //    This is the ONLY path that throws.
+  const isAdmin = isAdminFromEvent(event);
+  if (!isAdmin && !hasRoleFromEvent(event, 'architect')) {
+    throw new Error('Unauthorized: probeImportReachability requires the admin or architect role');
+  }
+
+  const registryService = getRegistryService();
+
+  // 2. Load the record (null → clean not-found, mirrors attestAgentImport).
+  const record = await registryService.getResource('agent', importId);
+  if (!record) {
+    throw new Error(`Agent not found: ${importId}`);
+  }
+
+  const meta = readMeta(registryService, record);
+
+  // 3. Org-scope (non-admin only): same cross-tenant not-found masking as attest
+  //    — a cross-tenant caller cannot distinguish "exists elsewhere" from "absent".
+  if (!isAdmin) {
+    const callerOrg = await extractOrgFromEvent(event);
+    if (!callerOrg || meta.orgId !== callerOrg) {
+      throw new Error(`Agent not found: ${importId}`);
+    }
+  }
+
+  // 4. Probe the resolved endpoint. probeReachability NEVER throws: a network
+  //    error/timeout → 'unreachable'; a missing/invalid endpoint → 'no_endpoint';
+  //    a private/internal host → 'unverifiable_private' WITHOUT a fetch.
+  const endpoint = meta.invocation?.target;
+  const probe = await probeReachability(endpoint);
+  const checkedAt = new Date().toISOString();
+
+  const reachability: AgentReachabilityMetadata = {
+    reachable: probe.reachable,
+    classification: probe.classification,
+    checkedAt,
+  };
+  if (probe.detail) {
+    reachability.detail = probe.detail;
+  }
+
+  // 5. Persist to customMetadata.reachability ONLY. The spread preserves
+  //    manifest / invocation / state / governanceAttestation byte-for-byte, and
+  //    the update sends customMetadata only (no name/description/status), so the
+  //    record STAYS DRAFT. BEST-EFFORT: a persistence failure is logged
+  //    (secret-free) and still returns the classified result.
+  const mergedMeta: AgentCustomMetadata = { ...meta, reachability };
+  try {
+    await registryService.updateResource('agent', record.recordId, {
+      customMetadata: registryService.serializeCustomMetadata(mergedMeta),
+    });
+  } catch (err) {
+    console.error(
+      `probeImportReachability: best-effort persist for ${record.recordId} failed (swallowed):`,
+      err,
+    );
+  }
+
+  return {
+    reachable: reachability.reachable,
+    classification: reachability.classification,
+    detail: reachability.detail ?? null,
+    checkedAt,
+  };
 }
 
 /**
