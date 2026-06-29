@@ -17,11 +17,16 @@ import type { AgentConfig } from './agentConfigService';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
+  AgentImportRecord,
   DiscoverAgentsInput,
   ImportAgentInput,
   ImportAgentResult,
   ImportTestResult,
+  ProposedManifest,
+  ProposedManifestConfidence,
+  ProposedManifestReviewState,
   TestImportedAgentInput,
+  Tier3ProposalResult,
 } from '../types/agentImport';
 
 const discoverAgentsQuery = `
@@ -104,6 +109,84 @@ const testImportedAgentMutation = `
   }
 `;
 
+// Shared selection for the UNTRUSTED, LLM-proposed manifest parked on a DRAFT
+// import record (Tier-3). `manifest` and `fieldConfidence` are AWSJSON scalars
+// (JSON strings) — parsed into objects by `normalizeProposedManifest`. Fields
+// mirror the GraphQL `ProposedManifest` type exactly (no reviewedBy/reviewedAt:
+// the schema does not expose them).
+const proposedManifestSelection = `
+  proposedManifest {
+    manifest
+    confidence
+    reviewState
+    source
+    fieldConfidence
+    proposedAt
+    correlationId
+    sanitized
+    truncated
+    error
+  }
+`;
+
+// Tier-3 ASYNC manifest-proposal REQUEST. Returns only { requestId, status };
+// the proposed manifest lands later on the DRAFT record's `proposedManifest`.
+// The optional cross-account discovery variables are nullable — omitting them
+// leaves the same-account signal-gathering path unchanged (back-compat).
+const proposeAgentManifestTier3Mutation = `
+  mutation ProposeAgentManifestTier3(
+    $ref: String!
+    $discoveryRoleArn: String
+    $discoveryExternalId: String
+  ) {
+    proposeAgentManifestTier3(
+      ref: $ref
+      discoveryRoleArn: $discoveryRoleArn
+      discoveryExternalId: $discoveryExternalId
+    ) {
+      requestId
+      status
+    }
+  }
+`;
+
+// Human-only ACCEPT step: promotes a pending proposedManifest into the record's
+// trusted manifest. The record STAYS DRAFT (never auto-activated). Returns the
+// updated AgentConfig; we re-select proposedManifest to reflect the accepted
+// review state back to the UI.
+const acceptProposedManifestTier3Mutation = `
+  mutation AcceptProposedManifestTier3($importId: String!) {
+    acceptProposedManifestTier3(importId: $importId) {
+      agentId
+      name
+      config
+      state
+      categories
+      createdAt
+      updatedAt
+      ${proposedManifestSelection}
+    }
+  }
+`;
+
+// Import-record fetch: the DRAFT record (an AgentConfig) including the parked
+// proposedManifest. Used to poll for the async Tier-3 result and to reflect the
+// accepted state. Reuses the existing `getAgentConfig` field.
+const getImportRecordQuery = `
+  query GetAgentImportRecord($agentId: String!) {
+    getAgentConfig(agentId: $agentId) {
+      agentId
+      name
+      config
+      state
+      categories
+      createdAt
+      updatedAt
+      ${proposedManifestSelection}
+    }
+  }
+`;
+
 /**
  * Parse an AgentConfig's AWSJSON `config` field. Most records store JSON, but
  * some legacy/registry-backed records carry free text. On parse failure we
@@ -148,6 +231,92 @@ function parseCapabilityDescriptor(raw: unknown): AgentCapabilityDescriptor {
   throw new Error(
     'Failed to parse agent capability descriptor: describeAgentCandidate returned no descriptor'
   );
+}
+
+/**
+ * Parse an AWSJSON scalar that should hold a JSON object (e.g. a proposed
+ * manifest or a fieldConfidence map). Returns the object, passing an
+ * already-parsed object through, and yielding `null` for absent/non-object/
+ * malformed payloads (the UI renders "no body" rather than crashing).
+ */
+function parseAwsJsonObject(raw: unknown): Record<string, unknown> | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'object') return raw as Record<string, unknown>;
+  if (typeof raw === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return parsed !== null && typeof parsed === 'object'
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Raw `ProposedManifest` as returned by GraphQL (AWSJSON fields unparsed). */
+interface RawProposedManifest {
+  manifest?: unknown;
+  confidence?: string | null;
+  reviewState?: string | null;
+  source?: string | null;
+  fieldConfidence?: unknown;
+  proposedAt?: string | null;
+  correlationId?: string | null;
+  sanitized?: boolean | null;
+  truncated?: boolean | null;
+  error?: string | null;
+}
+
+/** Raw import record (an AgentConfig) as returned by GraphQL. */
+interface RawImportRecord {
+  agentId: string;
+  name?: string | null;
+  config?: unknown;
+  state?: AgentConfig['state'];
+  categories?: string[] | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  proposedManifest?: RawProposedManifest | null;
+}
+
+/** Normalize a raw proposed manifest: parse its AWSJSON manifest/fieldConfidence. */
+function normalizeProposedManifest(
+  raw: RawProposedManifest | null | undefined
+): ProposedManifest | null {
+  if (!raw) return null;
+  return {
+    manifest: parseAwsJsonObject(raw.manifest),
+    confidence: (raw.confidence ?? null) as ProposedManifestConfidence | null,
+    reviewState: (raw.reviewState ?? 'pending_review') as ProposedManifestReviewState,
+    source: raw.source ?? null,
+    fieldConfidence: parseAwsJsonObject(raw.fieldConfidence) as
+      | Record<string, ProposedManifestConfidence>
+      | null,
+    proposedAt: raw.proposedAt ?? null,
+    correlationId: raw.correlationId ?? null,
+    sanitized: raw.sanitized ?? null,
+    truncated: raw.truncated ?? null,
+    error: raw.error ?? null,
+  };
+}
+
+/** Normalize a raw import record: parse `config` and the parked proposedManifest. */
+function normalizeImportRecord(
+  raw: RawImportRecord | null | undefined
+): AgentImportRecord | null {
+  if (!raw) return null;
+  return {
+    agentId: raw.agentId,
+    name: raw.name ?? undefined,
+    config: parseAgentConfig(raw.config),
+    state: raw.state ?? 'inactive',
+    categories: raw.categories ?? undefined,
+    createdAt: raw.createdAt ?? undefined,
+    updatedAt: raw.updatedAt ?? undefined,
+    proposedManifest: normalizeProposedManifest(raw.proposedManifest),
+  };
 }
 
 export const agentImportService = {
@@ -264,6 +433,84 @@ export const agentImportService = {
       return response.testImportedAgent;
     } catch (error) {
       console.error('Error testing imported agent:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Tier-3 ASYNC manifest-proposal REQUEST. Enqueues an LLM manifest proposal
+   * for `ref`; the proposed manifest lands LATER on the DRAFT record's
+   * `proposedManifest` (poll via `getImportRecord`). Returns `{ requestId,
+   * status }` ('PENDING' on a successful enqueue) — it never mutates the record.
+   *
+   * For a cross-account SCAN-discovered candidate, pass the same read-only
+   * discovery role + external ID via `opts`; they are sent as variables only
+   * when present (same-account callers omit them — back-compat).
+   */
+  async proposeAgentManifestTier3(
+    ref: string,
+    opts?: { discoveryRoleArn?: string; discoveryExternalId?: string }
+  ): Promise<Tier3ProposalResult> {
+    try {
+      const variables: {
+        ref: string;
+        discoveryRoleArn?: string;
+        discoveryExternalId?: string;
+      } = { ref };
+      if (opts?.discoveryRoleArn) variables.discoveryRoleArn = opts.discoveryRoleArn;
+      if (opts?.discoveryExternalId) {
+        variables.discoveryExternalId = opts.discoveryExternalId;
+      }
+
+      const response = await serverService.mutate<{
+        proposeAgentManifestTier3: Tier3ProposalResult;
+      }>(proposeAgentManifestTier3Mutation, variables);
+
+      return response.proposeAgentManifestTier3;
+    } catch (error) {
+      console.error('Error proposing Tier-3 agent manifest:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Human-only ACCEPT: promotes a pending `proposedManifest` into the record's
+   * trusted manifest. The record STAYS DRAFT and is NOT activated. Returns the
+   * updated import record with its `config` parsed and the (now accepted)
+   * `proposedManifest` normalized.
+   */
+  async acceptProposedManifestTier3(importId: string): Promise<AgentImportRecord> {
+    try {
+      const response = await serverService.mutate<{
+        acceptProposedManifestTier3: RawImportRecord;
+      }>(acceptProposedManifestTier3Mutation, { importId });
+
+      const record = normalizeImportRecord(response.acceptProposedManifestTier3);
+      if (!record) {
+        throw new Error('acceptProposedManifestTier3 returned no record');
+      }
+      return record;
+    } catch (error) {
+      console.error('Error accepting proposed Tier-3 manifest:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Fetch a DRAFT import record (an AgentConfig) including the parked
+   * `proposedManifest`. Used to poll for the async Tier-3 result and reflect the
+   * accepted state. The AWSJSON `config` and `proposedManifest.manifest`/
+   * `fieldConfidence` are JSON-parsed into objects. Returns null when not found.
+   */
+  async getImportRecord(agentId: string): Promise<AgentImportRecord | null> {
+    try {
+      const response = await serverService.query<{
+        getAgentConfig: RawImportRecord | null;
+      }>(getImportRecordQuery, { agentId });
+
+      return normalizeImportRecord(response.getAgentConfig);
+    } catch (error) {
+      console.error('Error fetching agent import record:', error);
       throw error;
     }
   },

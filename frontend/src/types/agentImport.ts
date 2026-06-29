@@ -257,3 +257,60 @@ export interface ImportTestResult {
   error?: string | null;
   latencyMs?: number | null;
 }
+
+/**
+ * Review state of a Tier-3 (LLM-proposed) manifest parked on a DRAFT import
+ * record. `pending_review` — awaiting human review; `accepted` — a human has
+ * promoted it into the record's TRUSTED manifest (the record STAYS DRAFT and is
+ * NOT activated); `failed` — the async proposal failed and is retry-able.
+ * Mirrors the `ProposedManifest.reviewState` String on the GraphQL `AgentConfig`.
+ */
+export type ProposedManifestReviewState = 'pending_review' | 'accepted' | 'failed';
+
+/** Overall inference confidence on a Tier-3 proposal — always 'low'. */
+export type ProposedManifestConfidence = DescriptorFieldConfidence;
+
+/**
+ * UNTRUSTED, LLM-proposed agent manifest (Tier-3 agent import) parked READ-only
+ * on a DRAFT import record for human review. Mirrors the GraphQL
+ * `ProposedManifest` type. `manifest` and `fieldConfidence` arrive as AWSJSON
+ * (JSON strings) and are JSON-parsed into objects by `agentImportService`.
+ *
+ * This is NEVER an active/trusted manifest: promotion into the record's trusted
+ * manifest is a separate, human-gated step (`acceptProposedManifestTier3`) that
+ * does NOT activate the agent. The deployed schema does not expose
+ * reviewedBy/reviewedAt on this type, so they are intentionally omitted (they
+ * would not be selectable).
+ */
+export interface ProposedManifest {
+  manifest?: Record<string, unknown> | null;
+  confidence?: ProposedManifestConfidence | null;
+  reviewState: ProposedManifestReviewState;
+  source?: string | null;
+  fieldConfidence?: Record<string, ProposedManifestConfidence> | null;
+  proposedAt?: string | null;
+  correlationId?: string | null;
+  sanitized?: boolean | null;
+  truncated?: boolean | null;
+  error?: string | null;
+}
+
+/**
+ * Result of the async Tier-3 manifest-proposal REQUEST
+ * (`proposeAgentManifestTier3`). `requestId` correlates the async result that
+ * lands later on the record's `proposedManifest`; `status` is "PENDING" on a
+ * successful enqueue. Mirrors the GraphQL `Tier3ProposalResult`.
+ */
+export interface Tier3ProposalResult {
+  requestId: string;
+  status: string;
+}
+
+/**
+ * A DRAFT agent-import record as fetched for review. Extends the shared
+ * `AgentConfig` with the optional, READ-only `proposedManifest` (present only
+ * while a Tier-3 proposal is pending, accepted, or failed).
+ */
+export interface AgentImportRecord extends AgentConfig {
+  proposedManifest?: ProposedManifest | null;
+}

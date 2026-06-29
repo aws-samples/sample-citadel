@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from './ui/select';
 import { agentImportService } from '../services/agentImportService';
+import { Tier3ProposalPanel } from './Tier3ProposalPanel';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -146,6 +147,18 @@ interface BatchImportResult {
 const errorMessage = (err: unknown, fallback: string): string =>
   err instanceof Error ? err.message : fallback;
 
+// A DRAFT import's capability is "thin" — worth offering a Tier-3 AI-assisted
+// manifest proposal — when the inferred descriptor carries any low-confidence
+// field or is missing its output contract / skills.
+const isCapabilityThin = (d: AgentCapabilityDescriptor | null): boolean => {
+  if (!d) return false;
+  const conf = d.fieldConfidence ?? {};
+  const hasLowField = Object.values(conf).some((c) => c === 'low');
+  const thinOutput = !d.outputSchema || Object.keys(d.outputSchema).length === 0;
+  const thinSkills = !d.skills || d.skills.length === 0;
+  return hasLowField || thinOutput || thinSkills;
+};
+
 const confidenceClass = (level: string): string => {
   switch (level) {
     case 'high':
@@ -208,6 +221,9 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
   const [conflict, setConflict] = useState<ImportAgentResult | null>(null);
   const [conflictChoice, setConflictChoice] = useState<ImportConflictPolicy | null>(null);
   const [registered, setRegistered] = useState(false);
+  // The DRAFT record created on a successful register — its agentId is the
+  // importId targeted by the Tier-3 accept/refresh flow on the success screen.
+  const [registeredAgent, setRegisteredAgent] = useState<ImportAgentResult['agent']>(null);
 
   // Batch draft-import (when multiple candidates are selected). `batchResults`
   // being non-null switches the wizard into its results view.
@@ -400,6 +416,7 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
         setConflict(result);
       } else {
         setConflict(null);
+        setRegisteredAgent(result.agent);
         setRegistered(true);
       }
     } catch (err) {
@@ -1222,15 +1239,26 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
 
   const renderRegisterStep = () => {
     if (registered) {
+      const discoveryOpts = describeDiscoveryOpts();
       return (
-        <div className="flex flex-col items-center gap-3 py-8 text-center">
-          <CheckCircle2 className="size-10 text-chart-2" />
-          <h2 className="text-lg font-semibold text-foreground">Agent imported</h2>
-          <p className="text-sm text-muted-foreground max-w-md">
-            <span className="font-medium text-foreground">{editedName}</span> was created
-            as a <span className="font-medium text-foreground">DRAFT</span> record, pending
-            governance attestation before it can be activated.
-          </p>
+        <div className="flex flex-col gap-6">
+          <div className="flex flex-col items-center gap-3 py-8 text-center">
+            <CheckCircle2 className="size-10 text-chart-2" />
+            <h2 className="text-lg font-semibold text-foreground">Agent imported</h2>
+            <p className="text-sm text-muted-foreground max-w-md">
+              <span className="font-medium text-foreground">{editedName}</span> was created
+              as a <span className="font-medium text-foreground">DRAFT</span> record, pending
+              governance attestation before it can be activated.
+            </p>
+          </div>
+          {registeredAgent && activeRef && isCapabilityThin(descriptor) && (
+            <Tier3ProposalPanel
+              agentId={registeredAgent.agentId}
+              reference={activeRef}
+              discoveryRoleArn={discoveryOpts?.discoveryRoleArn}
+              discoveryExternalId={discoveryOpts?.discoveryExternalId}
+            />
+          )}
         </div>
       );
     }

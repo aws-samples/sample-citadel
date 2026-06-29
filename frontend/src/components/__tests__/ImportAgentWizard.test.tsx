@@ -23,6 +23,11 @@ jest.mock('../../services/agentImportService', () => ({
     importAgent: jest.fn(),
     attestAgentImport: jest.fn(),
     testImportedAgent: jest.fn(),
+    // Tier-3 (AI-assisted manifest proposal) — exercised by the embedded
+    // Tier3ProposalPanel on the register-success screen.
+    proposeAgentManifestTier3: jest.fn(),
+    acceptProposedManifestTier3: jest.fn(),
+    getImportRecord: jest.fn(),
   },
 }));
 
@@ -77,6 +82,9 @@ const svc = agentImportService as unknown as {
   importAgent: jest.Mock;
   attestAgentImport: jest.Mock;
   testImportedAgent: jest.Mock;
+  proposeAgentManifestTier3: jest.Mock;
+  acceptProposedManifestTier3: jest.Mock;
+  getImportRecord: jest.Mock;
 };
 
 const candidate: AgentCandidate = {
@@ -987,5 +995,44 @@ describe('ImportAgentWizard — Step 1 cross-account discovery (SCAN)', () => {
     );
     expect(svc.describeAgentCandidate).toHaveBeenCalledWith('ref-orders-1');
     expect(svc.describeAgentCandidate.mock.calls[0][1]).toBeUndefined();
+  });
+});
+
+describe('ImportAgentWizard — Tier-3 AI-assisted proposal on the register-success screen', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('offers the Tier-3 propose action for a thin-capability DRAFT and proposes with the candidate ref', async () => {
+    const user = userEvent.setup();
+    svc.discoverAgents.mockResolvedValue([candidate]);
+    svc.describeAgentCandidate.mockResolvedValue(descriptor);
+    renderWizard();
+    await gotoRegister(user);
+
+    svc.importAgent.mockResolvedValue(successResult);
+    await user.click(screen.getByRole('button', { name: /register agent/i }));
+
+    // the DRAFT/attestation notice still renders (unchanged)…
+    expect(await screen.findByText(/draft/i)).toBeInTheDocument();
+    // …and the Tier-3 AI-assisted proposal is offered for the thin descriptor
+    const proposeBtn = await screen.findByRole('button', {
+      name: /propose manifest \(tier-3/i,
+    });
+    expect(proposeBtn).toBeInTheDocument();
+
+    svc.proposeAgentManifestTier3.mockResolvedValue({
+      requestId: 'req-1',
+      status: 'PENDING',
+    });
+    await user.click(proposeBtn);
+
+    await waitFor(() =>
+      expect(svc.proposeAgentManifestTier3).toHaveBeenCalledTimes(1),
+    );
+    // proposed with the candidate ref; no discovery opts (blank SCAN fields)
+    expect(svc.proposeAgentManifestTier3).toHaveBeenCalledWith(
+      'ref-orders-1',
+      undefined,
+    );
+    expect(await screen.findByText(/appear here once ready/i)).toBeInTheDocument();
   });
 });

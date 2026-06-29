@@ -373,3 +373,191 @@ describe('agentImportService', () => {
     });
   });
 });
+
+/**
+ * Tier-3 (AI-assisted) manifest proposal + accept + the import-record fetch.
+ * proposeAgentManifestTier3 enqueues an async LLM proposal; acceptProposed
+ * ManifestTier3 promotes a pending proposal into the record's trusted manifest
+ * (record STAYS DRAFT); getImportRecord reads the DRAFT record incl. the AWSJSON
+ * proposedManifest (manifest/fieldConfidence are JSON-parsed on the way out).
+ */
+describe('agentImportService — Tier-3 manifest proposal', () => {
+  let errorSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  describe('proposeAgentManifestTier3', () => {
+    it('sends the proposeAgentManifestTier3 mutation with just the ref and returns { requestId, status }', async () => {
+      mutate.mockResolvedValue({
+        proposeAgentManifestTier3: { requestId: 'req-1', status: 'PENDING' },
+      });
+
+      const result = await agentImportService.proposeAgentManifestTier3('ref-orders-1');
+
+      expect(mutate).toHaveBeenCalledWith(
+        expect.stringContaining('proposeAgentManifestTier3'),
+        { ref: 'ref-orders-1' }
+      );
+      expect(result).toEqual({ requestId: 'req-1', status: 'PENDING' });
+    });
+
+    it('forwards discoveryRoleArn/discoveryExternalId as variables when provided (cross-account)', async () => {
+      mutate.mockResolvedValue({
+        proposeAgentManifestTier3: { requestId: 'req-2', status: 'PENDING' },
+      });
+
+      await agentImportService.proposeAgentManifestTier3('ref-xacct', {
+        discoveryRoleArn: 'arn:aws:iam::444455556666:role/citadel-discovery-readonly',
+        discoveryExternalId: 'citadel-ext-scan-1',
+      });
+
+      expect(mutate.mock.calls[0][1]).toEqual({
+        ref: 'ref-xacct',
+        discoveryRoleArn: 'arn:aws:iam::444455556666:role/citadel-discovery-readonly',
+        discoveryExternalId: 'citadel-ext-scan-1',
+      });
+    });
+
+    it('omits blank discovery values (variables are exactly { ref })', async () => {
+      mutate.mockResolvedValue({
+        proposeAgentManifestTier3: { requestId: 'req-3', status: 'PENDING' },
+      });
+
+      await agentImportService.proposeAgentManifestTier3('ref-plain', {
+        discoveryRoleArn: '',
+        discoveryExternalId: undefined,
+      });
+
+      expect(mutate.mock.calls[0][1]).toEqual({ ref: 'ref-plain' });
+    });
+
+    it('surfaces GraphQL errors', async () => {
+      mutate.mockRejectedValue(new Error('Unauthorized: admin/architect only'));
+
+      await expect(
+        agentImportService.proposeAgentManifestTier3('ref-orders-1')
+      ).rejects.toThrow('Unauthorized: admin/architect only');
+    });
+  });
+
+  describe('acceptProposedManifestTier3', () => {
+    it('sends the mutation with the importId and returns the record with parsed config + parsed proposedManifest.manifest', async () => {
+      mutate.mockResolvedValue({
+        acceptProposedManifestTier3: {
+          agentId: 'agent-1',
+          name: 'Orders Agent',
+          config: JSON.stringify({ name: 'Orders Agent' }),
+          state: 'inactive',
+          categories: ['commerce'],
+          proposedManifest: {
+            manifest: JSON.stringify({ name: 'Orders Agent', skills: ['create_order'] }),
+            confidence: 'low',
+            reviewState: 'accepted',
+            source: 'llm_tier3',
+            fieldConfidence: JSON.stringify({ description: 'low' }),
+            proposedAt: '2026-06-29T00:00:00.000Z',
+          },
+        },
+      });
+
+      const result = await agentImportService.acceptProposedManifestTier3('agent-1');
+
+      expect(mutate).toHaveBeenCalledWith(
+        expect.stringContaining('acceptProposedManifestTier3'),
+        { importId: 'agent-1' }
+      );
+      expect(result.agentId).toBe('agent-1');
+      expect(result.state).toBe('inactive');
+      expect(result.config).toEqual({ name: 'Orders Agent' });
+      expect(result.proposedManifest?.reviewState).toBe('accepted');
+      // AWSJSON manifest + fieldConfidence parsed into objects
+      expect(result.proposedManifest?.manifest).toEqual({
+        name: 'Orders Agent',
+        skills: ['create_order'],
+      });
+      expect(result.proposedManifest?.fieldConfidence).toEqual({ description: 'low' });
+    });
+
+    it('surfaces GraphQL errors', async () => {
+      mutate.mockRejectedValue(new Error('Forbidden'));
+
+      await expect(
+        agentImportService.acceptProposedManifestTier3('agent-1')
+      ).rejects.toThrow('Forbidden');
+    });
+  });
+
+  describe('getImportRecord', () => {
+    it('selects proposedManifest and JSON-parses its AWSJSON manifest/fieldConfidence', async () => {
+      query.mockResolvedValue({
+        getAgentConfig: {
+          agentId: 'agent-1',
+          name: 'Orders Agent',
+          config: JSON.stringify({ name: 'Orders Agent' }),
+          state: 'inactive',
+          categories: ['commerce'],
+          proposedManifest: {
+            manifest: JSON.stringify({ name: 'Orders Agent' }),
+            confidence: 'low',
+            reviewState: 'pending_review',
+            source: 'llm_tier3',
+            fieldConfidence: JSON.stringify({ description: 'low' }),
+            proposedAt: '2026-06-29T00:00:00.000Z',
+          },
+        },
+      });
+
+      const record = await agentImportService.getImportRecord('agent-1');
+
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining('proposedManifest'),
+        { agentId: 'agent-1' }
+      );
+      expect(record?.agentId).toBe('agent-1');
+      expect(record?.config).toEqual({ name: 'Orders Agent' });
+      expect(record?.proposedManifest?.reviewState).toBe('pending_review');
+      expect(record?.proposedManifest?.manifest).toEqual({ name: 'Orders Agent' });
+      expect(record?.proposedManifest?.fieldConfidence).toEqual({ description: 'low' });
+    });
+
+    it('returns a record with proposedManifest null when no proposal is parked', async () => {
+      query.mockResolvedValue({
+        getAgentConfig: {
+          agentId: 'agent-2',
+          name: 'Plain Agent',
+          config: JSON.stringify({ name: 'Plain Agent' }),
+          state: 'inactive',
+          categories: [],
+          proposedManifest: null,
+        },
+      });
+
+      const record = await agentImportService.getImportRecord('agent-2');
+
+      expect(record?.proposedManifest).toBeNull();
+    });
+
+    it('returns null when the record is not found', async () => {
+      query.mockResolvedValue({ getAgentConfig: null });
+
+      const record = await agentImportService.getImportRecord('missing');
+
+      expect(record).toBeNull();
+    });
+
+    it('surfaces GraphQL errors', async () => {
+      query.mockRejectedValue(new Error('NotFound'));
+
+      await expect(agentImportService.getImportRecord('agent-1')).rejects.toThrow(
+        'NotFound'
+      );
+    });
+  });
+});
