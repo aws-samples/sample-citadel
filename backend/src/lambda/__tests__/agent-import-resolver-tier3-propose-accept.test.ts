@@ -133,6 +133,8 @@ import {
   handler,
   _resetRegistryService,
 } from '../agent-import-resolver';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 const ORG = 'test-org-a';
@@ -483,5 +485,21 @@ describe('acceptProposedManifestTier3', () => {
 
     expect(res.agentId).toBe('rec-1');
     expect(mockUpdateResource).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+// ===========================================================================
+// Typed-model cleanup guard
+//
+// The Tier-3 ACCEPT fields (reviewState='accepted', reviewedBy, reviewedAt) are
+// now first-class on ProposedManifestMetadata, so acceptProposedManifestTier3
+// writes them against the shared type directly — the previous local widened
+// type + `as unknown as ProposedManifestMetadata` boundary cast must be gone.
+// ===========================================================================
+describe('acceptProposedManifestTier3 typed-model cleanup', () => {
+  it('no longer round-trips the accepted state via an `as unknown as ProposedManifestMetadata` cast', () => {
+    const source = readFileSync(join(__dirname, '..', 'agent-import-resolver.ts'), 'utf8');
+    expect(source).not.toContain('as unknown as ProposedManifestMetadata');
   });
 });

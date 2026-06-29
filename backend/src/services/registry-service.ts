@@ -180,8 +180,13 @@ export interface ProposedManifestMetadata {
   manifest?: Record<string, unknown>;
   /** Always 'low' for an LLM proposal (invariant: LLM-inferred ⇒ low). */
   confidence?: ProposedManifestConfidence;
-  /** Review gate. 'pending_review' on a proposal; 'failed' on the failure marker. */
-  reviewState: 'pending_review' | 'failed';
+  /**
+   * Review gate. 'pending_review' on a proposal; 'failed' on the failure
+   * marker; 'accepted' once the human-gated Tier-3 accept step has promoted the
+   * proposed manifest into the trusted manifest. Acceptance NEVER activates the
+   * agent — the record still STAYS DRAFT.
+   */
+  reviewState: 'pending_review' | 'failed' | 'accepted';
   /** Provenance — fixed for the Tier-3 LLM path. */
   source: 'llm_tier3';
   /** Per-field confidence for the proposed manifest; all 'low' for an LLM proposal. */
@@ -196,6 +201,18 @@ export interface ProposedManifestMetadata {
   truncated?: boolean;
   /** Sanitized + length-capped failure detail (failure marker only). */
   error?: string;
+  /**
+   * Identity (Cognito `sub`, falling back to `username`) of the admin/architect
+   * who ACCEPTED the proposal. Additive: set only when `reviewState` advances to
+   * 'accepted' via the human-gated Tier-3 accept step; absent while
+   * 'pending_review'/'failed'.
+   */
+  reviewedBy?: string;
+  /**
+   * ISO 8601 timestamp at which `reviewState` advanced to 'accepted'. Additive:
+   * set alongside {@link reviewedBy} on acceptance; absent otherwise.
+   */
+  reviewedAt?: string;
 }
 
 /**

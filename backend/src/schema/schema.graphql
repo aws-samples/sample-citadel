@@ -539,9 +539,11 @@ type AgentConfig {
 # READ-only for review UIs. `manifest` is the sanitized proposed body as AWSJSON
 # (the LLM output shape is open); the scalar fields let the UI render the review
 # gate without parsing the blob. confidence is always "low" and reviewState is
-# "pending_review" (a proposal) or "failed" (a failure marker); source is
-# "llm_tier3". Promotion into the trusted AgentConfig.manifest is a separate,
-# human-gated step.
+# "pending_review" (a proposal), "failed" (a failure marker), or "accepted" (the
+# human-gated accept step promoted it into the trusted manifest; the record
+# still stays DRAFT); source is "llm_tier3". reviewedBy/reviewedAt are the
+# accepting identity + ISO timestamp, set only once reviewState is "accepted".
+# Promotion into the trusted AgentConfig.manifest is a separate, human-gated step.
 type ProposedManifest {
   manifest: AWSJSON
   confidence: String
@@ -553,6 +555,8 @@ type ProposedManifest {
   sanitized: Boolean
   truncated: Boolean
   error: String
+  reviewedBy: String
+  reviewedAt: String
 }
 
 # Result of an async Tier-3 manifest-proposal REQUEST (proposeAgentManifestTier3).

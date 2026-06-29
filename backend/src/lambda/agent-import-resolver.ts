@@ -2026,22 +2026,6 @@ export async function proposeAgentManifestTier3(
 }
 
 /**
- * The B1 {@link ProposedManifestMetadata} type (owned by registry-service.ts,
- * out of scope for this increment) types `reviewState` as
- * 'pending_review' | 'failed'. The accept step advances it to 'accepted' and
- * stamps `reviewedBy`/`reviewedAt`. This local alias widens the union and adds
- * the audit fields so the promotion code stays type-safe; those fields are
- * persisted purely as JSON via `serializeCustomMetadata` (JSON.stringify) and
- * re-surface on the next deserialize, so the runtime contract holds without
- * widening the shared type.
- */
-type ReviewedProposedManifest = Omit<ProposedManifestMetadata, 'reviewState'> & {
-  reviewState: ProposedManifestMetadata['reviewState'] | 'accepted';
-  reviewedBy?: string;
-  reviewedAt?: string;
-};
-
-/**
  * Tier-3 ACCEPT step (B2): the ONLY (human-gated) path that promotes a parked
  * `proposedManifest.manifest` into the record's TRUSTED manifest. The proposed
  * manifest was ALREADY recursively sanitized by the B1 result handler.
@@ -2091,8 +2075,9 @@ export async function acceptProposedManifestTier3(
     }
   }
 
-  // 4. Require a parked proposal (widened locally so 'accepted' is representable).
-  const proposed: ReviewedProposedManifest | undefined = meta.proposedManifest;
+  // 4. Require a parked proposal. reviewState='accepted' + reviewedBy/reviewedAt
+  //    are first-class on ProposedManifestMetadata, so no local widening is needed.
+  const proposed: ProposedManifestMetadata | undefined = meta.proposedManifest;
   if (!proposed) {
     throw new Error('No proposed manifest to accept: nothing is pending review');
   }
@@ -2119,7 +2104,7 @@ export async function acceptProposedManifestTier3(
     asNonEmptyString(event.identity?.sub) ??
     asNonEmptyString(event.identity?.username) ??
     'unknown';
-  const updatedProposed: ReviewedProposedManifest = {
+  const updatedProposed: ProposedManifestMetadata = {
     ...proposed,
     reviewState: 'accepted',
     reviewedBy,
@@ -2128,10 +2113,11 @@ export async function acceptProposedManifestTier3(
   const mergedMeta: AgentCustomMetadata = {
     ...meta,
     manifest: proposed.manifest,
-    // Single boundary cast: the widened reviewState is not assignable back to
-    // the B1 ProposedManifestMetadata field, but the value is only serialized
-    // (JSON.stringify) here, never structurally consumed, so the cast is safe.
-    proposedManifest: updatedProposed as unknown as ProposedManifestMetadata,
+    // reviewState='accepted' + reviewedBy/reviewedAt are first-class on
+    // ProposedManifestMetadata now, so this assigns against the shared type
+    // directly (no boundary cast). Behaviour is unchanged: status / state /
+    // governanceAttestation are untouched, so the record STAYS DRAFT.
+    proposedManifest: updatedProposed,
   };
 
   const updated = await registryService.updateResource('agent', record.recordId, {

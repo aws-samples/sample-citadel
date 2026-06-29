@@ -106,4 +106,74 @@ describe('RegistryService proposedManifest (Tier-3 agent import B1)', () => {
     const config = service.mapToAgentConfig(record);
     expect(config.proposedManifest).toBeUndefined();
   });
+
+  // --- Tier-3 ACCEPT-state fields promoted into the shared type ------------
+  // The accept step advances reviewState to 'accepted' and stamps
+  // reviewedBy/reviewedAt. These are now first-class on ProposedManifestMetadata
+  // (no local widened type / boundary cast in the resolver), so they round-trip
+  // through serialize → deserialize and surface READ-ONLY via mapToAgentConfig.
+
+  it('round-trips an accepted proposedManifest (reviewedBy/reviewedAt) and surfaces it read-only', () => {
+    const meta: AgentCustomMetadata = {
+      categories: [],
+      icon: '',
+      state: 'maintenance',
+      manifest: { name: 'promoted' },
+      proposedManifest: {
+        manifest: { name: 'promoted' },
+        confidence: 'low',
+        reviewState: 'accepted',
+        source: 'llm_tier3',
+        proposedAt: '2026-06-29T00:00:00.000Z',
+        reviewedBy: 'admin-1',
+        reviewedAt: '2026-06-30T00:00:00.000Z',
+      },
+    };
+    const record: RegistryRecord = {
+      recordId: 'imp-2',
+      name: 'agent',
+      status: 'DRAFT',
+      customDescriptorContent: service.serializeCustomMetadata(meta),
+    };
+
+    const config = service.mapToAgentConfig(record);
+    expect(config.proposedManifest).toBeDefined();
+    expect(config.proposedManifest!.reviewState).toBe('accepted');
+    expect(config.proposedManifest!.reviewedBy).toBe('admin-1');
+    expect(config.proposedManifest!.reviewedAt).toBe('2026-06-30T00:00:00.000Z');
+    expect(config.proposedManifest!.source).toBe('llm_tier3');
+  });
+
+  it('omits reviewedBy/reviewedAt when the proposal has not been reviewed', () => {
+    const meta: AgentCustomMetadata = {
+      categories: [],
+      icon: '',
+      state: 'maintenance',
+      manifest: { name: 'trusted' },
+      proposedManifest: {
+        manifest: { name: 'llm-proposed' },
+        confidence: 'low',
+        reviewState: 'pending_review',
+        source: 'llm_tier3',
+        proposedAt: '2026-06-29T00:00:00.000Z',
+      },
+    };
+    const serialized = service.serializeCustomMetadata(meta);
+    const record: RegistryRecord = {
+      recordId: 'imp-3',
+      name: 'agent',
+      status: 'DRAFT',
+      customDescriptorContent: serialized,
+    };
+
+    const config = service.mapToAgentConfig(record);
+    expect(config.proposedManifest).toBeDefined();
+    expect(config.proposedManifest!.reviewState).toBe('pending_review');
+    expect(config.proposedManifest!.reviewedBy).toBeUndefined();
+    expect(config.proposedManifest!.reviewedAt).toBeUndefined();
+    // Absent audit fields must not be serialized as keys.
+    const parsed = JSON.parse(serialized);
+    expect(parsed.proposedManifest).not.toHaveProperty('reviewedBy');
+    expect(parsed.proposedManifest).not.toHaveProperty('reviewedAt');
+  });
 });
