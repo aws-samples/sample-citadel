@@ -396,6 +396,24 @@ if (app.node.tryGetContext('nag')!== 'false') {
                 }],
               );
 
+              // IAM5 — US-IMP-018 ECS source adapter endpoint resolution. The ECS
+              // discovery substrate resolves a service's HTTP endpoint via
+              // read-only ecs:ListClusters/ListServices/DescribeServices/
+              // DescribeTaskDefinition (granted by buildImportDiscoveryPolicy) plus
+              // read-only elasticloadbalancing:DescribeTargetGroups/
+              // DescribeLoadBalancers. These List/Describe APIs have no
+              // resource-level scoping, so they require Resource '*'. Additive to
+              // the discovery suppression registered just above; read-only only.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason: 'read-only ECS/ELB discovery requires * resource',
+                  appliesTo: ['Resource::*'],
+                }],
+              );
+
               // IAM5 — AgentImportResolverFunction pre-activation TEST-INVOKE
               // (testImportedAgent). The admin/architect-gated dry-run invokes an
               // operator-supplied import candidate; the target is arbitrary, so

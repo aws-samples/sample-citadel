@@ -29,7 +29,10 @@ import type {
   AgentCandidate,
   AgentInvocationProtocol,
   AgentOrigin,
+  AgentSourceAdapter,
 } from '../adapters/agent-source/base';
+import { EcsSourceAdapter } from '../adapters/agent-source/ecs-source-adapter';
+import type { AdapterCredentialProvider } from '../adapters/agent-source/invoke-support';
 import { validateImportDescriptor } from '../lambda/agent-config-resolver';
 import { assumeRoleCredentials, type AssumedRoleCredentials } from '../utils/trust-path';
 
@@ -90,11 +93,16 @@ export interface ResolvedSourceRef {
  * | arn:aws:bedrock-agentcore:*:*:runtime/*       | AGENTCORE_RUNTIME | agentcore_runtime |
  * | arn:aws:lambda:*:*:function:*                 | LAMBDA_INVOKE     | lambda            |
  * | arn:aws:bedrock:*:*:agent-alias/* | agent/*   | BEDROCK_AGENT     | bedrock_agent     |
+ * | arn:aws:ecs:*:*:service/*                     | HTTP_ENDPOINT     | ecs               |
  * | mcp://… | mcp+http(s)://…                       | MCP               | mcp               |
  * | http(s)://…                                   | HTTP_ENDPOINT     | http              |
  *
+ * ECS is a DISCOVERY SUBSTRATE: a service ARN invokes over HTTP_ENDPOINT, but
+ * discover/describe are substrate-specific (resolve the service's endpoint).
+ *
  * @throws {UnsupportedSourceError} a well-formed ARN whose service is not a
- *   phase-1 substrate (ECS/EKS/EC2/Step Functions/SageMaker, or any other).
+ *   phase-1 substrate (EKS/EC2/Step Functions/SageMaker, a non-service ECS ARN,
+ *   or any other).
  * @throws {InvalidSourceRefError} a ref that is neither a well-formed ARN nor a
  *   supported URL scheme.
  */
@@ -164,8 +172,18 @@ function resolveArn(arn: string): ResolvedSourceRef {
     throw new InvalidSourceRefError(`unsupported ${service} resource: ${resource}`);
   }
 
-  // Any other AWS service (ECS/EKS/EC2/Step Functions/SageMaker, SQS, …) is a
-  // well-formed but unsupported substrate — typed so tag-scans skip-and-continue.
+  // ECS is a DISCOVERY SUBSTRATE (US-IMP-018): a SERVICE ARN resolves to an
+  // HTTP_ENDPOINT invocation — the service is reached over HTTP, while
+  // discover/describe are substrate-specific (they resolve the service's
+  // endpoint via the load balancer / `citadel:endpoint` tag). Non-service ECS
+  // ARNs (task, task-definition, cluster) stay unsupported below.
+  if (service === 'ecs' && resource.startsWith('service/')) {
+    return { protocol: 'HTTP_ENDPOINT', substrate: 'ecs', target: arn };
+  }
+
+  // Any other AWS service (EKS/EC2/Step Functions/SageMaker, SQS, non-service
+  // ECS, …) is a well-formed but unsupported substrate — typed so tag-scans
+  // skip-and-continue.
   throw new UnsupportedSourceError(service);
 }
 
@@ -467,4 +485,44 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /** Returns `value` when it is a non-empty string, else `undefined`. */
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Discovery-substrate dispatch (US-IMP-018)
+// ---------------------------------------------------------------------------
+
+/** Optional dependencies threaded into a substrate discovery adapter. */
+export interface DiscoveryAdapterDeps {
+  /**
+   * Cross-account assumed credentials (READ-ONLY discovery role). Threaded into
+   * the substrate adapter's AWS SDK clients so describe/healthCheck run in the
+   * TARGET account. Absent ⇒ the default provider chain (same-account).
+   */
+  credentialProvider?: AdapterCredentialProvider;
+}
+
+/**
+ * Resolve the DISCOVERY adapter for a substrate, or `undefined` when the
+ * substrate has no substrate-specific discovery adapter (it is described
+ * through the protocol-keyed registry instead).
+ *
+ * A DISCOVERY SUBSTRATE is one whose discover/describe/healthCheck are
+ * substrate-specific — e.g. ECS resolves the service's HTTP endpoint from its
+ * load balancer / `citadel:endpoint` tag — even though the produced candidate
+ * INVOKES through a standard protocol (HTTP_ENDPOINT for ECS). This is the
+ * single substrate→adapter dispatch point so `describeAgentCandidate` can route
+ * by substrate; it mirrors the protocol-keyed
+ * {@link AgentSourceAdapterRegistry}. Future substrates (EKS/EC2) add a case
+ * here.
+ */
+export function getDiscoveryAdapterForSubstrate(
+  substrate: string,
+  deps: DiscoveryAdapterDeps = {},
+): AgentSourceAdapter | undefined {
+  switch (substrate) {
+    case 'ecs':
+      return new EcsSourceAdapter({ credentialProvider: deps.credentialProvider });
+    default:
+      return undefined;
+  }
 }

@@ -1155,6 +1155,27 @@ export class BackendStack extends cdk.Stack {
       );
     }
 
+    // US-IMP-018: the ECS source adapter (a DISCOVERY SUBSTRATE) resolves an ECS
+    // service's HTTP endpoint by following its load balancer
+    // (loadBalancers -> targetGroupArn -> ELBv2 DescribeTargetGroups ->
+    // LoadBalancerArns -> DescribeLoadBalancers -> DNSName). The ECS reads
+    // (ecs:ListClusters/ListServices/DescribeServices/DescribeTaskDefinition) are
+    // ALREADY granted by buildImportDiscoveryPolicy() above; this adds the
+    // companion read-only ELBv2 Describe actions. Both ELBv2 calls are
+    // List/Describe-class reads with no resource-level scoping, so Resource '*'
+    // (the cdk-nag IAM5 finding on this role's DefaultPolicy is suppressed with
+    // the read-only ECS/ELB discovery justification in bin/app.ts).
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'elasticloadbalancing:DescribeTargetGroups',
+          'elasticloadbalancing:DescribeLoadBalancers',
+        ],
+        resources: ['*'],
+      }),
+    );
+
     // Grant S3 permissions for agent code
     // The bucket is created in the arbiter stack, so we grant permissions by ARN
     agentCodeResolverFunction.addToRolePolicy(

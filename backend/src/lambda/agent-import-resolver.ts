@@ -41,6 +41,7 @@ import {
   resolveSourceRef,
   tagScanDiscover,
   candidateFromManifest,
+  getDiscoveryAdapterForSubstrate,
   UnsupportedSourceError,
   InvalidSourceRefError,
 } from '../services/agent-discovery';
@@ -701,34 +702,30 @@ async function discoverAgents(input: unknown): Promise<FlatAgentCandidate[]> {
 }
 
 /**
- * Cross-account-aware adapter-registry builder for the DESCRIBE path. Sibling of
- * {@link buildInvokeRegistryFor}, but keyed on an explicit operator-supplied
- * READ-ONLY discovery role (not an invocation block):
+ * Resolve the cross-account `credentialProvider` for the DESCRIBE path, or
+ * `undefined` for a same-account describe (no `discoveryRoleArn`).
  *
- *   - CROSS-ACCOUNT (`discoveryRoleArn` supplied): assume that role in the
- *     TARGET account via {@link assumeRoleCredentials} (externalId-gated), map
- *     the raw temp credentials onto {@link InvokeCredentials} reusing the SAME
- *     {@link toInvokeCredentials} mapper the invoke paths use, and build the
- *     registry whose AWS-native adapters describe with those assumed credentials
- *     (the adapter's SDK client serves describe + invoke alike, so a
- *     credentialProvider makes describe's List/Get calls run in the target
- *     account). A failed assume THROWS — describe is error-shaped, so the throw
- *     propagates to the handler as a clean GraphQL error; we NEVER fall back to
- *     this Lambda's identity (which would describe in the wrong account).
- *   - SAME-ACCOUNT (no `discoveryRoleArn`): the default registry, byte-identical
- *     to today (this Lambda's caller identity).
+ * When a `discoveryRoleArn` (a READ-ONLY role in the TARGET account) is supplied
+ * it is assumed (externalId-gated) via {@link assumeRoleCredentials} and the raw
+ * temp credentials are mapped onto the invoke-credentials shape with the SAME
+ * {@link toInvokeCredentials} mapper the invoke paths use. A failed assume — or
+ * one yielding no usable credentials — THROWS (describe is error-shaped; the
+ * handler surfaces a clean GraphQL error); we NEVER fall back to this Lambda's
+ * identity (which would describe in the wrong account). The assumed credentials
+ * are NEVER logged.
  *
- * The assumed/raw credentials are NEVER logged.
+ * Shared by BOTH describe dispatch paths: the protocol-keyed registry
+ * ({@link buildDescribeRegistry}) and the substrate discovery adapter
+ * ({@link getDiscoveryAdapterForSubstrate}), so the assume happens exactly once.
  */
-async function buildDescribeRegistryFor(
+async function resolveDescribeCredentialProvider(
   discoveryRoleArn: string | undefined,
   discoveryExternalId: string | undefined,
-): Promise<ReturnType<typeof buildDefaultAgentSourceRegistry>> {
+): Promise<InvokeCredentials | undefined> {
   if (!discoveryRoleArn) {
     // Same-account — current behaviour, no assumed credentials.
-    return buildDefaultAgentSourceRegistry();
+    return undefined;
   }
-
   // Cross-account: assume the operator-supplied READ-ONLY discovery role
   // (externalId-gated). A throw here propagates to the caller (the handler),
   // surfacing a clean GraphQL error. The assumed credentials are NEVER logged.
@@ -750,7 +747,21 @@ async function buildDescribeRegistryFor(
       'describeAgentCandidate: cross-account discovery-role assume produced no usable credentials',
     );
   }
-  return buildDefaultAgentSourceRegistry({ credentialProvider });
+  return credentialProvider;
+}
+
+/**
+ * Build the protocol-keyed adapter registry for the DESCRIBE path. With a
+ * `credentialProvider` (cross-account) the AWS-native adapters describe with the
+ * assumed credentials; without one the default same-account registry is built,
+ * byte-identical to the pre-Phase-2 behaviour (no args).
+ */
+function buildDescribeRegistry(
+  credentialProvider: InvokeCredentials | undefined,
+): ReturnType<typeof buildDefaultAgentSourceRegistry> {
+  return credentialProvider
+    ? buildDefaultAgentSourceRegistry({ credentialProvider })
+    : buildDefaultAgentSourceRegistry();
 }
 
 /**
@@ -791,12 +802,22 @@ async function describeAgentCandidate(
     reference: target,
   };
 
-  // Cross-account-aware: a supplied discoveryRoleArn assumes the READ-ONLY
-  // discovery role (externalId-gated) and builds the registry with the assumed
-  // credentials so describe runs in the target account; otherwise the default
-  // same-account registry (unchanged).
-  const registry = await buildDescribeRegistryFor(discoveryRoleArn, discoveryExternalId);
-  const adapter = registry.resolve(protocol);
+  // Cross-account creds (undefined on the same-account path) — computed ONCE
+  // and threaded into whichever describe path runs (assume happens at most once).
+  const credentialProvider = await resolveDescribeCredentialProvider(
+    discoveryRoleArn,
+    discoveryExternalId,
+  );
+
+  // DISCOVERY-SUBSTRATE dispatch (US-IMP-018): ECS (and future EKS/EC2) describe
+  // is substrate-specific — it resolves the service's HTTP endpoint — even
+  // though the produced candidate INVOKES via HTTP_ENDPOINT. When a discovery
+  // adapter exists for the substrate, describe through IT (not the protocol-keyed
+  // HTTP adapter); otherwise the protocol-keyed registry path (unchanged). The
+  // assumed credentialProvider is threaded into the discovery adapter so a
+  // cross-account ECS describe runs in the TARGET account.
+  const discoveryAdapter = getDiscoveryAdapterForSubstrate(substrate, { credentialProvider });
+  const adapter = discoveryAdapter ?? buildDescribeRegistry(credentialProvider).resolve(protocol);
   const descriptor = await adapter.describe(candidate);
   return JSON.stringify(descriptor);
 }
