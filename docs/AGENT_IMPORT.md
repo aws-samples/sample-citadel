@@ -552,7 +552,7 @@ Example — an imported Lambda agent (`customDescriptorContent`):
     "mode": "sync",
     "region": "us-west-2",
     "account": "111122223333",
-    "roleArn": "arn:aws:iam::257192363080:role/citadel-agent-invoke-invoice-classifier",
+    "roleArn": "arn:aws:iam::123456789012:role/citadel-agent-invoke-invoice-classifier",
     "externalId": "citadel-import-7f3a"
   },
   "origin": {
@@ -591,7 +591,7 @@ Example — an imported Bedrock Agent (import the alias, not the draft):
     "mode": "sync",
     "region": "us-west-2",
     "account": "111122223333",
-    "roleArn": "arn:aws:iam::257192363080:role/citadel-agent-invoke-tier1-support",
+    "roleArn": "arn:aws:iam::123456789012:role/citadel-agent-invoke-tier1-support",
     "externalId": "citadel-import-9b2c"
   },
   "origin": {
