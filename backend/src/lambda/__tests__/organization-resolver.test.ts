@@ -27,7 +27,7 @@ describe('organization-resolver', () => {
   });
 
   const makeEvent = (fieldName: string, args: any) => ({
-    fieldName,
+    info: { fieldName },
     arguments: args,
   });
 
@@ -55,6 +55,32 @@ describe('organization-resolver', () => {
           input: { name: 'Duplicate' },
         }))
       ).rejects.toThrow('already exists');
+    });
+
+    test('creates organization with no description, writing no undefined attributes', async () => {
+      // Regression: the resolver's document client is created without
+      // `removeUndefinedValues`, so a PutCommand carrying `description:
+      // undefined` fails marshalling at runtime (surfaces as
+      // Lambda:Unhandled). The frontend sends `description: undefined`
+      // whenever the field is left blank, so this path must not write
+      // an undefined value.
+      dynamoMock.on(ScanCommand).resolves({ Items: [] });
+      dynamoMock.on(PutCommand).resolves({});
+
+      const result = await handler(makeEvent('createOrganization', {
+        input: { name: 'No Desc Org' },
+      }));
+
+      expect(result.name).toBe('No Desc Org');
+
+      const putCalls = dynamoMock.commandCalls(PutCommand);
+      expect(putCalls).toHaveLength(1);
+      const item = (putCalls[0].args[0].input as any).Item;
+      // Absent description defaults to '' (mirrors project-resolver).
+      expect(item.description).toBe('');
+      // No attribute may be undefined — that is exactly what breaks
+      // DynamoDB marshalling in production.
+      expect(Object.values(item).every((v) => v !== undefined)).toBe(true);
     });
   });
 
