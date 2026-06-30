@@ -33,7 +33,8 @@ interface UserManagementResponse {
 export const handler = async (event: any): Promise<any> => {
   console.log('Organization resolver event:', JSON.stringify(event, null, 2));
 
-  const { fieldName, arguments: args } = event;
+  const { info, arguments: args } = event;
+  const fieldName = info.fieldName;
 
   try {
     switch (fieldName) {
@@ -77,7 +78,13 @@ async function createOrganization(input: CreateOrganizationInput): Promise<Organ
   const organization: Organization = {
     orgId,
     name: input.name,
-    description: input.description,
+    // Default to '' rather than passing through undefined. The document
+    // client is created without `removeUndefinedValues`, so a PutCommand
+    // with `description: undefined` fails marshalling ("Pass
+    // options.removeUndefinedValues=true ...") and surfaces as a
+    // Lambda:Unhandled error when an org is created with no description.
+    // Mirrors the `input.description || ''` idiom in project-resolver.
+    description: input.description || '',
     createdAt: now,
   };
 
