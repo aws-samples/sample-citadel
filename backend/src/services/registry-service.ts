@@ -247,6 +247,35 @@ export interface AgentReachabilityMetadata {
   checkedAt: string;
 }
 
+/**
+ * Record of an imported agent published as a target on Citadel's shared
+ * AgentCore Gateway (US-IMP-031). Additive and READ-only downstream: written
+ * ONLY by the `publishImportToGateway` / `unpublishImportFromGateway` resolvers,
+ * NEVER promoted into {@link AgentCustomMetadata.manifest} / `invocation` /
+ * `state` / {@link AgentCustomMetadata.governanceAttestation}, and never
+ * activates the agent (the record STAYS DRAFT — direct invoke remains the
+ * default). Absent until the agent has been published at least once.
+ *
+ * `targetType` is fixed at 'mcpServer' for now — only invocation.protocol==='MCP'
+ * imports are gateway-publishable; REST/OpenAPI (HTTP_ENDPOINT) publish is
+ * deferred. `credentialProviderArn` is present only when auth was offloaded
+ * (API_KEY/BEARER); a NONE-auth publication carries no provider. `status`
+ * advances 'published' → 'unpublished' when the target is removed; the audit
+ * fields are retained across an unpublish.
+ */
+export interface GatewayPublicationMetadata {
+  status: 'published' | 'unpublished';
+  targetType: 'mcpServer';
+  gatewayId: string;
+  gatewayTargetId: string;
+  /** Present only when auth was offloaded (API_KEY/BEARER); absent for NONE. */
+  credentialProviderArn?: string;
+  /** ISO 8601 timestamp at which the agent was (most recently) published. */
+  publishedAt: string;
+  /** Identity (Cognito `sub`, falling back to `username`) of the publisher. */
+  publishedBy: string;
+}
+
 export interface AgentCustomMetadata {
   categories: string[];
   icon: string;
@@ -304,6 +333,14 @@ export interface AgentCustomMetadata {
    * `governanceAttestation`. Absent until a probe has run.
    */
   reachability?: AgentReachabilityMetadata;
+  /**
+   * Record of a publication to Citadel's shared AgentCore Gateway (US-IMP-031).
+   * Additive and READ-only downstream: written ONLY by the
+   * `publishImportToGateway` / `unpublishImportFromGateway` resolvers, NEVER
+   * promoted into {@link manifest} / `invocation` / `state` /
+   * `governanceAttestation`. Absent until the agent has been published once.
+   */
+  gatewayPublication?: GatewayPublicationMetadata;
 }
 
 /**
@@ -394,6 +431,12 @@ export interface AgentConfig {
    * field.
    */
   reachability?: AgentReachabilityMetadata;
+  /**
+   * Record of a publication to Citadel's shared AgentCore Gateway (US-IMP-031),
+   * surfaced READ-ONLY. Present only once the agent has been published; never an
+   * active/trusted field and never changes the record's DRAFT/activation state.
+   */
+  gatewayPublication?: GatewayPublicationMetadata;
 }
 
 export interface ToolConfig {
@@ -1127,6 +1170,7 @@ export class RegistryService {
     governanceAttestation: undefined,
     proposedManifest: undefined,
     reachability: undefined,
+    gatewayPublication: undefined,
   };
 
   private static readonly TOOL_METADATA_DEFAULTS: ToolCustomMetadata = {
@@ -1202,6 +1246,9 @@ export class RegistryService {
       // Surface the best-effort reachability probe result READ-ONLY when present
       // (US-IMP-017b). Never an active/trusted field.
       ...(meta.reachability ? { reachability: meta.reachability } : {}),
+      // Surface the gateway publication record READ-ONLY when present
+      // (US-IMP-031). Never an active/trusted field; never changes DRAFT state.
+      ...(meta.gatewayPublication ? { gatewayPublication: meta.gatewayPublication } : {}),
     };
   }
 

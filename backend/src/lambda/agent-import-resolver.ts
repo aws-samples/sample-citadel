@@ -24,6 +24,17 @@
  * so import and create stay in lock-step.
  */
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import {
+  BedrockAgentCoreControlClient,
+  CreateGatewayTargetCommand,
+  DeleteGatewayTargetCommand,
+} from '@aws-sdk/client-bedrock-agentcore-control';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import {
+  buildMCPServerTargetPayload,
+  deleteTargetAndProvider,
+} from '../utils/gateway-target-manager';
+import { createOrUpsertApiKeyProvider } from '../utils/credential-provider-manager';
 import { getRegistryService, validateImportDescriptor } from './agent-config-resolver';
 import { createADR } from './adr-resolver';
 import { extractOrgFromEvent, isAdminFromEvent, hasRoleFromEvent } from '../utils/auth-event';
@@ -69,6 +80,7 @@ import type {
   AgentInvocationMode,
   AgentOrigin,
   AgentReachabilityMetadata,
+  GatewayPublicationMetadata,
   ProposedManifestMetadata,
   RegistryRecord,
 } from '../services/registry-service';
@@ -534,6 +546,7 @@ export const handler = async (
   | ImportTestResult
   | ImportReachabilityResult
   | Tier3ProposalResult
+  | GatewayPublicationResult
 > => {
   const fieldName = event.info?.fieldName;
   // One correlationId per resolver invocation, shared by the discovery summary
@@ -578,6 +591,28 @@ export const handler = async (
           throw new Error('probeImportReachability: importId is required');
         }
         return await probeImportReachability(importId, event);
+      }
+      case 'publishImportToGateway': {
+        // Authentication is required up-front (mirrors the sibling import
+        // mutations); the admin/architect authorization gate lives inside
+        // publishImportToGateway.
+        requireAuthenticated(event);
+        const importId = asNonEmptyString(event.arguments?.importId);
+        if (!importId) {
+          throw new Error('publishImportToGateway: importId is required');
+        }
+        return await publishImportToGateway(importId, event);
+      }
+      case 'unpublishImportFromGateway': {
+        // Authentication is required up-front (mirrors the sibling import
+        // mutations); the admin/architect authorization gate lives inside
+        // unpublishImportFromGateway.
+        requireAuthenticated(event);
+        const importId = asNonEmptyString(event.arguments?.importId);
+        if (!importId) {
+          throw new Error('unpublishImportFromGateway: importId is required');
+        }
+        return await unpublishImportFromGateway(importId, event);
       }
       case 'proposeAgentManifestTier3': {
         // Authentication is required up-front (mirrors the sibling import
@@ -1479,6 +1514,360 @@ export async function probeImportReachability(
     classification: reachability.classification,
     detail: reachability.detail ?? null,
     checkedAt,
+  };
+}
+
+// ===========================================================================
+// MCP Gateway publish / unpublish (US-IMP-031)
+// ===========================================================================
+
+/**
+ * AgentCore control-plane client for gateway-target create/delete. Module-scope
+ * so the Lambda warm pool reuses it; no network I/O at construction.
+ */
+const bedrockAgentCoreClient = new BedrockAgentCoreControlClient({
+  region: process.env.AWS_REGION,
+});
+
+/** SSM client for runtime gateway-id resolution (param owned by ServicesStack). */
+const ssmGatewayClient = new SSMClient({ region: process.env.AWS_REGION });
+
+/** Cached gateway id (per warm Lambda) once resolved from SSM. */
+let cachedGatewayId: string | undefined;
+
+/** @internal test hook — drop the cached gateway id between tests. */
+export function __resetGatewayIdCacheForTesting(): void {
+  cachedGatewayId = undefined;
+}
+
+/**
+ * Resolve the shared AgentCore Gateway id. Mirrors gateway-registration-handler:
+ *   1. `AGENTCORE_GATEWAY_ID` env (fast path AND the var the reused
+ *      gateway-target-manager.deleteTargetAndProvider reads directly).
+ *   2. else a cached value from a prior SSM read.
+ *   3. else a runtime SSM GetParameter on `GATEWAY_ID_PARAM` (the param is owned
+ *      by ServicesStack, so it cannot be resolved at this stack's deploy time;
+ *      runtime resolution mirrors the integration/gateway-registration flow).
+ *
+ * On a successful SSM read the value is ALSO written back to
+ * `process.env.AGENTCORE_GATEWAY_ID` so the reused gateway-target-manager
+ * helpers (which read that env var for the target delete) operate on the same
+ * gateway. Throws a clear 'gateway not configured' error when neither source
+ * yields a value.
+ */
+async function resolveGatewayId(): Promise<string> {
+  const fromEnv = process.env.AGENTCORE_GATEWAY_ID;
+  if (fromEnv) return fromEnv;
+  if (cachedGatewayId) {
+    process.env.AGENTCORE_GATEWAY_ID = cachedGatewayId;
+    return cachedGatewayId;
+  }
+  const paramName = process.env.GATEWAY_ID_PARAM;
+  if (paramName) {
+    const resp = await ssmGatewayClient.send(new GetParameterCommand({ Name: paramName }));
+    const value = resp.Parameter?.Value;
+    if (value) {
+      cachedGatewayId = value;
+      // Bridge into the env var the reused gateway-target-manager helpers read.
+      process.env.AGENTCORE_GATEWAY_ID = value;
+      return value;
+    }
+  }
+  throw new Error(
+    'AgentCore Gateway not configured: set AGENTCORE_GATEWAY_ID or GATEWAY_ID_PARAM',
+  );
+}
+
+/**
+ * Flat result of the gateway publish/unpublish mutations. `gatewayTargetId` is
+ * null only on a no-op unpublish (nothing was published); `detail` is a short,
+ * secret-free human-readable note.
+ */
+export interface GatewayPublicationResult {
+  status: 'published' | 'unpublished';
+  gatewayTargetId: string | null;
+  detail: string;
+}
+
+/** Auth modes whose credential is offloaded to an AgentCore api-key provider. */
+const API_KEY_AUTH_MODES: ReadonlySet<AgentInvocationAuthMode> =
+  new Set<AgentInvocationAuthMode>(['API_KEY', 'BEARER']);
+
+/**
+ * Shared admin/architect gate + record load for the gateway publish/unpublish
+ * paths. Mirrors {@link attestAgentImport} / {@link probeImportReachability}:
+ * only `admin` or `architect` may run it (publishing exposes operator-supplied
+ * infrastructure on the shared gateway, so authentication alone is
+ * insufficient), and a non-admin caller is additionally org-scoped with the SAME
+ * cross-tenant not-found mask as the sibling mutations (so a cross-tenant probe
+ * cannot tell "exists elsewhere" from "absent"). Returns the loaded record + its
+ * deserialized metadata. This is the ONLY path that throws an authorization
+ * error; a missing record is a clean not-found.
+ */
+async function loadImportForGatewayOp(
+  importId: string,
+  event: ImportAgentEvent,
+  op: string,
+): Promise<{ record: RegistryRecord; meta: AgentCustomMetadata }> {
+  const isAdmin = isAdminFromEvent(event);
+  if (!isAdmin && !hasRoleFromEvent(event, 'architect')) {
+    throw new Error(`Unauthorized: ${op} requires the admin or architect role`);
+  }
+
+  const registryService = getRegistryService();
+  const record = await registryService.getResource('agent', importId);
+  if (!record) {
+    throw new Error(`Agent not found: ${importId}`);
+  }
+  const meta = readMeta(registryService, record);
+
+  if (!isAdmin) {
+    const callerOrg = await extractOrgFromEvent(event);
+    if (!callerOrg || meta.orgId !== callerOrg) {
+      throw new Error(`Agent not found: ${importId}`);
+    }
+  }
+  return { record, meta };
+}
+
+/**
+ * Publishes a PUBLICLY-REACHABLE, governance-ATTESTED, MCP-substrate imported
+ * agent as an `mcpServer` target on Citadel's shared AgentCore Gateway (auth
+ * offload + tool exposure). Direct invoke remains the default — this writes ONLY
+ * `customMetadata.gatewayPublication` and NEVER touches manifest / invocation /
+ * `state` / `governanceAttestation`, so the record STAYS DRAFT and is never
+ * auto-activated.
+ *
+ * Gates (each a clear typed error): admin/architect → MCP-only eligibility
+ * (HTTP_ENDPOINT ⇒ deferred REST/OpenAPI message; AWS-native ⇒ direct-invoke
+ * only) → governanceAttestation ATTESTED → reachability 'reachable'. Auth
+ * offload supports NONE / API_KEY / BEARER only (OAUTH2/SIGV4/COGNITO rejected,
+ * deferred); for API_KEY/BEARER the raw secret at `invocation.auth.secretRef` is
+ * fetched (NEVER logged) and provisioned as an AgentCore api-key credential
+ * provider, whose ARN is attached to the gateway-target credentialProvider
+ * configuration.
+ *
+ * Idempotent: a re-publish of an already-published import returns the existing
+ * target without creating a duplicate. On a target-create failure a clean error
+ * is thrown and NO (half) publication is persisted.
+ */
+export async function publishImportToGateway(
+  importId: string,
+  event: ImportAgentEvent,
+): Promise<GatewayPublicationResult> {
+  const { record, meta } = await loadImportForGatewayOp(
+    importId,
+    event,
+    'publishImportToGateway',
+  );
+
+  // Idempotent: already published with a live target → return it (no duplicate
+  // create, no re-write). Checked first so a re-publish is a clean no-op.
+  const existing = meta.gatewayPublication;
+  if (existing && existing.status === 'published' && existing.gatewayTargetId) {
+    return {
+      status: 'published',
+      gatewayTargetId: existing.gatewayTargetId,
+      detail: 'already published',
+    };
+  }
+
+  // INVARIANT 2: eligibility — only an MCP-substrate import is gateway-publishable.
+  const protocol = meta.invocation?.protocol ?? 'AGENTCORE_RUNTIME';
+  if (protocol !== 'MCP') {
+    if (protocol === 'HTTP_ENDPOINT') {
+      throw new Error(
+        'REST/OpenAPI gateway publish not yet supported (deferred): only MCP-substrate ' +
+          'imports are gateway-publishable',
+      );
+    }
+    throw new Error(
+      `Protocol ${protocol} is direct-invoke only and cannot be published to the gateway (MCP only)`,
+    );
+  }
+
+  // INVARIANT 3a: governance attestation must be ATTESTED (not 'pending'/absent).
+  if (meta.governanceAttestation?.status !== 'attested') {
+    throw new Error(
+      'Cannot publish: the import is not governance-attested — attest it before publishing',
+    );
+  }
+
+  // INVARIANT 3b: the agent must be publicly reachable (a prior probe classified
+  // it 'reachable'). 'unverifiable_private' / 'no_endpoint' / 'unreachable' /
+  // absent all reject.
+  if (meta.reachability?.classification !== 'reachable') {
+    throw new Error(
+      'Cannot publish: agent is not publicly reachable — probe reachability first ' +
+        '(classification must be "reachable")',
+    );
+  }
+
+  const invocation = meta.invocation;
+  if (!invocation) {
+    throw new Error('Cannot publish: the import has no invocation block');
+  }
+
+  // Resolve the shared gateway id up-front (clear 'gateway not configured' error).
+  const gatewayId = await resolveGatewayId();
+
+  // INVARIANT 4: auth offload supports NONE / API_KEY / BEARER only.
+  const authMode = invocation.auth.mode;
+  let credentialProviderArn: string | undefined;
+  if (authMode === 'NONE') {
+    credentialProviderArn = undefined;
+  } else if (API_KEY_AUTH_MODES.has(authMode)) {
+    const secretRef = invocation.auth.secretRef;
+    if (!secretRef) {
+      throw new Error(
+        `Cannot publish: auth mode ${authMode} requires invocation.auth.secretRef`,
+      );
+    }
+    // Fetch the raw secret (NEVER logged) and provision an AgentCore api-key
+    // credential provider. The provider name derives from integrationId=importId
+    // (`integration-<importId>-api-key`), matching the unpublish teardown so the
+    // same provider is deleted later.
+    const secret = await getAgentInvocationSecret(secretRef);
+    const provider = await createOrUpsertApiKeyProvider({ integrationId: importId, apiKey: secret });
+    credentialProviderArn = provider.credentialProviderArn;
+  } else {
+    throw new Error(
+      `Cannot publish: auth mode ${authMode} offload is not supported (deferred); ` +
+        'use NONE, API_KEY or BEARER',
+    );
+  }
+
+  // Build the mcpServer target payload via the reused builder (serverUrl =
+  // invocation.target; credentialProviderConfigurations from the providerArn),
+  // then override the name to `import-<importId>` and pin the resolved gateway id.
+  const basePayload = buildMCPServerTargetPayload({
+    integrationId: importId,
+    config: { serverUrl: invocation.target },
+    ...(credentialProviderArn
+      ? { credentialProviderArn, credentialProviderType: 'API_KEY' as const }
+      : {}),
+  });
+  const createInput = {
+    ...basePayload,
+    name: `import-${importId}`,
+    gatewayIdentifier: gatewayId,
+  };
+
+  // Create the target. On failure surface a clean error and do NOT write a half
+  // publication (the customMetadata update below never runs). The thrown error
+  // carries no secret — the secret VALUE never reaches the SDK input or logs.
+  let gatewayTargetId: string;
+  try {
+    const resp = await bedrockAgentCoreClient.send(new CreateGatewayTargetCommand(createInput));
+    if (!resp.targetId) {
+      throw new Error('AgentCore returned no targetId for the created gateway target');
+    }
+    gatewayTargetId = resp.targetId;
+  } catch (err) {
+    throw new Error(
+      `Failed to create gateway target for import ${importId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
+  const publishedBy =
+    asNonEmptyString(event.identity?.sub) ??
+    asNonEmptyString(event.identity?.username) ??
+    'unknown';
+  const gatewayPublication: GatewayPublicationMetadata = {
+    status: 'published',
+    targetType: 'mcpServer',
+    gatewayId,
+    gatewayTargetId,
+    ...(credentialProviderArn ? { credentialProviderArn } : {}),
+    publishedAt: new Date().toISOString(),
+    publishedBy,
+  };
+
+  // INVARIANT 5: persist gatewayPublication to customMetadata ONLY — the spread
+  // preserves manifest / invocation / state / governanceAttestation
+  // byte-for-byte and the update sends customMetadata only (no name/description/
+  // status), mirroring attestAgentImport, so the record STAYS DRAFT.
+  const registryService = getRegistryService();
+  const mergedMeta: AgentCustomMetadata = { ...meta, gatewayPublication };
+  await registryService.updateResource('agent', record.recordId, {
+    customMetadata: registryService.serializeCustomMetadata(mergedMeta),
+  });
+
+  return { status: 'published', gatewayTargetId, detail: 'mcpServer target created' };
+}
+
+/**
+ * Unpublishes an imported agent from the shared AgentCore Gateway: removes its
+ * gateway target (and, when auth was offloaded, its credential provider) and
+ * flips `customMetadata.gatewayPublication.status` to 'unpublished'. Like
+ * publish, it writes customMetadata ONLY and NEVER changes `state` /
+ * `governanceAttestation` (the record STAYS DRAFT).
+ *
+ * Admin/architect-gated (same gate as publish). Idempotent: a no-op returning
+ * `{ status:'unpublished', detail:'nothing published' }` when no live publication
+ * exists. For an API_KEY/BEARER publication the reused
+ * gateway-target-manager.deleteTargetAndProvider removes target THEN provider in
+ * the safe order; a NONE publication has no provider, so the target is deleted
+ * directly.
+ */
+export async function unpublishImportFromGateway(
+  importId: string,
+  event: ImportAgentEvent,
+): Promise<GatewayPublicationResult> {
+  const { record, meta } = await loadImportForGatewayOp(
+    importId,
+    event,
+    'unpublishImportFromGateway',
+  );
+
+  const pub = meta.gatewayPublication;
+  // Idempotent no-op: nothing currently published (absent, already unpublished,
+  // or missing a target id). No gateway calls, no re-write.
+  if (!pub || pub.status !== 'published' || !pub.gatewayTargetId) {
+    return {
+      status: 'unpublished',
+      gatewayTargetId: pub?.gatewayTargetId ?? null,
+      detail: 'nothing published',
+    };
+  }
+
+  // Resolve + bridge the gateway id (deleteTargetAndProvider reads it from env).
+  const gatewayId = await resolveGatewayId();
+
+  // Remove the gateway target. When auth was offloaded, REUSE
+  // gateway-target-manager.deleteTargetAndProvider (target THEN provider, in the
+  // safe order; integrationId=importId matches the publish-time provider name).
+  // A NONE publication has no provider, so delete the target directly.
+  if (pub.credentialProviderArn) {
+    await deleteTargetAndProvider({
+      targetId: pub.gatewayTargetId,
+      integrationId: importId,
+      credentialProviderType: 'API_KEY',
+    });
+  } else {
+    await bedrockAgentCoreClient.send(
+      new DeleteGatewayTargetCommand({
+        gatewayIdentifier: gatewayId,
+        targetId: pub.gatewayTargetId,
+      }),
+    );
+  }
+
+  // Flip status to 'unpublished' (retain the audit fields). INVARIANT: never
+  // change state/governanceAttestation; the update sends customMetadata only.
+  const updatedPublication: GatewayPublicationMetadata = { ...pub, status: 'unpublished' };
+  const registryService = getRegistryService();
+  const mergedMeta: AgentCustomMetadata = { ...meta, gatewayPublication: updatedPublication };
+  await registryService.updateResource('agent', record.recordId, {
+    customMetadata: registryService.serializeCustomMetadata(mergedMeta),
+  });
+
+  return {
+    status: 'unpublished',
+    gatewayTargetId: pub.gatewayTargetId,
+    detail: 'gateway target removed',
   };
 }
 

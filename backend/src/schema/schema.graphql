@@ -202,6 +202,25 @@ type Mutation {
   # resolver enforces the admin/architect role. Best-effort: a network
   # error/timeout yields an 'unreachable' result, never a GraphQL error.
   probeImportReachability(importId: String!): ImportReachabilityResult!
+  # Admin/architect MCP Gateway PUBLISH (US-IMP-031). Publishes a
+  # PUBLICLY-REACHABLE, governance-ATTESTED, MCP-substrate imported agent as an
+  # `mcpServer` target on Citadel's shared AgentCore Gateway (auth offload + tool
+  # exposure). Eligibility: ONLY invocation.protocol==='MCP'; HTTP_ENDPOINT
+  # returns a 'REST/OpenAPI gateway publish not yet supported' error; every
+  # AWS-native protocol is rejected (direct-invoke only). Requires
+  # governanceAttestation ATTESTED and reachability 'reachable'. Auth offload
+  # supports NONE/API_KEY/BEARER only. Writes ONLY
+  # customMetadata.gatewayPublication — NEVER manifest/invocation/state/
+  # governanceAttestation, so the record STAYS DRAFT and direct invoke remains
+  # the default. Idempotent: re-publishing an already-published import returns
+  # the existing target without creating a duplicate. Default Cognito auth.
+  publishImportToGateway(importId: String!): GatewayPublicationResult!
+  # Admin/architect MCP Gateway UNPUBLISH (US-IMP-031). Removes the agent's
+  # gateway target (and its credential provider, when auth was offloaded) and
+  # flips customMetadata.gatewayPublication.status to 'unpublished'. Never
+  # changes state/governanceAttestation. Idempotent: a no-op when nothing is
+  # published. Default Cognito auth; the resolver enforces the admin/architect role.
+  unpublishImportFromGateway(importId: String!): GatewayPublicationResult!
   deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
   activateProjectAgents(projectId: ID!): ActivateAgentsResult
   updateAgentCode(input: UpdateAgentCodeInput!): AgentCode
@@ -533,6 +552,10 @@ type AgentConfig {
   # READ-only. Absent until probeImportReachability has run; never an
   # active/trusted field.
   reachability: ImportReachability
+  # Record of a publication to Citadel's shared AgentCore Gateway (US-IMP-031),
+  # surfaced READ-only. Absent until publishImportToGateway has run; never an
+  # active/trusted field and never changes the record's DRAFT/activation state.
+  gatewayPublication: GatewayPublication
 }
 
 # UNTRUSTED, LLM-proposed agent manifest (Tier-3 agent import), surfaced
@@ -695,6 +718,32 @@ type ImportReachability {
   classification: String!
   detail: String
   checkedAt: String!
+}
+
+# Result of the MCP Gateway publish/unpublish mutations (US-IMP-031).
+# `status` is "published" or "unpublished"; `gatewayTargetId` is the AgentCore
+# Gateway target id (null on a no-op unpublish where nothing was published);
+# `detail` is a short human-readable note (e.g. "mcpServer target created",
+# "already published", "nothing published").
+type GatewayPublicationResult {
+  status: String!
+  gatewayTargetId: String
+  detail: String
+}
+
+# READ-only record of an imported agent's publication to Citadel's shared
+# AgentCore Gateway (US-IMP-031), surfaced on AgentConfig. `targetType` is fixed
+# at "mcpServer"; `credentialProviderArn` is present only when auth was offloaded
+# (API_KEY/BEARER). `status` advances "published" -> "unpublished" when the
+# target is removed. Never an active/trusted field; the record STAYS DRAFT.
+type GatewayPublication {
+  status: String!
+  targetType: String!
+  gatewayId: String!
+  gatewayTargetId: String!
+  credentialProviderArn: String
+  publishedAt: String!
+  publishedBy: String!
 }
 
 # Agent import (US-IMP) — discovery. `discoverAgents` enumerates importable

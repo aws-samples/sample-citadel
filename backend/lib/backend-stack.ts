@@ -1657,6 +1657,62 @@ export class BackendStack extends cdk.Stack {
       })
     );
 
+    // ── US-IMP-031: MCP Gateway publish/unpublish for the import resolver ────
+    // The admin/architect-gated publishImportToGateway / unpublishImportFromGateway
+    // mutations publish a PUBLICLY-REACHABLE, governance-ATTESTED, MCP-substrate
+    // imported agent as an `mcpServer` target on the shared AgentCore Gateway and
+    // tear it down. Least-privilege grants MIRRORING the gateway-registration
+    // handler (the only other gateway-target lifecycle path):
+    //   • CreateGatewayTarget / DeleteGatewayTarget on the gateway + its targets.
+    //   • Create/Update/DeleteApiKeyCredentialProvider for API_KEY/BEARER auth
+    //     offload, scoped to the `integration-*` provider namespace the reused
+    //     credential-provider-manager uses (provider integration-<importId>-api-key).
+    //   • ssm:GetParameter on the EXACT gateway-id parameter (owned by
+    //     ServicesStack), resolved at RUNTIME — the same mechanism the
+    //     gateway-registration handler uses; the resolver bridges the value into
+    //     AGENTCORE_GATEWAY_ID for the reused gateway-target-manager delete helper.
+    // GetSecretValue on /citadel/agents/* (the offload secret) is ALREADY granted
+    // by the test-invoke READ grant above (no second grant). The wildcard ARNs
+    // here (bedrock-agentcore gateway/* + credential-provider/integration-*) are
+    // covered by the stack-level IAM5 suppression in bin/app.ts; the SSM ARN is
+    // exact (no wildcard ⇒ no finding).
+    agentImportResolverFunction.addEnvironment('GATEWAY_ID_PARAM', gatewayIdParamName);
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:CreateGatewayTarget',
+          'bedrock-agentcore:DeleteGatewayTarget',
+        ],
+        resources: [
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`,
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*/target/*`,
+        ],
+      })
+    );
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:CreateApiKeyCredentialProvider',
+          'bedrock-agentcore:UpdateApiKeyCredentialProvider',
+          'bedrock-agentcore:DeleteApiKeyCredentialProvider',
+        ],
+        resources: [
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:credential-provider/integration-*`,
+        ],
+      })
+    );
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter${gatewayIdParamName}`,
+        ],
+      })
+    );
+
     // EventBridge rule for gateway registration
     const gatewayRegistrationRule = new events.Rule(
       this,
@@ -2812,6 +2868,24 @@ export class BackendStack extends cdk.Stack {
     agentImportLambdaDataSource.createResolver("AcceptProposedManifestTier3Resolver", {
       typeName: "Mutation",
       fieldName: "acceptProposedManifestTier3",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // US-IMP-031 MCP Gateway publish/unpublish. Reuse the existing AgentImport
+    // data source — the import resolver now also has the gateway-target +
+    // credential-provider + gateway-id grants (see the gateway-publish IAM block
+    // above), so no new Lambda/data source is required.
+    agentImportLambdaDataSource.createResolver("PublishImportToGatewayResolver", {
+      typeName: "Mutation",
+      fieldName: "publishImportToGateway",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("UnpublishImportFromGatewayResolver", {
+      typeName: "Mutation",
+      fieldName: "unpublishImportFromGateway",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
