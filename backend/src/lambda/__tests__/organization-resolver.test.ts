@@ -75,7 +75,7 @@ describe('organization-resolver', () => {
 
       const putCalls = dynamoMock.commandCalls(PutCommand);
       expect(putCalls).toHaveLength(1);
-      const item = (putCalls[0].args[0].input as any).Item;
+      const item = putCalls[0].args[0].input.Item!;
       // Absent description defaults to '' (mirrors project-resolver).
       expect(item.description).toBe('');
       // No attribute may be undefined — that is exactly what breaks
