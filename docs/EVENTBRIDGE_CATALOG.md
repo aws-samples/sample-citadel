@@ -414,6 +414,53 @@ Emitted by `backend/src/lambda/agent-config-resolver.ts` (NOT the import resolve
 }
 ```
 
+## Agent Import — Tier-3 Manifest Proposal Events
+
+The Tier-3 (AI-assisted) manifest proposal is asynchronous. The `agent-import-resolver.proposeAgentManifestTier3` mutation enqueues a **secret-free** signal envelope to the Fabricator queue (`requestType: manifest-proposal`); the Python Fabricator (`arbiter/fabricator/index.py` `publish_manifest_event`, via `manifest_proposal.propose_agent_manifest`) then emits one of the two events below when the LLM proposal completes. Both are produced on the agent bus (`COMPLETION_BUS_NAME` → `citadel-agents-{env}`) and — following the same `Source == DetailType` convention as the Fabrication Events below — their `Source` equals the detail-type (not `citadel.backend`). They are **not** declared in the `EventTypes` constants (those are TypeScript-side; these are produced by the Python Fabricator).
+
+They are consumed by `backend/src/lambda/agent-import-manifest-result-handler.ts` (the B1 result handler), which recursively sanitizes the untrusted manifest and parks it on the DRAFT import record as `customMetadata.proposedManifest` (`reviewState: 'pending_review'` on a proposal, `'failed'` on the marker). The handler is idempotent on `correlationId || requestId` and never promotes/activates the record.
+
+### Event Types
+
+| DetailType (== Source) | Producer | Consumer | Description |
+|------------------------|----------|----------|-------------|
+| `agent.import.manifest.proposed` | Fabricator `_process_manifest_proposal` | `agent-import-manifest-result-handler` | An LLM-proposed capability descriptor is ready for human review (always low confidence) |
+| `agent.import.manifest.failed` | Fabricator `_process_manifest_proposal` | `agent-import-manifest-result-handler` | The proposal could not be produced (unparseable/invalid model output, or a model/client error) |
+
+### Event Schemas
+
+#### agent.import.manifest.proposed
+
+```json
+{
+  "source": "agent.import.manifest.proposed",
+  "detail-type": "agent.import.manifest.proposed",
+  "detail": {
+    "requestId": "string (UUID)",
+    "correlationId": "string (UUID)",
+    "importId": "string (DRAFT import record id)",
+    "proposedManifest": { "...": "AgentCapabilityDescriptor-shaped JSON; sanitized by the consumer" },
+    "status": "proposed"
+  }
+}
+```
+
+#### agent.import.manifest.failed
+
+```json
+{
+  "source": "agent.import.manifest.failed",
+  "detail-type": "agent.import.manifest.failed",
+  "detail": {
+    "requestId": "string (UUID)",
+    "correlationId": "string (UUID)",
+    "importId": "string (DRAFT import record id)",
+    "error": "string (short, secret-free)",
+    "status": "failed"
+  }
+}
+```
+
 ## Execution Control Events
 
 These events control workflow execution lifecycle. They are published by the Execution Resolver and consumed by the Step Runner.

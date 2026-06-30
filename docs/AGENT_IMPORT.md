@@ -1,6 +1,8 @@
 # Agent Import
 
-Citadel fabricates agents it owns. This document specifies a proposed capability — Agent Import — that lets Citadel absorb foreign agents that already run on heterogeneous AWS substrates (AgentCore Runtime, Bedrock Agents, Lambda, ECS, EKS, EC2, HTTP/MCP endpoints, Step Functions, SageMaker) without owning or redeploying their infrastructure. Import discovers a candidate agent, determines its capabilities, normalizes it into the existing AgentCore Registry record model, wires a protocol-aware invocation path, and routes the whole thing through the governance engine. Current-state facts are labeled "Today". Everything new is labeled "Proposed". Nothing in the Proposed sections is implemented yet.
+Citadel fabricates agents it owns. Agent Import is the **shipped** capability that lets Citadel absorb foreign agents that already run on heterogeneous AWS substrates (AgentCore Runtime, Bedrock Agents, Lambda, HTTP/MCP endpoints, and ECS/EKS/EC2 container/VM substrates that are discovered then resolved to an HTTP endpoint) without owning or redeploying their infrastructure. Import discovers a candidate agent, determines its capabilities through a four-tier fallback, normalizes it into the existing AgentCore Registry record model, wires a protocol-aware invocation path, and routes the whole thing through the governance engine.
+
+**Status — as-built.** Phase 1 (self-describing substrates, same-account, Tiers 0–1), Phase 2 (ECS/EKS/EC2 discovery substrates, cross-account discovery/analysis/invoke, Tiers 2–3), and the follow-ons (governance attestation + a mode-aware activation gate, pre-activation test-invoke, backend reachability probe, Tier-3 LLM-proposed manifest via the Python Fabricator, and an optional MCP gateway publish) are all merged on `feat/agent-import`. This document is reconciled to the shipped code: every mutation, query, field, event, and adapter named below exists in the codebase. The labels in this document now mean: **"Today"** = pre-existing platform facts Import builds on; **"As-built"** = shipped Agent Import behaviour; **"Deferred"** = genuinely future work (REST/OpenAPI gateway publish, the peered-VPC reachability prober, OAUTH2/SIGV4/COGNITO gateway auth offload, and the `A2A` / `STEP_FUNCTIONS` / `SAGEMAKER_ENDPOINT` / `SQS_ASYNC` protocols, which exist in the invocation type union but have no invoke adapter wired yet). The original design used the word "Proposed"; where that survives below it now describes **as-built** behaviour unless explicitly marked Deferred.
 
 ## Table of Contents
 
@@ -20,6 +22,7 @@ Citadel fabricates agents it owns. This document specifies a proposed capability
     - [Stage 2: Capability Determination](#stage-2-capability-determination)
     - [Stage 3: Interfacing](#stage-3-interfacing)
     - [Stage 4: Registration](#stage-4-registration)
+  - [GraphQL Surface (Resolvers)](#graphql-surface-resolvers)
   - [Data Model](#data-model)
   - [Invocation Dispatch](#invocation-dispatch)
   - [Security and Governance](#security-and-governance)
@@ -46,7 +49,7 @@ Citadel fabricates agents it owns. This document specifies a proposed capability
 
 ### Problem
 
-Today Citadel only creates agents it owns. The Fabricator generates an agent, registers it, and points invocation at infrastructure Citadel controls — an AgentCore Runtime ARN or the SQS worker queue. Enterprises already operate agents elsewhere: a Bedrock Agent in another account, a Lambda behind a Function URL, a containerized service on ECS, an MCP server, a partner A2A endpoint. Citadel cannot orchestrate any of them. The frontend exposes the intent — an Import Agent button in `frontend/src/pages/AgentCatalog.tsx` — but the button is deliberately disabled pending a product spec.
+Before Agent Import, Citadel only created agents it owns. The Fabricator generates an agent, registers it, and points invocation at infrastructure Citadel controls — an AgentCore Runtime ARN or the SQS worker queue. Enterprises already operate agents elsewhere: a Bedrock Agent in another account, a Lambda behind a Function URL, a containerized service on ECS, an MCP server, a partner A2A endpoint. Citadel could not orchestrate any of them. Agent Import closes that gap: the Import Agent flow is now a shipped 5-step React wizard (`frontend/src/components/ImportAgentWizard.tsx`) backed by the `agent-import-resolver` AppSync surface.
 
 ### Solution
 
@@ -54,13 +57,13 @@ One line: introduce an Agent Source Adapter abstraction (mirroring the proven `C
 
 ### Scope
 
-In scope (Proposed):
+In scope (as-built):
 
-- Discover candidate agents in an AWS account/region/scope, by sweep, by pasted reference, or by uploaded manifest.
-- Determine capabilities through a four-tier fallback that always ends in human review.
-- Normalize foreign agents into the existing AgentCore Registry record model.
-- Invoke imported agents across nine protocols through a single dispatcher.
-- Route every import through governance: ADR, interrogation, IAM trust-path/drift analysis, authority-unit assignment.
+- Discover candidate agents by account-wide tag scan, by pasted ARN/endpoint reference, or by uploaded manifest — same-account or **cross-account** via an operator-supplied read-only discovery role + STS external id.
+- Determine capabilities through a four-tier fallback (Tier‑0 manifest, Tier‑1 heuristic, Tier‑2 live probe, Tier‑3 LLM-proposed manifest) that always ends in human review.
+- Normalize foreign agents into the existing AgentCore Registry record model (a CUSTOM descriptor carrying `invocation` + `origin` blocks).
+- Invoke imported agents through a single protocol dispatcher. Five protocols have invoke adapters today (`AGENTCORE_RUNTIME`, `BEDROCK_AGENT`, `LAMBDA_INVOKE`, `HTTP_ENDPOINT`, `MCP`); the dispatcher is gated by the `IMPORT_ENABLED` flag (see [Invocation Dispatch](#invocation-dispatch)).
+- Route every import through governance: a system-generated ADR on import, an authority-unit grant, an explicit `attestAgentImport` step, a mode-aware activation gate, and lazy IAM trust-path attestation (cross-account via the analysis role).
 
 ### Non-Goals
 
@@ -146,10 +149,10 @@ The takeaway: the storage model is already generic, and invocation is already ev
 
 ## Design Pattern: Agent Source Adapter
 
-Import introduces one new abstraction (Proposed): the Agent Source Adapter. It mirrors the `ConnectorAdapter` family (`backend/src/adapters/base.ts`) that already sits behind 27 datastore and 13 integration adapters, each with a scoped IAM role and a config-driven `DynamicConnectorForm`. One Agent Source Adapter implements the pattern per substrate.
+Import introduces one new abstraction (as-built): the Agent Source Adapter. It mirrors the `ConnectorAdapter` family (`backend/src/adapters/base.ts`) that already sits behind 27 datastore and 13 integration adapters, each with a scoped IAM role and a config-driven `DynamicConnectorForm`. One Agent Source Adapter implements the pattern per substrate.
 
 ```
-DIAGRAM 2 — Agent Source Adapter pattern (Proposed)
+DIAGRAM 2 — Agent Source Adapter pattern (as-built)
 
                          ┌──────────────────────────────────┐
                          │   interface AgentSourceAdapter   │
@@ -180,63 +183,50 @@ Each adapter carries five responsibilities:
 | `vendCredentials()` | Obtain scoped, short-lived creds via PolicyManager | `requiredPolicies` |
 | `invoke(req)` | Normalized request to normalized response | `connect` / runtime call |
 
-The proposed interface:
+The as-built interface (`backend/src/adapters/agent-source/base.ts` + `types.ts`):
 
 ```typescript
-// Proposed — backend/src/adapters/agent-source/base.ts
-export type AgentSubstrate =
-  | 'AGENTCORE_RUNTIME' | 'BEDROCK_AGENT' | 'LAMBDA'
-  | 'ECS' | 'EKS' | 'EC2'
-  | 'HTTP' | 'MCP' | 'A2A'
-  | 'STEP_FUNCTIONS' | 'SAGEMAKER' | 'API_GATEWAY' | 'APP_RUNNER';
+// As-built — backend/src/adapters/agent-source/base.ts + types.ts
+export type Confidence = 'high' | 'medium' | 'low'; // self-described=high, probe=medium, LLM=low
 
-export interface AgentRef {
-  substrate: AgentSubstrate;
-  sourceArn?: string;      // ARN when the substrate is ARN-addressable
-  endpoint?: string;       // URL for HTTP / MCP / A2A
-  account: string;
-  region: string;
-  externalId?: string;     // cross-account AssumeRole correlation
-}
-
-export interface DiscoveredAgent {
-  ref: AgentRef;
+export interface AgentCandidate {       // discovered-but-not-yet-described agent
+  origin: AgentOrigin;                  // provenance (substrate, sourceArn?, ownership:'external', …)
   displayName: string;
-  hints: Record<string, unknown>;   // tags, description, env keys
+  reference: string;                    // opaque handle describe()/invoke() resolves (ARN | endpoint | id)
 }
 
-export interface CapabilityField<T> {
-  value: T;
-  confidence: number;      // 0..1 — drives review badges
-  source: 'tier0' | 'tier1' | 'tier2' | 'tier3';
-}
+export type AgentRef = AgentCandidate | string;
 
 export interface AgentSourceAdapter {
-  readonly substrate: AgentSubstrate;
+  readonly protocol: AgentInvocationProtocol;          // the adapter's key in the registry
 
-  // Stage 1 — enumerate candidates under a read-only role
-  discover(scope: DiscoveryScope): Promise<DiscoveredAgent[]>;
+  discover(scope: unknown): Promise<AgentCandidate[]>;          // enumerate candidates
+  describe(ref: AgentRef): Promise<AgentCapabilityDescriptor>;  // normalize one candidate
+  healthCheck(ref: AgentRef): Promise<HealthCheckResult>;       // reachability without invoking
+  vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials>; // scoped creds
+  invoke(
+    req: InvokeRequest,
+    descriptor: AgentCapabilityDescriptor,
+  ): Promise<InvokeResponse>;            // normalized request -> normalized response
+}
 
-  // Stage 2 — normalize one candidate into a Capability Descriptor
-  describe(ref: AgentRef): Promise<AgentCapabilityDescriptor>;
-
-  // confirm reachability + liveness (mirrors testConnection)
-  healthCheck(ref: AgentRef): Promise<ConnectionTestResult>;
-
-  // Stage 3 prerequisite — scoped, short-lived creds via PolicyManager
-  vendCredentials(ref: AgentRef): Promise<ScopedCredentials>;
-
-  // Stage 3 — normalized request -> normalized response
-  invoke(req: NormalizedAgentRequest): Promise<NormalizedAgentResponse>;
+// The SINGLE protocol -> adapter dispatch point. resolve() throws
+// UnknownProtocolError for a protocol with no registered adapter.
+export class AgentSourceAdapterRegistry {
+  register(adapter: AgentSourceAdapter): void;
+  resolve(protocol: AgentInvocationProtocol): AgentSourceAdapter;
+  has(protocol: AgentInvocationProtocol): boolean;
 }
 ```
 
-How it mirrors `ConnectorAdapter`: the connector pattern exposes `category`, `spec`, `requiredPolicies`, `testConnection`, `connect`, `disconnect`, and optional `provision`/`deprovision`/`getMetrics`/`validate`. The Agent Source Adapter keeps the same shape — a typed discriminator (`substrate` vs `category`), a capability/spec description, a policy declaration, a reachability test, and a runtime call — and adds `discover()` because foreign agents must be found before they can be described. `vendCredentials()` plays the role `requiredPolicies()` plays for connectors: it is the single choke point where PolicyManager issues a least-privilege role.
+Two as-built corrections to the original design: the adapter keys on the **`protocol`** discriminator (`AgentInvocationProtocol`, the single source of truth in `registry-service.ts`), not a `substrate` enum; and inferred-field confidence is the three-value `Confidence` union (`'high' | 'medium' | 'low'`), surfaced on the descriptor as `fieldConfidence?: Record<string, Confidence>` — not a `0..1` float. `buildDefaultAgentSourceRegistry()` (`registry-factory.ts`) registers the five dispatchable protocol adapters; `discover`/`describe`/`healthCheck`/`vendCredentials` are implemented per the import stories (the invocation-dispatcher increment shipped `invoke()` first, with `NotImplementedError` as the placeholder for the rest on adapters that have not yet filled them in).
+
+How it mirrors `ConnectorAdapter`: the connector pattern exposes `category`, `spec`, `requiredPolicies`, `testConnection`, `connect`, `disconnect`, and optional `provision`/`deprovision`/`getMetrics`/`validate`. The Agent Source Adapter keeps the same shape — a typed discriminator (`protocol` vs `category`), a capability/spec description, a policy declaration, a reachability test, and a runtime call — and adds `discover()` because foreign agents must be found before they can be described. `vendCredentials()` plays the role `requiredPolicies()` plays for connectors: it is the single choke point where short-lived, least-privilege credentials are obtained (via PolicyManager scoped-role assume for a cross-account invoke). ECS/EKS/EC2 are **discovery substrates**: their candidates invoke over `HTTP_ENDPOINT`, but discover/describe are substrate-specific (resolving the service's HTTP endpoint), so they ship as dedicated `Ecs/Eks/Ec2SourceAdapter`s dispatched by `getDiscoveryAdapterForSubstrate()` (`agent-discovery.ts`) rather than through the protocol-keyed registry.
 
 ## Architecture
 
 ```
-DIAGRAM 1 — Where Import sits (Proposed components marked *)
+DIAGRAM 1 — Where Import sits (Import components marked *; all shipped)
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  Frontend — Import Wizard in AgentCatalog.tsx *                             │
@@ -269,25 +259,26 @@ DIAGRAM 1 — Where Import sits (Proposed components marked *)
 
 Component responsibilities:
 
-| Component | Today / Proposed | Responsibility |
-|-----------|------------------|----------------|
-| Import Wizard (`AgentCatalog.tsx`) | Proposed | 5-step UI: source, candidates, descriptor review, invocation+test, governance+register |
-| `agent-import-resolver` | Proposed | AppSync resolver that drives the import pipeline and writes the record |
-| AgentSourceAdapter registry | Proposed | Routes `discover/describe/healthCheck/vendCredentials/invoke` to the substrate adapter |
-| `RegistryService` | Today | Persists the CUSTOM descriptor record; reused unchanged |
-| `agent-message-handler` | Today (generalized) | Becomes a protocol dispatcher keyed on `invocation.protocol` |
-| PolicyManager | Today | Vends scoped discovery role and per-agent invoke role |
+| Component | Status | Responsibility |
+|-----------|--------|----------------|
+| Import Wizard (`ImportAgentWizard.tsx`) | As-built | 5-step UI: source, candidates, descriptor review, invocation+test, governance+register (+ Tier-3 panel) |
+| `agent-import-resolver` | As-built | AppSync resolver driving discovery, import, attest, test, probe, Tier-3, reachability, and gateway publish |
+| AgentSourceAdapter registry | As-built | Routes `discover/describe/healthCheck/vendCredentials/invoke` to the protocol/substrate adapter |
+| `RegistryService` | Today | Persists the CUSTOM descriptor record; reused for the import sub-blocks |
+| `agent-message-handler` | As-built (generalized) | Protocol dispatcher keyed on `invocation.protocol`, `IMPORT_ENABLED`-gated, with the unchanged legacy AgentCore fallback |
+| PolicyManager | Today | Vends the cross-account scoped invoke role (`vendImportCredentials`) |
 | Secrets Manager / SSM | Today | Stores invocation secrets (`secretRef`) and runtime pointers |
-| Governance engine | Today | ADR, interrogation, IAM trust-path/drift, authority units, enforcement mode |
-| Health monitor (Services stack) | Today (extended) | Drift detection and auto-deprecation of imported records |
-| `ToolTestingSandbox` | Today (extended) | Mandatory dry-run before activation |
+| Governance engine | Today (extended) | System import ADR, authority unit, attestation, mode-aware activation gate, IAM trust-path |
+| Reachability probe (import Lambda) | As-built | `probeImportReachability` — public-only classification; VPC-attached prober is Deferred |
+| Test-invoke (`testImportedAgent`) | As-built | Pre-activation dry-run through the real adapters; sanitized; persists nothing |
+| Health monitor — drift/auto-deprecation of imports | Deferred | Drift detection + auto-deprecation of imported records is future work |
 
 ## The Import Pipeline
 
 Import is a four-stage pipeline with a mandatory human review gate between capability determination and activation.
 
 ```
-DIAGRAM 3 — Import pipeline (Proposed)
+DIAGRAM 3 — Import pipeline (as-built)
 
  ┌───────────┐    ┌────────────────────────┐    ┌────────────────────┐
  │ Discover  │───▶│ Determine Capability   │───▶│  HUMAN REVIEW GATE │
@@ -327,7 +318,9 @@ Per-substrate discovery APIs:
 | External MCP | (endpoint paste / existing MCP integration type) | Citadel already has this integration type |
 | A2A | (endpoint paste; agent card discovery) | Self-describing via agent card |
 
-Discovery emits `agent.import.discovered` on the `citadel.agents` source (Proposed; see [Eventing](#eventing)).
+As-built note: `resolveSourceRef` (`backend/src/services/agent-discovery.ts`) recognizes exactly the shipped substrates — `bedrock-agentcore` runtime → `AGENTCORE_RUNTIME`; `lambda` function → `LAMBDA_INVOKE`; `bedrock` agent/agent-alias → `BEDROCK_AGENT`; `ecs` service / `eks` cluster / `ec2` instance → `HTTP_ENDPOINT` (discovery substrates); `mcp://` / `mcp+http(s)://` → `MCP`; `http(s)://` → `HTTP_ENDPOINT`. API Gateway, Step Functions, SageMaker, App Runner, and A2A references raise `UnsupportedSourceError` (Deferred) — and tag-scan skips them rather than failing the whole scan.
+
+Discovery emits `agent.import.discovered` on the `citadel.backend` source (see [Eventing](#eventing)).
 
 ### Stage 2: Capability Determination
 
@@ -337,10 +330,10 @@ Capability determination produces a normalized Agent Capability Descriptor throu
 |------|------|---------|--------|
 | 0 | Self-describing (best) | AgentCore Registry manifest; A2A Agent Card at `/.well-known/agent.json`; MCP `initialize` + `tools/list`; Bedrock Agent action-group OpenAPI/function schemas + instructions; API Gateway OpenAPI export | input/output schemas for free |
 | 1 | Structural introspection | Lambda env vars, tags, description, resource policy, event-source mappings, Function URL; ECS/EKS task def (image, ports, env) | name, hints, rough I/O |
-| 2 | Probe/handshake (sandboxed) | describe probe (MCP `tools/list`, A2A capabilities, or Citadel convention `{"op":"describe"}`); dry-run invoke in `ToolTestingSandbox` to observe real I/O | observed request/response shapes |
-| 3 | LLM-assisted inference | reuse the Fabricator's Bedrock codegen to read README/OpenAPI/source/sample payloads and propose a manifest + JSON schema; human reviews/edits | a proposed contract for opaque agents |
+| 2 | Probe/handshake (sandboxed) | `probeAgentCandidate`: a static `describe()` plus, only when the descriptor has gaps (empty `outputSchema`/`skills` or low/absent confidence), ONE guarded dry-run `invoke`; the sanitized output is merged back conservatively at `confidence:'medium'` (records an `outputSample`; never fabricates a full schema) | observed request/response shapes at medium confidence |
+| 3 | LLM-proposed manifest | `proposeAgentManifestTier3` enqueues **secret-free** signals to the Python Fabricator (`propose_agent_manifest`), which proposes a capability descriptor with **no code generation**, forces every `fieldConfidence` to `'low'`, and returns it asynchronously as `agent.import.manifest.proposed`; the result handler parks it on the DRAFT record as `proposedManifest` (`reviewState:'pending_review'`) | a low-confidence proposed contract for opaque agents |
 
-Tier 3 is the bridge for opaque EC2/ECS agents where no contract is published. It proposes; it never decides. The human review gate confirms or edits every Tier 2 and Tier 3 field, and low-confidence fields surface as badges in the wizard.
+Tier 3 is the bridge for opaque EC2/ECS agents where no contract is published. It proposes; it never decides — `acceptProposedManifestTier3` (admin/architect, human-gated) is the **only** path that promotes a `pending_review` proposal into the trusted manifest, and even acceptance leaves the record DRAFT (activation is still a separate, explicit step). Low-confidence fields surface as badges in the wizard, and the Tier-3 propose/review/accept flow lives in `Tier3ProposalPanel.tsx`.
 
 ### Stage 3: Interfacing
 
@@ -368,14 +361,34 @@ Registration reuses `RegistryService.createResource('agent', ...)`, `validateMan
 - Store the `invocation` block in `customDescriptorContent`.
 - Start in `state = inactive` (DRAFT) until a sandbox test and governance attestation pass.
 
-Conflict policy (blocker #2): dedupe on `origin.sourceArn` first, then name. On collision, offer three choices — link (attach to the existing record), replace (update in place), or import-as-copy (name suffix). This reuses the same idempotency guard the Fabricator's `_find_existing_record_id` implements. Registration emits `agent.import.registered` (or `agent.import.failed`) on `citadel.agents`.
+Conflict policy (blocker #2): dedupe on `origin.sourceArn` first, then name. On collision, offer three choices — link (attach to the existing record), replace (update in place), or import-as-copy (name suffix). This reuses the same idempotency guard the Fabricator's `_find_existing_record_id` implements. Registration emits `agent.import.registered` (or `agent.import.failed`) on `citadel.backend`.
+
+## GraphQL Surface (Resolvers)
+
+The import surface is served by `backend/src/lambda/agent-import-resolver.ts`, which dispatches on the AppSync field name. All names below are verified against `backend/src/schema/schema.graphql`. The discovery queries and every mutation enforce the `admin` or `architect` role inside the resolver (account-level operations); `importAgent` additionally derives tenancy from the caller identity and is org-scoped.
+
+| Operation | Kind | Signature (schema) | Behaviour |
+|-----------|------|--------------------|-----------|
+| `discoverAgents` | Query | `(input: DiscoverAgentsInput!): [AgentCandidate!]!` | Enumerate candidates by `SCAN` (Resource Groups Tagging API), `PASTE` (one ARN/URL), or `MANIFEST`; cross-account via `discoveryRoleArn` + `discoveryExternalId` |
+| `describeAgentCandidate` | Query | `(ref, discoveryRoleArn?, discoveryExternalId?): AWSJSON!` | Resolve a ref to a capability descriptor; substrate-keyed describe dispatch for ECS/EKS/EC2; cross-account read-only assume |
+| `importAgent` | Mutation | `(input: ImportAgentInput!): ImportAgentResult!` | Register a DRAFT/inactive record, `origin.ownership='external'`; conflict `LINK`/`REPLACE`/`COPY`; raw secret → Secrets Manager (`secretRef` only on the record); system import ADR + authority grant + `pending` attestation |
+| `attestAgentImport` | Mutation | `(agentId: ID!): AgentConfig!` | Advance `governanceAttestation.status` `pending` → `attested` (idempotent) |
+| `testImportedAgent` | Mutation | `(input: TestImportedAgentInput!): ImportTestResult!` | Pre-activation test-invoke through the real adapters; transient secret; sanitized output; persists nothing; a failed invoke is a normal `{ ok:false, error }` |
+| `probeAgentCandidate` | Mutation | `(input: TestImportedAgentInput!): AWSJSON!` | Tier-2 sandboxed probe: static `describe()` + one guarded dry-run on gaps, merged conservatively at `confidence:'medium'` |
+| `proposeAgentManifestTier3` | Mutation | `(ref, discoveryRoleArn?, discoveryExternalId?): Tier3ProposalResult!` | Enqueue **secret-free** signals to the Fabricator; returns `{ requestId, status:'PENDING' }`; the LLM manifest returns async |
+| `acceptProposedManifestTier3` | Mutation | `(importId: String!): AgentConfig!` | Human-gated promotion of a `pending_review` proposed manifest into the trusted manifest; record STAYS DRAFT |
+| `probeImportReachability` | Mutation | `(importId: String!): ImportReachabilityResult!` | Backend best-effort probe; persists `customMetadata.reachability` only |
+| `publishImportToGateway` | Mutation | `(importId: String!): GatewayPublicationResult!` | MCP-only; gated on `attested` + `reachable`; creates an `mcpServer` gateway target; record STAYS DRAFT |
+| `unpublishImportFromGateway` | Mutation | `(importId: String!): GatewayPublicationResult!` | Remove the gateway target (+ credential provider when offloaded); idempotent |
+
+The mode-aware **activation gate** is not a dedicated resolver: it is enforced in `backend/src/lambda/agent-config-resolver.ts` (`enforceImportActivationGate`) on the APPROVED transition of an imported, not-yet-attested record (`updateAgentConfig` / `activateProjectAgents`). In `strict` it throws before the APPROVED write; in `shadow`/`permissive` it emits `agent.import.activation_gate` and proceeds. The same path performs the lazy IAM trust-path attestation (`computeTrustPath`; cross-account via `assumeAnalysisRoleClient` when `invocation.analysisRoleArn` is set).
 
 ## Data Model
 
 The import payload (blocker #1) is the extended descriptor: manifest + invocation block + origin block. It is stored in the Registry record's `customDescriptorContent`, consistent with Today. Secrets go to Secrets Manager (`secretRef`), never the record. The scoped invoke role goes in `roleArn`.
 
 ```
-DIAGRAM 5 — Extended descriptor data model (Proposed additions marked *)
+DIAGRAM 5 — Extended descriptor data model (additive blocks marked *; all shipped)
 
   AgentCore Registry record
   └─ customDescriptorContent (JSON)
@@ -397,51 +410,123 @@ DIAGRAM 5 — Extended descriptor data model (Proposed additions marked *)
            └─ ownership: 'external'  ── lifecycle never deletes foreign infra
 ```
 
-The normalized Agent Capability Descriptor (Proposed):
+The normalized Agent Capability Descriptor (as-built, `backend/src/adapters/agent-source/types.ts`):
 
 ```typescript
-// Proposed — Agent Capability Descriptor
+// As-built — Agent Capability Descriptor (types.ts)
 interface AgentCapabilityDescriptor {
   name: string;
   description: string;
   version: string;
   skills: string[];
   categories: string[];
-  inputSchema: object;   // JSON Schema
-  outputSchema: object;  // JSON Schema
-  invocation: InvocationBlock;
-  constraints: {
+  inputSchema: JsonSchema;   // open JSON Schema document
+  outputSchema: JsonSchema;
+  invocation: AgentInvocationBlock;
+  origin: AgentOrigin;
+  constraints?: {
     maxLatencyMs?: number;
     costHint?: string;
-    dataSensitivity?: 'public' | 'internal' | 'confidential' | 'restricted';
-    piiHandling?: 'none' | 'transient' | 'stored';
+    dataSensitivity?: string;
+    piiHandling?: string;
   };
-  origin: {
-    sourceArn: string;
-    account: string;
-    region: string;
-    substrate: AgentSubstrate;
-    discoveredAt: string;     // ISO 8601
-    ownership: 'external';
+  fieldConfidence?: Record<string, Confidence>; // per-field 'high' | 'medium' | 'low'
+}
+```
+
+The invocation + origin blocks are the single source of truth in `backend/src/services/registry-service.ts` (imported by the adapter types to avoid a circular dependency):
+
+```typescript
+// As-built — backend/src/services/registry-service.ts
+type AgentInvocationProtocol =
+  | 'AGENTCORE_RUNTIME' | 'BEDROCK_AGENT' | 'LAMBDA_INVOKE'
+  | 'HTTP_ENDPOINT' | 'MCP'
+  | 'A2A' | 'STEP_FUNCTIONS' | 'SAGEMAKER_ENDPOINT' | 'SQS_ASYNC';
+  // 9 values in the union; the first 5 have invoke adapters today. The last 4
+  // are reserved — resolving them throws UnknownProtocolError (Deferred).
+
+type AgentInvocationAuthMode =
+  | 'SIGV4' | 'API_KEY' | 'OAUTH2' | 'COGNITO' | 'NONE' | 'BEARER';
+
+type AgentInvocationMode = 'sync' | 'async_callback';
+
+interface AgentInvocationBlock {
+  protocol: AgentInvocationProtocol;
+  target: string;                       // arn | url | functionName | …
+  auth: {
+    mode: AgentInvocationAuthMode;
+    secretRef?: string;                 // Secrets Manager ARN — never an inline secret
+    header?: string;                    // custom API_KEY header name (e.g. 'x-api-key')
   };
+  mode: AgentInvocationMode;
+  region?: string;
+  account?: string;
+  roleArn?: string;                     // cross-account INVOKE role (externalId-gated)
+  externalId?: string;                  // STS ExternalId (confused-deputy guard)
+  analysisRoleArn?: string;             // cross-account read-only role for activation trust-path
 }
 
-interface InvocationBlock {
-  protocol:
-    | 'AGENTCORE_RUNTIME' | 'BEDROCK_AGENT' | 'LAMBDA_INVOKE'
-    | 'HTTP_ENDPOINT' | 'MCP' | 'A2A'
-    | 'STEP_FUNCTIONS' | 'SAGEMAKER_ENDPOINT' | 'SQS_ASYNC';
-  target: string;            // arn | url | functionName | stateMachineArn
-  auth: {
-    mode: 'SIGV4' | 'API_KEY' | 'OAUTH2' | 'COGNITO' | 'NONE';
-    secretRef?: string;      // /citadel/agents/<id>/secret (Secrets Manager)
-  };
-  mode: 'sync' | 'async_callback';
-  region: string;
-  account: string;
-  roleArn: string;           // scoped invoke role
-  externalId?: string;
+interface AgentOrigin {
+  sourceArn?: string;                   // dedupe key (conflict policy)
+  account?: string;
+  region?: string;
+  substrate: string;
+  discoveredAt: string;                 // ISO 8601
+  ownership: 'external';                // hard invariant — lifecycle never deletes foreign infra
 }
+```
+
+A record with no `invocation` block is treated as `protocol = AGENTCORE_RUNTIME` (`getInvocationProtocol()`), so every pre-import record keeps its exact prior behaviour (back-compat invariant).
+
+These blocks plus four additive metadata sub-blocks live inside the serialized `AgentCustomMetadata` (the record's `customDescriptorContent` JSON). Each sub-block is written by exactly one resolver path, is surfaced READ-only, and **never** promotes itself into the trusted `manifest` / `invocation` / `state` — an imported record STAYS DRAFT until an explicit, separate activation:
+
+```typescript
+// As-built — AgentCustomMetadata import sub-blocks (registry-service.ts;
+// governanceAttestation.trustPath is stamped by agent-config-resolver.ts)
+governanceAttestation?: {
+  status: 'pending' | 'attested';
+  enforcementMode: string;              // governance rollout mode at import time
+  authorityRequested: boolean;
+  requestedAt: string;
+  adrId?: string;                       // system-generated import ADR
+  attestedBy?: string;                  // set on attest (Cognito sub | username)
+  attestedAt?: string;
+  trustPath?: {                         // stamped lazily at activation (local augmentation)
+    checkedAt: string;
+    clean: boolean;
+    findings: string[];
+    crossAccount?: boolean;             // true when introspected via the analysis role
+  };
+};
+proposedManifest?: {                    // Tier-3 LLM proposal — UNTRUSTED, human-accept-gated
+  manifest?: Record<string, unknown>;   // sanitized proposed body
+  confidence?: 'high' | 'medium' | 'low'; // always 'low' for an LLM proposal
+  reviewState: 'pending_review' | 'failed' | 'accepted';
+  source: 'llm_tier3';
+  fieldConfidence?: Record<string, 'high' | 'medium' | 'low'>;
+  proposedAt: string;
+  correlationId?: string;
+  sanitized?: boolean;
+  truncated?: boolean;
+  error?: string;                       // failure marker only
+  reviewedBy?: string;                  // set on accept
+  reviewedAt?: string;
+};
+reachability?: {                        // backend best-effort probe (US-IMP-017b)
+  reachable: boolean;
+  classification: 'reachable' | 'unreachable' | 'unverifiable_private' | 'no_endpoint';
+  detail?: string;
+  checkedAt: string;
+};
+gatewayPublication?: {                  // optional MCP gateway publish (US-IMP-031)
+  status: 'published' | 'unpublished';
+  targetType: 'mcpServer';
+  gatewayId: string;
+  gatewayTargetId: string;
+  credentialProviderArn?: string;       // present only when auth was offloaded (API_KEY/BEARER)
+  publishedAt: string;
+  publishedBy: string;
+};
 ```
 
 Example — an imported Lambda agent (`customDescriptorContent`):
@@ -474,7 +559,7 @@ Example — an imported Lambda agent (`customDescriptorContent`):
     "sourceArn": "arn:aws:lambda:us-west-2:111122223333:function:invoice-classifier",
     "account": "111122223333",
     "region": "us-west-2",
-    "substrate": "LAMBDA",
+    "substrate": "lambda",
     "discoveredAt": "2026-06-25T10:42:00Z",
     "ownership": "external"
   },
@@ -513,7 +598,7 @@ Example — an imported Bedrock Agent (import the alias, not the draft):
     "sourceArn": "arn:aws:bedrock:us-west-2:111122223333:agent-alias/AGENT123/ALIAS456",
     "account": "111122223333",
     "region": "us-west-2",
-    "substrate": "BEDROCK_AGENT",
+    "substrate": "bedrock_agent",
     "discoveredAt": "2026-06-25T10:55:00Z",
     "ownership": "external"
   },
@@ -524,10 +609,12 @@ Example — an imported Bedrock Agent (import the alias, not the draft):
 
 ## Invocation Dispatch
 
-The generalization is small but load-bearing: `agent-message-handler` stops assuming the runtime pointer is `{ agentRuntimeArn }` and instead reads `invocation.protocol` from the resolved record, then dispatches. The existing AgentCore path becomes simply `protocol = AGENTCORE_RUNTIME` with unchanged behavior.
+The generalization is small but load-bearing, and it shipped: `agent-message-handler` (`backend/src/lambda/agent-message-handler.ts`) no longer assumes the runtime pointer is `{ agentRuntimeArn }`. When the `IMPORT_ENABLED` flag is on, `REGISTRY_ID` is configured, and the resolved Registry record carries an `invocation` block, it routes through `dispatchImportedInvocation`: it reads `invocation.protocol`, resolves the per-protocol adapter from `buildDefaultAgentSourceRegistry()`, invokes, **sanitizes the untrusted response** (`sanitizeUntrustedAgentOutput`), and stores + publishes exactly as the legacy path does. A record with no `invocation` block (or the flag off / no `REGISTRY_ID` / a Registry read error) falls back to the **unchanged** SSM → `InvokeAgentRuntimeCommand` path. An explicit but unregistered protocol throws `UnknownProtocolError` rather than silently falling back — so only the five adapters wired in `registry-factory.ts` (`AGENTCORE_RUNTIME`, `BEDROCK_AGENT`, `LAMBDA_INVOKE`, `HTTP_ENDPOINT`, `MCP`) can be dispatched; `A2A` / `STEP_FUNCTIONS` / `SAGEMAKER_ENDPOINT` / `SQS_ASYNC` resolve to `UnknownProtocolError` (Deferred).
+
+Cross-account invoke is wired (`resolveImportRegistry`): when `invocation.roleArn` resolves to a different account than `ACCOUNT_ID` (`isCrossAccountRoleArn`), the handler assumes that operator-supplied invoke role via `vendImportCredentials` (PolicyManager scoped-role assume, `externalId`-gated) and builds the AWS-native adapters with the assumed credentials. A failed cross-account assume **throws** — it never silently falls back to the handler's own identity (which would invoke with the wrong account's credentials).
 
 ```
-DIAGRAM 4 — Invocation dispatch (generalized agent-message-handler, Proposed)
+DIAGRAM 4 — Invocation dispatch (generalized agent-message-handler, as-built)
 
  EventBridge: message.sent_to_agent
         │
@@ -542,8 +629,8 @@ DIAGRAM 4 — Invocation dispatch (generalized agent-message-handler, Proposed)
    │ LAMBDA_INVOKE     ──▶ │ Invoke (RequestResponse | Event)             │
    │ HTTP_ENDPOINT     ──▶ │ signed HTTPS (SignatureV4)                   │
    │ MCP               ──▶ │ tools/call (JSON-RPC)                        │
-   │ STEP_FUNCTIONS    ──▶ │ StartSyncExecution | StartExecution          │
-   │ SAGEMAKER_ENDPOINT──▶ │ InvokeEndpoint                               │
+   │ A2A / STEP_FUNCTIONS / SAGEMAKER_ENDPOINT / SQS_ASYNC:               │
+   │   (no adapter)    ──▶ │ UnknownProtocolError              (Deferred) │
    └───────────────────────┴──────────────────────────────────────────────┘
  }
         │
@@ -570,18 +657,21 @@ Identity and credentials:
 - Cross-account: `AssumeRole` plus an external ID to defeat the confused-deputy problem.
 - Secrets: API keys, OAuth client secrets, and bearer tokens live in Secrets Manager and are referenced by `secretRef`. They never enter the descriptor record.
 
-Governance. Every import routes through the existing governance engine:
+Governance (as-built). Every import is recorded and gated through the existing governance engine:
 
-- ADR: a decision record stating "we imported agent X from account Y", with the discovered descriptor and confidence scores attached.
-- Interrogation round: the governance engine challenges the import before activation.
-- IAM trust-path and drift analysis: run on the vended invoke role to confirm the trust path is sound and stays sound.
-- Authority unit and composition contract: assigned to the imported record, constraining what the agent is permitted to do within an orchestration.
+- ADR: a **system-generated** ADR (author `system:agent-import`, keyed to the synthetic global project `citadel-imports-global`) is recorded on every record-creating import; its id is stamped into `governanceAttestation.adrId`. Best-effort — an ADR-write failure never fails the import.
+- Authority unit: `grantFabricatorAuthority` grants one authority unit per imported record (best-effort, idempotent).
+- Attestation: import stamps `governanceAttestation = { status:'pending', enforcementMode, authorityRequested, requestedAt }`; the admin/architect `attestAgentImport` mutation advances it to `attested` (recording `attestedBy`/`attestedAt`).
+- Mode-aware activation gate: at the DRAFT→APPROVED transition of an imported, not-yet-attested record, `enforceImportActivationGate` runs. `strict` throws before the APPROVED write; `shadow`/`permissive` emit an `agent.import.activation_gate` "would-block" event and proceed. The governance flag fails open to `permissive`.
+- Lazy IAM trust-path attestation: when an imported, pending record with an `invocation.roleArn` is activated, `computeTrustPath` introspects that role; a clean path auto-attests (`attestedBy:'system:trust-path'`) so activation proceeds in the same request, and the summary is persisted to `governanceAttestation.trustPath`. A **cross-account** role is introspected via the operator-supplied read-only `analysisRoleArn` (externalId-gated, `assumeAnalysisRoleClient`); without one, a manual-attestation finding is recorded and the record stays `pending`.
+
+(Interrogation rounds and composition contracts remain project-keyed governance artefacts and are not part of the import path; an import is governed via the ADR + authority unit + attestation + activation gate above.)
 
 Enforcement posture. Imported agents are external and less trusted. They start in permissive or shadow enforcement and graduate to strict only after attestation. Progressive enforcement (permissive to shadow to strict) and grandfathering already exist in the governance engine.
 
 Untrusted output. A foreign agent's response is an external input. It crosses a prompt-injection boundary. The dispatcher sanitizes the normalized response before it re-enters orchestration. Instructions embedded in a foreign agent's output are data, not commands.
 
-Network reachability is the largest hidden cost. AgentCore Runtime, Bedrock Agents, Lambda, and public HTTP/MCP endpoints are reachable from a standard Lambda. ECS, EKS, EC2, and private endpoints frequently are not — they sit behind security groups in private subnets. Import needs a reachability probe and, for private targets, a VPC-attached prober Lambda that is PrivateLink and security-group aware. Reachability failure is a first-class, expected outcome, not an error to paper over.
+Network reachability is the largest hidden cost, and it is handled honestly. The `probeImportReachability` mutation (backed by `backend/src/utils/reachability-probe.ts`) issues a bounded (AbortController, 5s default), unauthenticated `GET` from the non-VPC import Lambda and classifies the endpoint as `reachable` (any HTTP response from a public host), `unreachable` (network error/timeout on a public host), `unverifiable_private` (an RFC1918 / loopback / link-local / `internal-*.elb.amazonaws.com` / `.internal`/`.local` host — **not** a false `unreachable`), or `no_endpoint`. The probe never reads the response body and persists only `customMetadata.reachability`, leaving the record DRAFT. A VPC-attached prober Lambda (PrivateLink / security-group aware) for private and cross-account targets is **Deferred**.
 
 ## Substrate Deep-Dives
 
@@ -686,7 +776,7 @@ Drift detection and contract validation reuse the api-contract-agent/OpenAPI too
 
 ## User Experience: The Import Wizard
 
-The wizard (Proposed) mirrors `CreateAgentWizard`, `DynamicConnectorForm`, and the integration picker. Five steps:
+The wizard ships as `frontend/src/components/ImportAgentWizard.tsx` (mirroring `CreateAgentWizard`, `DynamicConnectorForm`, and the integration picker; calls go through `services/agentImportService.ts`). Five steps (the literal step ids/labels are `source` → `candidates` → `review` → `configure` "Configure & Test" → `register` "Governance & Register"):
 
 ```
  Step 1            Step 2            Step 3            Step 4            Step 5
@@ -700,33 +790,50 @@ The wizard (Proposed) mirrors `CreateAgentWizard`, `DynamicConnectorForm`, and t
 └──────────┘     └──────────┘     └──────────┘     └──────────┘     └──────────┘
 ```
 
-1. Choose source: scan an account (role + region), paste an ARN/endpoint, or upload a manifest.
-2. Select candidates: multi-select from the discovered list (sweep mode) or confirm the single pasted reference.
-3. Review/edit the inferred descriptor: schemas, skills, categories, constraints — each annotated with a confidence badge. Low-confidence fields require explicit confirmation.
-4. Configure invocation: protocol, target, auth mode, `secretRef`, sync/async mode, then a mandatory TEST through the extended `ToolTestingSandbox`.
-5. Governance and permissions: review the scoped invoke role, the ADR, and the authority-unit assignment, then register (DRAFT). Activation is a separate, explicit action after attestation.
+1. Choose source: account tag scan (`SCAN`, with optional region/tagKey/tagValue and an optional cross-account read-only `discoveryRoleArn` + `discoveryExternalId`), paste an ARN/endpoint (`PASTE`), or upload a manifest (`MANIFEST`).
+2. Select candidates: multi-select from the discovered list (scan mode) or confirm the single pasted reference. Selecting several drives a batch DRAFT import.
+3. Review/edit the inferred descriptor: name, categories, schemas, skills — annotated with `high`/`medium`/`low` confidence badges; low-confidence/thin descriptors surface the Tier-3 propose option.
+4. Configure invocation + test: protocol, target, auth mode (`NONE`/`SIGV4`/`API_KEY`/`BEARER`/`OAUTH2`/`COGNITO`), optional custom API-key header, a transient secret, sync/async mode, and optional cross-account `invocationRoleArn`/`invocationExternalId`/`analysisRoleArn`, then a pre-activation **test-invoke** (`testImportedAgent`) that actually reaches the target and returns a sanitized result without persisting anything.
+5. Governance & register: register (DRAFT) via `importAgent`; on a conflict the wizard surfaces `LINK`/`REPLACE`/`COPY`. The success screen exposes the Tier-3 `Tier3ProposalPanel`, reachability probe, and attest actions. Activation (DRAFT→APPROVED) is a separate, explicit action gated on attestation.
 
 ## Eventing
 
-Import emits lifecycle events on a Proposed `citadel.agents` source, following the existing EventBridge schema (`detail` carries `agentId`, `payload`, `timestamp`, `correlationId`) on the `citadel-agents-{env}` bus. All events are idempotent and carry a correlation ID.
+Import emits **best-effort** lifecycle events on the existing **`citadel.backend`** source (via `backend/src/utils/events.ts` `publishEvent`), on the shared `citadel-agents-{env}` bus — not on a new `citadel.agents` source. A publish failure is logged and swallowed and never fails (or alters the result of) the underlying mutation/query. Each event carries a `correlationId` (UUID, generated per call) and an ISO 8601 `timestamp`; import-specific fields live under `detail.payload`, with `projectId` emitted as `""`. The `EventTypes` constants are defined in `events.ts`.
 
 | DetailType | Producer | Description |
 |------------|----------|-------------|
-| `agent.import.discovered` | `agent-import-resolver` (Proposed) | A candidate agent was discovered in a scope |
-| `agent.import.registered` | `agent-import-resolver` (Proposed) | An imported agent was written as a DRAFT record |
-| `agent.import.failed` | `agent-import-resolver` (Proposed) | Discovery, capability determination, or registration failed |
+| `agent.import.discovered` | `agent-import-resolver.discoverAgents` | One summary event per discovery call (SCAN / PASTE / MANIFEST) — `payload: { source, candidateCount, substrates }` |
+| `agent.import.registered` | `agent-import-resolver.importAgent` | An external agent was written as a DRAFT record (CREATE / REPLACE / COPY; never on a no-op link or unresolved conflict) |
+| `agent.import.failed` | `agent-import-resolver` (import / discover / describe catch) | An import/discover/describe operation threw; emitted before the original error is rethrown |
+| `agent.import.attested` | `agent-import-resolver.attestAgentImport` | `governanceAttestation.status` advanced `pending` → `attested` (once per real transition) |
+| `agent.import.activation_gate` | `agent-config-resolver` (APPROVED transition) | The activation gate evaluated an imported, not-yet-attested agent in `shadow`/`permissive` mode (a "would-block" telemetry event; `strict` throws instead) |
+
+The Tier-3 manifest-proposal path uses two **separate** events produced by the Python Fabricator (`arbiter/fabricator/index.py` `publish_manifest_event`) on the agent bus (`COMPLETION_BUS_NAME`), following the Fabrication-event convention where `Source == DetailType`:
+
+| DetailType (== Source) | Producer | Consumer | Description |
+|------------------------|----------|----------|-------------|
+| `agent.import.manifest.proposed` | Fabricator `_process_manifest_proposal` | `agent-import-manifest-result-handler` | LLM-proposed descriptor ready — `detail: { requestId, correlationId, importId, proposedManifest, status:'proposed' }` |
+| `agent.import.manifest.failed` | Fabricator `_process_manifest_proposal` | `agent-import-manifest-result-handler` | Proposal could not be produced — `detail: { requestId, correlationId, importId, error, status:'failed' }` |
+
+The result handler (B1) is idempotent (on `correlationId`), recursively sanitizes the untrusted proposed manifest, and parks it on the DRAFT record as `customMetadata.proposedManifest` (`reviewState:'pending_review'`) for human review. See [docs/EVENTBRIDGE_CATALOG.md](EVENTBRIDGE_CATALOG.md) for the full schemas.
 
 Observability and cost: imported agents reuse the per-app observability pattern (the `AppApiDashboard` approach) and X-Ray tracing. Each imported agent gets per-agent invocation counts, latency, error rates, and cost attribution, so an external dependency's behavior is visible and billable to the right owner.
 
 ## Phased Delivery and Roadmap
 
-| Phase | Substrates | Access | Discovery | Capability tiers | Key additions |
-|-------|------------|--------|-----------|------------------|---------------|
-| Phase 1 (highest leverage) | AgentCore Runtime, Bedrock Agent, Lambda, HTTP/MCP | Same-account | Paste-ARN + tag-scan | Tiers 0-1 | Invocation block, protocol dispatcher, import resolver, wizard, DRAFT registration |
-| Phase 2 | ECS, EKS, EC2 | Cross-account | + sweep | + Tiers 2-3 | VPC reachability prober, LLM-assisted inference, cross-account AssumeRole + external ID |
-| Phase 3 | A2A, Step Functions, SageMaker | Cross-account | continuous | all | Drift/health reconciliation, A2A federation, marketplace-style sharing |
+| Phase | Substrates | Access | Capability tiers | Status |
+|-------|------------|--------|------------------|--------|
+| Phase 1 | AgentCore Runtime, Bedrock Agent, Lambda, HTTP/MCP | Same-account | Tiers 0–1 | ✅ Shipped — invocation block, protocol dispatcher (`IMPORT_ENABLED`-gated), import resolver, 5-step wizard, DRAFT registration, conflict link/replace/copy |
+| Phase 2 | ECS, EKS, EC2 discovery substrates | Cross-account | + Tiers 2–3 | ✅ Shipped — substrate discovery adapters, cross-account discovery/analysis/invoke roles (AssumeRole + externalId), Tier-2 sandboxed probe, Tier-3 LLM-proposed manifest |
+| Follow-ons | (all of the above) | — | — | ✅ Shipped — governance attestation + mode-aware activation gate, lazy IAM trust-path attestation, test-invoke, backend reachability probe, optional MCP gateway publish |
 
-Phase 1 deliberately targets the self-describing substrates so the first release leans on Tier 0/1 and avoids the reachability and inference complexity that defines Phases 2 and 3.
+**Deferred (documented, not built):**
+
+- **REST/OpenAPI gateway publish.** `publishImportToGateway` is MCP-only; an `HTTP_ENDPOINT` import returns a "REST/OpenAPI gateway publish not yet supported" error.
+- **Peered-VPC reachability prober.** `probeImportReachability` runs from the non-VPC import Lambda, so a private/cross-account target is honestly `unverifiable_private` rather than reachable. A VPC-attached prober (peering/PrivateLink-aware) is the deferred add-on.
+- **Gateway auth offload beyond NONE/API_KEY/BEARER.** OAUTH2 / SIGV4 / COGNITO offload is rejected (deferred).
+- **`A2A` / `STEP_FUNCTIONS` / `SAGEMAKER_ENDPOINT` / `SQS_ASYNC` invoke + discovery.** These protocols exist in the invocation union but have no invoke adapter, and `resolveSourceRef` does not recognize Step Functions / SageMaker / API Gateway / App Runner / A2A references (they raise `UnsupportedSourceError`).
+- **Drift/health reconciliation and A2A federation** (the original Phase 3 vision).
 
 ## Resolved Decisions
 
@@ -743,16 +850,20 @@ These four decisions answer the blockers recorded verbatim in `frontend/src/page
 
 Source files (real, current code):
 
-- `backend/src/services/registry-service.ts` — `RegistryService`, `RegistryRecord`, status mapping (`toInternalState`/`toRegistryStatus`), CUSTOM descriptor persistence.
-- `backend/src/lambda/agent-config-resolver.ts` — `validateManifest()`.
-- `backend/src/lambda/registry-agent-record-resolver.ts` — `AgentAppManifest` interface.
-- `backend/src/lambda/agent-message-handler.ts` — `message.sent_to_agent` handler, SSM resolution, `InvokeAgentRuntimeCommand`, `SignatureV4` import (the generalization target).
+- `backend/src/lambda/agent-import-resolver.ts` — the import surface: `importAgent`, `discoverAgents`, `describeAgentCandidate`, `attestAgentImport`, `testImportedAgent`, `probeAgentCandidate`, `proposeAgentManifestTier3`, `acceptProposedManifestTier3`, `probeImportReachability`, `publishImportToGateway`, `unpublishImportFromGateway`.
+- `backend/src/adapters/agent-source/` — `base.ts` (`AgentSourceAdapter` + `AgentSourceAdapterRegistry`), `types.ts`, `registry-factory.ts` (`buildDefaultAgentSourceRegistry`), `invoke-support.ts` (`vendImportCredentials`, `toInvokeCredentials`, `authHeaderScheme`, `collectOpenApi`), and the `agentcore-runtime` / `bedrock-agent` / `lambda-invoke` / `http-endpoint` / `mcp` / `ecs` / `eks` / `ec2` adapters.
+- `backend/src/services/agent-discovery.ts` — `resolveSourceRef`, `tagScanDiscover`, `candidateFromManifest`, `getDiscoveryAdapterForSubstrate`.
+- `backend/src/services/registry-service.ts` — `RegistryService`, `RegistryRecord`, `AgentInvocationBlock`, `AgentOrigin`, `AgentCustomMetadata` (incl. `governanceAttestation` / `proposedManifest` / `reachability` / `gatewayPublication`), `getInvocationProtocol`, status mapping, CUSTOM descriptor persistence.
+- `backend/src/lambda/agent-config-resolver.ts` — `validateManifest()`, `validateImportDescriptor()`, the import activation gate (`enforceImportActivationGate`), and the lazy trust-path attestation.
+- `backend/src/lambda/agent-message-handler.ts` — `message.sent_to_agent` handler; `dispatchImportedInvocation` / `resolveImportRegistry` (the generalized, `IMPORT_ENABLED`-gated protocol dispatcher) alongside the unchanged legacy AgentCore path.
+- `backend/src/lambda/agent-import-manifest-result-handler.ts` — the B1 EventBridge consumer that parks the Tier-3 proposal on the DRAFT record.
+- `backend/src/utils/trust-path.ts` — `computeTrustPath`, `isCrossAccountRoleArn`, `assumeRoleCredentials`, `assumeAnalysisRoleClient`.
+- `backend/src/utils/reachability-probe.ts` — `probeReachability` + classification.
+- `backend/src/schema/schema.graphql` — the import mutations/queries and the `ImportAgentInput` / `ImportAgentResult` / `TestImportedAgentInput` / `ImportTestResult` / `ImportReachabilityResult` / `GatewayPublicationResult` / `Tier3ProposalResult` / `ProposedManifest` / `AgentCandidate` / `DiscoverAgentsInput` types.
+- `arbiter/fabricator/manifest_proposal.py` + `arbiter/fabricator/index.py` — `propose_agent_manifest` (Tier-3, descriptor-only, all-low confidence, secret-redacted) and `publish_manifest_event` (the `agent.import.manifest.{proposed,failed}` producer); `store_agent_config_registry` + `_find_existing_record_id` (idempotency guard).
 - `backend/src/adapters/base.ts` — `ConnectorAdapter` interface (the pattern the Agent Source Adapter mirrors).
-- `arbiter/fabricator/index.py` — `store_agent_config_registry()`, `_find_existing_record_id` (idempotency guard).
-- `frontend/src/pages/AgentCatalog.tsx` — disabled Import Agent button and the four-blocker comment.
-- `frontend/src/config/connectorRegistry.ts` — `DynamicConnectorForm` config the wizard mirrors.
-- `frontend/src/components/ToolTestingSandbox.tsx` — dry-run sandbox extended for mandatory pre-activation tests.
-- `backend/src/utils/events.ts` — `EventTypes` constants and EventBridge publishing.
+- `frontend/src/components/ImportAgentWizard.tsx` + `frontend/src/components/Tier3ProposalPanel.tsx` — the 5-step Import Wizard and the Tier-3 proposal panel; `frontend/src/services/agentImportService.ts` + `frontend/src/types/agentImport.ts`.
+- `backend/src/utils/events.ts` — `EventTypes` constants (incl. `AGENT_IMPORT_*`) and EventBridge publishing.
 
 Sibling documents:
 
