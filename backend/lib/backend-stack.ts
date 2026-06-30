@@ -2854,6 +2854,17 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
+    // US-IMP-017 post-import reachability probe (probeImportReachability).
+    // Reuses the existing AgentImport data source — the import resolver already
+    // implements this field (agent-import-resolver.ts) and carries the Registry
+    // CRUD grants it needs, so no new Lambda/data source/perms are required.
+    agentImportLambdaDataSource.createResolver("ProbeImportReachabilityResolver", {
+      typeName: "Mutation",
+      fieldName: "probeImportReachability",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
     // Tier-3 agent-import B2 — manifest-proposal REQUEST + human-gated ACCEPT.
     // Both reuse the existing AgentImport data source: the import resolver now
     // also carries the scoped sqs:SendMessage grant (propose) and already has
