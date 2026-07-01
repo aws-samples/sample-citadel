@@ -7,7 +7,12 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 
 const client = new DynamoDBClient({});
-const docClient = DynamoDBDocumentClient.from(client);
+// removeUndefinedValues: defensive guard so no undefined attribute can break
+// PutCommand marshalling (Issue #14). The `input.description || ''` default in
+// createOrganization handles the known case; this covers any future field.
+const docClient = DynamoDBDocumentClient.from(client, {
+  marshallOptions: { removeUndefinedValues: true },
+});
 const cognitoClient = new CognitoIdentityProviderClient({});
 
 const ORGANIZATIONS_TABLE = process.env.ORGANIZATIONS_TABLE || '';
@@ -33,7 +38,12 @@ interface UserManagementResponse {
 export const handler = async (event: any): Promise<any> => {
   console.log('Organization resolver event:', JSON.stringify(event, null, 2));
 
-  const { fieldName, arguments: args } = event;
+  // AppSync delivers the operation name under event.info.fieldName (not
+  // event.fieldName). Reading the wrong path left fieldName undefined, so every
+  // dispatch fell through to the default case → 'Unknown field: undefined'
+  // (Issue #14). Match project-resolver.ts + docs/RESOLVER_GUIDE.md.
+  const { info, arguments: args } = event;
+  const fieldName = info.fieldName;
 
   try {
     switch (fieldName) {
@@ -77,7 +87,9 @@ async function createOrganization(input: CreateOrganizationInput): Promise<Organ
   const organization: Organization = {
     orgId,
     name: input.name,
-    description: input.description,
+    // Default to '' (matches project-resolver.ts). Writing `undefined` breaks
+    // DynamoDB marshalling in the real client → Lambda:Unhandled (Issue #14).
+    description: input.description || '',
     createdAt: now,
   };
 

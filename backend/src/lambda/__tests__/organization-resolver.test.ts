@@ -1,5 +1,17 @@
 /**
- * Tests for organization-resolver Lambda
+ * Tests for organization-resolver Lambda.
+ *
+ * Regression coverage for Issue #14 — "Team Management Add/Delete Organization
+ * fails with 'Unknown field: undefined' (Lambda:Unhandled)":
+ *   - Bug (a): the handler must dispatch on `event.info.fieldName` (the real
+ *     AppSync $context shape), NOT `event.fieldName`. `makeEvent` below builds
+ *     the REAL AppSync event so the dispatch path is exercised exactly as
+ *     production sees it. (The previous helper produced a fake `{ fieldName }`
+ *     object that agreed with the buggy resolver and masked the defect.)
+ *   - Bug (b): `createOrganization` must never place `description: undefined`
+ *     into the DynamoDB item — it must default to '' (matching
+ *     project-resolver.ts `input.description || ''`) so PutCommand marshalling
+ *     in the real (unmocked) client cannot throw.
  */
 // Env vars must be set BEFORE the resolver module loads — the resolver
 // captures process.env values into top-level constants at import time.
@@ -26,13 +38,17 @@ describe('organization-resolver', () => {
     cognitoMock.reset();
   });
 
+  // REAL AppSync $context shape: the field name lives under `info.fieldName`,
+  // with `arguments` and `identity` alongside — matching project-resolver.test.ts
+  // and docs/RESOLVER_GUIDE.md.
   const makeEvent = (fieldName: string, args: any) => ({
-    fieldName,
+    info: { fieldName },
     arguments: args,
+    identity: { sub: 'user-1' },
   });
 
   describe('createOrganization', () => {
-    test('creates organization when name is unique', async () => {
+    test('creates organization when name is unique and preserves the description', async () => {
       dynamoMock.on(ScanCommand).resolves({ Items: [] });
       dynamoMock.on(PutCommand).resolves({});
 
@@ -42,7 +58,39 @@ describe('organization-resolver', () => {
 
       expect(result.orgId).toBe('org-uuid-123');
       expect(result.name).toBe('New Org');
+      expect(result.description).toBe('A test org');
       expect(result.createdAt).toBeDefined();
+
+      const putCalls = dynamoMock.commandCalls(PutCommand);
+      expect(putCalls).toHaveLength(1);
+      expect((putCalls[0].args[0].input.Item as any).description).toBe('A test org');
+    });
+
+    test('creates organization with a blank description and writes NO undefined attribute', async () => {
+      dynamoMock.on(ScanCommand).resolves({ Items: [] });
+      dynamoMock.on(PutCommand).resolves({});
+
+      // `description` omitted from input -> resolver must default it to ''.
+      const result = await handler(makeEvent('createOrganization', {
+        input: { name: 'No Desc Org' },
+      }));
+
+      expect(result.orgId).toBe('org-uuid-123');
+      expect(result.name).toBe('No Desc Org');
+      // Defaulted to '' (matches project-resolver.ts `input.description || ''`).
+      expect(result.description).toBe('');
+
+      // The PutCommand Item must contain NO attribute whose value is undefined.
+      // An undefined value throws during DynamoDB marshalling in the real
+      // (unmocked) client and produced the Lambda:Unhandled error in Issue #14.
+      const putCalls = dynamoMock.commandCalls(PutCommand);
+      expect(putCalls).toHaveLength(1);
+      const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+      expect(item.description).toBe('');
+      const undefinedAttrs = Object.entries(item)
+        .filter(([, v]) => v === undefined)
+        .map(([k]) => k);
+      expect(undefinedAttrs).toEqual([]);
     });
 
     test('throws when organization name already exists', async () => {
@@ -116,7 +164,11 @@ describe('organization-resolver', () => {
     });
   });
 
-  test('throws on unknown field', async () => {
-    await expect(handler(makeEvent('unknownField', {}))).rejects.toThrow('Unknown field');
+  test('throws a clear error naming the unknown field', async () => {
+    // Dispatch must resolve the real field name from info.fieldName — an
+    // unknown field yields 'Unknown field: <name>', never 'Unknown field: undefined'.
+    await expect(
+      handler(makeEvent('unknownField', {}))
+    ).rejects.toThrow('Unknown field: unknownField');
   });
 });
