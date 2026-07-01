@@ -1,5 +1,17 @@
 /**
- * Tests for organization-resolver Lambda
+ * Tests for organization-resolver Lambda.
+ *
+ * Regression coverage for Issue #14 — "Team Management Add/Delete Organization
+ * fails with 'Unknown field: undefined' (Lambda:Unhandled)":
+ *   - Bug (a): the handler must dispatch on `event.info.fieldName` (the real
+ *     AppSync $context shape), NOT `event.fieldName`. `makeEvent` below builds
+ *     the REAL AppSync event so the dispatch path is exercised exactly as
+ *     production sees it. (The previous helper produced a fake `{ fieldName }`
+ *     object that agreed with the buggy resolver and masked the defect.)
+ *   - Bug (b): `createOrganization` must never place `description: undefined`
+ *     into the DynamoDB item — it must default to '' (matching
+ *     project-resolver.ts `input.description || ''`) so PutCommand marshalling
+ *     in the real (unmocked) client cannot throw.
  */
 // Env vars must be set BEFORE the resolver module loads — the resolver
 // captures process.env values into top-level constants at import time.
@@ -26,13 +38,17 @@ describe('organization-resolver', () => {
     cognitoMock.reset();
   });
 
+  // REAL AppSync $context shape: the field name lives under `info.fieldName`,
+  // with `arguments` and `identity` alongside — matching project-resolver.test.ts
+  // and docs/RESOLVER_GUIDE.md.
   const makeEvent = (fieldName: string, args: any) => ({
-    fieldName,
+    info: { fieldName },
     arguments: args,
+    identity: { sub: 'user-1' },
   });
 
   describe('createOrganization', () => {
-    test('creates organization when name is unique', async () => {
+    test('creates organization when name is unique and preserves the description', async () => {
       dynamoMock.on(ScanCommand).resolves({ Items: [] });
       dynamoMock.on(PutCommand).resolves({});
 
@@ -42,7 +58,39 @@ describe('organization-resolver', () => {
 
       expect(result.orgId).toBe('org-uuid-123');
       expect(result.name).toBe('New Org');
+      expect(result.description).toBe('A test org');
       expect(result.createdAt).toBeDefined();
+
+      const putCalls = dynamoMock.commandCalls(PutCommand);
+      expect(putCalls).toHaveLength(1);
+      expect((putCalls[0].args[0].input.Item as any).description).toBe('A test org');
+    });
+
+    test('creates organization with a blank description and writes NO undefined attribute', async () => {
+      dynamoMock.on(ScanCommand).resolves({ Items: [] });
+      dynamoMock.on(PutCommand).resolves({});
+
+      // `description` omitted from input -> resolver must default it to ''.
+      const result = await handler(makeEvent('createOrganization', {
+        input: { name: 'No Desc Org' },
+      }));
+
+      expect(result.orgId).toBe('org-uuid-123');
+      expect(result.name).toBe('No Desc Org');
+      // Defaulted to '' (matches project-resolver.ts `input.description || ''`).
+      expect(result.description).toBe('');
+
+      // The PutCommand Item must contain NO attribute whose value is undefined.
+      // An undefined value throws during DynamoDB marshalling in the real
+      // (unmocked) client and produced the Lambda:Unhandled error in Issue #14.
+      const putCalls = dynamoMock.commandCalls(PutCommand);
+      expect(putCalls).toHaveLength(1);
+      const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+      expect(item.description).toBe('');
+      const undefinedAttrs = Object.entries(item)
+        .filter(([, v]) => v === undefined)
+        .map(([k]) => k);
+      expect(undefinedAttrs).toEqual([]);
     });
 
     test('throws when organization name already exists', async () => {
@@ -59,38 +107,68 @@ describe('organization-resolver', () => {
   });
 
   describe('deleteOrganization', () => {
-    test('deletes empty organization, calls ListUsersCommand with correct filter, then DeleteCommand', async () => {
+    // Orphan-user guard rationale (Issue #14, 2nd bug): the user↔org link lives
+    // ONLY in the Cognito `custom:organization` user-pool attribute. Cognito
+    // ListUsers supports server-side `Filter` on STANDARD attributes only — a
+    // `custom:*` Filter raises InvalidParameterException ("Input fails to
+    // satisfy the constraints") in the real service (aws-sdk-client-mock does
+    // NOT enforce that constraint, which is exactly what masked the bug). The
+    // resolver must therefore PAGINATE ListUsers and match attributes
+    // client-side, failing closed on the first match.
+
+    // (b): a delete SUCCEEDS when users exist in the pool but NONE carry
+    // custom:organization === orgId — the resolver must discriminate on the
+    // attribute value, not merely on "any users returned".
+    test('deletes organization when no user matches the orgId, then calls DeleteCommand', async () => {
       // Existence check returns the org row.
       dynamoMock.on(ScanCommand).resolves({
         Items: [{ orgId: 'org-1', name: 'Org' }],
       });
-      // Cognito returns no users with matching custom:organization claim.
-      cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
+      // Users exist but NONE carry custom:organization === 'org-1'.
+      cognitoMock.on(ListUsersCommand).resolves({
+        Users: [
+          { Username: 'other-1', Attributes: [{ Name: 'custom:organization', Value: 'different-org' }] },
+          { Username: 'no-attr', Attributes: [] },
+        ],
+      });
       dynamoMock.on(DeleteCommand).resolves({});
 
       const result = await handler(makeEvent('deleteOrganization', { orgId: 'org-1' }));
 
       expect(result.success).toBe(true);
-
-      // ListUsersCommand was invoked with the correct user-pool + filter.
-      const listUsersCalls = cognitoMock.commandCalls(ListUsersCommand);
-      expect(listUsersCalls).toHaveLength(1);
-      const listInput = listUsersCalls[0].args[0].input as any;
-      expect(listInput.UserPoolId).toBe('us-east-1_testpool');
-      expect(listInput.Filter).toBe('"custom:organization" = "org-1"');
-      expect(listInput.Limit).toBe(1);
-
       // DeleteCommand ran exactly once.
       expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(1);
     });
 
-    test('throws when organization still has users assigned, DeleteCommand NOT called', async () => {
+    // (c): the ListUsers input must NOT contain a `custom:` attribute Filter —
+    // that server-side filter is precisely what Cognito rejects.
+    test('does NOT send a custom: attribute Filter to ListUsers', async () => {
       dynamoMock.on(ScanCommand).resolves({
         Items: [{ orgId: 'org-1', name: 'Org' }],
       });
-      // Cognito returns one user — org cannot be deleted while users link to it.
+      cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
+      dynamoMock.on(DeleteCommand).resolves({});
+
+      await handler(makeEvent('deleteOrganization', { orgId: 'org-1' }));
+
+      const listUsersCalls = cognitoMock.commandCalls(ListUsersCommand);
+      expect(listUsersCalls.length).toBeGreaterThanOrEqual(1);
+      const listInput = listUsersCalls[0].args[0].input as any;
+      expect(listInput.UserPoolId).toBe('us-east-1_testpool');
+      const filterStr = listInput.Filter === undefined ? '' : String(listInput.Filter);
+      expect(filterStr.includes('custom:')).toBe(false);
+    });
+
+    // (a): delete is BLOCKED (fail-closed) when a returned user's
+    // custom:organization attribute equals the target orgId.
+    test('throws when a user custom:organization matches orgId, DeleteCommand NOT called', async () => {
+      dynamoMock.on(ScanCommand).resolves({
+        Items: [{ orgId: 'org-1', name: 'Org' }],
+      });
       cognitoMock.on(ListUsersCommand).resolves({
-        Users: [{ Username: 'still-here-user', Attributes: [] }],
+        Users: [
+          { Username: 'still-here-user', Attributes: [{ Name: 'custom:organization', Value: 'org-1' }] },
+        ],
       });
 
       await expect(
@@ -98,6 +176,37 @@ describe('organization-resolver', () => {
       ).rejects.toThrow(/user\(s\) still assigned/);
 
       // DeleteCommand must NOT have run.
+      expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(0);
+    });
+
+    // (d): pagination — a match on the SECOND page must still block the delete.
+    // Page 1 returns a non-matching user + PaginationToken; page 2 returns the
+    // match. The resolver must follow the token and catch it.
+    test('paginates ListUsers and blocks the delete on a second-page match', async () => {
+      dynamoMock.on(ScanCommand).resolves({
+        Items: [{ orgId: 'org-1', name: 'Org' }],
+      });
+      cognitoMock
+        .on(ListUsersCommand)
+        .resolvesOnce({
+          Users: [
+            { Username: 'other', Attributes: [{ Name: 'custom:organization', Value: 'different-org' }] },
+          ],
+          PaginationToken: 'page-2-token',
+        })
+        .resolvesOnce({
+          Users: [
+            { Username: 'matching-user', Attributes: [{ Name: 'custom:organization', Value: 'org-1' }] },
+          ],
+        });
+
+      await expect(
+        handler(makeEvent('deleteOrganization', { orgId: 'org-1' }))
+      ).rejects.toThrow(/user\(s\) still assigned/);
+
+      // Both pages were fetched — the PaginationToken from page 1 was followed.
+      expect(cognitoMock.commandCalls(ListUsersCommand)).toHaveLength(2);
+      // And the delete was blocked.
       expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(0);
     });
 
@@ -116,7 +225,11 @@ describe('organization-resolver', () => {
     });
   });
 
-  test('throws on unknown field', async () => {
-    await expect(handler(makeEvent('unknownField', {}))).rejects.toThrow('Unknown field');
+  test('throws a clear error naming the unknown field', async () => {
+    // Dispatch must resolve the real field name from info.fieldName — an
+    // unknown field yields 'Unknown field: <name>', never 'Unknown field: undefined'.
+    await expect(
+      handler(makeEvent('unknownField', {}))
+    ).rejects.toThrow('Unknown field: unknownField');
   });
 });
