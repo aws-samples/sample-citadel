@@ -6,6 +6,7 @@
 
 import {
   ConnectorError,
+  DataStoreError,
   ProvisioningError,
   ConnectionError,
   PermissionError,
@@ -86,7 +87,6 @@ describe('Unified Error Hierarchy', () => {
   });
 
   test('DataStoreError is ConnectorError (simple alias)', () => {
-    const { DataStoreError } = require('../errors');
     expect(DataStoreError).toBe(ConnectorError);
     const err = new DataStoreError('test', 'CODE', false);
     expect(err).toBeInstanceOf(ConnectorError);

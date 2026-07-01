@@ -564,21 +564,22 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
           const Icon = opt.icon;
           const selected = source === opt.value;
           return (
-            <button
+            <Button
               key={opt.value}
               type="button"
+              variant="outline"
               aria-pressed={selected}
               onClick={() => setSource(opt.value)}
-              className={`flex flex-col gap-2 rounded-lg border p-4 text-left cursor-pointer transition-colors ${
+              className={`flex flex-col h-auto items-start justify-start whitespace-normal gap-2 rounded-lg border p-4 text-left cursor-pointer transition-colors ${
                 selected
-                  ? 'border-primary bg-primary/5'
+                  ? 'border-primary bg-primary/5 hover:bg-primary/5'
                   : 'border-border bg-card hover:bg-accent'
               }`}
             >
               <Icon className="size-5 text-primary" />
               <span className="text-sm font-medium text-foreground">{opt.label}</span>
               <span className="text-xs text-muted-foreground">{opt.description}</span>
-            </button>
+            </Button>
           );
         })}
       </div>
@@ -745,14 +746,15 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
           {candidates.map((c) => {
             const selected = selectedRefs.includes(c.reference);
             return (
-              <button
+              <Button
                 key={c.reference}
                 type="button"
+                variant="outline"
                 aria-pressed={selected}
                 onClick={() => toggleCandidate(c.reference)}
-                className={`flex items-center justify-between gap-3 rounded-lg border p-3 text-left cursor-pointer transition-colors ${
+                className={`flex items-center justify-between h-auto whitespace-normal gap-3 rounded-lg border p-3 text-left cursor-pointer transition-colors ${
                   selected
-                    ? 'border-primary bg-primary/5'
+                    ? 'border-primary bg-primary/5 hover:bg-primary/5'
                     : 'border-border bg-card hover:bg-accent'
                 }`}
               >
@@ -773,7 +775,7 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
                     Selected
                   </Badge>
                 )}
-              </button>
+              </Button>
             );
           })}
         </div>
@@ -1339,20 +1341,21 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
               {options.map((o) => {
                 const selected = conflictChoice === o.value;
                 return (
-                  <button
+                  <Button
                     key={o.value}
                     type="button"
+                    variant="outline"
                     aria-pressed={selected}
                     onClick={() => setConflictChoice(o.value)}
-                    className={`flex flex-col gap-1 rounded-lg border p-3 text-left cursor-pointer transition-colors ${
+                    className={`flex flex-col h-auto items-start justify-start whitespace-normal gap-1 rounded-lg border p-3 text-left cursor-pointer transition-colors ${
                       selected
-                        ? 'border-primary bg-primary/5'
+                        ? 'border-primary bg-primary/5 hover:bg-primary/5'
                         : 'border-border bg-card hover:bg-accent'
                     }`}
                   >
                     <span className="text-sm font-medium text-foreground">{o.label}</span>
                     <span className="text-xs text-muted-foreground">{o.hint}</span>
-                  </button>
+                  </Button>
                 );
               })}
             </div>

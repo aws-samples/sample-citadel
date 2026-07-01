@@ -8,12 +8,6 @@ import type { AgentInvocationBlock } from '../base';
 
 const URL_ = 'https://api.example.com/agent';
 
-interface FetchInit {
-  method?: string;
-  body?: string;
-  headers?: Record<string, string>;
-}
-type FetchLike = (url: unknown, init?: FetchInit) => Promise<unknown>;
 const asFetch = (fn: jest.Mock): typeof fetch => fn as unknown as typeof fetch;
 
 describe('HttpEndpointAdapter.discover (US-IMP-011)', () => {

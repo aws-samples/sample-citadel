@@ -195,10 +195,13 @@ def _write_fabrication_status(
     """
     table = os.environ.get("FABRICATION_JOBS_TABLE")
     if not table:
+        # orchestration_id/agent_use_id omitted: event-derived identifiers
+        # CodeQL taints as secret-conflated. status is a fixed lifecycle label
+        # and safe to log.
         logger.info(
             "_write_fabrication_status: FABRICATION_JOBS_TABLE unset; "
-            "skipping status=%s for %s/%s",
-            status, orchestration_id, agent_use_id,
+            "skipping status=%s (orchestration/agentUse ids redacted)",
+            status,
         )
         return False
 
@@ -244,9 +247,11 @@ def _write_fabrication_status(
         )
         return True
     except Exception as e:  # noqa: BLE001 — best-effort: never change outcome
+        # Redact event-derived ids and the exception message (may echo request
+        # values); log the exception class only. status is a fixed label.
         logger.warning(
-            "_write_fabrication_status failed (status=%s, %s/%s): %s",
-            status, orchestration_id, agent_use_id, e,
+            "_write_fabrication_status failed (status=%s): %s",
+            status, type(e).__name__,
         )
         return False
 
@@ -879,9 +884,11 @@ def _process_manifest_proposal(event):
         publish_manifest_event('agent.import.manifest.proposed', detail)
     except Exception as e:  # noqa: BLE001 — ManifestProposalError + model/client errors; never poison the queue
         short_error = sanitize_text(str(e))[:200]
+        # Do not log importId (event-derived) or the error text (may echo
+        # request values); log the exception class only. short_error is still
+        # shipped in the published FAILED event detail below (unchanged).
         logger.warning(
-            "manifest-proposal failed for importId=%s: %s",
-            base_detail['importId'], short_error,
+            "manifest-proposal failed: %s", type(e).__name__,
         )
         detail = {
             **base_detail,
@@ -909,7 +916,8 @@ def publish_intake_progress(session_id: str, agent_index: int, total_agents: int
             'changeSummary': summary,
         }),
     }])
-    print(f"Published intake progress: {pct}% — {summary}")
+    # summary embeds the event-derived agent name; log only the numeric pct.
+    print(f"Published intake progress: {pct}%")
 
 def upload_to_s3(file_path, folder):
     """Upload a file to S3"""
@@ -1761,7 +1769,12 @@ def process_event(event, context, request_type=None):
     datastore_bindings = request.get("dataStoreBindings", None)
     
     if TASK is None:
-        print(f"Error: No taskDetails found in event: {event}")
+        # Do not log the full event: agent_input may embed integration/
+        # datastore bindings containing credentials. Log only a safe count.
+        print(
+            "Error: No taskDetails found in agent_input "
+            f"(event key count={len(event) if isinstance(event, dict) else 0})"
+        )
         raise ValueError("taskDetails is required in agent_input")
 
     # US-ARB-017 precondition gate. Forward-compatible: no-op when projectId
@@ -1788,9 +1801,12 @@ def process_event(event, context, request_type=None):
                 from catalog.registry_client import get_source_project_id
                 project_id = get_source_project_id(registry_id, record_id)
                 if project_id:
+                    # projectId/registry_id/record_id omitted (env- and
+                    # event-derived, taint-conflated as secret). Log only that
+                    # the fallback resolution succeeded.
                     logger.info(
-                        'fabricator: resolved projectId=%s from registry record %s/%s',
-                        project_id, registry_id, record_id,
+                        'fabricator: resolved projectId from registry record '
+                        '(fallback path)'
                     )
             except ImportError:
                 # catalog Layer not attached (unexpected post-PR-2 but keep

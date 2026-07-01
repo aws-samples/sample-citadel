@@ -64,6 +64,12 @@ jest.mock('../../utils/appsync-publish', () => ({
 
 import { handler } from '../registry-agent-record-resolver';
 import { APP_META_SORT_VALUE } from '../../utils/apps-table-meta';
+import type { Context } from 'aws-lambda';
+
+// Typed Lambda invocation stub — the resolver ignores context/callback, so a
+// cast-through-unknown Context (plus a jest.fn() callback) keeps handler calls
+// type-correct without `any` (mirrors seed-blueprints.test.ts convention).
+const mockContext = {} as unknown as Context;
 
 function makeEvent(fieldName: string, args: any, sub = 'user-123') {
   return {
@@ -155,8 +161,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const result = await handler(
         makeEvent('getApp', { appId: 'app-1' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.appId).toBe('app-1');
@@ -203,8 +209,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const result = await handler(
         makeAdminEvent('listApps', { orgId: 'All Organizations' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.items).toHaveLength(3);
@@ -222,8 +228,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       await handler(
         makeAdminEvent('listApps', { orgId: 'All Organizations' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       const scanCalls = ddbMock.commandCalls(ScanCommand);
@@ -239,8 +245,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const result = await handler(
         makeAdminEvent('listApps', { orgId: 'All Organizations' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.items).toEqual([]);
@@ -251,8 +257,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
       await expect(
         handler(
           makeEvent('listApps', { orgId: 'All Organizations' }),
-          {} as any,
-          {} as any,
+          mockContext,
+          jest.fn(),
         ),
       ).rejects.toThrow(/Only admins/i);
 
@@ -274,8 +280,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const result = await handler(
         makeEvent('listApps', { orgId: 'org-1' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.items).toHaveLength(2);
@@ -305,8 +311,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const result = await handler(
         makeEvent('listApps', { orgId: 'org-other' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.items).toEqual([]);
@@ -330,8 +336,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const result = await handler(
         makeEvent('listApps', { orgId: 'org-1' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.items).toHaveLength(1);
@@ -354,8 +360,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const result = await handler(
         makeEvent('listApps', { orgId: 'org-1' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.items).toHaveLength(1);
@@ -388,8 +394,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const result = await handler(
         makeEvent('listApps', { orgId: 'org-1' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.items).toHaveLength(2);
@@ -417,8 +423,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
             orgId: 'org-1',
           },
         }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result).toMatchObject({
@@ -436,8 +442,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
         makeEvent('createApp', {
           input: { name: 'EB Test App', orgId: 'org-1' },
         }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -461,8 +467,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
           makeEvent('updateApp', {
             input: { appId: 'app-1', version: 1, name: 'Updated Name' },
           }),
-          {} as any,
-          {} as any,
+          mockContext,
+          jest.fn(),
         ),
       ).resolves.toBeDefined();
 
@@ -482,8 +488,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
           makeEvent('updateApp', {
             input: { appId: 'app-1', name: 'Stale', version: 1 },
           }),
-          {} as any,
-          {} as any,
+          mockContext,
+          jest.fn(),
         ),
       ).rejects.toThrow(/Conflict/);
     });
@@ -495,8 +501,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
         makeEvent('updateApp', {
           input: { appId: 'app-1', name: 'Updated', version: 1 },
         }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -516,8 +522,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const result = await handler(
         makeEvent('deleteApp', { appId: 'app-1' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.success).toBe(true);
@@ -535,8 +541,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       await handler(
         makeEvent('deleteApp', { appId: 'app-1' }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -561,8 +567,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
             sourceProjectId: 'proj-1',
           },
         }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.sourceProjectId).toBe('proj-1');
@@ -580,8 +586,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
             orgId: 'org-1',
           },
         }),
-        {} as any,
-        {} as any,
+        mockContext,
+        jest.fn(),
       );
 
       expect(result.sourceProjectId == null).toBe(true);
@@ -599,8 +605,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
               sourceProjectId: 'proj-2',
             },
           }),
-          {} as any,
-          {} as any,
+          mockContext,
+          jest.fn(),
         ),
       ).resolves.toBeDefined();
 
@@ -624,8 +630,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
               version: 1,
             },
           }),
-          {} as any,
-          {} as any,
+          mockContext,
+          jest.fn(),
         ),
       ).resolves.toBeDefined();
 

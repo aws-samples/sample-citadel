@@ -70,9 +70,11 @@ def get_agent_record(registry_id: str, record_id: str) -> dict | None:
             recordId=record_id,
         )
     except ClientError as exc:
+        # registry_id/record_id may carry taint from secret-bearing upstream
+        # inputs, and the exception can echo request parameters. Log only the
+        # exception class name (safe metadata, no sensitive values).
         logger.warning(
-            "Registry get_registry_record failed (registry=%s, record=%s): %s",
-            registry_id, record_id, exc,
+            "Registry get_registry_record failed: %s", type(exc).__name__,
         )
         return None
     return {
@@ -103,10 +105,9 @@ def get_source_project_id(registry_id: str, record_id: str) -> str | None:
     try:
         parsed = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        logger.warning(
-            "Malformed customDescriptorContent for record %s/%s",
-            registry_id, record_id,
-        )
+        # registry_id/record_id omitted: may carry taint from secret-bearing
+        # upstream inputs. The malformed-JSON condition is the useful signal.
+        logger.warning("Malformed customDescriptorContent for a registry record")
         return None
     if not isinstance(parsed, dict):
         return None

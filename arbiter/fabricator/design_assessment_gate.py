@@ -77,18 +77,16 @@ def check_design_assessment(
         logger.debug('design-assessment gate: no project_id provided, skipping')
         return
     if grandfathered:
-        logger.info(
-            'design-assessment gate: bypassed for project_id=%s (grandfathered)',
-            project_id,
-        )
+        # project_id omitted: event-derived, taint-conflated as secret. The
+        # bypass decision is the operational signal.
+        logger.info('design-assessment gate: bypassed (grandfathered)')
         return
 
     table = _get_table()
     if table is None:
         logger.warning(
             'design-assessment gate: AGENT_DESIGN_ASSESSMENTS_TABLE unset; '
-            'skipping gate for project_id=%s',
-            project_id,
+            'skipping gate (project_id omitted from log)'
         )
         return
 
@@ -104,7 +102,6 @@ def check_design_assessment(
             f'AgentDesignAssessment for projectId={project_id!r} exists but is '
             f'not marked completed. Fabrication requires completedAt to be set.'
         )
-    logger.info(
-        'design-assessment gate: passed for project_id=%s (completed_at=%s)',
-        project_id, item.get('completedAt'),
-    )
+    # project_id and DDB item fields omitted: may carry taint from secret-
+    # bearing upstream inputs. The pass decision is the useful signal.
+    logger.info('design-assessment gate: passed')
