@@ -131,8 +131,8 @@ async function deleteOrganization(orgId: string): Promise<UserManagementResponse
   //    and risks cross-tenant access if the orgId is ever reused.
   //
   //    Mirror the `createOrganization` "pre-check + throw" idiom used
-  //    above — list users with a server-side filter, hard-cap to 1, fail
-  //    closed if any are returned.
+  //    above — enumerate users and fail closed if any still point at this
+  //    org (client-side match; see the ListUsers note below for why).
   //
   //    Defensive guard: if USER_POOL_ID is unset (e.g. transitional
   //    deploy ordering or local fixture), refuse the delete rather than
@@ -144,22 +144,38 @@ async function deleteOrganization(orgId: string): Promise<UserManagementResponse
     );
   }
 
-  const usersResponse = await cognitoClient.send(
-    new ListUsersCommand({
-      UserPoolId: USER_POOL_ID,
-      // Cognito ListUsers filter syntax requires the attribute name to be
-      // wrapped in double quotes when it contains a colon (custom:*).
-      // Reference: https://docs.aws.amazon.com/cognito/latest/developerguide/how-to-manage-user-accounts.html#cognito-user-pools-searching-for-users-using-listusers-api
-      Filter: `"custom:organization" = "${orgId}"`,
-      Limit: 1,
-    })
-  );
-
-  if (usersResponse.Users && usersResponse.Users.length > 0) {
-    throw new Error(
-      'Cannot delete organization: 1+ user(s) still assigned. Reassign or remove these users before deleting the organization.'
+  //    Cognito ListUsers server-side `Filter` supports STANDARD attributes
+  //    ONLY (username, email, phone_number, name, given_name, family_name,
+  //    preferred_username, sub, cognito:user_status, status). Filtering on a
+  //    CUSTOM attribute (custom:organization) raises InvalidParameterException
+  //    — surfaced to the client as "Input fails to satisfy the constraints"
+  //    and logged as Lambda:Unhandled (Issue #14, 2nd bug). We therefore PAGE
+  //    through the pool (max 60 users per page) and match custom:organization
+  //    CLIENT-SIDE, failing closed on the FIRST match. Bounded by design: we
+  //    check-and-early-exit per page and never buffer an unbounded user array.
+  let paginationToken: string | undefined;
+  do {
+    const usersResponse = await cognitoClient.send(
+      new ListUsersCommand({
+        UserPoolId: USER_POOL_ID,
+        Limit: 60,
+        PaginationToken: paginationToken,
+      })
     );
-  }
+
+    for (const user of usersResponse.Users ?? []) {
+      const assignedToOrg = (user.Attributes ?? []).some(
+        (attr) => attr.Name === 'custom:organization' && attr.Value === orgId
+      );
+      if (assignedToOrg) {
+        throw new Error(
+          'Cannot delete organization: 1+ user(s) still assigned. Reassign or remove these users before deleting the organization.'
+        );
+      }
+    }
+
+    paginationToken = usersResponse.PaginationToken;
+  } while (paginationToken);
 
   // 3. Safe to delete.
   //

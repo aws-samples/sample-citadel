@@ -107,38 +107,68 @@ describe('organization-resolver', () => {
   });
 
   describe('deleteOrganization', () => {
-    test('deletes empty organization, calls ListUsersCommand with correct filter, then DeleteCommand', async () => {
+    // Orphan-user guard rationale (Issue #14, 2nd bug): the user↔org link lives
+    // ONLY in the Cognito `custom:organization` user-pool attribute. Cognito
+    // ListUsers supports server-side `Filter` on STANDARD attributes only — a
+    // `custom:*` Filter raises InvalidParameterException ("Input fails to
+    // satisfy the constraints") in the real service (aws-sdk-client-mock does
+    // NOT enforce that constraint, which is exactly what masked the bug). The
+    // resolver must therefore PAGINATE ListUsers and match attributes
+    // client-side, failing closed on the first match.
+
+    // (b): a delete SUCCEEDS when users exist in the pool but NONE carry
+    // custom:organization === orgId — the resolver must discriminate on the
+    // attribute value, not merely on "any users returned".
+    test('deletes organization when no user matches the orgId, then calls DeleteCommand', async () => {
       // Existence check returns the org row.
       dynamoMock.on(ScanCommand).resolves({
         Items: [{ orgId: 'org-1', name: 'Org' }],
       });
-      // Cognito returns no users with matching custom:organization claim.
-      cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
+      // Users exist but NONE carry custom:organization === 'org-1'.
+      cognitoMock.on(ListUsersCommand).resolves({
+        Users: [
+          { Username: 'other-1', Attributes: [{ Name: 'custom:organization', Value: 'different-org' }] },
+          { Username: 'no-attr', Attributes: [] },
+        ],
+      });
       dynamoMock.on(DeleteCommand).resolves({});
 
       const result = await handler(makeEvent('deleteOrganization', { orgId: 'org-1' }));
 
       expect(result.success).toBe(true);
-
-      // ListUsersCommand was invoked with the correct user-pool + filter.
-      const listUsersCalls = cognitoMock.commandCalls(ListUsersCommand);
-      expect(listUsersCalls).toHaveLength(1);
-      const listInput = listUsersCalls[0].args[0].input as any;
-      expect(listInput.UserPoolId).toBe('us-east-1_testpool');
-      expect(listInput.Filter).toBe('"custom:organization" = "org-1"');
-      expect(listInput.Limit).toBe(1);
-
       // DeleteCommand ran exactly once.
       expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(1);
     });
 
-    test('throws when organization still has users assigned, DeleteCommand NOT called', async () => {
+    // (c): the ListUsers input must NOT contain a `custom:` attribute Filter —
+    // that server-side filter is precisely what Cognito rejects.
+    test('does NOT send a custom: attribute Filter to ListUsers', async () => {
       dynamoMock.on(ScanCommand).resolves({
         Items: [{ orgId: 'org-1', name: 'Org' }],
       });
-      // Cognito returns one user — org cannot be deleted while users link to it.
+      cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
+      dynamoMock.on(DeleteCommand).resolves({});
+
+      await handler(makeEvent('deleteOrganization', { orgId: 'org-1' }));
+
+      const listUsersCalls = cognitoMock.commandCalls(ListUsersCommand);
+      expect(listUsersCalls.length).toBeGreaterThanOrEqual(1);
+      const listInput = listUsersCalls[0].args[0].input as any;
+      expect(listInput.UserPoolId).toBe('us-east-1_testpool');
+      const filterStr = listInput.Filter === undefined ? '' : String(listInput.Filter);
+      expect(filterStr.includes('custom:')).toBe(false);
+    });
+
+    // (a): delete is BLOCKED (fail-closed) when a returned user's
+    // custom:organization attribute equals the target orgId.
+    test('throws when a user custom:organization matches orgId, DeleteCommand NOT called', async () => {
+      dynamoMock.on(ScanCommand).resolves({
+        Items: [{ orgId: 'org-1', name: 'Org' }],
+      });
       cognitoMock.on(ListUsersCommand).resolves({
-        Users: [{ Username: 'still-here-user', Attributes: [] }],
+        Users: [
+          { Username: 'still-here-user', Attributes: [{ Name: 'custom:organization', Value: 'org-1' }] },
+        ],
       });
 
       await expect(
@@ -146,6 +176,37 @@ describe('organization-resolver', () => {
       ).rejects.toThrow(/user\(s\) still assigned/);
 
       // DeleteCommand must NOT have run.
+      expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(0);
+    });
+
+    // (d): pagination — a match on the SECOND page must still block the delete.
+    // Page 1 returns a non-matching user + PaginationToken; page 2 returns the
+    // match. The resolver must follow the token and catch it.
+    test('paginates ListUsers and blocks the delete on a second-page match', async () => {
+      dynamoMock.on(ScanCommand).resolves({
+        Items: [{ orgId: 'org-1', name: 'Org' }],
+      });
+      cognitoMock
+        .on(ListUsersCommand)
+        .resolvesOnce({
+          Users: [
+            { Username: 'other', Attributes: [{ Name: 'custom:organization', Value: 'different-org' }] },
+          ],
+          PaginationToken: 'page-2-token',
+        })
+        .resolvesOnce({
+          Users: [
+            { Username: 'matching-user', Attributes: [{ Name: 'custom:organization', Value: 'org-1' }] },
+          ],
+        });
+
+      await expect(
+        handler(makeEvent('deleteOrganization', { orgId: 'org-1' }))
+      ).rejects.toThrow(/user\(s\) still assigned/);
+
+      // Both pages were fetched — the PaginationToken from page 1 was followed.
+      expect(cognitoMock.commandCalls(ListUsersCommand)).toHaveLength(2);
+      // And the delete was blocked.
       expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(0);
     });
 
