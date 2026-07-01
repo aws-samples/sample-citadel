@@ -66,6 +66,21 @@ import {
 } from '../services/registry-service';
 import { PolicyManager, type PolicyScope } from '../utils/policy-manager';
 import { getUnifiedRegistry } from '../adapters/registry';
+import {
+  fetchTrustPathHop,
+  parseTrustPolicyPrincipals,
+  projectInlinePolicyDocument,
+  extractCrossAccountRoleArn,
+} from '../utils/trust-path';
+// Re-export the pure trust-path helpers from their original module path so
+// existing importers (governance-ui-resolver.test.ts) keep working unchanged.
+// The IAM-fetch + hop projection now lives in ../utils/trust-path; getTrustPath
+// delegates its per-hop work there (behaviour-preserving — Wave 5.C.1).
+export {
+  parseTrustPolicyPrincipals,
+  projectInlinePolicyDocument,
+  extractCrossAccountRoleArn,
+};
 
 // --- Clients ---
 
@@ -6246,7 +6261,6 @@ const WAVE5C1_RESOURCE_TYPE_ALLOWLIST: ReadonlySet<string> = new Set([
   'integration',
 ]);
 const WAVE5C1_RESOURCE_ID_MAX_LENGTH = 256;
-const WAVE5C1_INLINE_POLICY_NAME = 'DataStoreAccess';
 const WAVE5C1_CACHE_TTL_MS = 5 * 60_000;
 
 interface GetTrustPathArgs {
@@ -6299,98 +6313,6 @@ const SCOPE_ROLE_PREFIX: Record<string, string> = {
 };
 
 /**
- * Parse the trust policy JSON and collect every `Principal.AWS` entry
- * as a flat string array. Tolerates both string and array shapes —
- * IAM allows either form.
- */
-export function parseTrustPolicyPrincipals(trustPolicyJson: string | undefined): string[] {
-  if (!trustPolicyJson) return [];
-  try {
-    const policy = JSON.parse(trustPolicyJson);
-    const statements = Array.isArray(policy?.Statement)
-      ? policy.Statement
-      : policy?.Statement
-        ? [policy.Statement]
-        : [];
-    const principals: string[] = [];
-    for (const stmt of statements) {
-      const aws = stmt?.Principal?.AWS;
-      if (typeof aws === 'string') {
-        principals.push(aws);
-      } else if (Array.isArray(aws)) {
-        for (const entry of aws) {
-          if (typeof entry === 'string') principals.push(entry);
-        }
-      }
-    }
-    return principals;
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Project an IAM inline policy document JSON into the GraphQL shape.
- * Coerces `Action` and `Resource` to string arrays (IAM permits either
- * a single string or an array). `Condition` is preserved verbatim as
- * stringified JSON so the frontend can pretty-print without losing
- * shape detail.
- */
-export function projectInlinePolicyDocument(
-  documentJson: string | undefined,
-): TrustPathPolicyStatementProjected[] {
-  if (!documentJson) return [];
-  try {
-    const doc = JSON.parse(documentJson);
-    const statements = Array.isArray(doc?.Statement)
-      ? doc.Statement
-      : doc?.Statement
-        ? [doc.Statement]
-        : [];
-    const projected: TrustPathPolicyStatementProjected[] = [];
-    for (const stmt of statements) {
-      const actionsRaw = stmt?.Action;
-      const resourcesRaw = stmt?.Resource;
-      const actions = typeof actionsRaw === 'string'
-        ? [actionsRaw]
-        : Array.isArray(actionsRaw)
-          ? actionsRaw.filter((a): a is string => typeof a === 'string')
-          : [];
-      const resources = typeof resourcesRaw === 'string'
-        ? [resourcesRaw]
-        : Array.isArray(resourcesRaw)
-          ? resourcesRaw.filter((r): r is string => typeof r === 'string')
-          : [];
-      const condition = stmt?.Condition;
-      const conditionsJson =
-        condition !== undefined && condition !== null
-          ? JSON.stringify(condition)
-          : null;
-      projected.push({
-        effect: typeof stmt?.Effect === 'string' ? stmt.Effect : 'Allow',
-        actions,
-        resources,
-        conditionsJson,
-      });
-    }
-    return projected;
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Extract a role name from an IAM role ARN. Returns the substring after
- * the final `/`. Handles both `arn:aws:iam::<acct>:role/<name>` and
- * paths like `arn:aws:iam::<acct>:role/path/to/<name>`.
- */
-function roleNameFromArn(arn: string): string {
-  const slashIdx = arn.lastIndexOf('/');
-  if (slashIdx < 0 || slashIdx === arn.length - 1) return arn;
-  return arn.substring(slashIdx + 1);
-}
-
-/**
  * Resolve the Lambda execution role ARN that drives the trust chain.
  * Preferred source is the `LAMBDA_EXEC_ROLE_ARN` env var (set on the
  * resolver Lambda by ArbiterStack). Falls back to deriving from
@@ -6412,82 +6334,20 @@ function resolveLambdaExecRoleArn(): { arn: string | null; note: string | null }
 }
 
 /**
- * Fetch a hop's role + inline policy. Each IAM call is wrapped in its
- * own try/catch — a single missing role or absent inline policy
- * produces a hop with empty fields and a contextual note rather than
- * cratering the whole report.
+ * Fetch a hop's role + inline policy by delegating to the shared trust-path
+ * core (`fetchTrustPathHop` in ../utils/trust-path). Behaviour-preserving: the
+ * same IAM calls (via the module `iam` client), the same per-hop projection,
+ * and the same contextual notes appended to the shared `notes` array in order
+ * as the pre-refactor inline implementation.
  */
 async function buildHop(
   arn: string,
   scope: string,
   notes: string[],
 ): Promise<TrustPathRoleProjected> {
-  const name = roleNameFromArn(arn);
-
-  let trustPolicyPrincipals: string[] = [];
-  let roleFound = true;
-  try {
-    const roleOut: GetRoleCommandOutput = await iam.send(
-      new GetRoleCommand({ RoleName: name }),
-    );
-    const trustPolicyEncoded = roleOut.Role?.AssumeRolePolicyDocument;
-    // IAM may URL-encode the trust policy — decode if it doesn't already
-    // look like raw JSON.
-    const trustPolicyJson =
-      typeof trustPolicyEncoded === 'string' && trustPolicyEncoded.length > 0
-        ? (trustPolicyEncoded.trim().startsWith('{')
-            ? trustPolicyEncoded
-            : decodeURIComponent(trustPolicyEncoded))
-        : undefined;
-    trustPolicyPrincipals = parseTrustPolicyPrincipals(trustPolicyJson);
-  } catch (err) {
-    roleFound = false;
-    notes.push(`Role ${arn} not found`);
-    console.warn('getTrustPath: GetRole failed', { arn, error: (err as Error)?.message });
-  }
-
-  let inlinePolicy: TrustPathPolicyStatementProjected[] = [];
-  let inlinePolicyName: string | null = null;
-  if (roleFound) {
-    try {
-      const policyOut: GetRolePolicyCommandOutput = await iam.send(
-        new GetRolePolicyCommand({
-          RoleName: name,
-          PolicyName: WAVE5C1_INLINE_POLICY_NAME,
-        }),
-      );
-      const documentEncoded = policyOut.PolicyDocument;
-      const documentJson =
-        typeof documentEncoded === 'string' && documentEncoded.length > 0
-          ? (documentEncoded.trim().startsWith('{')
-              ? documentEncoded
-              : decodeURIComponent(documentEncoded))
-          : undefined;
-      inlinePolicy = projectInlinePolicyDocument(documentJson);
-      inlinePolicyName = WAVE5C1_INLINE_POLICY_NAME;
-    } catch (err) {
-      notes.push(`Inline policy not present on ${arn}`);
-      console.warn('getTrustPath: GetRolePolicy failed', { arn, error: (err as Error)?.message });
-    }
-  }
-
-  let totalActions = 0;
-  let totalResources = 0;
-  for (const stmt of inlinePolicy) {
-    totalActions += stmt.actions.length;
-    totalResources += stmt.resources.length;
-  }
-
-  return {
-    arn,
-    name,
-    scope,
-    trustPolicyPrincipals,
-    inlinePolicy,
-    inlinePolicyName,
-    totalActions,
-    totalResources,
-  };
+  const result = await fetchTrustPathHop(iam, arn, scope);
+  for (const note of result.notes) notes.push(note);
+  return result.hop;
 }
 
 /**
@@ -6545,40 +6405,6 @@ async function loadTrustPathResource(
     } catch (err) {
       console.warn('getTrustPath: agent lookup failed', err);
       return null;
-    }
-  }
-  return null;
-}
-
-/**
- * Best-effort extraction of the optional `crossAccountRoleArn` field
- * from a resource record. Datastores and integrations store
- * configuration in a `config` blob; agents may surface it via
- * `customDescriptorContent` JSON. Returns `null` when absent or
- * malformed.
- */
-export function extractCrossAccountRoleArn(
-  record: Record<string, unknown> | null,
-): string | null {
-  if (!record) return null;
-  // Top-level fast path.
-  const direct = record.crossAccountRoleArn;
-  if (typeof direct === 'string' && direct.length > 0) return direct;
-  // `config` may be a nested object on datastore / integration rows.
-  const cfg = record.config;
-  if (cfg && typeof cfg === 'object') {
-    const fromCfg = (cfg as Record<string, unknown>).crossAccountRoleArn;
-    if (typeof fromCfg === 'string' && fromCfg.length > 0) return fromCfg;
-  }
-  // Agent custom metadata path — try to parse customDescriptorContent.
-  const metaRaw = record.customDescriptorContent;
-  if (typeof metaRaw === 'string' && metaRaw.length > 0) {
-    try {
-      const parsed = JSON.parse(metaRaw);
-      const fromMeta = parsed?.crossAccountRoleArn;
-      if (typeof fromMeta === 'string' && fromMeta.length > 0) return fromMeta;
-    } catch {
-      /* swallow — malformed metadata is not a fatal error */
     }
   }
   return null;

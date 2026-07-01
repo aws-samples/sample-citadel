@@ -11,6 +11,10 @@ from strands_tools import file_write, http_request, shell
 import os
 from tools_config import load_config_from_dynamodb, create_tool_desc
 from design_assessment_gate import check_design_assessment, DesignAssessmentMissingError
+from manifest_proposal import (
+    propose_agent_manifest,
+    sanitize_text,
+)
 import boto3
 from botocore.config import Config
 
@@ -191,10 +195,13 @@ def _write_fabrication_status(
     """
     table = os.environ.get("FABRICATION_JOBS_TABLE")
     if not table:
+        # orchestration_id/agent_use_id omitted: event-derived identifiers
+        # CodeQL taints as secret-conflated. status is a fixed lifecycle label
+        # and safe to log.
         logger.info(
             "_write_fabrication_status: FABRICATION_JOBS_TABLE unset; "
-            "skipping status=%s for %s/%s",
-            status, orchestration_id, agent_use_id,
+            "skipping status=%s (orchestration/agentUse ids redacted)",
+            status,
         )
         return False
 
@@ -240,9 +247,11 @@ def _write_fabrication_status(
         )
         return True
     except Exception as e:  # noqa: BLE001 — best-effort: never change outcome
+        # Redact event-derived ids and the exception message (may echo request
+        # values); log the exception class only. status is a fixed label.
         logger.warning(
-            "_write_fabrication_status failed (status=%s, %s/%s): %s",
-            status, orchestration_id, agent_use_id, e,
+            "_write_fabrication_status failed (status=%s): %s",
+            status, type(e).__name__,
         )
         return False
 
@@ -807,6 +816,87 @@ def publish_fabrication_event(orchestration_id: str, event_type: str, agent_id: 
     print(f"Published {event_type} event: {response}")
     return response
 
+def publish_manifest_event(detail_type: str, detail: dict):
+    """Publish a Tier-3 agent-import manifest event to the agent event bus.
+
+    Mirrors ``publish_fabrication_event``'s PutEvents pattern exactly — same
+    boto3 ``events`` client, same ``COMPLETION_BUS_NAME`` agent bus, and the
+    Source==DetailType convention — but carries the B1 agent-import result
+    contract detail shape verbatim:
+
+      - 'agent.import.manifest.proposed':
+          {requestId, correlationId, importId, proposedManifest, status:'proposed'}
+      - 'agent.import.manifest.failed':
+          {requestId, correlationId, importId, error, status:'failed'}
+
+    The backend result handler (B1) listens for these detail-types on the
+    agent bus and writes the (sanitized) descriptor into
+    ``customMetadata.proposedManifest`` for human review (B2).
+
+    Args:
+        detail_type: The EventBridge DetailType (and Source) — one of the two
+            agent-import manifest detail-types above.
+        detail: The fully-formed event detail dict (already secret-free).
+
+    Returns:
+        The response from EventBridge ``put_events``.
+    """
+    client = boto3.client('events')
+    bus = os.environ.get('COMPLETION_BUS_NAME')
+    event = {
+        'Source': detail_type,
+        'DetailType': detail_type,
+        'EventBusName': bus,
+        'Detail': json.dumps(detail, default=str),
+    }
+    response = client.put_events(Entries=[event])
+    print(f"Published {detail_type} event: {response}")
+    return response
+
+def _process_manifest_proposal(event):
+    """Tier-3 agent-import (ARBITER-A) manifest-proposal branch.
+
+    Parses the B1 request body ``{requestId, correlationId, importId,
+    signals}`` and asks the model to PROPOSE an agent capability descriptor
+    from the non-secret signals. This path proposes a descriptor only — it
+    NEVER generates or executes code, so it deliberately does NOT touch the
+    design-assessment / code-fabrication path.
+
+    On success it emits ``agent.import.manifest.proposed``; on ANY failure
+    (unparseable/invalid model output, or a model/client error) it emits
+    ``agent.import.manifest.failed`` with a short, secret-free error message.
+    No exception escapes this function: a poison/failed message must report a
+    FAILED event rather than nack-and-retry the SQS message forever.
+    """
+    base_detail = {
+        'requestId': event.get('requestId'),
+        'correlationId': event.get('correlationId'),
+        'importId': event.get('importId'),
+    }
+    signals = event.get('signals') or {}
+    try:
+        proposed_manifest = propose_agent_manifest(signals)
+        detail = {
+            **base_detail,
+            'proposedManifest': proposed_manifest,
+            'status': 'proposed',
+        }
+        publish_manifest_event('agent.import.manifest.proposed', detail)
+    except Exception as e:  # noqa: BLE001 — ManifestProposalError + model/client errors; never poison the queue
+        short_error = sanitize_text(str(e))[:200]
+        # Do not log importId (event-derived) or the error text (may echo
+        # request values); log the exception class only. short_error is still
+        # shipped in the published FAILED event detail below (unchanged).
+        logger.warning(
+            "manifest-proposal failed: %s", type(e).__name__,
+        )
+        detail = {
+            **base_detail,
+            'error': short_error,
+            'status': 'failed',
+        }
+        publish_manifest_event('agent.import.manifest.failed', detail)
+
 def publish_intake_progress(session_id: str, agent_index: int, total_agents: int, agent_name: str, failed: bool = False):
     """Publish implementation progress back to the intake EventBridge bus."""
     client = boto3.client('events')
@@ -826,7 +916,8 @@ def publish_intake_progress(session_id: str, agent_index: int, total_agents: int
             'changeSummary': summary,
         }),
     }])
-    print(f"Published intake progress: {pct}% — {summary}")
+    # summary embeds the event-derived agent name; log only the numeric pct.
+    print(f"Published intake progress: {pct}%")
 
 def upload_to_s3(file_path, folder):
     """Upload a file to S3"""
@@ -1635,6 +1726,29 @@ def create_agent_fabricator(complete_task, store_agent_tool=None):
     return agent_fabricator
 
 def process_event(event, context, request_type=None):
+    # Tier-3 agent-import (ARBITER-A): the 'manifest-proposal' path proposes an
+    # agent capability descriptor from non-secret signals. It uses a DIFFERENT
+    # event shape ({requestId, correlationId, importId, signals}) and MUST NOT
+    # run the taskDetails extraction, the design-assessment gate, or the
+    # code-fabrication path — it proposes a descriptor, it never generates or
+    # executes code. Handle it first and return.
+    if request_type == "manifest-proposal":
+        _process_manifest_proposal(event)
+        return
+
+    # Poison-queue defence (Tier-3 invariant 5): an UNRECOGNISED requestType is
+    # a safe no-op — log and return without publishing an event or raising. A
+    # raise here would nack the SQS message and retry the poison forever. The
+    # known fabrication request types (legacy/direct=None, "agent-creation",
+    # "tool-creation") fall through to the existing code-fabrication path
+    # unchanged.
+    if request_type not in (None, "", "agent-creation", "tool-creation"):
+        logger.warning(
+            "process_event: ignoring unrecognised requestType=%r (safe no-op)",
+            request_type,
+        )
+        return
+
     # Get values with defaults for direct requests
     orchestration_id = event.get("orchestration_id", "0")
     agent_use_id = event.get("agent_use_id", "unknown")
@@ -1655,7 +1769,12 @@ def process_event(event, context, request_type=None):
     datastore_bindings = request.get("dataStoreBindings", None)
     
     if TASK is None:
-        print(f"Error: No taskDetails found in event: {event}")
+        # Do not log the full event: agent_input may embed integration/
+        # datastore bindings containing credentials. Log only a safe count.
+        print(
+            "Error: No taskDetails found in agent_input "
+            f"(event key count={len(event) if isinstance(event, dict) else 0})"
+        )
         raise ValueError("taskDetails is required in agent_input")
 
     # US-ARB-017 precondition gate. Forward-compatible: no-op when projectId
@@ -1682,9 +1801,12 @@ def process_event(event, context, request_type=None):
                 from catalog.registry_client import get_source_project_id
                 project_id = get_source_project_id(registry_id, record_id)
                 if project_id:
+                    # projectId/registry_id/record_id omitted (env- and
+                    # event-derived, taint-conflated as secret). Log only that
+                    # the fallback resolution succeeded.
                     logger.info(
-                        'fabricator: resolved projectId=%s from registry record %s/%s',
-                        project_id, registry_id, record_id,
+                        'fabricator: resolved projectId from registry record '
+                        '(fallback path)'
                     )
             except ImportError:
                 # catalog Layer not attached (unexpected post-PR-2 but keep

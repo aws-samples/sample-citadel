@@ -76,6 +76,11 @@ export const EventTypes = {
   AGENT_TASK_COMPLETED: 'agent.task_completed',
   AGENT_ERROR: 'agent.error',
   PROJECT_PROGRESS_UPDATED: 'project.progress_updated',
+  AGENT_IMPORT_DISCOVERED: 'agent.import.discovered',
+  AGENT_IMPORT_REGISTERED: 'agent.import.registered',
+  AGENT_IMPORT_FAILED: 'agent.import.failed',
+  AGENT_IMPORT_ATTESTED: 'agent.import.attested',
+  AGENT_IMPORT_ACTIVATION_GATE: 'agent.import.activation_gate',
 } as const;
 
 export type EventType = typeof EventTypes[keyof typeof EventTypes];

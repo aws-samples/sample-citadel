@@ -1,15 +1,15 @@
 /**
- * AgentCatalog unit tests — stub-button regression suite
+ * AgentCatalog unit tests — Import Agent wizard entry point
  *
- * Validates the BLOCKED safe-default plan: the Import Agent button is
- * rendered but disabled with a "Coming soon" tooltip pending product
- * spec for import format and conflict handling.
+ * The Import Agent feature is now ENABLED: the button is active (no longer a
+ * disabled "Coming soon" stub) and opens the ImportAgentWizard as a sub-view.
  *
  * Tests:
- *  1. Import Agent button is disabled (header location)
- *  2. Clicking the disabled Import Agent button is a no-op (no alert)
- *  3. "Coming soon" tooltip text is present in the DOM
- *  4. Create Worker button stays enabled (permission/wiring preserved)
+ *  1. Import Agent button is enabled (header + empty-state locations)
+ *  2. Import Agent button carries cursor-pointer (accessibility)
+ *  3. Clicking Import Agent opens the ImportAgentWizard sub-view
+ *  4. The obsolete "Coming soon" affordance is gone
+ *  5. Create Worker button stays enabled (permission/wiring preserved)
  */
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -28,15 +28,6 @@ jest.mock('@/components/ui/button', () => ({
 jest.mock('@/components/ui/badge', () => ({
   Badge: ({ children, className }: any) =>
     React.createElement('span', { className, 'data-testid': 'badge' }, children),
-}));
-
-jest.mock('@/components/ui/tooltip', () => ({
-  Tooltip: ({ children }: any) => React.createElement('div', null, children),
-  TooltipContent: ({ children }: any) =>
-    React.createElement('div', { 'data-testid': 'tooltip-content' }, children),
-  TooltipProvider: ({ children }: any) => React.createElement('div', null, children),
-  TooltipTrigger: ({ children }: any) =>
-    React.createElement('div', { 'data-testid': 'tooltip-trigger' }, children),
 }));
 
 jest.mock('@/components/ui/utils', () => ({
@@ -63,6 +54,22 @@ jest.mock('@/components/AgentDetails', () => ({
 jest.mock('@/components/CreateAgentWizard', () => ({
   CreateAgentWizard: () =>
     React.createElement('div', { 'data-testid': 'create-agent-wizard' }),
+}));
+
+jest.mock('@/components/ImportAgentWizard', () => ({
+  ImportAgentWizard: ({ onBack, onComplete }: any) =>
+    React.createElement('div', { 'data-testid': 'import-agent-wizard' }, [
+      React.createElement(
+        'button',
+        { key: 'back', 'data-testid': 'iw-back', onClick: onBack },
+        'iw-back',
+      ),
+      React.createElement(
+        'button',
+        { key: 'done', 'data-testid': 'iw-done', onClick: onComplete },
+        'iw-done',
+      ),
+    ]),
 }));
 
 jest.mock('@/components/AgentCard', () => ({
@@ -117,20 +124,13 @@ jest.mock('@/services/agentConfigService', () => ({
 import { AgentCatalog } from '../AgentCatalog';
 import { agentConfigService } from '../../services/agentConfigService';
 
-describe('AgentCatalog — Import Agent stub button (BLOCKED → disabled + tooltip)', () => {
-  let alertSpy: jest.SpyInstance;
-
+describe('AgentCatalog — Import Agent (enabled → opens wizard)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     (agentConfigService.listAgentConfigs as jest.Mock).mockResolvedValue([]);
-    alertSpy = jest.spyOn(window, 'alert').mockImplementation(() => undefined);
   });
 
-  afterEach(() => {
-    alertSpy.mockRestore();
-  });
-
-  it('renders the Import Agent button as disabled', async () => {
+  it('renders the Import Agent button as enabled', async () => {
     render(<AgentCatalog />);
     await waitFor(() =>
       expect(agentConfigService.listAgentConfigs).toHaveBeenCalled(),
@@ -139,33 +139,41 @@ describe('AgentCatalog — Import Agent stub button (BLOCKED → disabled + tool
     const importButtons = screen.getAllByRole('button', { name: /Import Agent/i });
     expect(importButtons.length).toBeGreaterThan(0);
     importButtons.forEach((btn) => {
-      expect(btn).toBeDisabled();
+      expect(btn).not.toBeDisabled();
     });
   });
 
-  it('does not invoke window.alert when the disabled Import Agent button is clicked', async () => {
+  it('gives the Import Agent button a cursor-pointer affordance', async () => {
     render(<AgentCatalog />);
     await waitFor(() =>
       expect(agentConfigService.listAgentConfigs).toHaveBeenCalled(),
     );
 
     const importButtons = screen.getAllByRole('button', { name: /Import Agent/i });
-    importButtons.forEach((btn) => fireEvent.click(btn));
-
-    expect(alertSpy).not.toHaveBeenCalled();
+    importButtons.forEach((btn) => {
+      expect(btn.className).toMatch(/cursor-pointer/);
+    });
   });
 
-  it('renders a "Coming soon" tooltip near the Import Agent button', async () => {
+  it('opens the ImportAgentWizard when the Import Agent button is clicked', async () => {
     render(<AgentCatalog />);
     await waitFor(() =>
       expect(agentConfigService.listAgentConfigs).toHaveBeenCalled(),
     );
 
-    const tooltipContents = screen.getAllByTestId('tooltip-content');
-    const matched = tooltipContents.some((el) =>
-      /coming soon/i.test(el.textContent || ''),
+    const importButtons = screen.getAllByRole('button', { name: /Import Agent/i });
+    fireEvent.click(importButtons[0]);
+
+    expect(screen.getByTestId('import-agent-wizard')).toBeInTheDocument();
+  });
+
+  it('no longer surfaces a "Coming soon" affordance', async () => {
+    render(<AgentCatalog />);
+    await waitFor(() =>
+      expect(agentConfigService.listAgentConfigs).toHaveBeenCalled(),
     );
-    expect(matched).toBe(true);
+
+    expect(screen.queryByText(/coming soon/i)).not.toBeInTheDocument();
   });
 
   it('keeps the Create Worker button enabled (permission + wiring preserved)', async () => {

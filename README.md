@@ -39,6 +39,8 @@ State is event-driven and eventually consistent: EventBridge carries `citadel.*`
 
 **Agent Fabrication.** A Fabricator dynamically generates agents and custom tools at runtime from specifications, registers them, and binds them to data stores and integrations.
 
+**Agent Import.** Beyond fabricating agents it owns, Citadel *imports* foreign agents that already run on heterogeneous AWS substrates — AgentCore Runtime, Bedrock Agents, Lambda, HTTP/MCP endpoints, and ECS/EKS/EC2 services resolved to an HTTP endpoint — without owning or redeploying their infrastructure. A five-step wizard discovers candidates (paste an ARN/manifest, or an account-wide tag scan; same-account or cross-account via an operator-supplied read-only role + STS external id), determines capabilities across four tiers (Tier-0 manifest, Tier-1 heuristic, Tier-2 live sandboxed probe, and a Tier-3 LLM-proposed manifest from the Fabricator that is low-confidence and human-accept-gated), and normalizes each into the existing AgentCore Registry record model as a DRAFT, externally-owned record. Imported agents are invoked through a protocol-aware dispatcher (AgentCore Runtime / Bedrock Agent / Lambda / HTTP / MCP) with cross-account assumed credentials, Secrets-Manager-backed auth, and prompt-injection sanitization of untrusted output. Every import is governed: a system-generated ADR, an authority-unit grant, an explicit attestation step, a mode-aware activation gate, IAM trust-path introspection, and a reachability probe — and an imported MCP agent can optionally be published as a target on the shared AgentCore Gateway. Citadel orchestrates imported agents but never owns them: `origin.ownership='external'` is a hard invariant, so it never deploys, scales, or deletes a customer's infrastructure. See [docs/AGENT_IMPORT.md](docs/AGENT_IMPORT.md).
+
 **Visual Workflow Builder.** A drag-and-drop canvas (ReactFlow) with blueprint templates compiles to DAGs executed by the StepRunner, including conditional branching and bounded retries.
 
 **27 Data Store Adapters.** A unified `ConnectorAdapter` architecture spanning S3, DynamoDB, RDS, Aurora, Redshift, Snowflake, Databricks, and more — each provisioned with a scoped IAM role (`citadel-ds-{id}`) under least privilege.
@@ -130,7 +132,7 @@ Prerequisites: AWS CLI, Node.js 24+, Python 3.14+, CDK 2.100+, and Finch (or Doc
 
 **Can we adopt governance gradually?** Yes. Enforcement moves from permissive → shadow → strict, and grandfathering protects projects created before a gate existed.
 
-**What's still maturing?** The three legacy connectors (SharePoint, Salesforce, GitHub) are partially implemented; everything else described above is implemented in the codebase.
+**What's still maturing?** The three legacy connectors (SharePoint, Salesforce, GitHub) are partially implemented. Agent Import is built end to end (discover → describe → register → govern → invoke), with a few extensions deferred: REST/OpenAPI gateway publish (MCP gateway publish is built), a peered-VPC reachability prober for private/cross-account targets, gateway auth offload beyond NONE/API_KEY/BEARER, and invoke/discovery for the A2A / Step Functions / SageMaker protocols. Everything else described above is implemented in the codebase.
 
 ## Project status, contributing, and license
 

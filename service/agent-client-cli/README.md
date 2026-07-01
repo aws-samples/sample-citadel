@@ -33,7 +33,7 @@ Start an interactive chat session with Agent 1:
 
 ```bash
 python agent_cli_interactive.py \
-  --agent-arn arn:aws:bedrock-agentcore:ap-southeast-2:941384789627:runtime/agent1_assessment-XXXXX
+  --agent-arn arn:aws:bedrock-agentcore:ap-southeast-2:123456789012:runtime/agent1_assessment-XXXXX
 ```
 
 ## Arguments
@@ -56,7 +56,7 @@ python agent_cli_interactive.py \
 ================================================================================
 🤖 Agent 1 - Assessment & Evaluation Interactive Chat
 ================================================================================
-Agent ARN: arn:aws:bedrock-agentcore:ap-southeast-2:941384789627:runtime/agent1_assessment-XXXXX
+Agent ARN: arn:aws:bedrock-agentcore:ap-southeast-2:123456789012:runtime/agent1_assessment-XXXXX
 Session ID: session-a1b2c3d4e5f67890abcdef1234567890
 Region: ap-southeast-2
 
@@ -197,14 +197,14 @@ The CLI uses boto3 with your configured AWS credentials:
 Interactive session example:
 
 ```bash
-python agent_cli_interactive.py --agent-arn arn:aws:bedrock-agentcore:ap-southeast-2:941384789627:runtime/agent1_assessment-XXXXX
+python agent_cli_interactive.py --agent-arn arn:aws:bedrock-agentcore:ap-southeast-2:123456789012:runtime/agent1_assessment-XXXXX
 
 ✅ AWS credentials found
 
 ================================================================================
 🤖 Agent 1 - Assessment & Evaluation Interactive Chat
 ================================================================================
-Agent ARN: arn:aws:bedrock-agentcore:ap-southeast-2:941384789627:runtime/agent1_assessment-XXXXX
+Agent ARN: arn:aws:bedrock-agentcore:ap-southeast-2:123456789012:runtime/agent1_assessment-XXXXX
 Session ID: session-a1b2c3d4e5f67890abcdef1234567890
 Region: ap-southeast-2
 ================================================================================

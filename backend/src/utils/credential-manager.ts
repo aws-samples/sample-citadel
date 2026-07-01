@@ -96,6 +96,84 @@ export async function storeCredentials(
   };
 }
 
+/** Result of {@link storeAgentInvocationSecret}; the ARN doubles as the secretRef. */
+export interface StoreAgentInvocationSecretResult {
+  /** Full Secrets Manager ARN — stored on the Registry record as `invocation.auth.secretRef`. */
+  secretArn: string;
+  /** Path-style secret name (`/citadel/agents/{orgId}/{secretId}`). */
+  secretName: string;
+}
+
+/**
+ * Persist a single RAW invocation secret for an imported agent to AWS Secrets
+ * Manager and return its ARN — the value the caller stores on the Registry
+ * record as `invocation.auth.secretRef`. The raw value NEVER touches the
+ * record itself.
+ *
+ * Uses the agent secret-path convention `/citadel/agents/{orgId}/{secretId}`
+ * (product naming: `/citadel/{type}/{orgId}/{resource-id}`), distinct from the
+ * connector-credential path used by {@link storeCredentials}
+ * (`/citadel/integrations/...`). Unlike {@link storeCredentials}, this stores an
+ * opaque scalar secret and is NOT coupled to the connector registry, so it
+ * serves arbitrary imported-agent auth material (API key, OAuth client secret,
+ * bearer token, …). The caller supplies a stable, unique `secretId` (e.g. a
+ * UUID) so two imports never collide.
+ *
+ * @param orgId - tenant the imported agent belongs to (path-scoped).
+ * @param secretId - stable, unique id for this secret (e.g. a UUID).
+ * @param rawSecret - the raw secret value to persist (never logged).
+ * @returns the secret ARN (use as `secretRef`) and the path-style name.
+ * @throws if Secrets Manager returns no ARN — the caller treats this as a hard
+ *   store failure and fails the import rather than persisting a record whose
+ *   secretRef points at nothing.
+ */
+export async function storeAgentInvocationSecret(
+  orgId: string,
+  secretId: string,
+  rawSecret: string
+): Promise<StoreAgentInvocationSecretResult> {
+  const secretName = `/citadel/agents/${orgId}/${secretId}`;
+  const response = await secretsManager.send(new CreateSecretCommand({
+    Name: secretName,
+    SecretString: rawSecret,
+    Description: `Invocation secret for imported agent (org ${orgId})`
+  }));
+  if (!response.ARN) {
+    throw new Error(`Secrets Manager returned no ARN for ${secretName}`);
+  }
+  return { secretArn: response.ARN, secretName };
+}
+
+/**
+ * Resolve a single RAW invocation secret previously persisted by
+ * {@link storeAgentInvocationSecret} — the additive READ counterpart. Given the
+ * `secretRef` stored on an imported agent's Registry record
+ * (`invocation.auth.secretRef`, a Secrets Manager ARN or path-style name),
+ * fetch the opaque scalar secret string via GetSecretValue so the invoke path
+ * (agent-message-handler) can apply it as a request auth header.
+ *
+ * Mirrors the GetSecretValue client/usage style of {@link retrieveCredentials}
+ * but, like {@link storeAgentInvocationSecret}, treats the secret as an opaque
+ * scalar (NOT JSON-parsed) and is decoupled from the connector registry, so it
+ * serves arbitrary imported-agent auth material (API key, OAuth/bearer token).
+ *
+ * The returned value is sensitive: callers MUST NOT log it.
+ *
+ * @param secretRef - the Secrets Manager ARN or name from the Registry record.
+ * @returns the raw secret string.
+ * @throws if the secret has no string value (binary-only or empty) — the caller
+ *   treats this as a hard failure rather than invoking unauthenticated.
+ */
+export async function getAgentInvocationSecret(secretRef: string): Promise<string> {
+  const response = await secretsManager.send(new GetSecretValueCommand({
+    SecretId: secretRef,
+  }));
+  if (!response.SecretString) {
+    throw new Error(`Agent invocation secret ${secretRef} has no string value`);
+  }
+  return response.SecretString;
+}
+
 /**
  * Detect if credentials are in old format (pre-multi-connector)
  * Old format detection heuristics:

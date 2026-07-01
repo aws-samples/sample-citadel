@@ -263,6 +263,76 @@ if (app.node.tryGetContext('nag')!== 'false') {
                 NagSuppressions.addResourceSuppressionsByPath(stack, `/${stack.stackName}/${path}`, resourceStarSuppression);
               }
 
+              // IAM5 — US-IMP lazy trust-path. The agent-config-resolver performs
+              // READ-ONLY IAM introspection of an imported agent's operator-supplied
+              // invocation.roleArn during activation. That role is not citadel-prefixed
+              // (and may be cross-account), so the grants are scoped to THIS account's
+              // role/* and policy/* IAM namespace (account-scoped, never bare Resource::*).
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentConfigResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'Lazy trust-path activation issues read-only IAM introspection ' +
+                    '(iam:GetRole/GetRolePolicy/ListRolePolicies/ListAttachedRolePolicies/' +
+                    'GetPolicy/GetPolicyVersion) on an imported agent\'s operator-supplied ' +
+                    'invocation.roleArn, which is not citadel-prefixed. Scoped to this ' +
+                    'account\'s role/* and policy/* namespace (account-scoped, not bare *); ' +
+                    'no write or assume granted. Tracked: AAF-NAG-IAM5-trustpath.',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:iam::.*:role\\/\\*$/g' },
+                    { regex: '/^Resource::arn:aws:iam::.*:policy\\/\\*$/g' },
+                  ],
+                }],
+              );
+
+              // IAM5 — Phase-2 cross-account trust-path. When an imported agent's
+              // invocation.roleArn is cross-account and the operator supplied a
+              // READ-ONLY invocation.analysisRoleArn, the agent-config-resolver
+              // assumes that analysis role to run read-only IAM introspection in
+              // the role's home account. The analysis role is operator-supplied
+              // and may live in ANY account, so sts:AssumeRole is scoped to the
+              // cross-account IAM role namespace (arn:aws:iam::*:role/*) rather
+              // than this account; the externalId is the runtime confused-deputy
+              // control. Additive to the read-only introspection suppression above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentConfigResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'cross-account read-only analysis-role assume for trust-path; ' +
+                    'externalId-gated; target role is operator-supplied and must trust Citadel',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:iam::\\*:role\\/\\*$/g' },
+                  ],
+                }],
+              );
+
+              // IAM5 — Phase-2 cross-account INVOKE. When an imported agent's
+              // invocation.roleArn is cross-account, the agent-message-handler
+              // assumes that operator-supplied invoke role (externalId-gated) and
+              // runs the AWS-native protocol invoke under the assumed credentials.
+              // The invoke role is operator-supplied and may live in ANY account,
+              // so sts:AssumeRole is scoped to the cross-account IAM role namespace
+              // (arn:aws:iam::*:role/*) rather than this account; the externalId is
+              // the runtime confused-deputy control. Additive to the Resource::*
+              // suppression already registered for this role above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentMessageHandlerFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'cross-account invoke-role assume for imported agents; externalId-gated; ' +
+                    'operator-supplied target role must trust Citadel',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:iam::\\*:role\\/\\*$/g' },
+                  ],
+                }],
+              );
+
               // CloudFront — partial hardening. TLS 1.2 and access logging applied; the
               // rest require follow-up work.
               NagSuppressions.addResourceSuppressionsByPath(frontendStack, `/${frontendStack.stackName}/FrontendDistribution`, [
@@ -296,6 +366,7 @@ if (app.node.tryGetContext('nag')!== 'false') {
               const registryArnPaths: Array<[cdk.Stack, string]> = [
                 [backendStack, 'RegistrySyncLambda/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'AgentConfigResolverFunction/ServiceRole/DefaultPolicy/Resource'],
+                [backendStack, 'AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'ToolConfigResolverFunction/ServiceRole/DefaultPolicy/Resource'],
                 [arbiterStack, 'FabricatorAgent/ServiceRole/DefaultPolicy/Resource'],
                 [arbiterStack, 'SupervisorAgent/ServiceRole/DefaultPolicy/Resource'],
@@ -303,9 +374,99 @@ if (app.node.tryGetContext('nag')!== 'false') {
                 [arbiterStack, 'GovernanceUiResolverFn/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'RegistryAgentRecordResolverFunction/ServiceRole/DefaultPolicy/Resource'],
                 [backendStack, 'ReconcileAppsMetaScheduledFunction/ServiceRole/DefaultPolicy/Resource'],
+                // Tier-3 agent import (B1): the manifest RESULT handler reads the
+                // DRAFT import record and updates only its custom metadata
+                // (GetRegistryRecord + UpdateRegistryRecord), scoped to the
+                // registry ARN + its records (<AgentCoreRegistry.RegistryArn>/*).
+                [backendStack, 'AgentImportManifestResultHandler/ServiceRole/DefaultPolicy/Resource'],
                 [servicesStack, 'AgentIntakeSingleRuntime/ExecutionRole/DefaultPolicy/Resource'],
               ];
               for (const [stack, path] of registryArnPaths) {
                 NagSuppressions.addResourceSuppressionsByPath(stack, `/${stack.stackName}/${path}`, registryArnSuppression);
               }
+
+              // IAM5 — AgentImportResolverFunction discovery policy
+              // (buildImportDiscoveryPolicy) grants read-only List/Describe/Get
+              // across the phase-1 substrates with Resource '*', which those
+              // List/Describe APIs do not support resource-level scoping for.
+              // Additive to the registry-ARN suppression already registered for
+              // this role above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason: 'read-only discovery list/describe requires * resource',
+                  appliesTo: ['Resource::*'],
+                }],
+              );
+
+              // IAM5 — US-IMP-018 ECS source adapter endpoint resolution. The ECS
+              // discovery substrate resolves a service's HTTP endpoint via
+              // read-only ecs:ListClusters/ListServices/DescribeServices/
+              // DescribeTaskDefinition (granted by buildImportDiscoveryPolicy) plus
+              // read-only elasticloadbalancing:DescribeTargetGroups/
+              // DescribeLoadBalancers. These List/Describe APIs have no
+              // resource-level scoping, so they require Resource '*'. Additive to
+              // the discovery suppression registered just above; read-only only.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason: 'read-only ECS/ELB discovery requires * resource',
+                  appliesTo: ['Resource::*'],
+                }],
+              );
+
+              // IAM5 — AgentImportResolverFunction pre-activation TEST-INVOKE
+              // (testImportedAgent). The admin/architect-gated dry-run invokes an
+              // operator-supplied import candidate; the target is arbitrary, so
+              // the invoke actions are scoped to THIS ACCOUNT (lambda function:*,
+              // bedrock agent-alias/*, execute-api) rather than bare Resource::*.
+              // The bedrock-agentcore runtime/* and /citadel/agents/* (GetSecretValue)
+              // wildcards are already covered by the stack-level IAM5 suppression.
+              // Additive to the discovery suppression registered just above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'admin/architect-gated pre-activation test-invoke against ' +
+                    'operator-supplied targets; account-scoped (lambda function:*, ' +
+                    'bedrock agent-alias/*, execute-api), never bare Resource::*. ' +
+                    'Tracked: AAF-NAG-IAM5-testinvoke.',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:lambda:\\*:.*:function:\\*$/g' },
+                    { regex: '/^Resource::arn:aws:bedrock:\\*:.*:agent-alias\\/\\*$/g' },
+                    { regex: '/^Resource::arn:aws:execute-api:\\*:.*:\\*$/g' },
+                  ],
+                }],
+              );
+
+              // IAM5 — Phase-2 cross-account INVOKE for the import resolver. When
+              // an import candidate's invocation.roleArn is cross-account, the
+              // admin/architect-gated testImportedAgent / probeAgentCandidate
+              // dry-run assumes that operator-supplied invoke role (externalId-
+              // gated) and runs the AWS-native protocol invoke under the assumed
+              // credentials. The invoke role is operator-supplied and may live in
+              // ANY account, so sts:AssumeRole is scoped to the cross-account IAM
+              // role namespace (arn:aws:iam::*:role/*) rather than this account;
+              // the externalId is the runtime confused-deputy control. Additive to
+              // the discovery + test-invoke suppressions already registered for
+              // this role above.
+              NagSuppressions.addResourceSuppressionsByPath(
+                backendStack,
+                `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+                [{
+                  id: 'AwsSolutions-IAM5',
+                  reason:
+                    'cross-account invoke-role assume for imported-agent test/probe; ' +
+                    'externalId-gated; operator-supplied target role must trust Citadel',
+                  appliesTo: [
+                    { regex: '/^Resource::arn:aws:iam::\\*:role\\/\\*$/g' },
+                  ],
+                }],
+              );
 }

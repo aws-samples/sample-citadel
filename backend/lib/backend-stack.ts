@@ -19,6 +19,7 @@ import { Construct } from "constructs";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import { CustomResource, Duration } from "aws-cdk-lib";
 import { NagSuppressions } from "cdk-nag";
+import { buildImportDiscoveryPolicy } from "../src/utils/agent-import-policy";
 
 interface BackendStackProps extends cdk.StackProps {
   environment: string;
@@ -709,10 +710,248 @@ export class BackendStack extends cdk.Stack {
           AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
           REGISTRY_ENABLED: 'true',
           REGISTRY_ID: registryId,
+          // Governance activation gate (US-IMP): ENVIRONMENT selects the
+          // governance rollout SSM parameter path (getGovernanceEnforce);
+          // EVENT_BUS_NAME targets the shared bus for best-effort gate
+          // telemetry. Both mirror the agent-import resolver. Scoped IAM
+          // grants below; getGovernanceEnforce fails open to 'permissive'.
+          ENVIRONMENT: props.environment,
+          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          // Phase-2 cross-account trust-path: the deploying account id powers
+          // isCrossAccountRoleArn so the resolver can tell when an imported
+          // agent's invocation.roleArn lives in a DIFFERENT account and route to
+          // the operator analysis-role assume path (sts:AssumeRole grant below).
+          ACCOUNT_ID: this.account,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'AgentConfigResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
       }
+    );
+
+    // Agent Import Resolver - registers externally-owned agents (importAgent
+    // mutation). Same runtime/bundling/env as the agent-config resolver; it
+    // reuses that resolver's RegistryService + import-descriptor validator.
+    const agentImportResolverFunction = new lambda.Function(
+      this,
+      "AgentImportResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "agent-import-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
+          REGISTRY_ENABLED: 'true',
+          REGISTRY_ID: registryId,
+          // Best-effort agent.import.{discovered,registered,failed} emission via
+          // backend/src/utils/events.ts (source citadel.backend). Scoped grant below.
+          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          // Governance attestation: imported agents request one fabricator
+          // authority unit. AuthorityUnitsTable lives on ArbiterStack; we use the
+          // deterministic table name to avoid a circular cross-stack dep (mirrors
+          // RegistryAgentRecordResolverFunction). Scoped IAM grant below.
+          AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
+          // Phase-2 cross-account INVOKE: the deploying account id powers
+          // isCrossAccountRoleArn so the test-invoke/probe paths detect when an
+          // import candidate's invocation.roleArn lives in a DIFFERENT account and
+          // assume the operator-supplied invoke role (sts:AssumeRole grant below)
+          // instead of using this Lambda's identity. Mirrors the
+          // agent-message-handler + agent-config-resolver.
+          ACCOUNT_ID: this.account,
+          // Tier-3 agent-import B2: the import resolver's proposeAgentManifestTier3
+          // mutation enqueues a `manifest-proposal` job to the Fabricator queue.
+          // The queue is owned by ArbiterStack; we use the deterministic URL
+          // (not fabricatorQueue.queueUrl) to avoid a circular cross-stack
+          // dependency — the SAME no-cross-ref mechanism the fabricator-request
+          // resolver uses. Scoped sqs:SendMessage grant below.
+          FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, 'AgentImportResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
+      }
+    );
+
+    // Least-privilege: events:PutEvents scoped to the shared agent event bus
+    // ARN, mirroring the other emitting resolvers.
+    this.agentEventBus.grantPutEventsTo(agentImportResolverFunction);
+
+    // Governance attestation: Write access (PutItem/UpdateItem) to the per-env
+    // AuthorityUnitsTable owned by ArbiterStack so an import can grant its
+    // fabricator authority unit. Referenced by explicit ARN pattern to avoid the
+    // circular cross-stack dependency a Table.grantWriteData would introduce —
+    // identical to RegistryAgentRecordResolverFunction's grant.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        resources: [
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-authority-units-${props.environment}`,
+        ],
+      })
+    );
+
+    // Import-side auth-secret storage (US-IMP): a caller may submit a RAW
+    // invocation secret with an imported agent. It is persisted to Secrets
+    // Manager via credential-manager.storeAgentInvocationSecret and the Registry
+    // record stores ONLY the returned secretRef (never the raw value). Least
+    // privilege: WRITE-only (CreateSecret/PutSecretValue/TagResource) scoped to
+    // the agent secret-path convention /citadel/agents/*. No GetSecretValue here.
+    // TODO(agent-import): invoke-side secretRef resolution (GetSecretValue) is a
+    // follow-up on the invoke path (agent-message-handler), not this resolver.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'secretsmanager:CreateSecret',
+          'secretsmanager:PutSecretValue',
+          'secretsmanager:TagResource',
+        ],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
+        ],
+      })
+    );
+
+    // Pre-activation TEST-INVOKE (testImportedAgent): the admin/architect-gated
+    // dry-run actually invokes an operator-supplied import CANDIDATE through the
+    // existing per-protocol adapters and returns a sanitized result WITHOUT
+    // persisting anything. Because the target is operator-supplied/arbitrary,
+    // the invoke actions are scoped to THIS ACCOUNT (never bare '*' where an
+    // account-scoped ARN exists). The residual ':*'/'/*' wildcards are suppressed
+    // (AwsSolutions-IAM5) in bin/app.ts with this justification.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:InvokeAgentRuntime',
+          'lambda:InvokeFunction',
+          'bedrock:InvokeAgent',
+          'execute-api:Invoke',
+        ],
+        resources: [
+          `arn:aws:bedrock-agentcore:*:${this.account}:runtime/*`,
+          `arn:aws:lambda:*:${this.account}:function:*`,
+          `arn:aws:bedrock:*:${this.account}:agent-alias/*`,
+          `arn:aws:execute-api:*:${this.account}:*`,
+        ],
+      })
+    );
+    // READ a pre-existing invocation secret for the test-invoke. Scoped to the
+    // agent secret-path convention /citadel/agents/* (the same scope as the
+    // import-time write grant above). A raw inline secret needs no AWS read.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
+        ],
+      })
+    );
+
+    // Phase-2 cross-account INVOKE (testImportedAgent / probeAgentCandidate):
+    // when an import candidate's invocation.roleArn is in a DIFFERENT account,
+    // the admin/architect-gated dry-run assumes that operator-supplied invoke
+    // role (reusing vendImportCredentials) and runs the AWS-native protocol
+    // invoke under the assumed credentials. The invoke role is operator-supplied
+    // and may live in ANY account, so the assume cannot be account-scoped; it is
+    // scoped to the cross-account IAM role namespace (arn:aws:iam::*:role/*). The
+    // runtime confused-deputy control is the externalId threaded into the
+    // AssumeRole call — the target role must trust Citadel under sts:ExternalId.
+    // Same-account invokes never assume. The role/* wildcard is suppressed
+    // (AwsSolutions-IAM5) in bin/app.ts. Mirrors the agent-message-handler grant.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sts:AssumeRole'],
+        resources: ['arn:aws:iam::*:role/*'],
+      })
+    );
+
+    // Tier-3 agent-import B2 (proposeAgentManifestTier3): enqueue a
+    // `manifest-proposal` job to the Fabricator queue. Least privilege:
+    // sqs:SendMessage ONLY (the URL is constructed, so no GetQueueUrl is
+    // needed), scoped to the single fully-qualified queue ARN (no wildcard ⇒ no
+    // AwsSolutions-IAM5 nag). Mirrors the fabricator-request resolver's grant
+    // and references the queue by ARN string (not arbiter-stack's queueArn) so
+    // no cross-stack dependency cycle is introduced.
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sqs:SendMessage'],
+        resources: [
+          `arn:aws:sqs:${this.region}:${this.account}:citadel-fabricator-queue-${props.environment}`,
+        ],
+      })
+    );
+
+    // ── Agent Import — Manifest RESULT handler (Tier-3 agent import, B1) ─────
+    // Consumes an ASYNC, LLM-proposed manifest from the Fabricator on the shared
+    // agent bus and parks it on the DRAFT import record as UNTRUSTED /
+    // low-confidence / pending-review (NEVER activated). Mirrors the
+    // EventBridge-triggered handler convention: NODEJS_24_X, dist/lambda esbuild
+    // bundle, idempotency table, scoped Registry perms.
+    const agentImportManifestResultHandler = new lambda.Function(
+      this,
+      'AgentImportManifestResultHandler',
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: 'agent-import-manifest-result-handler.handler',
+        code: lambda.Code.fromAsset('dist/lambda'),
+        environment: {
+          REGISTRY_ENABLED: 'true',
+          REGISTRY_ID: registryId,
+          IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, 'AgentImportManifestResultHandlerLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
+      }
+    );
+
+    // Idempotency table: dedupe on correlationId||requestId (duplicate emits).
+    this.idempotencyTable.grantReadWriteData(agentImportManifestResultHandler);
+
+    // Least privilege: READ the DRAFT import record and UPDATE only its custom
+    // metadata. NO status/approval/delete/create — this handler never activates
+    // an agent; it only parks a pending-review proposal under
+    // customMetadata.proposedManifest. Scoped to the registry + its records. The
+    // residual ${registryArn}/* wildcard is covered by the stack-level
+    // AwsSolutions-IAM5 suppression (citadel-scoped bedrock-agentcore ARNs).
+    agentImportManifestResultHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:GetRegistryRecord',
+          'bedrock-agentcore:UpdateRegistryRecord',
+        ],
+        resources: [registryArn, `${registryArn}/*`],
+      })
+    );
+
+    // EventBridge rule on the shared agent bus: route the proposed/failed
+    // manifest-result detail-types to the handler. Detail-type-only match
+    // mirrors FabricationRegistrationRule. This is the CONTRACT anchor — B2 and
+    // the arbiter Fabricator branch MUST emit these detail-types on this bus.
+    const agentImportManifestResultRule = new events.Rule(
+      this,
+      'AgentImportManifestResultRule',
+      {
+        eventBus: this.agentEventBus,
+        ruleName: `citadel-agent-import-manifest-result-${props.environment}`,
+        description:
+          'Routes async LLM-proposed agent-import manifest results (proposed/failed) to the result handler',
+        eventPattern: {
+          detailType: [
+            'agent.import.manifest.proposed',
+            'agent.import.manifest.failed',
+          ],
+        },
+      }
+    );
+    agentImportManifestResultRule.addTarget(
+      new targets.LambdaFunction(agentImportManifestResultHandler, {
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.hours(2),
+      })
     );
 
     // Agent Code Resolver - for reading/writing agent code from S3
@@ -899,6 +1138,147 @@ export class BackendStack extends cdk.Stack {
           'bedrock-agentcore:ListRegistryRecords',
         ],
         resources: [registryArn, `${registryArn}/*`],
+      }),
+    );
+
+    // Governance activation gate (US-IMP): the agent-config-resolver now reads
+    // the governance rollout flag and emits best-effort "would-block" telemetry
+    // on the imported-agent activation path. Mirror the import/event-emitting
+    // consumers with the minimal scoped grants:
+    //   • events:PutEvents on the shared agent event bus (gate telemetry event)
+    //   • ssm:GetParameter on the two governance rollout parameters only
+    // getGovernanceEnforce fails open to 'permissive' internally, so a missing
+    // parameter or denied read can never hard-fail an activation.
+    this.agentEventBus.grantPutEventsTo(agentConfigResolverFunction);
+    agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
+      }),
+    );
+
+    // US-IMP lazy IAM trust-path: on the APPROVED activation of an imported
+    // agent the resolver calls computeTrustPath (../utils/trust-path), which
+    // performs READ-ONLY IAM introspection of the agent's invocation.roleArn.
+    // computeTrustPath issues iam:GetRole + iam:GetRolePolicy today; the
+    // List*/GetPolicy* actions are granted additively for the richer
+    // attached/managed-policy walk. An imported agent's invocation.roleArn is
+    // operator-supplied and NOT citadel-prefixed (and may be cross-account), so
+    // role/policy reads are scoped to THIS account's IAM namespace rather than a
+    // citadel-* prefix; cross-account / unresolvable roles simply fail GetRole
+    // and are handled best-effort (attestation left 'pending'). No write or
+    // assume is granted. The role/* + policy/* wildcards are suppressed
+    // (AwsSolutions-IAM5) in bin/app.ts with this rationale.
+    agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'iam:GetRole',
+          'iam:GetRolePolicy',
+          'iam:ListRolePolicies',
+          'iam:ListAttachedRolePolicies',
+        ],
+        resources: [`arn:aws:iam::${this.account}:role/*`],
+      }),
+    );
+    agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['iam:GetPolicy', 'iam:GetPolicyVersion'],
+        resources: [`arn:aws:iam::${this.account}:policy/*`],
+      }),
+    );
+
+    // Phase-2 cross-account trust-path: when an imported agent's
+    // invocation.roleArn is in a DIFFERENT account and the operator supplied a
+    // READ-ONLY invocation.analysisRoleArn in that target account, the resolver
+    // assumes that analysis role to run read-only iam:GetRole/GetRolePolicy in
+    // the role's home account (assumeAnalysisRoleClient → computeTrustPath). The
+    // analysis role is operator-supplied and may live in ANY account, so the
+    // assume cannot be account-scoped; it is scoped to the cross-account IAM
+    // role namespace (arn:aws:iam::*:role/*). The runtime confused-deputy
+    // control is the externalId threaded into every AssumeRole call (the target
+    // role must trust Citadel under sts:ExternalId). No write/assume beyond
+    // this; failures are handled best-effort (attestation left 'pending'). The
+    // role/* wildcard is suppressed (AwsSolutions-IAM5) in bin/app.ts.
+    agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['sts:AssumeRole'],
+        resources: ['arn:aws:iam::*:role/*'],
+      }),
+    );
+
+    // Grant permissions for agent import (same DynamoDB + Registry grants as
+    // agent-config-resolver; the import resolver reuses RegistryService).
+    this.agentConfigTable.grantReadWriteData(agentImportResolverFunction);
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:CreateRegistryRecord',
+          'bedrock-agentcore:UpdateRegistryRecord',
+          'bedrock-agentcore:UpdateRegistryRecordStatus',
+          'bedrock-agentcore:SubmitRegistryRecordForApproval',
+          'bedrock-agentcore:DeleteRegistryRecord',
+          'bedrock-agentcore:GetRegistryRecord',
+          'bedrock-agentcore:ListRegistryRecords',
+        ],
+        resources: [registryArn, `${registryArn}/*`],
+      }),
+    );
+
+    // Grant read-only discovery permissions for the discoverAgents /
+    // describeAgentCandidate queries. buildImportDiscoveryPolicy() is the
+    // single source of truth for the List/Describe/Get actions across the
+    // phase-1 substrates (lambda, bedrock, bedrock-agentcore, ecs, ec2, eks,
+    // apigateway, tag). These are read-only and use Resource '*' (List/Describe
+    // has no resource-level scoping); the cdk-nag IAM5 finding on this role's
+    // DefaultPolicy is suppressed with that justification in bin/app.ts.
+    for (const statement of buildImportDiscoveryPolicy().Statement) {
+      agentImportResolverFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: statement.Action,
+          resources: statement.Resource,
+        }),
+      );
+    }
+
+    // US-IMP-018 (ECS) + US-IMP-019 (EKS) + US-IMP-020 (EC2): three DISCOVERY
+    // SUBSTRATES that resolve an agent's HTTP endpoint via a load balancer. ECS
+    // follows its service's target group (loadBalancers -> targetGroupArn ->
+    // DescribeTargetGroups -> LoadBalancerArns -> DescribeLoadBalancers ->
+    // DNSName); EKS enumerates load balancers and matches one tagged for the
+    // cluster (DescribeLoadBalancers + DescribeTags -> kubernetes.io/cluster/
+    // <name>=owned|shared or elbv2.k8s.aws/cluster=<name> -> DNSName); EC2
+    // enumerates target groups and matches one the instance is a REGISTERED
+    // target of (DescribeTargetGroups -> DescribeTargetHealth match on the
+    // InstanceId -> DescribeLoadBalancers -> DNSName). The ECS reads
+    // (ecs:ListClusters/ListServices/DescribeServices/DescribeTaskDefinition),
+    // the EKS reads (eks:ListClusters/eks:DescribeCluster) and the EC2 reads
+    // (ec2:DescribeInstances/DescribeTags) are ALREADY granted by
+    // buildImportDiscoveryPolicy() above; this adds the companion read-only ELBv2
+    // Describe actions (DescribeTags is required by the EKS LB->cluster match;
+    // DescribeTargetHealth by the EC2 instance->target-group match). All four
+    // ELBv2 calls are List/Describe-class reads with no resource-level scoping,
+    // so Resource '*' (the cdk-nag IAM5 finding on this role's DefaultPolicy is
+    // suppressed with the read-only ECS/ELB discovery justification in
+    // bin/app.ts).
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'elasticloadbalancing:DescribeTargetGroups',
+          'elasticloadbalancing:DescribeTargetHealth',
+          'elasticloadbalancing:DescribeLoadBalancers',
+          'elasticloadbalancing:DescribeTags',
+        ],
+        resources: ['*'],
       }),
     );
 
@@ -1274,6 +1654,62 @@ export class BackendStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['s3:GetObject'],
         resources: [`arn:aws:s3:::citadel-schemas-${props.environment}-${this.account}-${this.region}/*`],
+      })
+    );
+
+    // ── US-IMP-031: MCP Gateway publish/unpublish for the import resolver ────
+    // The admin/architect-gated publishImportToGateway / unpublishImportFromGateway
+    // mutations publish a PUBLICLY-REACHABLE, governance-ATTESTED, MCP-substrate
+    // imported agent as an `mcpServer` target on the shared AgentCore Gateway and
+    // tear it down. Least-privilege grants MIRRORING the gateway-registration
+    // handler (the only other gateway-target lifecycle path):
+    //   • CreateGatewayTarget / DeleteGatewayTarget on the gateway + its targets.
+    //   • Create/Update/DeleteApiKeyCredentialProvider for API_KEY/BEARER auth
+    //     offload, scoped to the `integration-*` provider namespace the reused
+    //     credential-provider-manager uses (provider integration-<importId>-api-key).
+    //   • ssm:GetParameter on the EXACT gateway-id parameter (owned by
+    //     ServicesStack), resolved at RUNTIME — the same mechanism the
+    //     gateway-registration handler uses; the resolver bridges the value into
+    //     AGENTCORE_GATEWAY_ID for the reused gateway-target-manager delete helper.
+    // GetSecretValue on /citadel/agents/* (the offload secret) is ALREADY granted
+    // by the test-invoke READ grant above (no second grant). The wildcard ARNs
+    // here (bedrock-agentcore gateway/* + credential-provider/integration-*) are
+    // covered by the stack-level IAM5 suppression in bin/app.ts; the SSM ARN is
+    // exact (no wildcard ⇒ no finding).
+    agentImportResolverFunction.addEnvironment('GATEWAY_ID_PARAM', gatewayIdParamName);
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:CreateGatewayTarget',
+          'bedrock-agentcore:DeleteGatewayTarget',
+        ],
+        resources: [
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`,
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*/target/*`,
+        ],
+      })
+    );
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:CreateApiKeyCredentialProvider',
+          'bedrock-agentcore:UpdateApiKeyCredentialProvider',
+          'bedrock-agentcore:DeleteApiKeyCredentialProvider',
+        ],
+        resources: [
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:credential-provider/integration-*`,
+        ],
+      })
+    );
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter${gatewayIdParamName}`,
+        ],
       })
     );
 
@@ -1776,6 +2212,12 @@ export class BackendStack extends cdk.Stack {
           APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
           ENVIRONMENT: props.environment,
           IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
+          // Deployment account id — read by the import-dispatch path via
+          // isCrossAccountRoleArn(invocation.roleArn, process.env.ACCOUNT_ID)
+          // so a CROSS-ACCOUNT imported invoke assumes the operator-supplied
+          // invoke role (externalId-gated) instead of using the handler
+          // identity. Same-account invokes are unaffected.
+          ACCOUNT_ID: this.account,
         },
         timeout: cdk.Duration.minutes(15), // Max timeout for agent interactions (extraction can be slow)
         logGroup: new logs.LogGroup(this, 'AgentMessageHandlerFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -1792,6 +2234,42 @@ export class BackendStack extends cdk.Stack {
         resources: [
           `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/agents/*`,
         ],
+      })
+    );
+
+    // Invoke-side auth-secret resolution for IMPORTED agents: the handler
+    // resolves an imported agent's invocation `auth.secretRef`
+    // (API_KEY / OAUTH2 / COGNITO) to apply the request Authorization header.
+    // Least privilege: READ-only GetSecretValue scoped to the agent secret-path
+    // convention /citadel/agents/* (the WRITE-only counterpart —
+    // CreateSecret/PutSecretValue/TagResource — lives on the import resolver).
+    // The legacy AgentCore path uses no secret and is unaffected.
+    agentMessageHandlerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["secretsmanager:GetSecretValue"],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
+        ],
+      })
+    );
+
+    // Cross-account invoke-role assume for IMPORTED agents (Phase 2,
+    // agent-import). When an imported agent's invocation.roleArn is in a
+    // DIFFERENT account, the handler assumes that operator-supplied invoke role
+    // (reusing vendImportCredentials) and runs the AWS-native protocol invoke
+    // under the assumed credentials. The invoke role is operator-supplied and
+    // may live in ANY account, so the assume cannot be account-scoped; it is
+    // scoped to the cross-account IAM role namespace (arn:aws:iam::*:role/*).
+    // The runtime confused-deputy control is the externalId threaded into the
+    // AssumeRole call — the target role must trust Citadel under sts:ExternalId.
+    // Same-account invokes never assume. The role/* wildcard is suppressed
+    // (AwsSolutions-IAM5) in bin/app.ts.
+    agentMessageHandlerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sts:AssumeRole"],
+        resources: ["arn:aws:iam::*:role/*"],
       })
     );
 
@@ -2121,6 +2599,10 @@ export class BackendStack extends cdk.Stack {
       "AgentConfigLambdaDataSource",
       agentConfigResolverFunction
     );
+    const agentImportLambdaDataSource = this.appSyncApi.addLambdaDataSource(
+      "AgentImportLambdaDataSource",
+      agentImportResolverFunction
+    );
     const agentCodeLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentCodeLambdaDataSource",
       agentCodeResolverFunction
@@ -2316,6 +2798,105 @@ export class BackendStack extends cdk.Stack {
     agentConfigLambdaDataSource.createResolver("CreateAgentConfigResolver", {
       typeName: "Mutation",
       fieldName: "createAgentConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("ImportAgentResolver", {
+      typeName: "Mutation",
+      fieldName: "importAgent",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // Reuses the existing AgentImport data source — the import resolver already
+    // has Registry CRUD + events:PutEvents, so no new Lambda/data source/perms.
+    agentImportLambdaDataSource.createResolver("AttestAgentImportResolver", {
+      typeName: "Mutation",
+      fieldName: "attestAgentImport",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("DiscoverAgentsResolver", {
+      typeName: "Query",
+      fieldName: "discoverAgents",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("DescribeAgentCandidateResolver", {
+      typeName: "Query",
+      fieldName: "describeAgentCandidate",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // Pre-activation test-invoke. Reuses the existing AgentImport data source —
+    // the import resolver now also carries the account-scoped invoke +
+    // GetSecretValue grants needed to invoke an operator-supplied candidate.
+    agentImportLambdaDataSource.createResolver("TestImportedAgentResolver", {
+      typeName: "Mutation",
+      fieldName: "testImportedAgent",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // Tier-2 sandboxed probe (probeAgentCandidate): describe() + a single
+    // guarded dry-run that enriches the descriptor at confidence='medium'.
+    // Reuses the existing AgentImport data source — the import resolver already
+    // carries the account-scoped invoke + GetSecretValue grants (test-invoke),
+    // so no new Lambda/data source/perms are required.
+    agentImportLambdaDataSource.createResolver("ProbeAgentCandidateResolver", {
+      typeName: "Mutation",
+      fieldName: "probeAgentCandidate",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // US-IMP-017 post-import reachability probe (probeImportReachability).
+    // Reuses the existing AgentImport data source — the import resolver already
+    // implements this field (agent-import-resolver.ts) and carries the Registry
+    // CRUD grants it needs, so no new Lambda/data source/perms are required.
+    agentImportLambdaDataSource.createResolver("ProbeImportReachabilityResolver", {
+      typeName: "Mutation",
+      fieldName: "probeImportReachability",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // Tier-3 agent-import B2 — manifest-proposal REQUEST + human-gated ACCEPT.
+    // Both reuse the existing AgentImport data source: the import resolver now
+    // also carries the scoped sqs:SendMessage grant (propose) and already has
+    // Registry CRUD (accept), so no new Lambda/data source/perms are required.
+    agentImportLambdaDataSource.createResolver("ProposeAgentManifestTier3Resolver", {
+      typeName: "Mutation",
+      fieldName: "proposeAgentManifestTier3",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("AcceptProposedManifestTier3Resolver", {
+      typeName: "Mutation",
+      fieldName: "acceptProposedManifestTier3",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // US-IMP-031 MCP Gateway publish/unpublish. Reuse the existing AgentImport
+    // data source — the import resolver now also has the gateway-target +
+    // credential-provider + gateway-id grants (see the gateway-publish IAM block
+    // above), so no new Lambda/data source is required.
+    agentImportLambdaDataSource.createResolver("PublishImportToGatewayResolver", {
+      typeName: "Mutation",
+      fieldName: "publishImportToGateway",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    agentImportLambdaDataSource.createResolver("UnpublishImportFromGatewayResolver", {
+      typeName: "Mutation",
+      fieldName: "unpublishImportFromGateway",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
@@ -3507,6 +4088,17 @@ export class BackendStack extends cdk.Stack {
     this.adrsTable.grantReadData(projectResolverFunction);
     this.executionSpecificationsTable.grantReadData(projectResolverFunction);
     this.agentDesignAssessmentsTable.grantReadData(projectResolverFunction);
+
+    // ADR-on-import (US-IMP): the agent import resolver records a
+    // system-generated ADR keyed to the synthetic GLOBAL import project. Write-
+    // only grant — it creates ADRs (createADR → PutItem) and never reads them.
+    // Deferred to here, mirroring projectResolverFunction's ADRS_TABLE wiring,
+    // because adrsTable is instantiated later in the constructor than the
+    // function. Same-stack reference (ADRsTable lives in this BackendStack); the
+    // resulting GSI /index/* wildcard is covered by the stack-level
+    // AwsSolutions-IAM5 suppression in bin/app.ts.
+    agentImportResolverFunction.addEnvironment('ADRS_TABLE', this.adrsTable.tableName);
+    this.adrsTable.grantWriteData(agentImportResolverFunction);
   }
 
   /**

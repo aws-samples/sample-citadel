@@ -13,6 +13,7 @@ record (Decision #6), one design-assessment gate per record (US-ARB-017).
 - [Overview](#overview)
 - [Status Lifecycle](#status-lifecycle)
 - [Governance Integration](#governance-integration)
+- [Imported Agent Records (Agent Import)](#imported-agent-records-agent-import)
 - [Migration Guide — AgentApp to RegistryRecord](#migration-guide--agentapp-to-registryrecord)
 - [Python Bridge — arbiter/catalog/registry_client.py](#python-bridge--arbitercatalogregistry_clientpy)
 - [Roles and Permissions](#roles-and-permissions)
@@ -352,6 +353,62 @@ Any of these requires a binding-model architecture decision outside the
 scope of the AgentCore Registry governance retrofit. This document tracks
 the retrofit only; see [Known Deferrals](#known-deferrals) for the deferred
 migration.
+
+## Imported Agent Records (Agent Import)
+
+An **imported** agent (see [docs/AGENT_IMPORT.md](AGENT_IMPORT.md)) is an ordinary CUSTOM `RegistryAgentRecord` — discovered from a foreign AWS substrate rather than fabricated. It carries the same `recordId` / `status` / timestamps as any record; what distinguishes it is the content of `customDescriptorContent` (the serialized `AgentCustomMetadata`), which adds an `invocation` block, an `origin` block, and up to four additive import sub-blocks. The authoritative types live in `backend/src/services/registry-service.ts`.
+
+Two invariants hold for every imported record:
+
+- **`origin.ownership === 'external'`** — Citadel orchestrates the agent but never owns its infrastructure. The lifecycle layer never deletes, redeploys, or scales the customer's Lambda/cluster/agent; the strongest action is deprecating the catalog record.
+- **DRAFT by default, never auto-activated** — `importAgent` lands the record DRAFT/inactive; activation (DRAFT→APPROVED) is a separate, explicit step gated on governance attestation. A record with **no** `invocation` block is treated as `protocol = AGENTCORE_RUNTIME` (`getInvocationProtocol`), so every pre-import record behaves exactly as before (back-compat).
+
+### Invocation + origin blocks
+
+```typescript
+// backend/src/services/registry-service.ts
+type AgentInvocationProtocol =
+  | 'AGENTCORE_RUNTIME' | 'BEDROCK_AGENT' | 'LAMBDA_INVOKE' | 'HTTP_ENDPOINT' | 'MCP'
+  | 'A2A' | 'STEP_FUNCTIONS' | 'SAGEMAKER_ENDPOINT' | 'SQS_ASYNC'; // first 5 dispatchable today
+type AgentInvocationAuthMode = 'SIGV4' | 'API_KEY' | 'OAUTH2' | 'COGNITO' | 'NONE' | 'BEARER';
+type AgentInvocationMode = 'sync' | 'async_callback';
+
+interface AgentInvocationBlock {
+  protocol: AgentInvocationProtocol;
+  target: string;                       // arn | url | functionName | …
+  auth: { mode: AgentInvocationAuthMode; secretRef?: string; header?: string };
+  mode: AgentInvocationMode;
+  region?: string;
+  account?: string;
+  roleArn?: string;                     // cross-account INVOKE role (externalId-gated)
+  externalId?: string;                  // STS ExternalId (confused-deputy guard)
+  analysisRoleArn?: string;             // cross-account read-only role for the activation trust-path
+}
+
+interface AgentOrigin {
+  sourceArn?: string;                   // dedupe key (conflict link/replace/copy)
+  account?: string;
+  region?: string;
+  substrate: string;                    // agentcore_runtime | lambda | bedrock_agent | ecs | eks | ec2 | http | mcp
+  discoveredAt: string;                 // ISO 8601
+  ownership: 'external';                // hard invariant
+}
+```
+
+Secrets are never inlined — `auth.secretRef` points at a Secrets Manager ARN; a raw secret submitted at import time is persisted there and only the reference is stored on the record.
+
+### AgentCustomMetadata import sub-blocks
+
+Each sub-block lives inside the serialized `AgentCustomMetadata`, is written by exactly one resolver path, is surfaced READ-only (also on the `AgentConfig` GraphQL type), and **never** promotes itself into the trusted `manifest` / `invocation` / `state` — so the record STAYS DRAFT.
+
+| Sub-block | Written by | Purpose |
+|-----------|------------|---------|
+| `governanceAttestation` | `importAgent` (`pending`) → `attestAgentImport` (`attested`); `agent-config-resolver` stamps `trustPath` at activation | `{ status:'pending'\|'attested', enforcementMode, authorityRequested, requestedAt, adrId?, attestedBy?, attestedAt?, trustPath?{ checkedAt, clean, findings[], crossAccount? } }` |
+| `proposedManifest` | `agent-import-manifest-result-handler` (B1); promoted by `acceptProposedManifestTier3` | UNTRUSTED Tier-3 LLM proposal: `{ manifest?, confidence:'low', reviewState:'pending_review'\|'failed'\|'accepted', source:'llm_tier3', fieldConfidence?, proposedAt, correlationId?, sanitized?, truncated?, error?, reviewedBy?, reviewedAt? }` |
+| `reachability` | `probeImportReachability` | `{ reachable, classification:'reachable'\|'unreachable'\|'unverifiable_private'\|'no_endpoint', detail?, checkedAt }` |
+| `gatewayPublication` | `publishImportToGateway` / `unpublishImportFromGateway` | `{ status:'published'\|'unpublished', targetType:'mcpServer', gatewayId, gatewayTargetId, credentialProviderArn?, publishedAt, publishedBy }` |
+
+`getResource('agent', …)` still classifies the record as an agent purely by the presence of a `manifest` (the agent/tool discriminator), so imported records always carry a manifest. The full discover → describe → register → govern → invoke pipeline, the GraphQL surface, and the emitted events are documented in [docs/AGENT_IMPORT.md](AGENT_IMPORT.md) and [docs/EVENTBRIDGE_CATALOG.md](EVENTBRIDGE_CATALOG.md).
 
 ## Migration Guide — AgentApp to RegistryRecord
 

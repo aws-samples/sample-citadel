@@ -9,6 +9,20 @@ type Query {
   listAgentConfigs: [AgentConfig]
   getAgentConfig(agentId: String!): AgentConfig
   getAgentCode(agentId: String!): AgentCode
+  # Agent import (US-IMP) — account-level discovery. Same auth as the
+  # neighbouring agent queries (default API auth); results are account-wide
+  # and NOT org-filtered.
+  discoverAgents(input: DiscoverAgentsInput!): [AgentCandidate!]!
+  # `describeAgentCandidate` resolves one ref to a capability descriptor. For a
+  # CROSS-ACCOUNT candidate, also supply discoveryRoleArn (+ discoveryExternalId):
+  # a READ-ONLY role in the TARGET account that Citadel assumes (with the external
+  # id) so the describe's List/Get calls run there. The role must trust Citadel
+  # and the external id. Absent ⇒ same-account describe under the caller identity.
+  describeAgentCandidate(
+    ref: String!
+    discoveryRoleArn: String
+    discoveryExternalId: String
+  ): AWSJSON!
   listToolConfigs: [ToolConfig]
   getToolConfig(toolId: String!): ToolConfig
   listUsers: [User]
@@ -132,6 +146,81 @@ type Mutation {
   generateDocumentPdf(projectId: ID!, documentKey: String!): ReportDownloadUrl
   updateAgentConfig(input: UpdateAgentConfigInput!): AgentConfig
   createAgentConfig(input: CreateAgentConfigInput!): AgentConfig
+  importAgent(input: ImportAgentInput!): ImportAgentResult!
+  # Admin/architect governance action: flips an imported agent's
+  # governanceAttestation.status from 'pending' to 'attested'. Default Cognito
+  # auth (same as the sibling agent mutations); the resolver enforces the
+  # admin/architect role and org-scoping. Idempotent on an already-attested record.
+  attestAgentImport(agentId: ID!): AgentConfig!
+  # Admin/architect pre-activation TEST-INVOKE: actually invokes an import
+  # candidate through the existing per-protocol adapters and returns a SANITIZED
+  # result WITHOUT persisting anything (no Registry record, no stored secret).
+  # Default Cognito auth (same as the sibling agent mutations); the resolver
+  # enforces the admin/architect role. A failed invoke is a normal
+  # { ok:false, error } result, not an error.
+  testImportedAgent(input: TestImportedAgentInput!): ImportTestResult!
+  # Admin/architect Tier-2 SANDBOXED PROBE: builds an import candidate's static
+  # capability descriptor (the adapter's describe()) and, when it has GAPS
+  # (empty outputSchema/skills or low/absent field confidence), performs ONE
+  # guarded sandboxed dry-run, sanitizes the untrusted output, and merges it
+  # back CONSERVATIVELY at confidence='medium' (records an outputSample; never
+  # fabricates a full schema). Persists nothing. Reuses TestImportedAgentInput.
+  # Default Cognito auth (same as the sibling agent mutations); the resolver
+  # enforces the admin/architect role. Best-effort: a dry-run that throws yields
+  # the describe-only descriptor with a probe-incomplete note, not an error.
+  probeAgentCandidate(input: TestImportedAgentInput!): AWSJSON!
+  # Admin/architect Tier-3 ASYNC manifest-proposal REQUEST. Gathers SECRET-FREE
+  # signals (substrate / ARN / display-name / Tier-1 capability NAMES / optional
+  # Tier-2 probe summary) for `ref` by reusing the describe path and enqueues a
+  # manifest-proposal job to the Fabricator. The LLM-proposed manifest returns
+  # ASYNC and is parked on the DRAFT record as proposedManifest (pending review)
+  # by the result handler — this request NEVER mutates the record and NEVER
+  # enqueues a secret VALUE. Default Cognito auth; the resolver enforces the
+  # admin/architect role. For a CROSS-ACCOUNT candidate, supply discoveryRoleArn
+  # (+ discoveryExternalId): a READ-ONLY role in the TARGET account assumed
+  # (externalId-gated) for the signal-gathering describe.
+  proposeAgentManifestTier3(
+    ref: String!
+    discoveryRoleArn: String
+    discoveryExternalId: String
+  ): Tier3ProposalResult!
+  # Admin/architect (human) ACCEPT step — the ONLY path that promotes a pending
+  # proposedManifest.manifest into the record's trusted manifest. It NEVER
+  # changes status/state/governanceAttestation: the record STAYS DRAFT and is
+  # never auto-activated (activation still requires the existing attest +
+  # DRAFT→APPROVED gate). Idempotent: accepting an already-accepted proposal
+  # returns the record unchanged. Default Cognito auth; the resolver enforces the
+  # admin/architect role and org-scoping.
+  acceptProposedManifestTier3(importId: String!): AgentConfig!
+  # Admin/architect BACKEND-ONLY best-effort reachability probe (US-IMP-017b).
+  # Loads the DRAFT import record and probes its resolved endpoint
+  # (invocation.target) from the (non-VPC) import Lambda, persisting the result
+  # to customMetadata.reachability ONLY (never manifest/invocation/state/
+  # governanceAttestation — the record STAYS DRAFT). The Lambda runs outside any
+  # VPC, so a private/cross-account target is honestly classified
+  # 'unverifiable_private' (NOT a false 'unreachable'). Default Cognito auth; the
+  # resolver enforces the admin/architect role. Best-effort: a network
+  # error/timeout yields an 'unreachable' result, never a GraphQL error.
+  probeImportReachability(importId: String!): ImportReachabilityResult!
+  # Admin/architect MCP Gateway PUBLISH (US-IMP-031). Publishes a
+  # PUBLICLY-REACHABLE, governance-ATTESTED, MCP-substrate imported agent as an
+  # `mcpServer` target on Citadel's shared AgentCore Gateway (auth offload + tool
+  # exposure). Eligibility: ONLY invocation.protocol==='MCP'; HTTP_ENDPOINT
+  # returns a 'REST/OpenAPI gateway publish not yet supported' error; every
+  # AWS-native protocol is rejected (direct-invoke only). Requires
+  # governanceAttestation ATTESTED and reachability 'reachable'. Auth offload
+  # supports NONE/API_KEY/BEARER only. Writes ONLY
+  # customMetadata.gatewayPublication — NEVER manifest/invocation/state/
+  # governanceAttestation, so the record STAYS DRAFT and direct invoke remains
+  # the default. Idempotent: re-publishing an already-published import returns
+  # the existing target without creating a duplicate. Default Cognito auth.
+  publishImportToGateway(importId: String!): GatewayPublicationResult!
+  # Admin/architect MCP Gateway UNPUBLISH (US-IMP-031). Removes the agent's
+  # gateway target (and its credential provider, when auth was offloaded) and
+  # flips customMetadata.gatewayPublication.status to 'unpublished'. Never
+  # changes state/governanceAttestation. Idempotent: a no-op when nothing is
+  # published. Default Cognito auth; the resolver enforces the admin/architect role.
+  unpublishImportFromGateway(importId: String!): GatewayPublicationResult!
   deleteAgentConfig(agentId: String!): DeleteAgentConfigResult
   activateProjectAgents(projectId: ID!): ActivateAgentsResult
   updateAgentCode(input: UpdateAgentCodeInput!): AgentCode
@@ -455,6 +544,251 @@ type AgentConfig {
   createdAt: AWSDateTime
   updatedAt: AWSDateTime
   manifest: AgentManifest
+  # UNTRUSTED, LLM-proposed manifest parked for human review (Tier-3 agent
+  # import). READ-only; never an active/trusted manifest. Absent unless a
+  # proposal is pending or failed.
+  proposedManifest: ProposedManifest
+  # BACKEND-ONLY best-effort reachability probe result (US-IMP-017b), surfaced
+  # READ-only. Absent until probeImportReachability has run; never an
+  # active/trusted field.
+  reachability: ImportReachability
+  # Record of a publication to Citadel's shared AgentCore Gateway (US-IMP-031),
+  # surfaced READ-only. Absent until publishImportToGateway has run; never an
+  # active/trusted field and never changes the record's DRAFT/activation state.
+  gatewayPublication: GatewayPublication
+}
+
+# UNTRUSTED, LLM-proposed agent manifest (Tier-3 agent import), surfaced
+# READ-only for review UIs. `manifest` is the sanitized proposed body as AWSJSON
+# (the LLM output shape is open); the scalar fields let the UI render the review
+# gate without parsing the blob. confidence is always "low" and reviewState is
+# "pending_review" (a proposal), "failed" (a failure marker), or "accepted" (the
+# human-gated accept step promoted it into the trusted manifest; the record
+# still stays DRAFT); source is "llm_tier3". reviewedBy/reviewedAt are the
+# accepting identity + ISO timestamp, set only once reviewState is "accepted".
+# Promotion into the trusted AgentConfig.manifest is a separate, human-gated step.
+type ProposedManifest {
+  manifest: AWSJSON
+  confidence: String
+  reviewState: String
+  source: String
+  fieldConfidence: AWSJSON
+  proposedAt: AWSDateTime
+  correlationId: String
+  sanitized: Boolean
+  truncated: Boolean
+  error: String
+  reviewedBy: String
+  reviewedAt: String
+}
+
+# Result of an async Tier-3 manifest-proposal REQUEST (proposeAgentManifestTier3).
+# The proposal is processed ASYNCHRONOUSLY by the Fabricator; the LLM-proposed
+# manifest is delivered later and parked on the DRAFT record as proposedManifest.
+# `requestId` correlates the async result; `status` is "PENDING" on a successful
+# enqueue.
+type Tier3ProposalResult {
+  requestId: String!
+  status: String!
+}
+
+# --- Agent import (US-IMP) -------------------------------------------------
+# Conflict resolution strategy when an imported agent collides with an
+# existing record (by sourceArn, then display name) in the caller's org.
+enum ImportConflictPolicy {
+  LINK
+  REPLACE
+  COPY
+}
+
+# Flat, typed import descriptor. `manifest` is AWSJSON (nested JSON object);
+# everything else is flat + typed. The resolver nests these into the internal
+# invocation/origin descriptor and forces origin.ownership to 'external'.
+input ImportAgentInput {
+  name: String!
+  manifest: AWSJSON
+  invocationProtocol: String!
+  invocationTarget: String!
+  invocationAuthMode: String
+  invocationSecretRef: String
+  # Optional custom request-header name for the resolved API_KEY secret (e.g.
+  # "x-api-key"). Only meaningful for invocationAuthMode API_KEY; absent ⇒ the
+  # secret is applied as `Authorization: <value>` (back-compat default).
+  invocationAuthHeader: String
+  # RAW secret value the caller may submit at import time. When present on a
+  # record-creating import (CREATE/REPLACE/COPY) it is persisted to AWS Secrets
+  # Manager and ONLY the resulting reference is stored on the Registry record
+  # (the raw value never touches the record or its logs). Takes precedence over
+  # invocationSecretRef, which is a pre-existing reference used as-is.
+  invocationSecret: String
+  # Optional operator-supplied TARGET-account read-only ANALYSIS role ARN
+  # (US-IMP Phase-2). When present it is stamped onto the persisted record's
+  # invocation.analysisRoleArn so the activation cross-account trust-path can
+  # assume it (externalId-gated). Not a secret — persisted verbatim. Absent ⇒
+  # a cross-account roleArn falls back to manual attestation.
+  invocationAnalysisRoleArn: String
+  # Optional operator-supplied CROSS-ACCOUNT INVOKE role ARN (US-IMP Phase-2):
+  # the IAM role Citadel assumes — gated by invocationExternalId — to INVOKE a
+  # cross-account imported agent. When present it is stamped onto the persisted
+  # record's invocation.roleArn so the activation trust-path + invoke paths
+  # detect the cross-account target and assume it. The role MUST trust Citadel
+  # and the external id. Not a secret — persisted verbatim. Absent ⇒ same-account
+  # invoke (unchanged).
+  invocationRoleArn: String
+  # STS ExternalId forwarded when assuming invocationRoleArn (confused-deputy
+  # protection). Stamped onto the persisted record's invocation.externalId so the
+  # invoke-time assume presents it. Absent ⇒ no external id is sent.
+  invocationExternalId: String
+  invocationMode: String
+  region: String
+  account: String
+  sourceArn: String
+  substrate: String!
+  categories: [String!]
+  onConflict: ImportConflictPolicy
+}
+
+# On success: { agent, conflict: false }. On an unresolved collision:
+# { agent: null, conflict: true, existingId, reason, options }.
+type ImportAgentResult {
+  agent: AgentConfig
+  conflict: Boolean!
+  existingId: ID
+  reason: String
+  options: [String!]
+}
+
+# Pre-activation TEST-INVOKE (US-IMP). Carries only the invocation-bearing
+# fields needed to reach + call a candidate (no name/manifest/origin — a
+# test-invoke never creates a record). `invocationSecret` is a RAW secret used
+# for THIS test only: it is resolved transiently in-memory and NEVER persisted.
+input TestImportedAgentInput {
+  invocationProtocol: String!
+  invocationTarget: String!
+  invocationAuthMode: String
+  invocationAuthHeader: String
+  invocationSecretRef: String
+  invocationSecret: String
+  invocationMode: String
+  region: String
+  account: String
+  # Optional operator-supplied CROSS-ACCOUNT INVOKE role ARN (US-IMP Phase-2):
+  # the IAM role Citadel assumes — gated by invocationExternalId — to run THIS
+  # test-invoke against a cross-account candidate. When set and in a DIFFERENT
+  # account than the deployment, the dry-run is performed under the assumed
+  # target-account credentials. The role MUST trust Citadel and the external id.
+  # Not a secret — never persisted (a test-invoke creates no record). Absent ⇒
+  # same-account test-invoke (unchanged).
+  invocationRoleArn: String
+  # STS ExternalId forwarded when assuming invocationRoleArn (confused-deputy
+  # protection). Absent ⇒ no external id is sent.
+  invocationExternalId: String
+  prompt: String
+}
+
+# Result of a pre-activation test-invoke. `ok` true ⇒ the candidate was reached
+# and `output` carries the SANITIZED response; `ok` false ⇒ `error` explains the
+# failure (a normal result, not a GraphQL error). `latencyMs` is the wall-clock
+# duration of the attempt.
+type ImportTestResult {
+  ok: Boolean!
+  output: String
+  error: String
+  latencyMs: Int
+}
+
+# Result of a BACKEND-ONLY best-effort reachability probe
+# (probeImportReachability mutation, US-IMP-017b). `reachable` is true only when
+# an HTTP response was observed from a PUBLIC endpoint. `classification` is one
+# of: "reachable" | "unreachable" | "unverifiable_private" (private/cross-account
+# target — honest, not a false "unreachable") | "no_endpoint". `detail` is a
+# short, secret-free note (e.g. "HTTP 200", a network error, or the VPC note);
+# `checkedAt` is the ISO 8601 probe time.
+type ImportReachabilityResult {
+  reachable: Boolean!
+  classification: String!
+  detail: String
+  checkedAt: String!
+}
+
+# READ-only reachability probe result surfaced on AgentConfig (US-IMP-017b).
+# Same shape as ImportReachabilityResult; present only once a probe has run.
+type ImportReachability {
+  reachable: Boolean!
+  classification: String!
+  detail: String
+  checkedAt: String!
+}
+
+# Result of the MCP Gateway publish/unpublish mutations (US-IMP-031).
+# `status` is "published" or "unpublished"; `gatewayTargetId` is the AgentCore
+# Gateway target id (null on a no-op unpublish where nothing was published);
+# `detail` is a short human-readable note (e.g. "mcpServer target created",
+# "already published", "nothing published").
+type GatewayPublicationResult {
+  status: String!
+  gatewayTargetId: String
+  detail: String
+}
+
+# READ-only record of an imported agent's publication to Citadel's shared
+# AgentCore Gateway (US-IMP-031), surfaced on AgentConfig. `targetType` is fixed
+# at "mcpServer"; `credentialProviderArn` is present only when auth was offloaded
+# (API_KEY/BEARER). `status` advances "published" -> "unpublished" when the
+# target is removed. Never an active/trusted field; the record STAYS DRAFT.
+type GatewayPublication {
+  status: String!
+  targetType: String!
+  gatewayId: String!
+  gatewayTargetId: String!
+  credentialProviderArn: String
+  publishedAt: String!
+  publishedBy: String!
+}
+
+# Agent import (US-IMP) — discovery. `discoverAgents` enumerates importable
+# agents three ways (account tag scan, a single pasted ref, or a pasted
+# manifest); `describeAgentCandidate` resolves one ref to a capability
+# descriptor returned as AWSJSON.
+enum DiscoverySource {
+  SCAN
+  PASTE
+  MANIFEST
+}
+
+# SCAN uses region/tagKey/tagValue; PASTE uses ref; MANIFEST uses manifest.
+# For a CROSS-ACCOUNT scan, also supply discoveryRoleArn (+ discoveryExternalId):
+# a read-only role in the TARGET account that Citadel assumes (with the external
+# id) to tag-scan there. The role must trust Citadel and the external id.
+input DiscoverAgentsInput {
+  source: DiscoverySource!
+  region: String
+  tagKey: String
+  tagValue: String
+  ref: String
+  manifest: AWSJSON
+  # Optional CROSS-ACCOUNT SCAN: a READ-ONLY discovery role in the TARGET
+  # account that Citadel assumes (externalId-gated) to run the tag scan there.
+  # The role's trust policy must allow Citadel + the external id. Absent ⇒
+  # same-account scan under Citadel's own identity.
+  discoveryRoleArn: String
+  # STS ExternalId forwarded when assuming discoveryRoleArn (confused-deputy
+  # guard). The discovery role's trust policy must require this external id.
+  discoveryExternalId: String
+}
+
+# Flat discovered-agent candidate (provenance flattened from the internal
+# origin block). `ownership` is always 'external' — Citadel never owns an
+# imported agent's infrastructure.
+type AgentCandidate {
+  displayName: String!
+  reference: String!
+  substrate: String!
+  sourceArn: String
+  region: String
+  account: String
+  ownership: String!
+  discoveredAt: String!
 }
 
 type DeleteAgentConfigResult {

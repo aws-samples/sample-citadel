@@ -1,7 +1,41 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, DeleteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { RegistryService, RegistryRecordStatusValues } from '../services/registry-service';
+import type {
+  AgentInvocationProtocol,
+  AgentCustomMetadata,
+  AgentInvocationBlock,
+  AgentOrigin,
+} from '../services/registry-service';
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
+import { getGovernanceEnforce } from '../utils/governance-flag';
+import { publishEvent } from '../utils/events';
+import { computeTrustPath, isCrossAccountRoleArn, assumeAnalysisRoleClient } from '../utils/trust-path';
+
+/** Trust-path summary persisted into governanceAttestation by the activation path. */
+interface TrustPathAttestationSummary {
+  checkedAt: string;
+  clean: boolean;
+  findings: string[];
+  /**
+   * Phase-2 marker: `true` when `invocation.roleArn` was detected as
+   * cross-account and the same-account {@link computeTrustPath} check was
+   * therefore skipped. Additive/optional so same-account summaries serialize
+   * byte-identically to Phase-1.
+   */
+  crossAccount?: boolean;
+}
+
+/**
+ * The registry-service governanceAttestation shape augmented with the additive
+ * `trustPath` summary stamped by the lazy activation-time IAM trust-path check.
+ * Declared locally (NOT in registry-service) so that module stays unchanged;
+ * the extra field is serialized verbatim via serializeCustomMetadata.
+ */
+type GovernanceAttestationWithTrustPath =
+  NonNullable<AgentCustomMetadata['governanceAttestation']> & {
+    trustPath?: TrustPathAttestationSummary;
+  };
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -275,6 +309,80 @@ export async function createAgentConfigRegistry(input: any, event?: any): Promis
 }
 
 /**
+ * Governance activation gate for imported agents (US-IMP governance retrofit).
+ *
+ * Applied at the APPROVED (activation) transition for an IMPORTED, not-yet-
+ * attested Registry record. An imported record is one whose deserialized
+ * customMetadata carries a `governanceAttestation` block (stamped by the import
+ * resolver); non-imported agents never have it, so the gate is a pure no-op for
+ * them.
+ *
+ * Trigger — ALL of:
+ *   (i)   target status is APPROVED  → enforced by the CALL-SITE (this helper is
+ *         only invoked on the APPROVED transition), so it assumes (i) holds.
+ *   (ii)  record is imported          → `governanceAttestation` present.
+ *   (iii) not yet attested            → `governanceAttestation.status !== 'attested'`.
+ *
+ * On trigger:
+ *   - strict              → THROW before the caller writes APPROVED status.
+ *   - shadow | permissive → best-effort "would-block" telemetry event, then
+ *                           return so the caller proceeds with activation.
+ *
+ * When NOT triggered (no attestation, or already attested) this returns
+ * immediately WITHOUT reading the governance flag or emitting any event, so the
+ * behaviour of every non-imported / already-attested activation is byte-
+ * identical to the pre-gate code path.
+ *
+ * `getGovernanceEnforce` fails open to 'permissive' internally (never throws),
+ * so an absent/unreadable SSM parameter can never hard-fail an activation.
+ */
+async function enforceImportActivationGate(
+  registryService: RegistryService,
+  agentId: string,
+  customDescriptorContent: string | undefined,
+): Promise<void> {
+  const meta = registryService.deserializeCustomMetadata<{
+    governanceAttestation?: { status: 'pending' | 'attested' };
+  }>(customDescriptorContent ?? null, { governanceAttestation: undefined });
+
+  const attestation = meta.governanceAttestation;
+  // (ii) not imported, or (iii) already attested → no-op.
+  if (!attestation || attestation.status === 'attested') {
+    return;
+  }
+
+  const mode = await getGovernanceEnforce(process.env.ENVIRONMENT || 'unknown');
+  if (mode === 'strict') {
+    throw new Error(
+      `Activation blocked: governance attestation pending for imported agent ${agentId}`,
+    );
+  }
+
+  // shadow | permissive → emit best-effort telemetry that the gate WOULD have
+  // blocked this activation, then proceed. A telemetry outage must never fail
+  // (or alter the result of) the activation, so the emit is swallowed on error.
+  try {
+    await publishEvent({
+      eventType: 'agent.import.activation_gate',
+      projectId: '',
+      agentId,
+      payload: {
+        agentId,
+        attestationStatus: attestation.status,
+        mode,
+        wouldBlock: true,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error(
+      `agent-config-resolver: best-effort activation-gate event for ${agentId} failed (swallowed):`,
+      err,
+    );
+  }
+}
+
+/**
  * Registry-backed update: updates the Registry resource with new metadata.
  * If state is being changed, also updates the Registry status via toRegistryStatus.
  * Returns the mapped AgentConfig.
@@ -335,15 +443,174 @@ export async function updateAgentConfigRegistry(input: any, event?: any): Promis
   const preservedOrgId = existingMeta.orgId
     ?? (event !== undefined ? (await extractOrgFromEvent(event)) ?? undefined : undefined);
 
-  // Merge custom metadata
-  const updatedMeta = registryService.serializeCustomMetadata({
+  // Desired Registry status computed up-front: the lazy trust-path attestation
+  // below only fires on the APPROVED (activation) transition, and the gate
+  // further down consumes the same value.
+  const desiredRegistryStatus = input.state
+    ? registryService.toRegistryStatus(input.state)
+    : undefined;
+
+  // US-IMP lazy IAM trust-path attestation. On the APPROVED activation of an
+  // IMPORTED (governanceAttestation present), still-'pending' record whose
+  // invocation.roleArn is set, inspect that role's IAM trust path in-process
+  // and — when it is clean — auto-attest so the activation gate passes in this
+  // same request. Best-effort: any failure (unresolvable / cross-account role,
+  // IAM denial) is logged and swallowed, leaving the attestation 'pending' so
+  // the gate governs unchanged. Roleless-imported and non-imported records
+  // never reach computeTrustPath, so their behaviour is byte-identical.
+  const importView = registryService.deserializeCustomMetadata<{
+    governanceAttestation?: GovernanceAttestationWithTrustPath;
+    invocation?: AgentInvocationBlock;
+    origin?: AgentOrigin;
+  }>(existing.customDescriptorContent ?? null, {
+    governanceAttestation: undefined,
+    invocation: undefined,
+    origin: undefined,
+  });
+
+  let importAttestationToPersist: GovernanceAttestationWithTrustPath | undefined;
+  let gateContentOverride: string | undefined;
+  const existingAttestation = importView.governanceAttestation;
+  const invocationRoleArn = importView.invocation?.roleArn;
+  if (
+    input.state &&
+    desiredRegistryStatus === RegistryRecordStatusValues.APPROVED &&
+    desiredRegistryStatus !== existing.status &&
+    existingAttestation &&
+    existingAttestation.status === 'pending' &&
+    typeof invocationRoleArn === 'string' &&
+    invocationRoleArn.length > 0
+  ) {
+    // Phase-2 cross-account awareness. When invocation.roleArn lives in a
+    // DIFFERENT account than this deployment (ACCOUNT_ID), the same-account,
+    // in-process computeTrustPath cannot introspect it — its GetRole runs in the
+    // home account and would just fail. Detection is best-effort: when
+    // ACCOUNT_ID is not configured (or the role ARN account is unparseable)
+    // isCrossAccountRoleArn returns false and the same-account branch below runs
+    // byte-identically to Phase-1, so same-account behaviour is unchanged.
+    if (isCrossAccountRoleArn(invocationRoleArn, process.env.ACCOUNT_ID)) {
+      // Phase-2 cross-account FULL introspection. When the operator supplied a
+      // READ-ONLY analysisRoleArn in the TARGET account, assume it
+      // (externalId-gated) to obtain a cross-account IAM client and run the SAME
+      // trust-path check there — then behave exactly like the same-account
+      // success path (auto-attest clean / pending+findings). With NO
+      // analysisRoleArn, keep the original 276ea59 manual-attestation finding.
+      // Either way the summary carries crossAccount:true. BEST-EFFORT: any
+      // assume / introspection failure records a finding and leaves the
+      // attestation 'pending' so the gate governs — activation is NEVER crashed,
+      // and the temporary credentials never reach this scope (the helper
+      // encapsulates them) so they cannot be logged.
+      const analysisRoleArn = importView.invocation?.analysisRoleArn;
+      if (typeof analysisRoleArn === 'string' && analysisRoleArn.length > 0) {
+        try {
+          const crossAccountIamClient = await assumeAnalysisRoleClient(
+            analysisRoleArn,
+            importView.invocation?.externalId,
+          );
+          const tp = await computeTrustPath(invocationRoleArn, {
+            iamClient: crossAccountIamClient,
+          });
+          const summary: TrustPathAttestationSummary = {
+            checkedAt: new Date().toISOString(),
+            clean: tp.clean,
+            crossAccount: true,
+            findings: tp.findings,
+          };
+          importAttestationToPersist = tp.clean
+            ? {
+                ...existingAttestation,
+                status: 'attested',
+                attestedBy: 'system:trust-path',
+                attestedAt: summary.checkedAt,
+                trustPath: summary,
+              }
+            : { ...existingAttestation, trustPath: summary };
+        } catch (err) {
+          // Best-effort: never log credentials (none reach this scope — the
+          // helper owns the STS temp creds). Record a finding and leave
+          // 'pending' for the gate / manual attestation.
+          console.error(
+            `agent-config-resolver: cross-account analysis-role trust-path for ` +
+              `${input.agentId} failed (best-effort, leaving 'pending'):`,
+            err instanceof Error ? err.message : String(err),
+          );
+          const summary: TrustPathAttestationSummary = {
+            checkedAt: new Date().toISOString(),
+            clean: false,
+            crossAccount: true,
+            findings: [
+              'cross-account analysis-role assume failed; manual attestation required',
+            ],
+          };
+          importAttestationToPersist = { ...existingAttestation, trustPath: summary };
+        }
+      } else {
+        const summary: TrustPathAttestationSummary = {
+          checkedAt: new Date().toISOString(),
+          clean: false,
+          crossAccount: true,
+          findings: [
+            'cross-account-role: automated trust-path unavailable; manual attestation required',
+          ],
+        };
+        importAttestationToPersist = { ...existingAttestation, trustPath: summary };
+      }
+    } else {
+      try {
+        const tp = await computeTrustPath(invocationRoleArn);
+        const summary: TrustPathAttestationSummary = {
+          checkedAt: new Date().toISOString(),
+          clean: tp.clean,
+          findings: tp.findings,
+        };
+        importAttestationToPersist = tp.clean
+          ? {
+              ...existingAttestation,
+              status: 'attested',
+              attestedBy: 'system:trust-path',
+              attestedAt: summary.checkedAt,
+              trustPath: summary,
+            }
+          : { ...existingAttestation, trustPath: summary };
+      } catch (err) {
+        // Best-effort: leave the attestation 'pending' and let the gate govern.
+        console.error(
+          `agent-config-resolver: trust-path attestation for ${input.agentId} failed ` +
+            `(best-effort, leaving 'pending'):`,
+          err,
+        );
+      }
+    }
+  }
+
+  // Merge custom metadata. The 6-field base is byte-identical to the pre-US-IMP
+  // path; the imported governance blocks (invocation / origin /
+  // governanceAttestation) are folded back in ONLY when the trust-path
+  // attestation actually ran, so every non-imported / roleless / non-activation
+  // update persists exactly the same metadata as before.
+  const baseMeta = {
     categories: input.categories !== undefined ? input.categories : existingMeta.categories,
     icon: input.icon !== undefined ? input.icon : existingMeta.icon,
     state: input.state || existingMeta.state,
     appId: input.appId !== undefined ? input.appId : existingMeta.appId,
     manifest: existingMeta.manifest,
     orgId: preservedOrgId,
-  });
+  };
+  const updatedMeta = registryService.serializeCustomMetadata(
+    (importAttestationToPersist
+      ? {
+          ...baseMeta,
+          invocation: importView.invocation,
+          origin: importView.origin,
+          governanceAttestation: importAttestationToPersist,
+        }
+      : baseMeta) as AgentCustomMetadata,
+  );
+  if (importAttestationToPersist) {
+    // The gate reads attestation status from this content; hand it the freshly
+    // attested view so a same-request auto-attest lets activation proceed.
+    gateContentOverride = updatedMeta;
+  }
 
   const record = await registryService.updateResource('agent', input.agentId, {
     name: parsedNewConfig.name || existing.name,
@@ -357,10 +624,20 @@ export async function updateAgentConfigRegistry(input: any, event?: any): Promis
   // to its 'active' default for records missing the field). The user-facing
   // state is derived from record.status via toInternalState, so that's what
   // must change for the toggle to actually take effect.
-  const desiredRegistryStatus = input.state
-    ? registryService.toRegistryStatus(input.state)
-    : undefined;
   if (input.state && desiredRegistryStatus && desiredRegistryStatus !== existing.status) {
+    // Governance activation gate (US-IMP): runs ONLY on the APPROVED transition
+    // for an imported, unattested record. A no-op for every other record and
+    // transition, so all non-activation / non-imported update paths are
+    // unchanged. In strict mode it throws here, BEFORE the APPROVED status write.
+    // When the lazy trust-path auto-attested above, gateContentOverride carries
+    // the attested metadata so this gate sees 'attested' and is a no-op.
+    if (desiredRegistryStatus === RegistryRecordStatusValues.APPROVED) {
+      await enforceImportActivationGate(
+        registryService,
+        input.agentId,
+        gateContentOverride ?? existing.customDescriptorContent ?? undefined,
+      );
+    }
     await registryService.updateResourceStatus('agent', input.agentId, desiredRegistryStatus);
     // Re-fetch after status transition so the returned state reflects the
     // post-SubmitForApproval record (PENDING_APPROVAL or APPROVED) rather
@@ -521,6 +798,15 @@ export async function activateProjectAgents(projectId: string): Promise<Activate
     }
 
     try {
+      // Governance activation gate (US-IMP): strict-blocks imported, unattested
+      // agents BEFORE the APPROVED write. The throw is caught below so a blocked
+      // agent lands in `failed` without aborting activation of the rest of the
+      // batch; shadow/permissive emits telemetry and proceeds as before.
+      await enforceImportActivationGate(
+        registryService,
+        record.recordId,
+        record.customDescriptorContent ?? undefined,
+      );
       await registryService.updateResourceStatus('agent', record.recordId, RegistryRecordStatusValues.APPROVED);
       result.activated.push(name);
     } catch (err) {
@@ -696,6 +982,75 @@ export function validateManifest(manifest: any): { valid: boolean; errors: strin
   }
   if (typeof manifest.version !== 'string' || manifest.version.trim() === '') {
     errors.push('version is required and must be a non-empty string');
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+// ─── Import Descriptor Validation (US-IMP-001) ───────────────
+
+/**
+ * The nine invocation protocols recognised by the import pipeline. Typed as
+ * AgentInvocationProtocol[] so every entry must be a valid protocol and the
+ * list stays in lock-step with the union in registry-service.ts.
+ */
+const IMPORT_INVOCATION_PROTOCOLS: readonly AgentInvocationProtocol[] = [
+  'AGENTCORE_RUNTIME',
+  'BEDROCK_AGENT',
+  'LAMBDA_INVOKE',
+  'HTTP_ENDPOINT',
+  'MCP',
+  'A2A',
+  'STEP_FUNCTIONS',
+  'SAGEMAKER_ENDPOINT',
+  'SQS_ASYNC',
+];
+
+/** Narrowing helper: true when `value` is a non-null, non-array object. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validates the invocation + origin blocks of an agent import descriptor
+ * (US-IMP-001). Sits beside validateManifest and follows the same
+ * `{ valid, errors }` contract.
+ *
+ * Requires:
+ *   - `invocation.protocol` is one of the nine AgentInvocationProtocol values
+ *   - `invocation.target` is a non-empty string
+ *   - `origin.ownership === 'external'`
+ *
+ * Each missing/invalid field contributes a specific, field-naming error so
+ * callers (and the UI) can pinpoint exactly what is wrong. Accepts `unknown`
+ * and narrows internally — never throws on malformed input.
+ */
+export function validateImportDescriptor(
+  descriptor: unknown,
+): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  const root = isPlainObject(descriptor) ? descriptor : {};
+  const invocation = isPlainObject(root.invocation) ? root.invocation : undefined;
+  const origin = isPlainObject(root.origin) ? root.origin : undefined;
+
+  const protocol = invocation?.protocol;
+  if (
+    typeof protocol !== 'string' ||
+    !IMPORT_INVOCATION_PROTOCOLS.includes(protocol as AgentInvocationProtocol)
+  ) {
+    errors.push(
+      `invocation.protocol is required and must be one of: ${IMPORT_INVOCATION_PROTOCOLS.join(', ')}`,
+    );
+  }
+
+  const target = invocation?.target;
+  if (typeof target !== 'string' || target.trim() === '') {
+    errors.push('invocation.target is required and must be a non-empty string');
+  }
+
+  if (origin?.ownership !== 'external') {
+    errors.push("origin.ownership is required and must be 'external'");
   }
 
   return { valid: errors.length === 0, errors };

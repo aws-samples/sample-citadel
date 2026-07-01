@@ -64,6 +64,218 @@ export interface DataStoreBinding {
   direction?: BindingDirection;
 }
 
+// ---------------------------------------------------------------------------
+// Agent import: invocation + origin descriptor blocks (US-IMP-001)
+//
+// These extend the agent descriptor stored in customDescriptorContent so an
+// imported (externally-owned) agent records HOW it is invoked and WHERE it
+// came from. Both blocks are optional — records that predate the import
+// feature carry neither and are treated as protocol=AGENTCORE_RUNTIME with
+// zero behaviour change (back-compat invariant 6).
+// ---------------------------------------------------------------------------
+
+/**
+ * Transport/protocol used to invoke an agent. The legacy AgentCore-only path
+ * is represented by AGENTCORE_RUNTIME, which is also the back-compat default
+ * for records with no invocation block.
+ */
+export type AgentInvocationProtocol =
+  | 'AGENTCORE_RUNTIME'
+  | 'BEDROCK_AGENT'
+  | 'LAMBDA_INVOKE'
+  | 'HTTP_ENDPOINT'
+  | 'MCP'
+  | 'A2A'
+  | 'STEP_FUNCTIONS'
+  | 'SAGEMAKER_ENDPOINT'
+  | 'SQS_ASYNC';
+
+/** Authentication mode used when reaching an invocation target. */
+export type AgentInvocationAuthMode =
+  | 'SIGV4'
+  | 'API_KEY'
+  | 'OAUTH2'
+  | 'COGNITO'
+  | 'NONE'
+  | 'BEARER';
+
+/** Synchronous request/response vs. asynchronous callback delivery. */
+export type AgentInvocationMode = 'sync' | 'async_callback';
+
+/**
+ * How to reach and invoke an agent. `target` is protocol-specific (an ARN, an
+ * HTTPS URL, an MCP endpoint, ...). Secrets are never inlined here — only a
+ * `secretRef` pointing at Secrets Manager (RD1, least-privilege invariant 2).
+ */
+export interface AgentInvocationBlock {
+  protocol: AgentInvocationProtocol;
+  target: string;
+  auth: {
+    mode: AgentInvocationAuthMode;
+    secretRef?: string;
+    /**
+     * Custom request-header name for the resolved API_KEY secret (e.g.
+     * 'x-api-key'). Optional and only meaningful for mode API_KEY; absent ⇒ the
+     * secret is sent as `Authorization: <value>` (back-compat default). Ignored
+     * by the bearer-token modes (BEARER/OAUTH2/COGNITO) and by SIGV4/NONE.
+     */
+    header?: string;
+  };
+  mode: AgentInvocationMode;
+  region?: string;
+  account?: string;
+  roleArn?: string;
+  externalId?: string;
+  /**
+   * Operator-supplied READ-ONLY analysis role in the TARGET account of a
+   * cross-account `roleArn` (US-IMP Phase-2). When present, the activation
+   * trust-path path assumes this role (externalId-gated) to run read-only
+   * `iam:GetRole`/`GetRolePolicy` against `roleArn` in its home account, then
+   * attests like the same-account path. Absent ⇒ a cross-account `roleArn`
+   * falls back to the manual-attestation finding. Never carries a secret — the
+   * role must trust Citadel and is gated by {@link externalId}.
+   */
+  analysisRoleArn?: string;
+}
+
+/**
+ * Provenance for an imported agent. `ownership` is fixed at 'external' —
+ * Citadel orchestrates imported agents but never owns, redeploys, or scales
+ * the customer's infrastructure (invariant 1).
+ */
+export interface AgentOrigin {
+  sourceArn?: string;
+  account?: string;
+  region?: string;
+  substrate: string;
+  discoveredAt: string;
+  ownership: 'external';
+}
+
+/**
+ * Confidence level for a proposed/inferred descriptor field, mirroring the
+ * agent-source `Confidence` union. Redeclared locally (rather than imported
+ * from ../adapters/agent-source/types) because that module imports its
+ * invocation/origin types FROM this file — keeping the alias here avoids a
+ * circular module dependency. LLM-proposed manifests are always 'low'.
+ */
+export type ProposedManifestConfidence = 'high' | 'medium' | 'low';
+
+/**
+ * UNTRUSTED, LLM-proposed agent manifest stored on a DRAFT import record
+ * (Tier-3 agent import). It is ingested asynchronously from the Fabricator,
+ * recursively sanitized, and parked here PENDING HUMAN REVIEW — it is NEVER
+ * promoted into the trusted {@link AgentCustomMetadata.manifest}, never alters
+ * {@link AgentCustomMetadata.invocation} / `state` /
+ * {@link AgentCustomMetadata.governanceAttestation}, and never activates the
+ * agent. A separate, human-gated accept step (a later increment) is the ONLY
+ * path from here into the trusted manifest.
+ *
+ * Required fields are always stamped by the result handler; the optional
+ * fields are present on the 'pending_review' (proposed) path and mostly absent
+ * on the minimal 'failed' marker.
+ */
+export interface ProposedManifestMetadata {
+  /** The sanitized LLM-proposed manifest. Untrusted-derived; never auto-trusted. */
+  manifest?: Record<string, unknown>;
+  /** Always 'low' for an LLM proposal (invariant: LLM-inferred ⇒ low). */
+  confidence?: ProposedManifestConfidence;
+  /**
+   * Review gate. 'pending_review' on a proposal; 'failed' on the failure
+   * marker; 'accepted' once the human-gated Tier-3 accept step has promoted the
+   * proposed manifest into the trusted manifest. Acceptance NEVER activates the
+   * agent — the record still STAYS DRAFT.
+   */
+  reviewState: 'pending_review' | 'failed' | 'accepted';
+  /** Provenance — fixed for the Tier-3 LLM path. */
+  source: 'llm_tier3';
+  /** Per-field confidence for the proposed manifest; all 'low' for an LLM proposal. */
+  fieldConfidence?: Record<string, ProposedManifestConfidence>;
+  /** ISO 8601 timestamp the proposal/marker was stored. */
+  proposedAt: string;
+  /** Correlation id from the proposing event (tracing). */
+  correlationId?: string;
+  /** True once the proposed JSON has passed recursive sanitization. */
+  sanitized?: boolean;
+  /** True iff sanitization hit a structural cap and truncated the payload. */
+  truncated?: boolean;
+  /** Sanitized + length-capped failure detail (failure marker only). */
+  error?: string;
+  /**
+   * Identity (Cognito `sub`, falling back to `username`) of the admin/architect
+   * who ACCEPTED the proposal. Additive: set only when `reviewState` advances to
+   * 'accepted' via the human-gated Tier-3 accept step; absent while
+   * 'pending_review'/'failed'.
+   */
+  reviewedBy?: string;
+  /**
+   * ISO 8601 timestamp at which `reviewState` advanced to 'accepted'. Additive:
+   * set alongside {@link reviewedBy} on acceptance; absent otherwise.
+   */
+  reviewedAt?: string;
+}
+
+/**
+ * Classification of a best-effort reachability probe (US-IMP-017b). Redeclared
+ * locally (rather than imported from ../utils/reachability-probe) to keep this
+ * service free of a utility import and consistent with the locally-declared
+ * {@link ProposedManifestConfidence}.
+ */
+export type AgentReachabilityClassification =
+  | 'reachable'
+  | 'unreachable'
+  | 'unverifiable_private'
+  | 'no_endpoint';
+
+/**
+ * Result of a BACKEND-ONLY best-effort reachability probe of an imported
+ * agent's endpoint (US-IMP-017b). Additive and READ-only downstream: written
+ * ONLY by the `probeImportReachability` resolver, NEVER promoted into
+ * {@link AgentCustomMetadata.manifest} / `invocation` / `state` /
+ * {@link AgentCustomMetadata.governanceAttestation}, and never activates the
+ * agent. The import Lambda runs outside any VPC, so a private/cross-account
+ * target is honestly 'unverifiable_private' rather than a false 'unreachable'.
+ */
+export interface AgentReachabilityMetadata {
+  /** True only when an HTTP response was observed from a PUBLIC endpoint. */
+  reachable: boolean;
+  /** How the endpoint was classified by the probe. */
+  classification: AgentReachabilityClassification;
+  /** Short, secret-free detail (e.g. 'HTTP 200', a network error, the VPC note). */
+  detail?: string;
+  /** ISO 8601 timestamp at which the probe ran. */
+  checkedAt: string;
+}
+
+/**
+ * Record of an imported agent published as a target on Citadel's shared
+ * AgentCore Gateway (US-IMP-031). Additive and READ-only downstream: written
+ * ONLY by the `publishImportToGateway` / `unpublishImportFromGateway` resolvers,
+ * NEVER promoted into {@link AgentCustomMetadata.manifest} / `invocation` /
+ * `state` / {@link AgentCustomMetadata.governanceAttestation}, and never
+ * activates the agent (the record STAYS DRAFT — direct invoke remains the
+ * default). Absent until the agent has been published at least once.
+ *
+ * `targetType` is fixed at 'mcpServer' for now — only invocation.protocol==='MCP'
+ * imports are gateway-publishable; REST/OpenAPI (HTTP_ENDPOINT) publish is
+ * deferred. `credentialProviderArn` is present only when auth was offloaded
+ * (API_KEY/BEARER); a NONE-auth publication carries no provider. `status`
+ * advances 'published' → 'unpublished' when the target is removed; the audit
+ * fields are retained across an unpublish.
+ */
+export interface GatewayPublicationMetadata {
+  status: 'published' | 'unpublished';
+  targetType: 'mcpServer';
+  gatewayId: string;
+  gatewayTargetId: string;
+  /** Present only when auth was offloaded (API_KEY/BEARER); absent for NONE. */
+  credentialProviderArn?: string;
+  /** ISO 8601 timestamp at which the agent was (most recently) published. */
+  publishedAt: string;
+  /** Identity (Cognito `sub`, falling back to `username`) of the publisher. */
+  publishedBy: string;
+}
+
 export interface AgentCustomMetadata {
   categories: string[];
   icon: string;
@@ -71,6 +283,76 @@ export interface AgentCustomMetadata {
   appId?: string;
   manifest?: Record<string, any>;
   orgId?: string;
+  /** Present only on imported agents (US-IMP-001). Absent ⇒ AGENTCORE_RUNTIME. */
+  invocation?: AgentInvocationBlock;
+  /** Present only on imported agents (US-IMP-001). */
+  origin?: AgentOrigin;
+  /**
+   * Governance attestation stamped when an externally-owned agent is imported.
+   * Additive: absent on every record that predates the governance retrofit and
+   * on all non-import create paths. `status` advances 'pending' → 'attested'
+   * once governance has acknowledged the requested authority grant.
+   */
+  governanceAttestation?: {
+    status: 'pending' | 'attested';
+    enforcementMode: string;
+    authorityRequested: boolean;
+    requestedAt: string;
+    /**
+     * Id of the system-generated Architecture Decision Record recorded when the
+     * agent was imported (US-IMP ADR-on-import). Additive and best-effort:
+     * absent when the import ADR write failed, and on every record that predates
+     * ADR-on-import.
+     */
+    adrId?: string;
+    /**
+     * Identity (Cognito `sub`, falling back to `username`) of the admin/architect
+     * who attested the import. Additive: set only when `status` advances to
+     * 'attested' via the `attestAgentImport` mutation; absent while 'pending'.
+     */
+    attestedBy?: string;
+    /**
+     * ISO 8601 timestamp at which `status` advanced to 'attested'. Additive:
+     * set alongside {@link attestedBy} on attestation; absent while 'pending'.
+     */
+    attestedAt?: string;
+  };
+  /**
+   * UNTRUSTED, LLM-proposed manifest parked for human review (Tier-3 agent
+   * import). Additive and READ-only downstream: written ONLY by the
+   * agent-import-manifest result handler, NEVER promoted automatically into
+   * {@link manifest}, and never alters `invocation` / `state` /
+   * `governanceAttestation`. Absent on every record that has no pending
+   * proposal (the overwhelming majority).
+   */
+  proposedManifest?: ProposedManifestMetadata;
+  /**
+   * BACKEND-ONLY best-effort reachability probe result (US-IMP-017b). Additive
+   * and READ-only downstream: written ONLY by the `probeImportReachability`
+   * resolver, NEVER promoted into {@link manifest} / `invocation` / `state` /
+   * `governanceAttestation`. Absent until a probe has run.
+   */
+  reachability?: AgentReachabilityMetadata;
+  /**
+   * Record of a publication to Citadel's shared AgentCore Gateway (US-IMP-031).
+   * Additive and READ-only downstream: written ONLY by the
+   * `publishImportToGateway` / `unpublishImportFromGateway` resolvers, NEVER
+   * promoted into {@link manifest} / `invocation` / `state` /
+   * `governanceAttestation`. Absent until the agent has been published once.
+   */
+  gatewayPublication?: GatewayPublicationMetadata;
+}
+
+/**
+ * Returns the invocation protocol for an agent's metadata, defaulting to
+ * AGENTCORE_RUNTIME for legacy records that carry no invocation block
+ * (back-compat invariant 6). Accepts any object exposing an optional
+ * `invocation` so callers can pass a full AgentCustomMetadata or a partial.
+ */
+export function getInvocationProtocol(meta: {
+  invocation?: AgentInvocationBlock;
+}): AgentInvocationProtocol {
+  return meta.invocation?.protocol ?? 'AGENTCORE_RUNTIME';
 }
 
 export interface ToolCustomMetadata {
@@ -137,6 +419,24 @@ export interface AgentConfig {
   createdAt?: string;
   updatedAt?: string;
   manifest?: Record<string, any>;
+  /**
+   * UNTRUSTED, LLM-proposed manifest surfaced READ-ONLY for review UIs
+   * (Tier-3 agent import). Present only while a proposal is pending/failed;
+   * absent otherwise. Never a trusted/active manifest.
+   */
+  proposedManifest?: ProposedManifestMetadata;
+  /**
+   * BACKEND-ONLY best-effort reachability probe result surfaced READ-ONLY
+   * (US-IMP-017b). Present only once a probe has run; never an active/trusted
+   * field.
+   */
+  reachability?: AgentReachabilityMetadata;
+  /**
+   * Record of a publication to Citadel's shared AgentCore Gateway (US-IMP-031),
+   * surfaced READ-ONLY. Present only once the agent has been published; never an
+   * active/trusted field and never changes the record's DRAFT/activation state.
+   */
+  gatewayPublication?: GatewayPublicationMetadata;
 }
 
 export interface ToolConfig {
@@ -865,6 +1165,12 @@ export class RegistryService {
     appId: undefined,
     manifest: undefined,
     orgId: undefined,
+    invocation: undefined,
+    origin: undefined,
+    governanceAttestation: undefined,
+    proposedManifest: undefined,
+    reachability: undefined,
+    gatewayPublication: undefined,
   };
 
   private static readonly TOOL_METADATA_DEFAULTS: ToolCustomMetadata = {
@@ -932,6 +1238,17 @@ export class RegistryService {
       createdAt: record.createdAt?.toISOString(),
       updatedAt: record.updatedAt?.toISOString(),
       manifest: meta.manifest,
+      // Surface the UNTRUSTED proposed manifest READ-ONLY when present so review
+      // UIs can read it. This never promotes it into `manifest` or activates it.
+      ...(meta.proposedManifest
+        ? { proposedManifest: meta.proposedManifest }
+        : {}),
+      // Surface the best-effort reachability probe result READ-ONLY when present
+      // (US-IMP-017b). Never an active/trusted field.
+      ...(meta.reachability ? { reachability: meta.reachability } : {}),
+      // Surface the gateway publication record READ-ONLY when present
+      // (US-IMP-031). Never an active/trusted field; never changes DRAFT state.
+      ...(meta.gatewayPublication ? { gatewayPublication: meta.gatewayPublication } : {}),
     };
   }
 

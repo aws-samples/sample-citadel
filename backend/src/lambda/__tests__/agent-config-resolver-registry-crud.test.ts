@@ -55,6 +55,20 @@ jest.mock('../../services/registry-service', () => ({
     toRegistryStatus: mockToRegistryStatus,
     mapToAgentConfig: mockMapToAgentConfig,
   })),
+  // The activation gate (US-IMP) guards on RegistryRecordStatusValues.APPROVED;
+  // the real registry-service exports these enum values, so the test double
+  // must export them too (mirrors agent-config-resolver.test.ts).
+  RegistryRecordStatusValues: {
+    DRAFT: 'DRAFT',
+    PENDING_APPROVAL: 'PENDING_APPROVAL',
+    APPROVED: 'APPROVED',
+    REJECTED: 'REJECTED',
+    DEPRECATED: 'DEPRECATED',
+    CREATING: 'CREATING',
+    UPDATING: 'UPDATING',
+    CREATE_FAILED: 'CREATE_FAILED',
+    UPDATE_FAILED: 'UPDATE_FAILED',
+  },
 }));
 
 describe('Registry-backed CRUD functions (task 6.4)', () => {
