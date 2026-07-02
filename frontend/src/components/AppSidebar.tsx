@@ -11,6 +11,7 @@ import {
   AppWindow,
   ChevronDown,
   Shield,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { useOrganization } from '../contexts/OrganizationContext';
 import {
@@ -44,6 +45,7 @@ export const navigationItems = [
   { id: 'agent-apps', label: 'Agent Apps', icon: AppWindow },
   { id: 'agent-catalog', label: 'Agent Catalog', icon: Bot },
   { id: 'tools', label: 'Agent Tools', icon: Wrench },
+  { id: 'model-config', label: 'Model Config', icon: SlidersHorizontal },
   { id: 'governance', label: 'Governance', icon: Shield },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'data-stores', label: 'Data Stores', icon: Database },
