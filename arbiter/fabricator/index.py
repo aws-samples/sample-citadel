@@ -26,6 +26,7 @@ def _cross_region_prefix(region: str) -> str:
     if region.startswith('me-'): return 'me'
     if region.startswith('ca-'): return 'ca'
     if region.startswith('sa-'): return 'sa'
+    if region.startswith('af-'): return 'af'
     return 'us'
 
 _REGION = os.environ.get('AWS_REGION', 'us-west-2')

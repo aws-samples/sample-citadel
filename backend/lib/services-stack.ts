@@ -36,6 +36,7 @@ export function crossRegionPrefix(region: string): string {
   if (region.startsWith('me-')) return 'me';
   if (region.startsWith('ca-')) return 'ca';
   if (region.startsWith('sa-')) return 'sa';
+  if (region.startsWith('af-')) return 'af';
   return 'us';
 }
 
