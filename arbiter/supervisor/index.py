@@ -36,6 +36,7 @@ if _arbiter_dir not in sys.path:
     sys.path.insert(0, _arbiter_dir)
 
 from common.region import cross_region_prefix
+from model_config_loader import load_model_id
 
 
 def _load_governance_package():
@@ -110,7 +111,10 @@ except ImportError as e:  # pragma: no cover — degraded-mode fallback
     _GOVERNANCE_AVAILABLE = False
 
 _REGION = os.environ.get('AWS_REGION', 'us-west-2')
-MODEL_ID = f"{cross_region_prefix(_REGION)}.anthropic.claude-sonnet-4-6"
+MODEL_ID = load_model_id(
+    region=_REGION,
+    fallback_model_id=f"{cross_region_prefix(_REGION)}.anthropic.claude-sonnet-4-6",
+)
 
 EVENT_BUS_NAME = os.environ.get('EVENT_BUS_NAME')
 ORCHESTRATION_TABLE = os.environ.get('ORCHESTRATION_TABLE')

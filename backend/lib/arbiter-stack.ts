@@ -166,6 +166,11 @@ export class ArbiterStack extends cdk.Stack {
         EVENT_BUS_NAME: props.agentEventBus.eventBusName,
         WORKER_STATE_TABLE: workerStateTable.tableName,
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+        // Configurable model selection: the supervisor resolves its model
+        // from these two tables via the shared pure resolver, falling back to
+        // its previous default on any miss.
+        MODEL_CONFIG_TABLE: `citadel-model-config-${props.environment}`,
+        MODEL_CATALOG_TABLE: `citadel-model-catalog-${props.environment}`,
         CODE_VERSION: '2', // Force Lambda code update
         ...(props.appsTable && { APPS_TABLE: props.appsTable.tableName }),
         ...(props.registryId && { REGISTRY_ID: props.registryId }),
@@ -191,6 +196,17 @@ export class ArbiterStack extends cdk.Stack {
     if (props.appsTable) {
       props.appsTable.grantReadData(supervisorLambda);
     }
+
+    // Configurable model selection (read-only). The supervisor reads the
+    // platform model-config + model-catalog tables to resolve its model via
+    // the shared pure resolver, with a bulletproof fallback to its previous
+    // default. Least privilege: grantReadData only — the supervisor never
+    // writes these tables. Referenced by deterministic name via fromTableName
+    // (owned elsewhere) to avoid a cross-stack construct dependency.
+    const modelConfigTable = dynamodb.Table.fromTableName(this, 'SupervisorModelConfigTableRef', `citadel-model-config-${props.environment}`);
+    const modelCatalogTable = dynamodb.Table.fromTableName(this, 'SupervisorModelCatalogTableRef', `citadel-model-catalog-${props.environment}`);
+    modelConfigTable.grantReadData(supervisorLambda);
+    modelCatalogTable.grantReadData(supervisorLambda);
 
     // Grant Supervisor read-only access to Registry APIs so it can
     // resolve agent/app identifiers during orchestration. Full CRUD
