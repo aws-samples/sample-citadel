@@ -8,6 +8,9 @@ type Query {
   getConversationHistory(projectId: ID!, limit: Int, nextToken: String): ConversationHistoryPage
   listAgentConfigs: [AgentConfig]
   getAgentConfig(agentId: String!): AgentConfig
+  # Operator-facing model catalog + resolved model-selection config.
+  listModelCatalog: [ModelCatalogEntry!]!
+  getModelConfig(scope: String): ModelConfig
   getAgentCode(agentId: String!): AgentCode
   # Agent import (US-IMP) — account-level discovery. Same auth as the
   # neighbouring agent queries (default API auth); results are account-wide
@@ -146,6 +149,9 @@ type Mutation {
   generateDocumentPdf(projectId: ID!, documentKey: String!): ReportDownloadUrl
   updateAgentConfig(input: UpdateAgentConfigInput!): AgentConfig
   createAgentConfig(input: CreateAgentConfigInput!): AgentConfig
+  # Model config/catalog mutations (admin-gated + validated in the resolver).
+  updateModelConfig(input: UpdateModelConfigInput!): ModelConfig
+  setModelCatalogEntryStatus(modelKey: String!, status: String!): ModelCatalogEntry
   importAgent(input: ImportAgentInput!): ImportAgentResult!
   # Admin/architect governance action: flips an imported agent's
   # governanceAttestation.status from 'pending' to 'attested'. Default Cognito
@@ -532,6 +538,37 @@ type DocumentVersion {
   lastModified: AWSDateTime!
   size: Int!
   isLatest: Boolean!
+}
+
+type ModelCatalogEntry {
+  modelKey: String!
+  provider: String!
+  baseModelId: String!
+  status: String!
+  modality: String!
+  invocationMode: String!
+  supportsTools: Boolean!
+  supportsSystemPrompt: Boolean!
+  supportsStreaming: Boolean!
+  regionProfiles: AWSJSON
+}
+
+type ModelConfig {
+  scope: String!
+  globalDefaultKey: String
+  slotDefaults: AWSJSON
+  orgDefaults: AWSJSON
+  agentOverrides: AWSJSON
+  localityMode: String!
+  updatedAt: String
+  updatedBy: String
+}
+
+input UpdateModelConfigInput {
+  scope: String
+  globalDefaultKey: String
+  slotDefaults: AWSJSON
+  localityMode: String
 }
 
 type AgentConfig {

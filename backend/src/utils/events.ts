@@ -81,6 +81,7 @@ export const EventTypes = {
   AGENT_IMPORT_FAILED: 'agent.import.failed',
   AGENT_IMPORT_ATTESTED: 'agent.import.attested',
   AGENT_IMPORT_ACTIVATION_GATE: 'agent.import.activation_gate',
+  MODEL_CONFIG_CHANGED: 'model.config.changed',
 } as const;
 
 export type EventType = typeof EventTypes[keyof typeof EventTypes];

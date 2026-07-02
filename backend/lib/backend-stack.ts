@@ -748,6 +748,33 @@ export class BackendStack extends cdk.Stack {
       }
     );
 
+    // Model Config Resolver — operator-facing GraphQL surface over the model
+    // catalog + resolved model-selection config tables. DATA-DRIVEN: it reads
+    // the catalog/config table names from its environment and never hardcodes
+    // model ids. Mirrors AgentConfigResolverFunction (runtime/bundling/env).
+    const modelConfigResolverFunction = new lambda.Function(
+      this,
+      "ModelConfigResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "model-config-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          MODEL_CONFIG_TABLE: modelConfigTable.tableName,
+          MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
+          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, 'ModelConfigResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
+      }
+    );
+
+    // Scoped grants: read/write both model tables + emit MODEL_CONFIG_CHANGED.
+    modelCatalogTable.grantReadWriteData(modelConfigResolverFunction);
+    modelConfigTable.grantReadWriteData(modelConfigResolverFunction);
+    this.agentEventBus.grantPutEventsTo(modelConfigResolverFunction);
+
     // Agent Import Resolver - registers externally-owned agents (importAgent
     // mutation). Same runtime/bundling/env as the agent-config resolver; it
     // reuses that resolver's RegistryService + import-descriptor validator.
@@ -2649,6 +2676,10 @@ export class BackendStack extends cdk.Stack {
       "AgentConfigLambdaDataSource",
       agentConfigResolverFunction
     );
+    const modelConfigLambdaDataSource = this.appSyncApi.addLambdaDataSource(
+      "ModelConfigLambdaDataSource",
+      modelConfigResolverFunction
+    );
     const agentImportLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentImportLambdaDataSource",
       agentImportResolverFunction
@@ -2732,6 +2763,34 @@ export class BackendStack extends cdk.Stack {
     agentConfigLambdaDataSource.createResolver("GetAgentConfigResolver", {
       typeName: "Query",
       fieldName: "getAgentConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("ListModelCatalogResolver", {
+      typeName: "Query",
+      fieldName: "listModelCatalog",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("GetModelConfigResolver", {
+      typeName: "Query",
+      fieldName: "getModelConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("UpdateModelConfigResolver", {
+      typeName: "Mutation",
+      fieldName: "updateModelConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("SetModelCatalogEntryStatusResolver", {
+      typeName: "Mutation",
+      fieldName: "setModelCatalogEntryStatus",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
