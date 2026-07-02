@@ -475,6 +475,88 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    // --- Scheduled Bedrock model-catalog sync -------------------------------
+    // Daily discovery/refresh of the ModelCatalogTable against the live
+    // Bedrock inventory. Discovers new foundation models, refreshes
+    // API-derived metadata on known ones (preserving operator status), and
+    // marks entries Bedrock no longer returns as deprecated. Mirrors the
+    // reconcile-apps-meta scheduled-function wiring above.
+    const modelCatalogSyncFunction = new lambda.Function(
+      this,
+      'ModelCatalogSyncFunction',
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: 'model-catalog-sync.handler',
+        code: lambda.Code.fromAsset('dist/lambda'),
+        environment: {
+          MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
+          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.minutes(5),
+        logGroup: new logs.LogGroup(this, 'ModelCatalogSyncFunctionLogs', {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    // Read-only Bedrock discovery permissions — the sync never mutates Bedrock.
+    modelCatalogSyncFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock:ListFoundationModels',
+          'bedrock:ListInferenceProfiles',
+          'bedrock:GetFoundationModel',
+          'bedrock:GetInferenceProfile',
+        ],
+        resources: ['*'],
+      }),
+    );
+
+    // cdk-nag: the Bedrock discovery actions above are account/region-level
+    // enumeration APIs. bedrock:ListFoundationModels and
+    // bedrock:ListInferenceProfiles have no resource-level scoping (they
+    // return the whole catalog and must be granted on '*'), and because this
+    // sync is data-driven — it never hardcodes model ids and discovers the
+    // model set dynamically each run — the Get* targets are not knowable
+    // ahead of time to enumerate as ARNs. All four actions are read-only and
+    // the function never mutates Bedrock. Scope is bounded to Bedrock's
+    // read-only discovery surface.
+    NagSuppressions.addResourceSuppressions(
+      modelCatalogSyncFunction.role!,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason:
+            'Bedrock discovery actions (ListFoundationModels/ListInferenceProfiles/' +
+            'GetFoundationModel/GetInferenceProfile) are read-only and have no ' +
+            'resource-level scoping; the model set is discovered dynamically each ' +
+            'run, so target ARNs are not known ahead of time.',
+          appliesTo: ['Resource::*'],
+        },
+      ],
+      true,
+    );
+
+    // Catalog read/write to upsert discovered rows; event bus to emit summaries.
+    modelCatalogTable.grantReadWriteData(modelCatalogSyncFunction);
+    this.agentEventBus.grantPutEventsTo(modelCatalogSyncFunction);
+
+    // Daily EventBridge schedule.
+    const modelCatalogSyncRule = new events.Rule(this, 'ModelCatalogSyncRule', {
+      description: 'Daily sync of the Bedrock model catalog',
+      schedule: events.Schedule.rate(cdk.Duration.hours(24)),
+    });
+
+    modelCatalogSyncRule.addTarget(
+      new targets.LambdaFunction(modelCatalogSyncFunction, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.minutes(30),
+      }),
+    );
+
     // Pre-token-generation trigger: promotes `custom:organization` and
     // `custom:role` attributes onto JWT claims so downstream resolvers can
     // read org/role identity without an AdminGetUserCommand per request.
