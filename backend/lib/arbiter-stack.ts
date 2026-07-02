@@ -131,9 +131,10 @@ export class ArbiterStack extends cdk.Stack {
           pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
         });
 
-    // PR 2: shared layer for arbiter/catalog/ so all arbiter PythonFunctions
-    // can `from catalog.registry_client import ...`. The layer structures
-    // catalog/ at /opt/python/catalog/ per the Python Lambda layer convention.
+    // Shared layer for arbiter root packages so all arbiter PythonFunctions
+    // can `from catalog.registry_client import ...` and `from common.region
+    // import ...`. The layer structures catalog/ at /opt/python/catalog/ and
+    // common/ at /opt/python/common/ per the Python Lambda layer convention.
     const catalogLayer = new lambda.LayerVersion(this, 'ArbiterCatalogLayer', {
       layerVersionName: `citadel-arbiter-catalog-${props.environment}`,
       code: lambda.Code.fromAsset(ARBITER_ROOT, {
@@ -141,14 +142,14 @@ export class ArbiterStack extends cdk.Stack {
           image: lambda.Runtime.PYTHON_3_14.bundlingImage,
           command: [
             'bash', '-c',
-            'mkdir -p /asset-output/python && cp -r /asset-input/catalog /asset-output/python/catalog',
+            'mkdir -p /asset-output/python && cp -r /asset-input/catalog /asset-output/python/catalog && cp -r /asset-input/common /asset-output/python/common',
           ],
         },
       }),
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_14],
       description:
-        'Shared arbiter/catalog/ Python package (registry_client and future utilities). ' +
-        'PR 2 of AgentCore Registry governance retrofit.',
+        'Shared arbiter Python packages (catalog: registry_client and utilities; ' +
+        'common: cross-region prefix helper).',
     });
 
     const supervisorLambda = new PythonFunction(this, 'SupervisorAgent', {

@@ -35,6 +35,8 @@ _arbiter_dir = os.path.dirname(_supervisor_dir)
 if _arbiter_dir not in sys.path:
     sys.path.insert(0, _arbiter_dir)
 
+from common.region import cross_region_prefix
+
 
 def _load_governance_package():
     """Load ``arbiter/governance/`` as a package under a private name.
@@ -107,19 +109,8 @@ except ImportError as e:  # pragma: no cover — degraded-mode fallback
     )
     _GOVERNANCE_AVAILABLE = False
 
-def _cross_region_prefix(region: str) -> str:
-    if region.startswith('us-'): return 'us'
-    if region.startswith('eu-'): return 'eu'
-    if region == 'ap-southeast-2': return 'au'
-    if region.startswith('ap-'): return 'apac'
-    if region.startswith('me-'): return 'me'
-    if region.startswith('ca-'): return 'ca'
-    if region.startswith('sa-'): return 'sa'
-    if region.startswith('af-'): return 'af'
-    return 'us'
-
 _REGION = os.environ.get('AWS_REGION', 'us-west-2')
-MODEL_ID = f"{_cross_region_prefix(_REGION)}.anthropic.claude-sonnet-4-6"
+MODEL_ID = f"{cross_region_prefix(_REGION)}.anthropic.claude-sonnet-4-6"
 
 EVENT_BUS_NAME = os.environ.get('EVENT_BUS_NAME')
 ORCHESTRATION_TABLE = os.environ.get('ORCHESTRATION_TABLE')

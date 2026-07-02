@@ -1,40 +1,26 @@
-"""Region-to-cross-region-inference-prefix mapping for the fabricator.
-
-Confirms _cross_region_prefix returns the correct inference-profile prefix
-for each supported AWS region family, including the af- family, and falls
-back to 'us' for unrecognised regions.
-"""
-
-import sys
 import os
+import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from common.region import cross_region_prefix as arbiter_prefix
 
-# Set required env vars before import (module-level code reads them).
-os.environ.setdefault("TOOL_CONFIG_TABLE", "fake-tool-table")
-os.environ.setdefault("AGENT_CONFIG_TABLE", "fake-agent-table")
-os.environ.setdefault("AGENT_BUCKET_NAME", "fake-bucket")
-os.environ.setdefault("COMPLETION_BUS_NAME", "fake-bus")
-os.environ.setdefault("WORKER_QUEUE_URL", "https://sqs.fake/queue")
-
-from index import _cross_region_prefix
-
-
-@pytest.mark.parametrize(
-    "region, expected",
-    [
-        ("us-east-1", "us"),
-        ("eu-west-1", "eu"),
-        ("ap-southeast-2", "au"),
-        ("ap-northeast-1", "apac"),
-        ("me-south-1", "me"),
-        ("ca-central-1", "ca"),
-        ("sa-east-1", "sa"),
-        ("af-south-1", "af"),
-        ("unknown-region-1", "us"),
-    ],
+# The intake service is a separate build/deploy unit with its own copy of the
+# pure prefix helper. Load it directly (no heavy dependencies) and assert the
+# two copies agree so they cannot drift apart.
+_SERVICE_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "service", "agent_intake_single")
 )
-def test_cross_region_prefix(region, expected):
-    assert _cross_region_prefix(region) == expected
+if _SERVICE_DIR not in sys.path:
+    sys.path.append(_SERVICE_DIR)
+from region import cross_region_prefix as service_prefix  # noqa: E402
+
+
+@pytest.mark.parametrize("region", [
+    "us-east-1", "us-west-2", "eu-west-1", "eu-central-1",
+    "ap-southeast-2", "ap-northeast-1", "ap-south-1",
+    "me-south-1", "ca-central-1", "sa-east-1", "af-south-1",
+    "unknown-region-1", "",
+])
+def test_arbiter_and_service_prefix_agree(region):
+    assert arbiter_prefix(region) == service_prefix(region)

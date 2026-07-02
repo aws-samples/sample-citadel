@@ -87,6 +87,12 @@ for _subdir in _MODULE_DIRS:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# Make arbiter-root packages (e.g. ``common``, ``catalog``) importable during
+# test collection regardless of import order. Appended (lowest priority) so it
+# never shadows the per-subdir ``index`` resolution handled below.
+if _ARBITER_ROOT not in sys.path:
+    sys.path.append(_ARBITER_ROOT)
+
 # Names that collide across subdirs (``index``) or are shadowed by the
 # ``arbiter/governance/`` package (``governance``).
 _AMBIGUOUS_MODULE_NAMES = {
