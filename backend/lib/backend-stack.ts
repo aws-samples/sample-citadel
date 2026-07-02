@@ -162,6 +162,26 @@ export class BackendStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
+    // Model Catalog Table — inventory of invokable foundation models. Additive and
+    // not yet wired into any runtime/Lambda env; operators curate rows over time.
+    const modelCatalogTable = new dynamodb.Table(this, 'ModelCatalogTable', {
+      tableName: `citadel-model-catalog-${props.environment}`,
+      partitionKey: { name: 'modelKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+
+    // Model Config Table — resolved model-selection defaults/overrides. Additive and
+    // not yet wired into any runtime/Lambda env.
+    const modelConfigTable = new dynamodb.Table(this, 'ModelConfigTable', {
+      tableName: `citadel-model-config-${props.environment}`,
+      partitionKey: { name: 'scope', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+
     // Integrations Table
     const integrationsTable = new dynamodb.Table(this, 'IntegrationsTable', {
       tableName: `citadel-integrations-${props.environment}`,
@@ -1845,6 +1865,36 @@ export class BackendStack extends cdk.Stack {
     );
 
     seedBlueprintsResource.node.addDependency(this.workflowsTable);
+
+    // Seed Model Catalog Custom Resource
+    const seedModelCatalogLambda = new lambda.Function(this, "SeedModelCatalogFunction", {
+      runtime: lambda.Runtime.NODEJS_24_X,
+      handler: "seed-model-catalog/index.handler",
+      code: lambda.Code.fromAsset("dist/lambda"),
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
+        MODEL_CONFIG_TABLE: modelConfigTable.tableName,
+      },
+      logGroup: new logs.LogGroup(this, 'SeedModelCatalogFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
+    });
+
+    modelCatalogTable.grantWriteData(seedModelCatalogLambda);
+    modelConfigTable.grantWriteData(seedModelCatalogLambda);
+
+    const seedModelCatalogResource = new cdk.CustomResource(
+      this,
+      "SeedModelCatalogResource",
+      {
+        serviceToken: seedModelCatalogLambda.functionArn,
+        properties: {
+          Version: 'v1.0.0',
+        },
+      }
+    );
+
+    seedModelCatalogResource.node.addDependency(modelCatalogTable);
+    seedModelCatalogResource.node.addDependency(modelConfigTable);
 
     // Admin email: prefer CDK context param, fall back to env var
     const adminEmail = this.node.tryGetContext('adminEmail') || process.env.ADMIN_EMAIL || '';
