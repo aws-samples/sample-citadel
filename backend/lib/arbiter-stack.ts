@@ -442,6 +442,11 @@ export class ArbiterStack extends cdk.Stack {
         COMPLETION_BUS_NAME: props.agentEventBus.eventBusName,
         WORKFLOW_STATE_TABLE: workerStateTable.tableName,
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+        // Configurable model selection: the fabricator resolves its model
+        // from these two tables via the shared pure resolver, falling back to
+        // its previous default on any miss.
+        MODEL_CONFIG_TABLE: `citadel-model-config-${props.environment}`,
+        MODEL_CATALOG_TABLE: `citadel-model-catalog-${props.environment}`,
         TOOL_CONFIG_TABLE: toolsConfigTable.tableName,
         AGENT_BUCKET_NAME: props.codeBucket.bucketName,
         WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
@@ -485,6 +490,19 @@ export class ArbiterStack extends cdk.Stack {
     // read-only access to ExecutionSpecifications so
     // assert_spec_approved can verify the bound spec_id is APPROVED.
     props.executionSpecificationsTable.grantReadData(fabricatorLambda);
+
+    // Configurable model selection (read-only). Mirrors the supervisor: the
+    // fabricator reads the platform model-config + model-catalog tables to
+    // resolve its model via the shared pure resolver, with a bulletproof
+    // fallback to its previous default. Least privilege: grantReadData only —
+    // the fabricator never writes these tables. Referenced by deterministic
+    // name via fromTableName (owned elsewhere) to avoid a cross-stack
+    // construct dependency. Construct ids are Fabricator-prefixed so they
+    // don't collide with the supervisor's SupervisorModel*TableRef refs.
+    const fabricatorModelConfigTable = dynamodb.Table.fromTableName(this, 'FabricatorModelConfigTableRef', `citadel-model-config-${props.environment}`);
+    const fabricatorModelCatalogTable = dynamodb.Table.fromTableName(this, 'FabricatorModelCatalogTableRef', `citadel-model-catalog-${props.environment}`);
+    fabricatorModelConfigTable.grantReadData(fabricatorLambda);
+    fabricatorModelCatalogTable.grantReadData(fabricatorLambda);
 
     // PutItem/UpdateItem on the durable fabrication-jobs table (owned by
     // BackendStack) so the consumer can upsert PROCESSING/COMPLETED/FAILED

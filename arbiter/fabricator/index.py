@@ -18,10 +18,17 @@ from manifest_proposal import (
 import boto3
 from botocore.config import Config
 from common.region import cross_region_prefix
+from model_config_loader import load_model_id
 
 _REGION = os.environ.get('AWS_REGION', 'us-west-2')
 _MODEL_PREFIX = cross_region_prefix(_REGION)
-FABRICATOR_MODEL_ID = f"{_MODEL_PREFIX}.anthropic.claude-sonnet-4-6"
+# Configurable model selection: resolve the fabricator's model from the
+# platform model-config + catalog tables via the shared pure resolver,
+# falling back to the previous default on any miss.
+FABRICATOR_MODEL_ID = load_model_id(
+    region=_REGION,
+    fallback_model_id=f"{_MODEL_PREFIX}.anthropic.claude-sonnet-4-6",
+)
 
 logger = logging.getLogger(__name__)
 
