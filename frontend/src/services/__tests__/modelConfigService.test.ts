@@ -182,6 +182,21 @@ describe('modelConfigService', () => {
     });
   });
 
+  describe('syncModelCatalog', () => {
+    it('calls mutate with the SyncModelCatalog mutation and returns the unwrapped result', async () => {
+      (serverService.mutate as jest.Mock).mockResolvedValue({
+        syncModelCatalog: { triggered: true, message: 'Model sync started' },
+      });
+
+      const result = await modelConfigService.syncModelCatalog();
+
+      expect(serverService.mutate).toHaveBeenCalledWith(
+        expect.stringContaining('SyncModelCatalog')
+      );
+      expect(result).toEqual({ triggered: true, message: 'Model sync started' });
+    });
+  });
+
   describe('error handling', () => {
     it('logs and rethrows when the query fails', async () => {
       const consoleSpy = jest

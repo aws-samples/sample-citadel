@@ -98,6 +98,10 @@ const setModelCatalogEntryStatusMutation = `
   }
 `;
 
+const syncModelCatalogMutation = `
+  mutation SyncModelCatalog { syncModelCatalog { triggered message } }
+`;
+
 /**
  * Safely parse an AWSJSON field. AppSync returns AWSJSON scalars as JSON
  * strings, but a resolver may also hand back an already-parsed object. When a
@@ -205,6 +209,19 @@ export const modelConfigService = {
       return normalizeCatalogEntry(response.setModelCatalogEntryStatus);
     } catch (error) {
       console.error('Error setting model catalog entry status:', error);
+      throw error;
+    }
+  },
+
+  async syncModelCatalog(): Promise<{ triggered: boolean; message?: string }> {
+    try {
+      const response = await serverService.mutate<{
+        syncModelCatalog: { triggered: boolean; message?: string };
+      }>(syncModelCatalogMutation);
+
+      return response.syncModelCatalog;
+    } catch (error) {
+      console.error('Error syncing model catalog:', error);
       throw error;
     }
   },

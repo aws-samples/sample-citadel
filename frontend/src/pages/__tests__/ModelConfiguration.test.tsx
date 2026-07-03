@@ -133,6 +133,9 @@ jest.mock('@/services/modelConfigService', () => ({
     getModelConfig: jest.fn(),
     updateModelConfig: jest.fn(),
     setModelCatalogEntryStatus: jest.fn(),
+    syncModelCatalog: jest
+      .fn()
+      .mockResolvedValue({ triggered: true, message: 'Model sync started' }),
   },
 }));
 
@@ -259,5 +262,23 @@ describe('ModelConfiguration', () => {
       screen.getByText(/Administrator access required/i),
     ).toBeInTheDocument();
     expect(modelConfigService.listModelCatalog).not.toHaveBeenCalled();
+  });
+
+  it('(e) renders the Model Sync button and triggers a catalog sync on click', async () => {
+    mockAdmin(true);
+    render(<ModelConfiguration />);
+
+    await waitFor(() =>
+      expect(modelConfigService.listModelCatalog).toHaveBeenCalled(),
+    );
+
+    const syncButton = await screen.findByRole('button', {
+      name: /sync model catalog from bedrock/i,
+    });
+    fireEvent.click(syncButton);
+
+    await waitFor(() =>
+      expect(modelConfigService.syncModelCatalog).toHaveBeenCalled(),
+    );
   });
 });

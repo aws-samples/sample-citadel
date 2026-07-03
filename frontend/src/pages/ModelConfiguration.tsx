@@ -1,10 +1,12 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   SlidersHorizontal,
   Cpu,
   ShieldAlert,
   Loader2,
   AlertTriangle,
+  RefreshCw,
+  RotateCw,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { PageContainer } from '../components/PageContainer';
@@ -115,6 +117,7 @@ export function ModelConfiguration() {
 
 function ModelConfigurationContent() {
   const { catalog, config, loading, error, refresh } = useModelConfig();
+  const [syncing, setSyncing] = useState(false);
 
   const enabledEntries = useMemo(
     () => catalog.filter((entry) => entry.status === 'enabled'),
@@ -182,6 +185,21 @@ function ModelConfigurationContent() {
     }
   };
 
+  const handleModelSync = async () => {
+    setSyncing(true);
+    try {
+      const res = await modelConfigService.syncModelCatalog();
+      toast.success(res?.message || 'Model sync started', {
+        description:
+          'New models appear after the sync completes — use Refresh in a few seconds.',
+      });
+    } catch (e: any) {
+      toast.error('Failed to start model sync', { description: e?.message });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   if (loading) {
     return (
       <div
@@ -246,13 +264,31 @@ function ModelConfigurationContent() {
             </p>
           </div>
         </div>
-        <Button
-          variant="outline"
-          className="cursor-pointer"
-          onClick={() => refresh()}
-        >
-          Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            className="cursor-pointer"
+            onClick={handleModelSync}
+            disabled={syncing}
+            aria-label="Sync model catalog from Bedrock"
+          >
+            {syncing ? (
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+            ) : (
+              <RefreshCw className="size-4" aria-hidden="true" />
+            )}
+            Model Sync
+          </Button>
+          <Button
+            variant="outline"
+            className="cursor-pointer"
+            onClick={() => refresh()}
+            aria-label="Refresh model configuration"
+          >
+            <RotateCw className="size-4" aria-hidden="true" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {/* Defaults */}
