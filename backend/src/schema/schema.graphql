@@ -152,6 +152,10 @@ type Mutation {
   # Model config/catalog mutations (admin-gated + validated in the resolver).
   updateModelConfig(input: UpdateModelConfigInput!): ModelConfig
   setModelCatalogEntryStatus(modelKey: String!, status: String!): ModelCatalogEntry
+  # On-demand catalog sync trigger (admin-gated in the resolver). Publishes a
+  # sync_requested event onto the custom agent bus; an event-pattern rule routes
+  # it to the existing discovery Lambda (no direct Lambda invocation).
+  syncModelCatalog: ModelCatalogSyncResult!
   importAgent(input: ImportAgentInput!): ImportAgentResult!
   # Admin/architect governance action: flips an imported agent's
   # governanceAttestation.status from 'pending' to 'attested'. Default Cognito
@@ -562,6 +566,11 @@ type ModelConfig {
   localityMode: String!
   updatedAt: String
   updatedBy: String
+}
+
+type ModelCatalogSyncResult {
+  triggered: Boolean!
+  message: String
 }
 
 input UpdateModelConfigInput {

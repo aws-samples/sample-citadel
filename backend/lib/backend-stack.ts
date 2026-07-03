@@ -557,6 +557,26 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    // On-demand sync: an event-pattern rule on the CUSTOM agent bus routes a
+    // model.catalog.sync_requested event (emitted by the syncModelCatalog
+    // mutation) to the SAME discovery Lambda. EventBridge invokes the target
+    // via the rule's managed permission — no lambda:InvokeFunction IAM grant.
+    const modelCatalogSyncRequestRule = new events.Rule(this, 'ModelCatalogSyncRequestRule', {
+      eventBus: this.agentEventBus,
+      description: 'On-demand model catalog sync (operator-triggered)',
+      eventPattern: {
+        source: ['citadel.backend'],
+        detailType: ['model.catalog.sync_requested'],
+      },
+    });
+
+    modelCatalogSyncRequestRule.addTarget(
+      new targets.LambdaFunction(modelCatalogSyncFunction, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.minutes(30),
+      }),
+    );
+
     // Pre-token-generation trigger: promotes `custom:organization` and
     // `custom:role` attributes onto JWT claims so downstream resolvers can
     // read org/role identity without an AdminGetUserCommand per request.
@@ -2880,6 +2900,13 @@ export class BackendStack extends cdk.Stack {
     modelConfigLambdaDataSource.createResolver("SetModelCatalogEntryStatusResolver", {
       typeName: "Mutation",
       fieldName: "setModelCatalogEntryStatus",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("SyncModelCatalogResolver", {
+      typeName: "Mutation",
+      fieldName: "syncModelCatalog",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });

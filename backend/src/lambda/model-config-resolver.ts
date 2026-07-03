@@ -63,6 +63,9 @@ export const handler = async (event: any) => {
           event,
         );
 
+      case 'syncModelCatalog':
+        return await syncModelCatalog(event);
+
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
@@ -276,4 +279,25 @@ async function setModelCatalogEntryStatus(
   );
 
   return updated;
+}
+
+/**
+ * Admin-only. Requests an on-demand model catalog sync by publishing a
+ * MODEL_CATALOG_SYNC_REQUESTED event onto the custom agent bus. An
+ * event-pattern rule on that bus routes the event to the existing discovery
+ * Lambda — this resolver never invokes that Lambda directly (no
+ * lambda:InvokeFunction). Returns a lightweight acknowledgement.
+ */
+async function syncModelCatalog(event: any) {
+  if (!isAdminFromEvent(event)) {
+    throw new Error('Only administrators can trigger a model catalog sync');
+  }
+  const requestedBy =
+    event.identity?.username || event.identity?.claims?.sub || 'unknown';
+  await publishEvent(
+    createProjectEvent(EventTypes.MODEL_CATALOG_SYNC_REQUESTED, 'catalog', {
+      requestedBy,
+    }),
+  );
+  return { triggered: true, message: 'Model catalog sync started' };
 }

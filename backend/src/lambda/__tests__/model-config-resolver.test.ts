@@ -18,7 +18,10 @@ jest.mock('../../utils/events', () => ({
     payload: any,
     correlationId?: string,
   ) => ({ eventType, projectId, payload, correlationId }),
-  EventTypes: { MODEL_CONFIG_CHANGED: 'model.config.changed' },
+  EventTypes: {
+    MODEL_CONFIG_CHANGED: 'model.config.changed',
+    MODEL_CATALOG_SYNC_REQUESTED: 'model.catalog.sync_requested',
+  },
 }));
 
 import { handler } from '../model-config-resolver';
@@ -291,6 +294,30 @@ describe('model-config-resolver', () => {
         ),
       ).rejects.toThrow('Only administrators');
       expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+  });
+
+  describe('syncModelCatalog', () => {
+    test('admin → publishes sync_requested and returns triggered', async () => {
+      const result = await handler(makeEvent('syncModelCatalog', {}, adminIdentity));
+
+      expect(mockPublishEvent).toHaveBeenCalledTimes(1);
+      expect(mockPublishEvent.mock.calls[0][0]).toMatchObject({
+        eventType: 'model.catalog.sync_requested',
+        projectId: 'catalog',
+        payload: { requestedBy: 'admin-user' },
+      });
+      expect(result).toEqual({
+        triggered: true,
+        message: 'Model catalog sync started',
+      });
+    });
+
+    test('non-admin → throws and does not publish', async () => {
+      await expect(
+        handler(makeEvent('syncModelCatalog', {}, nonAdminIdentity)),
+      ).rejects.toThrow('Only administrators can trigger a model catalog sync');
+      expect(mockPublishEvent).not.toHaveBeenCalled();
     });
   });
 
