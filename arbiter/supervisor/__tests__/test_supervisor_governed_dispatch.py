@@ -21,6 +21,7 @@ automatically on test exit.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from unittest.mock import MagicMock, patch
@@ -448,3 +449,76 @@ def test_app_id_is_forwarded_to_load_governance_state(monkeypatch):
         )
 
     mock_load.assert_called_once_with(registry_id="app-42")
+
+
+# ---------------------------------------------------------------------------
+# Per-agent modelOverride forwarding in process_agent_call (real dispatch)
+#
+# These exercise the ACTUAL payload build (not the governance wrapper) to
+# assert the resolved model id is forwarded in the SQS body when a binding
+# sets modelOverride, and that the payload is byte-for-byte unchanged (no
+# modelOverride key) when no override is set or resolution yields None.
+# ---------------------------------------------------------------------------
+
+_DISPATCH_CONFIG = {"agents": [{
+    "name": "agent-a",
+    "action": {"type": "sqs", "target": "https://sqs.fake/my-queue"},
+    "modelOverride": "some-model-key",
+}]}
+_DISPATCH_CONFIG_NO_OVERRIDE = {"agents": [{
+    "name": "agent-a",
+    "action": {"type": "sqs", "target": "https://sqs.fake/my-queue"},
+}]}
+
+
+def test_process_agent_call_forwards_resolved_model_override(monkeypatch):
+    """Binding sets modelOverride + it resolves -> SQS payload carries the id."""
+    import model_config_loader
+
+    fake_sqs = MagicMock()
+    with patch.object(supervisor_mod, "sqs", fake_sqs), \
+         patch.object(supervisor_mod, "EVENT_BUS_NAME", None), \
+         patch.object(model_config_loader, "resolve_agent_override",
+                      return_value="us.p.model-override") as mock_resolve:
+        supervisor_mod.process_agent_call(
+            _DISPATCH_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
+        )
+
+    # The binding *key* is what gets resolved (not a raw model id).
+    mock_resolve.assert_called_once()
+    assert mock_resolve.call_args[0][0] == "some-model-key"
+
+    fake_sqs.send_message.assert_called_once()
+    body = json.loads(fake_sqs.send_message.call_args[1]["MessageBody"])
+    assert body["modelOverride"] == "us.p.model-override"
+
+
+def test_process_agent_call_omits_model_override_when_binding_absent(monkeypatch):
+    """No modelOverride binding -> payload has no modelOverride key (unchanged)."""
+    fake_sqs = MagicMock()
+    with patch.object(supervisor_mod, "sqs", fake_sqs), \
+         patch.object(supervisor_mod, "EVENT_BUS_NAME", None):
+        supervisor_mod.process_agent_call(
+            _DISPATCH_CONFIG_NO_OVERRIDE, _ORCH, "agent-a", {"x": 1}, "use-1",
+        )
+
+    fake_sqs.send_message.assert_called_once()
+    body = json.loads(fake_sqs.send_message.call_args[1]["MessageBody"])
+    assert "modelOverride" not in body
+
+
+def test_process_agent_call_omits_model_override_when_resolution_none(monkeypatch):
+    """Binding set but resolution yields None -> payload stays clean (dormant)."""
+    import model_config_loader
+
+    fake_sqs = MagicMock()
+    with patch.object(supervisor_mod, "sqs", fake_sqs), \
+         patch.object(supervisor_mod, "EVENT_BUS_NAME", None), \
+         patch.object(model_config_loader, "resolve_agent_override", return_value=None):
+        supervisor_mod.process_agent_call(
+            _DISPATCH_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
+        )
+
+    fake_sqs.send_message.assert_called_once()
+    body = json.loads(fake_sqs.send_message.call_args[1]["MessageBody"])
+    assert "modelOverride" not in body

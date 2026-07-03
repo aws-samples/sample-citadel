@@ -87,6 +87,48 @@ def _install_governed_tool_handler():
     return True
 
 
+def _install_model_override():
+    """Patch ``strands.models.BedrockModel.__init__`` to force ``model_id``.
+
+    Overrides the model id for operator-selected per-agent overrides; a no-op
+    unless ``MODEL_OVERRIDE`` is set in the subprocess environment. Runs inside
+    the subprocess before the agent module is exec'd, so every ``BedrockModel``
+    construction in the loaded module picks up the operator-selected id.
+
+    Graceful degrade when ``strands`` (or its ``models`` submodule) cannot be
+    imported, or when ``BedrockModel`` is absent: WARN to stderr and return
+    False. A missing override layer must never halt an otherwise-valid agent.
+
+    Returns True when the patch was installed, False otherwise.
+    """
+    override = os.environ.get('MODEL_OVERRIDE')
+    if not override:
+        return False
+
+    try:
+        import strands  # type: ignore[import-not-found]  # noqa: F401
+        from strands import models as _sm
+    except ImportError as exc:
+        sys.stderr.write(
+            f'[agent_runner] WARN model override skipped — '
+            f'strands unavailable: {exc}\n'
+        )
+        return False
+
+    Bedrock = getattr(_sm, 'BedrockModel', None)
+    if Bedrock is None:
+        return False
+
+    original_init = Bedrock.__init__
+
+    def _override_init(self, *args, **kwargs):
+        kwargs['model_id'] = override
+        return original_init(self, *args, **kwargs)
+
+    Bedrock.__init__ = _override_init
+    return True
+
+
 def main():
     # Read input from stdin (single JSON line)
     raw = sys.stdin.read()
@@ -99,6 +141,10 @@ def main():
     # construction in the loaded module picks it up. Safe no-op when the
     # subprocess env lacks CITADEL_AGENT_ID (backward compatible).
     _install_governed_tool_handler()
+
+    # Overrides the model id for operator-selected per-agent overrides;
+    # no-op unless MODEL_OVERRIDE is set in the subprocess environment.
+    _install_model_override()
 
     # Load and execute the agent module
     spec = importlib.util.spec_from_file_location("agent_module", module_path)

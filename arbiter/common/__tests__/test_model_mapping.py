@@ -13,6 +13,7 @@ from common.model_mapping import (
     catalog_from_items,
     model_config_from_item,
     resolve_model_id_from_items,
+    resolve_model_key_to_id,
 )
 from common.model_types import (
     CatalogEntry,
@@ -165,3 +166,73 @@ def test_resolve_model_id_from_items_resolves_regional_profile():
     # us-east-1 -> prefix 'us' -> the regional profile is preferred.
     assert result == 'us.p.model-x'
     assert result != _FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# resolve_model_key_to_id — single-key resolution for per-agent overrides
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_model_key_to_id_enabled_key_resolves_regional_profile():
+    catalog_items = [{
+        'modelKey': 'mx',
+        'provider': 'p',
+        'baseModelId': 'p.model-x',
+        'status': 'enabled',
+        'modality': 'text',
+        'invocationMode': 'converse',
+        'supportsTools': True,
+        'supportsSystemPrompt': True,
+        'supportsStreaming': True,
+        'regionProfiles': {'us': 'us.p.model-x', 'global': 'global.p.model-x'},
+    }]
+
+    result = resolve_model_key_to_id('mx', catalog_items, 'us-east-1', LocalityMode.OFF)
+
+    # us-east-1 -> prefix 'us' -> the regional profile is preferred.
+    assert result == 'us.p.model-x'
+
+
+def test_resolve_model_key_to_id_unknown_key_returns_none():
+    catalog_items = [{
+        'modelKey': 'mx',
+        'baseModelId': 'p.model-x',
+        'status': 'enabled',
+        'regionProfiles': {'us': 'us.p.model-x'},
+    }]
+
+    assert resolve_model_key_to_id('missing', catalog_items, 'us-east-1', LocalityMode.OFF) is None
+
+
+def test_resolve_model_key_to_id_disabled_entry_returns_none():
+    catalog_items = [{
+        'modelKey': 'mx',
+        'baseModelId': 'p.model-x',
+        'status': 'disabled',
+        'regionProfiles': {'us': 'us.p.model-x'},
+    }]
+
+    assert resolve_model_key_to_id('mx', catalog_items, 'us-east-1', LocalityMode.OFF) is None
+
+
+def test_resolve_model_key_to_id_empty_or_none_key_returns_none():
+    assert resolve_model_key_to_id('', [], 'us-east-1', LocalityMode.OFF) is None
+    assert resolve_model_key_to_id(None, [], 'us-east-1', LocalityMode.OFF) is None
+
+
+def test_resolve_model_key_to_id_strict_locality_without_regional_returns_none():
+    catalog_items = [{
+        'modelKey': 'mx',
+        'provider': 'p',
+        'baseModelId': 'p.model-x',
+        'status': 'enabled',
+        'modality': 'text',
+        'invocationMode': 'converse',
+        'supportsTools': True,
+        # Only a global profile is known — no regional profile for prefix 'us'.
+        'regionProfiles': {'global': 'global.p.model-x'},
+    }]
+
+    result = resolve_model_key_to_id('mx', catalog_items, 'us-east-1', LocalityMode.STRICT)
+
+    assert result is None

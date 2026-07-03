@@ -434,6 +434,20 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
         "node": agent_name
     }
 
+    # Activate the per-agent modelOverride binding: resolve the configured
+    # model key to a concrete inference-profile id and forward it in the
+    # dispatch payload so the worker can set MODEL_OVERRIDE. Dormant no-op
+    # unless a binding sets modelOverride AND it resolves against the catalog;
+    # any failure is swallowed so dispatch is never broken.
+    if agent_config.get('modelOverride'):
+        try:
+            from model_config_loader import resolve_agent_override
+            _resolved = resolve_agent_override(agent_config['modelOverride'], _REGION)
+            if _resolved:
+                payload['modelOverride'] = _resolved
+        except Exception:
+            pass
+
     print(f"Sending payload to {action_type} queue: {target}")
     print(f"Payload: {json.dumps(payload, default=str)}")
 

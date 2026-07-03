@@ -10,7 +10,7 @@ own fallback. This module is intentionally pure: no boto3, no AWS clients, no
 """
 from __future__ import annotations
 
-from common.model_resolver import resolve_model
+from common.model_resolver import resolve_model, resolve_profile
 from common.model_types import (
     CatalogEntry,
     InvocationMode,
@@ -100,3 +100,22 @@ def resolve_model_id_from_items(
         region,
         fallback_model_id,
     ).model_id
+
+
+def resolve_model_key_to_id(model_key, catalog_items, region, locality_mode):
+    """Resolve a single model key to a concrete inference-profile id.
+
+    Returns the region-appropriate inference-profile id for ``model_key``, or
+    ``None`` when the key is falsy, absent from the catalog, disabled, or when
+    strict data locality blocks every candidate profile. Pure: the caller
+    supplies the raw catalog items and the resolution is delegated to
+    ``resolve_profile``.
+    """
+    if not model_key:
+        return None
+    catalog = catalog_from_items(catalog_items or [])
+    entry = catalog.get(model_key)
+    if entry is None or not entry.is_usable():
+        return None
+    profile_id, _scope, _warns = resolve_profile(entry, region, locality_mode)
+    return profile_id

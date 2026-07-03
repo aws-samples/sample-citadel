@@ -7,7 +7,7 @@ tables via the shared pure resolver.
 """
 from unittest.mock import MagicMock
 
-from model_config_loader import load_model_id
+from model_config_loader import load_model_id, resolve_agent_override
 
 _FALLBACK = 'fallback.provider.model-x'
 _CFG_TABLE = 'citadel-model-config-test'
@@ -118,3 +118,66 @@ def test_returns_fallback_when_config_item_missing(monkeypatch):
         fallback_model_id=_FALLBACK,
         dynamodb_resource=resource_empty,
     ) == _FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# resolve_agent_override — per-agent modelOverride key -> concrete id
+# ---------------------------------------------------------------------------
+
+_OVERRIDE_CFG = {'Item': {'scope': 'platform', 'localityMode': 'off'}}
+_OVERRIDE_CATALOG = {'Items': [{
+    'modelKey': 'mo',
+    'provider': 'p',
+    'baseModelId': 'p.model-o',
+    'status': 'enabled',
+    'modality': 'text',
+    'invocationMode': 'converse',
+    'supportsTools': True,
+    'supportsSystemPrompt': True,
+    'supportsStreaming': True,
+    'regionProfiles': {'us': 'us.p.model-o', 'global': 'global.p.model-o'},
+}]}
+
+
+def test_resolve_agent_override_enabled_key_returns_concrete_id(monkeypatch):
+    monkeypatch.setenv('MODEL_CONFIG_TABLE', _CFG_TABLE)
+    monkeypatch.setenv('MODEL_CATALOG_TABLE', _CAT_TABLE)
+    resource = _make_resource(_OVERRIDE_CFG, _OVERRIDE_CATALOG)
+
+    result = resolve_agent_override('mo', 'us-east-1', dynamodb_resource=resource)
+
+    # us-east-1 -> prefix 'us' -> the regional profile is preferred.
+    assert result == 'us.p.model-o'
+
+
+def test_resolve_agent_override_unknown_key_returns_none(monkeypatch):
+    monkeypatch.setenv('MODEL_CONFIG_TABLE', _CFG_TABLE)
+    monkeypatch.setenv('MODEL_CATALOG_TABLE', _CAT_TABLE)
+    resource = _make_resource(_OVERRIDE_CFG, _OVERRIDE_CATALOG)
+
+    assert resolve_agent_override('missing', 'us-east-1', dynamodb_resource=resource) is None
+
+
+def test_resolve_agent_override_returns_none_when_catalog_env_unset(monkeypatch):
+    monkeypatch.delenv('MODEL_CATALOG_TABLE', raising=False)
+    monkeypatch.setenv('MODEL_CONFIG_TABLE', _CFG_TABLE)
+    resource = MagicMock(name='unused_resource')
+
+    assert resolve_agent_override('mo', 'us-east-1', dynamodb_resource=resource) is None
+    # Catalog table unset -> short-circuit before any table access.
+    resource.Table.assert_not_called()
+
+
+def test_resolve_agent_override_returns_none_when_resource_raises(monkeypatch):
+    monkeypatch.setenv('MODEL_CONFIG_TABLE', _CFG_TABLE)
+    monkeypatch.setenv('MODEL_CATALOG_TABLE', _CAT_TABLE)
+    resource = MagicMock(name='exploding_resource')
+    resource.Table.side_effect = RuntimeError('boom')
+
+    assert resolve_agent_override('mo', 'us-east-1', dynamodb_resource=resource) is None
+
+
+def test_resolve_agent_override_none_or_empty_key_returns_none():
+    # Falsy key short-circuits before any env read or table access.
+    assert resolve_agent_override(None, 'us-east-1') is None
+    assert resolve_agent_override('', 'us-east-1') is None

@@ -19,8 +19,8 @@ container). TTL caching can be layered on later without changing the contract.
 import logging
 import os
 
-from common.model_mapping import resolve_model_id_from_items
-from common.model_types import Modality, SlotRequirements
+from common.model_mapping import resolve_model_id_from_items, resolve_model_key_to_id
+from common.model_types import LocalityMode, Modality, SlotRequirements
 
 logger = logging.getLogger(__name__)
 
@@ -60,3 +60,41 @@ def load_model_id(*, region, fallback_model_id, dynamodb_resource=None):
     except Exception as exc:
         logger.warning('supervisor model resolution failed; using fallback: %s', exc)
         return fallback_model_id
+
+
+def resolve_agent_override(model_key, region, dynamodb_resource=None):
+    """Resolve a per-agent ``modelOverride`` key to a concrete profile id.
+
+    Reads the platform locality mode and the model catalog from DynamoDB and
+    maps ``model_key`` to a region-appropriate inference-profile id via the
+    pure kernel. Returns ``None`` — leaving dispatch on its existing default —
+    when the key is falsy, the catalog table env var is unset, the key is
+    unknown/disabled, strict locality blocks it, or any read fails. Like
+    ``load_model_id`` this never raises: every failure logs a warning and
+    yields ``None`` so a bad override can never break agent dispatch.
+    """
+    if not model_key:
+        return None
+    try:
+        catalog_table = os.environ.get('MODEL_CATALOG_TABLE')
+        config_table = os.environ.get('MODEL_CONFIG_TABLE')
+        if not catalog_table:
+            return None
+        import boto3
+        resource = dynamodb_resource or boto3.resource('dynamodb')
+        locality = 'off'
+        if config_table:
+            config_item = resource.Table(config_table).get_item(
+                Key={'scope': 'platform'}
+            ).get('Item') or {}
+            locality = config_item.get('localityMode') or 'off'
+        catalog_items = resource.Table(catalog_table).scan().get('Items', [])
+        return resolve_model_key_to_id(
+            model_key,
+            catalog_items,
+            region,
+            LocalityMode(locality),
+        )
+    except Exception as exc:
+        logger.warning('agent model override resolution failed; ignoring override: %s', exc)
+        return None

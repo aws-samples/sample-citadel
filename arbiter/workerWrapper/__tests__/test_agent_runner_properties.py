@@ -323,3 +323,72 @@ class TestAgentRunnerGovernanceInjection:
         assert len(captured) == 1
         parsed = json.loads(captured[0])
         assert parsed["response"] == "ran-without-strands"
+
+
+# ---------------------------------------------------------------------------
+# Per-agent model override — agent_runner._install_model_override.
+#
+# When MODEL_OVERRIDE is set in the subprocess env, agent_runner MUST patch
+# strands.models.BedrockModel.__init__ so every BedrockModel(...) built inside
+# the loaded module is forced onto the operator-selected model id. When the
+# env var is unset the patch is a no-op (backward compatible).
+# ---------------------------------------------------------------------------
+
+
+class TestAgentRunnerModelOverride:
+    """MODEL_OVERRIDE subprocess wiring — BedrockModel.model_id patch contract."""
+
+    def test_override_forces_bedrock_model_id_when_env_set(self, monkeypatch):
+        """MODEL_OVERRIDE set -> BedrockModel(...) gets model_id == override."""
+        monkeypatch.setenv("MODEL_OVERRIDE", "us.p.model-override")
+        fake_mod = _install_fake_strands(monkeypatch)
+
+        sys.modules.pop("agent_runner", None)
+        from agent_runner import _install_model_override
+
+        installed = _install_model_override()
+
+        assert installed is True
+        # Even when caller passes a different id, the override wins.
+        model = fake_mod.models.BedrockModel(model_id="original.p.model")
+        assert model.kwargs["model_id"] == "us.p.model-override"
+        # And when caller passes no id at all, the override is injected.
+        model2 = fake_mod.models.BedrockModel()
+        assert model2.kwargs["model_id"] == "us.p.model-override"
+
+    def test_no_patch_when_env_unset(self, monkeypatch):
+        """Backward-compat: no MODEL_OVERRIDE -> returns False, __init__ untouched."""
+        monkeypatch.delenv("MODEL_OVERRIDE", raising=False)
+        fake_mod = _install_fake_strands(monkeypatch)
+        original_init = fake_mod.models.BedrockModel.__init__
+
+        sys.modules.pop("agent_runner", None)
+        from agent_runner import _install_model_override
+
+        installed = _install_model_override()
+
+        assert installed is False
+        assert fake_mod.models.BedrockModel.__init__ is original_init
+        model = fake_mod.models.BedrockModel(model_id="original.p.model")
+        assert model.kwargs["model_id"] == "original.p.model"
+
+    def test_graceful_degrade_when_strands_unimportable(self, monkeypatch):
+        """Missing strands -> WARN + return False, no crash."""
+        monkeypatch.setenv("MODEL_OVERRIDE", "us.p.model-override")
+        monkeypatch.delitem(sys.modules, "strands", raising=False)
+        monkeypatch.delitem(sys.modules, "strands.models", raising=False)
+
+        import builtins
+        real_import = builtins.__import__
+
+        def failing_import(name, *args, **kwargs):
+            if name == "strands" or name.startswith("strands."):
+                raise ImportError("strands unavailable (simulated)")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", failing_import)
+
+        sys.modules.pop("agent_runner", None)
+        from agent_runner import _install_model_override
+
+        assert _install_model_override() is False
