@@ -21,6 +21,11 @@ process.env.EVENT_BUS_NAME = 'citadel-agents-test';
 process.env.USER_POOL_ID = 'us-east-1_test';
 process.env.AUTHORITY_UNITS_TABLE = 'test-authority-units';
 process.env.AWS_REGION = 'us-east-1';
+// This suite exercises addAppComponent with a modelOverride but does not wire a
+// model catalog. Ensure MODEL_CATALOG_TABLE is unset so binding catalog
+// validation deterministically takes its non-breaking no-op path here,
+// independent of any env set by other test files sharing the worker process.
+delete process.env.MODEL_CATALOG_TABLE;
 
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { mockClient } from 'aws-sdk-client-mock';

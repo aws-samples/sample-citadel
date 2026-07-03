@@ -2144,6 +2144,11 @@ export class BackendStack extends cdk.Stack {
           // (ArbiterStack already depends on BackendStack outputs). The IAM
           // grant below references the table by explicit ARN pattern.
           AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
+          // Per-agent-binding modelOverride catalog validation
+          // (assertEnabledCatalogModel). Read-only grant below. Non-breaking:
+          // when this env var is unset the resolver treats validation as a
+          // no-op, so non-deploy/test paths are never blocked.
+          MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'RegistryAgentRecordResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -2154,6 +2159,8 @@ export class BackendStack extends cdk.Stack {
     this.appsTable.grantReadWriteData(registryAgentRecordResolverFunction);
     this.workflowsTable.grantReadWriteData(registryAgentRecordResolverFunction);
     this.agentConfigTable.grantReadData(registryAgentRecordResolverFunction);
+    // Read-only: per-agent-binding modelOverride catalog validation.
+    modelCatalogTable.grantReadData(registryAgentRecordResolverFunction);
     this.agentEventBus.grantPutEventsTo(registryAgentRecordResolverFunction);
     // US-ARB-014: Write access (PutItem/UpdateItem) to the per-env AuthorityUnitsTable
     // owned by ArbiterStack. Referenced by explicit ARN pattern to avoid the
