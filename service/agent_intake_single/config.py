@@ -17,7 +17,6 @@ AGENT_MODEL_ID = load_intake_model_id(region=AWS_REGION, fallback_model_id=_FALL
 AGENT_MODEL = BedrockModel(
     model_id=AGENT_MODEL_ID,
     region_name=AWS_REGION,
-    temperature=0.5,
     max_tokens=8192,
 )
 

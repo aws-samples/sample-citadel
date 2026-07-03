@@ -93,7 +93,7 @@ def _llm(system: str, user: str, max_tokens: int = 8192) -> str:
         modelId=AGENT_MODEL_ID,
         system=[{"text": system}],
         messages=[{"role": "user", "content": [{"text": user}]}],
-        inferenceConfig={"maxTokens": max_tokens, "temperature": 0},
+        inferenceConfig={"maxTokens": max_tokens},
     )
     raw = resp["output"]["message"]["content"][0]["text"].strip()
     if raw.startswith("```"):

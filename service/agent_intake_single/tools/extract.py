@@ -129,7 +129,7 @@ JSON only, no explanation."""
         modelId=EXTRACTION_MODEL,
         system=[{'text': EXTRACTION_SYSTEM_PROMPT}],
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
-        inferenceConfig={'maxTokens': 256, 'temperature': 0.0},
+        inferenceConfig={'maxTokens': 256},
     )
     raw = response['output']['message']['content'][0]['text'].strip()
     # Strip markdown code fences if present

@@ -606,7 +606,6 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
         system=SYSTEM_PROMPT,
         inferenceConfig={
             "maxTokens": 2048,
-            "temperature": 0,
         },
         toolConfig={
             "tools": agent_specs,

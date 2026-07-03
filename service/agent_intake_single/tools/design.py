@@ -106,7 +106,7 @@ After the section content, add a final line in this exact format (do not omit it
         modelId=AGENT_MODEL_ID,
         system=[{'text': SYSTEM_PROMPT}],
         messages=[{'role': 'user', 'content': [{'text': user_message}]}],
-        inferenceConfig={'maxTokens': 8192, 'temperature': 0.5},
+        inferenceConfig={'maxTokens': 8192},
     )
     return response['output']['message']['content'][0]['text']
 
@@ -232,7 +232,7 @@ Return JSON:
     response = bedrock.converse(
         modelId=AGENT_MODEL_ID,
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
-        inferenceConfig={'maxTokens': 2048, 'temperature': 0},
+        inferenceConfig={'maxTokens': 2048},
     )
     raw = response['output']['message']['content'][0]['text']
     import re
@@ -428,7 +428,7 @@ Current defaults:
     response = bedrock.converse(
         modelId=AGENT_MODEL_ID,
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
-        inferenceConfig={'maxTokens': 2048, 'temperature': 0},
+        inferenceConfig={'maxTokens': 2048},
     )
     raw = response['output']['message']['content'][0]['text']
     import re
