@@ -58,6 +58,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select';
+import { ModelOverrideSelect } from '../components/ModelOverrideSelect';
 import { appApiService } from '../services/appApiService';
 import { workflowApiService } from '../services/workflowApiService';
 import { agentConfigService } from '../services/agentConfigService';
@@ -1979,10 +1980,11 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Model Override</label>
-              <Input
+              <ModelOverrideSelect
+                id="model-override"
+                aria-label="Model override"
                 value={editBindingForm.modelOverride}
-                onChange={(e) => setEditBindingForm((f) => ({ ...f, modelOverride: e.target.value }))}
-                className="bg-transparent border border-input text-foreground text-xs"
+                onChange={(v) => setEditBindingForm((f) => ({ ...f, modelOverride: v }))}
               />
             </div>
             <div>
