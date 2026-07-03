@@ -89,7 +89,9 @@ export async function seedModelCatalog(
       new PutCommand({
         TableName: configTable,
         Item: SEED_MODEL_CONFIG_ITEM,
-        ConditionExpression: 'attribute_not_exists(scope)',
+        // `scope` is a DynamoDB reserved word — escape it via an alias.
+        ConditionExpression: 'attribute_not_exists(#scope)',
+        ExpressionAttributeNames: { '#scope': 'scope' },
       }),
     );
     console.log(`✓ Seeded model config entry: ${SEED_MODEL_CONFIG_ITEM.scope}`);

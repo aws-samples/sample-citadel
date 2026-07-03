@@ -52,7 +52,11 @@ describe('seed-model-catalog Lambda', () => {
     const input = configPut!.args[0].input;
     expect(input.Item!.scope).toBe('platform');
     expect(input.Item!.globalDefaultKey).toBe('anthropic-claude-sonnet-5');
-    expect(input.ConditionExpression).toContain('attribute_not_exists');
+    // Regression guard: `scope` is a DynamoDB reserved word, so the condition
+    // must use an escaped #scope alias. aws-sdk-client-mock does not validate
+    // reserved words, so assert the escaped form explicitly.
+    expect(input.ConditionExpression).toBe('attribute_not_exists(#scope)');
+    expect(input.ExpressionAttributeNames).toEqual({ '#scope': 'scope' });
   });
 
   test('swallows ConditionalCheckFailedException so re-runs never clobber operator changes', async () => {
