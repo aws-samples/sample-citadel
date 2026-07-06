@@ -99,6 +99,7 @@ jest.mock('../ui/alert', () => ({
 
 import {
   DynamicConnectorForm,
+  isValidArn,
   type ConnectorFormData,
 } from '../DynamicConnectorForm';
 import {
@@ -384,5 +385,40 @@ describe('DynamicConnectorForm — MCP_SERVER OAuth2 validation', () => {
     const nameError = document.getElementById('name-error');
     expect(nameError).not.toBeNull();
     expect(nameError).toHaveAttribute('role', 'alert');
+  });
+});
+
+/**
+ * isValidArn — ARN format validation helper.
+ *
+ * Regression for #20: Lambda function ARNs use a colon in the resource segment
+ * ('function:<name>'), which must be accepted alongside IAM role ARNs that use
+ * a slash ('role/<name>').
+ */
+describe('isValidArn', () => {
+  it('accepts a Lambda function ARN (colon in resource segment)', () => {
+    expect(
+      isValidArn('arn:aws:lambda:us-east-1:123456789012:function:hubspot-reader-dev'),
+    ).toBe(true);
+  });
+
+  it('accepts an IAM role ARN (slash in resource segment)', () => {
+    expect(isValidArn('arn:aws:iam::123456789012:role/citadel-lambdas')).toBe(true);
+  });
+
+  it('rejects a malformed ARN with a non-12-digit account id', () => {
+    expect(
+      isValidArn('arn:aws:lambda:us-east-1:12345:function:hubspot-reader-dev'),
+    ).toBe(false);
+  });
+
+  it('rejects a string with a bad prefix', () => {
+    expect(
+      isValidArn('arn:azure:lambda:us-east-1:123456789012:function:foo'),
+    ).toBe(false);
+  });
+
+  it('rejects an ARN missing the resource segment', () => {
+    expect(isValidArn('arn:aws:lambda:us-east-1:123456789012:')).toBe(false);
   });
 });

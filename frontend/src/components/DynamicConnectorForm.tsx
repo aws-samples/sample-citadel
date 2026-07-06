@@ -725,8 +725,11 @@ function isValidHttpsUrl(url: string): boolean {
  * ARN format validation helper
  * Requirements: 1.8, 1.9, 2.10, 4.6, 8.5, 8.6
  */
-function isValidArn(arn: string): boolean {
-  const arnRegex = /^arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:[a-zA-Z0-9/_-]+$/;
+export function isValidArn(arn: string): boolean {
+  // Resource segment allows ':' (e.g. Lambda 'function:<name>') and '/'
+  // (e.g. IAM 'role/<name>'). ':' is placed before the trailing '-' so '-'
+  // stays literal.
+  const arnRegex = /^arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:[a-zA-Z0-9/_:-]+$/;
   return arnRegex.test(arn);
 }
 
