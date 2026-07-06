@@ -117,17 +117,21 @@ describe('organization-resolver', () => {
     // client-side, failing closed on the first match.
 
     // (b): a delete SUCCEEDS when users exist in the pool but NONE carry
-    // custom:organization === orgId — the resolver must discriminate on the
-    // attribute value, not merely on "any users returned".
-    test('deletes organization when no user matches the orgId, then calls DeleteCommand', async () => {
-      // Existence check returns the org row.
+    // custom:organization === the org NAME — the resolver must discriminate on
+    // the attribute value, not merely on "any users returned". The org's
+    // orgId (a UUID) differs from its name, so a user still carrying the orgId
+    // as its attribute value must NOT block the delete (Issue #19).
+    test('deletes organization when no user matches the org name, then calls DeleteCommand', async () => {
+      // Existence check returns the org row (name differs from orgId).
       dynamoMock.on(ScanCommand).resolves({
-        Items: [{ orgId: 'org-1', name: 'Org' }],
+        Items: [{ orgId: 'org-1', name: 'Operations' }],
       });
-      // Users exist but NONE carry custom:organization === 'org-1'.
+      // Users exist but NONE carry custom:organization === 'Operations'.
+      // 'other-1' still holds the orgId UUID — proving the guard keys off name.
       cognitoMock.on(ListUsersCommand).resolves({
         Users: [
-          { Username: 'other-1', Attributes: [{ Name: 'custom:organization', Value: 'different-org' }] },
+          { Username: 'other-1', Attributes: [{ Name: 'custom:organization', Value: 'org-1' }] },
+          { Username: 'diff-org', Attributes: [{ Name: 'custom:organization', Value: 'different-org' }] },
           { Username: 'no-attr', Attributes: [] },
         ],
       });
@@ -144,7 +148,7 @@ describe('organization-resolver', () => {
     // that server-side filter is precisely what Cognito rejects.
     test('does NOT send a custom: attribute Filter to ListUsers', async () => {
       dynamoMock.on(ScanCommand).resolves({
-        Items: [{ orgId: 'org-1', name: 'Org' }],
+        Items: [{ orgId: 'org-1', name: 'Operations' }],
       });
       cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
       dynamoMock.on(DeleteCommand).resolves({});
@@ -160,14 +164,14 @@ describe('organization-resolver', () => {
     });
 
     // (a): delete is BLOCKED (fail-closed) when a returned user's
-    // custom:organization attribute equals the target orgId.
-    test('throws when a user custom:organization matches orgId, DeleteCommand NOT called', async () => {
+    // custom:organization attribute equals the target org NAME.
+    test('throws when a user custom:organization matches the org name, DeleteCommand NOT called', async () => {
       dynamoMock.on(ScanCommand).resolves({
-        Items: [{ orgId: 'org-1', name: 'Org' }],
+        Items: [{ orgId: 'org-1', name: 'Operations' }],
       });
       cognitoMock.on(ListUsersCommand).resolves({
         Users: [
-          { Username: 'still-here-user', Attributes: [{ Name: 'custom:organization', Value: 'org-1' }] },
+          { Username: 'still-here-user', Attributes: [{ Name: 'custom:organization', Value: 'Operations' }] },
         ],
       });
 
@@ -179,12 +183,34 @@ describe('organization-resolver', () => {
       expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(0);
     });
 
+    // (a'): regression for Issue #19 — the guard must key off the org NAME,
+    // not the orgId. A user whose custom:organization holds the orgId UUID
+    // (which is NEVER what the attribute actually stores) must NOT block the
+    // delete; the pre-fix code compared against orgId and would wrongly block
+    // here while wrongly allowing the real name-valued case above.
+    test('does NOT block on the orgId UUID (custom:organization stores the name, not the id)', async () => {
+      dynamoMock.on(ScanCommand).resolves({
+        Items: [{ orgId: 'org-1', name: 'Operations' }],
+      });
+      cognitoMock.on(ListUsersCommand).resolves({
+        Users: [
+          { Username: 'carries-uuid', Attributes: [{ Name: 'custom:organization', Value: 'org-1' }] },
+        ],
+      });
+      dynamoMock.on(DeleteCommand).resolves({});
+
+      const result = await handler(makeEvent('deleteOrganization', { orgId: 'org-1' }));
+
+      expect(result.success).toBe(true);
+      expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(1);
+    });
+
     // (d): pagination — a match on the SECOND page must still block the delete.
     // Page 1 returns a non-matching user + PaginationToken; page 2 returns the
     // match. The resolver must follow the token and catch it.
     test('paginates ListUsers and blocks the delete on a second-page match', async () => {
       dynamoMock.on(ScanCommand).resolves({
-        Items: [{ orgId: 'org-1', name: 'Org' }],
+        Items: [{ orgId: 'org-1', name: 'Operations' }],
       });
       cognitoMock
         .on(ListUsersCommand)
@@ -196,7 +222,7 @@ describe('organization-resolver', () => {
         })
         .resolvesOnce({
           Users: [
-            { Username: 'matching-user', Attributes: [{ Name: 'custom:organization', Value: 'org-1' }] },
+            { Username: 'matching-user', Attributes: [{ Name: 'custom:organization', Value: 'Operations' }] },
           ],
         });
 
