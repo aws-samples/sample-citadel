@@ -123,12 +123,27 @@ async function deleteOrganization(orgId: string): Promise<UserManagementResponse
     throw new Error(`Organization with ID "${orgId}" not found`);
   }
 
+  //    The Cognito `custom:organization` attribute stores the org NAME, not
+  //    the orgId — it is written verbatim from the (name-valued) org picker in
+  //    assignUserRole, read back verbatim by listUsers, and used name-first for
+  //    org scoping everywhere else (see extractOrgFromEvent + project/workflow
+  //    resolvers). The orphan-user check below must therefore compare against
+  //    the org NAME; comparing against the orgId (a generated UUID) would never
+  //    match and would silently bypass the guard (Issue #19).
+  const orgName = (existingOrgs.Items[0] as { name?: string }).name;
+  if (!orgName) {
+    // Fail closed: without the name we cannot correlate users to this org.
+    throw new Error(
+      'Cannot delete organization: organization record has no name; orphan-user verification cannot run.'
+    );
+  }
+
   // 2. Orphan-user verification.
   //
   //    The user↔org link lives in the Cognito `custom:organization`
   //    user-pool attribute (there is no DynamoDB users table). Deleting
   //    an org while users still point to it leaves dangling JWT claims
-  //    and risks cross-tenant access if the orgId is ever reused.
+  //    and risks cross-tenant access if the org name is ever reused.
   //
   //    Mirror the `createOrganization` "pre-check + throw" idiom used
   //    above — enumerate users and fail closed if any still point at this
@@ -151,8 +166,9 @@ async function deleteOrganization(orgId: string): Promise<UserManagementResponse
   //    — surfaced to the client as "Input fails to satisfy the constraints"
   //    and logged as Lambda:Unhandled (Issue #14, 2nd bug). We therefore PAGE
   //    through the pool (max 60 users per page) and match custom:organization
-  //    CLIENT-SIDE, failing closed on the FIRST match. Bounded by design: we
-  //    check-and-early-exit per page and never buffer an unbounded user array.
+  //    (the org NAME, per the note above) CLIENT-SIDE, failing closed on the
+  //    FIRST match. Bounded by design: we check-and-early-exit per page and
+  //    never buffer an unbounded user array.
   let paginationToken: string | undefined;
   do {
     const usersResponse = await cognitoClient.send(
@@ -165,7 +181,7 @@ async function deleteOrganization(orgId: string): Promise<UserManagementResponse
 
     for (const user of usersResponse.Users ?? []) {
       const assignedToOrg = (user.Attributes ?? []).some(
-        (attr) => attr.Name === 'custom:organization' && attr.Value === orgId
+        (attr) => attr.Name === 'custom:organization' && attr.Value === orgName
       );
       if (assignedToOrg) {
         throw new Error(
