@@ -15,7 +15,7 @@ jest.mock('../../utils/events', () => ({
   createProjectEvent: (
     eventType: string,
     projectId: string,
-    payload: any,
+    payload: unknown,
     correlationId?: string,
   ) => ({ eventType, projectId, payload, correlationId }),
   EventTypes: {
@@ -44,7 +44,7 @@ describe('model-config-resolver', () => {
   const adminIdentity = { username: 'admin-user', 'cognito:groups': ['admin'] };
   const nonAdminIdentity = { username: 'dev-user', 'cognito:groups': ['developer'] };
 
-  const makeEvent = (fieldName: string, args: any, identity?: any) => ({
+  const makeEvent = (fieldName: string, args: unknown, identity?: unknown) => ({
     info: { fieldName },
     arguments: args,
     identity,

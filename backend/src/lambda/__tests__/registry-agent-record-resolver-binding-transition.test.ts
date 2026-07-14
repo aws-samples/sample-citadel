@@ -540,7 +540,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
       .on(GetCommand, { TableName: CATALOG_TABLE, Key: { modelKey: ENABLED_KEY } })
       .resolves({ Item: { modelKey: ENABLED_KEY, status: 'enabled' } });
 
-    const result: any = await handler(bindingEvent(ENABLED_KEY), {} as any, {} as any);
+    const result = await handler(bindingEvent(ENABLED_KEY));
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
     expect(result).toMatchObject({
@@ -553,7 +553,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
     ddbMock.on(GetCommand).resolves({}); // no Item
 
     await expect(
-      handler(bindingEvent(UNKNOWN_KEY), {} as any, {} as any),
+      handler(bindingEvent(UNKNOWN_KEY)),
     ).rejects.toThrow('not found in the model catalog');
     // Nothing persisted when validation fails.
     expect(updateResourceMock).not.toHaveBeenCalled();
@@ -566,7 +566,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
       .resolves({ Item: { modelKey: DISABLED_KEY, status: 'disabled' } });
 
     await expect(
-      handler(bindingEvent(DISABLED_KEY), {} as any, {} as any),
+      handler(bindingEvent(DISABLED_KEY), {} as any),
     ).rejects.toThrow('is not enabled');
     expect(updateResourceMock).not.toHaveBeenCalled();
   });
@@ -574,7 +574,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
   test('(d) empty string clears the override without catalog validation', async () => {
     seedApp(LEGACY_KEY);
 
-    const result: any = await handler(bindingEvent(''), {} as any, {} as any);
+    const result = await handler(bindingEvent(''));
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(result).toMatchObject({
@@ -585,7 +585,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
   test('(e) unchanged legacy value is grandfathered — no catalog validation', async () => {
     seedApp(LEGACY_KEY);
 
-    const result: any = await handler(bindingEvent(LEGACY_KEY), {} as any, {} as any);
+    const result = await handler(bindingEvent(LEGACY_KEY));
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(result).toMatchObject({
@@ -598,9 +598,8 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     seedApp();
 
-    const result: any = await handler(
+    const result = await handler(
       bindingEvent('catalog-model-some-new'),
-      {} as any,
       {} as any,
     );
 
