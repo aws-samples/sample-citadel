@@ -35,6 +35,9 @@ _arbiter_dir = os.path.dirname(_supervisor_dir)
 if _arbiter_dir not in sys.path:
     sys.path.insert(0, _arbiter_dir)
 
+from common.region import cross_region_prefix
+from model_config_loader import load_model_id
+
 
 def _load_governance_package():
     """Load ``arbiter/governance/`` as a package under a private name.
@@ -107,18 +110,11 @@ except ImportError as e:  # pragma: no cover — degraded-mode fallback
     )
     _GOVERNANCE_AVAILABLE = False
 
-def _cross_region_prefix(region: str) -> str:
-    if region.startswith('us-'): return 'us'
-    if region.startswith('eu-'): return 'eu'
-    if region == 'ap-southeast-2': return 'au'
-    if region.startswith('ap-'): return 'apac'
-    if region.startswith('me-'): return 'me'
-    if region.startswith('ca-'): return 'ca'
-    if region.startswith('sa-'): return 'sa'
-    return 'us'
-
 _REGION = os.environ.get('AWS_REGION', 'us-west-2')
-MODEL_ID = f"{_cross_region_prefix(_REGION)}.anthropic.claude-sonnet-4-6"
+MODEL_ID = load_model_id(
+    region=_REGION,
+    fallback_model_id=f"{cross_region_prefix(_REGION)}.anthropic.claude-sonnet-4-6",
+)
 
 EVENT_BUS_NAME = os.environ.get('EVENT_BUS_NAME')
 ORCHESTRATION_TABLE = os.environ.get('ORCHESTRATION_TABLE')
@@ -438,6 +434,27 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
         "node": agent_name
     }
 
+    # Activate the per-agent modelOverride binding: resolve the configured
+    # model key to a concrete inference-profile id and forward it in the
+    # dispatch payload so the worker can set MODEL_OVERRIDE. Dormant no-op
+    # unless a binding sets modelOverride AND it resolves against the catalog;
+    # any failure is swallowed so dispatch is never broken.
+    if agent_config.get('modelOverride'):
+        try:
+            from model_config_loader import resolve_agent_override
+            _resolved = resolve_agent_override(agent_config['modelOverride'], _REGION)
+            if _resolved:
+                payload['modelOverride'] = _resolved
+        except Exception as e:
+            logger.warning(
+                "modelOverride resolution failed for agent '%s' "
+                "(override key '%s', region '%s'): %s",
+                agent_name,
+                agent_config['modelOverride'],
+                _REGION,
+                str(e),
+            )
+
     print(f"Sending payload to {action_type} queue: {target}")
     print(f"Payload: {json.dumps(payload, default=str)}")
 
@@ -596,7 +613,6 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
         system=SYSTEM_PROMPT,
         inferenceConfig={
             "maxTokens": 2048,
-            "temperature": 0,
         },
         toolConfig={
             "tools": agent_specs,

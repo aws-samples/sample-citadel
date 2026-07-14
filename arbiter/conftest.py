@@ -87,14 +87,23 @@ for _subdir in _MODULE_DIRS:
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# Names that collide across subdirs (``index``) or are shadowed by the
-# ``arbiter/governance/`` package (``governance``).
+# Make arbiter-root packages (e.g. ``common``, ``catalog``) importable during
+# test collection regardless of import order. Appended (lowest priority) so it
+# never shadows the per-subdir ``index`` resolution handled below.
+if _ARBITER_ROOT not in sys.path:
+    sys.path.append(_ARBITER_ROOT)
+
+# Names that collide across subdirs (``index``, ``model_config_loader``)
+# or are shadowed by the ``arbiter/governance/`` package (``governance``).
 _AMBIGUOUS_MODULE_NAMES = {
     # After the US-ARB-012a follow-up (#6) renamed
     # ``arbiter/workerWrapper/governance.py`` to
-    # ``worker_governance.py``, the only remaining cross-subdir
-    # basename collision in this tree is ``index.py`` (6 copies).
+    # ``worker_governance.py``, the cross-subdir basename collisions in
+    # this tree are ``index.py`` (6 copies) and, from the configurable
+    # model-selection feature, ``model_config_loader.py`` (2 copies:
+    # fabricator/ and supervisor/).
     "index",
+    "model_config_loader",
 }
 
 

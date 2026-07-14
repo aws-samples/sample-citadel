@@ -314,6 +314,41 @@ function getSharedDeps(): ApiKeyDeps & AccessControlDeps {
   };
 }
 
+/**
+ * Validates that a per-agent-binding `modelOverride` refers to a model that
+ * exists in the shared model catalog AND is currently `enabled`.
+ *
+ * Non-breaking / grandfathering contract:
+ *   - When `MODEL_CATALOG_TABLE` is not configured (local runs and unit-test
+ *     paths that do not wire the catalog), this is a deliberate no-op: it logs
+ *     a warning and returns, so unconfigured environments are never blocked.
+ *   - Callers only invoke this for a NEW or CHANGED, non-empty override, so
+ *     legacy/unchanged stored values are grandfathered and never re-validated.
+ *
+ * Throws a descriptive Error when the model key is unknown or disabled. Uses
+ * the file's shared lazy DynamoDBDocumentClient (read-only GetItem).
+ */
+async function assertEnabledCatalogModel(modelKey: string): Promise<void> {
+  const table = process.env.MODEL_CATALOG_TABLE;
+  if (!table) {
+    console.warn(
+      'MODEL_CATALOG_TABLE is not configured; skipping modelOverride catalog validation',
+    );
+    return;
+  }
+  const res = await getDocClient().send(
+    new GetCommand({ TableName: table, Key: { modelKey } }),
+  );
+  if (!res.Item) {
+    throw new Error(
+      `Invalid modelOverride '${modelKey}': not found in the model catalog`,
+    );
+  }
+  if (res.Item.status !== 'enabled') {
+    throw new Error(`Invalid modelOverride '${modelKey}': model is not enabled`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Manifest helpers — the RegistryRecord.customDescriptorContent JSON is the
 // single source of truth for AgentApp state during the deprecation window.
@@ -1017,6 +1052,16 @@ async function updateAgentBinding(
     updatedBinding.toolRestrictions = input.toolRestrictions;
   }
   if (input.modelOverride !== undefined) {
+    // Catalog validation on CHANGE only. A new, non-empty override that
+    // differs from the currently-stored binding value must reference an
+    // enabled catalog model. Unchanged/legacy values and the empty string
+    // (which clears the override) are grandfathered — never re-validated.
+    if (
+      input.modelOverride !== '' &&
+      input.modelOverride !== bindings[idx].modelOverride
+    ) {
+      await assertEnabledCatalogModel(input.modelOverride);
+    }
     updatedBinding.modelOverride = input.modelOverride;
   }
   if (input.status !== undefined) {
@@ -1063,6 +1108,13 @@ async function addAppComponent(
 
   switch (component.type.toLowerCase()) {
     case 'agent': {
+      // Creation-path catalog validation: a non-empty modelOverride supplied
+      // at bind time must reference an enabled catalog model before we
+      // persist. Absent/empty override → no validation (grandfathered; mirrors
+      // updateAgentBinding).
+      if (typeof data.modelOverride === 'string' && data.modelOverride !== '') {
+        await assertEnabledCatalogModel(data.modelOverride);
+      }
       componentId = data.agentId;
       const existing = manifest.agentBindings || [];
       const filtered = existing.filter((b: any) => b.agentId !== data.agentId);

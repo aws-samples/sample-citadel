@@ -54,6 +54,15 @@ jest.mock('@/components/ui/input', () => ({
   Input: (props: any) => React.createElement('input', props),
 }));
 
+jest.mock('@/components/ModelOverrideSelect', () => ({
+  ModelOverrideSelect: (props: any) =>
+    React.createElement('input', {
+      'data-testid': 'model-override',
+      value: props.value || '',
+      onChange: (e: any) => props.onChange(e.target.value),
+    }),
+}));
+
 // Mock OrganizationContext
 jest.mock('@/contexts/OrganizationContext', () => ({
   useOrganization: () => ({ selectedOrganization: 'org-1' }),

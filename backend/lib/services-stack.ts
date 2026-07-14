@@ -36,6 +36,7 @@ export function crossRegionPrefix(region: string): string {
   if (region.startsWith('me-')) return 'me';
   if (region.startsWith('ca-')) return 'ca';
   if (region.startsWith('sa-')) return 'sa';
+  if (region.startsWith('af-')) return 'af';
   return 'us';
 }
 
@@ -875,6 +876,8 @@ def handler(event, context):
           AGENT_CONFIG_TABLE: `citadel-agents-${props.environment}`,
           PROJECTS_TABLE: `citadel-projects-${props.environment}`,
           CONVERSATIONS_TABLE: `citadel-conversations-${props.environment}`,
+          MODEL_CONFIG_TABLE: `citadel-model-config-${props.environment}`,
+          MODEL_CATALOG_TABLE: `citadel-model-catalog-${props.environment}`,
           // Registry id so the intake catalog (list_factory_agents /
           // plan_fabrication) can read fabricated agents from the AgentCore
           // Registry. Conditionally wired, mirroring the fabricator.
@@ -896,6 +899,13 @@ def handler(event, context):
       const conversationsTable = dynamodb.Table.fromTableName(this, 'ConversationsTableRef', `citadel-conversations-${props.environment}`);
       projectsTable.grantReadWriteData(agentIntakeSingleRuntime);
       conversationsTable.grantReadData(agentIntakeSingleRuntime);
+
+      // Grant read-only access to the model config + catalog tables for
+      // configurable model selection (falls back to env defaults if absent)
+      const modelConfigTable = dynamodb.Table.fromTableName(this, 'ModelConfigTableRef', `citadel-model-config-${props.environment}`);
+      const modelCatalogTable = dynamodb.Table.fromTableName(this, 'ModelCatalogTableRef', `citadel-model-catalog-${props.environment}`);
+      modelConfigTable.grantReadData(agentIntakeSingleRuntime);
+      modelCatalogTable.grantReadData(agentIntakeSingleRuntime);
 
       new ssm.StringParameter(this, 'IntakeAgentParam', {
         parameterName: `/citadel/agents/agent_intake_single-${props.environment}`,

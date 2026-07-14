@@ -14,6 +14,7 @@ export const ROUTE_PATHS = {
   governance: '/governance',
   integrations: '/integrations',
   'data-stores': '/data-stores',
+  'model-config': '/model-config',
   team: '/team',
 } as const;
 

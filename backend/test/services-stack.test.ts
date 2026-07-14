@@ -286,6 +286,10 @@ describe('crossRegionPrefix', () => {
     expect(crossRegionPrefix('sa-east-1')).toBe('sa');
   });
 
+  test('af-* regions map to "af"', () => {
+    expect(crossRegionPrefix('af-south-1')).toBe('af');
+  });
+
   test('unknown regions default to "us"', () => {
     expect(crossRegionPrefix('xx-unknown-9')).toBe('us');
   });

@@ -27,12 +27,15 @@ process.env.AUTHORITY_UNITS_TABLE = 'test-authority-units';
 process.env.APPSYNC_ENDPOINT =
   'https://test-api.appsync-api.us-east-1.amazonaws.com/graphql';
 process.env.AWS_REGION = 'us-east-1';
+process.env.MODEL_CATALOG_TABLE = 'citadel-model-catalog-test';
 
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 import { TypeMismatchError } from '../../services/registry-service';
 
 const ebMock = mockClient(EventBridgeClient);
+const ddbMock = mockClient(DynamoDBDocumentClient);
 
 // A stable jest.fn() trio so individual tests can override behaviour per-case
 // without re-wiring the module mock. `updateResource` is overridden to honour
@@ -455,5 +458,156 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
       ([type, id]) => type === 'agent' && id !== APP_RECORD_ID,
     );
     expect(agentLookups).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// modelOverride catalog validation (feature/configurable-model-selection)
+//
+// Non-breaking contract:
+//   - Validation runs ONLY when a non-empty modelOverride is set/changed to a
+//     value that differs from the currently-stored binding value.
+//   - Empty string (clear), unchanged values, and legacy values are
+//     grandfathered — never validated.
+//   - When MODEL_CATALOG_TABLE is not configured the helper is a safe no-op.
+// Uses generic placeholder catalog keys — no real model-id literals.
+// ---------------------------------------------------------------------------
+describe('updateAgentBinding — modelOverride catalog validation', () => {
+  const CATALOG_TABLE = 'citadel-model-catalog-test';
+  const ENABLED_KEY = 'catalog-model-enabled';
+  const DISABLED_KEY = 'catalog-model-disabled';
+  const UNKNOWN_KEY = 'catalog-model-unknown';
+  const LEGACY_KEY = 'legacy-model-key';
+
+  beforeEach(() => {
+    resetMockRegistry();
+    ebMock.reset();
+    ebMock.on(PutEventsCommand).resolves({});
+    ddbMock.reset();
+    resolveRecordIdMock.mockReset();
+    getResourceMock.mockReset();
+    updateResourceMock.mockReset();
+    updateResourceMock.mockImplementation(async (_type: any, id: any, input: any) => ({
+      recordId: id,
+      name: 'Test App',
+      status: 'DRAFT',
+      customDescriptorContent: input.customMetadata,
+    }));
+    process.env.MODEL_CATALOG_TABLE = CATALOG_TABLE;
+  });
+
+  afterAll(() => {
+    delete process.env.MODEL_CATALOG_TABLE;
+  });
+
+  // Seeds the app lookup (getResource call #1) with a single agent binding
+  // that optionally already carries a stored modelOverride.
+  function seedApp(existingModelOverride?: string) {
+    getResourceMock.mockResolvedValueOnce({
+      recordId: APP_RECORD_ID,
+      name: 'Test App',
+      status: 'DRAFT',
+      customDescriptorContent: JSON.stringify({
+        appId: APP_RECORD_ID,
+        manifest: {
+          orgId: 'org-1',
+          version: 1,
+          status: 'DRAFT',
+          agentBindings: [
+            {
+              agentId: AGENT_RECORD_ID,
+              status: 'DESIGN',
+              addedAt: 't',
+              ...(existingModelOverride !== undefined && {
+                modelOverride: existingModelOverride,
+              }),
+            },
+          ],
+        },
+      }),
+    });
+  }
+
+  function bindingEvent(modelOverride: string) {
+    return makeEvent('updateAgentBinding', {
+      input: { appId: APP_RECORD_ID, agentId: AGENT_RECORD_ID, modelOverride },
+    });
+  }
+
+  test('(a) changing modelOverride to an enabled catalog key succeeds', async () => {
+    seedApp();
+    ddbMock
+      .on(GetCommand, { TableName: CATALOG_TABLE, Key: { modelKey: ENABLED_KEY } })
+      .resolves({ Item: { modelKey: ENABLED_KEY, status: 'enabled' } });
+
+    const result = await handler(bindingEvent(ENABLED_KEY));
+
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
+    expect(result).toMatchObject({
+      agentBindings: [expect.objectContaining({ modelOverride: ENABLED_KEY })],
+    });
+  });
+
+  test('(b) changing modelOverride to an unknown catalog key throws', async () => {
+    seedApp();
+    ddbMock.on(GetCommand).resolves({}); // no Item
+
+    await expect(
+      handler(bindingEvent(UNKNOWN_KEY)),
+    ).rejects.toThrow('not found in the model catalog');
+    // Nothing persisted when validation fails.
+    expect(updateResourceMock).not.toHaveBeenCalled();
+  });
+
+  test('(c) changing modelOverride to a disabled catalog key throws', async () => {
+    seedApp();
+    ddbMock
+      .on(GetCommand)
+      .resolves({ Item: { modelKey: DISABLED_KEY, status: 'disabled' } });
+
+    await expect(
+      handler(bindingEvent(DISABLED_KEY)),
+    ).rejects.toThrow('is not enabled');
+    expect(updateResourceMock).not.toHaveBeenCalled();
+  });
+
+  test('(d) empty string clears the override without catalog validation', async () => {
+    seedApp(LEGACY_KEY);
+
+    const result = await handler(bindingEvent(''));
+
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(result).toMatchObject({
+      agentBindings: [expect.objectContaining({ modelOverride: '' })],
+    });
+  });
+
+  test('(e) unchanged legacy value is grandfathered — no catalog validation', async () => {
+    seedApp(LEGACY_KEY);
+
+    const result = await handler(bindingEvent(LEGACY_KEY));
+
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(result).toMatchObject({
+      agentBindings: [expect.objectContaining({ modelOverride: LEGACY_KEY })],
+    });
+  });
+
+  test('unset MODEL_CATALOG_TABLE is a safe no-op (changed override still persists)', async () => {
+    delete process.env.MODEL_CATALOG_TABLE;
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    seedApp();
+
+    const result = await handler(bindingEvent('catalog-model-some-new'));
+
+    // No catalog read attempted, mutation still persisted (non-breaking).
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalled();
+    expect(result).toMatchObject({
+      agentBindings: [
+        expect.objectContaining({ modelOverride: 'catalog-model-some-new' }),
+      ],
+    });
+    warnSpy.mockRestore();
   });
 });

@@ -50,7 +50,7 @@ Write in markdown. Start with ## {section['title']}. Be specific and concise —
             modelId=AGENT_MODEL_ID,
             system=[{'text': SYSTEM_PROMPT}],
             messages=[{'role': 'user', 'content': [{'text': prompt}]}],
-            inferenceConfig={'maxTokens': 4096, 'temperature': 0.4},
+            inferenceConfig={'maxTokens': 4096},
         )
         content = response['output']['message']['content'][0]['text']
         parts.append(content)
@@ -203,7 +203,7 @@ Current config:
         response = bedrock.converse(
             modelId=AGENT_MODEL_ID,
             messages=[{'role': 'user', 'content': [{'text': patch_prompt}]}],
-            inferenceConfig={'maxTokens': 256, 'temperature': 0},
+            inferenceConfig={'maxTokens': 256},
         )
         import re
         raw = response['output']['message']['content'][0]['text']

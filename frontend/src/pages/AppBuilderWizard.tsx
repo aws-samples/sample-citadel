@@ -21,6 +21,7 @@ import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Textarea } from '../components/ui/textarea';
 import { Badge } from '../components/ui/badge';
+import { ModelOverrideSelect } from '../components/ModelOverrideSelect';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { appApiService } from '../services/appApiService';
 import { agentConfigService } from '../services/agentConfigService';
@@ -442,11 +443,10 @@ export function AppBuilderWizard({ onComplete, prefill }: AppBuilderWizardProps)
                           onChange={(e) => updateAgentOverride(agent.agentId, 'toolRestrictions', e.target.value)}
                           className="bg-transparent border border-border text-foreground text-xs"
                         />
-                        <Input
-                          placeholder="Model override (e.g. us.anthropic.claude-sonnet-4-6)"
+                        <ModelOverrideSelect
+                          aria-label="Model override"
                           value={overrides.modelOverride}
-                          onChange={(e) => updateAgentOverride(agent.agentId, 'modelOverride', e.target.value)}
-                          className="bg-transparent border border-border text-foreground text-xs"
+                          onChange={(v) => updateAgentOverride(agent.agentId, 'modelOverride', v)}
                         />
                       </div>
                     )}

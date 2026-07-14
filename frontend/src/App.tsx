@@ -7,6 +7,7 @@ import { Team } from './pages/Team';
 import { IntakeRequests } from './pages/IntakeRequests';
 import { AgentCatalog } from './pages/AgentCatalog';
 import { Tools } from './pages/AgentTools';
+import { ModelConfiguration } from './pages/ModelConfiguration';
 import { Integrations } from './pages/Integrations';
 import { DataStores } from './pages/DataStores';
 import { AgenticStudio } from './pages/AgenticStudio';
@@ -204,6 +205,7 @@ function App() {
               <Route path="/agent-apps/:appId/api-dashboard" element={<AppApiDashboardRoute />} />
               <Route path="/agent-catalog" element={<AgentCatalog />} />
               <Route path="/tools" element={<Tools />} />
+              <Route path="/model-config" element={<ModelConfiguration />} />
               <Route path="/integrations" element={<Integrations />} />
               <Route path="/data-stores" element={<DataStores />} />
               <Route path="/governance" element={<GovernanceOverview />} />

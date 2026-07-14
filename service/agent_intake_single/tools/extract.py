@@ -4,7 +4,9 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from strands.tools import tool
 from tools.kb import kb_query, load_json_from_s3, save_json_to_s3
-from config import bedrock, _cross_region_prefix, AWS_REGION
+from config import bedrock, AWS_REGION
+from region import cross_region_prefix
+from model_config_loader import load_extraction_model_id
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), '..', 'templates')
 # fourth assessment pillar 'dimensions' appended per QT2B-3.
@@ -14,7 +16,8 @@ TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), '..', 'templates')
 # cleanly because _init_if_needed only creates pillar state that's missing.
 PILLARS = ['business', 'technical', 'governance', 'dimensions']
 
-EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL") or f"{_cross_region_prefix(AWS_REGION)}.anthropic.claude-haiku-4-5-20251001-v1:0"
+_FALLBACK_EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL") or f"{cross_region_prefix(AWS_REGION)}.anthropic.claude-haiku-4-5-20251001-v1:0"
+EXTRACTION_MODEL = load_extraction_model_id(region=AWS_REGION, fallback_model_id=_FALLBACK_EXTRACTION_MODEL)
 
 EXTRACTION_SYSTEM_PROMPT = """You are extracting specific information from business documents to assess whether a process is suitable for agentification.
 For each field, extract a concise, specific value from the document context provided.
@@ -126,7 +129,7 @@ JSON only, no explanation."""
         modelId=EXTRACTION_MODEL,
         system=[{'text': EXTRACTION_SYSTEM_PROMPT}],
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
-        inferenceConfig={'maxTokens': 256, 'temperature': 0.0},
+        inferenceConfig={'maxTokens': 256},
     )
     raw = response['output']['message']['content'][0]['text'].strip()
     # Strip markdown code fences if present

@@ -162,6 +162,26 @@ export class BackendStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
+    // Model Catalog Table — inventory of invokable foundation models. Additive and
+    // not yet wired into any runtime/Lambda env; operators curate rows over time.
+    const modelCatalogTable = new dynamodb.Table(this, 'ModelCatalogTable', {
+      tableName: `citadel-model-catalog-${props.environment}`,
+      partitionKey: { name: 'modelKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+
+    // Model Config Table — resolved model-selection defaults/overrides. Additive and
+    // not yet wired into any runtime/Lambda env.
+    const modelConfigTable = new dynamodb.Table(this, 'ModelConfigTable', {
+      tableName: `citadel-model-config-${props.environment}`,
+      partitionKey: { name: 'scope', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+
     // Integrations Table
     const integrationsTable = new dynamodb.Table(this, 'IntegrationsTable', {
       tableName: `citadel-integrations-${props.environment}`,
@@ -455,6 +475,108 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    // --- Scheduled Bedrock model-catalog sync -------------------------------
+    // Daily discovery/refresh of the ModelCatalogTable against the live
+    // Bedrock inventory. Discovers new foundation models, refreshes
+    // API-derived metadata on known ones (preserving operator status), and
+    // marks entries Bedrock no longer returns as deprecated. Mirrors the
+    // reconcile-apps-meta scheduled-function wiring above.
+    const modelCatalogSyncFunction = new lambda.Function(
+      this,
+      'ModelCatalogSyncFunction',
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: 'model-catalog-sync.handler',
+        code: lambda.Code.fromAsset('dist/lambda'),
+        environment: {
+          MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
+          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.minutes(5),
+        logGroup: new logs.LogGroup(this, 'ModelCatalogSyncFunctionLogs', {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    // Read-only Bedrock discovery permissions — the sync never mutates Bedrock.
+    modelCatalogSyncFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock:ListFoundationModels',
+          'bedrock:ListInferenceProfiles',
+          'bedrock:GetFoundationModel',
+          'bedrock:GetInferenceProfile',
+        ],
+        resources: ['*'],
+      }),
+    );
+
+    // cdk-nag: the Bedrock discovery actions above are account/region-level
+    // enumeration APIs. bedrock:ListFoundationModels and
+    // bedrock:ListInferenceProfiles have no resource-level scoping (they
+    // return the whole catalog and must be granted on '*'), and because this
+    // sync is data-driven — it never hardcodes model ids and discovers the
+    // model set dynamically each run — the Get* targets are not knowable
+    // ahead of time to enumerate as ARNs. All four actions are read-only and
+    // the function never mutates Bedrock. Scope is bounded to Bedrock's
+    // read-only discovery surface.
+    NagSuppressions.addResourceSuppressions(
+      modelCatalogSyncFunction.role!,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason:
+            'Bedrock discovery actions (ListFoundationModels/ListInferenceProfiles/' +
+            'GetFoundationModel/GetInferenceProfile) are read-only and have no ' +
+            'resource-level scoping; the model set is discovered dynamically each ' +
+            'run, so target ARNs are not known ahead of time.',
+          appliesTo: ['Resource::*'],
+        },
+      ],
+      true,
+    );
+
+    // Catalog read/write to upsert discovered rows; event bus to emit summaries.
+    modelCatalogTable.grantReadWriteData(modelCatalogSyncFunction);
+    this.agentEventBus.grantPutEventsTo(modelCatalogSyncFunction);
+
+    // Daily EventBridge schedule.
+    const modelCatalogSyncRule = new events.Rule(this, 'ModelCatalogSyncRule', {
+      description: 'Daily sync of the Bedrock model catalog',
+      schedule: events.Schedule.rate(cdk.Duration.hours(24)),
+    });
+
+    modelCatalogSyncRule.addTarget(
+      new targets.LambdaFunction(modelCatalogSyncFunction, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.minutes(30),
+      }),
+    );
+
+    // On-demand sync: an event-pattern rule on the CUSTOM agent bus routes a
+    // model.catalog.sync_requested event (emitted by the syncModelCatalog
+    // mutation) to the SAME discovery Lambda. EventBridge invokes the target
+    // via the rule's managed permission — no lambda:InvokeFunction IAM grant.
+    const modelCatalogSyncRequestRule = new events.Rule(this, 'ModelCatalogSyncRequestRule', {
+      eventBus: this.agentEventBus,
+      description: 'On-demand model catalog sync (operator-triggered)',
+      eventPattern: {
+        source: ['citadel.backend'],
+        detailType: ['model.catalog.sync_requested'],
+      },
+    });
+
+    modelCatalogSyncRequestRule.addTarget(
+      new targets.LambdaFunction(modelCatalogSyncFunction, {
+        retryAttempts: 1,
+        maxEventAge: cdk.Duration.minutes(30),
+      }),
+    );
+
     // Pre-token-generation trigger: promotes `custom:organization` and
     // `custom:role` attributes onto JWT claims so downstream resolvers can
     // read org/role identity without an AdminGetUserCommand per request.
@@ -727,6 +849,33 @@ export class BackendStack extends cdk.Stack {
         logGroup: new logs.LogGroup(this, 'AgentConfigResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
       }
     );
+
+    // Model Config Resolver — operator-facing GraphQL surface over the model
+    // catalog + resolved model-selection config tables. DATA-DRIVEN: it reads
+    // the catalog/config table names from its environment and never hardcodes
+    // model ids. Mirrors AgentConfigResolverFunction (runtime/bundling/env).
+    const modelConfigResolverFunction = new lambda.Function(
+      this,
+      "ModelConfigResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "model-config-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          MODEL_CONFIG_TABLE: modelConfigTable.tableName,
+          MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
+          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, 'ModelConfigResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
+      }
+    );
+
+    // Scoped grants: read/write both model tables + emit MODEL_CONFIG_CHANGED.
+    modelCatalogTable.grantReadWriteData(modelConfigResolverFunction);
+    modelConfigTable.grantReadWriteData(modelConfigResolverFunction);
+    this.agentEventBus.grantPutEventsTo(modelConfigResolverFunction);
 
     // Agent Import Resolver - registers externally-owned agents (importAgent
     // mutation). Same runtime/bundling/env as the agent-config resolver; it
@@ -1846,6 +1995,36 @@ export class BackendStack extends cdk.Stack {
 
     seedBlueprintsResource.node.addDependency(this.workflowsTable);
 
+    // Seed Model Catalog Custom Resource
+    const seedModelCatalogLambda = new lambda.Function(this, "SeedModelCatalogFunction", {
+      runtime: lambda.Runtime.NODEJS_24_X,
+      handler: "seed-model-catalog/index.handler",
+      code: lambda.Code.fromAsset("dist/lambda"),
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
+        MODEL_CONFIG_TABLE: modelConfigTable.tableName,
+      },
+      logGroup: new logs.LogGroup(this, 'SeedModelCatalogFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
+    });
+
+    modelCatalogTable.grantWriteData(seedModelCatalogLambda);
+    modelConfigTable.grantWriteData(seedModelCatalogLambda);
+
+    const seedModelCatalogResource = new cdk.CustomResource(
+      this,
+      "SeedModelCatalogResource",
+      {
+        serviceToken: seedModelCatalogLambda.functionArn,
+        properties: {
+          Version: 'v1.0.0',
+        },
+      }
+    );
+
+    seedModelCatalogResource.node.addDependency(modelCatalogTable);
+    seedModelCatalogResource.node.addDependency(modelConfigTable);
+
     // Admin email: prefer CDK context param, fall back to env var
     const adminEmail = this.node.tryGetContext('adminEmail') || process.env.ADMIN_EMAIL || '';
 
@@ -1985,6 +2164,11 @@ export class BackendStack extends cdk.Stack {
           // (ArbiterStack already depends on BackendStack outputs). The IAM
           // grant below references the table by explicit ARN pattern.
           AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
+          // Per-agent-binding modelOverride catalog validation
+          // (assertEnabledCatalogModel). Read-only grant below. Non-breaking:
+          // when this env var is unset the resolver treats validation as a
+          // no-op, so non-deploy/test paths are never blocked.
+          MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, 'RegistryAgentRecordResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
@@ -1995,6 +2179,8 @@ export class BackendStack extends cdk.Stack {
     this.appsTable.grantReadWriteData(registryAgentRecordResolverFunction);
     this.workflowsTable.grantReadWriteData(registryAgentRecordResolverFunction);
     this.agentConfigTable.grantReadData(registryAgentRecordResolverFunction);
+    // Read-only: per-agent-binding modelOverride catalog validation.
+    modelCatalogTable.grantReadData(registryAgentRecordResolverFunction);
     this.agentEventBus.grantPutEventsTo(registryAgentRecordResolverFunction);
     // US-ARB-014: Write access (PutItem/UpdateItem) to the per-env AuthorityUnitsTable
     // owned by ArbiterStack. Referenced by explicit ARN pattern to avoid the
@@ -2599,6 +2785,10 @@ export class BackendStack extends cdk.Stack {
       "AgentConfigLambdaDataSource",
       agentConfigResolverFunction
     );
+    const modelConfigLambdaDataSource = this.appSyncApi.addLambdaDataSource(
+      "ModelConfigLambdaDataSource",
+      modelConfigResolverFunction
+    );
     const agentImportLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentImportLambdaDataSource",
       agentImportResolverFunction
@@ -2682,6 +2872,41 @@ export class BackendStack extends cdk.Stack {
     agentConfigLambdaDataSource.createResolver("GetAgentConfigResolver", {
       typeName: "Query",
       fieldName: "getAgentConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("ListModelCatalogResolver", {
+      typeName: "Query",
+      fieldName: "listModelCatalog",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("GetModelConfigResolver", {
+      typeName: "Query",
+      fieldName: "getModelConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("UpdateModelConfigResolver", {
+      typeName: "Mutation",
+      fieldName: "updateModelConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("SetModelCatalogEntryStatusResolver", {
+      typeName: "Mutation",
+      fieldName: "setModelCatalogEntryStatus",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    modelConfigLambdaDataSource.createResolver("SyncModelCatalogResolver", {
+      typeName: "Mutation",
+      fieldName: "syncModelCatalog",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });

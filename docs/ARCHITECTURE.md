@@ -213,6 +213,10 @@ Datastores and integrations use the `LifecycleManager` class with parameterized 
 
 All state-mutating operations on workflows, apps, and config use version-based optimistic locking. DynamoDB conditional writes check `version = :expectedVersion` and increment on success. On conflict, resolvers return a descriptive error and the frontend reloads the latest version.
 
+### Configurable Model Resolution
+
+The Bedrock model each arbiter role uses is resolved at runtime rather than hardcoded. At cold start the Supervisor, Fabricator, and the intake/extraction agents read a platform config row and a model catalog from DynamoDB (`citadel-model-config-{env}` and `citadel-model-catalog-{env}`) and run a pure, dependency-free resolver. The resolver walks a precedence chain (agent override → org default → slot default → global default), validates the candidate against the slot's requirements (modality, tool use, Converse), and maps it to a cross-region Bedrock inference profile for the deployment region. Every failure mode — missing config, malformed row, disabled model, or read error — falls back to a caller-supplied default, so model configuration can never break dispatch. The catalog is kept current by a daily EventBridge-scheduled sync against the live Bedrock inventory (also triggerable on demand) and curated through an admin-only Model Configuration UI. See [MODEL_SELECTION.md](./MODEL_SELECTION.md).
+
 ## Authentication and Authorization
 
 ### User Authentication
