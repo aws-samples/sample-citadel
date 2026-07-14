@@ -312,4 +312,55 @@ describe('ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)',
       expect(readOnlyPolicies.length).toBeGreaterThanOrEqual(2);
     });
   });
+
+  // --- Workflow metric grants + timeout watchdog ---
+  // Collect every IAM action attached to roles whose logical id contains the
+  // given substring (grantX + addToRolePolicy all land on the same DefaultPolicy).
+  function actionsForRole(roleSubstring: string): Set<string> {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const actions = new Set<string>();
+    for (const p of Object.values(policies) as any[]) {
+      const roles = p.Properties?.Roles || [];
+      const matches = roles.some((r: any) => (r?.Ref || '').includes(roleSubstring));
+      if (!matches) continue;
+      for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+        const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+        acts.forEach((a: string) => actions.add(a));
+      }
+    }
+    return actions;
+  }
+
+  describe('Workflow node-metric grants (PutMetricData)', () => {
+    test('Step Runner role can PutMetricData (node duration/failure metrics)', () => {
+      expect(actionsForRole('StepRunnerFunction').has('cloudwatch:PutMetricData')).toBe(true);
+    });
+
+    test('Worker role can PutMetricData (node duration/failure metrics)', () => {
+      expect(actionsForRole('WorkerAgentWrapper').has('cloudwatch:PutMetricData')).toBe(true);
+    });
+  });
+
+  describe('Workflow timeout watchdog', () => {
+    test('watchdog Lambda exists with watchdog.handler on Python 3.14', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Handler: 'watchdog.handler',
+        Runtime: 'python3.14',
+      });
+    });
+
+    test('watchdog runs on a 5-minute EventBridge schedule', () => {
+      template.hasResourceProperties('AWS::Events::Rule', {
+        ScheduleExpression: 'rate(5 minutes)',
+      });
+    });
+
+    test('watchdog has least-privilege grants: executions RW, PutEvents, PutMetricData', () => {
+      const actions = actionsForRole('WorkflowTimeoutWatchdog');
+      expect(actions.has('dynamodb:PutItem')).toBe(true);
+      expect(actions.has('dynamodb:GetItem')).toBe(true);
+      expect(actions.has('events:PutEvents')).toBe(true);
+      expect(actions.has('cloudwatch:PutMetricData')).toBe(true);
+    });
+  });
 });

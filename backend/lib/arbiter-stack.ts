@@ -335,6 +335,30 @@ export class ArbiterStack extends cdk.Stack {
     // status checks. Never written to from the worker.
     props.executionSpecificationsTable.grantReadData(workerAgentWrapperLambda);
 
+    // The worker emits best-effort node-level metrics (NodeDurationMs /
+    // NodeFailure) into the Citadel/Workflows namespace after running each
+    // workflow node. PutMetricData has no resource-level scoping; the call is
+    // narrowed to that namespace in code.
+    workerAgentWrapperLambda.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudwatch:PutMetricData'],
+      resources: ['*'],
+    }));
+    NagSuppressions.addResourceSuppressions(
+      workerAgentWrapperLambda.role!,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason:
+            'cloudwatch:PutMetricData has no resource-level scoping; the ' +
+            'worker narrows the call to the Citadel/Workflows namespace ' +
+            '(node duration/failure metrics).',
+          appliesTo: ['Resource::*'],
+        },
+      ],
+      true,
+    );
+
     // Grant IAM permissions for PolicyManager (agent scope)
     workerAgentWrapperLambda.addToRolePolicy(
       new PolicyStatement({
@@ -676,6 +700,29 @@ export class ArbiterStack extends cdk.Stack {
       // deletes from this queue (the worker owns consumption).
       workerAgentQueue.grantSendMessages(stepRunnerFunction);
 
+      // The Step Runner emits best-effort node-level metrics (NodeDurationMs /
+      // NodeFailure) into the Citadel/Workflows namespace. PutMetricData has no
+      // resource-level scoping; the call is narrowed to that namespace in code.
+      stepRunnerFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+      }));
+      NagSuppressions.addResourceSuppressions(
+        stepRunnerFunction.role!,
+        [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason:
+              'cloudwatch:PutMetricData has no resource-level scoping; the ' +
+              'step runner narrows the call to the Citadel/Workflows namespace ' +
+              '(node duration/failure metrics).',
+            appliesTo: ['Resource::*'],
+          },
+        ],
+        true,
+      );
+
       // EventBridge rules targeting StepRunner
       const stepRunnerStartRule = new events.Rule(this, 'StepRunnerStartRule', {
         eventBus: props.agentEventBus,
@@ -728,6 +775,64 @@ export class ArbiterStack extends cdk.Stack {
         });
         workflowProgressFanoutRule.addTarget(new targets.LambdaFunction(props.fanoutFunction));
       }
+
+      // --- Workflow Timeout Watchdog (self-contained) ---
+      // A scheduled sweep that fails executions stuck in the 'running' state
+      // past a configurable timeout, emitting workflow.failed via the events
+      // module so the rest of the system reacts as it would to any terminal
+      // failure. It shares the stepRunner asset but uses its own handler and
+      // talks only to the executions table + event bus (no executor coupling).
+      const workflowTimeoutWatchdogFunction = new lambda.Function(this, 'WorkflowTimeoutWatchdogFunction', {
+        runtime: lambda.Runtime.PYTHON_3_14,
+        handler: 'watchdog.handler',
+        code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'stepRunner')),
+        layers: [catalogLayer],
+        timeout: cdk.Duration.minutes(2),
+        memorySize: 256,
+        environment: {
+          EXECUTIONS_TABLE: props.executionsTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          // Executions still 'running' after this many seconds are considered
+          // stuck and failed by the sweep. Default 1 hour.
+          WORKFLOW_TIMEOUT_SECONDS: '3600',
+        },
+      });
+
+      // Least-privilege: read/write executions (conditional status update),
+      // PutEvents on the shared bus (workflow.failed), and PutMetricData for
+      // the best-effort timeout metric (Citadel/Workflows namespace).
+      props.executionsTable.grantReadWriteData(workflowTimeoutWatchdogFunction);
+      props.agentEventBus.grantPutEventsTo(workflowTimeoutWatchdogFunction);
+      workflowTimeoutWatchdogFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+      }));
+      NagSuppressions.addResourceSuppressions(
+        workflowTimeoutWatchdogFunction.role!,
+        [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason:
+              'cloudwatch:PutMetricData has no resource-level scoping; the ' +
+              'workflow timeout watchdog narrows the call to the ' +
+              'Citadel/Workflows namespace.',
+            appliesTo: ['Resource::*'],
+          },
+        ],
+        true,
+      );
+
+      // Sweep every 5 minutes on an EventBridge schedule.
+      const workflowTimeoutWatchdogSchedule = new events.Rule(this, 'WorkflowTimeoutWatchdogSchedule', {
+        ruleName: `citadel-workflow-timeout-watchdog-${props.environment}`,
+        description:
+          'Periodically fails workflow executions stuck in the running state past their timeout.',
+        schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      });
+      workflowTimeoutWatchdogSchedule.addTarget(
+        new targets.LambdaFunction(workflowTimeoutWatchdogFunction),
+      );
     }
 
     // O-03: Enable X-Ray active tracing on all Lambda functions
