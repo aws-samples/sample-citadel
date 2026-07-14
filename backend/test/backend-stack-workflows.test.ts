@@ -274,6 +274,36 @@ describe('BackendStack — Workflow/App/Execution Lambda functions and AppSync w
       expect(hasAppSyncGraphQLPolicy).toBe(true);
     });
 
+    test('WorkflowProgressFanout can PutMetricData for the failure metric', () => {
+      const functions = template.findResources('AWS::Lambda::Function', {
+        Properties: { Handler: 'workflow-progress-fanout.handler' },
+      });
+      const fanoutLogicalId = Object.keys(functions)[0];
+      expect(fanoutLogicalId).toBeDefined();
+
+      const policies = template.findResources('AWS::IAM::Policy');
+      const hasPutMetricData = Object.values(policies).some((p: any) => {
+        const roles = p.Properties?.Roles || [];
+        const attachedToFanout = roles.some((r: any) =>
+          (r?.Ref || '').includes('WorkflowProgressFanout')
+        );
+        if (!attachedToFanout) return false;
+        const statements = p.Properties?.PolicyDocument?.Statement || [];
+        return statements.some((s: any) => {
+          const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+          return actions.includes('cloudwatch:PutMetricData');
+        });
+      });
+      expect(hasPutMetricData).toBe(true);
+    });
+
+    test('an alarm watches the Citadel/Workflows FanoutPublishFailure metric', () => {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        Namespace: 'Citadel/Workflows',
+        MetricName: 'FanoutPublishFailure',
+      });
+    });
+
     test('EventBus PutEvents granted to workflow, app, and execution resolvers', () => {
       // There should be multiple IAM policies granting events:PutEvents
       const policies = template.findResources('AWS::IAM::Policy');
