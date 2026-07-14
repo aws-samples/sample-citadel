@@ -445,8 +445,15 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
             _resolved = resolve_agent_override(agent_config['modelOverride'], _REGION)
             if _resolved:
                 payload['modelOverride'] = _resolved
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "modelOverride resolution failed for agent '%s' "
+                "(override key '%s', region '%s'): %s",
+                agent_name,
+                agent_config['modelOverride'],
+                _REGION,
+                str(e),
+            )
 
     print(f"Sending payload to {action_type} queue: {target}")
     print(f"Payload: {json.dumps(payload, default=str)}")

@@ -9,7 +9,6 @@ All model ids are generic placeholders.
 import os, sys
 from unittest.mock import MagicMock
 
-import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from model_config_loader import load_intake_model_id, load_extraction_model_id  # noqa: E402
 

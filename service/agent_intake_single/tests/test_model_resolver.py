@@ -7,7 +7,6 @@ copy is wired up and behaves. Model ids are generic placeholders.
 """
 import os, sys
 
-import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import model_resolver as mr  # noqa: E402
 import model_types as mt      # noqa: E402

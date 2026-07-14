@@ -18,7 +18,6 @@ from model_types import (
     Modality,
     ModelConfig,
     ModelStatus,
-    SlotRequirements,
 )
 
 
