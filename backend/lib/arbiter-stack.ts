@@ -575,10 +575,16 @@ export class ArbiterStack extends cdk.Stack {
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
         WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
         FABRICATOR_QUEUE_URL: fabricatorQueue.queueUrl,
+        // Lets the seed upload the runnable demo agent module to the code
+        // bucket so the seeded agent config's ``filename`` is reachable.
+        AGENT_BUCKET_NAME: props.codeBucket.bucketName,
       },
     });
 
     props.agentConfigTable.grantWriteData(seedAgentConfigLambda);
+    // PutObject only — the seed writes the demo agent module, never reads or
+    // deletes from the code bucket.
+    props.codeBucket.grantPut(seedAgentConfigLambda);
 
     // Invoke the Custom Resource to seed agent config table
     // This must come after fabricatorQueue is created since we pass its URL.
@@ -590,7 +596,7 @@ export class ArbiterStack extends cdk.Stack {
       serviceToken: seedAgentConfigLambda.functionArn,
       properties: {
         // O-05: Use content hash instead of Date.now() to avoid unnecessary re-runs
-        Version: 'v1.1.0',
+        Version: 'v1.2.0',
       },
     });
 

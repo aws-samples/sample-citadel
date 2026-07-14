@@ -168,6 +168,38 @@ describe('canonical workflow node agentId shape', () => {
       }
     });
 
+    test('Echo Demo Workflow (a real seeded blueprint) passes publish validation', async () => {
+      // The demo references a real seeded agentId and forms a minimal
+      // connected acyclic DAG, so validateDefinition must accept it. It is the
+      // one seed blueprint intended to be publishable as-is (the others are
+      // placeholder templates rejected by design). Assert no validation error
+      // surfaces — placeholder / disconnected / circular / missing agentId.
+      const demo = SEED_BLUEPRINTS.find((b) => b.name === 'Echo Demo Workflow')!;
+      expect(demo).toBeDefined();
+
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: 'wf-demo-echo',
+          orgId: 'org-1',
+          status: 'DRAFT',
+          definition: JSON.stringify(demo.definition),
+          version: 1,
+        },
+      });
+
+      try {
+        await handler(
+          makeEvent('publishWorkflow', { workflowId: 'wf-demo-echo' }),
+          {} as any,
+          {} as any,
+        );
+      } catch (err: any) {
+        expect(String(err?.message ?? err)).not.toMatch(
+          /placeholder|disconnected|circular|missing agentId|validation failed/i,
+        );
+      }
+    });
+
     test('rejects a node with both shapes set but only data.agentId populated (top-level empty)', async () => {
       const emptyTopLevel = JSON.stringify({
         nodes: [

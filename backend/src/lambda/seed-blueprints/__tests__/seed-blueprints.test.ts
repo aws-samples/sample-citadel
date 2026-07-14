@@ -81,16 +81,17 @@ describe('seed-blueprints Lambda', () => {
   // ─── Blueprint structure validation ────────────────────────────
 
   describe('seed blueprint definitions', () => {
-    test('exports exactly 4 seed blueprints', () => {
-      expect(SEED_BLUEPRINTS).toHaveLength(4);
+    test('exports exactly 5 seed blueprints', () => {
+      expect(SEED_BLUEPRINTS).toHaveLength(5);
     });
 
-    test('all 4 expected blueprints are present by name', () => {
+    test('all 5 expected blueprints are present by name', () => {
       const names = SEED_BLUEPRINTS.map((b) => b.name);
       expect(names).toContain('Sequential Agent Pipeline');
       expect(names).toContain('Parallel Fan-Out');
       expect(names).toContain('Conditional Router');
       expect(names).toContain('Data Processing Pipeline');
+      expect(names).toContain('Echo Demo Workflow');
     });
 
     test.each([
@@ -98,6 +99,7 @@ describe('seed-blueprints Lambda', () => {
       'Parallel Fan-Out',
       'Conditional Router',
       'Data Processing Pipeline',
+      'Echo Demo Workflow',
     ])('"%s" has valid WorkflowDefinition structure (nodes array, edges array)', (name) => {
       const bp = SEED_BLUEPRINTS.find((b) => b.name === name)!;
       expect(bp).toBeDefined();
@@ -159,6 +161,30 @@ describe('seed-blueprints Lambda', () => {
       expect(bp.definition.nodes).toHaveLength(4);
       expect(bp.definition.edges).toHaveLength(3);
     });
+
+    test('Echo Demo Workflow references a real (non-placeholder) agent and forms a valid DAG', () => {
+      const bp = SEED_BLUEPRINTS.find((b) => b.name === 'Echo Demo Workflow')!;
+      expect(bp).toBeDefined();
+
+      // Unlike the template blueprints, the demo references a REAL seeded
+      // agent, so it must pass publish validation (no 'placeholder-' ids).
+      const agentIds = bp.definition.nodes.map((n) => n.agentId);
+      expect(agentIds.length).toBeGreaterThan(0);
+      for (const id of agentIds) {
+        expect(id.startsWith('placeholder-')).toBe(false);
+      }
+      expect(agentIds).toContain('demo-echo-agent');
+
+      // Minimal connected, acyclic DAG: 2 nodes joined by 1 edge.
+      expect(bp.definition.nodes).toHaveLength(2);
+      expect(bp.definition.edges).toHaveLength(1);
+      const nodeIds = new Set(bp.definition.nodes.map((n) => n.id));
+      for (const edge of bp.definition.edges) {
+        expect(nodeIds.has(edge.source)).toBe(true);
+        expect(nodeIds.has(edge.target)).toBe(true);
+        expect(edge.source).not.toBe(edge.target);
+      }
+    });
   });
 
   // ─── Create/Update behavior ────────────────────────────────────
@@ -170,7 +196,7 @@ describe('seed-blueprints Lambda', () => {
       await handler(makeEvent('Create'), mockContext, jest.fn());
 
       const putCalls = ddbMock.commandCalls(PutCommand);
-      expect(putCalls).toHaveLength(4);
+      expect(putCalls).toHaveLength(5);
 
       for (const call of putCalls) {
         const item = call.args[0].input.Item!;
@@ -227,14 +253,14 @@ describe('seed-blueprints Lambda', () => {
       expect(firstCallIds).toEqual(secondCallIds);
     });
 
-    test('uses WORKFLOWS_TABLE env var and writes all 4 blueprints', async () => {
+    test('uses WORKFLOWS_TABLE env var and writes all 5 blueprints', async () => {
       ddbMock.on(PutCommand).resolves({});
 
       await handler(makeEvent('Create'), mockContext, jest.fn());
 
-      // Verify all 4 blueprints were written
+      // Verify all 5 blueprints were written
       const putCalls = ddbMock.commandCalls(PutCommand);
-      expect(putCalls).toHaveLength(4);
+      expect(putCalls).toHaveLength(5);
 
       // Verify the handler reads from WORKFLOWS_TABLE env var
       // (if env var is missing, handler would throw on undefined table)

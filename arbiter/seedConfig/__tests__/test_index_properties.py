@@ -107,10 +107,10 @@ class TestSeedConfigHandler:
             from index import handler
             handler(event, context)
 
-            # --- Deterministic call count: 1 agent + 2 units + 1 layer = 4.
-            # (Per D3: no global fabricator unit — that's US-ARB-014.)
-            assert mock_table.put_item.call_count == 4, (
-                f"expected 4 put_item calls (1 agent + 2 units + 1 layer), "
+            # --- Deterministic call count: 2 agents (fabricator + echo) +
+            # 2 units + 1 layer = 5. (Per D3: no global fabricator unit.)
+            assert mock_table.put_item.call_count == 5, (
+                f"expected 5 put_item calls (2 agents + 2 units + 1 layer), "
                 f"got {mock_table.put_item.call_count}"
             )
 
@@ -413,3 +413,113 @@ class TestConstitutionalLayerParsability:
         )
         # The originating scope is carried through so legibility is preserved.
         assert override.scope_evaluated == "arbiter-invoke-all"
+
+
+# ---------------------------------------------------------------------------
+# Runnable demo echo agent seed
+# ---------------------------------------------------------------------------
+#
+# The seed must register one runnable worker agent (deterministic id
+# 'demo-echo-agent', state 'active') whose config carries the S3 module
+# filename the worker resolves at dispatch, and upload that module to the
+# agent code bucket so it is genuinely reachable.
+
+ECHO_AGENT_ID = "demo-echo-agent"
+ECHO_MODULE_FILENAME = "demo_echo_agent.py"
+ECHO_MODULE_S3_KEY = f"agents/{ECHO_MODULE_FILENAME}"
+
+
+def _create_event():
+    return {
+        "RequestType": "Create",
+        "ResponseURL": "https://cfn-response.example.com/callback",
+        "StackId": "arn:aws:cloudformation:us-east-1:123456789012:stack/s",
+        "RequestId": "req-echo-1",
+        "LogicalResourceId": "SeedAgentConfigResource",
+    }
+
+
+def _context():
+    return type("Ctx", (), {"log_stream_name": "log-stream-echo"})()
+
+
+class TestSeedEchoAgent:
+    """The seed registers a runnable, active echo worker agent."""
+
+    def _run_create(self, *, bucket=None):
+        """Invoke the handler for a Create with boto3 fully mocked.
+
+        Returns (mock_table, mock_s3, seeded_items). ``bucket`` toggles the
+        AGENT_BUCKET_NAME env var so the S3-upload branch can be exercised
+        both ways.
+        """
+        mock_table = MagicMock()
+        mock_dynamodb = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+        mock_s3 = MagicMock()
+
+        env = {}
+        if bucket is not None:
+            env["AGENT_BUCKET_NAME"] = bucket
+
+        with patch("index.boto3") as mock_boto3, \
+             patch("cfnresponse.send") as mock_send, \
+             patch.dict(os.environ, env, clear=False):
+            if bucket is None:
+                os.environ.pop("AGENT_BUCKET_NAME", None)
+            mock_boto3.resource.return_value = mock_dynamodb
+            mock_boto3.client.return_value = mock_s3
+
+            from index import handler
+            handler(_create_event(), _context())
+
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        return mock_table, mock_s3, mock_send, items
+
+    def _echo_item(self, items):
+        echo = [i for i in items if i.get("agentId") == ECHO_AGENT_ID]
+        assert len(echo) == 1, f"expected exactly one echo agent, got {len(echo)}"
+        return echo[0]
+
+    def test_create_seeds_echo_agent_active(self):
+        """The echo agent is seeded active with the fields the worker reads."""
+        _table, _s3, _send, items = self._run_create(bucket="citadel-code-bucket")
+        echo = self._echo_item(items)
+
+        assert echo["state"] == "active"
+        assert "config" in echo
+        cfg = echo["config"]
+        assert cfg["name"] == ECHO_AGENT_ID
+        # The S3-key field the worker resolves the runnable module from.
+        assert cfg["filename"] == ECHO_MODULE_FILENAME
+        assert cfg["action"]["type"] == "sqs"
+        assert "schema" in cfg and cfg["schema"]["type"] == "object"
+        assert "worker" in echo.get("categories", [])
+
+    def test_echo_module_uploaded_to_code_bucket_when_set(self):
+        """When AGENT_BUCKET_NAME is set, the module lands at agents/<filename>."""
+        _table, mock_s3, _send, _items = self._run_create(bucket="citadel-code-bucket")
+
+        assert mock_s3.put_object.called, "expected the echo module to be uploaded"
+        kwargs = mock_s3.put_object.call_args.kwargs
+        assert kwargs["Bucket"] == "citadel-code-bucket"
+        assert kwargs["Key"] == ECHO_MODULE_S3_KEY
+        # Body must be the real module source exposing a handler.
+        body = kwargs["Body"]
+        body_text = body.decode() if isinstance(body, (bytes, bytearray)) else str(body)
+        assert "def handler" in body_text
+
+    def test_echo_module_upload_skipped_when_bucket_unset(self):
+        """No bucket env → skip upload but still seed the config and SUCCESS."""
+        _table, mock_s3, mock_send, items = self._run_create(bucket=None)
+
+        assert not mock_s3.put_object.called
+        # Config is still seeded so the agent record exists for wiring.
+        self._echo_item(items)
+        assert mock_send.call_args[0][2] == "SUCCESS"
+
+    def test_echo_agent_seed_is_idempotent(self):
+        """Re-running Create yields an identical echo item (deterministic)."""
+        _t1, _s1, _snd1, items1 = self._run_create(bucket="citadel-code-bucket")
+        _t2, _s2, _snd2, items2 = self._run_create(bucket="citadel-code-bucket")
+        assert self._echo_item(items1) == self._echo_item(items2)

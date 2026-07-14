@@ -153,6 +153,28 @@ export const SEED_BLUEPRINTS: SeedBlueprint[] = [
     },
     metadata: { category: 'data-processing', isSystem: true, tags: ['data', 'etl', 'pipeline'] },
   },
+
+  // 5. Echo Demo — the one runnable, publishable seed workflow. Unlike the
+  //    template blueprints above (which carry placeholder agentIds and are
+  //    rejected by publish validation until cloned/re-mapped), this references
+  //    a REAL seeded, active agent ('demo-echo-agent') and forms a minimal
+  //    connected acyclic DAG, so it passes validateDefinition and can execute
+  //    end to end.
+  {
+    name: 'Echo Demo Workflow',
+    description: 'Runnable demo: two echo steps that each return their input. References a real seeded agent, so it passes publish validation and executes end to end.',
+    category: 'demo',
+    definition: {
+      nodes: [
+        { id: 'echo-1', agentId: 'demo-echo-agent', position: { x: 150, y: 200 }, configuration: {} },
+        { id: 'echo-2', agentId: 'demo-echo-agent', position: { x: 450, y: 200 }, configuration: {} },
+      ],
+      edges: [
+        { id: 'edge-echo-1-2', source: 'echo-1', target: 'echo-2', sourceHandle: 'output', targetHandle: 'input' },
+      ],
+    },
+    metadata: { category: 'demo', isSystem: true, tags: ['demo', 'echo', 'runnable'] },
+  },
 ];
 
 
