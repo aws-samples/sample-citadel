@@ -566,7 +566,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
       .resolves({ Item: { modelKey: DISABLED_KEY, status: 'disabled' } });
 
     await expect(
-      handler(bindingEvent(DISABLED_KEY), {} as any),
+      handler(bindingEvent(DISABLED_KEY)),
     ).rejects.toThrow('is not enabled');
     expect(updateResourceMock).not.toHaveBeenCalled();
   });
@@ -598,10 +598,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     seedApp();
 
-    const result = await handler(
-      bindingEvent('catalog-model-some-new'),
-      {} as any,
-    );
+    const result = await handler(bindingEvent('catalog-model-some-new'));
 
     // No catalog read attempted, mutation still persisted (non-breaking).
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
