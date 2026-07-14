@@ -31,6 +31,10 @@ export const handler: AppSyncResolverHandler<any, any> = async (event) => {
         return await startExecution(args.workflowId, args.input, userId, event);
       case 'cancelExecution':
         return await cancelExecution(args.executionId, userId, event);
+      case 'publishWorkflowProgress':
+        // IAM-signed fan-out mutation: echo the input so AppSync delivers it
+        // to onWorkflowProgress subscribers.
+        return args.input;
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }

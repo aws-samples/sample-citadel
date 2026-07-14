@@ -262,4 +262,35 @@ describe('execution-resolver', () => {
       expect(entry.DetailType).toBe('execution.cancel.requested');
     });
   });
+
+  // ─── publishWorkflowProgress ───────────────────────────────────
+
+  describe('publishWorkflowProgress', () => {
+    const progressInput = {
+      executionId: 'exec-1',
+      workflowId: 'wf-1',
+      eventType: 'node.completed',
+      nodeId: 'n1',
+      status: 'completed',
+      output: '{"result":"ok"}',
+      error: null,
+      timestamp: '2024-01-01T00:00:00Z',
+    };
+
+    test('echoes args.input so AppSync fans out to onWorkflowProgress subscribers', async () => {
+      const result = await handler(
+        makeEvent('publishWorkflowProgress', { input: progressInput }),
+        {} as any,
+        {} as any,
+      );
+
+      expect(result).toEqual(progressInput);
+    });
+
+    test('does not throw Unknown field', async () => {
+      await expect(
+        handler(makeEvent('publishWorkflowProgress', { input: progressInput }), {} as any, {} as any),
+      ).resolves.toBeDefined();
+    });
+  });
 });
