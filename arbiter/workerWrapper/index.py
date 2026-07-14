@@ -448,7 +448,15 @@ def _process_workflow_node(event):
     than a canned success, so the step runner's failure path is exercised.
     """
     msg = workflow_contract.parse_node_dispatch_message(event)
-    print(f"processing workflow node {msg.node_id} for execution {msg.execution_id}")
+    print(json.dumps({
+        'level': 'INFO',
+        'component': 'WorkerWrapper',
+        'action': 'workflow_node_started',
+        'executionId': msg.execution_id,
+        'nodeId': msg.node_id,
+        'workflowId': msg.workflow_id,
+        'agentId': msg.agent_id,
+    }))
     try:
         agent = load_config_from_dynamodb(msg.agent_id)
         config = agent['config']
@@ -471,6 +479,7 @@ def _process_workflow_node(event):
             'action': 'workflow_node_failed',
             'executionId': msg.execution_id,
             'nodeId': msg.node_id,
+            'workflowId': msg.workflow_id,
             'agentId': msg.agent_id,
             'error': str(exc),
         }))
@@ -481,6 +490,15 @@ def _process_workflow_node(event):
         )
         return
 
+    print(json.dumps({
+        'level': 'INFO',
+        'component': 'WorkerWrapper',
+        'action': 'workflow_node_completed',
+        'executionId': msg.execution_id,
+        'nodeId': msg.node_id,
+        'workflowId': msg.workflow_id,
+        'agentId': msg.agent_id,
+    }))
     _emit_node_result(
         msg,
         status=workflow_contract.STATUS_COMPLETED,
