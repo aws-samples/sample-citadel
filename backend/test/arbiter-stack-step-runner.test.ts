@@ -156,6 +156,32 @@ describe('ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)',
         },
       });
     });
+
+    test('has the shared arbiter catalog layer attached', () => {
+      // Resolve the catalog layer's logical id from its LayerName so the
+      // shared `common`/`catalog` packages resolve at runtime.
+      const layers = template.findResources('AWS::Lambda::LayerVersion', {
+        Properties: { LayerName: 'citadel-arbiter-catalog-test' },
+      });
+      const catalogLayerId = Object.keys(layers)[0];
+      expect(catalogLayerId).toBeDefined();
+
+      // Find the step runner function (python3.14, 300s timeout) and assert it
+      // references the catalog layer.
+      const functions = template.findResources('AWS::Lambda::Function', {
+        Properties: { Handler: 'index.handler', Runtime: 'python3.14', Timeout: 300 },
+      });
+      const stepRunnerEntry = Object.entries(functions).find(
+        ([, fn]: [string, any]) =>
+          fn.Properties.Timeout === 300 && fn.Properties.Runtime === 'python3.14'
+      );
+      expect(stepRunnerEntry).toBeDefined();
+      const stepRunnerLayers = (stepRunnerEntry![1] as any).Properties.Layers || [];
+      const referencesCatalogLayer = stepRunnerLayers.some(
+        (l: any) => l && l.Ref === catalogLayerId
+      );
+      expect(referencesCatalogLayer).toBe(true);
+    });
   });
 
   // --- EventBridge Rules targeting StepRunner ---

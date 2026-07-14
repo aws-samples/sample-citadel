@@ -10,6 +10,7 @@ DynamoDB state first to avoid duplicate work.
 
 import boto3
 import json
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -17,6 +18,7 @@ import events
 from dag import find_root_nodes, find_ready_nodes, find_convergence_nodes
 from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
+from common import workflow_contract
 
 # DynamoDB table names from environment
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'citadel-workflows-dev')
@@ -26,6 +28,21 @@ EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'citadel-executions-dev')
 _dynamodb = boto3.resource('dynamodb')
 _workflows_table = _dynamodb.Table(WORKFLOWS_TABLE)
 _executions_table = _dynamodb.Table(EXECUTIONS_TABLE)
+
+_logger = logging.getLogger(__name__)
+
+# Lazy SQS client for dispatching workflow nodes to the worker. Constructed on
+# first use (not at import) so module import never resolves credentials — the
+# same pattern the worker uses for its boto3 clients.
+_sqs_client = None
+
+
+def _get_sqs_client():
+    """Lazily construct the boto3 SQS client. Cached per process."""
+    global _sqs_client
+    if _sqs_client is None:
+        _sqs_client = boto3.client('sqs')
+    return _sqs_client
 
 
 def _now_iso() -> str:
@@ -113,7 +130,8 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
     1. Emit supervisor.chatter event for cross-system correlation (US-ARB-016)
     2. Update node status → running in DynamoDB
     3. Publish workflow.node.started event
-    4. Publish workflow.node.invoke event (picked up by worker wrapper)
+    4. Dispatch the node to the worker by sending a discriminated message to
+       the worker SQS queue (WORKER_QUEUE_URL)
     """
     # US-ARB-016: fire-and-forget chatter event for cross-system correlation.
     # The returned correlationId is currently a local only; it becomes the
@@ -157,6 +175,32 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
         started_at=now,
     )
 
+    # Dispatch the node to the worker over the shared SQS queue. The message
+    # carries the workflow-node discriminator so the worker can tell it apart
+    # from a supervisor task message on the same queue. The worker runs the
+    # agent and emits the node-completed / node-failed event that this step
+    # runner consumes (via its EventBridge rules) to advance the DAG.
+    queue_url = os.environ.get('WORKER_QUEUE_URL')
+    if not queue_url:
+        _logger.warning(
+            'WORKER_QUEUE_URL is not set; cannot dispatch node %s of execution %s',
+            node_id, execution_id,
+        )
+        return
+
+    message = workflow_contract.build_node_dispatch_message(
+        execution_id=execution_id,
+        node_id=node_id,
+        workflow_id=workflow_id,
+        agent_id=agent_id,
+        input=input_data,
+        configuration=configuration,
+    )
+    _get_sqs_client().send_message(
+        QueueUrl=queue_url,
+        MessageBody=json.dumps(message),
+    )
+
 
 def handle_node_completion(execution_id: str, node_id: str, output: dict) -> None:
     """Handle a completed node and advance the workflow.
@@ -184,7 +228,6 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict) -> Non
 
     # Find the completed node's agent ID
     node_data = node_results.get(node_id, {})
-    agent_id = node_data.get('agentId', '')
 
     now = _now_iso()
 
@@ -201,15 +244,11 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict) -> Non
         ExpressionAttributeValues={':status': 'completed', ':completedAt': now, ':output': output},
     )
 
-    # Publish node.completed event
-    events.publish_node_completed(
-        execution_id=execution_id,
-        workflow_id=execution.get('workflowId', ''),
-        node_id=node_id,
-        agent_id=agent_id,
-        completed_at=now,
-        output=output,
-    )
+    # NOTE: workflow.node.completed is NOT re-emitted here. This handler is
+    # triggered BY that event (the worker is its sole producer), and the step
+    # runner's own EventBridge rule consumes workflow.node.completed — so
+    # re-emitting it would self-trigger an infinite loop. We only advance the
+    # DAG below and emit the terminal workflow.completed when all nodes finish.
 
     # Update local state for ready-node calculation
     node_results[node_id] = {**node_data, 'status': 'completed', 'output': output}
@@ -353,15 +392,10 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             },
         )
 
-        events.publish_node_failed(
-            execution_id=execution_id,
-            workflow_id=execution.get('workflowId', ''),
-            node_id=node_id,
-            agent_id=agent_id,
-            error=error,
-            retry_count=retry_count,
-        )
-
+        # NOTE: workflow.node.failed is NOT re-emitted here. Like completion,
+        # this handler is triggered BY that event (the worker is its sole
+        # producer) and the step runner's own EventBridge rule consumes it, so
+        # re-emitting would self-trigger. We keep the terminal workflow.failed.
         events.publish_workflow_failed(
             execution_id=execution_id,
             workflow_id=execution.get('workflowId', ''),

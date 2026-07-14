@@ -13,6 +13,17 @@ from worker_governance import (
     get_blocked_tools,
 )
 
+# Shared workflow node dispatch/result contract (source of truth co-owned with
+# the step runner). Imported defensively: a workflow-node message only appears
+# once the step runner's dispatch path is live, and the shared module is
+# bundled into this Lambda by the same deployment change. Until that bundling
+# lands, a missing import must NOT break the supervisor task path — so we fall
+# back to None and treat every message as a supervisor task (see process_event).
+try:
+    from common import workflow_contract  # noqa: E402
+except ImportError:  # pragma: no cover — Lambda bundle path before follow-up
+    workflow_contract = None  # type: ignore[assignment]
+
 # QT3-6: dispatch-time defence-in-depth for the code-generating
 # tool / ExecutionSpecification binding rule. We depend on the rule predicate
 # ``is_code_generating`` and the status checker ``assert_spec_approved`` from
@@ -303,7 +314,7 @@ def get_scoped_credentials(agent_name: str, required_permissions: dict, app_id: 
         print(f"Failed to invoke credential vender: {e}")
         return None
 
-def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extra_env: dict | None = None) -> str:
+def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extra_env: dict | None = None, *, raise_on_error: bool = False) -> str:
     """
     Execute the agent code in an isolated subprocess.
 
@@ -312,6 +323,12 @@ def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extr
     - The agent code from reading the parent Lambda's ambient credentials
     - Credential leakage between sequential agent executions
     - Credentials persisting in /proc/self/environ of the parent
+
+    ``raise_on_error`` controls the non-zero-exit behaviour. The default
+    (False) preserves the supervisor task path: a failed subprocess returns a
+    human-readable fallback string. The workflow-node path passes True so a
+    subprocess failure raises and is surfaced as workflow.node.failed rather
+    than a canned success.
     """
     # Build the child's environment: inherit parent env for Python path etc.,
     # but override AWS credentials with scoped ones if available
@@ -353,6 +370,10 @@ def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extr
 
     if result.returncode!= 0:
         print(f"Agent subprocess exited with code {result.returncode}")
+        if raise_on_error:
+            raise RuntimeError(
+                f"Agent subprocess exited with code {result.returncode}"
+            )
         return "The task could not be completed, this agent has issues, please ignore for now."
 
     # Parse the response from stdout
@@ -382,8 +403,101 @@ def post_task_complete(response, agent_use_id, agent_name, orchestration_id):
     print(f"event posted: {response}")
     return f"event posted: {event}"
 
+def _emit_node_result(msg, *, status, output=None, error=None):
+    """Emit a workflow node-result event (completed/failed) to the agent event
+    bus the step runner consumes.
+
+    Reuses the worker's existing EventBridge PutEvents client and bus-name env
+    (COMPLETION_BUS_NAME, which resolves to the same citadel-agents bus the
+    step runner's node.completed/failed rules listen on). This is SEPARATE from
+    the supervisor task.completion path in post_task_complete — a distinct
+    Source/DetailType, not a different client or bus.
+    """
+    detail = workflow_contract.build_node_result_detail(
+        execution_id=msg.execution_id,
+        node_id=msg.node_id,
+        workflow_id=msg.workflow_id,
+        agent_id=msg.agent_id,
+        status=status,
+        output=output,
+        error=error,
+    )
+    detail_type = (
+        workflow_contract.NODE_COMPLETED_DETAIL_TYPE
+        if status == workflow_contract.STATUS_COMPLETED
+        else workflow_contract.NODE_FAILED_DETAIL_TYPE
+    )
+    client = boto3.client('events')
+    entry = {
+        'Source': workflow_contract.WORKFLOW_EVENT_SOURCE,
+        'DetailType': detail_type,
+        'EventBusName': os.environ.get('COMPLETION_BUS_NAME'),
+        'Detail': json.dumps(detail),
+    }
+    print(f"posting node-result event: {json.dumps(entry)}")
+    result = client.put_events(Entries=[entry])
+    print(f"node-result event posted: {result}")
+
+def _process_workflow_node(event):
+    """Run the agent for a dispatched workflow node and emit its result.
+
+    Reuses the worker's existing agent-execution path — config load →
+    credential vend → S3 module load → agent_runner subprocess — then emits
+    workflow.node.completed on success. On any failure (bad config, missing
+    module, or a non-zero subprocess exit) emits workflow.node.failed rather
+    than a canned success, so the step runner's failure path is exercised.
+    """
+    msg = workflow_contract.parse_node_dispatch_message(event)
+    print(f"processing workflow node {msg.node_id} for execution {msg.execution_id}")
+    try:
+        agent = load_config_from_dynamodb(msg.agent_id)
+        config = agent['config']
+        if isinstance(config, str):
+            config = json.loads(config)
+
+        required_permissions = config.get('requiredPermissions')
+        scoped_credentials = get_scoped_credentials(msg.agent_id, required_permissions)
+
+        fileName = config['filename']
+        load_file_from_s3_into_tmp(os.environ["AGENT_BUCKET_NAME"], fileName)
+
+        response = run_agent_in_subprocess(
+            msg.input, scoped_credentials, raise_on_error=True
+        )
+    except Exception as exc:  # noqa: BLE001 — any failure becomes node.failed
+        print(json.dumps({
+            'level': 'ERROR',
+            'component': 'WorkerWrapper',
+            'action': 'workflow_node_failed',
+            'executionId': msg.execution_id,
+            'nodeId': msg.node_id,
+            'agentId': msg.agent_id,
+            'error': str(exc),
+        }))
+        _emit_node_result(
+            msg,
+            status=workflow_contract.STATUS_FAILED,
+            error=str(exc) or 'agent execution failed',
+        )
+        return
+
+    _emit_node_result(
+        msg,
+        status=workflow_contract.STATUS_COMPLETED,
+        output={'response': response},
+    )
+
 def process_event(event, context):
     print("processing...")
+
+    # Discriminated shared queue: the step runner dispatches workflow-node
+    # execution over the same SQS queue the supervisor uses for task messages.
+    # A workflow-node message carries the contract's message_type discriminator;
+    # a supervisor task message does not, so it falls through unchanged below.
+    if workflow_contract is not None and workflow_contract.is_workflow_node_message(event):
+        _process_workflow_node(event)
+        return
+
     orchestration_id = event["orchestration_id"]
     agent_use_id = event["agent_use_id"]
     request = event["agent_input"]

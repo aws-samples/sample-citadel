@@ -150,14 +150,17 @@ def mock_executor():
     mock_wf_table = MagicMock()
     mock_exec_table = MagicMock()
     mock_events = MagicMock()
+    mock_sqs = MagicMock()
 
     with patch.object(executor, '_workflows_table', mock_wf_table), \
          patch.object(executor, '_executions_table', mock_exec_table), \
-         patch.object(executor, 'events', mock_events):
+         patch.object(executor, 'events', mock_events), \
+         patch.object(executor, '_get_sqs_client', return_value=mock_sqs):
         yield {
             'workflows_table': mock_wf_table,
             'executions_table': mock_exec_table,
             'events': mock_events,
+            'sqs': mock_sqs,
         }
 
 
@@ -216,8 +219,9 @@ class TestHandleNodeCompletion:
         # Should update n0 to completed
         mock_executor['executions_table'].update_item.assert_called()
 
-        # Should publish node.completed event
-        mock_executor['events'].publish_node_completed.assert_called()
+        # D2: the step runner no longer re-emits workflow.node.completed
+        # (the worker is its sole producer; re-emitting would self-trigger).
+        mock_executor['events'].publish_node_completed.assert_not_called()
 
         # Should invoke next node (n1) — publish_node_started called for n1
         mock_executor['events'].publish_node_started.assert_called()
@@ -234,8 +238,8 @@ class TestHandleNodeCompletion:
         # Output does NOT match condition (status != 'approved')
         handle_node_completion('exec-cond', 'n0', {'result': {'status': 'rejected'}})
 
-        # n0 completed event should be published
-        mock_executor['events'].publish_node_completed.assert_called()
+        # D2: the step runner no longer re-emits workflow.node.completed
+        mock_executor['events'].publish_node_completed.assert_not_called()
 
         # n1 should be skipped (condition false) — update_item called to set skipped
         update_calls = mock_executor['executions_table'].update_item.call_args_list
@@ -302,6 +306,8 @@ class TestHandleNodeFailure:
         # Should publish retrying event (not workflow.failed)
         mock_executor['events'].publish_node_retrying.assert_called()
         mock_executor['events'].publish_workflow_failed.assert_not_called()
+        # D2: workflow.node.failed is never re-emitted by the step runner.
+        mock_executor['events'].publish_node_failed.assert_not_called()
 
     def test_handle_node_failure_fails_execution_when_retries_exhausted(self, mock_executor):
         from executor import handle_node_failure
@@ -316,8 +322,10 @@ class TestHandleNodeFailure:
 
         handle_node_failure('exec-001', 'n0', 'FatalError')
 
-        # Should publish node.failed and workflow.failed events
-        mock_executor['events'].publish_node_failed.assert_called()
+        # D2: the step runner no longer re-emits workflow.node.failed
+        # (the worker is its sole producer; re-emitting would self-trigger).
+        mock_executor['events'].publish_node_failed.assert_not_called()
+        # Terminal workflow.failed is still emitted.
         mock_executor['events'].publish_workflow_failed.assert_called()
 
 

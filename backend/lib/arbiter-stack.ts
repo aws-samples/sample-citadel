@@ -639,6 +639,9 @@ export class ArbiterStack extends cdk.Stack {
         runtime: lambda.Runtime.PYTHON_3_14,
         handler: 'index.handler',
         code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'stepRunner')),
+        // Shared arbiter layer so `from common import workflow_contract`
+        // resolves at runtime (common/ is staged at /opt/python/common).
+        layers: [catalogLayer],
         timeout: cdk.Duration.minutes(5),
         memorySize: 1024,
         environment: {
@@ -648,6 +651,11 @@ export class ArbiterStack extends cdk.Stack {
           TOOLS_CONFIG_TABLE: toolsConfigTable.tableName,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
           APPSYNC_ENDPOINT: props.appSyncEndpoint,
+          // URL of the worker agent queue. The Step Runner dispatches a
+          // workflow node to the worker by sending a discriminated message to
+          // this SQS queue; the worker runs the agent and emits the node
+          // completed/failed events the rules below consume.
+          WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
         },
       });
 
@@ -657,6 +665,10 @@ export class ArbiterStack extends cdk.Stack {
       props.agentConfigTable.grantReadData(stepRunnerFunction);
       toolsConfigTable.grantReadData(stepRunnerFunction);
       props.agentEventBus.grantPutEventsTo(stepRunnerFunction);
+      // SendMessage only, on the single worker agent queue — the Step Runner
+      // dispatches node execution to the worker via SQS and never receives or
+      // deletes from this queue (the worker owns consumption).
+      workerAgentQueue.grantSendMessages(stepRunnerFunction);
 
       // EventBridge rules targeting StepRunner
       const stepRunnerStartRule = new events.Rule(this, 'StepRunnerStartRule', {
