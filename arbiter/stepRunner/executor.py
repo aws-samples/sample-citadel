@@ -229,6 +229,15 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict) -> Non
     # Find the completed node's agent ID
     node_data = node_results.get(node_id, {})
 
+    # Idempotency guard against duplicate deliveries. At-least-once transports
+    # (SQS / EventBridge) can redeliver the same node-completed event. If the
+    # persisted node status is already the terminal 'completed', this is a
+    # replay — return without re-updating state, re-advancing the DAG,
+    # re-invoking downstream nodes, or re-emitting the terminal
+    # workflow.completed event.
+    if node_data.get('status') == 'completed':
+        return
+
     now = _now_iso()
 
     # Update node to completed
@@ -336,6 +345,15 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
     node_data = node_results.get(node_id, {})
     agent_id = node_data.get('agentId', '')
     retry_count = node_data.get('retryCount', 0)
+
+    # Idempotency guard against duplicate deliveries. If the persisted node
+    # status is already the terminal 'failed' (retries exhausted), this is a
+    # replay of the same node-failed event — return without re-updating state
+    # or re-emitting the terminal workflow.failed event. A node still
+    # 'running'/'pending' is NOT terminal, so the legitimate retry path below
+    # (retries remaining) still runs.
+    if node_data.get('status') == 'failed':
+        return
 
     # Find the node definition to check retry policy
     node_def = next((n for n in nodes if n['id'] == node_id), None)
