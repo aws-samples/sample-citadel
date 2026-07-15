@@ -459,6 +459,24 @@ function projectAgentApp(record: RegistryRecord): any {
   };
 }
 
+/**
+ * `projectAgentApp` + identity normalization for mutation return paths.
+ *
+ * The Registry assigns its OWN 12-char recordId on create (the uuid the
+ * resolver passes in is discarded), while customDescriptorContent may still
+ * embed the ORIGINAL client-side UUID as `appId` — which
+ * `projectAgentAppShape` lets OVERRIDE the projected appId. Everything
+ * persisted (registry record, AppsTable #META mirror, authority unit) is
+ * keyed by record.recordId, so returning the UUID makes follow-up lookups
+ * (e.g. importBlueprint's GetItem) miss deterministically. Always return the
+ * 12-char recordId as appId — mirrors the normalization getApp applies.
+ */
+function projectAgentAppNormalized(record: RegistryRecord): any {
+  const projected = projectAgentApp(record);
+  projected.appId = record.recordId;
+  return projected;
+}
+
 // ---------------------------------------------------------------------------
 // IAM action validation (preserved from app-resolver.ts)
 // ---------------------------------------------------------------------------
@@ -768,8 +786,10 @@ async function createApp(input: any, userId: string): Promise<unknown> {
   });
 
   // Eventually-consistent mirror to AppsTable.#META so OrgIndex stays current
-  // for `listApps`. Helper logs and returns false on failure; never throws.
-  await upsertAppMeta(APPS_TABLE, {
+  // for `listApps`. Helper logs and returns false on failure; never throws —
+  // but a silent miss here strands the app out of listApps until the
+  // reconciler runs, so surface it in the resolver log too.
+  const metaMirrored = await upsertAppMeta(APPS_TABLE, {
     appId: record.recordId,
     orgId: input.orgId,
     name: agentAppInput.name,
@@ -782,6 +802,12 @@ async function createApp(input: any, userId: string): Promise<unknown> {
     updatedAt: now,
     version: 1,
   });
+  if (!metaMirrored) {
+    console.error('createApp: AppsTable #META mirror write failed', {
+      appId: record.recordId,
+      tableName: APPS_TABLE,
+    });
+  }
 
   // US-ARB-014: grant the per-app fabricator authority unit AFTER the registry
   // record exists but BEFORE the success event so subscribers see a fully
@@ -795,7 +821,10 @@ async function createApp(input: any, userId: string): Promise<unknown> {
     userId,
   });
 
-  return projectAgentApp(record);
+  // Always return the 12-char recordId as appId (not the UUID from
+  // customDescriptorContent) — the mirror row, authority unit, and event
+  // above are all keyed by record.recordId. Mirrors getApp's normalization.
+  return projectAgentAppNormalized(record);
 }
 
 async function updateApp(input: any, userId: string): Promise<unknown> {
@@ -916,7 +945,7 @@ async function updateApp(input: any, userId: string): Promise<unknown> {
     }
   }
 
-  return projectAgentApp(record);
+  return projectAgentAppNormalized(record);
 }
 
 async function deleteApp(appId: string, userId: string): Promise<unknown> {
@@ -961,7 +990,7 @@ async function bindWorkflowToApp(
   const existingIds = manifest.workflowIds || [];
   if (existingIds.includes(workflowId)) {
     // Idempotent — already bound, return the current projection unchanged.
-    return projectAgentApp(record);
+    return projectAgentAppNormalized(record);
   }
 
   const updatedContent = writeManifestMutation(record, (m) => {
@@ -975,7 +1004,7 @@ async function bindWorkflowToApp(
 
   await emitEvent('app.workflow.bound', { appId, workflowId, userId });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 async function unbindWorkflowFromApp(
@@ -1001,7 +1030,7 @@ async function unbindWorkflowFromApp(
 
   await emitEvent('app.workflow.unbound', { appId, workflowId, userId });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 async function updateAgentBinding(
@@ -1098,7 +1127,7 @@ async function updateAgentBinding(
     userId,
   });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 async function addAppComponent(
@@ -1188,7 +1217,7 @@ async function addAppComponent(
     userId,
   });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 async function removeAppComponent(
@@ -1231,7 +1260,7 @@ async function removeAppComponent(
     userId,
   });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 async function setAppConfigSchema(
@@ -1273,7 +1302,7 @@ async function setAppConfigSchema(
 
   await emitEvent('app.config.schema.set', { appId, userId });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 async function setAppConfigValues(
@@ -1322,7 +1351,7 @@ async function setAppConfigValues(
 
   await emitEvent('app.config.values.set', { appId, userId });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 async function setAppAuthConfig(
@@ -1351,7 +1380,7 @@ async function setAppAuthConfig(
 
   await emitEvent('app.auth.config.set', { appId, userId });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 async function grantAppAccess(
@@ -1388,7 +1417,7 @@ async function grantAppAccess(
     grantedBy: grantingUserId,
   });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 async function revokeAppAccess(
@@ -1418,7 +1447,7 @@ async function revokeAppAccess(
     revokedBy: revokingUserId,
   });
 
-  return projectAgentApp(updated);
+  return projectAgentAppNormalized(updated);
 }
 
 // ===========================================================================
