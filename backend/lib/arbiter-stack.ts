@@ -784,7 +784,7 @@ export class ArbiterStack extends cdk.Stack {
       // talks only to the executions table + event bus (no executor coupling).
       const workflowTimeoutWatchdogFunction = new lambda.Function(this, 'WorkflowTimeoutWatchdogFunction', {
         runtime: lambda.Runtime.PYTHON_3_14,
-        handler: 'watchdog.handler',
+        handler: 'timeout_watchdog.handler',
         code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'stepRunner')),
         layers: [catalogLayer],
         timeout: cdk.Duration.minutes(2),
@@ -833,6 +833,37 @@ export class ArbiterStack extends cdk.Stack {
       workflowTimeoutWatchdogSchedule.addTarget(
         new targets.LambdaFunction(workflowTimeoutWatchdogFunction),
       );
+
+      // Error-rate alarm for the Step Runner Lambda. Declared inside this
+      // guard block so it only exists when the Step Runner does. Mirrors the
+      // Supervisor/Fabricator pattern: Errors metric, 5-minute period,
+      // NOT_BREACHING, threshold 3 (the Step Runner is invoked on every
+      // workflow lifecycle event, so a burst of errors is the signal).
+      new cloudwatch.Alarm(this, 'StepRunnerErrorAlarm', {
+        alarmName: `citadel-step-runner-errors-${props.environment}`,
+        metric: stepRunnerFunction.metricErrors({ period: cdk.Duration.minutes(5) }),
+        threshold: 3,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: 'Step Runner Lambda error rate exceeded threshold',
+      });
+
+      // Error-rate alarm for the workflow timeout watchdog. Threshold is 1
+      // (not 3 like the request-driven Lambdas): the watchdog runs once per
+      // 5-minute schedule, so a threshold of 3 within a single 5-minute
+      // period could never be reached and the alarm would be dead. A single
+      // failed sweep means stuck executions aren't being reaped, which is
+      // itself worth paging on. Same Errors metric / NOT_BREACHING pattern.
+      new cloudwatch.Alarm(this, 'WorkflowTimeoutWatchdogErrorAlarm', {
+        alarmName: `citadel-workflow-timeout-watchdog-errors-${props.environment}`,
+        metric: workflowTimeoutWatchdogFunction.metricErrors({ period: cdk.Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: 'Workflow timeout watchdog Lambda error rate exceeded threshold',
+      });
     }
 
     // O-03: Enable X-Ray active tracing on all Lambda functions
@@ -881,6 +912,22 @@ export class ArbiterStack extends cdk.Stack {
           treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
           alarmDescription: 'Fabricator Lambda error rate exceeded threshold',
         });
+
+    // Worker agent Lambda error-rate alarm (workflow dispatch path). Mirrors
+    // the Supervisor/Fabricator pattern: Errors metric, 5-minute period,
+    // NOT_BREACHING, threshold 3. The worker's SQS DLQ depth is covered
+    // separately by WorkerDLQDepthAlarm; this alarm surfaces in-invocation
+    // failures (bad dispatch payload, agent crash) that are retried and may
+    // never reach the DLQ.
+    new cloudwatch.Alarm(this, 'WorkerErrorAlarm', {
+      alarmName: `citadel-worker-errors-${props.environment}`,
+      metric: workerAgentWrapperLambda.metricErrors({ period: cdk.Duration.minutes(5) }),
+      threshold: 3,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'Worker agent Lambda error rate exceeded threshold',
+    });
 
         // ============================================================
         // Jagged-Frontier escalation alarm (follow-up #8)

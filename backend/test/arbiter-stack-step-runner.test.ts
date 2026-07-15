@@ -342,9 +342,9 @@ describe('ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)',
   });
 
   describe('Workflow timeout watchdog', () => {
-    test('watchdog Lambda exists with watchdog.handler on Python 3.14', () => {
+    test('watchdog Lambda exists with timeout_watchdog.handler on Python 3.14', () => {
       template.hasResourceProperties('AWS::Lambda::Function', {
-        Handler: 'watchdog.handler',
+        Handler: 'timeout_watchdog.handler',
         Runtime: 'python3.14',
       });
     });
@@ -361,6 +361,81 @@ describe('ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)',
       expect(actions.has('dynamodb:GetItem')).toBe(true);
       expect(actions.has('events:PutEvents')).toBe(true);
       expect(actions.has('cloudwatch:PutMetricData')).toBe(true);
+    });
+  });
+
+  // --- Execution-path Lambda error-rate alarms ---
+  // Mirror the existing Supervisor/Fabricator error-alarm pattern
+  // (metricErrors, 5-minute period, NOT_BREACHING) for the workflow
+  // dispatch/execution path: the worker, the step runner, and the
+  // timeout watchdog. The worker SQS DLQ depth alarm already exists
+  // (WorkerDLQDepthAlarm) and is intentionally NOT duplicated here.
+  describe('Execution-path Lambda error-rate alarms', () => {
+    function alarmByName(name: string): any {
+      const alarms = template.findResources('AWS::CloudWatch::Alarm');
+      return Object.values(alarms).find(
+        (a: any) => a.Properties?.AlarmName === name,
+      );
+    }
+
+    function functionNameDimensionRef(alarm: any): string {
+      const dims = alarm?.Properties?.Dimensions || [];
+      const fn = dims.find((d: any) => d.Name === 'FunctionName');
+      return fn?.Value?.Ref || '';
+    }
+
+    test('Worker Lambda error-rate alarm exists (AWS/Lambda Errors, 5-min, NOT_BREACHING)', () => {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        AlarmName: 'citadel-worker-errors-test',
+        Namespace: 'AWS/Lambda',
+        MetricName: 'Errors',
+        Period: 300,
+        Threshold: 3,
+        ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+        TreatMissingData: 'notBreaching',
+      });
+    });
+
+    test('Worker error alarm is dimensioned on the WorkerAgentWrapper function', () => {
+      const alarm = alarmByName('citadel-worker-errors-test');
+      expect(alarm).toBeDefined();
+      expect(functionNameDimensionRef(alarm)).toContain('WorkerAgentWrapper');
+    });
+
+    test('Step Runner Lambda error-rate alarm exists (AWS/Lambda Errors, 5-min, NOT_BREACHING)', () => {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        AlarmName: 'citadel-step-runner-errors-test',
+        Namespace: 'AWS/Lambda',
+        MetricName: 'Errors',
+        Period: 300,
+        Threshold: 3,
+        ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+        TreatMissingData: 'notBreaching',
+      });
+    });
+
+    test('Step Runner error alarm is dimensioned on the StepRunnerFunction', () => {
+      const alarm = alarmByName('citadel-step-runner-errors-test');
+      expect(alarm).toBeDefined();
+      expect(functionNameDimensionRef(alarm)).toContain('StepRunnerFunction');
+    });
+
+    test('Watchdog Lambda error-rate alarm exists (AWS/Lambda Errors, 5-min, NOT_BREACHING)', () => {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        AlarmName: 'citadel-workflow-timeout-watchdog-errors-test',
+        Namespace: 'AWS/Lambda',
+        MetricName: 'Errors',
+        Period: 300,
+        Threshold: 1,
+        ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+        TreatMissingData: 'notBreaching',
+      });
+    });
+
+    test('Watchdog error alarm is dimensioned on the WorkflowTimeoutWatchdog function', () => {
+      const alarm = alarmByName('citadel-workflow-timeout-watchdog-errors-test');
+      expect(alarm).toBeDefined();
+      expect(functionNameDimensionRef(alarm)).toContain('WorkflowTimeoutWatchdog');
     });
   });
 });

@@ -22,7 +22,6 @@ All AWS is mocked; no real network or credentials are touched.
 
 import sys
 import os
-import importlib.util
 from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -33,19 +32,12 @@ from botocore.exceptions import ClientError
 
 
 # ---------------------------------------------------------------------------
-# Import the LOCAL watchdog module by explicit file path.
-#
-# The name ``watchdog`` collides with the file-watching pip package installed
-# in the dev venv, and plugins may import that package before our test's
-# sys.path insert takes effect. Loading from the module's absolute path under a
-# distinct internal name guarantees we always exercise OUR Lambda module,
-# regardless of sys.path ordering or import caching.
+# Import the local timeout-watchdog Lambda module. ``arbiter/stepRunner`` is on
+# sys.path (inserted above and by the arbiter conftest) and the module name no
+# longer collides with any installed package, so a direct import is safe. The
+# ``watchdog`` alias keeps the assertions below concise.
 # ---------------------------------------------------------------------------
-_WATCHDOG_PATH = os.path.join(os.path.dirname(__file__), '..', 'watchdog.py')
-_spec = importlib.util.spec_from_file_location('steprunner_watchdog', _WATCHDOG_PATH)
-watchdog = importlib.util.module_from_spec(_spec)
-sys.modules['steprunner_watchdog'] = watchdog
-_spec.loader.exec_module(watchdog)
+import timeout_watchdog as watchdog
 
 
 # ---------------------------------------------------------------------------
