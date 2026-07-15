@@ -133,7 +133,7 @@ const LIST_APP_WORKFLOWS = `
 
 // --- GraphQL Mutations ---
 
-const CREATE_WORKFLOW = `
+export const CREATE_WORKFLOW = `
   mutation CreateWorkflow($input: CreateWorkflowInput!) {
     createWorkflow(input: $input) {
       workflowId
@@ -155,7 +155,7 @@ const CREATE_WORKFLOW = `
   }
 `;
 
-const UPDATE_WORKFLOW = `
+export const UPDATE_WORKFLOW = `
   mutation UpdateWorkflow($input: UpdateWorkflowInput!) {
     updateWorkflow(input: $input) {
       workflowId
@@ -187,7 +187,7 @@ const DELETE_WORKFLOW = `
   }
 `;
 
-const PUBLISH_WORKFLOW = `
+export const PUBLISH_WORKFLOW = `
   mutation PublishWorkflow($workflowId: ID!) {
     publishWorkflow(workflowId: $workflowId) {
       workflowId
