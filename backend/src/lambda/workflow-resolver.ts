@@ -40,7 +40,7 @@ export const handler: AppSyncResolverHandler<any, unknown> = async (event) => {
       case 'updateWorkflowConfiguration':
         return await updateWorkflowConfiguration(args.workflowId, args.configuration, args.version, userId, event);
       case 'importBlueprint':
-        return await importBlueprint(args.blueprintId, args.appId, args.name, userId, event);
+        return await importBlueprint(args.blueprintId, args.appId, args.name, args.agentMapping, userId, event);
       case 'importWorkflow':
         return await importWorkflowFn(args.input, userId);
       case 'exportWorkflow':
@@ -407,6 +407,71 @@ function validateDefinition(definitionJson: string): { valid: boolean; errors: s
   return { valid: errors.length === 0, errors };
 }
 
+/**
+ * Verifies that every node's agentId resolves to an existing agent in the
+ * agents table. This is the async companion to validateDefinition's pure checks:
+ * validateDefinition rejects missing/placeholder agentIds, while this confirms the
+ * referenced agents actually exist before a workflow may transition to PUBLISHED.
+ *
+ * Returns the list of { nodeId, agentId } references that do NOT resolve. An empty
+ * list means every referenced agent exists.
+ */
+async function verifyAgentsExist(
+  definitionJson: string,
+): Promise<{ ok: boolean; missing: { nodeId: string; agentId: string }[] }> {
+  let definition: any;
+  try {
+    definition = JSON.parse(definitionJson);
+  } catch {
+    // Malformed definitions are caught by the pure validator; nothing to check.
+    return { ok: true, missing: [] };
+  }
+
+  const nodes: any[] = definition.nodes || [];
+  const agentIds = Array.from(
+    new Set(
+      nodes
+        .map((n) => n.agentId)
+        .filter((a): a is string => typeof a === 'string' && a.length > 0),
+    ),
+  );
+
+  if (agentIds.length === 0) {
+    return { ok: true, missing: [] };
+  }
+
+  // BatchGetItem against the agents table, chunked to the 100-key limit.
+  // Read the table name at call time (module-load env may not be set under test).
+  const agentConfigTable = process.env.AGENT_CONFIG_TABLE!;
+  const existing = new Set<string>();
+  for (let i = 0; i < agentIds.length; i += 100) {
+    const chunk = agentIds.slice(i, i + 100);
+    const result = await docClient.send(
+      new BatchGetCommand({
+        RequestItems: {
+          [agentConfigTable]: {
+            Keys: chunk.map((agentId) => ({ agentId })),
+          },
+        },
+      }),
+    );
+    for (const item of result.Responses?.[agentConfigTable] || []) {
+      if (item && typeof item.agentId === 'string') {
+        existing.add(item.agentId);
+      }
+    }
+  }
+
+  const missing: { nodeId: string; agentId: string }[] = [];
+  for (const node of nodes) {
+    if (typeof node.agentId === 'string' && node.agentId.length > 0 && !existing.has(node.agentId)) {
+      missing.push({ nodeId: node.id, agentId: node.agentId });
+    }
+  }
+
+  return { ok: missing.length === 0, missing };
+}
+
 async function publishWorkflow(workflowId: string, userId: string, event: any): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
@@ -416,6 +481,19 @@ async function publishWorkflow(workflowId: string, userId: string, event: any): 
   const validation = validateDefinition(workflow.definition);
   if (!validation.valid) {
     throw new Error(`Validation failed: ${validation.errors.join('; ')}`);
+  }
+
+  // A workflow cannot reach PUBLISHED until every node's agentId resolves to an
+  // existing agent. If any reference is unresolved, reject and stay DRAFT.
+  const existence = await verifyAgentsExist(workflow.definition);
+  if (!existence.ok) {
+    const details = existence.missing
+      .map((m) => `node '${m.nodeId}' -> agentId '${m.agentId}'`)
+      .join('; ');
+    throw new Error(
+      `Validation failed: workflow references agents that do not exist: ${details}. ` +
+      `Map each node to an existing agent before publishing; the workflow remains DRAFT.`,
+    );
   }
 
   const now = new Date().toISOString();
@@ -506,6 +584,7 @@ async function importBlueprint(
   blueprintId: string,
   appId: string,
   name: string | undefined,
+  agentMapping: string | Record<string, string> | undefined,
   userId: string,
   event: any,
 ): Promise<unknown> {
@@ -544,11 +623,33 @@ async function importBlueprint(
   const now = new Date().toISOString();
   const workflowId = uuidv4();
 
-  // Deep-copy the definition (stored as JSON string in DynamoDB)
+  // Deep-copy the definition (stored as JSON string in DynamoDB), then apply the
+  // optional agentMapping to rewrite each node's placeholder/slot agentId to the
+  // caller-chosen real agentId. Nodes whose agentId is not present in the mapping
+  // are left unchanged. Contract: agentMapping = { [placeholderAgentId]: realAgentId }.
   const definitionStr = typeof blueprint.definition === 'string'
     ? blueprint.definition
     : JSON.stringify(blueprint.definition);
-  const definition = JSON.stringify(JSON.parse(definitionStr));
+  const parsedDefinition = JSON.parse(definitionStr);
+
+  const mapping: Record<string, string> =
+    typeof agentMapping === 'string'
+      ? (agentMapping.trim() ? JSON.parse(agentMapping) : {})
+      : (agentMapping || {});
+
+  if (parsedDefinition && Array.isArray(parsedDefinition.nodes) && Object.keys(mapping).length > 0) {
+    for (const node of parsedDefinition.nodes) {
+      if (
+        node &&
+        typeof node.agentId === 'string' &&
+        Object.prototype.hasOwnProperty.call(mapping, node.agentId)
+      ) {
+        node.agentId = mapping[node.agentId];
+      }
+    }
+  }
+
+  const definition = JSON.stringify(parsedDefinition);
 
   const workflow = {
     workflowId,

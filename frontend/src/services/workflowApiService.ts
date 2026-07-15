@@ -232,8 +232,8 @@ const UPDATE_WORKFLOW_CONFIGURATION = `
 `;
 
 const IMPORT_BLUEPRINT = `
-  mutation ImportBlueprint($blueprintId: ID!, $appId: ID!, $name: String) {
-    importBlueprint(blueprintId: $blueprintId, appId: $appId, name: $name) {
+  mutation ImportBlueprint($blueprintId: ID!, $appId: ID!, $name: String, $agentMapping: AWSJSON) {
+    importBlueprint(blueprintId: $blueprintId, appId: $appId, name: $name, agentMapping: $agentMapping) {
       workflowId
       orgId
       name
@@ -344,10 +344,27 @@ class WorkflowApiService {
     return response.updateWorkflowConfiguration;
   }
 
-  async importBlueprint(blueprintId: string, appId: string, name?: string) {
+  async importBlueprint(
+    blueprintId: string,
+    appId: string,
+    name?: string,
+    agentMapping?: Record<string, string>
+  ) {
+    // agentMapping is an AWSJSON scalar on the wire: send it as a JSON string
+    // (matches the convention used for `configuration` and agent `config`).
+    // The `agentMapping` key is only included when provided so callers that
+    // omit it produce identical variables to the pre-remap contract.
+    const variables: { blueprintId: string; appId: string; name?: string; agentMapping?: string } = {
+      blueprintId,
+      appId,
+      name,
+    };
+    if (agentMapping) {
+      variables.agentMapping = JSON.stringify(agentMapping);
+    }
     const response = await serverService.mutate<{ importBlueprint: any }>(
       IMPORT_BLUEPRINT,
-      { blueprintId, appId, name }
+      variables
     );
     return response.importBlueprint;
   }

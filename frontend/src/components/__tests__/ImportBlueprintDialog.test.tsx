@@ -22,6 +22,12 @@ jest.mock('../../services/appApiService', () => ({
   },
 }));
 
+jest.mock('../../services/agentConfigService', () => ({
+  agentConfigService: {
+    listAgentConfigs: jest.fn().mockResolvedValue([]),
+  },
+}));
+
 import { ImportBlueprintDialog } from '../ImportBlueprintDialog';
 import type { BlueprintData } from '../BlueprintCard';
 

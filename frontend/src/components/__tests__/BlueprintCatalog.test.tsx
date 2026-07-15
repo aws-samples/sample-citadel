@@ -25,6 +25,13 @@ jest.mock('../../services/appApiService', () => ({
   },
 }));
 
+// Mock agentConfigService (agent catalog for the import remap UI)
+jest.mock('../../services/agentConfigService', () => ({
+  agentConfigService: {
+    listAgentConfigs: jest.fn().mockResolvedValue([]),
+  },
+}));
+
 import { BlueprintCatalog } from '../BlueprintCatalog';
 import { workflowApiService } from '../../services/workflowApiService';
 import { appApiService } from '../../services/appApiService';

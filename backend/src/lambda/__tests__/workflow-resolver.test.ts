@@ -301,6 +301,9 @@ describe('workflow-resolver', () => {
           version: 1,
         },
       });
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: { 'citadel-agents-test': [{ agentId: 'agent-1' }, { agentId: 'agent-2' }] },
+      });
       ddbMock.on(UpdateCommand).resolves({
         Attributes: {
           workflowId: 'wf-1',
@@ -381,6 +384,9 @@ describe('workflow-resolver', () => {
           version: 1,
         },
       });
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: { 'citadel-agents-test': [{ agentId: 'a1b2c3d4e5f6' }, { agentId: 'z9y8x7w6v5u4' }] },
+      });
       ddbMock.on(UpdateCommand).resolves({
         Attributes: {
           workflowId: 'wf-1',
@@ -425,6 +431,62 @@ describe('workflow-resolver', () => {
       await expect(
         handler(makeEvent('publishWorkflow', { workflowId: 'wf-1' }), {} as any, {} as any),
       ).rejects.toThrow(/placeholder.*n3/i);
+    });
+
+    test('rejects publish when a node agentId does not exist in the agents table (stays DRAFT)', async () => {
+      const def = JSON.stringify({
+        nodes: [
+          { id: 'n1', agentId: 'real-agent-1', type: 'agent' },
+          { id: 'n2', agentId: 'ghost-agent', type: 'agent' },
+        ],
+        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+      });
+      ddbMock.on(GetCommand).resolves({
+        Item: { workflowId: 'wf-1', orgId: 'org-1', status: 'DRAFT', definition: def, version: 1 },
+      });
+      // Only real-agent-1 exists; ghost-agent is absent from the agents table
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: { 'citadel-agents-test': [{ agentId: 'real-agent-1' }] },
+      });
+
+      await expect(
+        handler(makeEvent('publishWorkflow', { workflowId: 'wf-1' }), {} as any, {} as any),
+      ).rejects.toThrow(/ghost-agent/i);
+
+      // Must remain DRAFT — no status transition
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    });
+
+    test('publishes when every node agentId resolves to an existing agent (queries agents table)', async () => {
+      const def = JSON.stringify({
+        nodes: [
+          { id: 'n1', agentId: 'real-agent-1', type: 'agent' },
+          { id: 'n2', agentId: 'real-agent-2', type: 'agent' },
+        ],
+        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+      });
+      ddbMock.on(GetCommand).resolves({
+        Item: { workflowId: 'wf-1', orgId: 'org-1', status: 'DRAFT', definition: def, version: 1 },
+      });
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: { 'citadel-agents-test': [{ agentId: 'real-agent-1' }, { agentId: 'real-agent-2' }] },
+      });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: { workflowId: 'wf-1', orgId: 'org-1', status: 'PUBLISHED', version: 2 },
+      });
+
+      const result = await handler(
+        makeEvent('publishWorkflow', { workflowId: 'wf-1' }),
+        {} as any,
+        {} as any,
+      );
+
+      expect(result.status).toBe('PUBLISHED');
+
+      // Existence check must have queried the agents table
+      const batchCalls = ddbMock.commandCalls(BatchGetCommand);
+      expect(batchCalls.length).toBeGreaterThanOrEqual(1);
+      expect(batchCalls[0].args[0].input.RequestItems!['citadel-agents-test']).toBeDefined();
     });
   });
 
@@ -505,6 +567,9 @@ describe('workflow-resolver', () => {
       });
       ddbMock.on(GetCommand).resolves({
         Item: { workflowId: 'wf-1', orgId: 'org-1', status: 'DRAFT', definition: validDef, version: 1 },
+      });
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: { 'citadel-agents-test': [{ agentId: 'a1' }, { agentId: 'a2' }] },
       });
       ddbMock.on(UpdateCommand).resolves({
         Attributes: { workflowId: 'wf-1', orgId: 'org-1', status: 'PUBLISHED', version: 2 },
@@ -699,6 +764,84 @@ describe('workflow-resolver', () => {
           {} as any,
         ),
       ).rejects.toThrow(/Access denied/i);
+    });
+
+    test('applies agentMapping to rewrite placeholder node agentIds to real agentIds', async () => {
+      const placeholderDef = JSON.stringify({
+        nodes: [
+          { id: 'n1', agentId: 'placeholder-writer', type: 'agent' },
+          { id: 'n2', agentId: 'placeholder-reviewer', type: 'agent' },
+        ],
+        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+      });
+      ddbMock.on(GetCommand)
+        .resolvesOnce({
+          Item: {
+            workflowId: 'bp-1', orgId: 'org-1', name: 'BP', status: 'PUBLISHED',
+            isBlueprint: 'true', definition: placeholderDef, version: 2,
+          },
+        })
+        .resolvesOnce({
+          Item: { appId: 'app-1', orgId: 'org-1', name: 'App', workflowIds: [], version: 1 },
+        });
+      ddbMock.on(PutCommand).resolves({});
+      ddbMock.on(UpdateCommand).resolves({});
+
+      const result = await handler(
+        makeEvent('importBlueprint', {
+          blueprintId: 'bp-1',
+          appId: 'app-1',
+          agentMapping: JSON.stringify({
+            'placeholder-writer': 'real-agent-1',
+            'placeholder-reviewer': 'real-agent-2',
+          }),
+        }),
+        {} as any,
+        {} as any,
+      );
+
+      const parsed = JSON.parse(result.definition);
+      expect(parsed.nodes[0].agentId).toBe('real-agent-1');
+      expect(parsed.nodes[1].agentId).toBe('real-agent-2');
+      // Persisted definition must also be remapped
+      const putItem = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
+      expect(JSON.parse(putItem!.definition).nodes[0].agentId).toBe('real-agent-1');
+    });
+
+    test('leaves unmapped node agentIds unchanged when applying agentMapping', async () => {
+      const mixedDef = JSON.stringify({
+        nodes: [
+          { id: 'n1', agentId: 'placeholder-writer', type: 'agent' },
+          { id: 'n2', agentId: 'already-real', type: 'agent' },
+        ],
+        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+      });
+      ddbMock.on(GetCommand)
+        .resolvesOnce({
+          Item: {
+            workflowId: 'bp-1', orgId: 'org-1', name: 'BP', status: 'PUBLISHED',
+            isBlueprint: 'true', definition: mixedDef, version: 2,
+          },
+        })
+        .resolvesOnce({
+          Item: { appId: 'app-1', orgId: 'org-1', name: 'App', workflowIds: [], version: 1 },
+        });
+      ddbMock.on(PutCommand).resolves({});
+      ddbMock.on(UpdateCommand).resolves({});
+
+      const result = await handler(
+        makeEvent('importBlueprint', {
+          blueprintId: 'bp-1',
+          appId: 'app-1',
+          agentMapping: JSON.stringify({ 'placeholder-writer': 'real-agent-1' }),
+        }),
+        {} as any,
+        {} as any,
+      );
+
+      const parsed = JSON.parse(result.definition);
+      expect(parsed.nodes[0].agentId).toBe('real-agent-1');
+      expect(parsed.nodes[1].agentId).toBe('already-real');
     });
   });
 
