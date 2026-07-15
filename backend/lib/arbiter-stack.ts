@@ -322,7 +322,18 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-          resources: ['*'],
+          // Scoped to the same foundation models + inference profiles the
+          // supervisor/fabricator are granted — never a blanket '*'. This keeps
+          // the worker role's residual AwsSolutions-IAM5 suppression (below)
+          // pointed ONLY at the unavoidable cloudwatch:PutMetricData /
+          // sts:GetCallerIdentity Resource::*, not at Bedrock. These scoped
+          // Bedrock ARNs are covered by the app-level IAM5 regex suppression
+          // (foundation-model/*, inference-profile/*).
+          resources: [
+            `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
+            `arn:aws:bedrock:*::foundation-model/amazon.*`,
+            `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
+          ],
         }),
       ],
     });
@@ -607,8 +618,31 @@ export class ArbiterStack extends cdk.Stack {
 
     props.agentConfigTable.grantWriteData(seedAgentConfigLambda);
     // PutObject only — the seed writes the demo agent module, never reads or
-    // deletes from the code bucket.
-    props.codeBucket.grantPut(seedAgentConfigLambda);
+    // deletes from the code bucket. Path-scoped to the agents/* object-key
+    // prefix: the seed only writes agents/demo_echo_agent.py, so it never needs
+    // write access anywhere else in the bucket.
+    props.codeBucket.grantPut(seedAgentConfigLambda, 'agents/*');
+    // The agents/* object-key prefix is the residual (and unavoidable) S3
+    // resource wildcard — you cannot PutObject without a key. The app-level
+    // IAM5 suppression covers a bucket-wide <Arn>/* but not this narrower
+    // <Arn>/agents/* form, so scope the residual suppression to exactly the
+    // agents/* prefix here. (The s3:PutObject*/Abort* action wildcards are
+    // already covered by the app-level action suppression.)
+    NagSuppressions.addResourceSuppressions(
+      seedAgentConfigLambda.role!,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason:
+            'Seed S3 write is path-scoped to agents/* (writes only ' +
+            'agents/demo_echo_agent.py). The residual wildcard is the object-key ' +
+            'prefix inherent to any S3 PutObject; no bucket-wide or cross-prefix ' +
+            'write is granted.',
+          appliesTo: [{ regex: '/^Resource::<.+\\.Arn>\\/agents\\/\\*$/g' }],
+        },
+      ],
+      true,
+    );
 
     // Invoke the Custom Resource to seed agent config table
     // This must come after fabricatorQueue is created since we pass its URL.
@@ -798,10 +832,18 @@ export class ArbiterStack extends cdk.Stack {
         },
       });
 
-      // Least-privilege: read/write executions (conditional status update),
-      // PutEvents on the shared bus (workflow.failed), and PutMetricData for
-      // the best-effort timeout metric (Citadel/Workflows namespace).
-      props.executionsTable.grantReadWriteData(workflowTimeoutWatchdogFunction);
+      // Least-privilege: the watchdog only Scans for running executions and
+      // conditionally UpdateItems the stuck ones to failed (timeout_watchdog.py
+      // _scan_running + _fail_stuck). It never reads by key, puts, or deletes,
+      // so grant exactly dynamodb:Scan + dynamodb:UpdateItem on the base table
+      // ARN rather than full read/write (grantReadWriteData). PutEvents on the
+      // shared bus (workflow.failed) and PutMetricData for the best-effort
+      // timeout metric (Citadel/Workflows namespace) follow below.
+      workflowTimeoutWatchdogFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:Scan', 'dynamodb:UpdateItem'],
+        resources: [props.executionsTable.tableArn],
+      }));
       props.agentEventBus.grantPutEventsTo(workflowTimeoutWatchdogFunction);
       workflowTimeoutWatchdogFunction.addToRolePolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,

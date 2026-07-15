@@ -331,6 +331,65 @@ describe('ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)',
     return actions;
   }
 
+  // Collect the resources (as strings) of every statement on roles matching
+  // `roleSubstring` that include `action`. Non-string resources (Fn::Join /
+  // Fn::ImportValue tokens) are JSON-serialised so prefix assertions work.
+  function resourcesForRoleAction(roleSubstring: string, action: string): string[] {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const out: string[] = [];
+    for (const p of Object.values(policies) as any[]) {
+      const roles = p.Properties?.Roles || [];
+      if (!roles.some((r: any) => (r?.Ref || '').includes(roleSubstring))) continue;
+      for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+        const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (!acts.includes(action)) continue;
+        const res = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
+        res.forEach((r: any) => out.push(typeof r === 'string' ? r : JSON.stringify(r)));
+      }
+    }
+    return out;
+  }
+
+  // Resources of statements granting any s3:PutObject* action on the given role.
+  function s3PutResourcesForRole(roleSubstring: string): string[] {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const out: string[] = [];
+    for (const p of Object.values(policies) as any[]) {
+      const roles = p.Properties?.Roles || [];
+      if (!roles.some((r: any) => (r?.Ref || '').includes(roleSubstring))) continue;
+      for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+        const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (!acts.some((a: any) => typeof a === 'string' && a.startsWith('s3:PutObject'))) continue;
+        const res = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
+        res.forEach((r: any) => out.push(typeof r === 'string' ? r : JSON.stringify(r)));
+      }
+    }
+    return out;
+  }
+
+  describe('Worker Bedrock least-privilege', () => {
+    test('worker InvokeModel is scoped to the shared model ARNs, not Resource::*', () => {
+      const resources = resourcesForRoleAction('WorkerAgentWrapper', 'bedrock:InvokeModel');
+      expect(resources.length).toBeGreaterThan(0);
+      // No blanket wildcard — the whole point of the finding.
+      expect(resources).not.toContain('*');
+      // Scoped to the same three model families the supervisor/fabricator use.
+      expect(resources.some((r) => r.includes('foundation-model/anthropic.claude-*'))).toBe(true);
+      expect(resources.some((r) => r.includes('foundation-model/amazon.*'))).toBe(true);
+      expect(resources.some((r) => r.includes('inference-profile/'))).toBe(true);
+    });
+  });
+
+  describe('Seed S3 write least-privilege', () => {
+    test('seed PutObject is path-scoped to agents/*, not the whole bucket', () => {
+      const resources = s3PutResourcesForRole('SeedAgentConfig');
+      expect(resources.length).toBeGreaterThan(0);
+      // Every PutObject resource is the agents/* object-key prefix. A bucket-
+      // wide grant would render the suffix as ".../*" with no agents/ segment.
+      expect(resources.every((r) => r.includes('agents/*'))).toBe(true);
+    });
+  });
+
   describe('Workflow node-metric grants (PutMetricData)', () => {
     test('Step Runner role can PutMetricData (node duration/failure metrics)', () => {
       expect(actionsForRole('StepRunnerFunction').has('cloudwatch:PutMetricData')).toBe(true);
@@ -355,10 +414,20 @@ describe('ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)',
       });
     });
 
-    test('watchdog has least-privilege grants: executions RW, PutEvents, PutMetricData', () => {
+    test('watchdog DynamoDB grant is least-privilege: Scan + UpdateItem only, not full read/write', () => {
       const actions = actionsForRole('WorkflowTimeoutWatchdog');
-      expect(actions.has('dynamodb:PutItem')).toBe(true);
-      expect(actions.has('dynamodb:GetItem')).toBe(true);
+      // The watchdog only Scans for running executions and conditionally
+      // UpdateItems the stuck ones to failed (timeout_watchdog.py).
+      expect(actions.has('dynamodb:Scan')).toBe(true);
+      expect(actions.has('dynamodb:UpdateItem')).toBe(true);
+      // grantReadWriteData artifacts must be gone — no put/delete/batch, and no
+      // read-by-key (the watchdog never GetItems; it reads startedAt off Scan).
+      expect(actions.has('dynamodb:PutItem')).toBe(false);
+      expect(actions.has('dynamodb:DeleteItem')).toBe(false);
+      expect(actions.has('dynamodb:BatchWriteItem')).toBe(false);
+      expect(actions.has('dynamodb:GetItem')).toBe(false);
+      expect(actions.has('dynamodb:BatchGetItem')).toBe(false);
+      // Unchanged grants remain.
       expect(actions.has('events:PutEvents')).toBe(true);
       expect(actions.has('cloudwatch:PutMetricData')).toBe(true);
     });
