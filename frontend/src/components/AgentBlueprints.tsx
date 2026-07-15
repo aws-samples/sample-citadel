@@ -7,6 +7,7 @@ import { WorkflowCanvas } from './WorkflowCanvas';
 import { WorkflowToolbar } from './WorkflowToolbar';
 import { NodeConfigurationPanel } from './NodeConfigurationPanel';
 import { ExecutionOverlay } from './ExecutionOverlay';
+import { ExecutionHistoryPanel } from './ExecutionHistoryPanel';
 import { Button } from './ui/button';
 import type { WorkflowNode, WorkflowEdge, ValidationResult } from '../types/workflow';
 import { validateWorkflow, serializeWorkflow } from '../services/workflowService';
@@ -35,6 +36,7 @@ export function AgentBlueprints() {
   const [executionId, setExecutionId] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [isPublishing, setIsPublishing] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
   const { selectedOrganization } = useOrganization();
   const orgId = selectedOrganization || 'default';
@@ -312,6 +314,22 @@ export function AgentBlueprints() {
             {workflowStatus === 'PUBLISHED' ? 'Published' : 'Publish'}
           </Button>
 
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setIsHistoryOpen((open) => !open)}
+            disabled={!workflowId}
+            aria-pressed={isHistoryOpen}
+            title={
+              workflowId
+                ? 'Show past executions for this workflow'
+                : 'Create a workflow to view its execution history'
+            }
+          >
+            History
+          </Button>
+
           {saveStatusLabel && (
             <span
               data-testid="save-status"
@@ -359,6 +377,16 @@ export function AgentBlueprints() {
               validationResult={validationResult}
             />
           </main>
+
+          {/* Past executions for the active workflow, keyed by workflowId */}
+          {workflowId && (
+            <ExecutionHistoryPanel
+              key={workflowId}
+              workflowId={workflowId}
+              isOpen={isHistoryOpen}
+              onClose={() => setIsHistoryOpen(false)}
+            />
+          )}
         </div>
 
         {/* Node Configuration Panel */}
