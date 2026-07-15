@@ -142,3 +142,69 @@ class TestSupervisorTaskUnchanged:
         # Routing: supervisor task path taken, workflow-node path not invoked.
         mock_node.assert_not_called()
         mock_ptc.assert_called_once()
+
+
+class TestWorkflowNodeGovernanceEnv:
+    """The workflow-node path must carry the same layer-2 governance env the
+    supervisor task path builds, so the subprocess ``GovernedToolHandler`` is
+    installed for workflow-dispatched agents instead of being silently
+    bypassed.
+
+    ``CITADEL_AGENT_ID`` is the trigger that makes ``agent_runner`` patch
+    ``strands.Agent`` with the handler; ``CITADEL_WORKFLOW_ID`` is the
+    run-correlation id stamped on every finding. The supervisor path feeds a
+    per-run id (``orchestration_id``) into that slot, so the workflow-node
+    mirror is the per-run ``execution_id`` — not the reusable workflow
+    template id — keeping ledger findings correlatable to a single run.
+    """
+
+    @staticmethod
+    def _extract_extra_env(call):
+        env = call.kwargs.get('extra_env')
+        if env is None and len(call.args) >= 3:
+            env = call.args[2]
+        return env
+
+    def test_node_dispatch_passes_governance_env_into_subprocess(self):
+        mock_events = MagicMock()
+        mock_events.put_events.return_value = {'FailedEntryCount': 0}
+
+        with patch.dict('os.environ', _NODE_ENV):
+            with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
+                index = _fresh_index()
+                with patch.object(index, 'load_config_from_dynamodb',
+                                  return_value={'config': {'filename': 'agent.py'}}), \
+                     patch.object(index, 'get_scoped_credentials', return_value=None), \
+                     patch.object(index, 'load_file_from_s3_into_tmp'), \
+                     patch.object(index, 'run_agent_in_subprocess',
+                                  return_value='done') as mock_run:
+                    index.process_event(dict(NODE_MESSAGE), {})
+
+        mock_run.assert_called_once()
+        extra_env = self._extract_extra_env(mock_run.call_args)
+        assert extra_env is not None, \
+            "workflow-node dispatch did not pass a governance env to run_agent_in_subprocess"
+        # CITADEL_AGENT_ID is the trigger for GovernedToolHandler installation.
+        assert extra_env.get('CITADEL_AGENT_ID') == 'agent-A'
+        # Run-correlation id mirrors the supervisor's orchestration_id → the
+        # workflow-node per-run id is execution_id (not the template wf-1).
+        assert extra_env.get('CITADEL_WORKFLOW_ID') == 'exec-1'
+
+    def test_node_dispatch_preserves_raise_on_error(self):
+        # The governance-env change must NOT drop raise_on_error=True, which is
+        # what turns a non-zero subprocess exit into node.failed.
+        mock_events = MagicMock()
+        mock_events.put_events.return_value = {'FailedEntryCount': 0}
+
+        with patch.dict('os.environ', _NODE_ENV):
+            with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
+                index = _fresh_index()
+                with patch.object(index, 'load_config_from_dynamodb',
+                                  return_value={'config': {'filename': 'agent.py'}}), \
+                     patch.object(index, 'get_scoped_credentials', return_value=None), \
+                     patch.object(index, 'load_file_from_s3_into_tmp'), \
+                     patch.object(index, 'run_agent_in_subprocess',
+                                  return_value='done') as mock_run:
+                    index.process_event(dict(NODE_MESSAGE), {})
+
+        assert mock_run.call_args.kwargs.get('raise_on_error') is True

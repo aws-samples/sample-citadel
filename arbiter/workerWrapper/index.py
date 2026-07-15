@@ -469,8 +469,24 @@ def _process_workflow_node(event):
         fileName = config['filename']
         load_file_from_s3_into_tmp(os.environ["AGENT_BUCKET_NAME"], fileName)
 
+        # Layer-2 governance parity with the supervisor task path: build the
+        # same governance-carrying subprocess env so the subprocess
+        # GovernedToolHandler is installed for workflow-dispatched agents
+        # instead of being silently bypassed. CITADEL_AGENT_ID is the trigger
+        # (agent_runner patches strands.Agent only when it is set); without it
+        # the handler is never installed and layer-2 tool governance is skipped.
+        # The workflow-node per-run correlation id is execution_id — mirroring
+        # the supervisor path, which feeds its per-run orchestration_id into the
+        # same slot — so ledger findings stay correlatable to a single
+        # execution rather than the reusable workflow template id.
+        extra_env = build_subprocess_env(
+            {},
+            agent_id=msg.agent_id,
+            workflow_id=msg.execution_id,
+        )
+
         response = run_agent_in_subprocess(
-            msg.input, scoped_credentials, raise_on_error=True
+            msg.input, scoped_credentials, extra_env, raise_on_error=True
         )
     except Exception as exc:  # noqa: BLE001 — any failure becomes node.failed
         print(json.dumps({
