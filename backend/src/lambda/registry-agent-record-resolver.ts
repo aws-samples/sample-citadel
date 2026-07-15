@@ -715,6 +715,12 @@ async function createApp(input: any, userId: string): Promise<unknown> {
   const now = new Date().toISOString();
   const appId = uuidv4();
 
+  // The AgentCore Registry API requires description length >= 1. The Import
+  // Blueprint dialog's New App mode sends only { name, orgId }, so an
+  // absent/blank description defaults to the app name. Resolved once here so
+  // the registry record and the AppsTable #META mirror stay consistent.
+  const description = (input.description ?? '').trim() || input.name;
+
   // Build the AgentApp-shaped input, then project to a RegistryRecord skeleton
   // via the factory. The manifest sub-object carries the fields the legacy
   // resolver stored as separate DDB rows (workflowIds, bindings, permissions).
@@ -722,7 +728,7 @@ async function createApp(input: any, userId: string): Promise<unknown> {
     appId,
     orgId: input.orgId,
     name: input.name,
-    description: input.description || '',
+    description,
     status: 'DRAFT',
     version: 1,
     createdAt: now,
@@ -808,11 +814,18 @@ async function updateApp(input: any, userId: string): Promise<unknown> {
   // through the factory so the Registry write goes through the canonical
   // input-boundary projection rule.
   const existingProjection = projectAgentApp(existing);
+  // Same guard as createApp: the Registry API rejects descriptions shorter
+  // than 1 char, so an explicit-blank input (or an absent input over a legacy
+  // record whose stored description is blank) falls back to the app name.
+  const resolvedName = input.name ?? existingProjection.name;
+  const resolvedDescription =
+    ((input.description ?? existingProjection.description ?? '') as string).trim() ||
+    resolvedName;
   const mergedAgentApp = {
     appId: input.appId,
     orgId: input.orgId ?? existingProjection.orgId,
-    name: input.name ?? existingProjection.name,
-    description: input.description ?? existingProjection.description,
+    name: resolvedName,
+    description: resolvedDescription,
     status: input.status ?? existingProjection.status,
     version: existingVersion + 1,
     createdAt: existingProjection.createdAt,
@@ -848,7 +861,7 @@ async function updateApp(input: any, userId: string): Promise<unknown> {
     version: mergedAgentApp.version,
   };
   if (input.name !== undefined) metaPartial.name = input.name;
-  if (input.description !== undefined) metaPartial.description = input.description;
+  if (input.description !== undefined) metaPartial.description = resolvedDescription;
   if (input.status !== undefined) metaPartial.status = input.status;
   if (input.routingConfig !== undefined) metaPartial.routingConfig = input.routingConfig;
   await updateAppMetaFields(APPS_TABLE, input.appId, metaPartial);
