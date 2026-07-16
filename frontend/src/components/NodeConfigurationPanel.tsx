@@ -36,6 +36,38 @@ interface NodeConfigurationPanelProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (nodeId: string, configuration: Record<string, any>) => void;
+  onRename?: (nodeId: string, label: string) => void;
+}
+
+/**
+ * Defensively resolve a value that may be a JSON-encoded string into an
+ * object. Deployed agent records sometimes store `config` (or even the
+ * whole agentConfig) as a JSON string; malformed payloads must never
+ * crash the panel. Mirrors the idiom in AgentCatalog.tsx filteredAgents.
+ */
+function parseMaybeJson(value: unknown): Record<string, any> {
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return (value as Record<string, any>) ?? {};
+}
+
+/**
+ * Resolve the parameter schema for a node, tolerating string-encoded or
+ * malformed agentConfig/config values.
+ */
+function resolveNodeSchema(node: WorkflowNode): {
+  agentConfig: Record<string, any>;
+  schema: { properties?: Record<string, any>; required?: string[] } | undefined;
+} {
+  const agentConfig = parseMaybeJson(node.data.agentConfig);
+  const config = parseMaybeJson(agentConfig.config);
+  return { agentConfig, schema: config?.schema };
 }
 
 /**
@@ -151,9 +183,12 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
   isOpen,
   onClose,
   onSave,
+  onRename,
 }: NodeConfigurationPanelProps) {
   // Local state for configuration values
   const [configuration, setConfiguration] = useState<Record<string, any>>({});
+  // Local state for the editable node label
+  const [label, setLabel] = useState<string>('');
 
   /**
    * Initialize configuration state when node changes
@@ -163,6 +198,7 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
     if (node) {
       // Initialize with existing configuration or empty object
       setConfiguration(node.data.configuration || {});
+      setLabel(node.data.label || '');
     }
   }, [node]);
 
@@ -172,8 +208,13 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
    */
   const handleSave = useCallback(() => {
     if (node) {
-      // Validate required fields
-      const schema = node.data.agentConfig.config?.schema;
+      const trimmedLabel = label.trim();
+      if (!trimmedLabel) {
+        return;
+      }
+
+      // Validate required fields (defensive against string-encoded config)
+      const { schema } = resolveNodeSchema(node);
       const requiredFields = schema?.required || [];
       const missingFields = requiredFields.filter(
         (field: string) => !configuration[field] || configuration[field] === ''
@@ -187,22 +228,26 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
       }
 
       onSave(node.id, configuration);
+      if (onRename && trimmedLabel !== node.data.label) {
+        onRename(node.id, trimmedLabel);
+      }
       onClose();
-      
+
       toast.success('Configuration saved', {
-        description: `${node.data.label} configuration updated`,
+        description: `${trimmedLabel} configuration updated`,
       });
     }
-  }, [node, configuration, onSave, onClose]);
+  }, [node, configuration, label, onSave, onRename, onClose]);
 
   /**
    * Handle canceling configuration changes
    * Requirement 10.5: Discard changes and close panel
    */
   const handleCancel = useCallback(() => {
-    // Reset to original configuration
+    // Reset to original configuration and label
     if (node) {
       setConfiguration(node.data.configuration || {});
+      setLabel(node.data.label || '');
     }
     onClose();
   }, [node, onClose]);
@@ -222,10 +267,11 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
     return null;
   }
 
-  // Extract schema from agent config
-  const schema = node.data.agentConfig.config?.schema;
+  // Extract schema from agent config (defensive against string-encoded config)
+  const { agentConfig, schema } = resolveNodeSchema(node);
   const parameters = schema?.properties || {};
   const required = schema?.required || [];
+  const agentName = agentConfig.name || node.data.label;
 
   return (
     <Sheet open={isOpen} onOpenChange={(open: boolean) => !open && handleCancel()}>
@@ -257,6 +303,18 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
                 </div>
               </div>
             </div>
+          </div>
+
+          {/* Node Label (always editable) */}
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="node-label">Node label</Label>
+            <Input
+              id="node-label"
+              type="text"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="Enter node label"
+            />
           </div>
 
           {/* Configuration Parameters */}
@@ -292,8 +350,14 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
               })}
             </div>
           ) : (
-            <div className="text-sm text-muted-foreground text-center py-8">
-              This agent has no configurable parameters.
+            <div className="flex flex-col gap-2 rounded-md border border-dashed p-4">
+              <div className="text-sm font-medium">
+                {agentName} ({node.data.agentId})
+              </div>
+              <p className="text-sm text-muted-foreground">
+                This agent does not declare configurable parameters. Node-level
+                model and prompt overrides are not yet applied at runtime.
+              </p>
             </div>
           )}
 
@@ -320,6 +384,7 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
           </Button>
           <Button 
             onClick={handleSave}
+            disabled={!label.trim()}
             aria-label="Save configuration changes"
           >
             Save Configuration

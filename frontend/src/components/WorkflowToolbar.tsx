@@ -1,22 +1,24 @@
 /**
  * WorkflowToolbar Component
- * 
+ *
  * Provides action buttons for workflow operations including:
- * - Save: Download workflow as JSON file
- * - Load: Upload and load workflow from JSON file
+ * - Save: Save workflow to the blueprint catalog (create + publish)
+ * - Load: Load a published blueprint from the catalog
  * - Validate: Check workflow for errors and warnings
  * - Clear: Remove all nodes and edges from canvas
+ * - Import: Load workflow from a local JSON file
  * - Export: Download workflow as formatted JSON
- * 
+ *
  */
 
 import React, { useRef, useState, memo, useCallback } from 'react';
-import { 
-  SaveIcon, 
-  FolderOpenIcon, 
-  CheckCircleIcon, 
-  TrashIcon, 
+import {
+  SaveIcon,
+  FolderOpenIcon,
+  CheckCircleIcon,
+  TrashIcon,
   DownloadIcon,
+  UploadIcon,
   AlertCircleIcon,
   AlertTriangleIcon,
 } from 'lucide-react';
@@ -30,17 +32,72 @@ import {
   DialogTitle,
 } from './ui/dialog';
 import { Alert, AlertDescription, AlertTitle } from './ui/alert';
+import { Input } from './ui/input';
+import { Label } from './ui/label';
+import { Badge } from './ui/badge';
 import { toast } from 'sonner';
-import type { WorkflowNode, WorkflowEdge, ValidationResult } from '../types/workflow';
-import { serializeWorkflow, validateWorkflow, WorkflowError, deserializeWorkflow } from '../services/workflowService';
+import type {
+  WorkflowNode,
+  WorkflowEdge,
+  ValidationResult,
+  WorkflowDefinition,
+} from '../types/workflow';
+import {
+  serializeWorkflow,
+  validateWorkflow,
+  WorkflowError,
+  deserializeWorkflow,
+} from '../services/workflowService';
+import { workflowApiService } from '../services/workflowApiService';
 
 export interface WorkflowToolbarProps {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   onLoad: (nodes: WorkflowNode[], edges: WorkflowEdge[]) => void;
   onClear: () => void;
+  orgId: string;
+  workflowName?: string;
   hasUnsavedChanges?: boolean;
   validationResult?: ValidationResult | null;
+}
+
+/** Blueprint row shape returned by workflowApiService.listBlueprints(). */
+interface CatalogBlueprint {
+  workflowId: string;
+  name: string;
+  description?: string | null;
+  definition: string;
+  metadata?: string | null;
+}
+
+/**
+ * Parse a blueprint definition defensively: the backend may return the
+ * definition as a JSON string, or as a double-encoded JSON string.
+ * Mirrors parseDefinitionNodes in ImportBlueprintDialog.tsx.
+ */
+function parseBlueprintDefinition(definition: string): WorkflowDefinition {
+  let parsed: unknown = JSON.parse(definition);
+  if (typeof parsed === 'string') {
+    parsed = JSON.parse(parsed);
+  }
+  return parsed as WorkflowDefinition;
+}
+
+/** Defensively extract a category string from a blueprint's metadata JSON. */
+function parseBlueprintCategory(metadata: string | null | undefined): string | null {
+  if (typeof metadata !== 'string' || !metadata.trim()) {
+    return null;
+  }
+  try {
+    let parsed: unknown = JSON.parse(metadata);
+    if (typeof parsed === 'string') {
+      parsed = JSON.parse(parsed);
+    }
+    const category = (parsed as { category?: unknown } | null)?.category;
+    return typeof category === 'string' && category.trim() ? category : null;
+  } catch {
+    return null;
+  }
 }
 
 export const WorkflowToolbar = memo(function WorkflowToolbar({
@@ -48,6 +105,8 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
   edges,
   onLoad,
   onClear,
+  orgId,
+  workflowName,
   hasUnsavedChanges = false,
   validationResult: externalValidationResult,
 }: WorkflowToolbarProps) {
@@ -57,99 +116,208 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
   const [showSaveWarningDialog, setShowSaveWarningDialog] = useState(false);
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
 
+  // Save-to-catalog dialog state
+  const [showSaveCatalogDialog, setShowSaveCatalogDialog] = useState(false);
+  const [saveName, setSaveName] = useState('');
+  const [saveCategory, setSaveCategory] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  // Load-from-catalog dialog state
+  const [showReplaceDialog, setShowReplaceDialog] = useState(false);
+  const [showCatalogDialog, setShowCatalogDialog] = useState(false);
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [blueprints, setBlueprints] = useState<CatalogBlueprint[]>([]);
+  const [loadingBlueprint, setLoadingBlueprint] = useState(false);
+
+  /**
+   * Open the save-to-catalog dialog with the name prefilled from the
+   * workflowName prop (falling back to 'Untitled Blueprint').
+   */
+  const openSaveCatalogDialog = useCallback(() => {
+    setSaveName(workflowName?.trim() || 'Untitled Blueprint');
+    setSaveCategory('');
+    setShowSaveCatalogDialog(true);
+  }, [workflowName]);
+
   /**
    * Handle Save button click
-   * Requirement: Save workflow as JSON file
-   * Requirement: Serialize workflow with all data
+   * Requirement: Save workflow to the blueprint catalog
    * Requirement: Prevent saving invalid workflows with prompt
    */
   const handleSave = useCallback(() => {
-    try {
-      // Use external validation result if available, otherwise validate now
-      const validation = externalValidationResult || validateWorkflow(nodes, edges);
-      
-      // Show warning dialog if workflow has errors
-      if (!validation.isValid) {
-        setValidationResult(validation);
-        setShowSaveWarningDialog(true);
-        return;
-      }
+    // Use external validation result if available, otherwise validate now
+    const validation = externalValidationResult || validateWorkflow(nodes, edges);
 
-      // Proceed with save
-      performSave();
-    } catch (error) {
-      console.error('Failed to save workflow:', error);
-      
-      if (error instanceof WorkflowError) {
-        toast.error('Failed to save workflow', {
-          description: error.message,
-        });
-      } else {
-        toast.error('Failed to save workflow', {
-          description: 'An unexpected error occurred',
-        });
-      }
+    // Show warning dialog if workflow has errors
+    if (!validation.isValid) {
+      setValidationResult(validation);
+      setShowSaveWarningDialog(true);
+      return;
     }
-  }, [nodes, edges, externalValidationResult]);
+
+    openSaveCatalogDialog();
+  }, [nodes, edges, externalValidationResult, openSaveCatalogDialog]);
 
   /**
-   * Perform the actual save operation
-   */
-  const performSave = useCallback(() => {
-    try {
-      // Serialize workflow to JSON
-      const workflow = serializeWorkflow(nodes, edges, {
-        name: `Workflow ${new Date().toLocaleDateString()}`,
-      });
-
-      // Create blob and download
-      const blob = new Blob([JSON.stringify(workflow, null, 2)], {
-        type: 'application/json',
-      });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `workflow-${workflow.id}-${Date.now()}.json`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-
-      toast.success('Workflow saved successfully', {
-        description: `Saved as ${link.download}`,
-      });
-    } catch (error) {
-      console.error('Failed to save workflow:', error);
-      
-      if (error instanceof WorkflowError) {
-        toast.error('Failed to save workflow', {
-          description: error.message,
-        });
-      } else {
-        toast.error('Failed to save workflow', {
-          description: 'An unexpected error occurred',
-        });
-      }
-    }
-  }, [nodes, edges]);
-
-  /**
-   * Handle save confirmation when workflow has errors
+   * Handle save confirmation when workflow has errors ('Save Anyway')
    */
   const handleSaveConfirm = useCallback(() => {
     setShowSaveWarningDialog(false);
-    performSave();
-    toast.warning('Workflow saved with errors', {
-      description: 'The workflow may not execute correctly.',
-    });
-  }, [performSave]);
+    openSaveCatalogDialog();
+  }, [openSaveCatalogDialog]);
+
+  /**
+   * Perform the save-to-catalog operation:
+   * createWorkflow(isBlueprint: true) then publishWorkflow.
+   */
+  const handleSaveToCatalog = useCallback(async () => {
+    const name = saveName.trim();
+    if (!name) {
+      return;
+    }
+
+    setSaving(true);
+    let created: { workflowId: string };
+    try {
+      const workflow = serializeWorkflow(nodes, edges, { name });
+      const category = saveCategory.trim();
+      created = await workflowApiService.createWorkflow({
+        name,
+        orgId,
+        definition: JSON.stringify(workflow),
+        isBlueprint: true,
+        metadata: category ? JSON.stringify({ category }) : undefined,
+      });
+    } catch (error) {
+      console.error('Failed to save blueprint to catalog:', error);
+      toast.error('Failed to save blueprint', {
+        description:
+          error instanceof Error ? error.message : 'An unexpected error occurred',
+      });
+      setSaving(false);
+      return;
+    }
+
+    try {
+      await workflowApiService.publishWorkflow(created.workflowId);
+      toast.success('Blueprint saved to catalog', {
+        description: name,
+      });
+    } catch (error) {
+      console.error('Failed to publish blueprint:', error);
+      toast.warning('Blueprint saved but not published', {
+        description:
+          error instanceof Error
+            ? error.message
+            : 'The blueprint was created but could not be published.',
+      });
+    } finally {
+      setSaving(false);
+      setShowSaveCatalogDialog(false);
+    }
+  }, [saveName, saveCategory, nodes, edges, orgId]);
+
+  /**
+   * Fetch the blueprint catalog for the picker dialog.
+   */
+  const fetchBlueprints = useCallback(async () => {
+    setCatalogLoading(true);
+    setCatalogError(null);
+    try {
+      const result = await workflowApiService.listBlueprints();
+      setBlueprints(Array.isArray(result?.items) ? result.items : []);
+    } catch (error) {
+      console.error('Failed to list blueprints:', error);
+      setCatalogError(
+        error instanceof Error ? error.message : 'Failed to load the blueprint catalog'
+      );
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, []);
+
+  /**
+   * Open the catalog picker dialog and fetch blueprints.
+   */
+  const openCatalogDialog = useCallback(() => {
+    setCatalogSearch('');
+    setShowCatalogDialog(true);
+    void fetchBlueprints();
+  }, [fetchBlueprints]);
 
   /**
    * Handle Load button click
-   * Opens file picker for JSON file selection
-   * Requirement: Load workflow from JSON file
+   * Requirement: Load a blueprint from the catalog. If the canvas has
+   * content, ask for replace confirmation first.
    */
   const handleLoadClick = useCallback(() => {
+    if (nodes.length > 0) {
+      setShowReplaceDialog(true);
+      return;
+    }
+    openCatalogDialog();
+  }, [nodes.length, openCatalogDialog]);
+
+  /**
+   * Confirm replacing canvas contents, then open the catalog picker.
+   */
+  const handleReplaceConfirm = useCallback(() => {
+    setShowReplaceDialog(false);
+    openCatalogDialog();
+  }, [openCatalogDialog]);
+
+  /**
+   * Load the selected blueprint from the catalog onto the canvas.
+   */
+  const handleSelectBlueprint = useCallback(
+    async (blueprint: CatalogBlueprint) => {
+      setLoadingBlueprint(true);
+      try {
+        const definition = parseBlueprintDefinition(blueprint.definition);
+        const { nodes: loadedNodes, edges: loadedEdges } =
+          await deserializeWorkflow(definition);
+
+        const validation = validateWorkflow(loadedNodes, loadedEdges);
+
+        onLoad(loadedNodes, loadedEdges);
+        setShowCatalogDialog(false);
+
+        if (validation.isValid) {
+          toast.success('Workflow loaded successfully', {
+            description: `Loaded ${loadedNodes.length} nodes and ${loadedEdges.length} connections`,
+          });
+        } else {
+          toast.warning('Workflow loaded with warnings', {
+            description: `${validation.errors.length} errors found. Review validation results.`,
+          });
+        }
+      } catch (error) {
+        console.error('Failed to load blueprint:', error);
+
+        if (error instanceof WorkflowError) {
+          toast.error('Failed to load blueprint', {
+            description: error.message,
+          });
+        } else {
+          toast.error('Failed to load blueprint', {
+            description: 'Invalid blueprint definition or format',
+          });
+        }
+      } finally {
+        setLoadingBlueprint(false);
+      }
+    },
+    [onLoad]
+  );
+
+  /**
+   * Handle Import button click
+   * Opens file picker for JSON file selection
+   * Requirement: Import workflow from JSON file
+   */
+  const handleImportClick = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
 
@@ -259,7 +427,7 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
 
   /**
    * Handle Export button click
-   * Similar to Save but with formatted JSON
+   * Downloads the workflow as formatted JSON
    */
   const handleExport = useCallback(() => {
     try {
@@ -292,6 +460,16 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
     }
   }, [nodes, edges]);
 
+  // Blueprint rows filtered by the search query (name/description match)
+  const searchQuery = catalogSearch.trim().toLowerCase();
+  const filteredBlueprints = searchQuery
+    ? blueprints.filter(
+        (bp) =>
+          (bp.name || '').toLowerCase().includes(searchQuery) ||
+          (bp.description || '').toLowerCase().includes(searchQuery)
+      )
+    : blueprints;
+
   return (
     <>
       {/* Toolbar */}
@@ -307,8 +485,8 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
             size="sm"
             onClick={handleSave}
             disabled={nodes.length === 0}
-            title="Save workflow to file"
-            aria-label="Save workflow to file"
+            title="Save blueprint to catalog"
+            aria-label="Save blueprint to catalog"
             className="workflow-toolbar-button"
           >
             <SaveIcon className="size-4" aria-hidden="true" />
@@ -320,23 +498,13 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
             variant="outline"
             size="sm"
             onClick={handleLoadClick}
-            title="Load workflow from file"
-            aria-label="Load workflow from file"
+            title="Load blueprint from catalog"
+            aria-label="Load blueprint from catalog"
             className="workflow-toolbar-button"
           >
             <FolderOpenIcon className="size-4" aria-hidden="true" />
             Load
           </Button>
-
-          {/* Hidden file input */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json,application/json"
-            onChange={handleFileChange}
-            className="hidden"
-            aria-label="Select workflow file to load"
-          />
 
           {/* Validate Button */}
           <Button
@@ -365,6 +533,29 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
             <TrashIcon className="size-4" aria-hidden="true" />
             Clear
           </Button>
+
+          {/* Import Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleImportClick}
+            title="Import workflow from JSON file"
+            aria-label="Import workflow from JSON file"
+            className="workflow-toolbar-button"
+          >
+            <UploadIcon className="size-4" aria-hidden="true" />
+            Import
+          </Button>
+
+          {/* Hidden file input for Import */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleFileChange}
+            className="hidden"
+            aria-label="Select workflow file to import"
+          />
 
           {/* Export Button */}
           <Button
@@ -432,6 +623,162 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
         </div>
       </div>
 
+      {/* Save to Catalog Dialog */}
+      <Dialog open={showSaveCatalogDialog} onOpenChange={setShowSaveCatalogDialog}>
+        <DialogContent className="bg-card border-border text-foreground">
+          <DialogHeader>
+            <DialogTitle>Save Blueprint to Catalog</DialogTitle>
+            <DialogDescription>
+              Save this workflow to the blueprint catalog so it can be reused.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="blueprint-name">Blueprint Name</Label>
+              <Input
+                id="blueprint-name"
+                value={saveName}
+                onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
+                  setSaveName(event.target.value)
+                }
+                placeholder="Untitled Blueprint"
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="blueprint-category">Category</Label>
+              <Input
+                id="blueprint-category"
+                value={saveCategory}
+                onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
+                  setSaveCategory(event.target.value)
+                }
+                placeholder="e.g. automation (optional)"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowSaveCatalogDialog(false)}
+              disabled={saving}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveToCatalog}
+              disabled={saving || !saveName.trim()}
+            >
+              {saving ? 'Saving…' : 'Save to Catalog'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Replace Canvas Confirmation Dialog */}
+      <Dialog open={showReplaceDialog} onOpenChange={setShowReplaceDialog}>
+        <DialogContent className="bg-card border-border text-foreground">
+          <DialogHeader>
+            <DialogTitle>Replace canvas contents?</DialogTitle>
+            <DialogDescription>
+              Loading a blueprint will replace the current nodes and connections on
+              the canvas.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowReplaceDialog(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleReplaceConfirm}>
+              Replace
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Load from Catalog Dialog */}
+      <Dialog open={showCatalogDialog} onOpenChange={setShowCatalogDialog}>
+        <DialogContent className="sm:max-w-2xl max-h-[80vh] overflow-y-auto bg-card border-border text-foreground">
+          <DialogHeader>
+            <DialogTitle>Load blueprint from catalog</DialogTitle>
+            <DialogDescription>
+              Select a published blueprint to load onto the canvas.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-3">
+            <Input
+              aria-label="Search blueprints"
+              placeholder="Search blueprints..."
+              value={catalogSearch}
+              onChange={(event: React.ChangeEvent<HTMLInputElement>) =>
+                setCatalogSearch(event.target.value)
+              }
+            />
+
+            {catalogLoading ? (
+              <div
+                className="flex flex-col gap-2"
+                role="status"
+                aria-label="Loading blueprints"
+              >
+                <div className="h-14 w-full rounded-md bg-muted animate-pulse" />
+                <div className="h-14 w-full rounded-md bg-muted animate-pulse" />
+                <div className="h-14 w-full rounded-md bg-muted animate-pulse" />
+              </div>
+            ) : catalogError ? (
+              <div className="flex flex-col items-start gap-2 p-3 rounded-md bg-destructive/10 border border-destructive/20">
+                <p className="text-sm text-destructive">{catalogError}</p>
+                <Button variant="outline" size="sm" onClick={fetchBlueprints}>
+                  Retry
+                </Button>
+              </div>
+            ) : blueprints.length === 0 ? (
+              <p className="text-sm text-muted-foreground p-3">
+                No blueprints in the catalog yet.
+              </p>
+            ) : filteredBlueprints.length === 0 ? (
+              <p className="text-sm text-muted-foreground p-3">
+                No blueprints match your search.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {filteredBlueprints.map((blueprint) => {
+                  const category = parseBlueprintCategory(blueprint.metadata);
+                  return (
+                    <button
+                      key={blueprint.workflowId}
+                      type="button"
+                      onClick={() => handleSelectBlueprint(blueprint)}
+                      disabled={loadingBlueprint}
+                      aria-label={`Load blueprint ${blueprint.name}`}
+                      className="flex flex-col items-start gap-1 p-3 rounded-md border border-border text-left cursor-pointer transition-colors duration-200 hover:bg-accent disabled:opacity-50"
+                    >
+                      <div className="flex items-center gap-2 w-full min-w-0">
+                        <span className="text-sm font-medium">{blueprint.name}</span>
+                        {category && <Badge className="text-xs">{category}</Badge>}
+                      </div>
+                      {blueprint.description && (
+                        <p className="text-sm text-muted-foreground truncate w-full">
+                          {blueprint.description}
+                        </p>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowCatalogDialog(false)}>
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Clear Confirmation Dialog */}
       <Dialog open={showClearDialog} onOpenChange={setShowClearDialog}>
         <DialogContent className="bg-card border-border text-foreground">
@@ -461,7 +808,7 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
 
       {/* Validation Results Dialog */}
       <Dialog open={showValidationDialog} onOpenChange={setShowValidationDialog}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto bg-card border-border text-foreground">
+        <DialogContent className="sm:max-w-2xl max-h-[80vh] overflow-y-auto bg-card border-border text-foreground">
           <DialogHeader>
             <DialogTitle>Workflow Validation Results</DialogTitle>
             <DialogDescription>

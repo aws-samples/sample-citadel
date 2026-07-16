@@ -294,6 +294,25 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   }, []);
 
   /**
+   * Handle renaming a node from the configuration panel
+   */
+  const handleRenameNode = useCallback((nodeId: string, label: string) => {
+    setNodes((nds) =>
+      nds.map((node) =>
+        node.id === nodeId
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                label,
+              },
+            }
+          : node
+      )
+    );
+  }, []);
+
+  /**
    * Handle closing configuration panel
    */
   const handleCloseConfiguration = useCallback(() => {
@@ -381,6 +400,8 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
           edges={edges}
           onLoad={handleLoad}
           onClear={handleClear}
+          orgId={orgId}
+          workflowName={nameRef.current}
           validationResult={validationResult}
         />
 
@@ -495,6 +516,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
           isOpen={isConfigPanelOpen}
           onClose={handleCloseConfiguration}
           onSave={handleSaveConfiguration}
+          onRename={handleRenameNode}
         />
       </div>
     </ReactFlowProvider>
