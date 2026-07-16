@@ -17,6 +17,125 @@ CONSTITUTIONAL_LAYERS_TABLE = os.environ.get('CONSTITUTIONAL_LAYERS_TABLE')
 # same basename is bundled alongside this handler and uploaded at seed time.
 DEMO_ECHO_AGENT_ID = 'demo-echo-agent'
 DEMO_ECHO_MODULE_FILENAME = 'demo_echo_agent.py'
+DEMO_ECHO_DESCRIPTION = 'Demo agent that echoes its input back as output.'
+
+
+def _seed_demo_agent_registry_record(worker_queue_url):
+    """Create the demo agent's AgentCore Registry record (dual-store seam).
+
+    The DDB AGENT_CONFIG_TABLE row alone is not enough for the out-of-box
+    demo flow: app publish gates on the agent BINDING flipping DESIGN→READY,
+    and updateAgentBinding (backend/src/lambda/registry-agent-record-
+    resolver.ts) resolves the target agent BY NAME in the AgentCore Registry
+    and requires the record descriptor's ``state`` to be 'active'. This
+    helper mirrors the fabricator's ``store_agent_config_registry`` payload
+    (arbiter/fabricator/index.py): a CUSTOM-descriptor record whose
+    inlineContent carries categories/icon/state/manifest/config/createdBy/
+    orgId. Deliberate deviation: ``state`` is 'active' (the demo agent is
+    seeded immediately runnable, matching its DDB row) where fabricated
+    agents land 'inactive' pending activation. Like the fabricator, the
+    record is left in its post-create DRAFT status — no
+    UpdateRegistryRecordStatus/Submit call (the registry rejects a
+    DRAFT→DRAFT transition, and the READY gate reads descriptor state, not
+    record status).
+
+    Guards:
+      - No-op (with a log) when REGISTRY_ID/REGISTRY_ENABLED are unset —
+        registry-less environments still seed DDB only.
+      - No-op (with a log) when ``catalog.registry_client`` is not
+        importable — the shared catalog Lambda layer is required for the
+        idempotency lookup; DDB-only envs must keep seeding.
+      - IDEMPOTENT: mirrors the fabricator's lookup-first behavior — when a
+        record named ``demo-echo-agent`` already exists, CreateRegistryRecord
+        is skipped so CFN re-runs never create duplicates.
+    """
+    registry_id = os.environ.get('REGISTRY_ID')
+    registry_enabled = os.environ.get('REGISTRY_ENABLED')
+    if not registry_id or not registry_enabled:
+        print(
+            'Registry not configured (REGISTRY_ID/REGISTRY_ENABLED unset) — '
+            f'skipping {DEMO_ECHO_AGENT_ID} registry record seed'
+        )
+        return
+
+    try:
+        # Shared client from the arbiter catalog layer (same import pattern
+        # as the fabricator's catalog bridge). Defensive: environments where
+        # the layer is not attached must still seed the DDB rows.
+        from catalog.registry_client import list_agent_records
+    except ImportError:
+        print(
+            'WARNING: catalog.registry_client unavailable (catalog layer '
+            f'not attached?) — skipping {DEMO_ECHO_AGENT_ID} registry '
+            'record seed'
+        )
+        return
+
+    # Idempotency lookup first (mirrors the fabricator's
+    # _find_existing_record_id): exact name match on the record name.
+    for record in list_agent_records(registry_id):
+        if isinstance(record, dict) and record.get('name') == DEMO_ECHO_AGENT_ID:
+            print(
+                f"Registry record '{DEMO_ECHO_AGENT_ID}' already exists "
+                f"(recordId={record.get('recordId')}); skipping create"
+            )
+            return
+
+    # Fabricator-shaped executable config + manifest + custom metadata
+    # (see store_agent_config_registry in arbiter/fabricator/index.py).
+    config = {
+        'name': DEMO_ECHO_AGENT_ID,
+        'filename': DEMO_ECHO_MODULE_FILENAME,
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'message': {
+                    'type': 'string',
+                    'description': 'Arbitrary payload returned unchanged.'
+                }
+            },
+            'required': []
+        },
+        'version': 1,
+        'description': DEMO_ECHO_DESCRIPTION,
+        'action': {
+            'type': 'sqs',
+            'target': worker_queue_url,
+        },
+    }
+    manifest = {
+        'name': DEMO_ECHO_AGENT_ID,
+        'description': DEMO_ECHO_DESCRIPTION,
+        'version': 1,
+        'tools': [],
+    }
+    custom_metadata = {
+        'categories': ['built-in', 'worker', 'demo'],
+        'icon': '',
+        'state': 'active',
+        'manifest': manifest,
+        'config': config,
+        'createdBy': 'seedConfig',
+        'orgId': '',
+    }
+
+    client = boto3.client('bedrock-agentcore-control')
+    response = client.create_registry_record(
+        registryId=registry_id,
+        name=DEMO_ECHO_AGENT_ID,
+        description=DEMO_ECHO_DESCRIPTION,
+        descriptorType='CUSTOM',
+        descriptors={
+            'custom': {
+                'inlineContent': json.dumps(custom_metadata, default=str),
+            },
+        },
+    )
+    print(
+        f"Created registry record for {DEMO_ECHO_AGENT_ID} "
+        f"(status={response.get('status')}); leaving it in its post-create "
+        'DRAFT status like fabricator-created records'
+    )
 
 
 def handler(event, context):
@@ -77,7 +196,7 @@ def handler(event, context):
             'config': {
                 'name': DEMO_ECHO_AGENT_ID,
                 'filename': DEMO_ECHO_MODULE_FILENAME,
-                'description': 'Demo agent that echoes its input back as output.',
+                'description': DEMO_ECHO_DESCRIPTION,
                 'schema': {
                     'type': 'object',
                     'properties': {
@@ -129,6 +248,12 @@ def handler(event, context):
                 "WARNING: AGENT_BUCKET_NAME not set — skipping echo module "
                 "upload (partial deploy?). Agent config still seeded."
             )
+
+        # Dual-store seam: the DDB row above serves worker dispatch; the
+        # AgentCore Registry record below is what the app-publish readiness
+        # gate (agent binding DESIGN→READY) resolves by name. Guarded +
+        # idempotent — see the helper docstring.
+        _seed_demo_agent_registry_record(worker_queue_url)
 
         # ------------------------------------------------------------------
         # US-ARB-011: seed governance corpus

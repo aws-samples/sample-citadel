@@ -605,6 +605,10 @@ export class ArbiterStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_14,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'seedConfig')),
+      // Catalog layer so the seed can `from catalog.registry_client import
+      // list_agent_records` for the demo agent registry-record idempotency
+      // lookup (the seed degrades to DDB-only seeding when unavailable).
+      layers: [catalogLayer],
       timeout: cdk.Duration.seconds(30),
       environment: {
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
@@ -613,10 +617,58 @@ export class ArbiterStack extends cdk.Stack {
         // Lets the seed upload the runnable demo agent module to the code
         // bucket so the seeded agent config's ``filename`` is reachable.
         AGENT_BUCKET_NAME: props.codeBucket.bucketName,
+        // Dual-store agent seam: the seed also creates the demo agent's
+        // AgentCore Registry record (the app-publish readiness gate resolves
+        // agents by name in the registry). Same conditional pattern as the
+        // fabricator — unset in registry-less environments, where the seed
+        // logs and skips the registry write.
+        ...(props.registryId && { REGISTRY_ID: props.registryId }),
+        ...(props.registryId && { REGISTRY_ENABLED: 'true' }),
       },
     });
 
     props.agentConfigTable.grantWriteData(seedAgentConfigLambda);
+
+    // Minimal registry surface for the demo-agent record seed: the seed path
+    // calls ONLY ListRegistryRecords (idempotency lookup via
+    // catalog.registry_client.list_agent_records) and CreateRegistryRecord.
+    // No status/update/delete APIs — the record is left in its post-create
+    // DRAFT status, mirroring fabricator-created records. Scoped to the
+    // registry ARN like the fabricator's grant, and only wired when a
+    // registry is provisioned.
+    if (props.registryArn) {
+      seedAgentConfigLambda.addToRolePolicy(
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: [
+            'bedrock-agentcore:CreateRegistryRecord',
+            'bedrock-agentcore:ListRegistryRecords',
+          ],
+          resources: [props.registryArn, `${props.registryArn}/*`],
+        }),
+      );
+      // Same residual wildcard as every other registry-wired role (see the
+      // registryArnSuppression list in bin/app.ts): AgentCore registry
+      // operations require <registryArn>/* for record sub-resources. Scoped
+      // to exactly that form via appliesTo regex.
+      NagSuppressions.addResourceSuppressions(
+        seedAgentConfigLambda.role!,
+        [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason:
+              'AgentCore registry record create/list requires wildcard on ' +
+              'registry ARN sub-resources (records). Scoped to the specific ' +
+              'registry ARN; mirrors the registryArnSuppression applied to ' +
+              'the fabricator/supervisor roles in bin/app.ts.',
+            appliesTo: [
+              { regex: '/^Resource::<AgentCoreRegistry\\.RegistryArn>\\/\\*$/g' },
+            ],
+          },
+        ],
+        true,
+      );
+    }
     // PutObject only — the seed writes the demo agent module, never reads or
     // deletes from the code bucket. Path-scoped to the agents/* object-key
     // prefix: the seed only writes agents/demo_echo_agent.py, so it never needs
@@ -646,15 +698,14 @@ export class ArbiterStack extends cdk.Stack {
 
     // Invoke the Custom Resource to seed agent config table
     // This must come after fabricatorQueue is created since we pass its URL.
-    // Bumped Version v1.0.0 → v1.1.0 so the CFN Update event fires
-    // on the next deploy and the governance corpus (authority units +
-    // constitutional layer) is seeded. Additional dependencies on the
-    // governance tables are wired below, after those tables are declared.
+    // Bumped Version v1.2.0 → v1.3.0 so the CFN Update event fires on the
+    // next deploy and the demo agent's AgentCore Registry record is seeded
+    // in existing environments (dual-store agent seam).
     const seedAgentConfigResource = new cdk.CustomResource(this, 'SeedAgentConfigResource', {
       serviceToken: seedAgentConfigLambda.functionArn,
       properties: {
         // O-05: Use content hash instead of Date.now() to avoid unnecessary re-runs
-        Version: 'v1.2.0',
+        Version: 'v1.3.0',
       },
     });
 
