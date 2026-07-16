@@ -61,6 +61,7 @@ import {
   SelectValue,
 } from '../components/ui/select';
 import { ModelOverrideSelect } from '../components/ModelOverrideSelect';
+import { MAX_SYSTEM_PROMPT_ADDITION_CHARS } from '../utils/promptLimits';
 import { appApiService } from '../services/appApiService';
 import { workflowApiService } from '../services/workflowApiService';
 import { executionApiService } from '../services/executionApiService';
@@ -2226,7 +2227,11 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                 onChange={(e) => setEditBindingForm((f) => ({ ...f, systemPromptAddition: e.target.value }))}
                 className="bg-transparent border border-input text-foreground text-xs"
                 rows={3}
+                maxLength={MAX_SYSTEM_PROMPT_ADDITION_CHARS}
               />
+              <p className="text-xs text-muted-foreground mt-1 text-right">
+                {editBindingForm.systemPromptAddition.length}/{MAX_SYSTEM_PROMPT_ADDITION_CHARS}
+              </p>
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Tool Restrictions (comma-separated)</label>

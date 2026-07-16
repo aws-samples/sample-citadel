@@ -12,11 +12,15 @@ mechanisms verbatim:
   ``agent_runner._install_model_override``).
 
 Validation parity with the supervisor path: only present, NON-EMPTY STRING
-values apply (the supervisor path's falsy-skip / None-omit checks — worker
-governance imposes no size caps, so neither does the workflow path). Unknown
-keys (including the explicitly deferred ``toolRestrictions``) are IGNORED.
-Malformed configuration values never fail the node — a WARN is logged and the
-node executes without overrides. An empty configuration leaves behaviour
+values apply (the supervisor path's falsy-skip / None-omit checks). Size caps
+(decision 67caf7b0) are enforced INSIDE worker_governance so both paths get
+them: systemPromptAddition is capped at 4000 chars (env
+WORKER_MAX_PROMPT_ADDITION_CHARS, fallback 4000 on missing/invalid) and
+modelOverride at 256 chars — oversized values are SKIPPED entirely with a
+WARN, never truncated, and the node still executes. Unknown keys (including
+the explicitly deferred ``toolRestrictions``) are IGNORED. Malformed
+configuration values never fail the node — a WARN is logged and the node
+executes without overrides. An empty configuration leaves behaviour
 byte-identical to the pre-feature path.
 
 Wire note: a non-dict ``configuration`` on the SQS message itself is rejected
@@ -28,6 +32,7 @@ All AWS (boto3, subprocess) is mocked; no real network or credentials.
 """
 
 import json
+import logging
 import sys
 from unittest.mock import patch, MagicMock
 
@@ -122,12 +127,39 @@ class TestSystemPromptAdditionApplication:
         _, _, agent_cfg = _run_node({'systemPromptAddition': ''})
         assert agent_cfg['config']['description'] == 'Base agent.'
 
-    def test_uncapped_value_passes_through_matching_supervisor_path(self):
-        """Parity pin: worker_governance imposes no size caps on the supervisor
-        path, so the workflow path applies large values verbatim too."""
+    def test_at_cap_value_is_applied(self):
+        """Exactly 4000 chars (the default cap) still applies verbatim."""
+        at_cap = 'x' * 4000
+        _, _, agent_cfg = _run_node({'systemPromptAddition': at_cap})
+        assert agent_cfg['config']['description'] == 'Base agent.\n' + at_cap
+
+    def test_over_cap_value_is_skipped_with_warning_and_node_executes(self, caplog):
+        """Decision 67caf7b0: oversized additions are SKIPPED entirely (never
+        truncated) with a WARN carrying length + cap; the node still runs."""
         big = 'x' * 100_000
-        _, _, agent_cfg = _run_node({'systemPromptAddition': big})
-        assert agent_cfg['config']['description'] == 'Base agent.\n' + big
+        with caplog.at_level(logging.WARNING):
+            mock_run, mock_events, agent_cfg = _run_node({'systemPromptAddition': big})
+
+        # Override skipped — description unchanged, not truncated.
+        assert agent_cfg['config']['description'] == 'Base agent.'
+        assert 'system_prompt_addition_skipped' in caplog.text
+        assert '100000' in caplog.text
+        assert '4000' in caplog.text
+        # Node executed and completed normally despite the violation.
+        mock_run.assert_called_once()
+        entry = mock_events.put_events.call_args.kwargs['Entries'][0]
+        assert entry['DetailType'] == 'workflow.node.completed'
+
+    def test_over_cap_model_override_is_skipped_and_node_executes(self, caplog):
+        """modelOverride > 256 chars: env var never installed, node still runs."""
+        with caplog.at_level(logging.WARNING):
+            mock_run, mock_events, _ = _run_node({'modelOverride': 'm' * 257})
+
+        extra_env = _extract_extra_env(mock_run.call_args)
+        assert 'MODEL_OVERRIDE' not in extra_env
+        assert 'model_override_skipped' in caplog.text
+        entry = mock_events.put_events.call_args.kwargs['Entries'][0]
+        assert entry['DetailType'] == 'workflow.node.completed'
 
 
 class TestEmptyAndUnknownConfiguration:

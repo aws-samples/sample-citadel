@@ -67,6 +67,7 @@ jest.mock('@/components/ModelOverrideSelect', () => ({
 }));
 
 import { NodeConfigurationPanel } from '../NodeConfigurationPanel';
+import { MAX_SYSTEM_PROMPT_ADDITION_CHARS } from '@/utils/promptLimits';
 import type { WorkflowNode } from '../../types/workflow';
 
 function makeNode(
@@ -299,6 +300,40 @@ describe('NodeConfigurationPanel', () => {
       expect(screen.getByText('Temperature')).toBeInTheDocument();
       expect(screen.getByText(/execution overrides/i)).toBeInTheDocument();
       expect(screen.getByTestId('model-override')).toBeInTheDocument();
+    });
+  });
+
+  describe('system prompt addition cap (decision 67caf7b0)', () => {
+    it('caps the textarea at MAX_SYSTEM_PROMPT_ADDITION_CHARS via maxLength', () => {
+      renderPanel(makeNode());
+
+      expect(screen.getByLabelText(/system prompt addition/i)).toHaveAttribute(
+        'maxlength',
+        String(MAX_SYSTEM_PROMPT_ADDITION_CHARS)
+      );
+    });
+
+    it('shows a live character counter that updates as the user types', async () => {
+      const user = userEvent.setup();
+      renderPanel(
+        makeNode({ configuration: { systemPromptAddition: 'Be terse.' } })
+      );
+
+      // 'Be terse.' is 9 characters.
+      expect(screen.getByText(/9\s*\/\s*4000/)).toBeInTheDocument();
+
+      await user.type(
+        screen.getByLabelText(/system prompt addition/i),
+        ' Go'
+      );
+
+      expect(screen.getByText(/12\s*\/\s*4000/)).toBeInTheDocument();
+    });
+
+    it('shows a zero count when the override is empty', () => {
+      renderPanel(makeNode());
+
+      expect(screen.getByText(/0\s*\/\s*4000/)).toBeInTheDocument();
     });
   });
 });

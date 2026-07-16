@@ -149,6 +149,8 @@ Per-workflow settings stored in the `configuration` field, containing:
 
 The Step Runner passes the Workflow Configuration to each agent node as execution context, allowing agents to use workflow-specific integration endpoints and credentials.
 
+Per-node execution overrides are consumed by the Worker Wrapper via exactly two configuration keys: `systemPromptAddition` (appended to the agent's system prompt) and `modelOverride` (Bedrock model ID for the node). Both are size-capped (decision 67caf7b0): `systemPromptAddition` at 4000 characters by default — configurable through the Worker Wrapper's `WORKER_MAX_PROMPT_ADDITION_CHARS` environment variable (falls back to 4000 when missing or invalid) — and `modelOverride` at a fixed 256-character hygiene cap. An over-cap value is skipped entirely with a WARN log carrying the offending length and the effective cap; it is never truncated, and the node still executes without the override.
+
 ## Component Map
 
 ### Backend

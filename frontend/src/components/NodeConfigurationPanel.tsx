@@ -21,6 +21,7 @@ import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Textarea } from './ui/textarea';
 import { Label } from './ui/label';
+import { MAX_SYSTEM_PROMPT_ADDITION_CHARS } from '../utils/promptLimits';
 import {
   Select,
   SelectContent,
@@ -359,10 +360,15 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
                 }
                 placeholder="Enter additional instructions"
                 className="min-h-[80px]"
+                maxLength={MAX_SYSTEM_PROMPT_ADDITION_CHARS}
               />
-              <p className="text-xs text-muted-foreground">
-                {"Appended to the agent's instructions for this node only."}
-              </p>
+              <div className="flex items-start justify-between gap-2 text-xs text-muted-foreground">
+                <p>{"Appended to the agent's instructions for this node only."}</p>
+                <span className="flex-shrink-0">
+                  {(configuration.systemPromptAddition ?? '').length}/
+                  {MAX_SYSTEM_PROMPT_ADDITION_CHARS}
+                </span>
+              </div>
             </div>
           </div>
 

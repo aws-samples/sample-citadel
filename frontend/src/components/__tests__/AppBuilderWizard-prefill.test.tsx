@@ -88,8 +88,20 @@ jest.mock('@/utils/wizardValidation', () => ({
   validateWizardStep: jest.fn().mockReturnValue({ valid: true, errors: [] }),
 }));
 
+// ModelOverrideSelect fetches the model catalog; stub it so expanding the
+// per-agent overrides section stays network-free.
+jest.mock('@/components/ModelOverrideSelect', () => ({
+  ModelOverrideSelect: (props: any) =>
+    React.createElement('input', {
+      'data-testid': 'model-override',
+      value: props.value || '',
+      onChange: (e: any) => props.onChange(e.target.value),
+    }),
+}));
+
 import { ProjectCard } from '../ProjectCard';
 import { AppBuilderWizard } from '../../pages/AppBuilderWizard';
+import { MAX_SYSTEM_PROMPT_ADDITION_CHARS } from '@/utils/promptLimits';
 
 const completedProject = {
   id: 'proj-done',
@@ -232,5 +244,44 @@ describe('AppBuilderWizard — Prefill props', () => {
     const descInput = screen.getByPlaceholderText('Describe what this app does...') as HTMLTextAreaElement;
     fireEvent.change(descInput, { target: { value: 'Modified Desc' } });
     expect(descInput.value).toBe('Modified Desc');
+  });
+});
+
+describe('AppBuilderWizard — systemPromptAddition cap (decision 67caf7b0)', () => {
+  /** Navigate to the Agents step with agent-1 pre-selected and expand its overrides. */
+  async function openAgentOverrides() {
+    render(
+      <AppBuilderWizard
+        onComplete={jest.fn()}
+        prefill={{ name: 'Test', description: '', agentIds: ['agent-1'], integrationIds: [] }}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('Next'));
+    await waitFor(() => {
+      expect(screen.getByText('Agent One')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Overrides'));
+    return screen.getByPlaceholderText('System prompt addition') as HTMLInputElement;
+  }
+
+  it('caps the override field at MAX_SYSTEM_PROMPT_ADDITION_CHARS via maxLength', async () => {
+    const field = await openAgentOverrides();
+
+    expect(field).toHaveAttribute(
+      'maxlength',
+      String(MAX_SYSTEM_PROMPT_ADDITION_CHARS)
+    );
+  });
+
+  it('shows a live character counter that updates as the user types', async () => {
+    const field = await openAgentOverrides();
+
+    expect(screen.getByText(/0\s*\/\s*4000/)).toBeInTheDocument();
+
+    fireEvent.change(field, { target: { value: 'Be terse.' } });
+
+    expect(screen.getByText(/9\s*\/\s*4000/)).toBeInTheDocument();
   });
 });
