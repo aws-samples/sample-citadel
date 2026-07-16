@@ -15,7 +15,12 @@ import os
 from datetime import datetime, timezone
 
 import events
-from dag import find_root_nodes, find_ready_nodes, find_convergence_nodes
+from dag import (
+    find_root_nodes,
+    find_ready_nodes,
+    find_convergence_nodes,
+    merge_node_configuration,
+)
 from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
@@ -188,7 +193,11 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
     for node_id in root_ids:
         node = next((n for n in nodes if n['id'] == node_id), None)
         if node:
-            invoke_node(execution_id, workflow_id, node, {}, configuration)
+            # Per-node configuration overrides workflow-level per-key
+            # (decision 59376546). No node configuration → workflow config
+            # unchanged, byte-identical to the pre-feature dispatch.
+            invoke_node(execution_id, workflow_id, node, {},
+                        merge_node_configuration(configuration, node))
 
 
 def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict) -> None:
@@ -389,7 +398,10 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict) -> Non
     for ready_id in ready_ids:
         node = next((n for n in nodes if n['id'] == ready_id), None)
         if node:
-            invoke_node(execution_id, execution.get('workflowId', ''), node, output, configuration)
+            # Per-node configuration overrides workflow-level per-key
+            # (decision 59376546) — same merge as the root-dispatch site.
+            invoke_node(execution_id, execution.get('workflowId', ''), node, output,
+                        merge_node_configuration(configuration, node))
 
     # Check if all nodes are terminal (completed, skipped, or failed)
     all_terminal = all(

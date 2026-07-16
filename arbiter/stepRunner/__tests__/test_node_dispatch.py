@@ -241,3 +241,146 @@ class TestNoSelfReemit:
         mock_exec['events'].publish_node_retrying.assert_called_once()
         mock_exec['events'].publish_node_failed.assert_not_called()
         mock_exec['events'].publish_workflow_failed.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Per-node configuration merge at dispatch (decision 59376546)
+# ---------------------------------------------------------------------------
+# Merge precedence: node configuration overrides workflow-level configuration
+# per-key; workflow-only keys are preserved; unknown keys are carried through.
+# A node without configuration dispatches the workflow config only —
+# byte-identical to the pre-feature behaviour (regression pins).
+
+WF_CONFIG = {'modelOverride': 'us.wf-model', 'shared': 'wf-value'}
+NODE_CONFIG = {'modelOverride': 'us.node-model', 'systemPromptAddition': 'Be terse.'}
+MERGED_CONFIG = {
+    'modelOverride': 'us.node-model',
+    'systemPromptAddition': 'Be terse.',
+    'shared': 'wf-value',
+}
+
+ROOT_CFG_WORKFLOW = {
+    'workflowId': 'wf-cfg-root',
+    'name': 'CfgRoot',
+    'definition': json.dumps({
+        'nodes': [
+            {'id': 'n0', 'type': 'agent', 'agentId': 'agent-A', 'data': {},
+             'configuration': NODE_CONFIG},
+        ],
+        'edges': [],
+    }),
+    'configuration': json.dumps(WF_CONFIG),
+}
+
+ROOT_CFG_EXEC = {
+    'executionId': 'exec-cfg-root',
+    'workflowId': 'wf-cfg-root',
+    'appId': 'app-1',
+    'status': 'pending',
+    'nodeResults': {
+        'n0': {'nodeId': 'n0', 'agentId': 'agent-A', 'status': 'pending', 'retryCount': 0},
+    },
+}
+
+CHAIN_CFG_WORKFLOW = {
+    'workflowId': 'wf-cfg-chain',
+    'name': 'CfgChain',
+    'definition': json.dumps({
+        'nodes': [
+            {'id': 'n0', 'type': 'agent', 'agentId': 'agent-A', 'data': {}},
+            {'id': 'n1', 'type': 'agent', 'agentId': 'agent-B', 'data': {},
+             'configuration': NODE_CONFIG},
+        ],
+        'edges': [{'id': 'e0', 'source': 'n0', 'target': 'n1'}],
+    }),
+    'configuration': json.dumps(WF_CONFIG),
+}
+
+CHAIN_CFG_EXEC = {
+    'executionId': 'exec-cfg-chain',
+    'workflowId': 'wf-cfg-chain',
+    'appId': 'app-1',
+    'status': 'running',
+    'nodeResults': {
+        'n0': {'nodeId': 'n0', 'agentId': 'agent-A', 'status': 'running', 'retryCount': 0},
+        'n1': {'nodeId': 'n1', 'agentId': 'agent-B', 'status': 'pending', 'retryCount': 0},
+    },
+}
+
+
+def _dispatched_bodies(sqs):
+    return [json.loads(c.kwargs['MessageBody']) for c in sqs.send_message.call_args_list]
+
+
+class TestRootDispatchCarriesMergedConfiguration:
+    """Dispatch site 1: start_execution → invoke_node for root nodes."""
+
+    def test_root_node_with_configuration_dispatches_merged_dict(self, mock_exec, monkeypatch):
+        import executor
+
+        monkeypatch.setenv('WORKER_QUEUE_URL', 'https://sqs.fake/worker-queue')
+        mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(ROOT_CFG_WORKFLOW)}
+        mock_exec['executions_table'].get_item.return_value = {'Item': copy.deepcopy(ROOT_CFG_EXEC)}
+
+        executor.start_execution('exec-cfg-root', 'wf-cfg-root')
+
+        bodies = _dispatched_bodies(mock_exec['sqs'])
+        assert len(bodies) == 1
+        # Node keys win; workflow-only keys preserved; unknown keys carried.
+        assert bodies[0]['configuration'] == MERGED_CONFIG
+
+    def test_root_node_without_configuration_dispatches_workflow_config_only(self, mock_exec, monkeypatch):
+        """Regression: absent node configuration → byte-identical to today."""
+        import executor
+
+        monkeypatch.setenv('WORKER_QUEUE_URL', 'https://sqs.fake/worker-queue')
+        wf = copy.deepcopy(ROOT_CFG_WORKFLOW)
+        defn = json.loads(wf['definition'])
+        del defn['nodes'][0]['configuration']
+        wf['definition'] = json.dumps(defn)
+
+        mock_exec['workflows_table'].get_item.return_value = {'Item': wf}
+        mock_exec['executions_table'].get_item.return_value = {'Item': copy.deepcopy(ROOT_CFG_EXEC)}
+
+        executor.start_execution('exec-cfg-root', 'wf-cfg-root')
+
+        bodies = _dispatched_bodies(mock_exec['sqs'])
+        assert len(bodies) == 1
+        assert bodies[0]['configuration'] == WF_CONFIG
+
+
+class TestDagAdvanceCarriesMergedConfiguration:
+    """Dispatch site 2: handle_node_completion → invoke_node for ready nodes."""
+
+    def test_ready_node_with_configuration_dispatches_merged_dict(self, mock_exec, monkeypatch):
+        import executor
+
+        monkeypatch.setenv('WORKER_QUEUE_URL', 'https://sqs.fake/worker-queue')
+        mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(CHAIN_CFG_WORKFLOW)}
+        mock_exec['executions_table'].get_item.return_value = {'Item': copy.deepcopy(CHAIN_CFG_EXEC)}
+
+        executor.handle_node_completion('exec-cfg-chain', 'n0', {'result': 'done'})
+
+        bodies = _dispatched_bodies(mock_exec['sqs'])
+        assert len(bodies) == 1
+        assert bodies[0]['node_id'] == 'n1'
+        assert bodies[0]['configuration'] == MERGED_CONFIG
+
+    def test_ready_node_without_configuration_dispatches_workflow_config_only(self, mock_exec, monkeypatch):
+        """Regression: absent node configuration → byte-identical to today."""
+        import executor
+
+        monkeypatch.setenv('WORKER_QUEUE_URL', 'https://sqs.fake/worker-queue')
+        # TWO_NODE_WORKFLOW carries an empty workflow config — pin a non-empty
+        # one so this asserts pass-through rather than empty == empty.
+        wf = copy.deepcopy(TWO_NODE_WORKFLOW)
+        wf['configuration'] = json.dumps(WF_CONFIG)
+        mock_exec['workflows_table'].get_item.return_value = {'Item': wf}
+        mock_exec['executions_table'].get_item.return_value = {'Item': copy.deepcopy(TWO_NODE_EXEC)}
+
+        executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'})
+
+        bodies = _dispatched_bodies(mock_exec['sqs'])
+        assert len(bodies) == 1
+        assert bodies[0]['node_id'] == 'n1'
+        assert bodies[0]['configuration'] == WF_CONFIG

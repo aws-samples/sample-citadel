@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from './ui/select';
 import { toast } from 'sonner';
+import { ModelOverrideSelect } from './ModelOverrideSelect';
 import type { WorkflowNode } from '../types/workflow';
 
 interface NodeConfigurationPanelProps {
@@ -262,6 +263,25 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
     }));
   }, []);
 
+  /**
+   * Update an execution-override key (`modelOverride` / `systemPromptAddition`).
+   * Clearing the field DELETES the key so the worker's falsy-skip applies and
+   * the runtime merge never ships empty strings.
+   */
+  const handleOverrideChange = useCallback((key: string, value: string) => {
+    setConfiguration((prev) => {
+      if (value === '') {
+        if (!(key in prev)) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      return { ...prev, [key]: value };
+    });
+  }, []);
+
   // Don't render if no node is selected
   if (!node) {
     return null;
@@ -317,6 +337,35 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
             />
           </div>
 
+          {/* Execution Overrides (applied at runtime for every node) */}
+          <div className="flex flex-col gap-4">
+            <div className="text-sm font-medium">Execution overrides</div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="model-override">Model override</Label>
+              <ModelOverrideSelect
+                id="model-override"
+                aria-label="Model override"
+                value={configuration.modelOverride ?? ''}
+                onChange={(value) => handleOverrideChange('modelOverride', value)}
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="system-prompt-addition">System prompt addition</Label>
+              <Textarea
+                id="system-prompt-addition"
+                value={configuration.systemPromptAddition ?? ''}
+                onChange={(e) =>
+                  handleOverrideChange('systemPromptAddition', e.target.value)
+                }
+                placeholder="Enter additional instructions"
+                className="min-h-[80px]"
+              />
+              <p className="text-xs text-muted-foreground">
+                {"Appended to the agent's instructions for this node only."}
+              </p>
+            </div>
+          </div>
+
           {/* Configuration Parameters */}
           {Object.keys(parameters).length > 0 ? (
             <div className="flex flex-col gap-4">
@@ -355,8 +404,7 @@ export const NodeConfigurationPanel = memo(function NodeConfigurationPanel({
                 {agentName} ({node.data.agentId})
               </div>
               <p className="text-sm text-muted-foreground">
-                This agent does not declare configurable parameters. Node-level
-                model and prompt overrides are not yet applied at runtime.
+                This agent does not declare additional parameters.
               </p>
             </div>
           )}

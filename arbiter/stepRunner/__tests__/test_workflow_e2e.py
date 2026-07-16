@@ -427,3 +427,74 @@ class TestWorkflowEndToEndFailure:
         failed = [detail for dt, detail in event_log if dt == 'workflow.failed']
         assert failed[-1]['failedNodeId'] == 'echo-1'
         assert failed[-1]['error']  # non-empty error string propagated end to end
+
+
+# ---------------------------------------------------------------------------
+# Per-node configuration overrides (decision 59376546)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowEndToEndPerNodeConfiguration:
+    """One node carries both per-node overrides. The dispatch message must
+    carry the merged configuration (node keys win, workflow-only keys are
+    carried through) and the worker-side application hooks must fire: the
+    subprocess env receives MODEL_OVERRIDE (the env agent_runner's
+    ``_install_model_override`` consumes) and ``systemPromptAddition`` is
+    appended to the agent config's description via the supervisor-path
+    mechanism.
+    """
+
+    def test_node_overrides_flow_end_to_end(self):
+        nodes = [
+            _node('echo-1'),
+            {**_node('echo-2'), 'configuration': {
+                'modelOverride': 'us.node-model',
+                'systemPromptAddition': 'Be terse.',
+            }},
+        ]
+        edges = [{'id': 'edge-1', 'source': 'echo-1', 'target': 'echo-2'}]
+        workflow_item = _published_workflow('wf-cfg', nodes, edges)
+        # Workflow-level config carries only an unknown key so the two
+        # override keys observably originate from the NODE configuration.
+        workflow_item['configuration'] = json.dumps({'shared': 'wf-value'})
+        execution_item = _pending_execution('exec-cfg', 'wf-cfg', ['echo-1', 'echo-2'])
+
+        agent_cfg = {'config': {'filename': 'echo_agent.py', 'description': 'Echo agent.'}}
+        captured_envs = []
+        base_run = _make_fake_subprocess_run(fail=False)
+
+        def recording_run(cmd, input=None, **kwargs):  # noqa: A002 — mirrors subprocess.run kwarg
+            captured_envs.append(dict(kwargs.get('env') or {}))
+            return base_run(cmd, input=input, **kwargs)
+
+        with _harness(workflow_item, execution_item) as (executor_mod, worker_mod, sqs, ex_table, event_log):
+            with patch.object(worker_mod, 'load_config_from_dynamodb', return_value=agent_cfg), \
+                 patch('subprocess.run', side_effect=recording_run):
+                executor_mod.start_execution('exec-cfg', 'wf-cfg')
+                _drive_to_terminal(executor_mod, worker_mod, sqs, event_log, 'exec-cfg')
+
+            row = ex_table.current('exec-cfg')
+            dispatched = _dispatched_messages(sqs)
+
+        # The run still completes end to end.
+        assert row['status'] == 'completed'
+        assert [msg['node_id'] for msg in dispatched] == ['echo-1', 'echo-2']
+
+        # (1) Dispatch messages: echo-1 (no node config) carries the workflow
+        #     config only — byte-identical to today; echo-2 carries the merge.
+        assert dispatched[0]['configuration'] == {'shared': 'wf-value'}
+        assert dispatched[1]['configuration'] == {
+            'shared': 'wf-value',
+            'modelOverride': 'us.node-model',
+            'systemPromptAddition': 'Be terse.',
+        }
+
+        # (2) Worker-side modelOverride hook: the echo-2 subprocess env carries
+        #     MODEL_OVERRIDE; echo-1's does not.
+        assert len(captured_envs) == 2
+        assert 'MODEL_OVERRIDE' not in captured_envs[0]
+        assert captured_envs[1].get('MODEL_OVERRIDE') == 'us.node-model'
+
+        # (3) Worker-side systemPromptAddition hook: appended to the agent
+        #     description exactly as the supervisor path does ('\n'-joined).
+        assert agent_cfg['config']['description'] == 'Echo agent.\nBe terse.'

@@ -57,10 +57,21 @@ jest.mock('sonner', () => ({
   toast: { success: jest.fn(), error: jest.fn(), warning: jest.fn(), info: jest.fn() },
 }));
 
+jest.mock('@/components/ModelOverrideSelect', () => ({
+  ModelOverrideSelect: (props: any) =>
+    React.createElement('input', {
+      'data-testid': 'model-override',
+      value: props.value || '',
+      onChange: (e: any) => props.onChange(e.target.value),
+    }),
+}));
+
 import { NodeConfigurationPanel } from '../NodeConfigurationPanel';
 import type { WorkflowNode } from '../../types/workflow';
 
-function makeNode(overrides: { agentConfig?: any; label?: string } = {}): WorkflowNode {
+function makeNode(
+  overrides: { agentConfig?: any; label?: string; configuration?: Record<string, any> } = {}
+): WorkflowNode {
   return {
     id: 'node-1',
     type: 'agentNode',
@@ -72,7 +83,7 @@ function makeNode(overrides: { agentConfig?: any; label?: string } = {}): Workfl
           ? overrides.agentConfig
           : { agentId: 'agent-1', name: 'Agent One', config: {}, state: 'active' },
       label: overrides.label ?? 'Agent One',
-      configuration: {},
+      configuration: overrides.configuration ?? {},
       inputCount: 1,
       outputCount: 1,
     },
@@ -132,13 +143,13 @@ describe('NodeConfigurationPanel', () => {
   });
 
   describe('empty state for schema-less agents', () => {
-    it('shows the honest empty-state copy including agent identity', () => {
+    it('shows the parameters empty-state copy and drops the stale runtime disclaimer', () => {
       renderPanel(makeNode());
 
       expect(
-        screen.getByText(/does not declare configurable parameters/i)
+        screen.getByText(/does not declare additional parameters/i)
       ).toBeInTheDocument();
-      expect(screen.getByText(/not yet applied at runtime/i)).toBeInTheDocument();
+      expect(screen.queryByText(/not yet applied at runtime/i)).not.toBeInTheDocument();
       // Agent id remains visible in the panel
       expect(screen.getByText('agent-1')).toBeInTheDocument();
     });
@@ -165,7 +176,7 @@ describe('NodeConfigurationPanel', () => {
       expect(screen.getByText('Temperature')).toBeInTheDocument();
       expect(screen.getByText('Prompt')).toBeInTheDocument();
       expect(
-        screen.queryByText(/does not declare configurable parameters/i)
+        screen.queryByText(/does not declare additional parameters/i)
       ).not.toBeInTheDocument();
     });
   });
@@ -195,7 +206,7 @@ describe('NodeConfigurationPanel', () => {
       renderPanel(makeNode({ agentConfig }));
 
       expect(
-        screen.getByText(/does not declare configurable parameters/i)
+        screen.getByText(/does not declare additional parameters/i)
       ).toBeInTheDocument();
     });
 
@@ -209,6 +220,85 @@ describe('NodeConfigurationPanel', () => {
       renderPanel(makeNode({ agentConfig }));
 
       expect(screen.getByText('Region')).toBeInTheDocument();
+    });
+  });
+
+  describe('execution overrides', () => {
+    it('renders override fields for every node, initialized from node.data.configuration', () => {
+      renderPanel(
+        makeNode({
+          configuration: {
+            modelOverride: 'anthropic-claude',
+            systemPromptAddition: 'Be terse.',
+          },
+        })
+      );
+
+      expect(screen.getByText(/execution overrides/i)).toBeInTheDocument();
+      expect(screen.getByTestId('model-override')).toHaveValue('anthropic-claude');
+      expect(screen.getByLabelText(/system prompt addition/i)).toHaveValue('Be terse.');
+      expect(
+        screen.getByText(/appended to the agent's instructions for this node only/i)
+      ).toBeInTheDocument();
+    });
+
+    it('saves modelOverride and systemPromptAddition through onSave with exact keys', async () => {
+      const user = userEvent.setup();
+      const { props } = renderPanel(makeNode());
+
+      await user.type(screen.getByTestId('model-override'), 'model-key-1');
+      await user.type(
+        screen.getByLabelText(/system prompt addition/i),
+        'Focus on cost.'
+      );
+      await user.click(screen.getByRole('button', { name: /save configuration changes/i }));
+
+      expect(props.onSave).toHaveBeenCalledWith('node-1', {
+        modelOverride: 'model-key-1',
+        systemPromptAddition: 'Focus on cost.',
+      });
+    });
+
+    it('deletes cleared override keys from the saved configuration instead of saving empty strings', async () => {
+      const user = userEvent.setup();
+      const { props } = renderPanel(
+        makeNode({
+          configuration: {
+            modelOverride: 'model-key-1',
+            systemPromptAddition: 'Old addition',
+            keepMe: 'yes',
+          },
+        })
+      );
+
+      await user.clear(screen.getByTestId('model-override'));
+      await user.clear(screen.getByLabelText(/system prompt addition/i));
+      await user.click(screen.getByRole('button', { name: /save configuration changes/i }));
+
+      expect(props.onSave).toHaveBeenCalledTimes(1);
+      const saved = props.onSave.mock.calls[0][1];
+      expect(saved).not.toHaveProperty('modelOverride');
+      expect(saved).not.toHaveProperty('systemPromptAddition');
+      expect(saved).toEqual({ keepMe: 'yes' });
+    });
+
+    it('renders schema-declared parameters alongside the overrides section', () => {
+      const agentConfig = {
+        agentId: 'agent-1',
+        name: 'Agent One',
+        state: 'active',
+        config: {
+          schema: {
+            properties: { temperature: { type: 'number', title: 'Temperature' } },
+            required: [],
+          },
+        },
+      };
+      renderPanel(makeNode({ agentConfig }));
+
+      expect(screen.getByText('Temperature')).toBeInTheDocument();
+      expect(screen.getByText(/execution overrides/i)).toBeInTheDocument();
+      expect(screen.getByTestId('model-override')).toBeInTheDocument();
     });
   });
 });

@@ -438,6 +438,56 @@ def _emit_node_result(msg, *, status, output=None, error=None):
     result = client.put_events(Entries=[entry])
     print(f"node-result event posted: {result}")
 
+def extract_node_overrides(configuration) -> tuple[str | None, str | None]:
+    """Extract ``(model_override, system_prompt_addition)`` from a
+    node-dispatch ``configuration`` (decision 59376546).
+
+    Exactly TWO keys are consumed — ``modelOverride`` and
+    ``systemPromptAddition``. All other keys (including the explicitly
+    deferred ``toolRestrictions``) are IGNORED for forward compatibility.
+
+    Validation parity with the supervisor task path: only a present,
+    non-empty STRING value applies (``apply_system_prompt_addition`` no-ops
+    on falsy values; ``build_subprocess_env`` omits MODEL_OVERRIDE when
+    ``None`` — worker governance imposes no size caps, so neither does this
+    path). Defensive by contract: tolerates a dict, a JSON-string object, or
+    ``None``. NEVER raises on malformed input — a WARN is logged and no
+    overrides are returned, so the node still executes.
+    """
+    raw = configuration
+    if raw is None:
+        return None, None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    if not isinstance(raw, dict):
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'WorkerWrapper',
+            'action': 'node_configuration_ignored',
+            'error': 'node configuration is not an object: '
+                     f'{type(configuration).__name__}',
+        }))
+        return None, None
+
+    def _string_override(key: str) -> str | None:
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if value is not None and not isinstance(value, str):
+            print(json.dumps({
+                'level': 'WARN',
+                'component': 'WorkerWrapper',
+                'action': 'node_configuration_ignored',
+                'key': key,
+                'error': f'expected a non-empty string, got {type(value).__name__}',
+            }))
+        return None
+
+    return _string_override('modelOverride'), _string_override('systemPromptAddition')
+
 def _process_workflow_node(event):
     """Run the agent for a dispatched workflow node and emit its result.
 
@@ -458,10 +508,23 @@ def _process_workflow_node(event):
         'agentId': msg.agent_id,
     }))
     try:
+        # Per-node configuration overrides (decision 59376546): consume exactly
+        # modelOverride + systemPromptAddition from the merged configuration
+        # dict the step runner dispatched. Unknown keys are ignored; malformed
+        # values warn and the node executes without overrides.
+        model_override, system_prompt_addition = extract_node_overrides(msg.configuration)
+
         agent = load_config_from_dynamodb(msg.agent_id)
         config = agent['config']
         if isinstance(config, str):
             config = json.loads(config)
+
+        # Same mechanism as the supervisor task path (Req 3.6): append the
+        # addition to the agent's description via worker_governance.
+        if system_prompt_addition:
+            config['description'] = apply_system_prompt_addition(
+                config.get('description', ''), system_prompt_addition
+            )
 
         required_permissions = config.get('requiredPermissions')
         scoped_credentials = get_scoped_credentials(msg.agent_id, required_permissions)
@@ -479,8 +542,11 @@ def _process_workflow_node(event):
         # the supervisor path, which feeds its per-run orchestration_id into the
         # same slot — so ledger findings stay correlatable to a single
         # execution rather than the reusable workflow template id.
+        # modelOverride rides the exact supervisor-path mechanism: the
+        # MODEL_OVERRIDE env var consumed by agent_runner._install_model_override.
         extra_env = build_subprocess_env(
             {},
+            model_override=model_override,
             agent_id=msg.agent_id,
             workflow_id=msg.execution_id,
         )
