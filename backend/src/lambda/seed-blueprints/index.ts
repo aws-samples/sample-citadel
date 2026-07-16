@@ -1,7 +1,7 @@
 /**
  * Seed Blueprints — CloudFormation Custom Resource Lambda
  *
- * Loads 4 seed blueprint definitions into the workflows table on deployment.
+ * Loads the seed blueprint definitions into the workflows table on deployment.
  * Follows the existing seed-organizations pattern.
  *
  * Requirements: 23.1, 23.2, 23.3, 23.4

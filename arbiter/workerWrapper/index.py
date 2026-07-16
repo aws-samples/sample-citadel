@@ -449,10 +449,13 @@ def extract_node_overrides(configuration) -> tuple[str | None, str | None]:
     Validation parity with the supervisor task path: only a present,
     non-empty STRING value applies (``apply_system_prompt_addition`` no-ops
     on falsy values; ``build_subprocess_env`` omits MODEL_OVERRIDE when
-    ``None`` — worker governance imposes no size caps, so neither does this
-    path). Defensive by contract: tolerates a dict, a JSON-string object, or
-    ``None``. NEVER raises on malformed input — a WARN is logged and no
-    overrides are returned, so the node still executes.
+    ``None``). Size caps are enforced downstream in worker_governance: a
+    ``systemPromptAddition`` over the cap (WORKER_MAX_PROMPT_ADDITION_CHARS,
+    default 4000) is skipped, never truncated, and a ``modelOverride`` over
+    256 chars is not installed. Defensive by contract: tolerates a dict, a
+    JSON-string object, or ``None``. NEVER raises on malformed input — a
+    WARN is logged and no overrides are returned, so the node still
+    executes.
     """
     raw = configuration
     if raw is None:
