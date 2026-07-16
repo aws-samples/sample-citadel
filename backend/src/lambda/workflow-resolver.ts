@@ -144,9 +144,14 @@ async function createWorkflow(input: any, userId: string): Promise<unknown> {
   const now = new Date().toISOString();
   const workflowId = uuidv4();
 
+  // AppSync delivers AWSJSON as parsed objects — normalize to JSON strings first.
+  const definition = toJsonString(input.definition);
+  const configuration = toJsonString(input.configuration);
+  const metadata = toJsonString(input.metadata);
+
   // Validate definition structure before persistence (WF-01 AC 12)
-  if (input.definition) {
-    const validation = validateDefinitionStructure(input.definition);
+  if (definition) {
+    const validation = validateDefinitionStructure(definition);
     if (!validation.valid) {
       throw new Error(`Invalid workflow definition: ${validation.errors.join('; ')}`);
     }
@@ -159,15 +164,15 @@ async function createWorkflow(input: any, userId: string): Promise<unknown> {
     description: input.description || '',
     status: 'DRAFT',
     isBlueprint: input.isBlueprint ? 'true' : 'false',
-    definition: input.definition,
-    configuration: input.configuration || null,
+    definition,
+    configuration,
     version: 1,
     versionHistory: [],
     appId: null,
     createdBy: userId,
     createdAt: now,
     updatedAt: now,
-    metadata: input.metadata || null,
+    metadata,
   };
 
   await docClient.send(new PutCommand({
@@ -219,24 +224,26 @@ async function updateWorkflow(input: any, userId: string, event: any): Promise<u
     expressionAttributeValues[':description'] = input.description;
   }
   if (input.definition !== undefined) {
+    // AppSync delivers AWSJSON as parsed objects — normalize to a JSON string first.
+    const definition = toJsonString(input.definition);
     // Validate definition structure before persistence (WF-01 AC 12)
-    const validation = validateDefinitionStructure(input.definition);
+    const validation = validateDefinitionStructure(definition);
     if (!validation.valid) {
       throw new Error(`Invalid workflow definition: ${validation.errors.join('; ')}`);
     }
     updateExpression.push('#definition = :definition');
     expressionAttributeNames['#definition'] = 'definition';
-    expressionAttributeValues[':definition'] = input.definition;
+    expressionAttributeValues[':definition'] = definition;
   }
   if (input.configuration !== undefined) {
     updateExpression.push('#configuration = :configuration');
     expressionAttributeNames['#configuration'] = 'configuration';
-    expressionAttributeValues[':configuration'] = input.configuration;
+    expressionAttributeValues[':configuration'] = toJsonString(input.configuration);
   }
   if (input.metadata !== undefined) {
     updateExpression.push('#metadata = :metadata');
     expressionAttributeNames['#metadata'] = 'metadata';
-    expressionAttributeValues[':metadata'] = input.metadata;
+    expressionAttributeValues[':metadata'] = toJsonString(input.metadata);
   }
 
   updateExpression.push('#updatedAt = :updatedAt');
@@ -299,16 +306,37 @@ async function deleteWorkflow(workflowId: string, userId: string, event: any): P
 }
 
 /**
+ * Normalizes an AWSJSON argument to a JSON string for persistence.
+ * AppSync delivers AWSJSON arguments to Lambda resolvers as parsed OBJECTS,
+ * but DynamoDB items (and downstream consumers) expect JSON STRINGS.
+ * null/undefined → null; string → as-is (no double-encoding); otherwise JSON.stringify.
+ */
+function toJsonString(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  return JSON.stringify(value);
+}
+
+/**
  * Validates workflow definition structure before persistence (WF-01 AC 12).
  * Lightweight check: valid JSON, has nodes array and edges array.
+ * Accepts either a JSON string or an already-parsed object (AppSync AWSJSON).
  */
-function validateDefinitionStructure(definitionJson: string): { valid: boolean; errors: string[] } {
+function validateDefinitionStructure(definitionValue: unknown): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
   let definition: any;
-  try {
-    definition = JSON.parse(definitionJson);
-  } catch {
-    return { valid: false, errors: ['Invalid JSON in workflow definition'] };
+  if (typeof definitionValue === 'string') {
+    try {
+      definition = JSON.parse(definitionValue);
+    } catch {
+      return { valid: false, errors: ['Invalid JSON in workflow definition'] };
+    }
+  } else {
+    definition = definitionValue;
   }
   if (typeof definition !== 'object' || definition === null) {
     errors.push('Workflow definition must be a JSON object');

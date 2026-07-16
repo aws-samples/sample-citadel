@@ -250,6 +250,195 @@ describe('workflow-resolver', () => {
     });
   });
 
+  // ─── AWSJSON object normalization ──────────────────────────────
+  // AppSync delivers AWSJSON arguments as parsed OBJECTS, not strings.
+  // The resolver must accept both and always persist JSON STRINGS.
+
+  describe('AWSJSON object normalization (AppSync delivers parsed objects)', () => {
+    const defObject = {
+      version: '1.0.0',
+      nodes: [{ id: 'n1', agentId: 'agent-1', type: 'agent' }],
+      edges: [],
+    };
+
+    describe('createWorkflow with object arguments', () => {
+      test('accepts definition as OBJECT (live-bug regression) and persists a JSON string', async () => {
+        ddbMock.on(PutCommand).resolves({});
+
+        const result = await handler(
+          makeEvent('createWorkflow', {
+            input: {
+              name: 'Object Definition Workflow',
+              orgId: 'org-1',
+              definition: defObject, // object, exactly as AppSync delivers AWSJSON
+              isBlueprint: true,
+            },
+          }),
+          {} as any,
+          {} as any,
+        );
+
+        expect(result.status).toBe('DRAFT');
+        expect(result.isBlueprint).toBe('true'); // isBlueprint flag honored
+
+        const putItem = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item!;
+        expect(typeof putItem.definition).toBe('string');
+        expect(JSON.parse(putItem.definition)).toEqual(defObject); // round-trips
+      });
+
+      test('accepts definition as STRING and persists the identical string (no double-encoding)', async () => {
+        ddbMock.on(PutCommand).resolves({});
+        const defString = JSON.stringify(defObject);
+
+        await handler(
+          makeEvent('createWorkflow', {
+            input: { name: 'String Definition Workflow', orgId: 'org-1', definition: defString },
+          }),
+          {} as any,
+          {} as any,
+        );
+
+        const putItem = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item!;
+        expect(putItem.definition).toBe(defString); // not wrapped in extra quotes
+      });
+
+      test('still rejects a non-JSON definition string', async () => {
+        await expect(
+          handler(
+            makeEvent('createWorkflow', {
+              input: { name: 'Bad', orgId: 'org-1', definition: 'not-json' },
+            }),
+            {} as any,
+            {} as any,
+          ),
+        ).rejects.toThrow(/Invalid workflow definition/);
+        expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+      });
+
+      test('rejects an OBJECT definition missing nodes/edges arrays', async () => {
+        await expect(
+          handler(
+            makeEvent('createWorkflow', {
+              input: { name: 'Bad', orgId: 'org-1', definition: { version: '1.0.0' } },
+            }),
+            {} as any,
+            {} as any,
+          ),
+        ).rejects.toThrow(/Invalid workflow definition/);
+        expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+      });
+
+      test('persists configuration and metadata OBJECTS as JSON strings', async () => {
+        ddbMock.on(PutCommand).resolves({});
+        const configuration = { integrations: { int1: { endpoint: 'https://example.com' } } };
+        const metadata = { category: 'data-processing' };
+
+        await handler(
+          makeEvent('createWorkflow', {
+            input: {
+              name: 'Config Meta Workflow',
+              orgId: 'org-1',
+              definition: defObject,
+              configuration,
+              metadata,
+            },
+          }),
+          {} as any,
+          {} as any,
+        );
+
+        const putItem = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item!;
+        expect(typeof putItem.configuration).toBe('string');
+        expect(JSON.parse(putItem.configuration)).toEqual(configuration);
+        expect(typeof putItem.metadata).toBe('string');
+        expect(JSON.parse(putItem.metadata)).toEqual(metadata);
+      });
+    });
+
+    describe('updateWorkflow with object arguments', () => {
+      beforeEach(() => {
+        ddbMock.on(GetCommand).resolves({
+          Item: {
+            workflowId: 'wf-1',
+            orgId: 'org-1',
+            version: 1,
+            status: 'DRAFT',
+            definition: '{"nodes":[],"edges":[]}',
+            updatedAt: '2024-01-01T00:00:00Z',
+            createdBy: 'user-123',
+          },
+        });
+        ddbMock.on(UpdateCommand).resolves({
+          Attributes: { workflowId: 'wf-1', orgId: 'org-1', version: 2, status: 'DRAFT' },
+        });
+      });
+
+      test('accepts definition as OBJECT (live-bug regression) and persists a JSON string', async () => {
+        await handler(
+          makeEvent('updateWorkflow', {
+            input: { workflowId: 'wf-1', definition: defObject, version: 1 },
+          }),
+          {} as any,
+          {} as any,
+        );
+
+        const exprValues =
+          ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues!;
+        expect(typeof exprValues[':definition']).toBe('string');
+        expect(JSON.parse(exprValues[':definition'])).toEqual(defObject);
+      });
+
+      test('accepts definition as STRING and persists the identical string (no double-encoding)', async () => {
+        const defString = JSON.stringify(defObject);
+
+        await handler(
+          makeEvent('updateWorkflow', {
+            input: { workflowId: 'wf-1', definition: defString, version: 1 },
+          }),
+          {} as any,
+          {} as any,
+        );
+
+        const exprValues =
+          ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues!;
+        expect(exprValues[':definition']).toBe(defString);
+      });
+
+      test('still rejects an OBJECT definition missing nodes/edges arrays', async () => {
+        await expect(
+          handler(
+            makeEvent('updateWorkflow', {
+              input: { workflowId: 'wf-1', definition: { foo: 'bar' }, version: 1 },
+            }),
+            {} as any,
+            {} as any,
+          ),
+        ).rejects.toThrow(/Invalid workflow definition/);
+        expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+      });
+
+      test('persists configuration and metadata OBJECTS as JSON strings', async () => {
+        const configuration = { parameters: { key1: 'value1' } };
+        const metadata = { category: 'ops' };
+
+        await handler(
+          makeEvent('updateWorkflow', {
+            input: { workflowId: 'wf-1', configuration, metadata, version: 1 },
+          }),
+          {} as any,
+          {} as any,
+        );
+
+        const exprValues =
+          ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues!;
+        expect(typeof exprValues[':configuration']).toBe('string');
+        expect(JSON.parse(exprValues[':configuration'])).toEqual(configuration);
+        expect(typeof exprValues[':metadata']).toBe('string');
+        expect(JSON.parse(exprValues[':metadata'])).toEqual(metadata);
+      });
+    });
+  });
+
   // ─── deleteWorkflow ────────────────────────────────────────────
 
   describe('deleteWorkflow', () => {
