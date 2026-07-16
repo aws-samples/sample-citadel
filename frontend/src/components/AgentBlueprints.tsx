@@ -10,9 +10,10 @@ import { ExecutionOverlay } from './ExecutionOverlay';
 import { ExecutionHistoryPanel } from './ExecutionHistoryPanel';
 import { Button } from './ui/button';
 import type { WorkflowNode, WorkflowEdge, ValidationResult } from '../types/workflow';
-import { validateWorkflow, serializeWorkflow } from '../services/workflowService';
+import { validateWorkflow, serializeWorkflow, deserializeWorkflow } from '../services/workflowService';
 import { workflowApiService } from '../services/workflowApiService';
 import { executionApiService } from '../services/executionApiService';
+import { agentConfigService, type AgentConfig } from '../services/agentConfigService';
 import { useWorkflowPersistence } from '../hooks/useWorkflowPersistence';
 import { useExecutionSubscription } from '../hooks/useExecutionSubscription';
 import { useOrganization } from '../contexts/OrganizationContext';
@@ -23,7 +24,16 @@ const VALIDATION_DELAY = 500; // 500ms debounce
 
 type WorkflowStatus = 'DRAFT' | 'PUBLISHED';
 
-export function AgentBlueprints() {
+export interface AgentBlueprintsProps {
+  /**
+   * When provided, the canvas opens this existing server workflow instead of
+   * starting blank: the definition is hydrated into nodes/edges and autosave
+   * updates this workflow rather than creating a new one.
+   */
+  workflowId?: string;
+}
+
+export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprintsProps = {}) {
   const [nodes, setNodes] = useState<WorkflowNode[]>([]);
   const [edges, setEdges] = useState<WorkflowEdge[]>([]);
   const [configNode, setConfigNode] = useState<WorkflowNode | null>(null);
@@ -35,6 +45,7 @@ export function AgentBlueprints() {
   const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>('DRAFT');
   const [executionId, setExecutionId] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isPublishing, setIsPublishing] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
@@ -51,6 +62,9 @@ export function AgentBlueprints() {
   const versionRef = useRef<number>(1);
   const creatingRef = useRef(false);
   const nameRef = useRef<string>('Untitled Workflow');
+  // Hydrating an existing workflow sets nodes/edges without user input; skip
+  // the autosave those state changes would otherwise schedule.
+  const skipNextSaveRef = useRef(false);
 
   // Keep a synchronous mirror of workflowId so the debounced create effect never
   // races into a second createWorkflow call.
@@ -69,9 +83,11 @@ export function AgentBlueprints() {
   /**
    * Restore an unsaved/offline canvas from local storage on mount. This is a
    * best-effort fallback layer beneath server persistence — the server workflow
-   * is the source of truth once a workflowId exists.
+   * is the source of truth once a workflowId exists. Skipped entirely when the
+   * canvas is opening an existing server workflow.
    */
   useEffect(() => {
+    if (initialWorkflowId) return;
     try {
       const saved = localStorage.getItem(AUTOSAVE_KEY);
       if (saved) {
@@ -85,7 +101,75 @@ export function AgentBlueprints() {
       console.error('Failed to restore local workflow cache:', error);
       localStorage.removeItem(AUTOSAVE_KEY);
     }
-  }, []);
+  }, [initialWorkflowId]);
+
+  /**
+   * Load-by-id hydration: when opened with an existing workflowId (e.g. an
+   * imported or app-bound workflow), fetch it, deserialize its definition into
+   * canvas nodes/edges, and adopt its id/version/status so autosave UPDATES
+   * this workflow and Publish/Run gate on its real status. On failure, surface
+   * the error and fall back to a blank canvas.
+   */
+  useEffect(() => {
+    if (!initialWorkflowId) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const wf = await workflowApiService.getWorkflow(initialWorkflowId);
+        if (!wf) {
+          throw new Error(`Workflow ${initialWorkflowId} not found`);
+        }
+        const definition =
+          typeof wf.definition === 'string' ? JSON.parse(wf.definition) : wf.definition;
+
+        // Build a lenient agent-config map: agents referenced by the definition
+        // but absent from the catalog (e.g. app-bound ids created by blueprint
+        // import) get a placeholder so the workflow still opens.
+        let configs: AgentConfig[] = [];
+        try {
+          configs = await agentConfigService.listAgentConfigs();
+        } catch (configError) {
+          console.error('Failed to list agent configs; using placeholders:', configError);
+        }
+        const configMap = new Map<string, AgentConfig>(configs.map((c) => [c.agentId, c]));
+        for (const nodeDef of definition?.nodes ?? []) {
+          if (nodeDef?.agentId && !configMap.has(nodeDef.agentId)) {
+            configMap.set(nodeDef.agentId, {
+              agentId: nodeDef.agentId,
+              name: nodeDef.agentId,
+              config: { name: nodeDef.agentId },
+              state: 'active',
+            });
+          }
+        }
+
+        const { nodes: loadedNodes, edges: loadedEdges } = await deserializeWorkflow(
+          definition,
+          configMap
+        );
+        if (cancelled) return;
+
+        workflowIdRef.current = wf.workflowId;
+        versionRef.current = typeof wf.version === 'number' ? wf.version : 1;
+        nameRef.current = wf.name || nameRef.current;
+        skipNextSaveRef.current = true;
+        setWorkflowId(wf.workflowId);
+        setWorkflowStatus(wf.status === 'PUBLISHED' ? 'PUBLISHED' : 'DRAFT');
+        setNodes(loadedNodes);
+        setEdges(loadedEdges);
+        setLoadError(null);
+      } catch (error: any) {
+        if (cancelled) return;
+        console.error('Failed to load workflow', initialWorkflowId, error);
+        setLoadError(error?.message || 'Failed to load workflow');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialWorkflowId]);
 
   /**
    * First server persistence: once the canvas has content and no server
@@ -137,6 +221,12 @@ export function AgentBlueprints() {
   useEffect(() => {
     if (!workflowId) return;
     if (nodes.length === 0 && edges.length === 0) return;
+    // Hydration sets nodes/edges from the server copy — nothing changed, so
+    // don't schedule a redundant (or PUBLISHED-mutating) save for it.
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false;
+      return;
+    }
 
     const definition = JSON.stringify(serializeWorkflow(nodes, edges, { name: nameRef.current }));
     save({ workflowId, version: versionRef.current, definition });
@@ -351,6 +441,16 @@ export function AgentBlueprints() {
             executionId={executionId}
           />
         </div>
+
+        {/* Load-by-id failure surfaced to the user (canvas stays blank) */}
+        {loadError && (
+          <div
+            role="alert"
+            className="px-4 py-2 text-sm text-destructive bg-destructive/10 border-b border-destructive/20"
+          >
+            Failed to load workflow: {loadError}
+          </div>
+        )}
 
         {/* Publish validation errors surfaced to the user */}
         {publishError && (

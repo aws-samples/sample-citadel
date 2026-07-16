@@ -25,7 +25,7 @@ interface RegistryAgentRecordSummary {
   updatedAt: string;
 }
 
-const STATUS_TABS = ['All', 'DRAFT', 'APPROVED', 'DEPRECATED'] as const;
+const STATUS_TABS = ['All', 'DRAFT', 'APPROVED', 'PUBLISHED', 'DEPRECATED'] as const;
 
 const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
   DRAFT: { bg: 'bg-primary/20', text: 'text-primary' },

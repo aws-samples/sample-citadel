@@ -50,6 +50,8 @@ function AppDetailViewRoute() {
           navigate(`/agent-apps/${view.split(':')[1]}`);
         } else if (view.startsWith('app-api-dashboard:')) {
           navigate(`/agent-apps/${view.split(':')[1]}/api-dashboard`);
+        } else if (view.startsWith('workflow-editor:')) {
+          navigate(`/agentic-studio/workflows/${view.slice('workflow-editor:'.length)}`);
         }
       }}
       onPublishSuccess={(data) => {
@@ -98,6 +100,12 @@ function AppApiDashboardRoute() {
       }}
     />
   );
+}
+
+function AgenticStudioWorkflowRoute() {
+  const { workflowId } = useParams<{ workflowId: string }>();
+  if (!workflowId) return <Navigate to="/agentic-studio" replace />;
+  return <AgenticStudio workflowId={workflowId} />;
 }
 
 function ImplementationRoute() {
@@ -198,6 +206,7 @@ function App() {
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/intake-requests" element={<IntakeRequests />} />
               <Route path="/agentic-studio" element={<AgenticStudio />} />
+              <Route path="/agentic-studio/workflows/:workflowId" element={<AgenticStudioWorkflowRoute />} />
               <Route path="/agent-apps" element={<AgentAppsRoute />} />
               <Route path="/agent-apps/new" element={<AppBuilderRoute />} />
               <Route path="/agent-apps/:appId" element={<AppDetailViewRoute />} />

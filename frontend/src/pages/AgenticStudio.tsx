@@ -7,8 +7,19 @@ import { ErrorBoundary } from '../components/ErrorBoundary';
 
 type SubSection = 'agent-blueprints' | 'blueprints-list';
 
-export function AgenticStudio() {
-  const [activeSection, setActiveSection] = useState<SubSection>('blueprints-list');
+export interface AgenticStudioProps {
+  /**
+   * Deep link to an existing workflow (e.g. an app-bound workflow's Open
+   * action). When set, the studio opens the canvas editor tab directly and
+   * AgentBlueprints hydrates this workflow.
+   */
+  workflowId?: string;
+}
+
+export function AgenticStudio({ workflowId }: AgenticStudioProps = {}) {
+  const [activeSection, setActiveSection] = useState<SubSection>(
+    workflowId ? 'agent-blueprints' : 'blueprints-list'
+  );
 
   const sections = [
     { id: 'blueprints-list' as SubSection, label: 'Agent Blueprints', icon: List },
@@ -37,7 +48,7 @@ export function AgenticStudio() {
       </TabsContent>
       <TabsContent value="agent-blueprints" className="flex-1 overflow-y-auto">
         <ErrorBoundary>
-          <AgentBlueprints />
+          <AgentBlueprints workflowId={workflowId} />
         </ErrorBoundary>
       </TabsContent>
     </Tabs>
