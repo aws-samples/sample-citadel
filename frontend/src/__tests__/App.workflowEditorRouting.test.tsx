@@ -47,7 +47,18 @@ jest.mock('@/pages/AgentTools', () => ({ Tools: stubPage('page-tools') }));
 jest.mock('@/pages/ModelConfiguration', () => ({ ModelConfiguration: stubPage('page-models') }));
 jest.mock('@/pages/Integrations', () => ({ Integrations: stubPage('page-integrations') }));
 jest.mock('@/pages/DataStores', () => ({ DataStores: stubPage('page-datastores') }));
-jest.mock('@/pages/AgentApps', () => ({ AgentApps: stubPage('page-agent-apps') }));
+jest.mock('@/pages/AgentApps', () => ({
+  AgentApps: ({ onNavigate }: any) => (
+    <div data-testid="page-agent-apps">
+      <button
+        data-testid="run-workflows-quick-action"
+        onClick={() => onNavigate?.('app-detail:app-7:workflows')}
+      >
+        Run workflows
+      </button>
+    </div>
+  ),
+}));
 jest.mock('@/pages/ImplementationPage', () => ({ ImplementationPage: stubPage('page-impl') }));
 jest.mock('@/pages/PublishConfirmationScreen', () => ({
   PublishConfirmationScreen: stubPage('page-publish-confirm'),
@@ -86,15 +97,25 @@ jest.mock('@/pages/AgenticStudio', () => ({
   ),
 }));
 
-// AppDetailView stub emits the real navigation prefix its workflow cards use.
+// AppDetailView stub emits the real navigation prefixes its workflow cards use
+// and echoes the initialTab prop it was mounted with.
 jest.mock('@/pages/AppDetailView', () => ({
-  AppDetailView: ({ onNavigate }: any) => (
-    <button
-      data-testid="open-workflow-editor"
-      onClick={() => onNavigate('workflow-editor:wf-123')}
-    >
-      Open in editor
-    </button>
+  AppDetailView: ({ onNavigate, initialTab }: any) => (
+    <div data-testid="page-app-detail">
+      <div data-testid="app-detail-initial-tab">{initialTab ?? 'none'}</div>
+      <button
+        data-testid="open-workflow-editor"
+        onClick={() => onNavigate('workflow-editor:wf-123')}
+      >
+        Open in editor
+      </button>
+      <button
+        data-testid="go-workflows-tab"
+        onClick={() => onNavigate('app-detail:app-1:workflows')}
+      >
+        Go to workflows tab
+      </button>
+    </div>
   ),
 }));
 
@@ -132,5 +153,44 @@ describe("App routing for 'workflow-editor:' navigation", () => {
 
     const studio = await screen.findByTestId('page-agentic-studio');
     expect(studio).toHaveTextContent('no-workflow-id');
+  });
+});
+
+describe("App routing for the app-detail 'tab' query param", () => {
+  it('a direct URL with ?tab=workflows renders AppDetailView with that initialTab', async () => {
+    renderAppAt('/agent-apps/app-1?tab=workflows');
+
+    const echo = await screen.findByTestId('app-detail-initial-tab');
+    expect(echo).toHaveTextContent('workflows');
+  });
+
+  it('a plain app-detail URL renders AppDetailView without an initialTab', async () => {
+    renderAppAt('/agent-apps/app-1');
+
+    const echo = await screen.findByTestId('app-detail-initial-tab');
+    expect(echo).toHaveTextContent('none');
+  });
+
+  it("AgentApps onNavigate('app-detail:<id>:workflows') lands on the app detail workflows tab", async () => {
+    renderAppAt('/agent-apps');
+
+    const quickAction = await screen.findByTestId('run-workflows-quick-action');
+    fireEvent.click(quickAction);
+
+    const echo = await screen.findByTestId('app-detail-initial-tab');
+    expect(echo).toHaveTextContent('workflows');
+  });
+
+  it("AppDetailView onNavigate('app-detail:<id>:<tab>') updates the tab query param", async () => {
+    renderAppAt('/agent-apps/app-1');
+
+    const echo = await screen.findByTestId('app-detail-initial-tab');
+    expect(echo).toHaveTextContent('none');
+
+    fireEvent.click(screen.getByTestId('go-workflows-tab'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('app-detail-initial-tab')).toHaveTextContent('workflows');
+    });
   });
 });

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { AuthScreen } from './components/AuthScreen';
 import { AppLayout } from './components/AppLayout';
 import { Dashboard } from './pages/Dashboard';
@@ -40,14 +40,18 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 function AppDetailViewRoute() {
   const navigate = useNavigate();
   const { appId } = useParams<{ appId: string }>();
+  const [searchParams] = useSearchParams();
+  const initialTab = searchParams.get('tab') ?? undefined;
   if (!appId) return <Navigate to="/agent-apps" replace />;
   return (
     <AppDetailView
       appId={appId}
+      initialTab={initialTab}
       onBack={() => navigate('/agent-apps')}
       onNavigate={(view: string) => {
         if (view.startsWith('app-detail:')) {
-          navigate(`/agent-apps/${view.split(':')[1]}`);
+          const [, id, tab] = view.split(':');
+          navigate(tab ? `/agent-apps/${id}?tab=${tab}` : `/agent-apps/${id}`);
         } else if (view.startsWith('app-api-dashboard:')) {
           navigate(`/agent-apps/${view.split(':')[1]}/api-dashboard`);
         } else if (view.startsWith('workflow-editor:')) {
@@ -127,7 +131,8 @@ function AgentAppsRoute() {
     <AgentApps
       onNavigate={(view: string) => {
         if (view.startsWith('app-detail:')) {
-          navigate(`/agent-apps/${view.split(':')[1]}`);
+          const [, id, tab] = view.split(':');
+          navigate(tab ? `/agent-apps/${id}?tab=${tab}` : `/agent-apps/${id}`);
         } else if (view === 'app-builder') {
           navigate('/agent-apps/new');
         }

@@ -15,7 +15,7 @@ jest.mock('@/components/ui/badge', () => ({
 
 jest.mock('@/components/ui/button', () => ({
   Button: ({ children, onClick, disabled, className, variant, size, ...props }: any) =>
-    React.createElement('button', { onClick, disabled, className, ...props }, children),
+    React.createElement('button', { onClick, disabled, className, 'data-variant': variant, ...props }, children),
 }));
 
 // Stateful Tabs mock that tracks active tab
@@ -84,6 +84,7 @@ jest.mock('@/services/workflowApiService', () => ({
   workflowApiService: {
     getWorkflow: jest.fn(),
     listWorkflows: jest.fn(),
+    publishWorkflow: jest.fn(),
   },
 }));
 
@@ -198,7 +199,8 @@ describe('AppDetailView — workflow Run action', () => {
 
     const runButton = screen.getByRole('button', { name: /run test workflow/i });
     expect(runButton).toBeDisabled();
-    expect(screen.getByText('Draft — publish in the studio first')).toBeInTheDocument();
+    expect(runButton).toHaveAttribute('data-variant', 'outline');
+    expect(screen.getByText('Draft — publish to enable Run')).toBeInTheDocument();
   });
 
   it('enables Run for a PUBLISHED workflow and starts an execution on click', async () => {
@@ -212,7 +214,7 @@ describe('AppDetailView — workflow Run action', () => {
 
     const runButton = screen.getByRole('button', { name: /run test workflow/i });
     expect(runButton).not.toBeDisabled();
-    expect(screen.queryByText('Draft — publish in the studio first')).not.toBeInTheDocument();
+    expect(screen.queryByText('Draft — publish to enable Run')).not.toBeInTheDocument();
 
     fireEvent.click(runButton);
 
@@ -356,6 +358,75 @@ describe('AppDetailView — workflow Run action', () => {
   });
 });
 
+describe('AppDetailView — workflow Publish action', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    tabsOnValueChange = null;
+    progressSubscriptions = [];
+    (appApiService.getApp as jest.Mock).mockResolvedValue(mockApp);
+    (workflowApiService.getWorkflow as jest.Mock).mockResolvedValue(draftWorkflow);
+    (executionApiService.listExecutions as jest.Mock).mockResolvedValue({ items: [] });
+    (serverService.subscribe as jest.Mock).mockReturnValue(jest.fn());
+  });
+
+  const openWorkflowsTab = async () => {
+    render(<AppDetailView {...defaultProps} />);
+    await waitFor(() => expect(screen.getByText('Test App')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Workflows'));
+    await waitFor(() => expect(screen.getByText('Test Workflow')).toBeInTheDocument());
+  };
+
+  it('shows Publish on a DRAFT card and enables Run after a successful publish', async () => {
+    (workflowApiService.publishWorkflow as jest.Mock).mockResolvedValue({
+      workflowId: 'wf-1',
+      status: 'PUBLISHED',
+    });
+
+    await openWorkflowsTab();
+
+    const publishButton = screen.getByRole('button', { name: /publish test workflow/i });
+    fireEvent.click(publishButton);
+
+    await waitFor(() => {
+      expect(workflowApiService.publishWorkflow).toHaveBeenCalledWith('wf-1');
+    });
+
+    await waitFor(() => expect(screen.getByText('PUBLISHED')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: /run test workflow/i })).not.toBeDisabled();
+    expect(toast.success).toHaveBeenCalledWith('Workflow published');
+    expect(screen.queryByRole('button', { name: /publish test workflow/i })).not.toBeInTheDocument();
+    expect(screen.queryByText('Draft — publish to enable Run')).not.toBeInTheDocument();
+  });
+
+  it('does not show Publish on a PUBLISHED card', async () => {
+    (workflowApiService.getWorkflow as jest.Mock).mockResolvedValue(publishedWorkflow);
+
+    await openWorkflowsTab();
+
+    expect(screen.queryByRole('button', { name: /publish test workflow/i })).not.toBeInTheDocument();
+  });
+
+  it('toasts an error and keeps Run disabled when publish fails', async () => {
+    (workflowApiService.publishWorkflow as jest.Mock).mockRejectedValue(
+      new Error('Version conflict'),
+    );
+
+    await openWorkflowsTab();
+
+    fireEvent.click(screen.getByRole('button', { name: /publish test workflow/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Failed to publish workflow', {
+        description: 'Version conflict',
+      });
+    });
+
+    expect(screen.getByText('Draft — publish to enable Run')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /run test workflow/i })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /publish test workflow/i })).not.toBeDisabled();
+  });
+});
+
 describe('AppDetailView — Executions tab wiring', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -415,6 +486,25 @@ describe('AppDetailView — Executions tab wiring', () => {
       expect(screen.getByText('No executions recorded yet.')).toBeInTheDocument();
     });
   });
+
+  it('offers a Go to Workflows action in the empty state that switches tabs', async () => {
+    (executionApiService.listExecutions as jest.Mock).mockResolvedValue({ items: [] });
+
+    render(<AppDetailView {...defaultProps} />);
+    await waitFor(() => expect(screen.getByText('Test App')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText('Executions'));
+    await waitFor(() => {
+      expect(screen.getByText('No executions recorded yet.')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('tabs')).toHaveAttribute('data-value', 'executions');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to Workflows' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('tabs')).toHaveAttribute('data-value', 'workflows');
+    });
+  });
 });
 
 describe('AppDetailView — draft-workflow publish precondition warning', () => {
@@ -431,17 +521,17 @@ describe('AppDetailView — draft-workflow publish precondition warning', () => 
     (workflowApiService.getWorkflow as jest.Mock).mockResolvedValue(draftWorkflow);
 
     render(<AppDetailView {...defaultProps} />);
-    await waitFor(() => expect(screen.getByText('Publish')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Publish' })).toBeInTheDocument());
     // Wait for workflows to load so preconditions can inspect their status
     await waitFor(() => expect(workflowApiService.getWorkflow).toHaveBeenCalledWith('wf-1'));
 
-    fireEvent.click(screen.getByText('Publish'));
+    fireEvent.click(screen.getByRole('button', { name: 'Publish' }));
 
     await waitFor(() => expect(screen.getByText('Publish App')).toBeInTheDocument());
 
-    // Warning text names the count and points to the studio
+    // Warning text names the count and points to the Workflows tab
     expect(screen.getByText(/1 workflow\(s\) not PUBLISHED/)).toBeInTheDocument();
-    expect(screen.getByText(/publish (it|them) in the Agentic Studio/i)).toBeInTheDocument();
+    expect(screen.getByText(/publish (it|them) from the Workflows tab/i)).toBeInTheDocument();
 
     // Warning must NOT block publishing
     expect(screen.getByText('Confirm Publish')).not.toBeDisabled();
@@ -451,10 +541,10 @@ describe('AppDetailView — draft-workflow publish precondition warning', () => 
     (workflowApiService.getWorkflow as jest.Mock).mockResolvedValue(publishedWorkflow);
 
     render(<AppDetailView {...defaultProps} />);
-    await waitFor(() => expect(screen.getByText('Publish')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Publish' })).toBeInTheDocument());
     await waitFor(() => expect(workflowApiService.getWorkflow).toHaveBeenCalledWith('wf-1'));
 
-    fireEvent.click(screen.getByText('Publish'));
+    fireEvent.click(screen.getByRole('button', { name: 'Publish' }));
 
     await waitFor(() => expect(screen.getByText('Publish App')).toBeInTheDocument());
 

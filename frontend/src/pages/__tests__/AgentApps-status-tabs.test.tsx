@@ -114,3 +114,47 @@ describe('AgentApps status filter tabs', () => {
     expect(screen.getByText('Pub App')).toBeInTheDocument();
   });
 });
+
+describe('AgentApps run-workflows quick action', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('shows the Play quick action only for apps with bound workflows', async () => {
+    (appApiService.listApps as jest.Mock).mockResolvedValue({
+      items: [
+        makeApp({ appId: 'app-wf', name: 'App With Workflows', workflowIds: ['wf-1'] }),
+        makeApp({ appId: 'app-nowf', name: 'App Without Workflows', workflowIds: [] }),
+        makeApp({ appId: 'app-undef', name: 'App Undefined Workflows' }),
+      ],
+    });
+
+    render(React.createElement(AgentApps, { onNavigate: jest.fn() }));
+    await waitFor(() => expect(screen.getByText('App With Workflows')).toBeInTheDocument());
+
+    expect(
+      screen.getByRole('button', { name: 'Run workflows for App With Workflows' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Run workflows for App Without Workflows' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Run workflows for App Undefined Workflows' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('clicking Play navigates to the workflows tab without triggering card navigation', async () => {
+    const onNavigate = jest.fn();
+    (appApiService.listApps as jest.Mock).mockResolvedValue({
+      items: [makeApp({ appId: 'app-wf', name: 'App With Workflows', workflowIds: ['wf-1'] })],
+    });
+
+    render(React.createElement(AgentApps, { onNavigate }));
+    await waitFor(() => expect(screen.getByText('App With Workflows')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run workflows for App With Workflows' }));
+
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(onNavigate).toHaveBeenCalledWith('app-detail:app-wf:workflows');
+  });
+});

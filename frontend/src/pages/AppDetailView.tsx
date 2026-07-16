@@ -25,6 +25,8 @@ import {
   Check,
   Activity,
   BarChart3,
+  Upload,
+  ChevronRight,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -74,6 +76,7 @@ import {
   type HealthStatus,
 } from '../utils/publishUtils';
 import { PageContainer } from '../components/PageContainer';
+import { ExecutionDetailSheet } from '../components/ExecutionDetailSheet';
 
 // ---- Types ----
 
@@ -82,6 +85,8 @@ interface AppDetailViewProps {
   onBack: () => void;
   onNavigate?: (view: string) => void;
   onPublishSuccess?: (data: { appId: string; appName: string; endpointUrl: string; apiKey: string }) => void;
+  /** Optional initial tab — one of the valid tab values (e.g. 'workflows'). */
+  initialTab?: string;
 }
 
 interface RegistryAgentBinding {
@@ -113,6 +118,12 @@ interface Execution {
   status: string;
   startedAt: string;
   completedAt?: string;
+  workflowVersion?: number;
+  triggeredBy?: string;
+  input?: string | null;
+  output?: string | null;
+  error?: string | null;
+  nodeResults?: string | null;
 }
 
 interface RegistryAgentRecordDetail {
@@ -288,7 +299,7 @@ function buildPreconditions(
       passed: true,
       warning: unpublished.length > 0,
       detail: unpublished.length > 0
-        ? `Draft workflows cannot run — publish ${unpublished.length === 1 ? 'it' : 'them'} in the Agentic Studio first`
+        ? `Draft workflows cannot run — publish ${unpublished.length === 1 ? 'it' : 'them'} from the Workflows tab`
         : undefined,
     });
   }
@@ -335,17 +346,25 @@ const TIME_RANGES = [
 
 // ---- Component ----
 
-export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: AppDetailViewProps) {
+// Tab values accepted via the initialTab prop
+const VALID_TABS = ['agents', 'workflows', 'permissions', 'configuration', 'executions', 'api'];
+
+export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, initialTab }: AppDetailViewProps) {
   const [app, setApp] = useState<RegistryAgentRecordDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [executions, setExecutions] = useState<Execution[]>([]);
-  const [activeTab, setActiveTab] = useState('agents');
+  const [selectedExecution, setSelectedExecution] = useState<Execution | null>(null);
+  const [detailSheetOpen, setDetailSheetOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState(
+    initialTab && VALID_TABS.includes(initialTab) ? initialTab : 'agents',
+  );
 
   // Workflow run state — one live run tracked at a time
   const [activeRun, setActiveRun] = useState<{ executionId: string; workflowId: string } | null>(null);
   const [startingRun, setStartingRun] = useState<string | null>(null);
+  const [publishingWorkflowId, setPublishingWorkflowId] = useState<string | null>(null);
   const { events: runEvents } = useExecutionSubscription(activeRun?.executionId ?? null);
   const runToastRef = useRef<string | null>(null);
 
@@ -557,6 +576,39 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
     }
   }, [runStatus, activeRun, app?.workflowIds, loadExecutions]);
 
+  // While the detail sheet shows a RUNNING/PENDING execution, refresh the
+  // executions on each onWorkflowProgress event so the sheet stays live.
+  const processedRunEventCountRef = useRef(0);
+  useEffect(() => {
+    if (runEvents.length === 0 || runEvents.length === processedRunEventCountRef.current) return;
+    processedRunEventCountRef.current = runEvents.length;
+    if (!detailSheetOpen || !selectedExecution || !app?.workflowIds) return;
+    const status = (selectedExecution.status || '').toUpperCase();
+    if (status !== 'RUNNING' && status !== 'PENDING') return;
+    const hasEventForSelected = runEvents.some(
+      (e: any) => e?.executionId === selectedExecution.executionId,
+    );
+    if (!hasEventForSelected) return;
+    loadExecutions(app.workflowIds);
+  }, [runEvents, detailSheetOpen, selectedExecution, app?.workflowIds, loadExecutions]);
+
+  // Keep the selected execution object in sync with the refreshed list so the
+  // open detail sheet never shows stale data.
+  useEffect(() => {
+    if (!selectedExecution) return;
+    const refreshed = executions.find(
+      (e) => e.executionId === selectedExecution.executionId,
+    );
+    if (refreshed && refreshed !== selectedExecution) {
+      setSelectedExecution(refreshed);
+    }
+  }, [executions, selectedExecution]);
+
+  const openExecutionDetail = (exec: Execution) => {
+    setSelectedExecution(exec);
+    setDetailSheetOpen(true);
+  };
+
   const handleRunWorkflow = async (workflowId: string) => {
     try {
       setStartingRun(workflowId);
@@ -567,6 +619,26 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
       toast.error(message);
     } finally {
       setStartingRun(null);
+    }
+  };
+
+  const handlePublishWorkflow = async (workflowId: string) => {
+    try {
+      setPublishingWorkflowId(workflowId);
+      const published = await workflowApiService.publishWorkflow(workflowId);
+      setWorkflows((prev) =>
+        prev.map((wf) =>
+          wf.workflowId === workflowId
+            ? { ...wf, status: published?.status || 'PUBLISHED' }
+            : wf,
+        ),
+      );
+      toast.success('Workflow published');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      toast.error('Failed to publish workflow', { description: message });
+    } finally {
+      setPublishingWorkflowId(null);
     }
   };
 
@@ -1086,7 +1158,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
                   <p className="text-xs text-muted-foreground mb-3">{wf.nodeCount} node{wf.nodeCount !== 1 ? 's' : ''}</p>
                   <div className="flex items-center gap-2">
                     <Button
-                      variant="ghost"
+                      variant="outline"
                       size="sm"
                       className="text-xs text-muted-foreground hover:text-foreground h-7 px-2"
                       aria-label={`Run ${wf.name}`}
@@ -1097,6 +1169,20 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
                         ? <Loader2 className="size-3 mr-1 animate-spin" />
                         : <Play className="size-3 mr-1" />} Run
                     </Button>
+                    {!isPublished && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-xs h-7 px-2"
+                        aria-label={`Publish ${wf.name}`}
+                        disabled={publishingWorkflowId === wf.workflowId}
+                        onClick={() => handlePublishWorkflow(wf.workflowId)}
+                      >
+                        {publishingWorkflowId === wf.workflowId
+                          ? <Loader2 className="size-3 mr-1 animate-spin" />
+                          : <Upload className="size-3 mr-1" />} Publish
+                      </Button>
+                    )}
                     <Button
                       variant="ghost"
                       size="sm"
@@ -1115,7 +1201,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
                     </Button>
                   </div>
                   {!isPublished && (
-                    <p className="text-xs text-chart-4 mt-2">Draft — publish in the studio first</p>
+                    <p className="text-xs text-chart-4 mt-2">Draft — publish to enable Run</p>
                   )}
                 </Card>
               );
@@ -1348,7 +1434,17 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
       return (
         <div className="text-center py-12">
           <Clock className="size-10 text-muted-foreground mx-auto mb-3" />
-          <p className="text-muted-foreground text-sm">No executions recorded yet.</p>
+          <div className="flex items-center justify-center gap-3">
+            <p className="text-muted-foreground text-sm">No executions recorded yet.</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs h-7 px-2"
+              onClick={() => setActiveTab('workflows')}
+            >
+              <GitBranch className="size-3 mr-1" /> Go to Workflows
+            </Button>
+          </div>
         </div>
       );
     }
@@ -1363,13 +1459,27 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
               <th className="text-left py-2 px-3 text-muted-foreground font-medium text-xs">Started</th>
               <th className="text-left py-2 px-3 text-muted-foreground font-medium text-xs">Completed</th>
               <th className="text-right py-2 px-3 text-muted-foreground font-medium text-xs">Duration</th>
+              <th className="py-2 px-3 w-8"><span className="sr-only">View details</span></th>
             </tr>
           </thead>
           <tbody>
             {executions.map((exec) => {
               const colors = EXECUTION_STATUS_COLORS[exec.status] || EXECUTION_STATUS_COLORS.PENDING;
               return (
-                <tr key={exec.executionId} className="border-b border-border/50 hover:bg-card">
+                <tr
+                  key={exec.executionId}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`View execution ${exec.executionId}`}
+                  className="border-b border-border/50 hover:bg-card cursor-pointer transition-colors"
+                  onClick={() => openExecutionDetail(exec)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openExecutionDetail(exec);
+                    }
+                  }}
+                >
                   <td className="py-2 px-3 text-foreground text-xs font-mono">{exec.executionId.slice(0, 12)}...</td>
                   <td className="py-2 px-3 text-muted-foreground text-xs">{exec.workflowId}</td>
                   <td className="py-2 px-3">
@@ -1378,6 +1488,9 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
                   <td className="py-2 px-3 text-muted-foreground text-xs">{formatDate(exec.startedAt)}</td>
                   <td className="py-2 px-3 text-muted-foreground text-xs">{exec.completedAt ? formatDate(exec.completedAt) : '—'}</td>
                   <td className="py-2 px-3 text-right text-muted-foreground text-xs">{computeDuration(exec.startedAt, exec.completedAt)}</td>
+                  <td className="py-2 px-3 text-right">
+                    <ChevronRight className="size-3 text-muted-foreground inline-block" aria-hidden="true" />
+                  </td>
                 </tr>
               );
             })}
@@ -1942,6 +2055,13 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
 
       {/* Publish dialog */}
       {renderPublishDialog()}
+
+      {/* Execution detail sheet */}
+      <ExecutionDetailSheet
+        execution={selectedExecution}
+        open={detailSheetOpen}
+        onClose={() => setDetailSheetOpen(false)}
+      />
 
       {/* Unpublish dialog */}
       <Dialog open={unpublishDialogOpen} onOpenChange={(open) => {
