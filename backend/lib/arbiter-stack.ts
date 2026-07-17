@@ -322,7 +322,18 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-          resources: ['*'],
+          // Scoped to the same foundation models + inference profiles the
+          // supervisor/fabricator are granted — never a blanket '*'. This keeps
+          // the worker role's residual AwsSolutions-IAM5 suppression (below)
+          // pointed ONLY at the unavoidable cloudwatch:PutMetricData /
+          // sts:GetCallerIdentity Resource::*, not at Bedrock. These scoped
+          // Bedrock ARNs are covered by the app-level IAM5 regex suppression
+          // (foundation-model/*, inference-profile/*).
+          resources: [
+            `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
+            `arn:aws:bedrock:*::foundation-model/amazon.*`,
+            `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
+          ],
         }),
       ],
     });
@@ -334,6 +345,30 @@ export class ArbiterStack extends cdk.Stack {
     // read-only access to ExecutionSpecifications for dispatch-time
     // status checks. Never written to from the worker.
     props.executionSpecificationsTable.grantReadData(workerAgentWrapperLambda);
+
+    // The worker emits best-effort node-level metrics (NodeDurationMs /
+    // NodeFailure) into the Citadel/Workflows namespace after running each
+    // workflow node. PutMetricData has no resource-level scoping; the call is
+    // narrowed to that namespace in code.
+    workerAgentWrapperLambda.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudwatch:PutMetricData'],
+      resources: ['*'],
+    }));
+    NagSuppressions.addResourceSuppressions(
+      workerAgentWrapperLambda.role!,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason:
+            'cloudwatch:PutMetricData has no resource-level scoping; the ' +
+            'worker narrows the call to the Citadel/Workflows namespace ' +
+            '(node duration/failure metrics).',
+          appliesTo: ['Resource::*'],
+        },
+      ],
+      true,
+    );
 
     // Grant IAM permissions for PolicyManager (agent scope)
     workerAgentWrapperLambda.addToRolePolicy(
@@ -570,27 +605,107 @@ export class ArbiterStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_14,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'seedConfig')),
+      // Catalog layer so the seed can `from catalog.registry_client import
+      // list_agent_records` for the demo agent registry-record idempotency
+      // lookup (the seed degrades to DDB-only seeding when unavailable).
+      layers: [catalogLayer],
       timeout: cdk.Duration.seconds(30),
       environment: {
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
         WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
         FABRICATOR_QUEUE_URL: fabricatorQueue.queueUrl,
+        // Lets the seed upload the runnable demo agent module to the code
+        // bucket so the seeded agent config's ``filename`` is reachable.
+        AGENT_BUCKET_NAME: props.codeBucket.bucketName,
+        // Dual-store agent seam: the seed also creates the demo agent's
+        // AgentCore Registry record (the app-publish readiness gate resolves
+        // agents by name in the registry). Same conditional pattern as the
+        // fabricator — unset in registry-less environments, where the seed
+        // logs and skips the registry write.
+        ...(props.registryId && { REGISTRY_ID: props.registryId }),
+        ...(props.registryId && { REGISTRY_ENABLED: 'true' }),
       },
     });
 
     props.agentConfigTable.grantWriteData(seedAgentConfigLambda);
 
+    // Minimal registry surface for the demo-agent record seed: the seed path
+    // calls ONLY ListRegistryRecords (idempotency lookup via
+    // catalog.registry_client.list_agent_records) and CreateRegistryRecord.
+    // No status/update/delete APIs — the record is left in its post-create
+    // DRAFT status, mirroring fabricator-created records. Scoped to the
+    // registry ARN like the fabricator's grant, and only wired when a
+    // registry is provisioned.
+    if (props.registryArn) {
+      seedAgentConfigLambda.addToRolePolicy(
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: [
+            'bedrock-agentcore:CreateRegistryRecord',
+            'bedrock-agentcore:ListRegistryRecords',
+          ],
+          resources: [props.registryArn, `${props.registryArn}/*`],
+        }),
+      );
+      // Same residual wildcard as every other registry-wired role (see the
+      // registryArnSuppression list in bin/app.ts): AgentCore registry
+      // operations require <registryArn>/* for record sub-resources. Scoped
+      // to exactly that form via appliesTo regex.
+      NagSuppressions.addResourceSuppressions(
+        seedAgentConfigLambda.role!,
+        [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason:
+              'AgentCore registry record create/list requires wildcard on ' +
+              'registry ARN sub-resources (records). Scoped to the specific ' +
+              'registry ARN; mirrors the registryArnSuppression applied to ' +
+              'the fabricator/supervisor roles in bin/app.ts.',
+            appliesTo: [
+              { regex: '/^Resource::<AgentCoreRegistry\\.RegistryArn>\\/\\*$/g' },
+            ],
+          },
+        ],
+        true,
+      );
+    }
+    // PutObject only — the seed writes the demo agent module, never reads or
+    // deletes from the code bucket. Path-scoped to the agents/* object-key
+    // prefix: the seed only writes agents/demo_echo_agent.py, so it never needs
+    // write access anywhere else in the bucket.
+    props.codeBucket.grantPut(seedAgentConfigLambda, 'agents/*');
+    // The agents/* object-key prefix is the residual (and unavoidable) S3
+    // resource wildcard — you cannot PutObject without a key. The app-level
+    // IAM5 suppression covers a bucket-wide <Arn>/* but not this narrower
+    // <Arn>/agents/* form, so scope the residual suppression to exactly the
+    // agents/* prefix here. (The s3:PutObject*/Abort* action wildcards are
+    // already covered by the app-level action suppression.)
+    NagSuppressions.addResourceSuppressions(
+      seedAgentConfigLambda.role!,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason:
+            'Seed S3 write is path-scoped to agents/* (writes only ' +
+            'agents/demo_echo_agent.py). The residual wildcard is the object-key ' +
+            'prefix inherent to any S3 PutObject; no bucket-wide or cross-prefix ' +
+            'write is granted.',
+          appliesTo: [{ regex: '/^Resource::<.+\\.Arn>\\/agents\\/\\*$/g' }],
+        },
+      ],
+      true,
+    );
+
     // Invoke the Custom Resource to seed agent config table
     // This must come after fabricatorQueue is created since we pass its URL.
-    // Bumped Version v1.0.0 → v1.1.0 so the CFN Update event fires
-    // on the next deploy and the governance corpus (authority units +
-    // constitutional layer) is seeded. Additional dependencies on the
-    // governance tables are wired below, after those tables are declared.
+    // Bumped Version v1.2.0 → v1.3.0 so the CFN Update event fires on the
+    // next deploy and the demo agent's AgentCore Registry record is seeded
+    // in existing environments (dual-store agent seam).
     const seedAgentConfigResource = new cdk.CustomResource(this, 'SeedAgentConfigResource', {
       serviceToken: seedAgentConfigLambda.functionArn,
       properties: {
         // O-05: Use content hash instead of Date.now() to avoid unnecessary re-runs
-        Version: 'v1.1.0',
+        Version: 'v1.3.0',
       },
     });
 
@@ -639,6 +754,9 @@ export class ArbiterStack extends cdk.Stack {
         runtime: lambda.Runtime.PYTHON_3_14,
         handler: 'index.handler',
         code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'stepRunner')),
+        // Shared arbiter layer so `from common import workflow_contract`
+        // resolves at runtime (common/ is staged at /opt/python/common).
+        layers: [catalogLayer],
         timeout: cdk.Duration.minutes(5),
         memorySize: 1024,
         environment: {
@@ -648,6 +766,11 @@ export class ArbiterStack extends cdk.Stack {
           TOOLS_CONFIG_TABLE: toolsConfigTable.tableName,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
           APPSYNC_ENDPOINT: props.appSyncEndpoint,
+          // URL of the worker agent queue. The Step Runner dispatches a
+          // workflow node to the worker by sending a discriminated message to
+          // this SQS queue; the worker runs the agent and emits the node
+          // completed/failed events the rules below consume.
+          WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
         },
       });
 
@@ -657,6 +780,33 @@ export class ArbiterStack extends cdk.Stack {
       props.agentConfigTable.grantReadData(stepRunnerFunction);
       toolsConfigTable.grantReadData(stepRunnerFunction);
       props.agentEventBus.grantPutEventsTo(stepRunnerFunction);
+      // SendMessage only, on the single worker agent queue — the Step Runner
+      // dispatches node execution to the worker via SQS and never receives or
+      // deletes from this queue (the worker owns consumption).
+      workerAgentQueue.grantSendMessages(stepRunnerFunction);
+
+      // The Step Runner emits best-effort node-level metrics (NodeDurationMs /
+      // NodeFailure) into the Citadel/Workflows namespace. PutMetricData has no
+      // resource-level scoping; the call is narrowed to that namespace in code.
+      stepRunnerFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+      }));
+      NagSuppressions.addResourceSuppressions(
+        stepRunnerFunction.role!,
+        [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason:
+              'cloudwatch:PutMetricData has no resource-level scoping; the ' +
+              'step runner narrows the call to the Citadel/Workflows namespace ' +
+              '(node duration/failure metrics).',
+            appliesTo: ['Resource::*'],
+          },
+        ],
+        true,
+      );
 
       // EventBridge rules targeting StepRunner
       const stepRunnerStartRule = new events.Rule(this, 'StepRunnerStartRule', {
@@ -710,6 +860,103 @@ export class ArbiterStack extends cdk.Stack {
         });
         workflowProgressFanoutRule.addTarget(new targets.LambdaFunction(props.fanoutFunction));
       }
+
+      // --- Workflow Timeout Watchdog (self-contained) ---
+      // A scheduled sweep that fails executions stuck in the 'running' state
+      // past a configurable timeout, emitting workflow.failed via the events
+      // module so the rest of the system reacts as it would to any terminal
+      // failure. It shares the stepRunner asset but uses its own handler and
+      // talks only to the executions table + event bus (no executor coupling).
+      const workflowTimeoutWatchdogFunction = new lambda.Function(this, 'WorkflowTimeoutWatchdogFunction', {
+        runtime: lambda.Runtime.PYTHON_3_14,
+        handler: 'timeout_watchdog.handler',
+        code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'stepRunner')),
+        layers: [catalogLayer],
+        timeout: cdk.Duration.minutes(2),
+        memorySize: 256,
+        environment: {
+          EXECUTIONS_TABLE: props.executionsTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          // Executions still 'running' after this many seconds are considered
+          // stuck and failed by the sweep. Default 1 hour.
+          WORKFLOW_TIMEOUT_SECONDS: '3600',
+        },
+      });
+
+      // Least-privilege: the watchdog only Scans for running executions and
+      // conditionally UpdateItems the stuck ones to failed (timeout_watchdog.py
+      // _scan_running + _fail_stuck). It never reads by key, puts, or deletes,
+      // so grant exactly dynamodb:Scan + dynamodb:UpdateItem on the base table
+      // ARN rather than full read/write (grantReadWriteData). PutEvents on the
+      // shared bus (workflow.failed) and PutMetricData for the best-effort
+      // timeout metric (Citadel/Workflows namespace) follow below.
+      workflowTimeoutWatchdogFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:Scan', 'dynamodb:UpdateItem'],
+        resources: [props.executionsTable.tableArn],
+      }));
+      props.agentEventBus.grantPutEventsTo(workflowTimeoutWatchdogFunction);
+      workflowTimeoutWatchdogFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+      }));
+      NagSuppressions.addResourceSuppressions(
+        workflowTimeoutWatchdogFunction.role!,
+        [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason:
+              'cloudwatch:PutMetricData has no resource-level scoping; the ' +
+              'workflow timeout watchdog narrows the call to the ' +
+              'Citadel/Workflows namespace.',
+            appliesTo: ['Resource::*'],
+          },
+        ],
+        true,
+      );
+
+      // Sweep every 5 minutes on an EventBridge schedule.
+      const workflowTimeoutWatchdogSchedule = new events.Rule(this, 'WorkflowTimeoutWatchdogSchedule', {
+        ruleName: `citadel-workflow-timeout-watchdog-${props.environment}`,
+        description:
+          'Periodically fails workflow executions stuck in the running state past their timeout.',
+        schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      });
+      workflowTimeoutWatchdogSchedule.addTarget(
+        new targets.LambdaFunction(workflowTimeoutWatchdogFunction),
+      );
+
+      // Error-rate alarm for the Step Runner Lambda. Declared inside this
+      // guard block so it only exists when the Step Runner does. Mirrors the
+      // Supervisor/Fabricator pattern: Errors metric, 5-minute period,
+      // NOT_BREACHING, threshold 3 (the Step Runner is invoked on every
+      // workflow lifecycle event, so a burst of errors is the signal).
+      new cloudwatch.Alarm(this, 'StepRunnerErrorAlarm', {
+        alarmName: `citadel-step-runner-errors-${props.environment}`,
+        metric: stepRunnerFunction.metricErrors({ period: cdk.Duration.minutes(5) }),
+        threshold: 3,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: 'Step Runner Lambda error rate exceeded threshold',
+      });
+
+      // Error-rate alarm for the workflow timeout watchdog. Threshold is 1
+      // (not 3 like the request-driven Lambdas): the watchdog runs once per
+      // 5-minute schedule, so a threshold of 3 within a single 5-minute
+      // period could never be reached and the alarm would be dead. A single
+      // failed sweep means stuck executions aren't being reaped, which is
+      // itself worth paging on. Same Errors metric / NOT_BREACHING pattern.
+      new cloudwatch.Alarm(this, 'WorkflowTimeoutWatchdogErrorAlarm', {
+        alarmName: `citadel-workflow-timeout-watchdog-errors-${props.environment}`,
+        metric: workflowTimeoutWatchdogFunction.metricErrors({ period: cdk.Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: 'Workflow timeout watchdog Lambda error rate exceeded threshold',
+      });
     }
 
     // O-03: Enable X-Ray active tracing on all Lambda functions
@@ -758,6 +1005,22 @@ export class ArbiterStack extends cdk.Stack {
           treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
           alarmDescription: 'Fabricator Lambda error rate exceeded threshold',
         });
+
+    // Worker agent Lambda error-rate alarm (workflow dispatch path). Mirrors
+    // the Supervisor/Fabricator pattern: Errors metric, 5-minute period,
+    // NOT_BREACHING, threshold 3. The worker's SQS DLQ depth is covered
+    // separately by WorkerDLQDepthAlarm; this alarm surfaces in-invocation
+    // failures (bad dispatch payload, agent crash) that are retried and may
+    // never reach the DLQ.
+    new cloudwatch.Alarm(this, 'WorkerErrorAlarm', {
+      alarmName: `citadel-worker-errors-${props.environment}`,
+      metric: workerAgentWrapperLambda.metricErrors({ period: cdk.Duration.minutes(5) }),
+      threshold: 3,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'Worker agent Lambda error rate exceeded threshold',
+    });
 
         // ============================================================
         // Jagged-Frontier escalation alarm (follow-up #8)

@@ -199,6 +199,67 @@ Agent config:
 
 Result: the agent can invoke Claude Sonnet 4 and assume the `citadel-ds-ds-my-s3-bucket` role (which has S3 read/write on that specific bucket). The agent code would call `sts:AssumeRole` to get the datastore credentials, or use the scoped session directly.
 
+## Workflow Execution Permissions
+
+Workflow execution (see [BLUEPRINTS_WORKFLOWS.md](./BLUEPRINTS_WORKFLOWS.md#how-access-and-permissions-work)) adds a second least-privilege surface alongside credential vending: the Step Runner engine, the worker's workflow-dispatch path, a timeout watchdog, a progress fan-out, the workflow/execution resolvers, and two seed Lambdas. Grants name specific tables, queues, buses, and ARN patterns — never a blanket `*` on data-plane actions. For the operator-facing summary, see the [IAM posture notes in WORKFLOW_USER_GUIDE.md](./WORKFLOW_USER_GUIDE.md#iam-posture).
+
+### Per-function grants
+
+The workflow-execution grants per function:
+
+| Function | Actions | Resources | Notes |
+|----------|---------|-----------|-------|
+| `StepRunnerFunction` | DynamoDB read/write | Executions table | Owns durable execution state |
+| | DynamoDB read | Workflows, agent config, and tools config tables | Definition and agent lookups at dispatch |
+| | `events:PutEvents` | `citadel-agents-{env}` bus | Emits `workflow.*` progress events |
+| | `sqs:SendMessage` | `citadel-worker-agent-queue-{env}` | Send-only node dispatch — never Receive/Delete; the worker owns consumption |
+| | `cloudwatch:PutMetricData` | `*`, narrowed to the `Citadel/Workflows` namespace | `NodeDurationMs` / `NodeFailure` metrics |
+| `WorkerAgentWrapper` | `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream` | `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`, `arn:aws:bedrock:*::foundation-model/amazon.*`, `arn:aws:bedrock:*:{account}:inference-profile/*` | Scoped model ARNs — never a blanket `*` |
+| | `events:PutEvents` | `citadel-agents-{env}` bus | Emits `workflow.node.completed` / `workflow.node.failed` |
+| | DynamoDB read | Agent config and execution specifications tables | Config load plus a read-only dispatch-time spec check |
+| | S3 read | Agent code bucket | Downloads `agents/<filename>` for subprocess execution |
+| | `lambda:InvokeFunction` | Credential vender | Scoped-credential vending (see [How It Works](#how-it-works)) |
+| | `iam:CreateRole` / `DeleteRole` / `GetRole` / `PutRolePolicy` / `DeleteRolePolicy` / `TagRole`, `sts:AssumeRole` | `arn:aws:iam::{account}:role/citadel-agent-*` | PolicyManager role lifecycle; `sts:GetCallerIdentity` on `*` |
+| | `bedrock-agentcore:GetRegistryRecord`, `bedrock-agentcore:ListRegistryRecords` | Registry ARN (when the registry is enabled) | Read-only registry lookups |
+| | `cloudwatch:PutMetricData` | `*`, narrowed to `Citadel/Workflows` | |
+| `WorkflowTimeoutWatchdogFunction` | `dynamodb:Scan`, `dynamodb:UpdateItem` | Executions table | Explicit two-action statement — deliberately not `grantReadWriteData` |
+| | `events:PutEvents` | `citadel-agents-{env}` bus | Emits `workflow.failed` on timeout |
+| | `cloudwatch:PutMetricData` | `*`, narrowed to `Citadel/Workflows` | `WorkflowTimedOut` metric |
+| `WorkflowProgressFanoutFunction` | `appsync:GraphQL` | `{apiArn}/types/Mutation/fields/publishWorkflowProgress` | Single-field grant on the progress mutation |
+| | `cloudwatch:PutMetricData` | `*`, narrowed to `Citadel/Workflows` | `FanoutPublishFailure` metric |
+| `WorkflowResolverFunction` | DynamoDB read/write | Workflows and apps tables | `importBlueprint` appends to `app.workflowIds` |
+| | DynamoDB read | Agent config table | Publish-time `verifyAgentsExist` batch lookup |
+| | `events:PutEvents`, `cognito-idp:AdminGetUser` | Bus; user pool | Org-scoped access checks |
+| `ExecutionResolverFunction` | DynamoDB read/write | Executions table | |
+| | DynamoDB read | Workflows table | Enforces the `PUBLISHED` gate on `startExecution` |
+| | `events:PutEvents`, `cognito-idp:AdminGetUser` | Bus; user pool | Org-scoped access checks |
+| `SeedBlueprintsFunction` | DynamoDB write | Workflows table | Write-only; idempotent via `attribute_not_exists(workflowId)` |
+| `SeedAgentConfigFunction` | DynamoDB write | Agent config table | Seeds the `demo-echo-agent` config |
+| | DynamoDB write | Authority units and constitutional layers tables | Governance seed data |
+| | `bedrock-agentcore:CreateRegistryRecord`, `bedrock-agentcore:ListRegistryRecords` | Registry ARN (when the registry is enabled) | Create/List only — no update, status change, or delete |
+| | `s3:PutObject*` | Agent code bucket, `agents/*` prefix | Path-scoped `grantPut`; uploads `agents/demo_echo_agent.py` |
+
+### Invocation topology
+
+- `StepRunnerFunction` — triggered by four EventBridge rules on the agents bus: `execution.start.requested`, `workflow.node.completed`, `workflow.node.failed`, and `execution.cancel.requested`
+- `WorkerAgentWrapper` — consumes `citadel-worker-agent-queue-{env}` (batch size 1, dead-letter queue after 3 receives); workflow node dispatches arrive as discriminated messages sent by the Step Runner
+- `WorkflowTimeoutWatchdogFunction` — EventBridge schedule, every 5 minutes; fails executions `running` longer than `WORKFLOW_TIMEOUT_SECONDS` (default 3600) via a conditional update
+- `WorkflowProgressFanoutFunction` — triggered by a rule matching the seven `workflow.*` progress event types; calls the `publishWorkflowProgress` mutation
+
+The Step Runner and its rules, the worker, the watchdog, the fan-out rule, and `SeedAgentConfigFunction` are provisioned by the arbiter stack (`backend/lib/arbiter-stack.ts`); the fan-out Lambda, the workflow/execution resolvers, and `SeedBlueprintsFunction` by the backend stack (`backend/lib/backend-stack.ts`).
+
+### Governance of workflow-dispatched agents
+
+Workflow node dispatch reuses the subprocess isolation described above. The worker's `_process_workflow_node` builds the child environment via `worker_governance.build_subprocess_env`, which installs three governance variables:
+
+| Variable | Value | Effect |
+|----------|-------|--------|
+| `CITADEL_AGENT_ID` | The node's `agentId` | Triggers installation of the layer-2 `GovernedToolHandler` in `agent_runner` — without it, layer-2 tool governance is bypassed |
+| `CITADEL_WORKFLOW_ID` | The execution ID (not the reusable workflow template ID) | Correlates every worker-tool-handler finding to a single run, mirroring the supervisor path's orchestration ID |
+| `MODEL_OVERRIDE` | The node's `modelOverride`, only when 256 characters or fewer | Consumed by `agent_runner` — the same mechanism as the supervisor path |
+
+`systemPromptAddition` is appended to the agent's system prompt before dispatch, capped at `WORKER_MAX_PROMPT_ADDITION_CHARS` (the arbiter stack does not set the variable, so deployed environments use the default of 4000); oversized values are skipped with a warning, never truncated. The supervisor path's `DENIED_TOOLS` denial list is not populated on the workflow path. Scoped credentials from the credential vender are passed only into the child subprocess environment — the parent Lambda's environment is never modified.
+
 ## File Locations
 
 | File | Purpose |
@@ -210,3 +271,9 @@ Result: the agent can invoke Claude Sonnet 4 and assume the `citadel-ds-ds-my-s3
 | `arbiter/workerWrapper/agent_runner.py` | Subprocess runner (executes agent code) |
 | `backend/lib/arbiter-stack.ts` | CDK infrastructure for both Lambdas |
 | `backend/src/lambda/__tests__/agent-credential-vender.test.ts` | Unit tests |
+| `arbiter/stepRunner/executor.py` | Step Runner orchestration (dispatch, completion, cancellation) |
+| `arbiter/stepRunner/timeout_watchdog.py` | Scheduled execution-timeout sweep |
+| `arbiter/workerWrapper/worker_governance.py` | Override caps and subprocess env governance |
+| `backend/src/lambda/workflow-progress-fanout.ts` | Progress fan-out to AppSync |
+| `backend/src/lambda/seed-blueprints/index.ts` | Seed blueprint loader |
+| `backend/lib/backend-stack.ts` | CDK infrastructure for the resolvers, fan-out, and blueprint seeding |

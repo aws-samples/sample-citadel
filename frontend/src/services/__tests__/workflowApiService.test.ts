@@ -158,6 +158,23 @@ describe('workflowApiService', () => {
       );
       expect(result).toEqual(mockImported);
     });
+
+    it('serializes agentMapping as an AWSJSON string variable when provided', async () => {
+      const mockImported = { workflowId: 'wf-imported', status: 'DRAFT' };
+      (serverService.mutate as jest.Mock).mockResolvedValue({ importBlueprint: mockImported });
+
+      const agentMapping = { 'placeholder-agent-1': 'agent-real-1' };
+      await workflowApiService.importBlueprint('bp-1', 'app-1', undefined, agentMapping);
+
+      const [doc, variables] = (serverService.mutate as jest.Mock).mock.calls[0];
+      expect(doc).toEqual(expect.stringContaining('$agentMapping: AWSJSON'));
+      expect(variables).toEqual({
+        blueprintId: 'bp-1',
+        appId: 'app-1',
+        name: undefined,
+        agentMapping: JSON.stringify(agentMapping),
+      });
+    });
   });
 
   describe('importWorkflow', () => {

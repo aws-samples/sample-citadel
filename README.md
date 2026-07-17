@@ -43,7 +43,7 @@ State is event-driven and eventually consistent: EventBridge carries `citadel.*`
 
 **Configurable Model Selection.** Operators choose which Bedrock foundation model each arbiter role — Supervisor, Fabricator, and the intake/extraction agents — uses, without code changes or redeploys. A daily sync discovers invokable models from the live Bedrock inventory into an operator-curated catalog; an admin-only UI sets a global default, per-slot defaults, and a data-locality policy; and a pure, region-aware resolver maps the choice to a cross-region inference profile at runtime, with a bulletproof fallback to a safe default so model configuration can never break agent dispatch. See [docs/MODEL_SELECTION.md](docs/MODEL_SELECTION.md).
 
-**Visual Workflow Builder.** A drag-and-drop canvas (ReactFlow) with blueprint templates compiles to DAGs executed by the StepRunner, including conditional branching and bounded retries.
+**Visual Workflow Builder.** A drag-and-drop canvas (ReactFlow) compiles to DAGs executed by the StepRunner, including conditional branching and bounded retries. Designs round-trip through a blueprint catalog — save a canvas as a published blueprint, load it back, or import it into an app — and each node can pin a Bedrock model and extend its system prompt via size-capped execution overrides. Workflows publish and run from the canvas or from an app's Workflows tab, stream live per-node progress over GraphQL subscriptions, and expose full execution inspection (per-node status, durations, retries, and outputs). A seeded Echo Demo Workflow runs end to end out of the box.
 
 **27 Data Store Adapters.** A unified `ConnectorAdapter` architecture spanning S3, DynamoDB, RDS, Aurora, Redshift, Snowflake, Databricks, and more — each provisioned with a scoped IAM role (`citadel-ds-{id}`) under least privilege.
 
@@ -118,6 +118,7 @@ Prerequisites: AWS CLI, Node.js 24+, Python 3.14+, CDK 2.100+, and Finch (or Doc
 - **[docs/ADAPTER_GUIDE.md](docs/ADAPTER_GUIDE.md)** - Adapter development guide (adding datastores/integrations)
 - **[docs/AGENT_APPS.md](docs/AGENT_APPS.md)** - Agent Apps platform architecture
 - **[docs/BLUEPRINTS_WORKFLOWS.md](docs/BLUEPRINTS_WORKFLOWS.md)** - Workflow engine and DAG execution
+- **[docs/WORKFLOW_USER_GUIDE.md](docs/WORKFLOW_USER_GUIDE.md)** - End-to-end workflow guide (blueprints, canvas, publish, run, inspect)
 - **[docs/DATASTORES_INTEGRATIONS.md](docs/DATASTORES_INTEGRATIONS.md)** - Datastore and integration subsystem
 - **[docs/AGENT_PERMISSIONS.md](docs/AGENT_PERMISSIONS.md)** - Agent scoped credentials
 - **[docs/MODEL_SELECTION.md](docs/MODEL_SELECTION.md)** - Configurable per-agent model selection (catalog sync, runtime resolution, operator UI)

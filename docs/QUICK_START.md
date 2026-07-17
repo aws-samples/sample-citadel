@@ -97,6 +97,18 @@ cdk destroy --all
 - Review CloudFormation outputs for API endpoints
 - Add more users in Team Management
 
+## Run the Demo Workflow
+
+Every deployment seeds a runnable **Echo Demo Workflow** blueprint and a real `demo-echo-agent` that echoes its input — no configuration needed.
+
+1. Open **Agent Apps** and create an app (or pick an existing one)
+2. In the blueprint catalog, choose **Echo Demo Workflow** → **Use in App** and select your app — no agent remapping is needed
+3. In the app's **Workflows** tab, click **Publish** on the imported "Echo Demo Workflow (Copy)" card
+4. Click **Run** and watch the live status indicator (Pending → Running → Completed)
+5. Open the **Executions** tab and click the run to see the per-node timeline and the echoed output
+
+See [WORKFLOW_USER_GUIDE.md](WORKFLOW_USER_GUIDE.md) for the full walkthrough.
+
 ## Support
 
 - Check CloudWatch Logs for errors

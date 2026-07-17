@@ -7,7 +7,7 @@
 import { useState, useEffect } from 'react';
 import serverService from '../services/server';
 
-const ON_WORKFLOW_PROGRESS = `
+export const ON_WORKFLOW_PROGRESS = `
   subscription OnWorkflowProgress($executionId: ID!) {
     onWorkflowProgress(executionId: $executionId) {
       executionId

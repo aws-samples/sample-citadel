@@ -1,11 +1,45 @@
 """DAG module — pure functions for workflow graph operations.
 
 Provides topological sorting, root/convergence node detection,
-ready-node resolution, and downstream subgraph traversal.
-All functions are pure (no side effects, no AWS calls).
+ready-node resolution, downstream subgraph traversal, and per-node
+configuration merging. All functions are pure (no side effects, no AWS calls).
 """
 
+import json
 from collections import deque
+
+
+def merge_node_configuration(workflow_config: dict | None, node: dict | None) -> dict:
+    """Merge a node definition's per-node ``configuration`` over the
+    workflow-level configuration (decision 59376546).
+
+    Per-key precedence: the node's configuration wins. Workflow-only keys are
+    preserved and unknown keys are carried through untouched — the worker
+    ignores keys it does not understand (forward compatibility).
+
+    Defensive semantics keep dispatch byte-identical to the pre-feature
+    behaviour whenever no usable node configuration exists:
+
+    * ``node`` missing/None, ``configuration`` key absent, ``None``, or ``{}``
+      → a copy of the workflow configuration, unchanged.
+    * A JSON-string configuration (frontend-serialized definitions) is parsed;
+      a malformed string or any non-object value is ignored.
+    * Inputs are never mutated; the result is always a new dict.
+    """
+    base = dict(workflow_config) if isinstance(workflow_config, dict) else {}
+    if not isinstance(node, dict):
+        return base
+
+    node_config = node.get('configuration')
+    if isinstance(node_config, str):
+        try:
+            node_config = json.loads(node_config)
+        except ValueError:
+            node_config = None
+    if not isinstance(node_config, dict):
+        return base
+
+    return {**base, **node_config}
 
 
 def topological_sort(nodes: list[dict], edges: list[dict]) -> list[str]:

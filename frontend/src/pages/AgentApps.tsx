@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Plus, Bot, GitBranch, RefreshCw, AppWindow, BarChart3 } from 'lucide-react';
+import { Plus, Bot, GitBranch, RefreshCw, AppWindow, BarChart3, Play } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Card } from '../components/ui/card';
@@ -25,7 +25,7 @@ interface RegistryAgentRecordSummary {
   updatedAt: string;
 }
 
-const STATUS_TABS = ['All', 'DRAFT', 'APPROVED', 'DEPRECATED'] as const;
+const STATUS_TABS = ['All', 'DRAFT', 'APPROVED', 'PUBLISHED', 'DEPRECATED'] as const;
 
 const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
   DRAFT: { bg: 'bg-primary/20', text: 'text-primary' },
@@ -229,6 +229,21 @@ export function AgentApps({ onNavigate }: AgentAppsProps) {
                         <GitBranch className="size-3" />
                         {workflowCount}
                       </span>
+                      {workflowCount > 0 && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onNavigate?.(`app-detail:${app.appId}:workflows`);
+                          }}
+                          className="size-5 text-muted-foreground hover:text-foreground"
+                          aria-label={`Run workflows for ${app.name}`}
+                          title="Run workflows"
+                        >
+                          <Play className="size-3.5" />
+                        </Button>
+                      )}
                       {app.status === 'PUBLISHED' && (
                         <Button
                           variant="ghost"

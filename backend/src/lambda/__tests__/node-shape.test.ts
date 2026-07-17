@@ -37,16 +37,22 @@ jest.mock('../../utils/appsync', () => ({
   getUserId: jest.fn().mockReturnValue('user-123'),
 }));
 
+import type { Context, Callback } from 'aws-lambda';
 import { handler } from '../workflow-resolver';
 import { SEED_BLUEPRINTS } from '../seed-blueprints';
 
-function makeEvent(fieldName: string, args: any, sub = 'user-123') {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub, claims: { sub } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
+
+const mockContext = {} as Context;
+const mockCallback: Callback<unknown> = () => undefined;
 
 function mockCognitoOrg(orgId: string) {
   cognitoMock.on(AdminGetUserCommand).resolves({
@@ -95,7 +101,7 @@ describe('canonical workflow node agentId shape', () => {
 
     test('no seed-blueprint node uses the data-nested shape (data.agentId)', () => {
       for (const bp of SEED_BLUEPRINTS) {
-        for (const node of bp.definition.nodes as any[]) {
+        for (const node of bp.definition.nodes as Array<{ data?: { agentId?: unknown } }>) {
           // The persisted definition must NOT carry agentId under node.data.
           // The data-nested shape is the frontend's ReactFlow runtime
           // representation only (see frontend/src/types/workflow.ts).
@@ -129,8 +135,8 @@ describe('canonical workflow node agentId shape', () => {
       await expect(
         handler(
           makeEvent('publishWorkflow', { workflowId: 'wf-shape-1' }),
-          {} as any,
-          {} as any,
+          mockContext,
+          mockCallback,
         ),
       ).rejects.toThrow(/missing agentId/i);
     });
@@ -160,11 +166,43 @@ describe('canonical workflow node agentId shape', () => {
       try {
         await handler(
           makeEvent('publishWorkflow', { workflowId: 'wf-shape-2' }),
-          {} as any,
-          {} as any,
+          mockContext,
+          mockCallback,
         );
-      } catch (err: any) {
-        expect(String(err?.message ?? err)).not.toMatch(/missing agentId/i);
+      } catch (err) {
+        expect(String((err as Error)?.message ?? err)).not.toMatch(/missing agentId/i);
+      }
+    });
+
+    test('Echo Demo Workflow (a real seeded blueprint) passes publish validation', async () => {
+      // The demo references a real seeded agentId and forms a minimal
+      // connected acyclic DAG, so validateDefinition must accept it. It is the
+      // one seed blueprint intended to be publishable as-is (the others are
+      // placeholder templates rejected by design). Assert no validation error
+      // surfaces — placeholder / disconnected / circular / missing agentId.
+      const demo = SEED_BLUEPRINTS.find((b) => b.name === 'Echo Demo Workflow')!;
+      expect(demo).toBeDefined();
+
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: 'wf-demo-echo',
+          orgId: 'org-1',
+          status: 'DRAFT',
+          definition: JSON.stringify(demo.definition),
+          version: 1,
+        },
+      });
+
+      try {
+        await handler(
+          makeEvent('publishWorkflow', { workflowId: 'wf-demo-echo' }),
+          mockContext,
+          mockCallback,
+        );
+      } catch (err) {
+        expect(String((err as Error)?.message ?? err)).not.toMatch(
+          /placeholder|disconnected|circular|missing agentId|validation failed/i,
+        );
       }
     });
 
@@ -191,8 +229,8 @@ describe('canonical workflow node agentId shape', () => {
       await expect(
         handler(
           makeEvent('publishWorkflow', { workflowId: 'wf-shape-3' }),
-          {} as any,
-          {} as any,
+          mockContext,
+          mockCallback,
         ),
       ).rejects.toThrow(/missing agentId/i);
     });

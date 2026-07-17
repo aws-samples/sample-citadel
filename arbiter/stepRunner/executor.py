@@ -10,13 +10,20 @@ DynamoDB state first to avoid duplicate work.
 
 import boto3
 import json
+import logging
 import os
 from datetime import datetime, timezone
 
 import events
-from dag import find_root_nodes, find_ready_nodes, find_convergence_nodes
+from dag import (
+    find_root_nodes,
+    find_ready_nodes,
+    find_convergence_nodes,
+    merge_node_configuration,
+)
 from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
+from common import workflow_contract
 
 # DynamoDB table names from environment
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'citadel-workflows-dev')
@@ -27,10 +34,91 @@ _dynamodb = boto3.resource('dynamodb')
 _workflows_table = _dynamodb.Table(WORKFLOWS_TABLE)
 _executions_table = _dynamodb.Table(EXECUTIONS_TABLE)
 
+_logger = logging.getLogger(__name__)
+
+# CloudWatch custom-metric namespace. Shared convention with the workflow
+# infrastructure (fan-out error metric + alarms live in the same namespace).
+METRIC_NAMESPACE = 'Citadel/Workflows'
+
+# Lazy SQS client for dispatching workflow nodes to the worker. Constructed on
+# first use (not at import) so module import never resolves credentials — the
+# same pattern the worker uses for its boto3 clients.
+_sqs_client = None
+
+# Lazy CloudWatch client for best-effort node telemetry. Same lazy pattern as
+# the SQS client: never resolve credentials at import time.
+_cloudwatch_client = None
+
+
+def _get_sqs_client():
+    """Lazily construct the boto3 SQS client. Cached per process."""
+    global _sqs_client
+    if _sqs_client is None:
+        _sqs_client = boto3.client('sqs')
+    return _sqs_client
+
+
+def _get_cloudwatch_client():
+    """Lazily construct the boto3 CloudWatch client. Cached per process."""
+    global _cloudwatch_client
+    if _cloudwatch_client is None:
+        _cloudwatch_client = boto3.client('cloudwatch')
+    return _cloudwatch_client
+
 
 def _now_iso() -> str:
     """Return current UTC time as ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _log_event(action: str, **fields) -> None:
+    """Emit a structured JSON log line for cross-system correlation.
+
+    Every line carries an ``executionId`` (and, where relevant, ``nodeId`` /
+    ``workflowId``) so a log search can stitch one execution together across
+    the step runner and the worker. Emitted via stdout (Lambda ships stdout to
+    CloudWatch Logs), matching the worker's structured-logging convention.
+    None-valued fields are dropped to keep lines terse.
+    """
+    payload = {'component': 'StepRunner', 'action': action}
+    payload.update({k: v for k, v in fields.items() if v is not None})
+    print(json.dumps(payload))
+
+
+def _duration_ms(started_at, completed_at) -> float | None:
+    """Return elapsed milliseconds between two ISO 8601 timestamps.
+
+    Returns None when either bound is missing or unparseable — the duration
+    metric is best-effort and must never be fabricated.
+    """
+    if not started_at or not completed_at:
+        return None
+    try:
+        start = datetime.fromisoformat(started_at)
+        end = datetime.fromisoformat(completed_at)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, (end - start).total_seconds() * 1000.0)
+
+
+def _emit_metric(metric_name: str, value: float, unit: str, *, workflow_id: str = '') -> None:
+    """Emit a single CloudWatch custom metric, best-effort.
+
+    Wrapped so a telemetry backend failure (throttling, missing
+    cloudwatch:PutMetricData permission, network) can NEVER break workflow
+    execution. A WorkflowId dimension is attached when available to keep
+    cardinality bounded while still allowing per-workflow drill-down.
+    """
+    try:
+        datum = {'MetricName': metric_name, 'Value': float(value), 'Unit': unit}
+        if workflow_id:
+            datum['Dimensions'] = [{'Name': 'WorkflowId', 'Value': workflow_id}]
+        _get_cloudwatch_client().put_metric_data(
+            Namespace=METRIC_NAMESPACE,
+            MetricData=[datum],
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must never raise
+        _logger.warning('cloudwatch metric emit failed metric=%s: %s', metric_name, exc)
 
 
 def _load_workflow(workflow_id: str) -> dict:
@@ -94,6 +182,7 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
         app_id=execution.get('appId', ''),
         started_at=now,
     )
+    _log_event('execution_start', executionId=execution_id, workflowId=workflow_id)
 
     # Find and invoke root nodes
     root_ids = find_root_nodes(nodes, edges)
@@ -104,7 +193,11 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
     for node_id in root_ids:
         node = next((n for n in nodes if n['id'] == node_id), None)
         if node:
-            invoke_node(execution_id, workflow_id, node, {}, configuration)
+            # Per-node configuration overrides workflow-level per-key
+            # (decision 59376546). No node configuration → workflow config
+            # unchanged, byte-identical to the pre-feature dispatch.
+            invoke_node(execution_id, workflow_id, node, {},
+                        merge_node_configuration(configuration, node))
 
 
 def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict) -> None:
@@ -113,7 +206,8 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
     1. Emit supervisor.chatter event for cross-system correlation (US-ARB-016)
     2. Update node status → running in DynamoDB
     3. Publish workflow.node.started event
-    4. Publish workflow.node.invoke event (picked up by worker wrapper)
+    4. Dispatch the node to the worker by sending a discriminated message to
+       the worker SQS queue (WORKER_QUEUE_URL)
     """
     # US-ARB-016: fire-and-forget chatter event for cross-system correlation.
     # The returned correlationId is currently a local only; it becomes the
@@ -136,6 +230,16 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
     agent_id = node.get('agentId', '')
     now = _now_iso()
 
+    # Correlation log: one line per node dispatch, tagged with the ids a log
+    # search needs to stitch this node to its worker-side execution.
+    _log_event(
+        'node_dispatch',
+        executionId=execution_id,
+        workflowId=workflow_id,
+        nodeId=node_id,
+        agentId=agent_id or None,
+    )
+
     # Update node status to running
     _executions_table.update_item(
         Key={'executionId': execution_id},
@@ -155,6 +259,32 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
         node_id=node_id,
         agent_id=agent_id,
         started_at=now,
+    )
+
+    # Dispatch the node to the worker over the shared SQS queue. The message
+    # carries the workflow-node discriminator so the worker can tell it apart
+    # from a supervisor task message on the same queue. The worker runs the
+    # agent and emits the node-completed / node-failed event that this step
+    # runner consumes (via its EventBridge rules) to advance the DAG.
+    queue_url = os.environ.get('WORKER_QUEUE_URL')
+    if not queue_url:
+        _logger.warning(
+            'WORKER_QUEUE_URL is not set; cannot dispatch node %s of execution %s',
+            node_id, execution_id,
+        )
+        return
+
+    message = workflow_contract.build_node_dispatch_message(
+        execution_id=execution_id,
+        node_id=node_id,
+        workflow_id=workflow_id,
+        agent_id=agent_id,
+        input=input_data,
+        configuration=configuration,
+    )
+    _get_sqs_client().send_message(
+        QueueUrl=queue_url,
+        MessageBody=json.dumps(message),
     )
 
 
@@ -184,7 +314,15 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict) -> Non
 
     # Find the completed node's agent ID
     node_data = node_results.get(node_id, {})
-    agent_id = node_data.get('agentId', '')
+
+    # Idempotency guard against duplicate deliveries. At-least-once transports
+    # (SQS / EventBridge) can redeliver the same node-completed event. If the
+    # persisted node status is already the terminal 'completed', this is a
+    # replay — return without re-updating state, re-advancing the DAG,
+    # re-invoking downstream nodes, or re-emitting the terminal
+    # workflow.completed event.
+    if node_data.get('status') == 'completed':
+        return
 
     now = _now_iso()
 
@@ -201,15 +339,25 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict) -> Non
         ExpressionAttributeValues={':status': 'completed', ':completedAt': now, ':output': output},
     )
 
-    # Publish node.completed event
-    events.publish_node_completed(
-        execution_id=execution_id,
-        workflow_id=execution.get('workflowId', ''),
-        node_id=node_id,
-        agent_id=agent_id,
-        completed_at=now,
-        output=output,
+    # Best-effort telemetry (WF-053). A metric or log failure must never break
+    # DAG advancement, so both are wrapped / fire-and-forget.
+    workflow_id = execution.get('workflowId', '')
+    _log_event(
+        'node_completed',
+        executionId=execution_id,
+        workflowId=workflow_id,
+        nodeId=node_id,
+        agentId=node_data.get('agentId') or None,
     )
+    duration = _duration_ms(node_data.get('startedAt'), now)
+    if duration is not None:
+        _emit_metric('NodeDurationMs', duration, 'Milliseconds', workflow_id=workflow_id)
+
+    # NOTE: workflow.node.completed is NOT re-emitted here. This handler is
+    # triggered BY that event (the worker is its sole producer), and the step
+    # runner's own EventBridge rule consumes workflow.node.completed — so
+    # re-emitting it would self-trigger an infinite loop. We only advance the
+    # DAG below and emit the terminal workflow.completed when all nodes finish.
 
     # Update local state for ready-node calculation
     node_results[node_id] = {**node_data, 'status': 'completed', 'output': output}
@@ -250,7 +398,10 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict) -> Non
     for ready_id in ready_ids:
         node = next((n for n in nodes if n['id'] == ready_id), None)
         if node:
-            invoke_node(execution_id, execution.get('workflowId', ''), node, output, configuration)
+            # Per-node configuration overrides workflow-level per-key
+            # (decision 59376546) — same merge as the root-dispatch site.
+            invoke_node(execution_id, execution.get('workflowId', ''), node, output,
+                        merge_node_configuration(configuration, node))
 
     # Check if all nodes are terminal (completed, skipped, or failed)
     all_terminal = all(
@@ -298,6 +449,15 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
     agent_id = node_data.get('agentId', '')
     retry_count = node_data.get('retryCount', 0)
 
+    # Idempotency guard against duplicate deliveries. If the persisted node
+    # status is already the terminal 'failed' (retries exhausted), this is a
+    # replay of the same node-failed event — return without re-updating state
+    # or re-emitting the terminal workflow.failed event. A node still
+    # 'running'/'pending' is NOT terminal, so the legitimate retry path below
+    # (retries remaining) still runs.
+    if node_data.get('status') == 'failed':
+        return
+
     # Find the node definition to check retry policy
     node_def = next((n for n in nodes if n['id'] == node_id), None)
     retry_policy = node_def.get('data', {}).get('retryPolicy', {}) if node_def else {}
@@ -333,6 +493,16 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             retry_count=new_retry_count,
             backoff=backoff,
         )
+        # Correlation log only — a retry is not a terminal failure, so it does
+        # NOT emit the NodeFailure metric (that would double-count retries).
+        _log_event(
+            'node_retrying',
+            executionId=execution_id,
+            workflowId=execution.get('workflowId', ''),
+            nodeId=node_id,
+            agentId=agent_id or None,
+            retryCount=new_retry_count,
+        )
     else:
         # No retry — mark node and execution as failed
         _executions_table.update_item(
@@ -353,14 +523,24 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             },
         )
 
-        events.publish_node_failed(
-            execution_id=execution_id,
-            workflow_id=execution.get('workflowId', ''),
-            node_id=node_id,
-            agent_id=agent_id,
+        # NOTE: workflow.node.failed is NOT re-emitted here. Like completion,
+        # this handler is triggered BY that event (the worker is its sole
+        # producer) and the step runner's own EventBridge rule consumes it, so
+        # re-emitting would self-trigger. We keep the terminal workflow.failed.
+
+        # Best-effort telemetry (WF-053): terminal failure count + correlation
+        # log. Both are non-fatal — execution failure handling proceeds
+        # regardless of the telemetry backend.
+        workflow_id = execution.get('workflowId', '')
+        _log_event(
+            'node_failed',
+            executionId=execution_id,
+            workflowId=workflow_id,
+            nodeId=node_id,
+            agentId=agent_id or None,
             error=error,
-            retry_count=retry_count,
         )
+        _emit_metric('NodeFailure', 1, 'Count', workflow_id=workflow_id)
 
         events.publish_workflow_failed(
             execution_id=execution_id,

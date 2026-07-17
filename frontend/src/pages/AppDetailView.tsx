@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   ArrowLeft,
   Bot,
@@ -25,6 +25,8 @@ import {
   Check,
   Activity,
   BarChart3,
+  Upload,
+  ChevronRight,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -59,9 +61,13 @@ import {
   SelectValue,
 } from '../components/ui/select';
 import { ModelOverrideSelect } from '../components/ModelOverrideSelect';
+import { MAX_SYSTEM_PROMPT_ADDITION_CHARS } from '../utils/promptLimits';
 import { appApiService } from '../services/appApiService';
 import { workflowApiService } from '../services/workflowApiService';
+import { executionApiService } from '../services/executionApiService';
 import { agentConfigService } from '../services/agentConfigService';
+import { useExecutionSubscription } from '../hooks/useExecutionSubscription';
+import { toast } from 'sonner';
 import serverService from '../services/server';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { cn } from '../components/ui/utils';
@@ -71,6 +77,7 @@ import {
   type HealthStatus,
 } from '../utils/publishUtils';
 import { PageContainer } from '../components/PageContainer';
+import { ExecutionDetailSheet } from '../components/ExecutionDetailSheet';
 
 // ---- Types ----
 
@@ -79,6 +86,8 @@ interface AppDetailViewProps {
   onBack: () => void;
   onNavigate?: (view: string) => void;
   onPublishSuccess?: (data: { appId: string; appName: string; endpointUrl: string; apiKey: string }) => void;
+  /** Optional initial tab — one of the valid tab values (e.g. 'workflows'). */
+  initialTab?: string;
 }
 
 interface RegistryAgentBinding {
@@ -110,6 +119,12 @@ interface Execution {
   status: string;
   startedAt: string;
   completedAt?: string;
+  workflowVersion?: number;
+  triggeredBy?: string;
+  input?: string | null;
+  output?: string | null;
+  error?: string | null;
+  nodeResults?: string | null;
 }
 
 interface RegistryAgentRecordDetail {
@@ -170,6 +185,8 @@ interface Precondition {
   label: string;
   passed: boolean;
   detail?: string;
+  /** Advisory only — rendered as a warning and never blocks the transition. */
+  warning?: boolean;
 }
 
 // ---- Constants ----
@@ -245,7 +262,10 @@ function computeDuration(startedAt: string, completedAt?: string): string {
   }
 }
 
-function buildPreconditions(app: RegistryAgentRecordDetail): Precondition[] {
+function buildPreconditions(
+  app: RegistryAgentRecordDetail,
+  workflows: WorkflowInfo[] = [],
+): Precondition[] {
   const preconditions: Precondition[] = [];
 
   // Check agent bindings — all should be READY
@@ -267,6 +287,21 @@ function buildPreconditions(app: RegistryAgentRecordDetail): Precondition[] {
       label: 'Workflow bound (required for multi-agent apps)',
       passed: false,
       detail: 'Multi-agent apps require at least one workflow to define orchestration',
+    });
+  }
+
+  // Warn (non-blocking) when bound workflows are not PUBLISHED — they cannot run
+  if (workflows.length > 0) {
+    const unpublished = workflows.filter((w) => w.status !== 'PUBLISHED');
+    preconditions.push({
+      label: unpublished.length > 0
+        ? `${unpublished.length} workflow(s) not PUBLISHED`
+        : 'All bound workflows are PUBLISHED',
+      passed: true,
+      warning: unpublished.length > 0,
+      detail: unpublished.length > 0
+        ? `Draft workflows cannot run — publish ${unpublished.length === 1 ? 'it' : 'them'} from the Workflows tab`
+        : undefined,
     });
   }
 
@@ -312,13 +347,27 @@ const TIME_RANGES = [
 
 // ---- Component ----
 
-export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: AppDetailViewProps) {
+// Tab values accepted via the initialTab prop
+const VALID_TABS = ['agents', 'workflows', 'permissions', 'configuration', 'executions', 'api'];
+
+export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, initialTab }: AppDetailViewProps) {
   const [app, setApp] = useState<RegistryAgentRecordDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
-  const [executions] = useState<Execution[]>([]);
-  const [activeTab, setActiveTab] = useState('agents');
+  const [executions, setExecutions] = useState<Execution[]>([]);
+  const [selectedExecution, setSelectedExecution] = useState<Execution | null>(null);
+  const [detailSheetOpen, setDetailSheetOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState(
+    initialTab && VALID_TABS.includes(initialTab) ? initialTab : 'agents',
+  );
+
+  // Workflow run state — one live run tracked at a time
+  const [activeRun, setActiveRun] = useState<{ executionId: string; workflowId: string } | null>(null);
+  const [startingRun, setStartingRun] = useState<string | null>(null);
+  const [publishingWorkflowId, setPublishingWorkflowId] = useState<string | null>(null);
+  const { events: runEvents } = useExecutionSubscription(activeRun?.executionId ?? null);
+  const runToastRef = useRef<string | null>(null);
 
   // Status transition dialog
   const [transitionDialogOpen, setTransitionDialogOpen] = useState(false);
@@ -474,6 +523,125 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
       loadWorkflows(app.workflowIds);
     }
   }, [app?.workflowIds, loadWorkflows]);
+
+  // Aggregate executions across all bound workflows, newest first
+  const loadExecutions = useCallback(async (workflowIds: string[]) => {
+    if (!workflowIds || workflowIds.length === 0) {
+      setExecutions([]);
+      return;
+    }
+    try {
+      const results = await Promise.allSettled(
+        workflowIds.map((id) => executionApiService.listExecutions(id)),
+      );
+      const items: Execution[] = results
+        .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled' && !!r.value)
+        .flatMap((r) => r.value.items || []);
+      items.sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
+      setExecutions(items);
+    } catch {
+      setExecutions([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (app?.workflowIds) {
+      loadExecutions(app.workflowIds);
+    }
+  }, [app?.workflowIds, loadExecutions]);
+
+  // Derive the current run's status strictly from its own subscription events
+  // (the hook accumulates events across executions, so filter by executionId).
+  const runStatus = useMemo<string | null>(() => {
+    if (!activeRun) return null;
+    const evts = runEvents.filter((e: any) => e.executionId === activeRun.executionId);
+    if (evts.some((e: any) => e.eventType === 'workflow.failed')) return 'failed';
+    if (evts.some((e: any) => e.eventType === 'workflow.completed')) return 'completed';
+    if (evts.length > 0) return 'running';
+    return 'pending';
+  }, [runEvents, activeRun]);
+
+  // Toast once per terminal state and refresh the executions list
+  useEffect(() => {
+    if (!activeRun || (runStatus !== 'completed' && runStatus !== 'failed')) return;
+    const key = `${activeRun.executionId}:${runStatus}`;
+    if (runToastRef.current === key) return;
+    runToastRef.current = key;
+    if (runStatus === 'completed') {
+      toast.success('Workflow run completed');
+    } else {
+      toast.error('Workflow run failed');
+    }
+    if (app?.workflowIds) {
+      loadExecutions(app.workflowIds);
+    }
+  }, [runStatus, activeRun, app?.workflowIds, loadExecutions]);
+
+  // While the detail sheet shows a RUNNING/PENDING execution, refresh the
+  // executions on each onWorkflowProgress event so the sheet stays live.
+  const processedRunEventCountRef = useRef(0);
+  useEffect(() => {
+    if (runEvents.length === 0 || runEvents.length === processedRunEventCountRef.current) return;
+    processedRunEventCountRef.current = runEvents.length;
+    if (!detailSheetOpen || !selectedExecution || !app?.workflowIds) return;
+    const status = (selectedExecution.status || '').toUpperCase();
+    if (status !== 'RUNNING' && status !== 'PENDING') return;
+    const hasEventForSelected = runEvents.some(
+      (e: any) => e?.executionId === selectedExecution.executionId,
+    );
+    if (!hasEventForSelected) return;
+    loadExecutions(app.workflowIds);
+  }, [runEvents, detailSheetOpen, selectedExecution, app?.workflowIds, loadExecutions]);
+
+  // Keep the selected execution object in sync with the refreshed list so the
+  // open detail sheet never shows stale data.
+  useEffect(() => {
+    if (!selectedExecution) return;
+    const refreshed = executions.find(
+      (e) => e.executionId === selectedExecution.executionId,
+    );
+    if (refreshed && refreshed !== selectedExecution) {
+      setSelectedExecution(refreshed);
+    }
+  }, [executions, selectedExecution]);
+
+  const openExecutionDetail = (exec: Execution) => {
+    setSelectedExecution(exec);
+    setDetailSheetOpen(true);
+  };
+
+  const handleRunWorkflow = async (workflowId: string) => {
+    try {
+      setStartingRun(workflowId);
+      const exec = await executionApiService.startExecution(workflowId);
+      setActiveRun({ executionId: exec.executionId, workflowId });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to start workflow run';
+      toast.error(message);
+    } finally {
+      setStartingRun(null);
+    }
+  };
+
+  const handlePublishWorkflow = async (workflowId: string) => {
+    try {
+      setPublishingWorkflowId(workflowId);
+      const published = await workflowApiService.publishWorkflow(workflowId);
+      setWorkflows((prev) =>
+        prev.map((wf) =>
+          wf.workflowId === workflowId
+            ? { ...wf, status: published?.status || 'PUBLISHED' }
+            : wf,
+        ),
+      );
+      toast.success('Workflow published');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      toast.error('Failed to publish workflow', { description: message });
+    } finally {
+      setPublishingWorkflowId(null);
+    }
+  };
 
   // Load API tab data when app is PUBLISHED
   const loadApiData = useCallback(async (selectedRange: string) => {
@@ -799,7 +967,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
 
     // For publish, check preconditions first
     if (pendingTransition.targetStatus === 'APPROVED') {
-      const preconditions = buildPreconditions(app);
+      const preconditions = buildPreconditions(app, workflows);
       const failing = preconditions.filter((p) => !p.passed);
       if (failing.length > 0) {
         setFailedPreconditions(preconditions);
@@ -963,33 +1131,82 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {workflows.map((wf) => (
-              <Card key={wf.workflowId} className="rounded-lg border-border/50 p-4 gap-0">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-sm font-medium text-foreground truncate mr-2">{wf.name}</span>
-                  <Badge className="text-xs border-0 bg-muted/20 text-muted-foreground">{wf.status}</Badge>
-                </div>
-                <p className="text-xs text-muted-foreground mb-3">{wf.nodeCount} node{wf.nodeCount !== 1 ? 's' : ''}</p>
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-xs text-muted-foreground hover:text-foreground h-7 px-2"
-                    onClick={() => onNavigate?.(`workflow-editor:${wf.workflowId}`)}
-                  >
-                    <ExternalLink className="size-3 mr-1" /> Open
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-xs text-destructive hover:text-destructive h-7 px-2"
-                    onClick={() => handleUnbindWorkflow(wf.workflowId)}
-                  >
-                    <Trash2 className="size-3 mr-1" /> Unbind
-                  </Button>
-                </div>
-              </Card>
-            ))}
+            {workflows.map((wf) => {
+              const isPublished = wf.status === 'PUBLISHED';
+              const isActiveRun = activeRun?.workflowId === wf.workflowId;
+              const runIndicator = isActiveRun && runStatus
+                ? runStatus === 'completed'
+                  ? { label: 'Completed', bg: 'bg-chart-2/20', text: 'text-chart-2' }
+                  : runStatus === 'failed'
+                    ? { label: 'Failed', bg: 'bg-destructive/20', text: 'text-destructive' }
+                    : runStatus === 'running'
+                      ? { label: 'Running', bg: 'bg-primary/20', text: 'text-primary' }
+                      : { label: 'Pending', bg: 'bg-chart-4/20', text: 'text-chart-4' }
+                : null;
+              return (
+                <Card key={wf.workflowId} className="rounded-lg border-border/50 p-4 gap-0">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-sm font-medium text-foreground truncate mr-2">{wf.name}</span>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {runIndicator && (
+                        <Badge className={cn(runIndicator.bg, runIndicator.text, 'text-xs border-0')}>
+                          {runIndicator.label}
+                        </Badge>
+                      )}
+                      <Badge className="text-xs border-0 bg-muted/20 text-muted-foreground">{wf.status}</Badge>
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground mb-3">{wf.nodeCount} node{wf.nodeCount !== 1 ? 's' : ''}</p>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-xs text-muted-foreground hover:text-foreground h-7 px-2"
+                      aria-label={`Run ${wf.name}`}
+                      disabled={!isPublished || startingRun === wf.workflowId || (isActiveRun && (runStatus === 'running' || runStatus === 'pending'))}
+                      onClick={() => handleRunWorkflow(wf.workflowId)}
+                    >
+                      {startingRun === wf.workflowId
+                        ? <Loader2 className="size-3 mr-1 animate-spin" />
+                        : <Play className="size-3 mr-1" />} Run
+                    </Button>
+                    {!isPublished && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-xs h-7 px-2"
+                        aria-label={`Publish ${wf.name}`}
+                        disabled={publishingWorkflowId === wf.workflowId}
+                        onClick={() => handlePublishWorkflow(wf.workflowId)}
+                      >
+                        {publishingWorkflowId === wf.workflowId
+                          ? <Loader2 className="size-3 mr-1 animate-spin" />
+                          : <Upload className="size-3 mr-1" />} Publish
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-muted-foreground hover:text-foreground h-7 px-2"
+                      onClick={() => onNavigate?.(`workflow-editor:${wf.workflowId}`)}
+                    >
+                      <ExternalLink className="size-3 mr-1" /> Open
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-xs text-destructive hover:text-destructive h-7 px-2"
+                      onClick={() => handleUnbindWorkflow(wf.workflowId)}
+                    >
+                      <Trash2 className="size-3 mr-1" /> Unbind
+                    </Button>
+                  </div>
+                  {!isPublished && (
+                    <p className="text-xs text-chart-4 mt-2">Draft — publish to enable Run</p>
+                  )}
+                </Card>
+              );
+            })}
           </div>
         )}
       </div>
@@ -1218,7 +1435,17 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
       return (
         <div className="text-center py-12">
           <Clock className="size-10 text-muted-foreground mx-auto mb-3" />
-          <p className="text-muted-foreground text-sm">No executions recorded yet.</p>
+          <div className="flex items-center justify-center gap-3">
+            <p className="text-muted-foreground text-sm">No executions recorded yet.</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs h-7 px-2"
+              onClick={() => setActiveTab('workflows')}
+            >
+              <GitBranch className="size-3 mr-1" /> Go to Workflows
+            </Button>
+          </div>
         </div>
       );
     }
@@ -1233,13 +1460,27 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
               <th className="text-left py-2 px-3 text-muted-foreground font-medium text-xs">Started</th>
               <th className="text-left py-2 px-3 text-muted-foreground font-medium text-xs">Completed</th>
               <th className="text-right py-2 px-3 text-muted-foreground font-medium text-xs">Duration</th>
+              <th className="py-2 px-3 w-8"><span className="sr-only">View details</span></th>
             </tr>
           </thead>
           <tbody>
             {executions.map((exec) => {
               const colors = EXECUTION_STATUS_COLORS[exec.status] || EXECUTION_STATUS_COLORS.PENDING;
               return (
-                <tr key={exec.executionId} className="border-b border-border/50 hover:bg-card">
+                <tr
+                  key={exec.executionId}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`View execution ${exec.executionId}`}
+                  className="border-b border-border/50 hover:bg-card cursor-pointer transition-colors"
+                  onClick={() => openExecutionDetail(exec)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openExecutionDetail(exec);
+                    }
+                  }}
+                >
                   <td className="py-2 px-3 text-foreground text-xs font-mono">{exec.executionId.slice(0, 12)}...</td>
                   <td className="py-2 px-3 text-muted-foreground text-xs">{exec.workflowId}</td>
                   <td className="py-2 px-3">
@@ -1248,6 +1489,9 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
                   <td className="py-2 px-3 text-muted-foreground text-xs">{formatDate(exec.startedAt)}</td>
                   <td className="py-2 px-3 text-muted-foreground text-xs">{exec.completedAt ? formatDate(exec.completedAt) : '—'}</td>
                   <td className="py-2 px-3 text-right text-muted-foreground text-xs">{computeDuration(exec.startedAt, exec.completedAt)}</td>
+                  <td className="py-2 px-3 text-right">
+                    <ChevronRight className="size-3 text-muted-foreground inline-block" aria-hidden="true" />
+                  </td>
                 </tr>
               );
             })}
@@ -1445,7 +1689,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
   const renderPublishDialog = () => {
     if (!app || app.status !== 'APPROVED') return null;
 
-    const preconditions = buildPreconditions(app);
+    const preconditions = buildPreconditions(app, workflows);
     const allPassed = shouldEnablePublish(preconditions);
 
     return (
@@ -1525,10 +1769,14 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
                     key={idx}
                     className={cn(
                       'flex items-start gap-2 rounded-md p-2 text-xs',
-                      pc.passed ? 'bg-chart-2/10 text-chart-2' : 'bg-destructive/10 text-destructive',
+                      pc.warning
+                        ? 'bg-chart-4/10 text-chart-4'
+                        : pc.passed ? 'bg-chart-2/10 text-chart-2' : 'bg-destructive/10 text-destructive',
                     )}
                   >
-                    {pc.passed ? <CheckCircle2 className="size-4 flex-shrink-0 mt-0.5" /> : <XCircle className="size-4 flex-shrink-0 mt-0.5" />}
+                    {pc.warning
+                      ? <AlertTriangle className="size-4 flex-shrink-0 mt-0.5" />
+                      : pc.passed ? <CheckCircle2 className="size-4 flex-shrink-0 mt-0.5" /> : <XCircle className="size-4 flex-shrink-0 mt-0.5" />}
                     <div>
                       <p>{pc.label}</p>
                       {pc.detail && <p className="text-xs opacity-75 mt-0.5">{pc.detail}</p>}
@@ -1578,7 +1826,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
     if (!pendingTransition || !app) return null;
 
     const preconditions = pendingTransition.targetStatus === 'APPROVED'
-      ? (failedPreconditions.length > 0 ? failedPreconditions : buildPreconditions(app))
+      ? (failedPreconditions.length > 0 ? failedPreconditions : buildPreconditions(app, workflows))
       : [];
 
     return (
@@ -1604,10 +1852,14 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
                   key={idx}
                   className={cn(
                     'flex items-start gap-2 rounded-md p-2 text-xs',
-                    pc.passed ? 'bg-chart-2/10 text-chart-2' : 'bg-destructive/10 text-destructive',
+                    pc.warning
+                      ? 'bg-chart-4/10 text-chart-4'
+                      : pc.passed ? 'bg-chart-2/10 text-chart-2' : 'bg-destructive/10 text-destructive',
                   )}
                 >
-                  {pc.passed ? <CheckCircle2 className="size-4 flex-shrink-0 mt-0.5" /> : <XCircle className="size-4 flex-shrink-0 mt-0.5" />}
+                  {pc.warning
+                    ? <AlertTriangle className="size-4 flex-shrink-0 mt-0.5" />
+                    : pc.passed ? <CheckCircle2 className="size-4 flex-shrink-0 mt-0.5" /> : <XCircle className="size-4 flex-shrink-0 mt-0.5" />}
                   <div>
                     <p>{pc.label}</p>
                     {pc.detail && <p className="text-xs opacity-75 mt-0.5">{pc.detail}</p>}
@@ -1805,6 +2057,13 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
       {/* Publish dialog */}
       {renderPublishDialog()}
 
+      {/* Execution detail sheet */}
+      <ExecutionDetailSheet
+        execution={selectedExecution}
+        open={detailSheetOpen}
+        onClose={() => setDetailSheetOpen(false)}
+      />
+
       {/* Unpublish dialog */}
       <Dialog open={unpublishDialogOpen} onOpenChange={(open) => {
         setUnpublishDialogOpen(open);
@@ -1968,7 +2227,11 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess }: A
                 onChange={(e) => setEditBindingForm((f) => ({ ...f, systemPromptAddition: e.target.value }))}
                 className="bg-transparent border border-input text-foreground text-xs"
                 rows={3}
+                maxLength={MAX_SYSTEM_PROMPT_ADDITION_CHARS}
               />
+              <p className="text-xs text-muted-foreground mt-1 text-right">
+                {editBindingForm.systemPromptAddition.length}/{MAX_SYSTEM_PROMPT_ADDITION_CHARS}
+              </p>
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Tool Restrictions (comma-separated)</label>

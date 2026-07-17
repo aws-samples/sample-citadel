@@ -1,7 +1,7 @@
 /**
  * Seed Blueprints — CloudFormation Custom Resource Lambda
  *
- * Loads 4 seed blueprint definitions into the workflows table on deployment.
+ * Loads the seed blueprint definitions into the workflows table on deployment.
  * Follows the existing seed-organizations pattern.
  *
  * Requirements: 23.1, 23.2, 23.3, 23.4
@@ -41,7 +41,7 @@ interface SeedBlueprintNode {
   id: string;
   agentId: string;
   position: { x: number; y: number };
-  configuration: Record<string, any>;
+  configuration: Record<string, unknown>;
 }
 
 interface SeedBlueprintEdge {
@@ -50,7 +50,7 @@ interface SeedBlueprintEdge {
   target: string;
   sourceHandle: string;
   targetHandle: string;
-  condition?: { field: string; operator: string; value: any };
+  condition?: { field: string; operator: string; value: unknown };
 }
 
 interface SeedBlueprintDefinition {
@@ -153,6 +153,28 @@ export const SEED_BLUEPRINTS: SeedBlueprint[] = [
     },
     metadata: { category: 'data-processing', isSystem: true, tags: ['data', 'etl', 'pipeline'] },
   },
+
+  // 5. Echo Demo — the one runnable, publishable seed workflow. Unlike the
+  //    template blueprints above (which carry placeholder agentIds and are
+  //    rejected by publish validation until cloned/re-mapped), this references
+  //    a REAL seeded, active agent ('demo-echo-agent') and forms a minimal
+  //    connected acyclic DAG, so it passes validateDefinition and can execute
+  //    end to end.
+  {
+    name: 'Echo Demo Workflow',
+    description: 'Runnable demo: two echo steps that each return their input. References a real seeded agent, so it passes publish validation and executes end to end.',
+    category: 'demo',
+    definition: {
+      nodes: [
+        { id: 'echo-1', agentId: 'demo-echo-agent', position: { x: 150, y: 200 }, configuration: {} },
+        { id: 'echo-2', agentId: 'demo-echo-agent', position: { x: 450, y: 200 }, configuration: {} },
+      ],
+      edges: [
+        { id: 'edge-echo-1-2', source: 'echo-1', target: 'echo-2', sourceHandle: 'output', targetHandle: 'input' },
+      ],
+    },
+    metadata: { category: 'demo', isSystem: true, tags: ['demo', 'echo', 'runnable'] },
+  },
 ];
 
 
@@ -161,7 +183,7 @@ async function sendCfnResponse(
   event: CloudFormationCustomResourceEvent,
   context: Context,
   status: 'SUCCESS' | 'FAILED',
-  data: Record<string, any>,
+  data: Record<string, unknown>,
 ): Promise<void> {
   const responseBody = JSON.stringify({
     Status: status,

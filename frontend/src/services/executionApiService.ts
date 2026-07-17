@@ -54,7 +54,7 @@ const LIST_EXECUTIONS = `
 
 // --- GraphQL Mutations ---
 
-const START_EXECUTION = `
+export const START_EXECUTION = `
   mutation StartExecution($workflowId: ID!, $input: AWSJSON) {
     startExecution(workflowId: $workflowId, input: $input) {
       executionId
@@ -75,7 +75,7 @@ const START_EXECUTION = `
   }
 `;
 
-const CANCEL_EXECUTION = `
+export const CANCEL_EXECUTION = `
   mutation CancelExecution($executionId: ID!) {
     cancelExecution(executionId: $executionId) {
       executionId

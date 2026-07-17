@@ -1982,13 +1982,16 @@ export class BackendStack extends cdk.Stack {
 
     this.workflowsTable.grantWriteData(seedBlueprintsLambda);
 
+    // Bumped Version v1.0.0 → v1.1.0 so the CFN Update event fires on the
+    // next deploy and the Echo Demo Workflow blueprint is seeded in
+    // pre-existing environments on upgrade.
     const seedBlueprintsResource = new cdk.CustomResource(
       this,
       "SeedBlueprintsResource",
       {
         serviceToken: seedBlueprintsLambda.functionArn,
         properties: {
-          Version: 'v1.0.0',
+          Version: 'v1.1.0',
         },
       }
     );
@@ -2382,6 +2385,52 @@ export class BackendStack extends cdk.Stack {
         ],
       })
     );
+
+    // Fan-out failure observability: the fan-out Lambda emits a best-effort
+    // Citadel/Workflows FanoutPublishFailure metric whenever a publish fails
+    // (non-2xx HTTP status OR a 200 carrying a GraphQL `errors` array).
+    // PutMetricData has no resource-level scoping; the call is narrowed to the
+    // Citadel/Workflows namespace in code.
+    this.workflowProgressFanoutFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+      })
+    );
+    NagSuppressions.addResourceSuppressions(
+      this.workflowProgressFanoutFunction.role!,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason:
+            'cloudwatch:PutMetricData has no resource-level scoping; the ' +
+            'workflow-progress-fanout Lambda narrows the call to the ' +
+            'Citadel/Workflows namespace (FanoutPublishFailure metric).',
+          appliesTo: ['Resource::*'],
+        },
+      ],
+      true,
+    );
+
+    // Alarm on the fan-out publish-failure metric so GraphQL-level publish
+    // errors (which return HTTP 200) surface, not just Lambda-level exceptions.
+    new cloudwatch.Alarm(this, 'WorkflowProgressFanoutFailureAlarm', {
+      alarmName: `citadel-workflow-fanout-publish-failure-${props.environment}`,
+      metric: new cloudwatch.Metric({
+        namespace: 'Citadel/Workflows',
+        metricName: 'FanoutPublishFailure',
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        'Workflow progress fan-out failed to publish to AppSync (transport or GraphQL error).',
+    });
 
     // Lambda function for handling agent messages
     const agentMessageHandlerFunction = new lambda.Function(

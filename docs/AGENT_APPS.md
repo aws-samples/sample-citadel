@@ -45,8 +45,54 @@
   frontend sign-off, and zero `@deprecated` `AgentApp` reads observed in
   client telemetry for a full rolling observation window.
 
+## Workflows
+
+> Unlike the superseded catalogue content above, this section and
+> [Executions](#executions) describe **current** functionality on the app
+> detail view. For the end-to-end journey (blueprint → canvas → publish →
+> run → inspect), see [WORKFLOW_USER_GUIDE.md](./WORKFLOW_USER_GUIDE.md).
+
+The app detail view (Agent Apps → select an app) includes a **Workflows**
+tab for managing the workflows bound to the app:
+
+- Bind and unbind workflows to the app.
+- Each workflow card carries per-card actions:
+  - **Run** — gated on the workflow being `PUBLISHED`.
+  - **Publish** — shown for `DRAFT` workflows; server-side validation
+    errors are surfaced as a toast when publishing fails (the canvas
+    shows the same errors inline).
+  - **Open** — a deep link to the canvas at
+    `/agentic-studio/workflows/:id`.
+- A live run indicator (Pending / Running / Completed / Failed) updates via
+  the `onWorkflowProgress` GraphQL subscription while a run is in flight.
+
+Related app-level behaviour:
+
+- The app publish dialog's preconditions include a **non-blocking** warning
+  for unpublished workflows, pointing at the Workflows tab.
+- App cards on the Agent Apps page show a **Run** quick-action when the app
+  has at least one workflow, deep-linking to
+  `/agent-apps/:id?tab=workflows`, and an **API dashboard** quick-action
+  once the app is `PUBLISHED`. The status filter tabs include `PUBLISHED`.
+
+## Executions
+
+The app detail view's **Executions** tab lists executions of the app's
+workflows. Clicking a row opens the execution detail sheet:
+
+- Result output as pretty-printed JSON, with a copy button.
+- An error block for failed executions.
+- A per-node step timeline — status, agent, duration, and retry count per
+  node, with expandable output and error per step.
+- The execution's input, collapsible.
+
+The sheet refreshes live while the execution is still running.
+
 ## Where To Go Next
 
+- [docs/WORKFLOW_USER_GUIDE.md](./WORKFLOW_USER_GUIDE.md) — task-oriented
+  walkthrough of building, publishing, running, and inspecting workflows,
+  including the app detail Workflows and Executions tabs.
 - [docs/AGENT_RECORDS.md](./AGENT_RECORDS.md) — authoritative data model for
   the AgentCore Registry, lifecycle, governance integration, and adapter APIs.
 - [docs/GOVERNANCE_ROLLOUT_RUNBOOK.md](./GOVERNANCE_ROLLOUT_RUNBOOK.md) —

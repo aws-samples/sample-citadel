@@ -156,6 +156,32 @@ describe('ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)',
         },
       });
     });
+
+    test('has the shared arbiter catalog layer attached', () => {
+      // Resolve the catalog layer's logical id from its LayerName so the
+      // shared `common`/`catalog` packages resolve at runtime.
+      const layers = template.findResources('AWS::Lambda::LayerVersion', {
+        Properties: { LayerName: 'citadel-arbiter-catalog-test' },
+      });
+      const catalogLayerId = Object.keys(layers)[0];
+      expect(catalogLayerId).toBeDefined();
+
+      // Find the step runner function (python3.14, 300s timeout) and assert it
+      // references the catalog layer.
+      const functions = template.findResources('AWS::Lambda::Function', {
+        Properties: { Handler: 'index.handler', Runtime: 'python3.14', Timeout: 300 },
+      });
+      const stepRunnerEntry = Object.entries(functions).find(
+        ([, fn]: [string, any]) =>
+          fn.Properties.Timeout === 300 && fn.Properties.Runtime === 'python3.14'
+      );
+      expect(stepRunnerEntry).toBeDefined();
+      const stepRunnerLayers = (stepRunnerEntry![1] as any).Properties.Layers || [];
+      const referencesCatalogLayer = stepRunnerLayers.some(
+        (l: any) => l && l.Ref === catalogLayerId
+      );
+      expect(referencesCatalogLayer).toBe(true);
+    });
   });
 
   // --- EventBridge Rules targeting StepRunner ---
@@ -284,6 +310,201 @@ describe('ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)',
       // At least 2 read-only DynamoDB policies: workflows table + agent config table
       // (tools config table also gets grantReadData, so could be 3+)
       expect(readOnlyPolicies.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  // --- Workflow metric grants + timeout watchdog ---
+  // Collect every IAM action attached to roles whose logical id contains the
+  // given substring (grantX + addToRolePolicy all land on the same DefaultPolicy).
+  function actionsForRole(roleSubstring: string): Set<string> {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const actions = new Set<string>();
+    for (const p of Object.values(policies) as any[]) {
+      const roles = p.Properties?.Roles || [];
+      const matches = roles.some((r: any) => (r?.Ref || '').includes(roleSubstring));
+      if (!matches) continue;
+      for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+        const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+        acts.forEach((a: string) => actions.add(a));
+      }
+    }
+    return actions;
+  }
+
+  // Collect the resources (as strings) of every statement on roles matching
+  // `roleSubstring` that include `action`. Non-string resources (Fn::Join /
+  // Fn::ImportValue tokens) are JSON-serialised so prefix assertions work.
+  function resourcesForRoleAction(roleSubstring: string, action: string): string[] {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const out: string[] = [];
+    for (const p of Object.values(policies) as any[]) {
+      const roles = p.Properties?.Roles || [];
+      if (!roles.some((r: any) => (r?.Ref || '').includes(roleSubstring))) continue;
+      for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+        const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (!acts.includes(action)) continue;
+        const res = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
+        res.forEach((r: any) => out.push(typeof r === 'string' ? r : JSON.stringify(r)));
+      }
+    }
+    return out;
+  }
+
+  // Resources of statements granting any s3:PutObject* action on the given role.
+  function s3PutResourcesForRole(roleSubstring: string): string[] {
+    const policies = template.findResources('AWS::IAM::Policy');
+    const out: string[] = [];
+    for (const p of Object.values(policies) as any[]) {
+      const roles = p.Properties?.Roles || [];
+      if (!roles.some((r: any) => (r?.Ref || '').includes(roleSubstring))) continue;
+      for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+        const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+        if (!acts.some((a: any) => typeof a === 'string' && a.startsWith('s3:PutObject'))) continue;
+        const res = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
+        res.forEach((r: any) => out.push(typeof r === 'string' ? r : JSON.stringify(r)));
+      }
+    }
+    return out;
+  }
+
+  describe('Worker Bedrock least-privilege', () => {
+    test('worker InvokeModel is scoped to the shared model ARNs, not Resource::*', () => {
+      const resources = resourcesForRoleAction('WorkerAgentWrapper', 'bedrock:InvokeModel');
+      expect(resources.length).toBeGreaterThan(0);
+      // No blanket wildcard — the whole point of the finding.
+      expect(resources).not.toContain('*');
+      // Scoped to the same three model families the supervisor/fabricator use.
+      expect(resources.some((r) => r.includes('foundation-model/anthropic.claude-*'))).toBe(true);
+      expect(resources.some((r) => r.includes('foundation-model/amazon.*'))).toBe(true);
+      expect(resources.some((r) => r.includes('inference-profile/'))).toBe(true);
+    });
+  });
+
+  describe('Seed S3 write least-privilege', () => {
+    test('seed PutObject is path-scoped to agents/*, not the whole bucket', () => {
+      const resources = s3PutResourcesForRole('SeedAgentConfig');
+      expect(resources.length).toBeGreaterThan(0);
+      // Every PutObject resource is the agents/* object-key prefix. A bucket-
+      // wide grant would render the suffix as ".../*" with no agents/ segment.
+      expect(resources.every((r) => r.includes('agents/*'))).toBe(true);
+    });
+  });
+
+  describe('Workflow node-metric grants (PutMetricData)', () => {
+    test('Step Runner role can PutMetricData (node duration/failure metrics)', () => {
+      expect(actionsForRole('StepRunnerFunction').has('cloudwatch:PutMetricData')).toBe(true);
+    });
+
+    test('Worker role can PutMetricData (node duration/failure metrics)', () => {
+      expect(actionsForRole('WorkerAgentWrapper').has('cloudwatch:PutMetricData')).toBe(true);
+    });
+  });
+
+  describe('Workflow timeout watchdog', () => {
+    test('watchdog Lambda exists with timeout_watchdog.handler on Python 3.14', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        Handler: 'timeout_watchdog.handler',
+        Runtime: 'python3.14',
+      });
+    });
+
+    test('watchdog runs on a 5-minute EventBridge schedule', () => {
+      template.hasResourceProperties('AWS::Events::Rule', {
+        ScheduleExpression: 'rate(5 minutes)',
+      });
+    });
+
+    test('watchdog DynamoDB grant is least-privilege: Scan + UpdateItem only, not full read/write', () => {
+      const actions = actionsForRole('WorkflowTimeoutWatchdog');
+      // The watchdog only Scans for running executions and conditionally
+      // UpdateItems the stuck ones to failed (timeout_watchdog.py).
+      expect(actions.has('dynamodb:Scan')).toBe(true);
+      expect(actions.has('dynamodb:UpdateItem')).toBe(true);
+      // grantReadWriteData artifacts must be gone — no put/delete/batch, and no
+      // read-by-key (the watchdog never GetItems; it reads startedAt off Scan).
+      expect(actions.has('dynamodb:PutItem')).toBe(false);
+      expect(actions.has('dynamodb:DeleteItem')).toBe(false);
+      expect(actions.has('dynamodb:BatchWriteItem')).toBe(false);
+      expect(actions.has('dynamodb:GetItem')).toBe(false);
+      expect(actions.has('dynamodb:BatchGetItem')).toBe(false);
+      // Unchanged grants remain.
+      expect(actions.has('events:PutEvents')).toBe(true);
+      expect(actions.has('cloudwatch:PutMetricData')).toBe(true);
+    });
+  });
+
+  // --- Execution-path Lambda error-rate alarms ---
+  // Mirror the existing Supervisor/Fabricator error-alarm pattern
+  // (metricErrors, 5-minute period, NOT_BREACHING) for the workflow
+  // dispatch/execution path: the worker, the step runner, and the
+  // timeout watchdog. The worker SQS DLQ depth alarm already exists
+  // (WorkerDLQDepthAlarm) and is intentionally NOT duplicated here.
+  describe('Execution-path Lambda error-rate alarms', () => {
+    function alarmByName(name: string): any {
+      const alarms = template.findResources('AWS::CloudWatch::Alarm');
+      return Object.values(alarms).find(
+        (a: any) => a.Properties?.AlarmName === name,
+      );
+    }
+
+    function functionNameDimensionRef(alarm: any): string {
+      const dims = alarm?.Properties?.Dimensions || [];
+      const fn = dims.find((d: any) => d.Name === 'FunctionName');
+      return fn?.Value?.Ref || '';
+    }
+
+    test('Worker Lambda error-rate alarm exists (AWS/Lambda Errors, 5-min, NOT_BREACHING)', () => {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        AlarmName: 'citadel-worker-errors-test',
+        Namespace: 'AWS/Lambda',
+        MetricName: 'Errors',
+        Period: 300,
+        Threshold: 3,
+        ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+        TreatMissingData: 'notBreaching',
+      });
+    });
+
+    test('Worker error alarm is dimensioned on the WorkerAgentWrapper function', () => {
+      const alarm = alarmByName('citadel-worker-errors-test');
+      expect(alarm).toBeDefined();
+      expect(functionNameDimensionRef(alarm)).toContain('WorkerAgentWrapper');
+    });
+
+    test('Step Runner Lambda error-rate alarm exists (AWS/Lambda Errors, 5-min, NOT_BREACHING)', () => {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        AlarmName: 'citadel-step-runner-errors-test',
+        Namespace: 'AWS/Lambda',
+        MetricName: 'Errors',
+        Period: 300,
+        Threshold: 3,
+        ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+        TreatMissingData: 'notBreaching',
+      });
+    });
+
+    test('Step Runner error alarm is dimensioned on the StepRunnerFunction', () => {
+      const alarm = alarmByName('citadel-step-runner-errors-test');
+      expect(alarm).toBeDefined();
+      expect(functionNameDimensionRef(alarm)).toContain('StepRunnerFunction');
+    });
+
+    test('Watchdog Lambda error-rate alarm exists (AWS/Lambda Errors, 5-min, NOT_BREACHING)', () => {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        AlarmName: 'citadel-workflow-timeout-watchdog-errors-test',
+        Namespace: 'AWS/Lambda',
+        MetricName: 'Errors',
+        Period: 300,
+        Threshold: 1,
+        ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+        TreatMissingData: 'notBreaching',
+      });
+    });
+
+    test('Watchdog error alarm is dimensioned on the WorkflowTimeoutWatchdog function', () => {
+      const alarm = alarmByName('citadel-workflow-timeout-watchdog-errors-test');
+      expect(alarm).toBeDefined();
+      expect(functionNameDimensionRef(alarm)).toContain('WorkflowTimeoutWatchdog');
     });
   });
 });

@@ -1,79 +1,239 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { ReactFlowProvider, type NodeMouseHandler } from 'reactflow';
 import 'reactflow/dist/style.css';
+import { toast } from 'sonner';
 import { AgentTray } from './AgentTray';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { WorkflowToolbar } from './WorkflowToolbar';
 import { NodeConfigurationPanel } from './NodeConfigurationPanel';
+import { ExecutionOverlay } from './ExecutionOverlay';
+import { ExecutionHistoryPanel } from './ExecutionHistoryPanel';
+import { Button } from './ui/button';
 import type { WorkflowNode, WorkflowEdge, ValidationResult } from '../types/workflow';
-import { validateWorkflow } from '../services/workflowService';
+import { validateWorkflow, serializeWorkflow, deserializeWorkflow } from '../services/workflowService';
+import { workflowApiService } from '../services/workflowApiService';
+import { executionApiService } from '../services/executionApiService';
+import { agentConfigService, type AgentConfig } from '../services/agentConfigService';
+import { useWorkflowPersistence } from '../hooks/useWorkflowPersistence';
+import { useExecutionSubscription } from '../hooks/useExecutionSubscription';
+import { useOrganization } from '../contexts/OrganizationContext';
 
 const AUTOSAVE_KEY = 'workflow-autosave';
-const AUTOSAVE_DELAY = 2000; // 2 seconds debounce
+const AUTOSAVE_DELAY = 2000; // 2 seconds debounce before first server create
 const VALIDATION_DELAY = 500; // 500ms debounce
 
-export function AgentBlueprints() {
+type WorkflowStatus = 'DRAFT' | 'PUBLISHED';
+
+export interface AgentBlueprintsProps {
+  /**
+   * When provided, the canvas opens this existing server workflow instead of
+   * starting blank: the definition is hydrated into nodes/edges and autosave
+   * updates this workflow rather than creating a new one.
+   */
+  workflowId?: string;
+}
+
+export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprintsProps = {}) {
   const [nodes, setNodes] = useState<WorkflowNode[]>([]);
   const [edges, setEdges] = useState<WorkflowEdge[]>([]);
   const [configNode, setConfigNode] = useState<WorkflowNode | null>(null);
   const [isConfigPanelOpen, setIsConfigPanelOpen] = useState(false);
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
 
+  // Server persistence + live execution state
+  const [workflowId, setWorkflowId] = useState<string | null>(null);
+  const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>('DRAFT');
+  const [executionId, setExecutionId] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+
+  const { selectedOrganization } = useOrganization();
+  const orgId = selectedOrganization || 'default';
+
+  // Server-side autosave (debounced update + conflict handling + offline fallback).
+  const { save, isSaving, lastSaved, conflict, workflow } = useWorkflowPersistence(workflowId);
+
+  // Live per-node execution updates over the onWorkflowProgress subscription.
+  const { nodeResults, executionStatus } = useExecutionSubscription(executionId);
+
+  const workflowIdRef = useRef<string | null>(null);
+  const versionRef = useRef<number>(1);
+  const creatingRef = useRef(false);
+  const nameRef = useRef<string>('Untitled Workflow');
+  // Hydrating an existing workflow sets nodes/edges without user input; skip
+  // the autosave those state changes would otherwise schedule.
+  const skipNextSaveRef = useRef(false);
+
+  // Keep a synchronous mirror of workflowId so the debounced create effect never
+  // races into a second createWorkflow call.
+  useEffect(() => {
+    workflowIdRef.current = workflowId;
+  }, [workflowId]);
+
+  // Track the server's version for optimistic-locking on subsequent saves.
+  // Version is monotonic; we never let it downgrade the locally-tracked publish status.
+  useEffect(() => {
+    if (workflow && typeof workflow.version === 'number') {
+      versionRef.current = workflow.version;
+    }
+  }, [workflow]);
+
   /**
-   * Load auto-saved workflow on mount
-   * Requirement: Auto-save to local storage
+   * Restore an unsaved/offline canvas from local storage on mount. This is a
+   * best-effort fallback layer beneath server persistence — the server workflow
+   * is the source of truth once a workflowId exists. Skipped entirely when the
+   * canvas is opening an existing server workflow.
    */
   useEffect(() => {
+    if (initialWorkflowId) return;
     try {
       const saved = localStorage.getItem(AUTOSAVE_KEY);
       if (saved) {
-        const { nodes: savedNodes, edges: savedEdges, timestamp } = JSON.parse(saved);
-        if (savedNodes && savedEdges) {
+        const { nodes: savedNodes, edges: savedEdges } = JSON.parse(saved);
+        if (Array.isArray(savedNodes) && savedNodes.length > 0 && Array.isArray(savedEdges)) {
           setNodes(savedNodes);
           setEdges(savedEdges);
-          console.log('Loaded auto-saved workflow from', new Date(timestamp).toLocaleString());
         }
       }
     } catch (error) {
-      console.error('Failed to load auto-saved workflow:', error);
-      // Clear corrupted data
+      console.error('Failed to restore local workflow cache:', error);
       localStorage.removeItem(AUTOSAVE_KEY);
     }
-  }, []);
+  }, [initialWorkflowId]);
 
   /**
-   * Auto-save workflow to local storage with debouncing
-   * Requirement: Auto-save to local storage
-   * Performance: Debounced to prevent excessive writes
+   * Load-by-id hydration: when opened with an existing workflowId (e.g. an
+   * imported or app-bound workflow), fetch it, deserialize its definition into
+   * canvas nodes/edges, and adopt its id/version/status so autosave UPDATES
+   * this workflow and Publish/Run gate on its real status. On failure, surface
+   * the error and fall back to a blank canvas.
    */
   useEffect(() => {
-    // Don't auto-save empty workflows
-    if (nodes.length === 0 && edges.length === 0) {
-      return;
-    }
+    if (!initialWorkflowId) return;
+    let cancelled = false;
 
-    // Debounce auto-save to prevent excessive writes during rapid changes
-    const autoSaveTimer = setTimeout(() => {
+    (async () => {
       try {
-        const data = {
-          nodes,
-          edges,
-          timestamp: new Date().toISOString(),
-        };
-        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(data));
-        console.log('Auto-saved workflow at', new Date().toLocaleString());
+        const wf = await workflowApiService.getWorkflow(initialWorkflowId);
+        if (!wf) {
+          throw new Error(`Workflow ${initialWorkflowId} not found`);
+        }
+        const definition =
+          typeof wf.definition === 'string' ? JSON.parse(wf.definition) : wf.definition;
+
+        // Build a lenient agent-config map: agents referenced by the definition
+        // but absent from the catalog (e.g. app-bound ids created by blueprint
+        // import) get a placeholder so the workflow still opens.
+        let configs: AgentConfig[] = [];
+        try {
+          configs = await agentConfigService.listAgentConfigs();
+        } catch (configError) {
+          console.error('Failed to list agent configs; using placeholders:', configError);
+        }
+        const configMap = new Map<string, AgentConfig>(configs.map((c) => [c.agentId, c]));
+        for (const nodeDef of definition?.nodes ?? []) {
+          if (nodeDef?.agentId && !configMap.has(nodeDef.agentId)) {
+            configMap.set(nodeDef.agentId, {
+              agentId: nodeDef.agentId,
+              name: nodeDef.agentId,
+              config: { name: nodeDef.agentId },
+              state: 'active',
+            });
+          }
+        }
+
+        const { nodes: loadedNodes, edges: loadedEdges } = await deserializeWorkflow(
+          definition,
+          configMap
+        );
+        if (cancelled) return;
+
+        workflowIdRef.current = wf.workflowId;
+        versionRef.current = typeof wf.version === 'number' ? wf.version : 1;
+        nameRef.current = wf.name || nameRef.current;
+        skipNextSaveRef.current = true;
+        setWorkflowId(wf.workflowId);
+        setWorkflowStatus(wf.status === 'PUBLISHED' ? 'PUBLISHED' : 'DRAFT');
+        setNodes(loadedNodes);
+        setEdges(loadedEdges);
+        setLoadError(null);
+      } catch (error: any) {
+        if (cancelled) return;
+        console.error('Failed to load workflow', initialWorkflowId, error);
+        setLoadError(error?.message || 'Failed to load workflow');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [initialWorkflowId]);
+
+  /**
+   * First server persistence: once the canvas has content and no server
+   * workflow exists yet, create one so the canvas gets a durable workflowId.
+   * Debounced and guarded against duplicate creates.
+   */
+  useEffect(() => {
+    if (workflowId) return;
+    if (nodes.length === 0 && edges.length === 0) return;
+    if (!orgId) return;
+
+    const timer = setTimeout(async () => {
+      if (creatingRef.current || workflowIdRef.current) return;
+      creatingRef.current = true;
+      try {
+        const definition = JSON.stringify(serializeWorkflow(nodes, edges, { name: nameRef.current }));
+        const created = await workflowApiService.createWorkflow({
+          name: nameRef.current,
+          orgId,
+          definition,
+        });
+        workflowIdRef.current = created.workflowId;
+        versionRef.current = typeof created.version === 'number' ? created.version : 1;
+        setWorkflowId(created.workflowId);
+        setWorkflowStatus(created.status === 'PUBLISHED' ? 'PUBLISHED' : 'DRAFT');
       } catch (error) {
-        console.error('Failed to auto-save workflow:', error);
+        console.error('Failed to create workflow on server; keeping local fallback:', error);
+        try {
+          localStorage.setItem(
+            AUTOSAVE_KEY,
+            JSON.stringify({ nodes, edges, timestamp: new Date().toISOString() })
+          );
+        } catch (storageError) {
+          console.error('Failed to write offline fallback:', storageError);
+        }
+      } finally {
+        creatingRef.current = false;
       }
     }, AUTOSAVE_DELAY);
 
-    return () => clearTimeout(autoSaveTimer);
-  }, [nodes, edges]);
+    return () => clearTimeout(timer);
+  }, [nodes, edges, workflowId, orgId]);
 
   /**
-   * Auto-validate workflow when nodes or edges change with debouncing
-   * Requirement: Real-time validation feedback
-   * Performance: Debounced to prevent excessive validation during rapid changes
+   * Subsequent autosave: once a workflowId exists, delegate to the persistence
+   * hook, which debounces the updateWorkflow mutation, handles version conflicts,
+   * and falls back to local storage when offline.
+   */
+  useEffect(() => {
+    if (!workflowId) return;
+    if (nodes.length === 0 && edges.length === 0) return;
+    // Hydration sets nodes/edges from the server copy — nothing changed, so
+    // don't schedule a redundant (or PUBLISHED-mutating) save for it.
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false;
+      return;
+    }
+
+    const definition = JSON.stringify(serializeWorkflow(nodes, edges, { name: nameRef.current }));
+    save({ workflowId, version: versionRef.current, definition });
+  }, [nodes, edges, workflowId, save]);
+
+  /**
+   * Auto-validate workflow when nodes or edges change with debouncing.
    */
   useEffect(() => {
     if (nodes.length === 0 && edges.length === 0) {
@@ -81,7 +241,6 @@ export function AgentBlueprints() {
       return;
     }
 
-    // Debounce validation to prevent excessive computation during rapid changes
     const validationTimer = setTimeout(() => {
       const result = validateWorkflow(nodes, edges);
       setValidationResult(result);
@@ -92,7 +251,6 @@ export function AgentBlueprints() {
 
   /**
    * Handle loading a workflow from file
-   * Requirement: Clear existing workflow and load new one
    */
   const handleLoad = useCallback((loadedNodes: WorkflowNode[], loadedEdges: WorkflowEdge[]) => {
     setNodes(loadedNodes);
@@ -101,18 +259,15 @@ export function AgentBlueprints() {
 
   /**
    * Handle clearing the canvas
-   * Removes all nodes and edges and clears auto-save
    */
   const handleClear = useCallback(() => {
     setNodes([]);
     setEdges([]);
-    // Clear auto-save when clearing canvas
     localStorage.removeItem(AUTOSAVE_KEY);
   }, []);
 
   /**
    * Handle double-clicking a node to open configuration panel
-   * Requirement: Open configuration panel on double-click
    */
   const handleNodeDoubleClick: NodeMouseHandler = useCallback((_event, node) => {
     setConfigNode(node as WorkflowNode);
@@ -121,7 +276,6 @@ export function AgentBlueprints() {
 
   /**
    * Handle saving node configuration
-   * Requirement: Update node configuration in workflow
    */
   const handleSaveConfiguration = useCallback((nodeId: string, configuration: Record<string, any>) => {
     setNodes((nds) =>
@@ -140,20 +294,100 @@ export function AgentBlueprints() {
   }, []);
 
   /**
+   * Handle renaming a node from the configuration panel
+   */
+  const handleRenameNode = useCallback((nodeId: string, label: string) => {
+    setNodes((nds) =>
+      nds.map((node) =>
+        node.id === nodeId
+          ? {
+              ...node,
+              data: {
+                ...node.data,
+                label,
+              },
+            }
+          : node
+      )
+    );
+  }, []);
+
+  /**
    * Handle closing configuration panel
-   * Requirement: Close panel and discard changes
    */
   const handleCloseConfiguration = useCallback(() => {
     setIsConfigPanelOpen(false);
     setConfigNode(null);
   }, []);
 
+  /**
+   * Publish the current workflow. Surfaces server-side validation errors and,
+   * on success, unlocks the Run control by moving the workflow to PUBLISHED.
+   */
+  const handlePublish = useCallback(async () => {
+    if (!workflowId) return;
+    setPublishError(null);
+    setIsPublishing(true);
+    try {
+      const published = await workflowApiService.publishWorkflow(workflowId);
+      if (published && typeof published.version === 'number') {
+        versionRef.current = published.version;
+      }
+      setWorkflowStatus(published?.status === 'DRAFT' ? 'DRAFT' : 'PUBLISHED');
+      toast.success('Workflow published');
+    } catch (error: any) {
+      const message = error?.message || 'Failed to publish workflow';
+      setPublishError(message);
+      toast.error('Failed to publish workflow', { description: message });
+    } finally {
+      setIsPublishing(false);
+    }
+  }, [workflowId]);
+
+  /**
+   * Start an execution for the published workflow and hand the returned
+   * executionId to the progress subscription so node badges go live.
+   */
+  const handleRun = useCallback(async () => {
+    if (!workflowId) return;
+    try {
+      const execution = await executionApiService.startExecution(workflowId);
+      if (execution?.executionId) {
+        setExecutionId(execution.executionId);
+      }
+    } catch (error: any) {
+      toast.error('Failed to start execution', {
+        description: error?.message || 'Unknown error',
+      });
+    }
+  }, [workflowId]);
+
+  /**
+   * Cancel the in-flight execution.
+   */
+  const handleCancel = useCallback(async () => {
+    if (!executionId) return;
+    try {
+      await executionApiService.cancelExecution(executionId);
+    } catch (error) {
+      console.error('Failed to cancel execution:', error);
+    }
+  }, [executionId]);
+
+  const saveStatusLabel = conflict
+    ? 'Conflict — reloaded latest from server'
+    : isSaving
+      ? 'Saving…'
+      : lastSaved
+        ? 'Saved'
+        : null;
+
   return (
     <ReactFlowProvider>
       <div className="flex flex-col h-full bg-background">
         {/* Skip to main content link for keyboard navigation */}
-        <a 
-          href="#workflow-canvas" 
+        <a
+          href="#workflow-canvas"
           className="skip-to-content"
           aria-label="Skip to workflow canvas"
         >
@@ -166,8 +400,88 @@ export function AgentBlueprints() {
           edges={edges}
           onLoad={handleLoad}
           onClear={handleClear}
+          orgId={orgId}
+          workflowName={nameRef.current}
           validationResult={validationResult}
         />
+
+        {/* Publish + run controls */}
+        <div
+          data-testid="run-controls"
+          className="flex items-center gap-3 px-4 py-2 bg-card border-b border-border"
+        >
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handlePublish}
+            disabled={!workflowId || workflowStatus === 'PUBLISHED' || isPublishing}
+            title={
+              !workflowId
+                ? 'Add to the canvas to create a workflow before publishing'
+                : 'Publish this workflow to enable execution'
+            }
+          >
+            {workflowStatus === 'PUBLISHED' ? 'Published' : 'Publish'}
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setIsHistoryOpen((open) => !open)}
+            disabled={!workflowId}
+            aria-pressed={isHistoryOpen}
+            title={
+              workflowId
+                ? 'Show past executions for this workflow'
+                : 'Create a workflow to view its execution history'
+            }
+          >
+            History
+          </Button>
+
+          {saveStatusLabel && (
+            <span
+              data-testid="save-status"
+              className={`text-xs ${conflict ? 'text-destructive' : 'text-muted-foreground'}`}
+              role="status"
+              aria-live="polite"
+            >
+              {saveStatusLabel}
+            </span>
+          )}
+
+          {/* Execution controls + live per-node status badges */}
+          <ExecutionOverlay
+            nodeResults={nodeResults as any}
+            executionStatus={executionStatus}
+            workflowStatus={workflowStatus}
+            onRun={handleRun}
+            onCancel={handleCancel}
+            executionId={executionId}
+          />
+        </div>
+
+        {/* Load-by-id failure surfaced to the user (canvas stays blank) */}
+        {loadError && (
+          <div
+            role="alert"
+            className="px-4 py-2 text-sm text-destructive bg-destructive/10 border-b border-destructive/20"
+          >
+            Failed to load workflow: {loadError}
+          </div>
+        )}
+
+        {/* Publish validation errors surfaced to the user */}
+        {publishError && (
+          <div
+            role="alert"
+            className="px-4 py-2 text-sm text-destructive bg-destructive/10 border-b border-destructive/20"
+          >
+            {publishError}
+          </div>
+        )}
 
         <div className="flex flex-1 overflow-hidden relative">
           {/* Agent Tray Sidebar */}
@@ -184,6 +498,16 @@ export function AgentBlueprints() {
               validationResult={validationResult}
             />
           </main>
+
+          {/* Past executions for the active workflow, keyed by workflowId */}
+          {workflowId && (
+            <ExecutionHistoryPanel
+              key={workflowId}
+              workflowId={workflowId}
+              isOpen={isHistoryOpen}
+              onClose={() => setIsHistoryOpen(false)}
+            />
+          )}
         </div>
 
         {/* Node Configuration Panel */}
@@ -192,6 +516,7 @@ export function AgentBlueprints() {
           isOpen={isConfigPanelOpen}
           onClose={handleCloseConfiguration}
           onSave={handleSaveConfiguration}
+          onRename={handleRenameNode}
         />
       </div>
     </ReactFlowProvider>

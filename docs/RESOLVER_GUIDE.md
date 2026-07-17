@@ -297,6 +297,22 @@ export async function handler(event: any) {
 }
 ```
 
+### 7. AWSJSON Arguments
+
+AppSync delivers `AWSJSON` arguments to Lambda resolvers as parsed **objects**, not strings — but DynamoDB items and downstream consumers expect JSON strings. Normalize before validation and persistence, as `workflow-resolver.ts` does with `toJsonString` for `definition`, `configuration`, and `metadata`:
+
+```typescript
+function toJsonString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return value; // already a string — no double-encoding
+  return JSON.stringify(value);
+}
+```
+
+Persist the normalized strings, and write validators that accept both shapes (string or already-parsed object).
+
+Testing rule: every resolver that takes an `AWSJSON` argument needs an object-shaped input test AND a string-shaped input test, plus a no-double-encoding assertion (a string input must persist unchanged, not as `"\"{...}\""`).
+
 ## Wiring a New Resolver in CDK
 
 ### 1. Create the Lambda Function

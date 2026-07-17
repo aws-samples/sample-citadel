@@ -27,6 +27,7 @@ import { appApiService } from '../services/appApiService';
 import { agentConfigService } from '../services/agentConfigService';
 import { workflowApiService } from '../services/workflowApiService';
 import { validateAppName, validateWizardStep } from '../utils/wizardValidation';
+import { MAX_SYSTEM_PROMPT_ADDITION_CHARS } from '../utils/promptLimits';
 import { cn } from '../components/ui/utils';
 
 // ---- Types ----
@@ -435,8 +436,12 @@ export function AppBuilderWizard({ onComplete, prefill }: AppBuilderWizardProps)
                           placeholder="System prompt addition"
                           value={overrides.systemPromptAddition}
                           onChange={(e) => updateAgentOverride(agent.agentId, 'systemPromptAddition', e.target.value)}
+                          maxLength={MAX_SYSTEM_PROMPT_ADDITION_CHARS}
                           className="bg-transparent border border-border text-foreground text-xs"
                         />
+                        <p className="text-xs text-muted-foreground text-right">
+                          {overrides.systemPromptAddition.length}/{MAX_SYSTEM_PROMPT_ADDITION_CHARS}
+                        </p>
                         <Input
                           placeholder="Tool restrictions (comma-separated)"
                           value={overrides.toolRestrictions}

@@ -8,6 +8,7 @@ and backward compatibility when no constraints are provided.
 import sys
 import os
 import json
+import logging
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -237,6 +238,106 @@ class TestNoConstraintsBackwardCompatibility:
         # Should be a new list, not the same reference
         if agent_tools:
             assert result is not agent_tools
+
+
+# ---------------------------------------------------------------------------
+# Decision 67caf7b0: systemPromptAddition / modelOverride size caps
+# ---------------------------------------------------------------------------
+
+class TestSystemPromptAdditionCap:
+    """systemPromptAddition size cap (decision 67caf7b0).
+
+    Cap default 4000 chars, overridable via WORKER_MAX_PROMPT_ADDITION_CHARS
+    (int; fallback 4000 on missing/invalid). Oversized additions are SKIPPED
+    entirely with a WARN — never truncated, never a failure. Length is
+    measured on the stripped value. Enforced inside
+    apply_system_prompt_addition so the supervisor task path and the
+    workflow-node path both get the rule with zero caller changes.
+    """
+
+    def test_at_cap_addition_is_applied(self, monkeypatch):
+        monkeypatch.delenv('WORKER_MAX_PROMPT_ADDITION_CHARS', raising=False)
+        addition = 'x' * 4000
+        result = apply_system_prompt_addition('Base.', addition)
+        assert result == 'Base.\n' + addition
+
+    def test_over_cap_addition_is_skipped_with_warning(self, monkeypatch, caplog):
+        monkeypatch.delenv('WORKER_MAX_PROMPT_ADDITION_CHARS', raising=False)
+        addition = 'x' * 4001
+        with caplog.at_level(logging.WARNING):
+            result = apply_system_prompt_addition('Base.', addition)
+        # Skipped entirely — never truncated, prompt unchanged.
+        assert result == 'Base.'
+        # WARN includes the offending length and the effective cap.
+        assert 'system_prompt_addition_skipped' in caplog.text
+        assert '4001' in caplog.text
+        assert '4000' in caplog.text
+
+    def test_env_override_is_respected(self, monkeypatch, caplog):
+        monkeypatch.setenv('WORKER_MAX_PROMPT_ADDITION_CHARS', '10')
+        with caplog.at_level(logging.WARNING):
+            assert apply_system_prompt_addition('B', 'x' * 10) == 'B\n' + 'x' * 10
+            assert apply_system_prompt_addition('B', 'x' * 11) == 'B'
+        assert 'system_prompt_addition_skipped' in caplog.text
+
+    def test_invalid_env_falls_back_to_4000(self, monkeypatch):
+        monkeypatch.setenv('WORKER_MAX_PROMPT_ADDITION_CHARS', 'not-an-int')
+        addition = 'x' * 4000
+        assert apply_system_prompt_addition('B', addition) == 'B\n' + addition
+        assert apply_system_prompt_addition('B', 'x' * 4001) == 'B'
+
+    def test_non_positive_env_falls_back_to_4000(self, monkeypatch):
+        monkeypatch.setenv('WORKER_MAX_PROMPT_ADDITION_CHARS', '-5')
+        addition = 'x' * 4000
+        assert apply_system_prompt_addition('B', addition) == 'B\n' + addition
+
+    def test_length_is_measured_on_the_stripped_value(self, monkeypatch):
+        """Whitespace padding does not count against the cap; the applied
+        value is the original addition (never modified)."""
+        monkeypatch.delenv('WORKER_MAX_PROMPT_ADDITION_CHARS', raising=False)
+        padded = '  ' + 'x' * 4000 + '  \n'
+        result = apply_system_prompt_addition('Base.', padded)
+        assert result == 'Base.\n' + padded
+
+    def test_helper_reads_env_per_call(self, monkeypatch):
+        from worker_governance import get_max_prompt_addition_chars
+        monkeypatch.delenv('WORKER_MAX_PROMPT_ADDITION_CHARS', raising=False)
+        assert get_max_prompt_addition_chars() == 4000
+        monkeypatch.setenv('WORKER_MAX_PROMPT_ADDITION_CHARS', '123')
+        assert get_max_prompt_addition_chars() == 123
+
+
+class TestModelOverrideCap:
+    """modelOverride 256-char hygiene cap at its env installation point
+    (decision 67caf7b0) — same skip+WARN semantics, never truncate."""
+
+    def test_at_cap_model_override_is_installed(self):
+        override = 'm' * 256
+        env = build_subprocess_env({}, model_override=override)
+        assert env['MODEL_OVERRIDE'] == override
+
+    def test_over_cap_model_override_is_skipped_with_warning(self, caplog):
+        override = 'm' * 257
+        with caplog.at_level(logging.WARNING):
+            env = build_subprocess_env(
+                {}, model_override=override, agent_id='agent-9', workflow_id='wf-9'
+            )
+        assert 'MODEL_OVERRIDE' not in env
+        assert 'model_override_skipped' in caplog.text
+        assert '257' in caplog.text
+        assert '256' in caplog.text
+        # Available correlation context rides along in the WARN.
+        assert 'agent-9' in caplog.text
+        assert 'wf-9' in caplog.text
+
+    def test_skipped_model_override_does_not_disturb_other_env(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            env = build_subprocess_env(
+                {'KEEP': '1'}, model_override='m' * 300, max_iterations=3
+            )
+        assert env['KEEP'] == '1'
+        assert env['MAX_ITERATIONS'] == '3'
+        assert 'MODEL_OVERRIDE' not in env
 
 
 # ---------------------------------------------------------------------------

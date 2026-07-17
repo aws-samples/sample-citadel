@@ -1,6 +1,6 @@
 # Blueprints & Workflows
 
-The Blueprints & Workflows system provides server-side workflow persistence, a reusable blueprint catalog, and an event-driven execution engine for multi-agent DAG workflows. It uses topological sorting to determine execution order, EventBridge for async node invocation, and DynamoDB for durable execution state. The system supports sequential and parallel execution, conditional branching, per-node retry policies with exponential backoff, and real-time execution progress via GraphQL subscriptions. A separate Step Runner Lambda handles workflow execution independently from the existing Supervisor, preserving backward compatibility while adding DAG-based orchestration.
+The Blueprints & Workflows system provides server-side workflow persistence, a reusable blueprint catalog, and an event-driven execution engine for multi-agent DAG workflows. It uses topological sorting to determine execution order, EventBridge for async node invocation, and DynamoDB for durable execution state. The system supports sequential and parallel execution, conditional branching, per-node retry policies with exponential backoff, and real-time execution progress via GraphQL subscriptions. A separate Step Runner Lambda handles workflow execution independently from the existing Supervisor, preserving backward compatibility while adding DAG-based orchestration. For a task-oriented walkthrough aimed at users and operators, see [WORKFLOW_USER_GUIDE.md](./WORKFLOW_USER_GUIDE.md).
 
 ## Table of Contents
 
@@ -20,6 +20,8 @@ The Blueprints & Workflows system provides server-side workflow persistence, a r
     - [Frontend](#frontend)
   - [How It Works](#how-it-works)
     - [Workflow CRUD Lifecycle](#workflow-crud-lifecycle)
+    - [Canvas Toolbar and Catalog Round-Trip](#canvas-toolbar-and-catalog-round-trip)
+    - [Node Configuration and Execution Overrides](#node-configuration-and-execution-overrides)
     - [Blueprint Import Flow](#blueprint-import-flow)
     - [Execution Flow](#execution-flow)
     - [Real-Time Subscriptions](#real-time-subscriptions)
@@ -118,7 +120,7 @@ A DynamoDB item keyed by `workflowId` representing a directed acyclic graph (DAG
 
 ### Blueprint
 
-A Workflow item with `isBlueprint: true` — a reusable, org-agnostic template that can be imported into an App as a customizable Workflow. Blueprints are read-only once published. The system ships with seed blueprints ("Sequential Agent Pipeline", "Parallel Fan-Out", "Conditional Router", "Data Processing Pipeline") loaded via a CDK Custom Resource during deployment.
+A Workflow item with `isBlueprint: true` — a reusable, org-agnostic template that can be imported into an App as a customizable Workflow. Blueprints are read-only once published. The system ships with five seed blueprints loaded via a CDK Custom Resource during deployment: four placeholder-agent templates ("Sequential Agent Pipeline", "Parallel Fan-Out", "Conditional Router", "Data Processing Pipeline") whose `placeholder-` agent IDs must be remapped to real agents before publishing, and one runnable demo ("Echo Demo Workflow", category `demo`) — two nodes referencing the real seeded `demo-echo-agent`, which echoes its input, so it passes publish validation and executes end to end.
 
 ### Execution
 
@@ -148,6 +150,8 @@ Per-workflow settings stored in the `configuration` field, containing:
 | `parameters` | Map of custom key-value parameters |
 
 The Step Runner passes the Workflow Configuration to each agent node as execution context, allowing agents to use workflow-specific integration endpoints and credentials.
+
+Per-node execution overrides are consumed by the Worker Wrapper via exactly two configuration keys: `systemPromptAddition` (appended to the agent's system prompt) and `modelOverride` (Bedrock model ID for the node). At dispatch time, node configuration merges over workflow configuration per key — a key set on the node wins over the same key set at workflow level. Both override keys are size-capped (decision 67caf7b0): `systemPromptAddition` at 4000 characters by default — configurable through the Worker Wrapper's `WORKER_MAX_PROMPT_ADDITION_CHARS` environment variable (falls back to 4000 when missing or invalid) — and `modelOverride` at a fixed 256-character hygiene cap. An over-cap value is skipped entirely with a WARN log carrying the offending length and the effective cap; it is never truncated, and the node still executes without the override. Users set these overrides through the node configuration drawer — see [Node Configuration and Execution Overrides](#node-configuration-and-execution-overrides).
 
 ## Component Map
 
@@ -181,6 +185,8 @@ The Step Runner passes the Workflow Configuration to each agent node as executio
 | Component | File | Purpose |
 |-----------|------|---------|
 | Blueprint Catalog | `frontend/src/components/BlueprintCatalog.tsx` | Blueprint grid with search, category filter tabs, "Use in App" action |
+| Workflow Toolbar | `frontend/src/components/WorkflowToolbar.tsx` | Canvas toolbar: save to catalog, load from catalog, import/export JSON, validate, clear |
+| Node Configuration Panel | `frontend/src/components/NodeConfigurationPanel.tsx` | Node drawer: rename, model override, system prompt addition, schema parameters |
 | Blueprint Card | `frontend/src/components/BlueprintCard.tsx` | Individual blueprint card with name, description, agent count, category tags |
 | Blueprint Preview Dialog | `frontend/src/components/BlueprintPreviewDialog.tsx` | Read-only ReactFlow canvas showing blueprint node/edge layout |
 | Import Blueprint Dialog | `frontend/src/components/ImportBlueprintDialog.tsx` | App selection dialog for importing a blueprint |
@@ -206,11 +212,36 @@ The Step Runner passes the Workflow Configuration to each agent node as executio
 6. Each update stores the previous definition in `versionHistory` for audit and rollback
 7. All CRUD operations emit EventBridge events (`workflow.created`, `workflow.updated`, `workflow.deleted`, `workflow.published`) with source `citadel.workflows`
 
+### Canvas Toolbar and Catalog Round-Trip
+
+The canvas (Agentic Studio → Create Agent Blueprints) carries a toolbar implemented in `frontend/src/components/WorkflowToolbar.tsx`:
+
+| Action | Behavior |
+|--------|----------|
+| Save | Saves the canvas to the blueprint catalog — a dialog collects a name and optional category, then creates the blueprint and publishes it so it is immediately usable (loadable and importable) |
+| Load | Picks a published blueprint from the catalog, with search; loading replaces the current canvas after a confirmation |
+| Import | Loads a workflow from a local JSON file |
+| Export | Downloads the current workflow as formatted JSON |
+| Validate | Checks the workflow for errors and warnings |
+| Clear | Removes all nodes and edges from the canvas |
+
+Autosave persists the canvas to the server continuously (see [Workflow CRUD Lifecycle](#workflow-crud-lifecycle)); Save is specifically the save-to-catalog action. The run-controls bar carries Publish, which moves the workflow `DRAFT` → `PUBLISHED` and unlocks Run, and History, which shows past executions.
+
+### Node Configuration and Execution Overrides
+
+Double-clicking a node (or using its configure action) opens the node configuration drawer (`frontend/src/components/NodeConfigurationPanel.tsx`):
+
+1. Rename the node
+2. Set execution overrides — a Model override (catalog-driven select) and a System prompt addition (up to 4000 characters, with a live character counter)
+3. Fill in agent-declared schema parameters, rendered from the agent config's parameter schema when present
+
+At runtime, node configuration merges over workflow configuration per key, and the Worker Wrapper honours only `modelOverride` and `systemPromptAddition`, subject to the size caps described in [Workflow Configuration](#workflow-configuration) — oversized values are skipped with a warning, never truncated, and the node still runs.
+
 ### Blueprint Import Flow
 
 1. User browses the Blueprint Catalog, which queries the `BlueprintIndex` GSI for `isBlueprint="true"` items sorted by `updatedAt`
-2. User clicks "Use in App" on a blueprint card, opening a dialog to select or create an Agent App
-3. The `importBlueprint` mutation deep-copies the blueprint's `definition` into a new Workflow with `status=DRAFT`, `isBlueprint=false`, a new `workflowId`, and the target `appId`
+2. User clicks "Use in App" on a blueprint card, opening a dialog to select or create an Agent App. Agent slots whose `agentId` carries the `placeholder-` prefix must be remapped to real agents in this dialog — publish validation rejects `placeholder-` references
+3. The `importBlueprint` mutation deep-copies the blueprint's `definition` into a new Workflow named `<blueprint> (Copy)` with `status=DRAFT`, `isBlueprint=false`, a new `workflowId`, and the target `appId`
 4. The new workflow's `workflowId` is appended to the target app's `workflowIds` array
 5. The imported workflow is fully editable — the blueprint remains unchanged
 6. Only published blueprints can be imported; draft blueprints are rejected
@@ -368,11 +399,12 @@ The Fan-out Lambda is triggered by EventBridge rules matching `workflow.*` event
 | Workflow not found | `Error('Workflow not found')` |
 | Access denied (org mismatch) | `Error('Access denied')` |
 | Optimistic lock conflict | `Error('Conflict: workflow was modified concurrently. Please retry.')` |
-| Delete published workflow | `Error('Published workflows cannot be deleted')` |
+| Delete published workflow | `Error('Cannot delete a published workflow. Unpublish it first.')` |
 | Publish validation fails | Returns validation errors (disconnected nodes, cycles, missing agent refs) without changing status |
 | Invalid definition JSON | `ValidationError` with structure errors |
 | Blueprint not published | `Error('Only published blueprints can be imported')` |
-| Import target app not found | `Error('Access denied')` |
+| Import target app not found | `Error('App not found')` |
+| Import target app org mismatch | `Error('Access denied')` |
 
 ### App Resolver
 

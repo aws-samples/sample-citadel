@@ -277,7 +277,7 @@ type Mutation {
   deleteWorkflow(workflowId: ID!): DeleteWorkflowResult
   publishWorkflow(workflowId: ID!): Workflow
   updateWorkflowConfiguration(workflowId: ID!, configuration: AWSJSON!, version: Int!): Workflow
-  importBlueprint(blueprintId: ID!, appId: ID!, name: String): Workflow
+  importBlueprint(blueprintId: ID!, appId: ID!, name: String, agentMapping: AWSJSON): Workflow
   importWorkflow(input: ImportWorkflowInput!): Workflow
   createApp(input: CreateAppInput!): RegistryAgentRecord
   updateApp(input: UpdateAppInput!): RegistryAgentRecord
