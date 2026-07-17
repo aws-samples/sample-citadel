@@ -57,18 +57,18 @@ jest.mock('../../services/registry-service', () => {
       const base = getMockRegistryService();
       return {
         ...base,
-        resolveRecordId: (...args: any[]) => resolveRecordIdMock(...args),
-        getResource: (...args: any[]) => getResourceMock(...args),
-        updateResource: (...args: any[]) => updateResourceMock(...args),
+        resolveRecordId: (...args: unknown[]) => resolveRecordIdMock(...args),
+        getResource: (...args: unknown[]) => getResourceMock(...args),
+        updateResource: (...args: unknown[]) => updateResourceMock(...args),
       };
     }),
     getRegistryService: jest.fn(() => {
       const base = getMockRegistryService();
       return {
         ...base,
-        resolveRecordId: (...args: any[]) => resolveRecordIdMock(...args),
-        getResource: (...args: any[]) => getResourceMock(...args),
-        updateResource: (...args: any[]) => updateResourceMock(...args),
+        resolveRecordId: (...args: unknown[]) => resolveRecordIdMock(...args),
+        getResource: (...args: unknown[]) => getResourceMock(...args),
+        updateResource: (...args: unknown[]) => updateResourceMock(...args),
       };
     }),
     _resetRegistryService: jest.fn(),
@@ -150,12 +150,16 @@ function inactiveAgentRecord(recordId: string) {
   };
 }
 
-function makeEvent(fieldName: string, args: any) {
+type HandlerEvent = Parameters<typeof handler>[0];
+type HandlerContext = Parameters<typeof handler>[1];
+type HandlerCallback = Parameters<typeof handler>[2];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-123', claims: { sub: 'user-123' } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +179,7 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     // returned record, mimicking the real RegistryService. This is what
     // projectAgentApp consumes, so assertions can read the post-update
     // manifest via the normal projection path.
-    updateResourceMock.mockImplementation(async (_type: any, id: any, input: any) => ({
+    updateResourceMock.mockImplementation(async (_type: unknown, id: unknown, input: { customMetadata?: string }) => ({
       recordId: id,
       name: 'Test App',
       status: 'DRAFT',
@@ -226,8 +230,8 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
           status: 'READY',
         },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(resolveRecordIdMock).toHaveBeenCalledWith('agent', AGENT_RECORD_ID);
@@ -274,8 +278,8 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
           status: 'READY',
         },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     // resolveRecordId was consulted for the binding's human name…
@@ -325,8 +329,8 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
             status: 'READY',
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow(`Agent ${AGENT_NAME} not found`);
     // The agent getResource path must not be reached when resolution failed.
@@ -375,8 +379,8 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
             status: 'READY',
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow('Agent must be active before it can be marked as ready');
   });
@@ -412,8 +416,8 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
             status: 'READY',
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow('Agent must be active before it can be marked as ready');
   });
@@ -447,8 +451,8 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
           status: 'DESIGN',
         },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(resolveRecordIdMock).not.toHaveBeenCalled();
@@ -487,7 +491,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
     resolveRecordIdMock.mockReset();
     getResourceMock.mockReset();
     updateResourceMock.mockReset();
-    updateResourceMock.mockImplementation(async (_type: any, id: any, input: any) => ({
+    updateResourceMock.mockImplementation(async (_type: unknown, id: unknown, input: { customMetadata?: string }) => ({
       recordId: id,
       name: 'Test App',
       status: 'DRAFT',

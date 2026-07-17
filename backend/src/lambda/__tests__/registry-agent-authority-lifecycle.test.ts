@@ -22,6 +22,7 @@ import {
   PutCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import type { PutCommandInput, UpdateCommandInput } from '@aws-sdk/lib-dynamodb';
 import {
   getAuthorityUnitsTable,
   grantFabricatorAuthority,
@@ -59,7 +60,7 @@ describe('registry-agent-authority-lifecycle (PR 6a)', () => {
 
       const calls = ddbMock.commandCalls(PutCommand);
       expect(calls).toHaveLength(1);
-      const input = calls[0].args[0].input as any;
+      const input = calls[0].args[0].input as PutCommandInput & { Item: Record<string, unknown> };
       expect(input.TableName).toBe('test-authority-units');
       expect(input.Item.unitId).toBe('fabricator-test-app-id-create-agents');
       expect(input.Item.registryId).toBe('test-app-id');
@@ -69,7 +70,7 @@ describe('registry-agent-authority-lifecycle (PR 6a)', () => {
     });
 
     test('swallows ConditionalCheckFailedException (idempotent on duplicate)', async () => {
-      const err: any = new Error('Conditional check failed');
+      const err = new Error('Conditional check failed');
       err.name = 'ConditionalCheckFailedException';
       ddbMock.on(PutCommand).rejects(err);
 
@@ -93,7 +94,7 @@ describe('registry-agent-authority-lifecycle (PR 6a)', () => {
 
       const calls = ddbMock.commandCalls(UpdateCommand);
       expect(calls).toHaveLength(1);
-      const input = calls[0].args[0].input as any;
+      const input = calls[0].args[0].input as UpdateCommandInput & { Key: Record<string, unknown> };
       expect(input.TableName).toBe('test-authority-units');
       expect(input.Key.unitId).toBe('fabricator-target-app-create-agents');
       expect(input.ConditionExpression).toContain('attribute_exists(unitId)');
@@ -104,7 +105,7 @@ describe('registry-agent-authority-lifecycle (PR 6a)', () => {
     });
 
     test('swallows ConditionalCheckFailedException on already-revoked row', async () => {
-      const err: any = new Error('Conditional check failed');
+      const err = new Error('Conditional check failed');
       err.name = 'ConditionalCheckFailedException';
       ddbMock.on(UpdateCommand).rejects(err);
 

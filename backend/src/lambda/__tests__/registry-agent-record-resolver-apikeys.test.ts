@@ -43,15 +43,18 @@ const mockRevoke = jest.fn();
 const mockRotate = jest.fn();
 const mockList = jest.fn();
 jest.mock('../app-api-key-management', () => ({
-  createAppApiKey: (...args: any[]) => mockCreate(...args),
-  revokeAppApiKey: (...args: any[]) => mockRevoke(...args),
-  rotateAppApiKey: (...args: any[]) => mockRotate(...args),
-  listAppApiKeys: (...args: any[]) => mockList(...args),
+  createAppApiKey: (...args: unknown[]) => mockCreate(...args),
+  revokeAppApiKey: (...args: unknown[]) => mockRevoke(...args),
+  rotateAppApiKey: (...args: unknown[]) => mockRotate(...args),
+  listAppApiKeys: (...args: unknown[]) => mockList(...args),
 }));
 
 import { handler } from '../registry-agent-record-resolver';
 
-function makeEvent(fieldName: string, args: Record<string, any>) {
+type HandlerEvent = Parameters<typeof handler>[0];
+type HandlerContext = Parameters<typeof handler>[1];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName, parentTypeName: 'Mutation', selectionSetList: [] },
     arguments: args,
@@ -60,7 +63,7 @@ function makeEvent(fieldName: string, args: Record<string, any>) {
     request: { headers: {} },
     prev: null,
     stash: {},
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 describe('registry-agent-record-resolver — API key surfaces', () => {
@@ -87,7 +90,7 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
 
     const result = await handler(
       makeEvent('createAppApiKey', { appId: 'app-1', name: 'Test Key' }),
-      {} as any,
+      {} as HandlerContext,
       () => {},
     );
 
@@ -117,7 +120,7 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
 
     const result = await handler(
       makeEvent('rotateAppApiKey', { appId: 'app-1', keyId: 'old-key' }),
-      {} as any,
+      {} as HandlerContext,
       () => {},
     );
 
@@ -142,7 +145,7 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
 
     const result = await handler(
       makeEvent('revokeAppApiKey', { appId: 'app-1', keyId: 'target-key' }),
-      {} as any,
+      {} as HandlerContext,
       () => {},
     );
 
@@ -163,7 +166,7 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
 
     const result = await handler(
       makeEvent('listAppApiKeys', { appId: 'app-1' }),
-      {} as any,
+      {} as HandlerContext,
       () => {},
     );
 
@@ -192,7 +195,7 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
 
     await handler(
       makeEvent('createAppApiKey', { appId: 'app-9', name: 'K', expiresIn: 3600 }),
-      {} as any,
+      {} as HandlerContext,
       () => {},
     );
 
@@ -210,7 +213,7 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
 
     await handler(
       makeEvent('listAppApiKeys', { appId: 'app-42' }),
-      {} as any,
+      {} as HandlerContext,
       () => {},
     );
 

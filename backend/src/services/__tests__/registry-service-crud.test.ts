@@ -101,7 +101,7 @@ describe('RegistryService CRUD operations', () => {
         status: 'DRAFT',
       });
       // Get fails with 404
-      const err = new Error('Not found') as any;
+      const err = new Error('Not found') as Error & { $metadata?: { httpStatusCode?: number } };
       err.name = 'ResourceNotFoundException';
       err.$metadata = { httpStatusCode: 404 };
       sdkMock.on(GetRegistryRecordCommand).rejects(err);
@@ -146,7 +146,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('returns null on ResourceNotFoundException', async () => {
-      const err = new Error('Not found') as any;
+      const err = new Error('Not found') as Error & { $metadata?: { httpStatusCode?: number } };
       err.name = 'ResourceNotFoundException';
       err.$metadata = { httpStatusCode: 404 };
       sdkMock.on(GetRegistryRecordCommand).rejects(err);
@@ -157,7 +157,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('returns null on 404 status code', async () => {
-      const err = new Error('Not found') as any;
+      const err = new Error('Not found') as Error & { $metadata?: { httpStatusCode?: number } };
       err.name = 'SomeOtherError';
       err.$metadata = { httpStatusCode: 404 };
       sdkMock.on(GetRegistryRecordCommand).rejects(err);
@@ -168,7 +168,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('throws non-404 errors', async () => {
-      const err = new Error('Access denied') as any;
+      const err = new Error('Access denied') as Error & { $metadata?: { httpStatusCode?: number } };
       err.name = 'AccessDeniedException';
       err.$metadata = { httpStatusCode: 403 };
       sdkMock.on(GetRegistryRecordCommand).rejects(err);
@@ -281,7 +281,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('throws on non-transient errors', async () => {
-      const err = new Error('Not found') as any;
+      const err = new Error('Not found') as Error & { $metadata?: { httpStatusCode?: number } };
       err.name = 'ResourceNotFoundException';
       err.$metadata = { httpStatusCode: 404 };
       sdkMock.on(DeleteRegistryRecordCommand).rejects(err);
@@ -395,7 +395,7 @@ describe('RegistryService CRUD operations', () => {
     it('returns empty array when registryRecords field is undefined', async () => {
       sdkMock.on(ListRegistryRecordsCommand).resolves({
         nextToken: undefined,
-      } as any);
+      });
 
       const results = await service.listResources('tool');
 
@@ -407,7 +407,7 @@ describe('RegistryService CRUD operations', () => {
 
   describe('retry with exponential backoff', () => {
     it('retries on 5xx errors and succeeds on subsequent attempt', async () => {
-      const serverError = new Error('Internal Server Error') as any;
+      const serverError = new Error('Internal Server Error') as Error & { $metadata?: { httpStatusCode?: number } };
       serverError.$metadata = { httpStatusCode: 500 };
 
       sdkMock
@@ -431,7 +431,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('retries on ThrottlingException', async () => {
-      const throttleError = new Error('Rate exceeded') as any;
+      const throttleError = new Error('Rate exceeded');
       throttleError.name = 'ThrottlingException';
 
       // First call to CreateRegistryRecordCommand throttles, second succeeds
@@ -463,7 +463,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('retries on ServiceUnavailableException', async () => {
-      const unavailableError = new Error('Service unavailable') as any;
+      const unavailableError = new Error('Service unavailable');
       unavailableError.name = 'ServiceUnavailableException';
 
       sdkMock
@@ -477,7 +477,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('throws after exhausting all 3 retry attempts', async () => {
-      const serverError = new Error('Persistent failure') as any;
+      const serverError = new Error('Persistent failure') as Error & { $metadata?: { httpStatusCode?: number } };
       serverError.$metadata = { httpStatusCode: 503 };
 
       sdkMock.on(GetRegistryRecordCommand).rejects(serverError);
@@ -491,7 +491,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('does not retry on non-transient errors (4xx)', async () => {
-      const clientError = new Error('Bad request') as any;
+      const clientError = new Error('Bad request') as Error & { $metadata?: { httpStatusCode?: number } };
       clientError.name = 'ValidationException';
       clientError.$metadata = { httpStatusCode: 400 };
 
@@ -509,7 +509,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('does not retry on AccessDeniedException', async () => {
-      const authError = new Error('Access denied') as any;
+      const authError = new Error('Access denied') as Error & { $metadata?: { httpStatusCode?: number } };
       authError.name = 'AccessDeniedException';
       authError.$metadata = { httpStatusCode: 403 };
 
@@ -523,7 +523,7 @@ describe('RegistryService CRUD operations', () => {
     });
 
     it('retries on InternalServerException by name', async () => {
-      const internalError = new Error('Internal error') as any;
+      const internalError = new Error('Internal error');
       internalError.name = 'InternalServerException';
 
       sdkMock

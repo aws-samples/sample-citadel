@@ -42,17 +42,21 @@ jest.mock('../../utils/appsync', () => ({
 
 const mockListAppAccessEntriesImpl = jest.fn();
 jest.mock('../app-access-control', () => ({
-  listAppAccessEntries: (...args: any[]) => mockListAppAccessEntriesImpl(...args),
+  listAppAccessEntries: (...args: unknown[]) => mockListAppAccessEntriesImpl(...args),
 }));
 
 import { handler } from '../registry-agent-record-resolver';
 
-function makeEvent(fieldName: string, args: any) {
+type HandlerEvent = Parameters<typeof handler>[0];
+type HandlerContext = Parameters<typeof handler>[1];
+type HandlerCallback = Parameters<typeof handler>[2];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-123', claims: { sub: 'user-123' } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function seedApp(): void {
@@ -98,8 +102,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
           appId: 'app-1',
           authConfig: JSON.stringify({ provider: 'cognito', userPoolId: 'up-1' }),
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       const entries = ebMock
@@ -117,8 +121,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
             appId: 'nonexistent',
             authConfig: JSON.stringify({ provider: 'cognito' }),
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -136,8 +140,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
           userId: 'target-user',
           role: 'editor',
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       const entries = ebMock
@@ -161,8 +165,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
             userId: 'target-user',
             role: 'editor',
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -179,8 +183,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
           appId: 'app-1',
           userId: 'target-user',
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       const entries = ebMock
@@ -202,8 +206,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
             appId: 'nonexistent',
             userId: 'target-user',
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -221,8 +225,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
 
       const result = await handler(
         makeEvent('listAppAccessEntries', { appId: 'app-1' }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       expect(result).toEqual(entries);
@@ -240,8 +244,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
 
       const result = await handler(
         makeEvent('listAppAccessEntries', { appId: 'app-empty' }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       expect(result).toEqual([]);

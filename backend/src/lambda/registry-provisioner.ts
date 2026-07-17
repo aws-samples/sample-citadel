@@ -82,7 +82,7 @@ export async function handler(event: CloudFormationCustomResourceEvent): Promise
       }
 
       case 'Update': {
-        const physicalId = (event as any).PhysicalResourceId as string;
+        const physicalId = event.PhysicalResourceId;
 
         // Check if the existing registry is still alive
         let registryArn = physicalId;
@@ -121,7 +121,7 @@ export async function handler(event: CloudFormationCustomResourceEvent): Promise
       }
 
       case 'Delete': {
-        const physicalId = (event as any).PhysicalResourceId as string;
+        const physicalId = event.PhysicalResourceId;
         const registryId = physicalId.split('/').pop()!;
 
         try {
@@ -143,7 +143,7 @@ export async function handler(event: CloudFormationCustomResourceEvent): Promise
       event,
       'FAILED',
       {},
-      (event as any).PhysicalResourceId ?? event.LogicalResourceId,
+      (event as { PhysicalResourceId?: string }).PhysicalResourceId ?? event.LogicalResourceId,
       err instanceof Error ? err.message : String(err),
     );
   }

@@ -45,11 +45,23 @@ const cwClient = new CloudWatchClient({});
 export type ResourceType = 'agent' | 'tool';
 export type EventType = 'CREATED' | 'UPDATED' | 'DELETED' | 'STATUS_CHANGED';
 
+/**
+ * Registry resource payload carried in EventBridge event details. Known fields
+ * are typed; everything else is passed through untyped (index signature).
+ */
+export interface RegistryResourcePayload {
+  [key: string]: unknown;
+  description?: string;
+  customDescriptorContent?: string | null;
+  createdAt?: string | number;
+  updatedAt?: string | number;
+}
+
 export interface RegistryEventDetail {
   resourceId: string;
   resourceType: ResourceType;
   eventType: EventType;
-  resource?: Record<string, any>;
+  resource?: RegistryResourcePayload;
   previousStatus?: string;
   newStatus?: string;
 }
@@ -60,12 +72,25 @@ export interface RegistryEvent {
   detail: RegistryEventDetail;
 }
 
+/**
+ * Structural view of a not-yet-validated event as seen by validateEvent.
+ * All fields are unknown until validation succeeds.
+ */
+export interface UnvalidatedEventDetail {
+  [key: string]: unknown;
+}
+
+export interface UnvalidatedEvent {
+  [key: string]: unknown;
+  detail?: UnvalidatedEventDetail | null;
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
-const VALID_RESOURCE_TYPES: ReadonlySet<string> = new Set(['agent', 'tool']);
-const VALID_EVENT_TYPES: ReadonlySet<string> = new Set([
+const VALID_RESOURCE_TYPES: ReadonlySet<unknown> = new Set(['agent', 'tool']);
+const VALID_EVENT_TYPES: ReadonlySet<unknown> = new Set([
   'CREATED',
   'UPDATED',
   'DELETED',
@@ -76,7 +101,9 @@ const VALID_EVENT_TYPES: ReadonlySet<string> = new Set([
  * Validates the incoming EventBridge event structure.
  * Returns an error message string if invalid, or null if valid.
  */
-export function validateEvent(event: any): string | null {
+export function validateEvent(
+  event: RegistryEvent | UnvalidatedEvent | null | undefined,
+): string | null {
   if (!event) {
     return 'Event is null or undefined';
   }
@@ -160,15 +187,15 @@ const AGENT_METADATA_DEFAULTS = {
   icon: '',
   state: 'active' as string,
   appId: undefined as string | undefined,
-  manifest: undefined as Record<string, any> | undefined,
+  manifest: undefined as Record<string, unknown> | undefined,
 };
 
 const TOOL_METADATA_DEFAULTS = {
   categories: [] as string[],
   icon: '',
   state: 'active' as string,
-  integrationBindings: undefined as any[] | undefined,
-  dataStoreBindings: undefined as any[] | undefined,
+  integrationBindings: undefined as unknown[] | undefined,
+  dataStoreBindings: undefined as unknown[] | undefined,
   appId: undefined as string | undefined,
 };
 
@@ -214,13 +241,44 @@ function getKeyForResource(
 // ---------------------------------------------------------------------------
 
 /**
+ * DynamoDB item shape for an agent cache record.
+ */
+export type AgentCacheRecord = {
+  agentId: string;
+  config: string;
+  state: string;
+  categories: string[];
+  icon: string;
+  appId: string | undefined;
+  manifest: Record<string, unknown> | undefined;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
+ * DynamoDB item shape for a tool cache record.
+ */
+export type ToolCacheRecord = {
+  toolId: string;
+  config: string;
+  state: string;
+  categories: string[];
+  icon: string;
+  integrationBindings: unknown[] | undefined;
+  dataStoreBindings: unknown[] | undefined;
+  appId: string | undefined;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
  * Builds a DynamoDB item for an agent cache record from the Registry event
  * resource payload.
  */
 export function buildAgentCacheRecord(
   resourceId: string,
-  resource: Record<string, any>,
-): Record<string, any> {
+  resource: RegistryResourcePayload,
+): AgentCacheRecord {
   const meta = deserializeCustomMetadata(
     resource.customDescriptorContent ?? null,
     AGENT_METADATA_DEFAULTS,
@@ -249,8 +307,8 @@ export function buildAgentCacheRecord(
  */
 export function buildToolCacheRecord(
   resourceId: string,
-  resource: Record<string, any>,
-): Record<string, any> {
+  resource: RegistryResourcePayload,
+): ToolCacheRecord {
   const meta = deserializeCustomMetadata(
     resource.customDescriptorContent ?? null,
     TOOL_METADATA_DEFAULTS,
@@ -287,7 +345,7 @@ export async function handleCreateOrUpdate(
   tableName: string,
   resourceType: ResourceType,
   resourceId: string,
-  resource: Record<string, any>,
+  resource: RegistryResourcePayload,
 ): Promise<void> {
   const item =
     resourceType === 'agent'

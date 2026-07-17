@@ -27,7 +27,7 @@ import {
   sendToDlq,
   emitSyncFailureMetric,
 } from '../registry-sync';
-import type { RegistryEvent } from '../registry-sync';
+import type { RegistryEvent, RegistryResourcePayload, ResourceType } from '../registry-sync';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -57,7 +57,14 @@ afterEach(() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeEvent(overrides: Partial<RegistryEvent> & { detail?: any } = {}): RegistryEvent {
+/** Loosely-typed overrides so tests can build deliberately malformed events. */
+interface EventOverrides {
+  source?: string;
+  'detail-type'?: string;
+  detail?: Record<string, unknown>;
+}
+
+function makeEvent(overrides: EventOverrides = {}): RegistryEvent {
   return {
     source: 'aws.bedrock-agentcore',
     'detail-type': 'AgentCore Registry Resource Change',
@@ -73,7 +80,7 @@ function makeEvent(overrides: Partial<RegistryEvent> & { detail?: any } = {}): R
   } as RegistryEvent;
 }
 
-function makeAgentResource(overrides: Record<string, any> = {}): Record<string, any> {
+function makeAgentResource(overrides: RegistryResourcePayload = {}): RegistryResourcePayload {
   return {
     description: JSON.stringify({ name: 'TestAgent', filename: 'test.py' }),
     customDescriptorContent: JSON.stringify({
@@ -89,7 +96,7 @@ function makeAgentResource(overrides: Record<string, any> = {}): Record<string, 
   };
 }
 
-function makeToolResource(overrides: Record<string, any> = {}): Record<string, any> {
+function makeToolResource(overrides: RegistryResourcePayload = {}): RegistryResourcePayload {
   return {
     description: JSON.stringify({ name: 'TestTool', filename: 'tool.py' }),
     customDescriptorContent: JSON.stringify({
@@ -120,11 +127,11 @@ describe('validateEvent', () => {
   });
 
   test('rejects wrong source', () => {
-    expect(validateEvent(makeEvent({ source: 'aws.s3' } as any))).toContain('Unexpected event source');
+    expect(validateEvent(makeEvent({ source: 'aws.s3' }))).toContain('Unexpected event source');
   });
 
   test('rejects wrong detail-type', () => {
-    expect(validateEvent(makeEvent({ 'detail-type': 'SomethingElse' } as any))).toContain('Unexpected detail-type');
+    expect(validateEvent(makeEvent({ 'detail-type': 'SomethingElse' }))).toContain('Unexpected detail-type');
   });
 
   test('rejects missing detail', () => {
@@ -176,7 +183,7 @@ describe('getTableForResourceType', () => {
   });
 
   test('throws for unknown resourceType', () => {
-    expect(() => getTableForResourceType('widget' as any)).toThrow('Unknown resourceType');
+    expect(() => getTableForResourceType('widget' as unknown as ResourceType)).toThrow('Unknown resourceType');
   });
 });
 
@@ -368,7 +375,7 @@ describe('handleCreateOrUpdate', () => {
 
   test('propagates DynamoDB errors (non-conditional)', async () => {
     const error = new Error('DynamoDB failure');
-    (error as any).name = 'InternalServerError';
+    error.name = 'InternalServerError';
     ddbMock.on(PutCommand).rejects(error);
 
     await expect(
@@ -470,7 +477,7 @@ describe('handleStatusChanged', () => {
 
   test('propagates DynamoDB errors (non-conditional)', async () => {
     const error = new Error('Update failed');
-    (error as any).name = 'InternalServerError';
+    error.name = 'InternalServerError';
     ddbMock.on(UpdateCommand).rejects(error);
 
     await expect(
@@ -594,7 +601,7 @@ describe('handler — cache operations', () => {
 
   test('ConditionalCheckFailedException is swallowed (idempotency)', async () => {
     const error = new Error('Conditional check failed');
-    (error as any).name = 'ConditionalCheckFailedException';
+    error.name = 'ConditionalCheckFailedException';
     ddbMock.on(PutCommand).rejects(error);
 
     const event = makeEvent({
@@ -612,7 +619,7 @@ describe('handler — cache operations', () => {
 
   test('ConditionalCheckFailedException on STATUS_CHANGED is swallowed', async () => {
     const error = new Error('Conditional check failed');
-    (error as any).name = 'ConditionalCheckFailedException';
+    error.name = 'ConditionalCheckFailedException';
     ddbMock.on(UpdateCommand).rejects(error);
 
     const event = makeEvent({
@@ -629,7 +636,7 @@ describe('handler — cache operations', () => {
 
   test('non-conditional DynamoDB errors propagate and route to DLQ', async () => {
     const error = new Error('DynamoDB is down');
-    (error as any).name = 'InternalServerError';
+    error.name = 'InternalServerError';
     ddbMock.on(PutCommand).rejects(error);
 
     const event = makeEvent({
@@ -646,7 +653,7 @@ describe('handler — cache operations', () => {
   });
 
   test('malformed event sends to DLQ then throws', async () => {
-    const badEvent = { source: 'aws.s3', 'detail-type': 'wrong', detail: {} } as any;
+    const badEvent = { source: 'aws.s3', 'detail-type': 'wrong', detail: {} } as unknown as RegistryEvent;
     await expect(handler(badEvent)).rejects.toThrow('Malformed registry sync event');
 
     // Verify DLQ was called
@@ -719,7 +726,7 @@ describe('emitSyncFailureMetric', () => {
 describe('handler — DLQ routing and metrics', () => {
   test('DynamoDB write failure sends to DLQ and emits SyncFailure metric', async () => {
     const error = new Error('DynamoDB is down');
-    (error as any).name = 'InternalServerError';
+    error.name = 'InternalServerError';
     ddbMock.on(PutCommand).rejects(error);
 
     const event = makeEvent({
@@ -749,7 +756,7 @@ describe('handler — DLQ routing and metrics', () => {
 
   test('DynamoDB delete failure sends to DLQ and emits metric', async () => {
     const error = new Error('Delete failed');
-    (error as any).name = 'InternalServerError';
+    error.name = 'InternalServerError';
     ddbMock.on(DeleteCommand).rejects(error);
 
     const event = makeEvent({
@@ -767,7 +774,7 @@ describe('handler — DLQ routing and metrics', () => {
 
   test('DynamoDB update failure sends to DLQ and emits metric', async () => {
     const error = new Error('Update failed');
-    (error as any).name = 'InternalServerError';
+    error.name = 'InternalServerError';
     ddbMock.on(UpdateCommand).rejects(error);
 
     const event = makeEvent({
@@ -786,7 +793,7 @@ describe('handler — DLQ routing and metrics', () => {
 
   test('ConditionalCheckFailedException does NOT send to DLQ or emit metric', async () => {
     const error = new Error('Conditional check failed');
-    (error as any).name = 'ConditionalCheckFailedException';
+    error.name = 'ConditionalCheckFailedException';
     ddbMock.on(PutCommand).rejects(error);
 
     const event = makeEvent({
@@ -804,7 +811,7 @@ describe('handler — DLQ routing and metrics', () => {
   });
 
   test('malformed event sends to DLQ but does NOT emit SyncFailure metric', async () => {
-    const badEvent = { source: 'aws.s3', 'detail-type': 'wrong', detail: {} } as any;
+    const badEvent = { source: 'aws.s3', 'detail-type': 'wrong', detail: {} } as unknown as RegistryEvent;
     await expect(handler(badEvent)).rejects.toThrow('Malformed registry sync event');
 
     // DLQ should be called
@@ -815,7 +822,7 @@ describe('handler — DLQ routing and metrics', () => {
 
   test('handler still throws even if DLQ send fails', async () => {
     const ddbError = new Error('DynamoDB is down');
-    (ddbError as any).name = 'InternalServerError';
+    ddbError.name = 'InternalServerError';
     ddbMock.on(PutCommand).rejects(ddbError);
     sqsMock.on(SendMessageCommand).rejects(new Error('SQS also down'));
 

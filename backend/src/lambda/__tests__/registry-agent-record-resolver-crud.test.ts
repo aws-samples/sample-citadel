@@ -65,18 +65,21 @@ jest.mock('../../utils/appsync-publish', () => ({
 import { handler } from '../registry-agent-record-resolver';
 import { APP_META_SORT_VALUE } from '../../utils/apps-table-meta';
 import type { Context } from 'aws-lambda';
+import type { QueryCommandInput, ScanCommandInput } from '@aws-sdk/lib-dynamodb';
+
+type HandlerEvent = Parameters<typeof handler>[0];
 
 // Typed Lambda invocation stub — the resolver ignores context/callback, so a
 // cast-through-unknown Context (plus a jest.fn() callback) keeps handler calls
 // type-correct without `any` (mirrors seed-blueprints.test.ts convention).
 const mockContext = {} as unknown as Context;
 
-function makeEvent(fieldName: string, args: any, sub = 'user-123') {
+function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123') {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub, claims: { sub } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 /**
@@ -84,7 +87,7 @@ function makeEvent(fieldName: string, args: any, sub = 'user-123') {
  * `listApps` "All Organizations" gate introduced by Phase 1 org-scoping.
  * Mirrors `makeEvent` but sets `custom:role = 'admin'` on the identity.
  */
-function makeAdminEvent(fieldName: string, args: any, sub = 'user-123') {
+function makeAdminEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123') {
   return {
     info: { fieldName },
     arguments: args,
@@ -93,7 +96,7 @@ function makeAdminEvent(fieldName: string, args: any, sub = 'user-123') {
       'custom:role': 'admin',
       claims: { sub, 'custom:role': 'admin' },
     },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function seedApp(
@@ -101,7 +104,7 @@ function seedApp(
     status?: string;
     version?: number;
     orgId?: string;
-    manifest?: Record<string, any>;
+    manifest?: Record<string, unknown>;
   } = {},
 ): void {
   seedMockRegistry('agent', 'app-1', {
@@ -178,7 +181,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
   // is no longer relevant to the listApps read path.
 
   /** Build a metadata row as it would appear in the AppsTable / OrgIndex. */
-  function metaRow(over: Partial<Record<string, any>> = {}): Record<string, any> {
+  function metaRow(over: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
     return {
       appId: 'app-1',
       sortId: APP_META_SORT_VALUE,
@@ -214,7 +217,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       );
 
       expect(result.items).toHaveLength(3);
-      const ids = result.items.map((a: any) => a.appId).sort();
+      const ids = result.items.map((a: { appId: string }) => a.appId).sort();
       expect(ids).toEqual(['app-1', 'app-2', 'app-3']);
       expect(result.nextToken).toBeNull();
 
@@ -234,7 +237,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
       const scanCalls = ddbMock.commandCalls(ScanCommand);
       expect(scanCalls.length).toBe(1);
-      const input = scanCalls[0].args[0].input as any;
+      const input = scanCalls[0].args[0].input as ScanCommandInput;
       expect(input.TableName).toBe('citadel-apps-test');
       expect(input.FilterExpression).toBe('sortId = :meta');
       expect(input.ExpressionAttributeValues[':meta']).toBe(APP_META_SORT_VALUE);
@@ -285,7 +288,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       );
 
       expect(result.items).toHaveLength(2);
-      const ids = result.items.map((a: any) => a.appId).sort();
+      const ids = result.items.map((a: { appId: string }) => a.appId).sort();
       expect(ids).toEqual(['app-1', 'app-2']);
       for (const app of result.items) {
         expect(app.orgId).toBe('org-1');
@@ -294,7 +297,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       // Org-scoped path must use Query against OrgIndex, not Scan.
       const queryCalls = ddbMock.commandCalls(QueryCommand);
       expect(queryCalls.length).toBe(1);
-      const input = queryCalls[0].args[0].input as any;
+      const input = queryCalls[0].args[0].input as QueryCommandInput;
       expect(input.TableName).toBe('citadel-apps-test');
       expect(input.IndexName).toBe('OrgIndex');
       expect(input.KeyConditionExpression).toBe('orgId = :org');
@@ -399,15 +402,15 @@ describe('registry-agent-record-resolver — CRUD', () => {
       );
 
       expect(result.items).toHaveLength(2);
-      expect(result.items.map((a: any) => a.appId)).toEqual(['app-1', 'app-2']);
+      expect(result.items.map((a: { appId: string }) => a.appId)).toEqual(['app-1', 'app-2']);
       // External cursor is not surfaced — pagination is fully drained internally.
       expect(result.nextToken).toBeNull();
 
       const queryCalls = ddbMock.commandCalls(QueryCommand);
       expect(queryCalls.length).toBe(2);
       // First call has no cursor; second call carries the page1 cursor.
-      expect((queryCalls[0].args[0].input as any).ExclusiveStartKey).toBeUndefined();
-      expect((queryCalls[1].args[0].input as any).ExclusiveStartKey).toEqual(page1Cursor);
+      expect((queryCalls[0].args[0].input as QueryCommandInput).ExclusiveStartKey).toBeUndefined();
+      expect((queryCalls[1].args[0].input as QueryCommandInput).ExclusiveStartKey).toEqual(page1Cursor);
     });
   });
 

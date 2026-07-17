@@ -42,16 +42,20 @@ jest.mock('../../utils/appsync-publish', () => ({
 
 import { handler } from '../registry-agent-record-resolver';
 
-function makeEvent(fieldName: string, args: any) {
+type HandlerEvent = Parameters<typeof handler>[0];
+type HandlerContext = Parameters<typeof handler>[1];
+type HandlerCallback = Parameters<typeof handler>[2];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-123', claims: { sub: 'user-123' } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function seedApp(
-  opts: { manifest?: Record<string, any> } = {},
+  opts: { manifest?: Record<string, unknown> } = {},
 ): void {
   seedMockRegistry('agent', 'app-1', {
     name: 'Test App',
@@ -106,8 +110,8 @@ describe('registry-agent-record-resolver — workflow binding', () => {
             appId: 'app-1',
             workflowId: 'wf-new',
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).resolves.toBeDefined();
 
@@ -128,8 +132,8 @@ describe('registry-agent-record-resolver — workflow binding', () => {
             appId: 'app-1',
             workflowId: 'wf-1',
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).resolves.toBeDefined();
 
@@ -143,8 +147,8 @@ describe('registry-agent-record-resolver — workflow binding', () => {
             appId: 'nonexistent',
             workflowId: 'wf-1',
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -162,8 +166,8 @@ describe('registry-agent-record-resolver — workflow binding', () => {
             appId: 'app-1',
             workflowId: 'wf-1',
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).resolves.toBeDefined();
 
@@ -182,8 +186,8 @@ describe('registry-agent-record-resolver — workflow binding', () => {
             appId: 'nonexistent',
             workflowId: 'wf-1',
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow('App not found');
     });

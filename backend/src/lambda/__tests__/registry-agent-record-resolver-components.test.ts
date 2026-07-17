@@ -66,22 +66,26 @@ const VALID_SCHEMA = {
   required: ['apiKey'],
 };
 
-function makeEvent(fieldName: string, args: any) {
+type HandlerEvent = Parameters<typeof handler>[0];
+type HandlerContext = Parameters<typeof handler>[1];
+type HandlerCallback = Parameters<typeof handler>[2];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-123', claims: { sub: 'user-123' } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function seedApp(
   opts: {
     appId?: string;
-    agentBindings?: any[];
-    permissions?: any[];
+    agentBindings?: unknown[];
+    permissions?: unknown[];
     version?: number;
-    configSchema?: any;
-    configValues?: any;
+    configSchema?: unknown;
+    configValues?: unknown;
   } = {},
 ) {
   const appId = opts.appId ?? 'app-1';
@@ -216,8 +220,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             data: JSON.stringify({ agentId: 'agent-1' }),
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       const entries = ebMock
@@ -250,8 +254,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             }),
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       expect(result).toBeDefined();
@@ -276,8 +280,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             }),
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       const entries = ebMock
@@ -307,8 +311,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
               }),
             },
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow(/Permission validation failed/);
     });
@@ -325,8 +329,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
               data: JSON.stringify({ agentId: 'agent-1' }),
             },
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -340,8 +344,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             appId: 'app-1',
             component: { type: 'unknown-type', data: JSON.stringify({ id: 'x' }) },
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow(/Unsupported component type/);
     });
@@ -364,8 +368,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
               }),
             },
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow('Bare wildcard');
     });
@@ -386,8 +390,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
               }),
             },
           }),
-          {} as any,
-          {} as any,
+          {} as HandlerContext,
+          {} as HandlerCallback,
         ),
       ).rejects.toThrow('Invalid IAM action format');
     });
@@ -407,8 +411,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             }),
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       expect(result).toBeDefined();
@@ -428,8 +432,8 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             data: JSON.stringify({ agentId: 'agent-1' }),
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       );
 
       expect(result.appId).toBe('app-1');
@@ -450,7 +454,7 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
     ebMock.on(PutEventsCommand).resolves({});
   });
 
-  function seedAppForRemove(opts: { agentBindings?: any[]; permissions?: any[] } = {}) {
+  function seedAppForRemove(opts: { agentBindings?: unknown[]; permissions?: unknown[] } = {}) {
     seedApp({
       agentBindings: opts.agentBindings ?? [
         { agentId: 'agent-1', status: 'DESIGN', addedAt: '2024-01-01T00:00:00Z' },
@@ -470,8 +474,8 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
         componentType: 'agent',
         componentId: 'agent-1',
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     const entries = ebMock
@@ -496,8 +500,8 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
         componentType: 'permission',
         componentId: 'perm-1',
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     const entries = ebMock
@@ -520,8 +524,8 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
         componentType: 'agent',
         componentId: 'nonexistent-agent',
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(result).toBeDefined();
@@ -536,8 +540,8 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
           componentType: 'agent',
           componentId: 'agent-1',
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow('App not found');
   });
@@ -552,8 +556,8 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
           componentType: 'unknown',
           componentId: 'x',
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow(/Unsupported component type/);
   });
@@ -582,8 +586,8 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
             systemPromptAddition: 'Be helpful',
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow('Agent is not a component of this app');
   });
@@ -594,8 +598,8 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
         makeEvent('updateAgentBinding', {
           input: { appId: 'nonexistent', agentId: 'agent-1' },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow('App not found');
   });
@@ -611,8 +615,8 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
           systemPromptAddition: 'Be helpful',
         },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(result).toBeDefined();
@@ -642,8 +646,8 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
           status: 'READY',
         },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(result).toBeDefined();
@@ -661,8 +665,8 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
             status: 'READY',
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow('Agent must be active before it can be marked as ready');
   });
@@ -680,8 +684,8 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
             status: 'READY',
           },
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow('Agent must be active before it can be marked as ready');
   });
@@ -697,8 +701,8 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
           status: 'DESIGN',
         },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(result).toBeDefined();
@@ -715,8 +719,8 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
           systemPromptAddition: 'Updated',
         },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(result.appId).toBe('app-1');
@@ -746,8 +750,8 @@ describe('registry-agent-record-resolver — setAppConfigSchema', () => {
         schema: JSON.stringify(VALID_SCHEMA),
         version: 3,
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(result).toBeDefined();
@@ -770,8 +774,8 @@ describe('registry-agent-record-resolver — setAppConfigSchema', () => {
           schema: JSON.stringify({ type: 'not-a-real-type' }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow(/invalid.*schema/i);
   });
@@ -786,8 +790,8 @@ describe('registry-agent-record-resolver — setAppConfigSchema', () => {
           schema: JSON.stringify('just a string'),
           version: 3,
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow(/invalid.*schema/i);
   });
@@ -802,8 +806,8 @@ describe('registry-agent-record-resolver — setAppConfigSchema', () => {
           schema: JSON.stringify(VALID_SCHEMA),
           version: 3,
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow(/Conflict/i);
   });
@@ -816,8 +820,8 @@ describe('registry-agent-record-resolver — setAppConfigSchema', () => {
           schema: JSON.stringify(VALID_SCHEMA),
           version: 3,
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow('App not found');
   });
@@ -844,8 +848,8 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
         values: JSON.stringify(values),
         version: 3,
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     const entries = ebMock
@@ -865,8 +869,8 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
         values: JSON.stringify(values),
         version: 3,
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(result).toBeDefined();
@@ -882,8 +886,8 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
           values: JSON.stringify({ maxRetries: 3 }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow(/validation/i);
   });
@@ -898,8 +902,8 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
           values: JSON.stringify({ apiKey: 12345, maxRetries: 3 }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow(/validation/i);
   });
@@ -914,8 +918,8 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
           values: JSON.stringify({ apiKey: 'sk-test-123' }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow(/Conflict/i);
   });
@@ -928,8 +932,8 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
           values: JSON.stringify({ apiKey: 'test' }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
+        {} as HandlerContext,
+        {} as HandlerCallback,
       ),
     ).rejects.toThrow('App not found');
   });

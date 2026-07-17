@@ -53,12 +53,16 @@ jest.mock('uuid', () => ({
 
 import { handler } from '../registry-agent-record-resolver';
 
-function makeEvent(fieldName: string, args: any) {
+type HandlerEvent = Parameters<typeof handler>[0];
+type HandlerContext = Parameters<typeof handler>[1];
+type HandlerCallback = Parameters<typeof handler>[2];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-123', claims: { sub: 'user-123' } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function seedApp(status: string, version: number = 1, orgId: string = 'org-1') {
@@ -112,8 +116,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'APPROVED', version: 1 },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -143,8 +147,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DEPRECATED', version: 1 },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -166,8 +170,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DRAFT', version: 3 },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -189,8 +193,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DRAFT', version: 3 },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -211,8 +215,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       makeEvent('updateApp', {
         input: { appId: 'app-1', name: 'Updated Name', version: 1 },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -230,8 +234,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DRAFT', name: 'Updated', version: 1 },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -249,8 +253,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'APPROVED', version: 1 },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(mockPublishAppStatusEvent).toHaveBeenCalledTimes(1);
@@ -271,8 +275,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       makeEvent('updateApp', {
         input: { appId: 'app-1', name: 'Updated Name', version: 1 },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(mockPublishAppStatusEvent).not.toHaveBeenCalled();
@@ -287,8 +291,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DRAFT', version: 3 },
       }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(result).toBeDefined();
@@ -305,8 +309,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
 
     const result = await handler(
       makeEvent('publishAppStatusEvent', { input }),
-      {} as any,
-      {} as any,
+      {} as HandlerContext,
+      {} as HandlerCallback,
     );
 
     expect(result).toEqual(input);

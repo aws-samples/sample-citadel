@@ -94,7 +94,7 @@ jest.mock('@databricks/sql', () => ({
 }));
 
 // All valid DataStoreType enum values and their expected adapter class
-const TYPE_TO_CLASS: Array<[string, any]> = [
+const TYPE_TO_CLASS: Array<[string, new (...args: never[]) => unknown]> = [
   ['S3', S3Adapter],
   ['DYNAMODB', DynamoDBAdapter],
   ['RDS_POSTGRESQL', RdsAdapter],
