@@ -22,8 +22,19 @@ const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 const WORKFLOWS_TABLE = process.env.WORKFLOWS_TABLE!;
 
+/**
+ * Monotonic seed-content version stamped on every seeded row as
+ * `seedVersion`. Bump it whenever the seeded blueprint content changes shape
+ * so existing SYSTEM seed rows are healed on the next deploy (user rows are
+ * never touched — see the ConditionExpression in the handler). Version 2
+ * introduced the full canvas-shape WorkflowDefinition envelope; rows seeded
+ * before v2 lack the `seedVersion` attribute entirely and are healed exactly
+ * once.
+ */
+export const SEED_VERSION = 2;
+
 /** Deterministic ID from blueprint name so re-deploys don't create duplicates. */
-function deterministicId(name: string): string {
+export function deterministicId(name: string): string {
   const hash = createHash('sha256')
     .update(`citadel-seed-blueprint:${name}`)
     .digest('hex');
@@ -64,6 +75,78 @@ interface SeedBlueprint {
   category: string;
   definition: SeedBlueprintDefinition;
   metadata: { category: string; isSystem: boolean; tags: string[] };
+}
+
+/**
+ * Full canvas-shape WorkflowDefinition envelope persisted in the `definition`
+ * column. Mirrors the WorkflowDefinition interface in
+ * frontend/src/types/workflow.ts so seeded rows load directly on the canvas.
+ * The envelope is additive — node/edge shapes are unchanged.
+ */
+interface SeedWorkflowDefinitionEnvelope extends SeedBlueprintDefinition {
+  version: string;
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** DynamoDB row shape written for each seeded blueprint. */
+export interface SeedBlueprintItem {
+  workflowId: string;
+  orgId: string;
+  name: string;
+  description: string;
+  status: string;
+  isBlueprint: string;
+  definition: string;
+  configuration: null;
+  version: number;
+  versionHistory: never[];
+  appId: null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  metadata: string;
+  seedVersion: number;
+}
+
+/**
+ * Build the DynamoDB item for a seed blueprint. Kept separate from the
+ * declarative SEED_BLUEPRINTS const so the definitions stay data-only while
+ * the envelope (version/id/name/createdAt/updatedAt) is computed here.
+ * Exported for the contract test in
+ * backend/src/lambda/__tests__/seed-blueprints-contract.test.ts.
+ */
+export function buildSeedBlueprintItem(blueprint: SeedBlueprint, now: string): SeedBlueprintItem {
+  const workflowId = deterministicId(blueprint.name);
+  const definition: SeedWorkflowDefinitionEnvelope = {
+    version: '1.0.0',
+    id: workflowId,
+    name: blueprint.name,
+    createdAt: now,
+    updatedAt: now,
+    nodes: blueprint.definition.nodes,
+    edges: blueprint.definition.edges,
+  };
+  return {
+    workflowId,
+    orgId: 'system',
+    name: blueprint.name,
+    description: blueprint.description,
+    status: 'PUBLISHED',
+    isBlueprint: 'true',
+    definition: JSON.stringify(definition),
+    configuration: null,
+    version: 1,
+    versionHistory: [],
+    appId: null,
+    createdBy: 'system',
+    createdAt: now,
+    updatedAt: now,
+    metadata: JSON.stringify(blueprint.metadata),
+    seedVersion: SEED_VERSION,
+  };
 }
 
 export const SEED_BLUEPRINTS: SeedBlueprint[] = [
@@ -229,36 +312,37 @@ export const handler: CloudFormationCustomResourceHandler = async (event, contex
     const now = new Date().toISOString();
 
     for (const blueprint of SEED_BLUEPRINTS) {
-      const item = {
-        workflowId: deterministicId(blueprint.name),
-        orgId: 'system',
-        name: blueprint.name,
-        description: blueprint.description,
-        status: 'PUBLISHED',
-        isBlueprint: 'true',
-        definition: JSON.stringify(blueprint.definition),
-        configuration: null,
-        version: 1,
-        versionHistory: [],
-        appId: null,
-        createdBy: 'system',
-        createdAt: now,
-        updatedAt: now,
-        metadata: JSON.stringify(blueprint.metadata),
-      };
+      const item = buildSeedBlueprintItem(blueprint, now);
 
       try {
-        await docClient.send(
+        // Upsert semantics: create when absent, overwrite SYSTEM seed rows
+        // that predate the current SEED_VERSION (rows seeded before the
+        // envelope change lack `seedVersion` entirely and are healed exactly
+        // once), and never touch rows that are already current. User-created
+        // workflows are never seeded here, so their rows are never matched
+        // by a seed workflowId and remain untouched.
+        const result = await docClient.send(
           new PutCommand({
             TableName: WORKFLOWS_TABLE,
             Item: item,
-            ConditionExpression: 'attribute_not_exists(workflowId)',
+            ConditionExpression:
+              'attribute_not_exists(workflowId) OR attribute_not_exists(seedVersion) OR seedVersion < :v',
+            ExpressionAttributeValues: { ':v': SEED_VERSION },
+            ReturnValues: 'ALL_OLD',
           }),
         );
-        console.log(`✓ Created blueprint: ${blueprint.name}`);
+        if (result.Attributes) {
+          console.log(
+            `↻ Updated outdated seed blueprint (seedVersion → ${SEED_VERSION}): ${blueprint.name}`,
+          );
+        } else {
+          console.log(`✓ Created blueprint: ${blueprint.name}`);
+        }
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
-          console.log(`⊘ Blueprint already exists, skipping: ${blueprint.name}`);
+          console.log(
+            `⊘ Blueprint current (seedVersion >= ${SEED_VERSION}), skipping: ${blueprint.name}`,
+          );
           continue;
         }
         throw err;

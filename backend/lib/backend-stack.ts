@@ -1982,16 +1982,17 @@ export class BackendStack extends cdk.Stack {
 
     this.workflowsTable.grantWriteData(seedBlueprintsLambda);
 
-    // Bumped Version v1.0.0 → v1.1.0 so the CFN Update event fires on the
-    // next deploy and the Echo Demo Workflow blueprint is seeded in
-    // pre-existing environments on upgrade.
+    // Bumped Version v1.1.0 → v1.2.0 so the CFN Update event re-fires on the
+    // next deploy: the seed lambda's seedVersion-aware upsert then heals
+    // pre-existing envelope-less seeded rows (bare {nodes,edges} definitions)
+    // to the full canvas-shape WorkflowDefinition envelope.
     const seedBlueprintsResource = new cdk.CustomResource(
       this,
       "SeedBlueprintsResource",
       {
         serviceToken: seedBlueprintsLambda.functionArn,
         properties: {
-          Version: 'v1.1.0',
+          Version: 'v1.2.0',
         },
       }
     );
