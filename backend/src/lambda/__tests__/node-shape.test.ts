@@ -37,7 +37,6 @@ jest.mock('../../utils/appsync', () => ({
   getUserId: jest.fn().mockReturnValue('user-123'),
 }));
 
-import type { Context, Callback } from 'aws-lambda';
 import { handler } from '../workflow-resolver';
 import { SEED_BLUEPRINTS } from '../seed-blueprints';
 
@@ -51,8 +50,11 @@ function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user
   } as unknown as HandlerEvent;
 }
 
-const mockContext = {} as Context;
-const mockCallback: Callback<unknown> = () => undefined;
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function mockCognitoOrg(orgId: string) {
   cognitoMock.on(AdminGetUserCommand).resolves({
@@ -133,10 +135,8 @@ describe('canonical workflow node agentId shape', () => {
       });
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('publishWorkflow', { workflowId: 'wf-shape-1' }),
-          mockContext,
-          mockCallback,
         ),
       ).rejects.toThrow(/missing agentId/i);
     });
@@ -164,10 +164,8 @@ describe('canonical workflow node agentId shape', () => {
       // check itself passes by checking the validation error message
       // does NOT mention "missing agentId".
       try {
-        await handler(
+        await invokeHandler(
           makeEvent('publishWorkflow', { workflowId: 'wf-shape-2' }),
-          mockContext,
-          mockCallback,
         );
       } catch (err) {
         expect(String((err as Error)?.message ?? err)).not.toMatch(/missing agentId/i);
@@ -194,10 +192,8 @@ describe('canonical workflow node agentId shape', () => {
       });
 
       try {
-        await handler(
+        await invokeHandler(
           makeEvent('publishWorkflow', { workflowId: 'wf-demo-echo' }),
-          mockContext,
-          mockCallback,
         );
       } catch (err) {
         expect(String((err as Error)?.message ?? err)).not.toMatch(
@@ -227,10 +223,8 @@ describe('canonical workflow node agentId shape', () => {
       });
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('publishWorkflow', { workflowId: 'wf-shape-3' }),
-          mockContext,
-          mockCallback,
         ),
       ).rejects.toThrow(/missing agentId/i);
     });

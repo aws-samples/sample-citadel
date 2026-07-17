@@ -42,17 +42,25 @@ jest.mock('../../utils/appsync', () => ({
 
 const mockListAppAccessEntriesImpl = jest.fn();
 jest.mock('../app-access-control', () => ({
-  listAppAccessEntries: (...args: any[]) => mockListAppAccessEntriesImpl(...args),
+  listAppAccessEntries: (...args: unknown[]) => mockListAppAccessEntriesImpl(...args),
 }));
 
 import { handler } from '../registry-agent-record-resolver';
 
-function makeEvent(fieldName: string, args: any) {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-123', claims: { sub: 'user-123' } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function seedApp(): void {
@@ -93,13 +101,11 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
     test('succeeds and emits app.auth.config.set event', async () => {
       seedApp();
 
-      await handler(
+      await invokeHandler(
         makeEvent('setAppAuthConfig', {
           appId: 'app-1',
           authConfig: JSON.stringify({ provider: 'cognito', userPoolId: 'up-1' }),
         }),
-        {} as any,
-        {} as any,
       );
 
       const entries = ebMock
@@ -112,13 +118,11 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
 
     test('throws when app not found', async () => {
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('setAppAuthConfig', {
             appId: 'nonexistent',
             authConfig: JSON.stringify({ provider: 'cognito' }),
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -130,14 +134,12 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
     test('succeeds and emits app.access.granted event with grantedBy user id', async () => {
       seedApp();
 
-      await handler(
+      await invokeHandler(
         makeEvent('grantAppAccess', {
           appId: 'app-1',
           userId: 'target-user',
           role: 'editor',
         }),
-        {} as any,
-        {} as any,
       );
 
       const entries = ebMock
@@ -155,14 +157,12 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
 
     test('throws when app not found', async () => {
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('grantAppAccess', {
             appId: 'nonexistent',
             userId: 'target-user',
             role: 'editor',
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -174,13 +174,11 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
     test('succeeds and emits app.access.revoked event with revokedBy user id', async () => {
       seedApp();
 
-      await handler(
+      await invokeHandler(
         makeEvent('revokeAppAccess', {
           appId: 'app-1',
           userId: 'target-user',
         }),
-        {} as any,
-        {} as any,
       );
 
       const entries = ebMock
@@ -197,13 +195,11 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
 
     test('throws when app not found', async () => {
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('revokeAppAccess', {
             appId: 'nonexistent',
             userId: 'target-user',
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -219,10 +215,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
       ];
       mockListAppAccessEntriesImpl.mockResolvedValueOnce(entries);
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('listAppAccessEntries', { appId: 'app-1' }),
-        {} as any,
-        {} as any,
       );
 
       expect(result).toEqual(entries);
@@ -238,10 +232,8 @@ describe('registry-agent-record-resolver — access / auth surfaces', () => {
     test('returns empty array when no access entries exist', async () => {
       mockListAppAccessEntriesImpl.mockResolvedValueOnce([]);
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('listAppAccessEntries', { appId: 'app-empty' }),
-        {} as any,
-        {} as any,
       );
 
       expect(result).toEqual([]);

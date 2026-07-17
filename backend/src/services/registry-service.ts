@@ -50,6 +50,15 @@ export interface RegistryServiceConfig {
 
 export type BindingDirection = 'INPUT' | 'OUTPUT' | 'BIDIRECTIONAL';
 
+/**
+ * Structural view of an AWS SDK error for transient/not-found checks.
+ * Used to inspect caught `unknown` errors without asserting a full class.
+ */
+interface AwsErrorLike {
+  name?: string;
+  $metadata?: { httpStatusCode?: number };
+}
+
 export interface IntegrationBinding {
   integrationId: string;
   integrationType: string;
@@ -281,7 +290,7 @@ export interface AgentCustomMetadata {
   icon: string;
   state: 'active' | 'inactive' | 'maintenance';
   appId?: string;
-  manifest?: Record<string, any>;
+  manifest?: Record<string, unknown>;
   orgId?: string;
   /** Present only on imported agents (US-IMP-001). Absent ⇒ AGENTCORE_RUNTIME. */
   invocation?: AgentInvocationBlock;
@@ -413,12 +422,12 @@ export interface AgentConfig {
   agentId: string;
   name?: string;
   orgId: string;
-  config: any;
+  config: string;
   state: string;
   categories?: string[];
   createdAt?: string;
   updatedAt?: string;
-  manifest?: Record<string, any>;
+  manifest?: Record<string, unknown>;
   /**
    * UNTRUSTED, LLM-proposed manifest surfaced READ-ONLY for review UIs
    * (Tier-3 agent import). Present only while a proposal is pending/failed;
@@ -442,7 +451,7 @@ export interface AgentConfig {
 export interface ToolConfig {
   toolId: string;
   orgId: string;
-  config: any;
+  config: string;
   state: string;
   categories?: string[];
   integrationBindings?: IntegrationBinding[] | null;
@@ -587,11 +596,11 @@ export class RegistryService {
   }
 
   /** Returns true if the error is transient (5xx, timeout, network). */
-  private isTransientError(err: any): boolean {
-    const statusCode = err?.$metadata?.httpStatusCode;
+  private isTransientError(err: unknown): boolean {
+    const statusCode = (err as AwsErrorLike)?.$metadata?.httpStatusCode;
     if (statusCode && statusCode >= 500) return true;
 
-    const name = err?.name ?? '';
+    const name = (err as AwsErrorLike)?.name ?? '';
     if (
       name === 'TimeoutError' ||
       name === 'NetworkingError' ||
@@ -727,10 +736,10 @@ export class RegistryService {
         createdAt: result.createdAt,
         updatedAt: result.updatedAt,
       };
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (
-        err.name === 'ResourceNotFoundException' ||
-        err?.$metadata?.httpStatusCode === 404
+        (err as AwsErrorLike).name === 'ResourceNotFoundException' ||
+        (err as AwsErrorLike)?.$metadata?.httpStatusCode === 404
       ) {
         return null;
       }
@@ -1194,11 +1203,11 @@ export class RegistryService {
    * "[Binding]" (optional list) shape.
    */
   private static sanitizeIntegrationBindings(
-    bindings: any,
+    bindings: unknown,
   ): IntegrationBinding[] | null {
     if (!Array.isArray(bindings) || bindings.length === 0) return null;
     const cleaned = bindings.filter(
-      (b: any) =>
+      (b: { integrationId?: unknown; integrationType?: unknown } | null | undefined) =>
         b &&
         typeof b.integrationId === 'string' && b.integrationId.length > 0 &&
         typeof b.integrationType === 'string' && b.integrationType.length > 0,
@@ -1207,11 +1216,11 @@ export class RegistryService {
   }
 
   private static sanitizeDataStoreBindings(
-    bindings: any,
+    bindings: unknown,
   ): DataStoreBinding[] | null {
     if (!Array.isArray(bindings) || bindings.length === 0) return null;
     const cleaned = bindings.filter(
-      (b: any) =>
+      (b: { dataStoreId?: unknown; dataStoreType?: unknown } | null | undefined) =>
         b &&
         typeof b.dataStoreId === 'string' && b.dataStoreId.length > 0 &&
         typeof b.dataStoreType === 'string' && b.dataStoreType.length > 0,

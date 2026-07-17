@@ -19,7 +19,7 @@ import { RegistryService } from '../registry-service';
 const sdkMock = mockClient(BedrockAgentCoreControlClient);
 
 /** Helper to build a minimal RegistryRecordSummary-like object for mocks. */
-function makeSummary(overrides: Record<string, any>) {
+function makeSummary(overrides: Record<string, unknown>) {
   return {
     recordArn: 'arn:mock',
     registryArn: 'arn:reg',
@@ -139,7 +139,7 @@ describe('RegistryService searchResources', () => {
   it('returns empty array when registryRecords field is undefined', async () => {
     sdkMock.on(ListRegistryRecordsCommand).resolves({
       nextToken: undefined,
-    } as any);
+    });
 
     const results = await service.searchResources('agent', 'missing');
 
@@ -147,7 +147,7 @@ describe('RegistryService searchResources', () => {
   });
 
   it('retries on transient 5xx errors', async () => {
-    const serverError = new Error('Internal Server Error') as any;
+    const serverError = new Error('Internal Server Error') as Error & { $metadata?: { httpStatusCode?: number } };
     serverError.$metadata = { httpStatusCode: 500 };
 
     sdkMock
@@ -166,7 +166,7 @@ describe('RegistryService searchResources', () => {
   });
 
   it('throws non-transient errors without retry', async () => {
-    const clientError = new Error('Access denied') as any;
+    const clientError = new Error('Access denied') as Error & { $metadata?: { httpStatusCode?: number } };
     clientError.name = 'AccessDeniedException';
     clientError.$metadata = { httpStatusCode: 403 };
 

@@ -57,12 +57,20 @@ jest.mock('../../utils/appsync-publish', () => ({
 import { handler } from '../registry-agent-record-resolver';
 import { APP_META_SORT_VALUE } from '../../utils/apps-table-meta';
 
-function makeEvent(fieldName: string, args: any, sub = 'user-123') {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
+
+function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123') {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub, claims: { sub } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function seedApp(opts: { version?: number; orgId?: string } = {}): void {
@@ -112,7 +120,7 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
 
   describe('createApp', () => {
     test('writes an UpdateCommand for the metadata row with full projection', async () => {
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('createApp', {
           input: {
             name: 'New App',
@@ -120,8 +128,6 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
             orgId: 'org-1',
           },
         }),
-        {} as any,
-        {} as any,
       );
 
       // upsertAppMeta is now an UpdateCommand (not a Put) so it preserves
@@ -130,12 +136,12 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
       const metaUpdate = updateCalls.find(
         (c) =>
           c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as any)?.appId === result.appId &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === result.appId &&
           // Key must be appId only — no sortId in the key.
-          (c.args[0].input.Key as any)?.sortId === undefined,
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined,
       );
       expect(metaUpdate).toBeDefined();
-      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as any;
+      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
       expect(values[':v_orgId']).toBe('org-1');
       expect(values[':v_name']).toBe('New App');
       expect(values[':v_status']).toBe('DRAFT');
@@ -154,12 +160,10 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
     test('writes an UpdateCommand for the metadata row with only the changed fields', async () => {
       seedApp({ version: 1 });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', version: 1, name: 'Renamed' },
         }),
-        {} as any,
-        {} as any,
       );
 
       const updateCalls = ddbMock.commandCalls(UpdateCommand);
@@ -169,12 +173,12 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
       const metaUpdate = updateCalls.find(
         (c) =>
           c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as any)?.appId === 'app-1' &&
-          (c.args[0].input.Key as any)?.sortId === undefined,
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === 'app-1' &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined,
       );
       expect(metaUpdate).toBeDefined();
 
-      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as any;
+      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
       // name was provided -> mirrored. status/description/routingConfig were
       // NOT provided -> must NOT be in the update.
       expect(values[':v_name']).toBe('Renamed');
@@ -189,25 +193,23 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
     test('mirrors a status change', async () => {
       seedApp({ version: 1 });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', version: 1, status: 'APPROVED' },
         }),
-        {} as any,
-        {} as any,
       );
 
       const updateCalls = ddbMock.commandCalls(UpdateCommand);
       const metaUpdate = updateCalls.find(
         (c) =>
           c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as any)?.appId === 'app-1' &&
-          (c.args[0].input.Key as any)?.sortId === undefined &&
-          (c.args[0].input.ExpressionAttributeValues as any)?.[':v_status'] !==
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === 'app-1' &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined &&
+          (c.args[0].input.ExpressionAttributeValues as Record<string, unknown> | undefined)?.[':v_status'] !==
             undefined,
       );
       expect(metaUpdate).toBeDefined();
-      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as any;
+      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
       expect(values[':v_status']).toBe('APPROVED');
       expect(values[':v_version']).toBe(2);
     });
@@ -217,19 +219,17 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
     test('writes a DeleteCommand for the metadata row keyed on appId only', async () => {
       seedApp();
 
-      await handler(
+      await invokeHandler(
         makeEvent('deleteApp', { appId: 'app-1' }),
-        {} as any,
-        {} as any,
       );
 
       const deleteCalls = ddbMock.commandCalls(DeleteCommand);
       const metaDelete = deleteCalls.find(
         (c) =>
           c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as any)?.appId === 'app-1' &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === 'app-1' &&
           // Key must be appId only — AppsTable has no sort key.
-          (c.args[0].input.Key as any)?.sortId === undefined,
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined,
       );
       expect(metaDelete).toBeDefined();
     });
@@ -241,12 +241,10 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
 
       // Helper swallows the error → handler must still resolve.
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('createApp', {
             input: { name: 'New App', orgId: 'org-1' },
           }),
-          {} as any,
-          {} as any,
         ),
       ).resolves.toBeDefined();
     });
@@ -256,10 +254,8 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
       ddbMock.on(DeleteCommand).rejects(new Error('AppsTable down'));
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('deleteApp', { appId: 'app-1' }),
-          {} as any,
-          {} as any,
         ),
       ).resolves.toBeDefined();
     });

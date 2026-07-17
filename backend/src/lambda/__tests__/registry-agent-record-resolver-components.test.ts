@@ -66,22 +66,30 @@ const VALID_SCHEMA = {
   required: ['apiKey'],
 };
 
-function makeEvent(fieldName: string, args: any) {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-123', claims: { sub: 'user-123' } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function seedApp(
   opts: {
     appId?: string;
-    agentBindings?: any[];
-    permissions?: any[];
+    agentBindings?: unknown[];
+    permissions?: unknown[];
     version?: number;
-    configSchema?: any;
-    configValues?: any;
+    configSchema?: unknown;
+    configValues?: unknown;
   } = {},
 ) {
   const appId = opts.appId ?? 'app-1';
@@ -208,7 +216,7 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
     test('emits app.component.added event with agent component detail', async () => {
       seedApp();
 
-      await handler(
+      await invokeHandler(
         makeEvent('addAppComponent', {
           appId: 'app-1',
           component: {
@@ -216,8 +224,6 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             data: JSON.stringify({ agentId: 'agent-1' }),
           },
         }),
-        {} as any,
-        {} as any,
       );
 
       const entries = ebMock
@@ -237,7 +243,7 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
     test('accepts override fields without throwing', async () => {
       seedApp();
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('addAppComponent', {
           appId: 'app-1',
           component: {
@@ -250,8 +256,6 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             }),
           },
         }),
-        {} as any,
-        {} as any,
       );
 
       expect(result).toBeDefined();
@@ -263,7 +267,7 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
     test('emits app.component.added event with permission component detail', async () => {
       seedApp();
 
-      await handler(
+      await invokeHandler(
         makeEvent('addAppComponent', {
           appId: 'app-1',
           component: {
@@ -276,8 +280,6 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             }),
           },
         }),
-        {} as any,
-        {} as any,
       );
 
       const entries = ebMock
@@ -295,7 +297,7 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
       seedApp();
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('addAppComponent', {
             appId: 'app-1',
             component: {
@@ -307,8 +309,6 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
               }),
             },
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow(/Permission validation failed/);
     });
@@ -317,7 +317,7 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
   describe('error paths', () => {
     test('rejects when app not found', async () => {
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('addAppComponent', {
             appId: 'nonexistent',
             component: {
@@ -325,8 +325,6 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
               data: JSON.stringify({ agentId: 'agent-1' }),
             },
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -335,13 +333,11 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
       seedApp();
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('addAppComponent', {
             appId: 'app-1',
             component: { type: 'unknown-type', data: JSON.stringify({ id: 'x' }) },
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow(/Unsupported component type/);
     });
@@ -352,7 +348,7 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
       seedApp();
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('addAppComponent', {
             appId: 'app-1',
             component: {
@@ -364,8 +360,6 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
               }),
             },
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow('Bare wildcard');
     });
@@ -374,7 +368,7 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
       seedApp();
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('addAppComponent', {
             appId: 'app-1',
             component: {
@@ -386,8 +380,6 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
               }),
             },
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow('Invalid IAM action format');
     });
@@ -395,7 +387,7 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
     test('allows permission component with valid service-prefixed actions', async () => {
       seedApp();
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('addAppComponent', {
           appId: 'app-1',
           component: {
@@ -407,8 +399,6 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             }),
           },
         }),
-        {} as any,
-        {} as any,
       );
 
       expect(result).toBeDefined();
@@ -420,7 +410,7 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
     test('returns app projection with agentBindings and permissions arrays present', async () => {
       seedApp();
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('addAppComponent', {
           appId: 'app-1',
           component: {
@@ -428,8 +418,6 @@ describe('registry-agent-record-resolver — addAppComponent', () => {
             data: JSON.stringify({ agentId: 'agent-1' }),
           },
         }),
-        {} as any,
-        {} as any,
       );
 
       expect(result.appId).toBe('app-1');
@@ -450,7 +438,7 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
     ebMock.on(PutEventsCommand).resolves({});
   });
 
-  function seedAppForRemove(opts: { agentBindings?: any[]; permissions?: any[] } = {}) {
+  function seedAppForRemove(opts: { agentBindings?: unknown[]; permissions?: unknown[] } = {}) {
     seedApp({
       agentBindings: opts.agentBindings ?? [
         { agentId: 'agent-1', status: 'DESIGN', addedAt: '2024-01-01T00:00:00Z' },
@@ -464,14 +452,12 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
   test('emits app.component.removed event for agent type', async () => {
     seedAppForRemove();
 
-    await handler(
+    await invokeHandler(
       makeEvent('removeAppComponent', {
         appId: 'app-1',
         componentType: 'agent',
         componentId: 'agent-1',
       }),
-      {} as any,
-      {} as any,
     );
 
     const entries = ebMock
@@ -490,14 +476,12 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
   test('emits app.component.removed event for permission type', async () => {
     seedAppForRemove();
 
-    await handler(
+    await invokeHandler(
       makeEvent('removeAppComponent', {
         appId: 'app-1',
         componentType: 'permission',
         componentId: 'perm-1',
       }),
-      {} as any,
-      {} as any,
     );
 
     const entries = ebMock
@@ -514,14 +498,12 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
   test('returns app unchanged when component does not exist (idempotent)', async () => {
     seedAppForRemove({ agentBindings: [] });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('removeAppComponent', {
         appId: 'app-1',
         componentType: 'agent',
         componentId: 'nonexistent-agent',
       }),
-      {} as any,
-      {} as any,
     );
 
     expect(result).toBeDefined();
@@ -530,14 +512,12 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
 
   test('rejects when app not found', async () => {
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('removeAppComponent', {
           appId: 'nonexistent',
           componentType: 'agent',
           componentId: 'agent-1',
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow('App not found');
   });
@@ -546,14 +526,12 @@ describe('registry-agent-record-resolver — removeAppComponent', () => {
     seedAppForRemove();
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('removeAppComponent', {
           appId: 'app-1',
           componentType: 'unknown',
           componentId: 'x',
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow(/Unsupported component type/);
   });
@@ -574,7 +552,7 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
     seedApp({ agentBindings: [] });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateAgentBinding', {
           input: {
             appId: 'app-1',
@@ -582,20 +560,16 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
             systemPromptAddition: 'Be helpful',
           },
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow('Agent is not a component of this app');
   });
 
   test('throws when app does not exist', async () => {
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateAgentBinding', {
           input: { appId: 'nonexistent', agentId: 'agent-1' },
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow('App not found');
   });
@@ -603,7 +577,7 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
   test('updates systemPromptAddition without throwing and emits event', async () => {
     seedAppWithBinding();
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateAgentBinding', {
         input: {
           appId: 'app-1',
@@ -611,8 +585,6 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
           systemPromptAddition: 'Be helpful',
         },
       }),
-      {} as any,
-      {} as any,
     );
 
     expect(result).toBeDefined();
@@ -634,7 +606,7 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
     seedAppWithBinding();
     seedTargetAgent({ agentId: 'agent-1', state: 'active' });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateAgentBinding', {
         input: {
           appId: 'app-1',
@@ -642,8 +614,6 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
           status: 'READY',
         },
       }),
-      {} as any,
-      {} as any,
     );
 
     expect(result).toBeDefined();
@@ -653,7 +623,7 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
     seedAppWithBinding();
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateAgentBinding', {
           input: {
             appId: 'app-1',
@@ -661,8 +631,6 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
             status: 'READY',
           },
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow('Agent must be active before it can be marked as ready');
   });
@@ -672,7 +640,7 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
     seedTargetAgent({ agentId: 'agent-1', state: 'inactive' });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateAgentBinding', {
           input: {
             appId: 'app-1',
@@ -680,8 +648,6 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
             status: 'READY',
           },
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow('Agent must be active before it can be marked as ready');
   });
@@ -689,7 +655,7 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
   test('status change to DESIGN does not require target agent validation', async () => {
     seedAppWithBinding({ bindingStatus: 'READY' });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateAgentBinding', {
         input: {
           appId: 'app-1',
@@ -697,8 +663,6 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
           status: 'DESIGN',
         },
       }),
-      {} as any,
-      {} as any,
     );
 
     expect(result).toBeDefined();
@@ -707,7 +671,7 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
   test('returns full app projection with agentBindings present', async () => {
     seedAppWithBinding();
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateAgentBinding', {
         input: {
           appId: 'app-1',
@@ -715,8 +679,6 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
           systemPromptAddition: 'Updated',
         },
       }),
-      {} as any,
-      {} as any,
     );
 
     expect(result.appId).toBe('app-1');
@@ -740,14 +702,12 @@ describe('registry-agent-record-resolver — setAppConfigSchema', () => {
   test('stores valid JSON Schema and emits app.config.schema.set event', async () => {
     seedApp({ version: 3 });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('setAppConfigSchema', {
         appId: 'app-1',
         schema: JSON.stringify(VALID_SCHEMA),
         version: 3,
       }),
-      {} as any,
-      {} as any,
     );
 
     expect(result).toBeDefined();
@@ -764,14 +724,12 @@ describe('registry-agent-record-resolver — setAppConfigSchema', () => {
     seedApp({ version: 3 });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('setAppConfigSchema', {
           appId: 'app-1',
           schema: JSON.stringify({ type: 'not-a-real-type' }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow(/invalid.*schema/i);
   });
@@ -780,14 +738,12 @@ describe('registry-agent-record-resolver — setAppConfigSchema', () => {
     seedApp({ version: 3 });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('setAppConfigSchema', {
           appId: 'app-1',
           schema: JSON.stringify('just a string'),
           version: 3,
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow(/invalid.*schema/i);
   });
@@ -796,28 +752,24 @@ describe('registry-agent-record-resolver — setAppConfigSchema', () => {
     seedApp({ version: 5 });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('setAppConfigSchema', {
           appId: 'app-1',
           schema: JSON.stringify(VALID_SCHEMA),
           version: 3,
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow(/Conflict/i);
   });
 
   test('throws when app not found', async () => {
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('setAppConfigSchema', {
           appId: 'nonexistent',
           schema: JSON.stringify(VALID_SCHEMA),
           version: 3,
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow('App not found');
   });
@@ -838,14 +790,12 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
     seedApp({ version: 3, configSchema: VALID_SCHEMA });
     const values = { apiKey: 'sk-test-123', maxRetries: 3 };
 
-    await handler(
+    await invokeHandler(
       makeEvent('setAppConfigValues', {
         appId: 'app-1',
         values: JSON.stringify(values),
         version: 3,
       }),
-      {} as any,
-      {} as any,
     );
 
     const entries = ebMock
@@ -859,14 +809,12 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
     const values = { anything: 'goes', nested: { deep: true } };
     seedApp({ version: 3, configSchema: null });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('setAppConfigValues', {
         appId: 'app-1',
         values: JSON.stringify(values),
         version: 3,
       }),
-      {} as any,
-      {} as any,
     );
 
     expect(result).toBeDefined();
@@ -876,14 +824,12 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
     seedApp({ version: 3, configSchema: VALID_SCHEMA });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('setAppConfigValues', {
           appId: 'app-1',
           values: JSON.stringify({ maxRetries: 3 }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow(/validation/i);
   });
@@ -892,14 +838,12 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
     seedApp({ version: 3, configSchema: VALID_SCHEMA });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('setAppConfigValues', {
           appId: 'app-1',
           values: JSON.stringify({ apiKey: 12345, maxRetries: 3 }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow(/validation/i);
   });
@@ -908,28 +852,24 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
     seedApp({ version: 5 });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('setAppConfigValues', {
           appId: 'app-1',
           values: JSON.stringify({ apiKey: 'sk-test-123' }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow(/Conflict/i);
   });
 
   test('throws when app not found', async () => {
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('setAppConfigValues', {
           appId: 'nonexistent',
           values: JSON.stringify({ apiKey: 'test' }),
           version: 3,
         }),
-        {} as any,
-        {} as any,
       ),
     ).rejects.toThrow('App not found');
   });

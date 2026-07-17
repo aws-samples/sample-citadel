@@ -42,16 +42,24 @@ jest.mock('../../utils/appsync-publish', () => ({
 
 import { handler } from '../registry-agent-record-resolver';
 
-function makeEvent(fieldName: string, args: any) {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-123', claims: { sub: 'user-123' } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function seedApp(
-  opts: { manifest?: Record<string, any> } = {},
+  opts: { manifest?: Record<string, unknown> } = {},
 ): void {
   seedMockRegistry('agent', 'app-1', {
     name: 'Test App',
@@ -101,13 +109,11 @@ describe('registry-agent-record-resolver — workflow binding', () => {
       seedApp({ manifest: { workflowIds: ['wf-existing'] } });
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('bindWorkflowToApp', {
             appId: 'app-1',
             workflowId: 'wf-new',
           }),
-          {} as any,
-          {} as any,
         ),
       ).resolves.toBeDefined();
 
@@ -123,13 +129,11 @@ describe('registry-agent-record-resolver — workflow binding', () => {
       seedApp({ manifest: { workflowIds: ['wf-1'] } });
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('bindWorkflowToApp', {
             appId: 'app-1',
             workflowId: 'wf-1',
           }),
-          {} as any,
-          {} as any,
         ),
       ).resolves.toBeDefined();
 
@@ -138,13 +142,11 @@ describe('registry-agent-record-resolver — workflow binding', () => {
 
     test('throws when app not found', async () => {
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('bindWorkflowToApp', {
             appId: 'nonexistent',
             workflowId: 'wf-1',
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow('App not found');
     });
@@ -157,13 +159,11 @@ describe('registry-agent-record-resolver — workflow binding', () => {
       seedApp({ manifest: { workflowIds: ['wf-1', 'wf-2'] } });
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('unbindWorkflowFromApp', {
             appId: 'app-1',
             workflowId: 'wf-1',
           }),
-          {} as any,
-          {} as any,
         ),
       ).resolves.toBeDefined();
 
@@ -177,13 +177,11 @@ describe('registry-agent-record-resolver — workflow binding', () => {
 
     test('throws when app not found', async () => {
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('unbindWorkflowFromApp', {
             appId: 'nonexistent',
             workflowId: 'wf-1',
           }),
-          {} as any,
-          {} as any,
         ),
       ).rejects.toThrow('App not found');
     });
