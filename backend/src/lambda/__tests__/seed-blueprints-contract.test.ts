@@ -41,6 +41,15 @@ import {
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
+// aws-lambda's Handler type declares a legacy required callback third
+// parameter, but the implementation is a two-parameter async
+// (event, context) function that never uses it — invoke through the real
+// signature (single cast here) so calls don't pass a superfluous callback.
+const invokeHandler = handler as (
+  event: CloudFormationCustomResourceEvent,
+  context: Context,
+) => Promise<void>;
+
 const EXPECTED_CONDITION_EXPRESSION =
   'attribute_not_exists(workflowId) OR attribute_not_exists(seedVersion) OR seedVersion < :v';
 
@@ -237,7 +246,7 @@ describe('seed-blueprints contract', () => {
     test('PutCommand uses the seedVersion-aware ConditionExpression with :v bound to SEED_VERSION', async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('Update'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Update'), mockContext);
 
       const putCalls = ddbMock.commandCalls(PutCommand);
       expect(putCalls).toHaveLength(SEED_BLUEPRINTS.length);
@@ -253,7 +262,7 @@ describe('seed-blueprints contract', () => {
     test('logs created for each blueprint when no prior row exists (no Attributes returned)', async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('Create'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Create'), mockContext);
 
       expect(logMessagesContaining(logSpy, 'Created blueprint:')).toBe(
         SEED_BLUEPRINTS.length,
@@ -269,7 +278,7 @@ describe('seed-blueprints contract', () => {
         Attributes: { workflowId: 'existing-row', orgId: 'system' },
       });
 
-      await handler(makeEvent('Update'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Update'), mockContext);
 
       expect(logMessagesContaining(logSpy, 'Updated outdated seed blueprint')).toBe(
         SEED_BLUEPRINTS.length,
@@ -283,7 +292,7 @@ describe('seed-blueprints contract', () => {
       ddbMock.on(PutCommand).rejects(conditionalError);
 
       await expect(
-        handler(makeEvent('Update'), mockContext, jest.fn()),
+        invokeHandler(makeEvent('Update'), mockContext),
       ).resolves.not.toThrow();
 
       // All blueprints are still attempted — one current row must not stop the rest.
@@ -301,7 +310,7 @@ describe('seed-blueprints contract', () => {
         .rejectsOnce(conditionalError)
         .resolves({ Attributes: { workflowId: 'stale-row' } });
 
-      await handler(makeEvent('Update'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Update'), mockContext);
 
       expect(logMessagesContaining(logSpy, 'skipping:')).toBe(2);
       expect(logMessagesContaining(logSpy, 'Updated outdated seed blueprint')).toBe(
