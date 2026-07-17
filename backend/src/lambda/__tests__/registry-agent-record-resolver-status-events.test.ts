@@ -54,8 +54,12 @@ jest.mock('uuid', () => ({
 import { handler } from '../registry-agent-record-resolver';
 
 type HandlerEvent = Parameters<typeof handler>[0];
-type HandlerContext = Parameters<typeof handler>[1];
-type HandlerCallback = Parameters<typeof handler>[2];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
@@ -112,12 +116,10 @@ describe('registry-agent-record-resolver — status transition events', () => {
   test('emits app.status.draft_to_approved on DRAFT→APPROVED transition', async () => {
     seedApp('DRAFT', 1);
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'APPROVED', version: 1 },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -143,12 +145,10 @@ describe('registry-agent-record-resolver — status transition events', () => {
   test('emits app.status.approved_to_deprecated on APPROVED→DEPRECATED transition', async () => {
     seedApp('APPROVED', 1);
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DEPRECATED', version: 1 },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -166,12 +166,10 @@ describe('registry-agent-record-resolver — status transition events', () => {
   test('emits app.status.deprecated_to_draft on DEPRECATED→DRAFT transition', async () => {
     seedApp('DEPRECATED', 3);
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DRAFT', version: 3 },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -189,12 +187,10 @@ describe('registry-agent-record-resolver — status transition events', () => {
   test('status event timestamp is valid ISO 8601', async () => {
     seedApp('DEPRECATED', 3);
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DRAFT', version: 3 },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -211,12 +207,10 @@ describe('registry-agent-record-resolver — status transition events', () => {
   test('does not emit status transition event for non-status updates', async () => {
     seedApp('DRAFT', 1);
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', name: 'Updated Name', version: 1 },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -230,12 +224,10 @@ describe('registry-agent-record-resolver — status transition events', () => {
   test('does not emit status transition event when status is unchanged', async () => {
     seedApp('DRAFT', 1);
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DRAFT', name: 'Updated', version: 1 },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -249,12 +241,10 @@ describe('registry-agent-record-resolver — status transition events', () => {
   test('calls publishAppStatusEvent for DRAFT→APPROVED transition', async () => {
     seedApp('DRAFT', 1);
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'APPROVED', version: 1 },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     expect(mockPublishAppStatusEvent).toHaveBeenCalledTimes(1);
@@ -271,12 +261,10 @@ describe('registry-agent-record-resolver — status transition events', () => {
   test('does not call publishAppStatusEvent for non-status updates', async () => {
     seedApp('DRAFT', 1);
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', name: 'Updated Name', version: 1 },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     expect(mockPublishAppStatusEvent).not.toHaveBeenCalled();
@@ -287,12 +275,10 @@ describe('registry-agent-record-resolver — status transition events', () => {
 
     seedApp('DEPRECATED', 3);
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DRAFT', version: 3 },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     expect(result).toBeDefined();
@@ -307,10 +293,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
       timestamp: '2025-05-08T10:00:00.000Z',
     };
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('publishAppStatusEvent', { input }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     expect(result).toEqual(input);

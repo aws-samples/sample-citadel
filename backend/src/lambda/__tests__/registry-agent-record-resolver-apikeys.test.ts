@@ -52,7 +52,12 @@ jest.mock('../app-api-key-management', () => ({
 import { handler } from '../registry-agent-record-resolver';
 
 type HandlerEvent = Parameters<typeof handler>[0];
-type HandlerContext = Parameters<typeof handler>[1];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
@@ -88,10 +93,8 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
       plaintext: 'plaintext-secret-abcdef',
     });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('createAppApiKey', { appId: 'app-1', name: 'Test Key' }),
-      {} as HandlerContext,
-      () => {},
     );
 
     expect(result).toHaveProperty('keyId', 'new-key-id');
@@ -118,10 +121,8 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
       revokedKeyId: 'old-key',
     });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('rotateAppApiKey', { appId: 'app-1', keyId: 'old-key' }),
-      {} as HandlerContext,
-      () => {},
     );
 
     expect(result).not.toHaveProperty('newKey');
@@ -143,10 +144,8 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
     };
     mockRevoke.mockResolvedValueOnce(revokedKey);
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('revokeAppApiKey', { appId: 'app-1', keyId: 'target-key' }),
-      {} as HandlerContext,
-      () => {},
     );
 
     expect(result).toEqual(revokedKey);
@@ -164,10 +163,8 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
       { keyId: 'k2', name: 'Key 2', prefix: 'bbbb2222', status: 'REVOKED', createdAt: '2024-02-01T00:00:00Z' },
     ]);
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('listAppApiKeys', { appId: 'app-1' }),
-      {} as HandlerContext,
-      () => {},
     );
 
     expect(Array.isArray(result)).toBe(true);
@@ -193,10 +190,8 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
       plaintext: 'pt',
     });
 
-    await handler(
+    await invokeHandler(
       makeEvent('createAppApiKey', { appId: 'app-9', name: 'K', expiresIn: 3600 }),
-      {} as HandlerContext,
-      () => {},
     );
 
     expect(mockCreate).toHaveBeenCalledWith(
@@ -211,10 +206,8 @@ describe('registry-agent-record-resolver — API key surfaces', () => {
   test('listAppApiKeys invokes impl with deps struct (no mutation of args)', async () => {
     mockList.mockResolvedValueOnce([]);
 
-    await handler(
+    await invokeHandler(
       makeEvent('listAppApiKeys', { appId: 'app-42' }),
-      {} as HandlerContext,
-      () => {},
     );
 
     expect(mockList).toHaveBeenCalledTimes(1);

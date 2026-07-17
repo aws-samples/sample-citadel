@@ -154,7 +154,6 @@ jest.mock('../../utils/appsync-publish', () => ({
 import { handler as registryHandler } from '../registry-agent-record-resolver';
 import { handler as workflowHandler } from '../workflow-resolver';
 import { handler as executionHandler } from '../execution-resolver';
-import type { Context } from 'aws-lambda';
 
 import * as registryServiceMockedModule from '../../services/registry-service';
 
@@ -167,7 +166,19 @@ const registryMock = registryServiceMockedModule as unknown as {
   __reset: () => void;
 };
 
-const mockContext = {} as unknown as Context;
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but each resolver implementation is a one-parameter async
+// (event) function that never uses them — invoke through the real signature
+// (single cast per handler) so calls don't pass superfluous arguments.
+const invokeRegistryHandler = registryHandler as (
+  event: Parameters<typeof registryHandler>[0],
+) => Promise<unknown>;
+const invokeWorkflowHandler = workflowHandler as (
+  event: Parameters<typeof workflowHandler>[0],
+) => Promise<unknown>;
+const invokeExecutionHandler = executionHandler as (
+  event: Parameters<typeof executionHandler>[0],
+) => Promise<unknown>;
 
 // ─── Shared in-memory fake DynamoDB ─────────────────────────────────────────
 
@@ -363,15 +374,13 @@ interface TestRow {
 
 /** Runs createApp + importBlueprint and returns { appId, workflow }. */
 async function createAppAndImport(): Promise<{ appId: string; workflow: TestRow }> {
-  const app = (await registryHandler(
+  const app = (await invokeRegistryHandler(
     makeEvent('createApp', {
       input: { name: 'Import Test App', orgId: 'org-1' },
     }),
-    mockContext,
-    jest.fn(),
   )) as TestRow;
 
-  const workflow = (await workflowHandler(
+  const workflow = (await invokeWorkflowHandler(
     makeEvent('importBlueprint', {
       blueprintId: BLUEPRINT_ID,
       appId: app.appId,
@@ -381,8 +390,6 @@ async function createAppAndImport(): Promise<{ appId: string; workflow: TestRow 
         'placeholder-b': 'demo-echo-agent',
       },
     }),
-    mockContext,
-    jest.fn(),
   )) as TestRow;
 
   return { appId: app.appId, workflow };
@@ -414,12 +421,10 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
 
   test('full flow: descriptionless createApp yields an importable appId, mapped import publishes and executes end to end', async () => {
     // ── Step 2: createApp with NO description ──────────────────────────────
-    const app = (await registryHandler(
+    const app = (await invokeRegistryHandler(
       makeEvent('createApp', {
         input: { name: 'Import Test App', orgId: 'org-1' },
       }),
-      mockContext,
-      jest.fn(),
     )) as TestRow;
 
     // Live bug #1: the description that reached the registry must be
@@ -437,7 +442,7 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
     expect(mirrorRow.description).toBe('Import Test App');
 
     // ── Step 3: importBlueprint with agentMapping ──────────────────────────
-    const imported = (await workflowHandler(
+    const imported = (await invokeWorkflowHandler(
       makeEvent('importBlueprint', {
         blueprintId: BLUEPRINT_ID,
         appId: app.appId,
@@ -447,8 +452,6 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
           'placeholder-b': 'demo-echo-agent',
         },
       }),
-      mockContext,
-      jest.fn(),
     )) as TestRow;
 
     // The regression this seam test exists for: the id handed back by
@@ -465,10 +468,8 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
     expect(appRowAfterImport.workflowIds).toContain(imported.workflowId);
 
     // ── Step 4: publishWorkflow (agent exists → PUBLISHED) ─────────────────
-    const published = (await workflowHandler(
+    const published = (await invokeWorkflowHandler(
       makeEvent('publishWorkflow', { workflowId: imported.workflowId }),
-      mockContext,
-      jest.fn(),
     )) as TestRow;
 
     expect(published.status).toBe('PUBLISHED');
@@ -477,10 +478,8 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
     ).toBe('PUBLISHED');
 
     // ── Step 5: startExecution ─────────────────────────────────────────────
-    const execution = (await executionHandler(
+    const execution = (await invokeExecutionHandler(
       makeEvent('startExecution', { workflowId: imported.workflowId }),
-      mockContext,
-      jest.fn(),
     )) as TestRow;
 
     expect(execution.executionId).toBeDefined();
@@ -520,10 +519,8 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
     const { workflow } = await createAppAndImport();
 
     await expect(
-      workflowHandler(
+      invokeWorkflowHandler(
         makeEvent('publishWorkflow', { workflowId: workflow.workflowId }),
-        mockContext,
-        jest.fn(),
       ),
     ).rejects.toThrow(/agents that do not exist.*demo-echo-agent/);
 

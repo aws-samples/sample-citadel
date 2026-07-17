@@ -83,9 +83,6 @@ jest.mock('../../utils/appsync-publish', () => ({
 
 import { getRegistryService } from '../../services/registry-service';
 import { handler } from '../registry-agent-record-resolver';
-import type { Context } from 'aws-lambda';
-
-const mockContext = {} as unknown as Context;
 
 const registry = getRegistryService() as unknown as {
   createResource: jest.Mock;
@@ -93,6 +90,12 @@ const registry = getRegistryService() as unknown as {
 };
 
 type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
   return {
@@ -195,12 +198,10 @@ describe('registry-agent-record-resolver — description defaulting', () => {
 
   describe('createApp', () => {
     test('defaults the registry description to the app name when description is omitted (Import Blueprint New App regression)', async () => {
-      await handler(
+      await invokeHandler(
         makeEvent('createApp', {
           input: { name: 'My New App', orgId: 'org-1' },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       const created = lastCreateResourceInput();
@@ -208,12 +209,10 @@ describe('registry-agent-record-resolver — description defaulting', () => {
     });
 
     test('defaults a blank (whitespace-only) description to the app name', async () => {
-      await handler(
+      await invokeHandler(
         makeEvent('createApp', {
           input: { name: 'My New App', orgId: 'org-1', description: '   ' },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       const created = lastCreateResourceInput();
@@ -221,19 +220,17 @@ describe('registry-agent-record-resolver — description defaulting', () => {
     });
 
     test('mirrors the defaulted description to the AppsTable #META row (registry/mirror consistency)', async () => {
-      await handler(
+      await invokeHandler(
         makeEvent('createApp', {
           input: { name: 'My New App', orgId: 'org-1' },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(lastMetaDescriptionWrite()).toBe('My New App');
     });
 
     test('passes a provided non-empty description to the registry verbatim', async () => {
-      await handler(
+      await invokeHandler(
         makeEvent('createApp', {
           input: {
             name: 'My New App',
@@ -241,8 +238,6 @@ describe('registry-agent-record-resolver — description defaulting', () => {
             description: 'Hand-written description',
           },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       const created = lastCreateResourceInput();
@@ -257,12 +252,10 @@ describe('registry-agent-record-resolver — description defaulting', () => {
     test('never forwards an explicit-blank description to the registry — defaults to the app name', async () => {
       seedApp({ name: 'Legacy App' });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', version: 1, description: '' },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       const updated = lastUpdateResourceInput();
@@ -272,12 +265,10 @@ describe('registry-agent-record-resolver — description defaulting', () => {
     test('defaults to the app name when description is omitted and the existing record description is blank (legacy record)', async () => {
       seedApp({ name: 'Legacy App', description: '' });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', version: 1, name: 'Renamed App' },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       const updated = lastUpdateResourceInput();
@@ -287,12 +278,10 @@ describe('registry-agent-record-resolver — description defaulting', () => {
     test('mirrors the defaulted description to the AppsTable #META row when the caller sent a blank description', async () => {
       seedApp({ name: 'Legacy App' });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', version: 1, description: '   ' },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(lastMetaDescriptionWrite()).toBe('Legacy App');
@@ -301,12 +290,10 @@ describe('registry-agent-record-resolver — description defaulting', () => {
     test('preserves a provided non-empty description verbatim', async () => {
       seedApp({ name: 'Legacy App' });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', version: 1, description: 'Updated by hand' },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       const updated = lastUpdateResourceInput();
@@ -317,12 +304,10 @@ describe('registry-agent-record-resolver — description defaulting', () => {
     test('keeps the existing non-blank description when the caller omits it', async () => {
       seedApp({ name: 'Legacy App', description: 'Existing description' });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', version: 1, name: 'Renamed App' },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       const updated = lastUpdateResourceInput();

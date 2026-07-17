@@ -64,6 +64,15 @@ const mockContext: Context = {
   succeed: jest.fn(),
 };
 
+// aws-lambda's Handler type declares a legacy required callback third
+// parameter, but the implementation is a two-parameter async
+// (event, context) function that never uses it — invoke through the real
+// signature (single cast here) so calls don't pass a superfluous callback.
+const invokeHandler = handler as (
+  event: CloudFormationCustomResourceEvent,
+  context: Context,
+) => Promise<void>;
+
 describe('seed-blueprints Lambda', () => {
   beforeAll(() => {
     process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
@@ -193,7 +202,7 @@ describe('seed-blueprints Lambda', () => {
     test('blueprints are created with isBlueprint="true" and status=PUBLISHED', async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('Create'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Create'), mockContext);
 
       const putCalls = ddbMock.commandCalls(PutCommand);
       expect(putCalls).toHaveLength(5);
@@ -212,7 +221,7 @@ describe('seed-blueprints Lambda', () => {
     test('PutCommand uses ConditionExpression for idempotency', async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('Create'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Create'), mockContext);
 
       const putCalls = ddbMock.commandCalls(PutCommand);
       for (const call of putCalls) {
@@ -229,14 +238,14 @@ describe('seed-blueprints Lambda', () => {
 
       // Should not throw — idempotent behavior
       await expect(
-        handler(makeEvent('Update'), mockContext, jest.fn()),
+        invokeHandler(makeEvent('Update'), mockContext),
       ).resolves.not.toThrow();
     });
 
     test('uses deterministic workflowId based on blueprint name', async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('Create'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Create'), mockContext);
       const firstCallIds = ddbMock.commandCalls(PutCommand).map(
         (c) => c.args[0].input.Item!.workflowId,
       );
@@ -244,7 +253,7 @@ describe('seed-blueprints Lambda', () => {
       ddbMock.reset();
       ddbMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('Create'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Create'), mockContext);
       const secondCallIds = ddbMock.commandCalls(PutCommand).map(
         (c) => c.args[0].input.Item!.workflowId,
       );
@@ -256,7 +265,7 @@ describe('seed-blueprints Lambda', () => {
     test('uses WORKFLOWS_TABLE env var and writes all 5 blueprints', async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('Create'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Create'), mockContext);
 
       // Verify all 5 blueprints were written
       const putCalls = ddbMock.commandCalls(PutCommand);
@@ -274,7 +283,7 @@ describe('seed-blueprints Lambda', () => {
     test('definition is stored as serialized JSON string', async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('Create'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Create'), mockContext);
 
       const putCalls = ddbMock.commandCalls(PutCommand);
       for (const call of putCalls) {
@@ -290,7 +299,7 @@ describe('seed-blueprints Lambda', () => {
     test('metadata is stored as serialized JSON string with category and isSystem', async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('Create'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Create'), mockContext);
 
       const putCalls = ddbMock.commandCalls(PutCommand);
       for (const call of putCalls) {
@@ -307,7 +316,7 @@ describe('seed-blueprints Lambda', () => {
 
   describe('Delete request type', () => {
     test('does nothing on Delete — no DynamoDB calls', async () => {
-      await handler(makeEvent('Delete'), mockContext, jest.fn());
+      await invokeHandler(makeEvent('Delete'), mockContext);
 
       const putCalls = ddbMock.commandCalls(PutCommand);
       expect(putCalls).toHaveLength(0);
@@ -321,7 +330,7 @@ describe('seed-blueprints Lambda', () => {
       ddbMock.on(PutCommand).rejects(new Error('InternalServerError'));
 
       await expect(
-        handler(makeEvent('Create'), mockContext, jest.fn()),
+        invokeHandler(makeEvent('Create'), mockContext),
       ).rejects.toThrow('InternalServerError');
     });
   });

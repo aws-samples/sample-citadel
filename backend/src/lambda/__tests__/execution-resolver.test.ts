@@ -6,7 +6,6 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCom
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
 import { mockClient } from 'aws-sdk-client-mock';
-import type { Context, Callback } from 'aws-lambda';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const ebMock = mockClient(EventBridgeClient);
@@ -28,12 +27,15 @@ function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user
   } as unknown as HandlerEvent;
 }
 
-const mockContext = {} as Context;
-const mockCallback: Callback<unknown> = () => undefined;
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
-/** Invokes the handler with stub context/callback and casts the result. */
+/** Invokes the handler and casts the result. */
 async function invoke<T = Record<string, unknown>>(event: HandlerEvent): Promise<T> {
-  return (await handler(event, mockContext, mockCallback)) as T;
+  return (await invokeHandler(event)) as T;
 }
 
 function mockCognitoOrg(orgId: string) {

@@ -58,8 +58,12 @@ import { handler } from '../registry-agent-record-resolver';
 import { APP_META_SORT_VALUE } from '../../utils/apps-table-meta';
 
 type HandlerEvent = Parameters<typeof handler>[0];
-type HandlerContext = Parameters<typeof handler>[1];
-type HandlerCallback = Parameters<typeof handler>[2];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123') {
   return {
@@ -116,7 +120,7 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
 
   describe('createApp', () => {
     test('writes an UpdateCommand for the metadata row with full projection', async () => {
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('createApp', {
           input: {
             name: 'New App',
@@ -124,8 +128,6 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
             orgId: 'org-1',
           },
         }),
-        {} as HandlerContext,
-        {} as HandlerCallback,
       );
 
       // upsertAppMeta is now an UpdateCommand (not a Put) so it preserves
@@ -158,12 +160,10 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
     test('writes an UpdateCommand for the metadata row with only the changed fields', async () => {
       seedApp({ version: 1 });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', version: 1, name: 'Renamed' },
         }),
-        {} as HandlerContext,
-        {} as HandlerCallback,
       );
 
       const updateCalls = ddbMock.commandCalls(UpdateCommand);
@@ -193,12 +193,10 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
     test('mirrors a status change', async () => {
       seedApp({ version: 1 });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', version: 1, status: 'APPROVED' },
         }),
-        {} as HandlerContext,
-        {} as HandlerCallback,
       );
 
       const updateCalls = ddbMock.commandCalls(UpdateCommand);
@@ -221,10 +219,8 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
     test('writes a DeleteCommand for the metadata row keyed on appId only', async () => {
       seedApp();
 
-      await handler(
+      await invokeHandler(
         makeEvent('deleteApp', { appId: 'app-1' }),
-        {} as HandlerContext,
-        {} as HandlerCallback,
       );
 
       const deleteCalls = ddbMock.commandCalls(DeleteCommand);
@@ -245,12 +241,10 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
 
       // Helper swallows the error → handler must still resolve.
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('createApp', {
             input: { name: 'New App', orgId: 'org-1' },
           }),
-          {} as HandlerContext,
-          {} as HandlerCallback,
         ),
       ).resolves.toBeDefined();
     });
@@ -260,10 +254,8 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
       ddbMock.on(DeleteCommand).rejects(new Error('AppsTable down'));
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('deleteApp', { appId: 'app-1' }),
-          {} as HandlerContext,
-          {} as HandlerCallback,
         ),
       ).resolves.toBeDefined();
     });

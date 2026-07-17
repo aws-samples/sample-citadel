@@ -64,15 +64,15 @@ jest.mock('../../utils/appsync-publish', () => ({
 
 import { handler } from '../registry-agent-record-resolver';
 import { APP_META_SORT_VALUE } from '../../utils/apps-table-meta';
-import type { Context } from 'aws-lambda';
 import type { QueryCommandInput, ScanCommandInput } from '@aws-sdk/lib-dynamodb';
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
-// Typed Lambda invocation stub — the resolver ignores context/callback, so a
-// cast-through-unknown Context (plus a jest.fn() callback) keeps handler calls
-// type-correct without `any` (mirrors seed-blueprints.test.ts convention).
-const mockContext = {} as unknown as Context;
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123') {
   return {
@@ -162,10 +162,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
     test('returns item when caller orgId matches', async () => {
       seedApp({ orgId: 'org-1' });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('getApp', { appId: 'app-1' }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.appId).toBe('app-1');
@@ -210,10 +208,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
         LastEvaluatedKey: undefined,
       });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeAdminEvent('listApps', { orgId: 'All Organizations' }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.items).toHaveLength(3);
@@ -229,10 +225,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
     test('Scan is filtered to metadata rows only via FilterExpression', async () => {
       ddbMock.on(ScanCommand).resolves({ Items: [], LastEvaluatedKey: undefined });
 
-      await handler(
+      await invokeHandler(
         makeAdminEvent('listApps', { orgId: 'All Organizations' }),
-        mockContext,
-        jest.fn(),
       );
 
       const scanCalls = ddbMock.commandCalls(ScanCommand);
@@ -246,10 +240,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
     test('returns empty items array when AppsTable is empty (admin caller)', async () => {
       ddbMock.on(ScanCommand).resolves({ Items: [], LastEvaluatedKey: undefined });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeAdminEvent('listApps', { orgId: 'All Organizations' }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.items).toEqual([]);
@@ -258,10 +250,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
     test('rejects non-admin callers with an "Only admins …" error (no DDB call)', async () => {
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('listApps', { orgId: 'All Organizations' }),
-          mockContext,
-          jest.fn(),
         ),
       ).rejects.toThrow(/Only admins/i);
 
@@ -281,10 +271,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
         LastEvaluatedKey: undefined,
       });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('listApps', { orgId: 'org-1' }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.items).toHaveLength(2);
@@ -312,10 +300,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
     test('returns empty items when OrgIndex Query returns no rows', async () => {
       ddbMock.on(QueryCommand).resolves({ Items: [], LastEvaluatedKey: undefined });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('listApps', { orgId: 'org-other' }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.items).toEqual([]);
@@ -337,10 +323,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
         LastEvaluatedKey: undefined,
       });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('listApps', { orgId: 'org-1' }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.items).toHaveLength(1);
@@ -361,10 +345,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
         LastEvaluatedKey: undefined,
       });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('listApps', { orgId: 'org-1' }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.items).toHaveLength(1);
@@ -395,10 +377,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
           LastEvaluatedKey: undefined,
         });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('listApps', { orgId: 'org-1' }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.items).toHaveLength(2);
@@ -418,7 +398,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
   describe('createApp', () => {
     test('sets version=1, status=DRAFT, workflowIds=[], generates UUID', async () => {
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('createApp', {
           input: {
             name: 'New App',
@@ -426,8 +406,6 @@ describe('registry-agent-record-resolver — CRUD', () => {
             orgId: 'org-1',
           },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result).toMatchObject({
@@ -441,12 +419,10 @@ describe('registry-agent-record-resolver — CRUD', () => {
     });
 
     test('emits app.created event', async () => {
-      await handler(
+      await invokeHandler(
         makeEvent('createApp', {
           input: { name: 'EB Test App', orgId: 'org-1' },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -466,12 +442,10 @@ describe('registry-agent-record-resolver — CRUD', () => {
       seedApp({ version: 1, orgId: 'org-1' });
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('updateApp', {
             input: { appId: 'app-1', version: 1, name: 'Updated Name' },
           }),
-          mockContext,
-          jest.fn(),
         ),
       ).resolves.toBeDefined();
 
@@ -487,12 +461,10 @@ describe('registry-agent-record-resolver — CRUD', () => {
       seedApp({ version: 3 });
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('updateApp', {
             input: { appId: 'app-1', name: 'Stale', version: 1 },
           }),
-          mockContext,
-          jest.fn(),
         ),
       ).rejects.toThrow(/Conflict/);
     });
@@ -500,12 +472,10 @@ describe('registry-agent-record-resolver — CRUD', () => {
     test('emits app.updated event', async () => {
       seedApp({ version: 1 });
 
-      await handler(
+      await invokeHandler(
         makeEvent('updateApp', {
           input: { appId: 'app-1', name: 'Updated', version: 1 },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -523,10 +493,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
     test('deletes and emits app.deleted', async () => {
       seedApp({ manifest: { workflowIds: ['wf-1', 'wf-2'] } });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('deleteApp', { appId: 'app-1' }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.success).toBe(true);
@@ -542,10 +510,8 @@ describe('registry-agent-record-resolver — CRUD', () => {
     test('emits app.deleted event on simple delete', async () => {
       seedApp();
 
-      await handler(
+      await invokeHandler(
         makeEvent('deleteApp', { appId: 'app-1' }),
-        mockContext,
-        jest.fn(),
       );
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
@@ -561,7 +527,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
 
   describe('sourceProjectId propagation (US-ARB-017)', () => {
     test('projects sourceProjectId onto createApp result when provided', async () => {
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('createApp', {
           input: {
             name: 'Governed App',
@@ -570,8 +536,6 @@ describe('registry-agent-record-resolver — CRUD', () => {
             sourceProjectId: 'proj-1',
           },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.sourceProjectId).toBe('proj-1');
@@ -581,7 +545,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
     });
 
     test('returns sourceProjectId as null when not provided', async () => {
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('createApp', {
           input: {
             name: 'Ungoverned App',
@@ -589,8 +553,6 @@ describe('registry-agent-record-resolver — CRUD', () => {
             orgId: 'org-1',
           },
         }),
-        mockContext,
-        jest.fn(),
       );
 
       expect(result.sourceProjectId == null).toBe(true);
@@ -600,7 +562,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       seedApp({ version: 1 });
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('updateApp', {
             input: {
               appId: 'app-1',
@@ -608,8 +570,6 @@ describe('registry-agent-record-resolver — CRUD', () => {
               sourceProjectId: 'proj-2',
             },
           }),
-          mockContext,
-          jest.fn(),
         ),
       ).resolves.toBeDefined();
 
@@ -625,7 +585,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       seedApp({ version: 1 });
 
       await expect(
-        handler(
+        invokeHandler(
           makeEvent('updateApp', {
             input: {
               appId: 'app-1',
@@ -633,8 +593,6 @@ describe('registry-agent-record-resolver — CRUD', () => {
               version: 1,
             },
           }),
-          mockContext,
-          jest.fn(),
         ),
       ).resolves.toBeDefined();
 

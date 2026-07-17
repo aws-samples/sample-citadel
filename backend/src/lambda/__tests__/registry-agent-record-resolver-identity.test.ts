@@ -139,7 +139,6 @@ jest.mock('../../utils/appsync-publish', () => ({
 }));
 
 import { handler } from '../registry-agent-record-resolver';
-import type { Context } from 'aws-lambda';
 
 import * as registryServiceMockedModule from '../../services/registry-service';
 
@@ -162,9 +161,13 @@ const registryMock = registryServiceMockedModule as unknown as {
   __reset: () => void;
 };
 
-const mockContext = {} as unknown as Context;
-
 type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
   return {
@@ -236,12 +239,10 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
 
   describe('createApp', () => {
     test('returns the registry-assigned recordId as appId, not the original UUID from customDescriptorContent', async () => {
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('createApp', {
           input: { name: 'New App', description: 'A test app', orgId: 'org-1' },
         }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
 
       // The persisted record's descriptor still embeds the original UUID.
@@ -257,12 +258,10 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
     });
 
     test('returned appId agrees with the AppsTable #META mirror key', async () => {
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('createApp', {
           input: { name: 'New App', description: 'A test app', orgId: 'org-1' },
         }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
 
       const calls = metaUpdateCalls();
@@ -279,12 +278,10 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
       const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
       try {
-        await handler(
+        await invokeHandler(
           makeEvent('createApp', {
             input: { name: 'New App', description: 'A test app', orgId: 'org-1' },
           }),
-          mockContext,
-          jest.fn(),
         );
 
         const mirrorFailureLogs = errorSpy.mock.calls.filter(
@@ -309,40 +306,32 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
   describe('sibling mutation paths return recordId when the descriptor embeds a stale UUID', () => {
     test('updateApp', async () => {
       seedAppWithStaleDescriptorId();
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('updateApp', { input: { appId: 'app-1', name: 'Renamed' } }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
     test('bindWorkflowToApp (new binding)', async () => {
       seedAppWithStaleDescriptorId();
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('bindWorkflowToApp', { appId: 'app-1', workflowId: 'wf-1' }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
     test('bindWorkflowToApp (idempotent early return)', async () => {
       seedAppWithStaleDescriptorId({ workflowIds: ['wf-1'] });
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('bindWorkflowToApp', { appId: 'app-1', workflowId: 'wf-1' }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
     test('unbindWorkflowFromApp', async () => {
       seedAppWithStaleDescriptorId({ workflowIds: ['wf-1'] });
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('unbindWorkflowFromApp', { appId: 'app-1', workflowId: 'wf-1' }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
@@ -351,25 +340,21 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
       seedAppWithStaleDescriptorId({
         agentBindings: [{ agentId: 'agent-x', status: 'DESIGN' }],
       });
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('updateAgentBinding', {
           input: { appId: 'app-1', agentId: 'agent-x', systemPromptAddition: 'hi' },
         }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
     test('addAppComponent', async () => {
       seedAppWithStaleDescriptorId();
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('addAppComponent', {
           appId: 'app-1',
           component: { type: 'agent', data: JSON.stringify({ agentId: 'agent-y' }) },
         }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
@@ -378,65 +363,55 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
       seedAppWithStaleDescriptorId({
         agentBindings: [{ agentId: 'agent-x', status: 'DESIGN' }],
       });
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('removeAppComponent', {
           appId: 'app-1',
           componentType: 'agent',
           componentId: 'agent-x',
         }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
     test('setAppConfigSchema', async () => {
       seedAppWithStaleDescriptorId();
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('setAppConfigSchema', {
           appId: 'app-1',
           schema: JSON.stringify({ type: 'object' }),
           version: 1,
         }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
     test('setAppConfigValues', async () => {
       seedAppWithStaleDescriptorId();
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('setAppConfigValues', {
           appId: 'app-1',
           values: JSON.stringify({}),
           version: 1,
         }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
     test('setAppAuthConfig', async () => {
       seedAppWithStaleDescriptorId();
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('setAppAuthConfig', {
           appId: 'app-1',
           authConfig: JSON.stringify({ mode: 'NONE' }),
         }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
     test('grantAppAccess', async () => {
       seedAppWithStaleDescriptorId();
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('grantAppAccess', { appId: 'app-1', userId: 'user-2', role: 'viewer' }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
@@ -445,10 +420,8 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
       seedAppWithStaleDescriptorId({
         access: { 'user-2': { role: 'viewer', grantedAt: 'x', grantedBy: 'y' } },
       });
-      const result = (await handler(
+      const result = (await invokeHandler(
         makeEvent('revokeAppAccess', { appId: 'app-1', userId: 'user-2' }),
-        mockContext,
-        jest.fn(),
       )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });

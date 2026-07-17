@@ -151,8 +151,12 @@ function inactiveAgentRecord(recordId: string) {
 }
 
 type HandlerEvent = Parameters<typeof handler>[0];
-type HandlerContext = Parameters<typeof handler>[1];
-type HandlerCallback = Parameters<typeof handler>[2];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
@@ -222,7 +226,7 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
       })
       .mockResolvedValueOnce(activeAgentRecord(AGENT_RECORD_ID));
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateAgentBinding', {
         input: {
           appId: APP_RECORD_ID,
@@ -230,8 +234,6 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
           status: 'READY',
         },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     expect(resolveRecordIdMock).toHaveBeenCalledWith('agent', AGENT_RECORD_ID);
@@ -270,7 +272,7 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
       })
       .mockResolvedValueOnce(activeAgentRecord(AGENT_RECORD_ID));
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateAgentBinding', {
         input: {
           appId: APP_RECORD_ID,
@@ -278,8 +280,6 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
           status: 'READY',
         },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     // resolveRecordId was consulted for the binding's human name…
@@ -321,7 +321,7 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateAgentBinding', {
           input: {
             appId: APP_RECORD_ID,
@@ -329,8 +329,6 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
             status: 'READY',
           },
         }),
-        {} as HandlerContext,
-        {} as HandlerCallback,
       ),
     ).rejects.toThrow(`Agent ${AGENT_NAME} not found`);
     // The agent getResource path must not be reached when resolution failed.
@@ -371,7 +369,7 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
       });
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateAgentBinding', {
           input: {
             appId: APP_RECORD_ID,
@@ -379,8 +377,6 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
             status: 'READY',
           },
         }),
-        {} as HandlerContext,
-        {} as HandlerCallback,
       ),
     ).rejects.toThrow('Agent must be active before it can be marked as ready');
   });
@@ -408,7 +404,7 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
       .mockResolvedValueOnce(inactiveAgentRecord(AGENT_RECORD_ID));
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateAgentBinding', {
           input: {
             appId: APP_RECORD_ID,
@@ -416,8 +412,6 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
             status: 'READY',
           },
         }),
-        {} as HandlerContext,
-        {} as HandlerCallback,
       ),
     ).rejects.toThrow('Agent must be active before it can be marked as ready');
   });
@@ -443,7 +437,7 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
       }),
     });
 
-    await handler(
+    await invokeHandler(
       makeEvent('updateAgentBinding', {
         input: {
           appId: APP_RECORD_ID,
@@ -451,8 +445,6 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
           status: 'DESIGN',
         },
       }),
-      {} as HandlerContext,
-      {} as HandlerCallback,
     );
 
     expect(resolveRecordIdMock).not.toHaveBeenCalled();
@@ -544,7 +536,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
       .on(GetCommand, { TableName: CATALOG_TABLE, Key: { modelKey: ENABLED_KEY } })
       .resolves({ Item: { modelKey: ENABLED_KEY, status: 'enabled' } });
 
-    const result = await handler(bindingEvent(ENABLED_KEY));
+    const result = await invokeHandler(bindingEvent(ENABLED_KEY));
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
     expect(result).toMatchObject({
@@ -557,7 +549,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
     ddbMock.on(GetCommand).resolves({}); // no Item
 
     await expect(
-      handler(bindingEvent(UNKNOWN_KEY)),
+      invokeHandler(bindingEvent(UNKNOWN_KEY)),
     ).rejects.toThrow('not found in the model catalog');
     // Nothing persisted when validation fails.
     expect(updateResourceMock).not.toHaveBeenCalled();
@@ -570,7 +562,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
       .resolves({ Item: { modelKey: DISABLED_KEY, status: 'disabled' } });
 
     await expect(
-      handler(bindingEvent(DISABLED_KEY)),
+      invokeHandler(bindingEvent(DISABLED_KEY)),
     ).rejects.toThrow('is not enabled');
     expect(updateResourceMock).not.toHaveBeenCalled();
   });
@@ -578,7 +570,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
   test('(d) empty string clears the override without catalog validation', async () => {
     seedApp(LEGACY_KEY);
 
-    const result = await handler(bindingEvent(''));
+    const result = await invokeHandler(bindingEvent(''));
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(result).toMatchObject({
@@ -589,7 +581,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
   test('(e) unchanged legacy value is grandfathered — no catalog validation', async () => {
     seedApp(LEGACY_KEY);
 
-    const result = await handler(bindingEvent(LEGACY_KEY));
+    const result = await invokeHandler(bindingEvent(LEGACY_KEY));
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(result).toMatchObject({
@@ -602,7 +594,7 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     seedApp();
 
-    const result = await handler(bindingEvent('catalog-model-some-new'));
+    const result = await invokeHandler(bindingEvent('catalog-model-some-new'));
 
     // No catalog read attempted, mutation still persisted (non-breaking).
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
