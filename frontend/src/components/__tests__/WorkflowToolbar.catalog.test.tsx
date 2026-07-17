@@ -68,9 +68,20 @@ jest.mock('../../services/agentConfigService', () => ({
   },
 }));
 
+// Wrap deserializeWorkflow with a call-through spy so tests can assert the
+// catalog meta argument the toolbar passes; all other exports stay real.
+jest.mock('../../services/workflowService', () => {
+  const actual = jest.requireActual('../../services/workflowService');
+  return {
+    ...actual,
+    deserializeWorkflow: jest.fn(actual.deserializeWorkflow),
+  };
+});
+
 import { WorkflowToolbar } from '../WorkflowToolbar';
 import { workflowApiService } from '../../services/workflowApiService';
 import { agentConfigService } from '../../services/agentConfigService';
+import { deserializeWorkflow } from '../../services/workflowService';
 import { toast } from 'sonner';
 import type { WorkflowNode, WorkflowEdge } from '../../types/workflow';
 
@@ -466,6 +477,77 @@ describe('WorkflowToolbar catalog behavior', () => {
       expect(
         screen.queryByText(/requires agent mapping — import this template into an app instead/i)
       ).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Load → seeded envelope-less blueprint', () => {
+    // Seeded catalog rows historically stored bare {nodes, edges} definitions
+    // without the WorkflowDefinition envelope. Loading one must succeed: the
+    // toolbar passes the catalog row's workflowId/name as meta and
+    // deserializeWorkflow synthesizes the rest of the envelope.
+    const bareDefinition = {
+      nodes: [
+        { id: 'echo-1', agentId: 'agent-1', position: { x: 150, y: 200 }, configuration: {} },
+        { id: 'echo-2', agentId: 'agent-1', position: { x: 450, y: 200 }, configuration: {} },
+      ],
+      edges: [
+        {
+          id: 'edge-echo-1-2',
+          source: 'echo-1',
+          target: 'echo-2',
+          sourceHandle: 'output',
+          targetHandle: 'input',
+        },
+      ],
+    };
+
+    const seededBlueprint = {
+      workflowId: 'bp-echo-demo',
+      name: 'Echo Demo Workflow',
+      description: 'Runnable demo: two echo steps.',
+      status: 'PUBLISHED',
+      isBlueprint: true,
+      definition: JSON.stringify(bareDefinition),
+      metadata: JSON.stringify({ category: 'demo', isSystem: true }),
+    };
+
+    beforeEach(() => {
+      (workflowApiService.listBlueprints as jest.Mock).mockResolvedValue({
+        items: [seededBlueprint],
+        nextToken: null,
+      });
+    });
+
+    it('loads a seeded blueprint whose definition lacks the envelope', async () => {
+      const user = userEvent.setup();
+      const onLoad = jest.fn();
+      renderToolbar({ nodes: [], onLoad });
+
+      await user.click(screen.getByRole('button', { name: /load blueprint from catalog/i }));
+      await user.click(
+        await screen.findByRole('button', { name: /load blueprint echo demo workflow/i })
+      );
+
+      await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(1));
+      const [loadedNodes, loadedEdges] = onLoad.mock.calls[0];
+      expect(loadedNodes).toHaveLength(2);
+      expect(loadedEdges).toHaveLength(1);
+      expect(toast.error).not.toHaveBeenCalled();
+      await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    });
+
+    it('passes the catalog workflowId/name as meta to deserializeWorkflow', async () => {
+      const user = userEvent.setup();
+      renderToolbar({ nodes: [] });
+
+      await user.click(screen.getByRole('button', { name: /load blueprint from catalog/i }));
+      await user.click(
+        await screen.findByRole('button', { name: /load blueprint echo demo workflow/i })
+      );
+
+      await waitFor(() => expect(deserializeWorkflow).toHaveBeenCalledTimes(1));
+      const callArgs = (deserializeWorkflow as jest.Mock).mock.calls[0];
+      expect(callArgs[2]).toEqual({ id: 'bp-echo-demo', name: 'Echo Demo Workflow' });
     });
   });
 

@@ -88,16 +88,62 @@ export function serializeWorkflow(
 }
 
 /**
+ * Normalizes a candidate workflow definition by synthesizing missing or
+ * invalid ENVELOPE fields (version/id/name/createdAt/updatedAt) when the
+ * candidate is an object carrying nodes + edges arrays. Seeded catalog
+ * blueprints historically stored bare {nodes, edges} definitions without the
+ * envelope; this makes them loadable without weakening node/edge validation —
+ * nodes and edges remain strictly validated by isWorkflowDefinition, so a bad
+ * node still fails with INVALID_WORKFLOW_STRUCTURE.
+ *
+ * Valid envelope fields are passed through UNCHANGED; only missing/invalid
+ * ones are synthesized (meta.id/meta.name win over generated defaults).
+ * Candidates without nodes/edges arrays are returned as-is for the guard to
+ * reject.
+ *
+ * @param candidate - Parsed workflow definition candidate
+ * @param meta - Optional catalog identity used for synthesized id/name
+ * @returns The candidate with a complete envelope, or the candidate unchanged
+ */
+export function normalizeWorkflowDefinition(
+  candidate: unknown,
+  meta?: { id?: string; name?: string }
+): unknown {
+  if (
+    candidate === null ||
+    typeof candidate !== 'object' ||
+    !Array.isArray((candidate as { nodes?: unknown }).nodes) ||
+    !Array.isArray((candidate as { edges?: unknown }).edges)
+  ) {
+    return candidate;
+  }
+
+  const partial = candidate as Record<string, unknown>;
+  const now = new Date().toISOString();
+
+  return {
+    ...partial,
+    version: typeof partial.version === 'string' ? partial.version : '1.0.0',
+    id: typeof partial.id === 'string' ? partial.id : meta?.id ?? uuidv4(),
+    name: typeof partial.name === 'string' ? partial.name : meta?.name ?? 'Untitled Workflow',
+    createdAt: typeof partial.createdAt === 'string' ? partial.createdAt : now,
+    updatedAt: typeof partial.updatedAt === 'string' ? partial.updatedAt : now,
+  };
+}
+
+/**
  * Deserializes a workflow from JSON to ReactFlow nodes and edges
  * 
  * @param workflowJson - JSON string or WorkflowDefinition object
  * @param agentConfigs - Optional map of agent configs (if not provided, will fetch from service)
+ * @param meta - Optional catalog identity threaded to normalizeWorkflowDefinition
  * @returns Object containing nodes and edges arrays for ReactFlow
  * @throws WorkflowError if JSON is invalid or references missing agents
  */
 export async function deserializeWorkflow(
   workflowJson: string | WorkflowDefinition,
-  agentConfigs?: Map<string, AgentConfig>
+  agentConfigs?: Map<string, AgentConfig>,
+  meta?: { id?: string; name?: string }
 ): Promise<{ nodes: WorkflowNode[]; edges: WorkflowEdge[] }> {
   try {
     // Parse JSON if string
@@ -116,6 +162,10 @@ export async function deserializeWorkflow(
     } else {
       workflow = workflowJson;
     }
+
+    // Tolerate envelope-less definitions (e.g. seeded catalog blueprints):
+    // synthesize missing envelope fields before strict validation.
+    workflow = normalizeWorkflowDefinition(workflow, meta) as WorkflowDefinition;
 
     // Validate workflow structure
     if (!isWorkflowDefinition(workflow)) {
@@ -532,6 +582,7 @@ export function topologicalSort(
 export const workflowService = {
   serializeWorkflow,
   deserializeWorkflow,
+  normalizeWorkflowDefinition,
   validateWorkflow,
   hasCycle,
   wouldCreateCycle,

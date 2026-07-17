@@ -296,8 +296,11 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
       setLoadingBlueprint(true);
       try {
         const definition = parseBlueprintDefinition(blueprint.definition);
-        const { nodes: loadedNodes, edges: loadedEdges } =
-          await deserializeWorkflow(definition);
+        const { nodes: loadedNodes, edges: loadedEdges } = await deserializeWorkflow(
+          definition,
+          undefined,
+          { id: blueprint.workflowId, name: blueprint.name }
+        );
 
         const validation = validateWorkflow(loadedNodes, loadedEdges);
 
