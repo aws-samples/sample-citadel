@@ -209,7 +209,7 @@ describe('seed-blueprints Lambda', () => {
       }
     });
 
-    test('PutCommand uses ConditionExpression for idempotency', async () => {
+    test('PutCommand uses the seedVersion-aware ConditionExpression for idempotency', async () => {
       ddbMock.on(PutCommand).resolves({});
 
       await handler(makeEvent('Create'), mockContext, jest.fn());
@@ -217,7 +217,7 @@ describe('seed-blueprints Lambda', () => {
       const putCalls = ddbMock.commandCalls(PutCommand);
       for (const call of putCalls) {
         expect(call.args[0].input.ConditionExpression).toBe(
-          'attribute_not_exists(workflowId)',
+          'attribute_not_exists(workflowId) OR attribute_not_exists(seedVersion) OR seedVersion < :v',
         );
       }
     });

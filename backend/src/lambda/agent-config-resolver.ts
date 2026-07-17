@@ -199,9 +199,11 @@ export async function getAgentConfigRegistry(agentId: string, event?: any): Prom
  *
  * Results are filtered to the caller's organization unless the caller has
  * `custom:role=admin`, in which case the full list (across all orgs) is
- * returned — matching the "All Organizations" admin UX. A non-admin caller
- * without an orgId receives an empty list with a warning, so anonymous
- * / api-key callers never see cross-tenant data.
+ * returned — matching the "All Organizations" admin UX. Agents with an
+ * empty orgId ('') are system-shared (e.g. seeded demo agents) and are
+ * visible to every org-scoped caller. A non-admin caller without an orgId
+ * receives an empty list with a warning, so anonymous / api-key callers
+ * never see cross-tenant data.
  */
 export async function listAgentConfigsRegistry(event?: any): Promise<AgentConfig[]> {
   const callerOrgId = event !== undefined ? await extractOrgFromEvent(event) : null;
@@ -220,13 +222,13 @@ export async function listAgentConfigsRegistry(event?: any): Promise<AgentConfig
   );
   const registryConfigs = admin
     ? allRegistryConfigs
-    : allRegistryConfigs.filter((a) => a.orgId === callerOrgId);
+    : allRegistryConfigs.filter((a) => a.orgId === callerOrgId || a.orgId === '');
 
   // 2. Fetch DynamoDB legacy records
   const allDynamoConfigs = await listAgentConfigs();
   const dynamoConfigs = admin
     ? allDynamoConfigs
-    : allDynamoConfigs.filter((a) => a.orgId === callerOrgId);
+    : allDynamoConfigs.filter((a) => a.orgId === callerOrgId || a.orgId === '');
 
   // 3. Build set of names from Registry (Registry wins on duplicates).
   //    Post-420d0ae, registryConfigs[].agentId is a 12-char recordId while

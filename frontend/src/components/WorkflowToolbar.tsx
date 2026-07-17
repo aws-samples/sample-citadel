@@ -49,6 +49,7 @@ import {
   deserializeWorkflow,
 } from '../services/workflowService';
 import { workflowApiService } from '../services/workflowApiService';
+import { isPlaceholderAgentId } from '../utils/blueprintPlaceholders';
 
 export interface WorkflowToolbarProps {
   nodes: WorkflowNode[];
@@ -97,6 +98,25 @@ function parseBlueprintCategory(metadata: string | null | undefined): string | n
     return typeof category === 'string' && category.trim() ? category : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * True when the blueprint's definition references any `placeholder-*` agent
+ * slots (seeded templates). Such blueprints cannot be loaded directly onto
+ * the canvas — their slots must be re-mapped via the app import flow first.
+ * Parsed defensively: an unparseable definition is treated as
+ * non-placeholder so the existing load error path handles it.
+ */
+function blueprintReferencesPlaceholders(definition: string): boolean {
+  try {
+    const parsed = parseBlueprintDefinition(definition);
+    const nodes = Array.isArray(parsed?.nodes) ? parsed.nodes : [];
+    return nodes.some(
+      (node) => typeof node?.agentId === 'string' && isPlaceholderAgentId(node.agentId)
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -276,8 +296,11 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
       setLoadingBlueprint(true);
       try {
         const definition = parseBlueprintDefinition(blueprint.definition);
-        const { nodes: loadedNodes, edges: loadedEdges } =
-          await deserializeWorkflow(definition);
+        const { nodes: loadedNodes, edges: loadedEdges } = await deserializeWorkflow(
+          definition,
+          undefined,
+          { id: blueprint.workflowId, name: blueprint.name }
+        );
 
         const validation = validateWorkflow(loadedNodes, loadedEdges);
 
@@ -749,13 +772,21 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
               <div className="flex flex-col gap-2 min-w-0">
                 {filteredBlueprints.map((blueprint) => {
                   const category = parseBlueprintCategory(blueprint.metadata);
+                  const hasPlaceholders = blueprintReferencesPlaceholders(
+                    blueprint.definition
+                  );
                   return (
                     <Button
                       key={blueprint.workflowId}
                       type="button"
                       variant="ghost"
-                      onClick={() => handleSelectBlueprint(blueprint)}
-                      disabled={loadingBlueprint}
+                      onClick={
+                        hasPlaceholders
+                          ? undefined
+                          : () => handleSelectBlueprint(blueprint)
+                      }
+                      disabled={loadingBlueprint || hasPlaceholders}
+                      aria-disabled={hasPlaceholders ? true : undefined}
                       aria-label={`Load blueprint ${blueprint.name}`}
                       className="h-auto w-full min-w-0 flex-col items-start justify-start gap-1 p-3 border border-border rounded-md text-left font-normal whitespace-normal cursor-pointer transition-colors duration-200"
                     >
@@ -768,6 +799,11 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
                       {blueprint.description && (
                         <p className="text-sm text-muted-foreground whitespace-normal break-words w-full min-w-0">
                           {blueprint.description}
+                        </p>
+                      )}
+                      {hasPlaceholders && (
+                        <p className="text-xs text-muted-foreground whitespace-normal break-words w-full min-w-0">
+                          Requires agent mapping — import this template into an app instead
                         </p>
                       )}
                     </Button>
