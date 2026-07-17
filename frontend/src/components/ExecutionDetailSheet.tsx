@@ -260,10 +260,11 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
                   const retryCount = node.retryCount ?? 0;
                   return (
                     <div key={node.nodeId} className="rounded-md border border-border/50">
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
                         aria-expanded={isExpanded}
-                        className="w-full flex items-center gap-2 p-2 text-left text-xs cursor-pointer hover:bg-accent/50 transition-colors"
+                        className="h-auto w-full min-w-0 items-center justify-start gap-2 p-2 rounded-md text-left text-xs font-normal whitespace-normal cursor-pointer hover:bg-accent/50 transition-colors"
                         onClick={() =>
                           setExpandedNodes((prev) => ({
                             ...prev,
@@ -292,7 +293,7 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
                             {retryCount} {retryCount === 1 ? 'retry' : 'retries'}
                           </Badge>
                         )}
-                      </button>
+                      </Button>
                       {isExpanded && (
                         <div className="flex flex-col gap-2 border-t border-border/50 p-2">
                           {node.error && (
@@ -317,10 +318,11 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
           {/* Input — collapsed by default; omitted entirely when absent */}
           {prettyInput !== null && (
             <section aria-label="Input">
-              <button
+              <Button
                 type="button"
+                variant="ghost"
                 aria-expanded={inputExpanded}
-                className="flex items-center gap-1 text-sm font-medium text-foreground cursor-pointer mb-2"
+                className="h-auto flex items-center justify-start gap-1 p-0 text-sm font-medium text-foreground whitespace-normal cursor-pointer mb-2 hover:bg-transparent hover:text-foreground"
                 onClick={() => setInputExpanded((v) => !v)}
               >
                 {inputExpanded ? (
@@ -329,7 +331,7 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
                   <ChevronRight className="size-3 text-muted-foreground" />
                 )}
                 Input
-              </button>
+              </Button>
               {inputExpanded && <pre className={PRE_CLASSES}>{prettyInput}</pre>}
             </section>
           )}

@@ -707,7 +707,10 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex flex-col gap-3">
+          {/* min-w-0 down this chain lets long unbroken text wrap inside the
+              dialog width instead of expanding the DialogContent grid column
+              (grid/flex children default to min-width:auto). */}
+          <div className="flex flex-col gap-3 min-w-0">
             <Input
               aria-label="Search blueprints"
               placeholder="Search blueprints..."
@@ -743,28 +746,31 @@ export const WorkflowToolbar = memo(function WorkflowToolbar({
                 No blueprints match your search.
               </p>
             ) : (
-              <div className="flex flex-col gap-2">
+              <div className="flex flex-col gap-2 min-w-0">
                 {filteredBlueprints.map((blueprint) => {
                   const category = parseBlueprintCategory(blueprint.metadata);
                   return (
-                    <button
+                    <Button
                       key={blueprint.workflowId}
                       type="button"
+                      variant="ghost"
                       onClick={() => handleSelectBlueprint(blueprint)}
                       disabled={loadingBlueprint}
                       aria-label={`Load blueprint ${blueprint.name}`}
-                      className="flex flex-col items-start gap-1 p-3 rounded-md border border-border text-left cursor-pointer transition-colors duration-200 hover:bg-accent disabled:opacity-50"
+                      className="h-auto w-full min-w-0 flex-col items-start justify-start gap-1 p-3 border border-border rounded-md text-left font-normal whitespace-normal cursor-pointer transition-colors duration-200"
                     >
                       <div className="flex items-center gap-2 w-full min-w-0">
-                        <span className="text-sm font-medium">{blueprint.name}</span>
+                        <span className="text-sm font-medium min-w-0 break-words">
+                          {blueprint.name}
+                        </span>
                         {category && <Badge className="text-xs">{category}</Badge>}
                       </div>
                       {blueprint.description && (
-                        <p className="text-sm text-muted-foreground truncate w-full">
+                        <p className="text-sm text-muted-foreground whitespace-normal break-words w-full min-w-0">
                           {blueprint.description}
                         </p>
                       )}
-                    </button>
+                    </Button>
                   );
                 })}
               </div>

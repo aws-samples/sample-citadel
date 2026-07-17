@@ -321,6 +321,30 @@ describe('WorkflowToolbar catalog behavior', () => {
       expect(await screen.findByText('Two Step')).toBeInTheDocument();
       expect(workflowApiService.listBlueprints).toHaveBeenCalledTimes(2);
     });
+
+    it('wraps a long unbroken blueprint description to the dialog width instead of truncating or overflowing', async () => {
+      // Regression: a single-line description with no break opportunities used
+      // to force the DialogContent grid column wider than the dialog box
+      // (grid/flex children default to min-width:auto, so `truncate` never
+      // engaged). The fix wraps the text inside the dialog width.
+      const user = userEvent.setup();
+      const longDescription = `unbroken-${'x'.repeat(400)}`;
+      (workflowApiService.listBlueprints as jest.Mock).mockResolvedValue({
+        items: [{ ...mockBlueprints[0], description: longDescription }],
+        nextToken: null,
+      });
+      renderToolbar({ nodes: [] });
+
+      await user.click(screen.getByRole('button', { name: /load blueprint from catalog/i }));
+
+      const description = await screen.findByText(longDescription);
+      // Word-wrap to the dialog width — not clipped, not overflowing.
+      expect(description).toHaveClass('whitespace-normal');
+      expect(description).toHaveClass('break-words');
+      expect(description).toHaveClass('min-w-0');
+      expect(description).not.toHaveClass('truncate');
+      expect(description).not.toHaveClass('whitespace-nowrap');
+    });
   });
 
   describe('Import button', () => {

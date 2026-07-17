@@ -183,9 +183,12 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogContent className="max-w-md">
-        <DialogHeader>
+        <DialogHeader className="min-w-0">
           <DialogTitle>Import Blueprint</DialogTitle>
-          <DialogDescription>
+          {/* min-w-0 + break-words: a long unbroken blueprint name must wrap
+              inside the dialog width instead of expanding the DialogContent
+              grid column (grid/flex children default to min-width:auto). */}
+          <DialogDescription className="min-w-0 whitespace-normal break-words">
             Import &quot;{blueprint.name}&quot; into an app
           </DialogDescription>
         </DialogHeader>
