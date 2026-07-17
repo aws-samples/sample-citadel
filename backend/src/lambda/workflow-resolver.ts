@@ -1,6 +1,6 @@
-import { AppSyncResolverHandler } from 'aws-lambda';
+import { AppSyncResolverHandler, AppSyncResolverEvent } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand, DeleteCommand, BatchGetCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand, DeleteCommand, BatchGetCommand, QueryCommandInput, UpdateCommandInput } from '@aws-sdk/lib-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { v4 as uuidv4 } from 'uuid';
 import { getUserId } from '../utils/appsync';
@@ -14,7 +14,94 @@ const WORKFLOWS_TABLE = process.env.WORKFLOWS_TABLE!;
 const APPS_TABLE = process.env.APPS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
 
-export const handler: AppSyncResolverHandler<any, unknown> = async (event) => {
+interface CreateWorkflowInput {
+  orgId: string;
+  name: string;
+  description?: string;
+  isBlueprint?: boolean;
+  definition?: unknown;
+  configuration?: unknown;
+  metadata?: unknown;
+}
+
+interface UpdateWorkflowInput {
+  workflowId: string;
+  version: number;
+  name?: string;
+  description?: string;
+  definition?: unknown;
+  configuration?: unknown;
+  metadata?: unknown;
+}
+
+interface ImportWorkflowInput {
+  orgId: string;
+  workflowJson: string;
+  name?: string;
+}
+
+/**
+ * Merged view of every argument shape this resolver's fields receive.
+ * AppSync only populates the arguments relevant to the dispatched field.
+ */
+interface WorkflowResolverArguments {
+  workflowId: string;
+  orgId: string;
+  status?: string;
+  category?: string;
+  input: CreateWorkflowInput & UpdateWorkflowInput & ImportWorkflowInput;
+  configuration: string;
+  version: number;
+  blueprintId: string;
+  appId: string;
+  name?: string;
+  agentMapping?: string | Record<string, string>;
+}
+
+type WorkflowResolverEvent = AppSyncResolverEvent<WorkflowResolverArguments>;
+
+interface WorkflowVersionHistoryEntry {
+  version: number;
+  definition: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+/** Shape of a workflow item persisted in the workflows table. */
+interface WorkflowRecord {
+  workflowId: string;
+  orgId: string;
+  name: string;
+  description?: string;
+  status: string;
+  isBlueprint: string;
+  definition: string;
+  configuration?: string | Record<string, unknown> | null;
+  version: number;
+  versionHistory?: WorkflowVersionHistoryEntry[];
+  appId?: string | null;
+  createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  metadata?: string | Record<string, unknown> | null;
+}
+
+interface WorkflowDefinitionNode {
+  id: string;
+  agentId?: unknown;
+}
+
+interface WorkflowDefinitionEdge {
+  source: string;
+  target: string;
+}
+
+interface ParsedWorkflowDefinition {
+  nodes?: WorkflowDefinitionNode[];
+  edges?: WorkflowDefinitionEdge[];
+}
+
+export const handler: AppSyncResolverHandler<WorkflowResolverArguments, unknown> = async (event) => {
   console.log('Workflow resolver event:', JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
@@ -58,7 +145,7 @@ export const handler: AppSyncResolverHandler<any, unknown> = async (event) => {
   }
 };
 
-async function getWorkflow(workflowId: string, userId: string, event: any): Promise<any> {
+async function getWorkflow(workflowId: string, userId: string, event: WorkflowResolverEvent): Promise<WorkflowRecord | null> {
   const result = await docClient.send(new GetCommand({
     TableName: WORKFLOWS_TABLE,
     Key: { workflowId },
@@ -73,19 +160,19 @@ async function getWorkflow(workflowId: string, userId: string, event: any): Prom
     throw new Error('Access denied');
   }
 
-  return result.Item;
+  return result.Item as WorkflowRecord;
 }
 
 async function listWorkflows(
   orgId: string,
   status: string | undefined,
   userId: string,
-  event: any,
+  event: WorkflowResolverEvent,
 ): Promise<{ items: unknown[]; nextToken?: string }> {
   const userOrg = await extractOrgFromEvent(event);
   const queryOrgId = userOrg || orgId;
 
-  const params: any = {
+  const params: QueryCommandInput = {
     TableName: WORKFLOWS_TABLE,
     IndexName: 'OrgStatusIndex',
     KeyConditionExpression: status
@@ -110,7 +197,7 @@ async function listWorkflows(
 async function listBlueprints(
   category?: string,
 ): Promise<{ items: unknown[]; nextToken?: string }> {
-  const params: any = {
+  const params: QueryCommandInput = {
     TableName: WORKFLOWS_TABLE,
     IndexName: 'BlueprintIndex',
     KeyConditionExpression: 'isBlueprint = :isBlueprint',
@@ -124,7 +211,7 @@ async function listBlueprints(
   let items = result.Items || [];
 
   if (category) {
-    items = items.filter((item: any) => {
+    items = items.filter((item) => {
       try {
         const meta = typeof item.metadata === 'string' ? JSON.parse(item.metadata) : item.metadata;
         return meta?.category === category;
@@ -140,7 +227,7 @@ async function listBlueprints(
   };
 }
 
-async function createWorkflow(input: any, userId: string): Promise<unknown> {
+async function createWorkflow(input: CreateWorkflowInput, userId: string): Promise<unknown> {
   const now = new Date().toISOString();
   const workflowId = uuidv4();
 
@@ -189,7 +276,7 @@ async function createWorkflow(input: any, userId: string): Promise<unknown> {
   return workflow;
 }
 
-async function updateWorkflow(input: any, userId: string, event: any): Promise<unknown> {
+async function updateWorkflow(input: UpdateWorkflowInput, userId: string, event: WorkflowResolverEvent): Promise<unknown> {
   // Verify org access first
   const existing = await getWorkflow(input.workflowId, userId, event);
   if (!existing) {
@@ -199,7 +286,7 @@ async function updateWorkflow(input: any, userId: string, event: any): Promise<u
   const now = new Date().toISOString();
   const updateExpression: string[] = [];
   const expressionAttributeNames: Record<string, string> = {};
-  const expressionAttributeValues: Record<string, any> = {};
+  const expressionAttributeValues: NonNullable<UpdateCommandInput['ExpressionAttributeValues']> = {};
 
   // Push current state to versionHistory before updating
   const historyEntry = {
@@ -281,7 +368,7 @@ async function updateWorkflow(input: any, userId: string, event: any): Promise<u
   }
 }
 
-async function deleteWorkflow(workflowId: string, userId: string, event: any): Promise<unknown> {
+async function deleteWorkflow(workflowId: string, userId: string, event: WorkflowResolverEvent): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
     throw new Error('Workflow not found');
@@ -328,7 +415,7 @@ function toJsonString(value: unknown): string | null {
  */
 function validateDefinitionStructure(definitionValue: unknown): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-  let definition: any;
+  let definition: unknown;
   if (typeof definitionValue === 'string') {
     try {
       definition = JSON.parse(definitionValue);
@@ -341,10 +428,11 @@ function validateDefinitionStructure(definitionValue: unknown): { valid: boolean
   if (typeof definition !== 'object' || definition === null) {
     errors.push('Workflow definition must be a JSON object');
   } else {
-    if (!Array.isArray(definition.nodes)) {
+    const candidate = definition as { nodes?: unknown; edges?: unknown };
+    if (!Array.isArray(candidate.nodes)) {
       errors.push('Workflow definition must contain a nodes array');
     }
-    if (!Array.isArray(definition.edges)) {
+    if (!Array.isArray(candidate.edges)) {
       errors.push('Workflow definition must contain an edges array');
     }
   }
@@ -358,15 +446,15 @@ function validateDefinitionStructure(definitionValue: unknown): { valid: boolean
 function validateDefinition(definitionJson: string): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
-  let definition: any;
+  let definition: ParsedWorkflowDefinition;
   try {
     definition = JSON.parse(definitionJson);
   } catch {
     return { valid: false, errors: ['Invalid JSON in workflow definition'] };
   }
 
-  const nodes: any[] = definition.nodes || [];
-  const edges: any[] = definition.edges || [];
+  const nodes: WorkflowDefinitionNode[] = definition.nodes || [];
+  const edges: WorkflowDefinitionEdge[] = definition.edges || [];
 
   // Check all nodes have agentId (and reject placeholder template IDs)
   for (const node of nodes) {
@@ -447,7 +535,7 @@ function validateDefinition(definitionJson: string): { valid: boolean; errors: s
 async function verifyAgentsExist(
   definitionJson: string,
 ): Promise<{ ok: boolean; missing: { nodeId: string; agentId: string }[] }> {
-  let definition: any;
+  let definition: ParsedWorkflowDefinition;
   try {
     definition = JSON.parse(definitionJson);
   } catch {
@@ -455,7 +543,7 @@ async function verifyAgentsExist(
     return { ok: true, missing: [] };
   }
 
-  const nodes: any[] = definition.nodes || [];
+  const nodes: WorkflowDefinitionNode[] = definition.nodes || [];
   const agentIds = Array.from(
     new Set(
       nodes
@@ -500,7 +588,7 @@ async function verifyAgentsExist(
   return { ok: missing.length === 0, missing };
 }
 
-async function publishWorkflow(workflowId: string, userId: string, event: any): Promise<unknown> {
+async function publishWorkflow(workflowId: string, userId: string, event: WorkflowResolverEvent): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
     throw new Error('Workflow not found');
@@ -556,7 +644,7 @@ async function updateWorkflowConfiguration(
   configurationJson: string,
   version: number,
   userId: string,
-  event: any,
+  event: WorkflowResolverEvent,
 ): Promise<unknown> {
   const existing = await getWorkflow(workflowId, userId, event);
   if (!existing) {
@@ -614,7 +702,7 @@ async function importBlueprint(
   name: string | undefined,
   agentMapping: string | Record<string, string> | undefined,
   userId: string,
-  event: any,
+  event: WorkflowResolverEvent,
 ): Promise<unknown> {
   // Get the blueprint
   const blueprintResult = await docClient.send(new GetCommand({
@@ -727,10 +815,16 @@ async function importBlueprint(
   return workflow;
 }
 
-async function importWorkflowFn(input: any, userId: string): Promise<unknown> {
+async function importWorkflowFn(input: ImportWorkflowInput, userId: string): Promise<unknown> {
   const { orgId, workflowJson, name } = input;
 
-  let parsed: any;
+  let parsed: {
+    name?: string;
+    description?: string;
+    definition?: string;
+    configuration?: string | null;
+    metadata?: string | null;
+  };
   try {
     parsed = JSON.parse(workflowJson);
   } catch {
@@ -771,7 +865,7 @@ async function importWorkflowFn(input: any, userId: string): Promise<unknown> {
   return workflow;
 }
 
-async function exportWorkflow(workflowId: string, userId: string, event: any): Promise<unknown> {
+async function exportWorkflow(workflowId: string, userId: string, event: WorkflowResolverEvent): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
     throw new Error('Workflow not found');
@@ -792,7 +886,7 @@ async function getWorkflowVersion(
   workflowId: string,
   version: number,
   userId: string,
-  event: any,
+  event: WorkflowResolverEvent,
 ): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
@@ -806,7 +900,7 @@ async function getWorkflowVersion(
 
   // Look in versionHistory
   const history = workflow.versionHistory || [];
-  const entry = history.find((h: any) => h.version === version);
+  const entry = history.find((h) => h.version === version);
   if (!entry) {
     throw new Error(`Version ${version} not found`);
   }
@@ -818,7 +912,7 @@ async function getWorkflowVersion(
   };
 }
 
-async function listAppWorkflows(appId: string, userId: string, event: any): Promise<unknown[]> {
+async function listAppWorkflows(appId: string, userId: string, event: WorkflowResolverEvent): Promise<unknown[]> {
   // Get the app first
   const appResult = await docClient.send(new GetCommand({
     TableName: APPS_TABLE,

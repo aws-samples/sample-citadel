@@ -51,12 +51,25 @@ const REGISTRY_ASSIGNED_ID = 'rec123456789';
 const STALE_UUID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
 jest.mock('../../services/registry-service', () => {
-  const records = new Map<string, any>();
+  interface MockRegistryRecord {
+    recordId: string;
+    name?: string;
+    description?: string;
+    status?: string;
+    customDescriptorContent?: string;
+    createdAt?: Date;
+    updatedAt?: Date;
+  }
+  const records = new Map<string, MockRegistryRecord>();
   const svc = {
     async getResource(type: string, id: string) {
       return records.get(`${type}:${id}`) ?? null;
     },
-    async createResource(type: string, _callerId: string, input: any) {
+    async createResource(
+      type: string,
+      _callerId: string,
+      input: { name?: string; description?: string; customMetadata?: string },
+    ) {
       // Mimic the real registry: the caller-supplied id is DISCARDED and a
       // registry-assigned 12-char recordId is used instead.
       const record = {
@@ -71,7 +84,11 @@ jest.mock('../../services/registry-service', () => {
       records.set(`${type}:${record.recordId}`, record);
       return record;
     },
-    async updateResource(type: string, id: string, input: any) {
+    async updateResource(
+      type: string,
+      id: string,
+      input: { name?: string; description?: string; customMetadata?: string },
+    ) {
       const existing = records.get(`${type}:${id}`);
       if (!existing) throw new Error(`Record not found: ${type}:${id}`);
       const updated = {
@@ -107,7 +124,7 @@ jest.mock('../../services/registry-service', () => {
     getRegistryService: jest.fn(() => svc),
     isRegistryEnabled: jest.fn(() => true),
     TypeMismatchError,
-    __seed: (type: string, id: string, rec: any) => records.set(`${type}:${id}`, rec),
+    __seed: (type: string, id: string, rec: MockRegistryRecord) => records.set(`${type}:${id}`, rec),
     __get: (type: string, id: string) => records.get(`${type}:${id}`),
     __reset: () => records.clear(),
   };
@@ -124,21 +141,37 @@ jest.mock('../../utils/appsync-publish', () => ({
 import { handler } from '../registry-agent-record-resolver';
 import type { Context } from 'aws-lambda';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const registryMock = require('../../services/registry-service') as {
-  __seed: (type: string, id: string, rec: any) => void;
-  __get: (type: string, id: string) => any;
+import * as registryServiceMockedModule from '../../services/registry-service';
+
+interface SeededRegistryRecord {
+  recordId: string;
+  name?: string;
+  description?: string;
+  status?: string;
+  customDescriptorContent?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// jest.mock above replaces the module, so this namespace import resolves to
+// the mock factory's return value (which carries the __seed/__get/__reset
+// test hooks not present on the real module's type).
+const registryMock = registryServiceMockedModule as unknown as {
+  __seed: (type: string, id: string, rec: SeededRegistryRecord) => void;
+  __get: (type: string, id: string) => SeededRegistryRecord | undefined;
   __reset: () => void;
 };
 
 const mockContext = {} as unknown as Context;
 
-function makeEvent(fieldName: string, args: any, sub = 'user-123') {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub, claims: { sub } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 /**
@@ -146,7 +179,7 @@ function makeEvent(fieldName: string, args: any, sub = 'user-123') {
  * in its customDescriptorContent (a stale UUID) — the exact persisted state
  * a real createApp leaves behind.
  */
-function seedAppWithStaleDescriptorId(manifest: Record<string, any> = {}): void {
+function seedAppWithStaleDescriptorId(manifest: Record<string, unknown> = {}): void {
   registryMock.__seed('agent', 'app-1', {
     recordId: 'app-1',
     name: 'Test App',
@@ -178,7 +211,7 @@ function seedAppWithStaleDescriptorId(manifest: Record<string, any> = {}): void 
 function metaUpdateCalls() {
   return ddbMock
     .commandCalls(UpdateCommand)
-    .filter((c) => (c.args[0].input as any).TableName === 'citadel-apps-test');
+    .filter((c) => (c.args[0].input as { TableName?: string }).TableName === 'citadel-apps-test');
 }
 
 describe('registry-agent-record-resolver — appId identity chain', () => {
@@ -209,7 +242,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
 
       // The persisted record's descriptor still embeds the original UUID.
       const persisted = registryMock.__get('agent', REGISTRY_ASSIGNED_ID);
@@ -230,11 +263,11 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
 
       const calls = metaUpdateCalls();
       expect(calls).toHaveLength(1);
-      const mirrorKey = (calls[0].args[0].input as any).Key.appId;
+      const mirrorKey = (calls[0].args[0].input as { Key: { appId?: string } }).Key.appId;
       expect(mirrorKey).toBe(REGISTRY_ASSIGNED_ID);
       // Create-then-import identity chain: the id handed back to the caller
       // must be the same id the mirror row is keyed by.
@@ -280,7 +313,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         makeEvent('updateApp', { input: { appId: 'app-1', name: 'Renamed' } }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -290,7 +323,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         makeEvent('bindWorkflowToApp', { appId: 'app-1', workflowId: 'wf-1' }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -300,7 +333,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         makeEvent('bindWorkflowToApp', { appId: 'app-1', workflowId: 'wf-1' }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -310,7 +343,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         makeEvent('unbindWorkflowFromApp', { appId: 'app-1', workflowId: 'wf-1' }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -324,7 +357,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -337,7 +370,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -353,7 +386,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -367,7 +400,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -381,7 +414,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -394,7 +427,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -404,7 +437,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         makeEvent('grantAppAccess', { appId: 'app-1', userId: 'user-2', role: 'viewer' }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
 
@@ -416,7 +449,7 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
         makeEvent('revokeAppAccess', { appId: 'app-1', userId: 'user-2' }),
         mockContext,
         jest.fn(),
-      )) as any;
+      )) as Record<string, unknown>;
       expect(result.appId).toBe('app-1');
     });
   });

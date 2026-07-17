@@ -41,7 +41,7 @@ interface SeedBlueprintNode {
   id: string;
   agentId: string;
   position: { x: number; y: number };
-  configuration: Record<string, any>;
+  configuration: Record<string, unknown>;
 }
 
 interface SeedBlueprintEdge {
@@ -50,7 +50,7 @@ interface SeedBlueprintEdge {
   target: string;
   sourceHandle: string;
   targetHandle: string;
-  condition?: { field: string; operator: string; value: any };
+  condition?: { field: string; operator: string; value: unknown };
 }
 
 interface SeedBlueprintDefinition {
@@ -183,7 +183,7 @@ async function sendCfnResponse(
   event: CloudFormationCustomResourceEvent,
   context: Context,
   status: 'SUCCESS' | 'FAILED',
-  data: Record<string, any>,
+  data: Record<string, unknown>,
 ): Promise<void> {
   const responseBody = JSON.stringify({
     Status: status,

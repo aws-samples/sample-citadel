@@ -44,6 +44,9 @@ import {
   GetCommand,
   QueryCommand,
   ScanCommand,
+  type NativeAttributeValue,
+  type QueryCommandOutput,
+  type ScanCommandOutput,
 } from '@aws-sdk/lib-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { v4 as uuidv4 } from 'uuid';
@@ -79,6 +82,7 @@ import {
   updateAppMetaFields,
   deleteAppMeta,
   APP_META_SORT_VALUE,
+  type AppMetaRow,
 } from '../utils/apps-table-meta';
 
 // ---------------------------------------------------------------------------
@@ -98,13 +102,13 @@ import {
 interface DeprecatedAgentAppShape {
   appId: string;
   orgId?: string;
-  name: string;
+  name?: string;
   description?: string;
   status?: string;
   version?: number;
   createdAt?: string;
   updatedAt?: string;
-  sourceProjectId?: string;
+  sourceProjectId?: string | null;
 }
 
 /**
@@ -215,7 +219,7 @@ function projectAgentAppShape(
 function recordFromInput(
   app: DeprecatedAgentAppShape,
 ): Partial<RegistryRecord> {
-  const metadata: AgentCustomMetadata & { sourceProjectId?: string } = {
+  const metadata: AgentCustomMetadata & { sourceProjectId?: string | null } = {
     categories: [],
     icon: '',
     state: 'active',
@@ -354,19 +358,37 @@ async function assertEnabledCatalogModel(modelKey: string): Promise<void> {
 // single source of truth for AgentApp state during the deprecation window.
 // ---------------------------------------------------------------------------
 
+/** A single agent binding entry stored in the manifest. */
+interface AgentBinding {
+  agentId: string;
+  status?: string;
+  addedAt?: string;
+  systemPromptAddition?: string;
+  toolRestrictions?: string[];
+  modelOverride?: string;
+}
+
+/** A single permission entry stored in the manifest. */
+interface AppPermission {
+  permissionId: string;
+  actions?: string[];
+  resources?: string[];
+  description?: string;
+}
+
 interface AgentAppManifest {
   orgId?: string;
   version?: number;
   status?: string;
   createdBy?: string;
   workflowIds?: string[];
-  agentBindings?: any[];
-  permissions?: any[];
-  configSchema?: any;
-  configValues?: any;
-  authConfig?: any;
+  agentBindings?: AgentBinding[];
+  permissions?: AppPermission[];
+  configSchema?: Record<string, unknown> | null;
+  configValues?: unknown;
+  authConfig?: unknown;
   access?: Record<string, { role: string; grantedAt: string; grantedBy: string }>;
-  routingConfig?: any;
+  routingConfig?: unknown;
   sourceProjectId?: string;
 }
 
@@ -427,7 +449,35 @@ function writeManifestMutation(
  * agentBindings, permissions, config, auth, access) that the legacy resolver
  * returned.
  */
-function projectAgentApp(record: RegistryRecord): any {
+/**
+ * The AgentApp-shaped projection returned by this resolver's read/mutation
+ * paths — DeprecatedAgentAppShape fields enriched with the manifest-derived
+ * payload plus the publish-time fields merged in from the AppsTable.
+ */
+interface ProjectedAgentApp {
+  appId?: string;
+  name?: string;
+  description?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  status: string;
+  orgId: string;
+  createdBy: string;
+  version: number;
+  workflowIds: string[];
+  agentBindings: AgentBinding[];
+  permissions: AppPermission[];
+  configSchema: Record<string, unknown> | null;
+  configValues: unknown;
+  authConfig: unknown;
+  access: { userId: string; role: string; grantedAt: string; grantedBy: string }[];
+  routingConfig: unknown;
+  sourceProjectId: string | null;
+  endpointUrl?: string;
+  apiId?: string;
+}
+
+function projectAgentApp(record: RegistryRecord): ProjectedAgentApp {
   const base = projectAgentAppShape(record);
   const descriptor = parseDescriptor(record);
   const manifest = readManifest(record);
@@ -471,7 +521,7 @@ function projectAgentApp(record: RegistryRecord): any {
  * (e.g. importBlueprint's GetItem) miss deterministically. Always return the
  * 12-char recordId as appId — mirrors the normalization getApp applies.
  */
-function projectAgentAppNormalized(record: RegistryRecord): any {
+function projectAgentAppNormalized(record: RegistryRecord): ProjectedAgentApp {
   const projected = projectAgentApp(record);
   projected.appId = record.recordId;
   return projected;
@@ -514,7 +564,72 @@ async function emitEvent(eventType: string, detail: unknown): Promise<void> {
 // Entry point — single handler dispatched on event.info.fieldName
 // ---------------------------------------------------------------------------
 
-export const handler: AppSyncResolverHandler<any, unknown> = async (event) => {
+interface CreateAppInput {
+  orgId: string;
+  name: string;
+  description?: string;
+  sourceProjectId?: string;
+}
+
+interface UpdateAppInput {
+  appId: string;
+  orgId?: string;
+  name?: string;
+  description?: string;
+  status?: string;
+  version?: number;
+  routingConfig?: string;
+  sourceProjectId?: string;
+}
+
+/**
+ * Merged view of every `input` argument shape the dispatched mutations
+ * receive (createApp, updateApp, updateAgentBinding, publishAppStatusEvent).
+ */
+interface RegistryAppInputArgument {
+  appId: string;
+  orgId: string;
+  name: string;
+  description?: string;
+  status?: string;
+  version?: number;
+  routingConfig?: string;
+  sourceProjectId?: string;
+  agentId: string;
+  systemPromptAddition?: string;
+  toolRestrictions?: string[];
+  modelOverride?: string;
+  previousStatus: string;
+  newStatus: string;
+  timestamp: string;
+}
+
+/**
+ * Merged view of every argument shape this resolver's 22 fields receive.
+ * AppSync only populates the arguments relevant to the dispatched field.
+ */
+interface RegistryResolverArguments {
+  appId: string;
+  orgId: string;
+  workflowId: string;
+  input: RegistryAppInputArgument;
+  component: { type: string; data: string };
+  componentType: string;
+  componentId: string;
+  schema: string | object;
+  values: string | object;
+  version: number;
+  authConfig: string | object;
+  userId: string;
+  role: string;
+  startTime: string;
+  endTime: string;
+  keyId: string;
+  name: string;
+  expiresIn?: number;
+}
+
+export const handler: AppSyncResolverHandler<RegistryResolverArguments, unknown> = async (event) => {
   console.log('Registry agent record resolver event:', JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
@@ -635,7 +750,7 @@ async function getApp(appId: string, _userId: string): Promise<unknown> {
 async function listApps(
   orgId: string,
   _userId: string,
-  event: any,
+  event: unknown,
 ): Promise<{ items: unknown[]; nextToken: string | null }> {
   const isAllOrgsRequest = !orgId || orgId === 'All Organizations';
   if (isAllOrgsRequest && !isAdminFromEvent(event)) {
@@ -663,9 +778,11 @@ async function queryAppsViaOrgIndex(
   orgId: string,
 ): Promise<{ items: unknown[]; nextToken: string | null }> {
   const items: unknown[] = [];
-  let nextToken: any = undefined;
+  let nextToken: Record<string, NativeAttributeValue> | undefined = undefined;
   do {
-    const result = await getDocClient().send(
+    // Explicit annotation breaks the let-variable flow-analysis cycle
+    // (nextToken → send() overload → result → nextToken) under TS 5.9.
+    const result: QueryCommandOutput = await getDocClient().send(
       new QueryCommand({
         TableName: APPS_TABLE,
         IndexName: 'OrgIndex',
@@ -692,9 +809,11 @@ async function scanAllAppsViaMeta(): Promise<{
   nextToken: string | null;
 }> {
   const items: unknown[] = [];
-  let nextToken: any = undefined;
+  let nextToken: Record<string, NativeAttributeValue> | undefined = undefined;
   do {
-    const result = await getDocClient().send(
+    // Same explicit annotation as queryAppsViaOrgIndex — breaks the
+    // let-variable flow-analysis cycle under TS 5.9.
+    const result: ScanCommandOutput = await getDocClient().send(
       new ScanCommand({
         TableName: APPS_TABLE,
         FilterExpression: 'sortId = :meta',
@@ -729,7 +848,7 @@ function metaRowToAppShape(row: Record<string, unknown>): Record<string, unknown
   };
 }
 
-async function createApp(input: any, userId: string): Promise<unknown> {
+async function createApp(input: CreateAppInput, userId: string): Promise<unknown> {
   const now = new Date().toISOString();
   const appId = uuidv4();
 
@@ -827,7 +946,7 @@ async function createApp(input: any, userId: string): Promise<unknown> {
   return projectAgentAppNormalized(record);
 }
 
-async function updateApp(input: any, userId: string): Promise<unknown> {
+async function updateApp(input: UpdateAppInput, userId: string): Promise<unknown> {
   const existing = await getRegistryService().getResource('agent', input.appId);
   if (!existing) {
     throw new Error('App not found');
@@ -885,7 +1004,7 @@ async function updateApp(input: any, userId: string): Promise<unknown> {
   // Eventually-consistent mirror to AppsTable.#META — only the fields the
   // caller actually changed, plus the always-bumped updatedAt + version so
   // OrgIndex projections (Step 3) stay correct. Helper never throws.
-  const metaPartial: Record<string, any> = {
+  const metaPartial: Partial<Omit<AppMetaRow, 'appId' | 'createdAt' | 'createdBy'>> = {
     updatedAt: mergedAgentApp.updatedAt,
     version: mergedAgentApp.version,
   };
@@ -1050,7 +1169,7 @@ async function updateAgentBinding(
   }
   const manifest = readManifest(record);
   const bindings = manifest.agentBindings || [];
-  const idx = bindings.findIndex((b: any) => b.agentId === input.agentId);
+  const idx = bindings.findIndex((b) => b.agentId === input.agentId);
   if (idx === -1) {
     throw new Error('Agent is not a component of this app');
   }
@@ -1159,7 +1278,7 @@ async function addAppComponent(
       }
       componentId = data.agentId;
       const existing = manifest.agentBindings || [];
-      const filtered = existing.filter((b: any) => b.agentId !== data.agentId);
+      const filtered = existing.filter((b) => b.agentId !== data.agentId);
       const binding = {
         agentId: data.agentId,
         status: 'DESIGN',
@@ -1188,7 +1307,7 @@ async function addAppComponent(
       componentId = data.permissionId;
       const existing = manifest.permissions || [];
       const filtered = existing.filter(
-        (p: any) => p.permissionId !== data.permissionId,
+        (p) => p.permissionId !== data.permissionId,
       );
       const permission = {
         permissionId: data.permissionId,
@@ -1235,12 +1354,12 @@ async function removeAppComponent(
     switch (componentType) {
       case 'agent':
         m.agentBindings = (m.agentBindings || []).filter(
-          (b: any) => b.agentId !== componentId,
+          (b) => b.agentId !== componentId,
         );
         break;
       case 'permission':
         m.permissions = (m.permissions || []).filter(
-          (p: any) => p.permissionId !== componentId,
+          (p) => p.permissionId !== componentId,
         );
         break;
       default:
@@ -1329,11 +1448,18 @@ async function setAppConfigValues(
     const valid = validate(values);
     if (!valid) {
       const errors = (validate.errors || [])
-        .map((e: any) => {
+        .map((e) => {
+          // ajv v6 ErrorObject has dataPath/params unions; access the fields
+          // this message builder needs through a structural view.
+          const err = e as {
+            instancePath?: string;
+            params?: { missingProperty?: string };
+            message?: string;
+          };
           const path =
-            e.instancePath ||
-            (e.params?.missingProperty ? e.params.missingProperty : '');
-          return `${path ? path + ': ' : ''}${e.message}`;
+            err.instancePath ||
+            (err.params?.missingProperty ? err.params.missingProperty : '');
+          return `${path ? path + ': ' : ''}${err.message}`;
         })
         .join('; ');
       throw new Error(`Config validation failed: ${errors}`);

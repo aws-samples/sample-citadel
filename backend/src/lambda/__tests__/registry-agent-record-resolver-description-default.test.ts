@@ -92,23 +92,31 @@ const registry = getRegistryService() as unknown as {
   updateResource: jest.Mock;
 };
 
-function makeEvent(fieldName: string, args: any, sub = 'user-123') {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub, claims: { sub } },
-  } as any;
+  } as unknown as HandlerEvent;
+}
+
+interface RegistryWriteInput {
+  name?: string;
+  description?: string;
+  customMetadata?: string;
 }
 
 /** Last createResource CreateResourceInput (third positional arg). */
-function lastCreateResourceInput(): any {
+function lastCreateResourceInput(): RegistryWriteInput {
   const calls = registry.createResource.mock.calls;
   expect(calls.length).toBeGreaterThanOrEqual(1);
   return calls[calls.length - 1][2];
 }
 
 /** Last updateResource UpdateResourceInput (third positional arg). */
-function lastUpdateResourceInput(): any {
+function lastUpdateResourceInput(): RegistryWriteInput {
   const calls = registry.updateResource.mock.calls;
   expect(calls.length).toBeGreaterThanOrEqual(1);
   return calls[calls.length - 1][2];

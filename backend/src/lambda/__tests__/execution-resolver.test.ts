@@ -6,6 +6,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCom
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { CognitoIdentityProviderClient, AdminGetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
 import { mockClient } from 'aws-sdk-client-mock';
+import type { Context, Callback } from 'aws-lambda';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const ebMock = mockClient(EventBridgeClient);
@@ -17,12 +18,22 @@ jest.mock('../../utils/appsync', () => ({
 
 import { handler } from '../execution-resolver';
 
-function makeEvent(fieldName: string, args: any, sub = 'user-123') {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub, claims: { sub } },
-  } as any;
+  } as unknown as HandlerEvent;
+}
+
+const mockContext = {} as Context;
+const mockCallback: Callback<unknown> = () => undefined;
+
+/** Invokes the handler with stub context/callback and casts the result. */
+async function invoke<T = Record<string, unknown>>(event: HandlerEvent): Promise<T> {
+  return (await handler(event, mockContext, mockCallback)) as T;
 }
 
 function mockCognitoOrg(orgId: string) {
@@ -72,10 +83,8 @@ describe('execution-resolver', () => {
       };
       ddbMock.on(GetCommand).resolves({ Item: execution });
 
-      const result = await handler(
+      const result = await invoke(
         makeEvent('getExecution', { executionId: 'exec-1' }),
-        {} as any,
-        {} as any,
       );
 
       expect(result).toEqual(execution);
@@ -92,7 +101,7 @@ describe('execution-resolver', () => {
       });
 
       await expect(
-        handler(makeEvent('getExecution', { executionId: 'exec-1' }), {} as any, {} as any),
+        invoke(makeEvent('getExecution', { executionId: 'exec-1' }),),
       ).rejects.toThrow('Access denied');
     });
 
@@ -112,9 +121,9 @@ describe('execution-resolver', () => {
         info: { fieldName: 'getExecution' },
         arguments: { executionId: 'exec-claim' },
         identity: { sub: 'user-123', 'custom:organization': 'org-claim' },
-      } as any;
+      } as unknown as HandlerEvent;
 
-      const result = await handler(claimEvent, {} as any, {} as any);
+      const result = await invoke(claimEvent);
 
       expect(result).toEqual(execution);
       expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
@@ -131,10 +140,8 @@ describe('execution-resolver', () => {
       ];
       ddbMock.on(QueryCommand).resolves({ Items: items });
 
-      const result = await handler(
+      const result = await invoke(
         makeEvent('listExecutions', { workflowId: 'wf-1' }),
-        {} as any,
-        {} as any,
       );
 
       expect(result).toEqual({ items, nextToken: undefined });
@@ -168,10 +175,8 @@ describe('execution-resolver', () => {
       ddbMock.on(GetCommand).resolves({ Item: publishedWorkflow });
       ddbMock.on(PutCommand).resolves({});
 
-      const result = await handler(
+      const result = await invoke(
         makeEvent('startExecution', { workflowId: 'wf-1', input: JSON.stringify({ key: 'value' }) }),
-        {} as any,
-        {} as any,
       );
 
       // Execution created with correct fields
@@ -184,7 +189,7 @@ describe('execution-resolver', () => {
       expect(result.startedAt).toBeDefined();
 
       // All nodeResults initialized as pending
-      const nodeResults = result.nodeResults;
+      const nodeResults = result.nodeResults as Record<string, { nodeId: string; agentId: string; status: string }>;
       expect(nodeResults).toBeDefined();
       expect(nodeResults['n1']).toMatchObject({ nodeId: 'n1', agentId: 'agent-1', status: 'pending' });
       expect(nodeResults['n2']).toMatchObject({ nodeId: 'n2', agentId: 'agent-2', status: 'pending' });
@@ -216,7 +221,7 @@ describe('execution-resolver', () => {
       });
 
       await expect(
-        handler(makeEvent('startExecution', { workflowId: 'wf-draft' }), {} as any, {} as any),
+        invoke(makeEvent('startExecution', { workflowId: 'wf-draft' }),),
       ).rejects.toThrow(/published/i);
     });
   });
@@ -242,10 +247,8 @@ describe('execution-resolver', () => {
         },
       });
 
-      const result = await handler(
+      const result = await invoke(
         makeEvent('cancelExecution', { executionId: 'exec-1' }),
-        {} as any,
-        {} as any,
       );
 
       expect(result.status).toBe('cancelled');
@@ -278,10 +281,8 @@ describe('execution-resolver', () => {
     };
 
     test('echoes args.input so AppSync fans out to onWorkflowProgress subscribers', async () => {
-      const result = await handler(
+      const result = await invoke(
         makeEvent('publishWorkflowProgress', { input: progressInput }),
-        {} as any,
-        {} as any,
       );
 
       expect(result).toEqual(progressInput);
@@ -289,7 +290,7 @@ describe('execution-resolver', () => {
 
     test('does not throw Unknown field', async () => {
       await expect(
-        handler(makeEvent('publishWorkflowProgress', { input: progressInput }), {} as any, {} as any),
+        invoke(makeEvent('publishWorkflowProgress', { input: progressInput }),),
       ).resolves.toBeDefined();
     });
   });

@@ -61,7 +61,18 @@ async function emitPublishFailureMetric(eventType: string): Promise<void> {
   }
 }
 
-export const handler: EventBridgeHandler<string, any, void> = async (event) => {
+/** EventBridge detail payload emitted by the arbiter step runner / workers. */
+interface WorkflowProgressDetail {
+  executionId?: string;
+  workflowId?: string;
+  nodeId?: string | null;
+  status?: string | null;
+  output?: unknown;
+  error?: string | null;
+  timestamp?: string;
+}
+
+export const handler: EventBridgeHandler<string, WorkflowProgressDetail, void> = async (event) => {
   const detail = event.detail;
   const detailType = event['detail-type'];
 

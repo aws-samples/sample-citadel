@@ -60,13 +60,27 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 const REGISTRY_ASSIGNED_ID = 'rec123456789';
 
 jest.mock('../../services/registry-service', () => {
-  const records = new Map<string, any>();
-  const createInputs: any[] = [];
+  interface MockRegistryRecord {
+    recordId: string;
+    name?: string;
+    description?: string;
+    status?: string;
+    customDescriptorContent?: string;
+    createdAt?: Date;
+    updatedAt?: Date;
+  }
+  interface MockRegistryWriteInput {
+    name?: string;
+    description?: string;
+    customMetadata?: string;
+  }
+  const records = new Map<string, MockRegistryRecord>();
+  const createInputs: MockRegistryWriteInput[] = [];
   const svc = {
     async getResource(type: string, id: string) {
       return records.get(`${type}:${id}`) ?? null;
     },
-    async createResource(type: string, _callerId: string, input: any) {
+    async createResource(type: string, _callerId: string, input: MockRegistryWriteInput) {
       // Mimic the REAL registry: the caller-supplied id is DISCARDED and a
       // registry-assigned 12-char recordId is used instead. The exact input
       // is captured so the test can assert on the description that reached
@@ -84,7 +98,7 @@ jest.mock('../../services/registry-service', () => {
       records.set(`${type}:${record.recordId}`, record);
       return record;
     },
-    async updateResource(type: string, id: string, input: any) {
+    async updateResource(type: string, id: string, input: MockRegistryWriteInput) {
       const existing = records.get(`${type}:${id}`);
       if (!existing) throw new Error(`Record not found: ${type}:${id}`);
       const updated = {
@@ -142,10 +156,14 @@ import { handler as workflowHandler } from '../workflow-resolver';
 import { handler as executionHandler } from '../execution-resolver';
 import type { Context } from 'aws-lambda';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const registryMock = require('../../services/registry-service') as {
-  __get: (type: string, id: string) => any;
-  __createInputs: any[];
+import * as registryServiceMockedModule from '../../services/registry-service';
+
+// jest.mock above replaces the module, so this namespace import resolves to
+// the mock factory's return value (which carries the __get/__createInputs/
+// __reset test hooks not present on the real module's type).
+const registryMock = registryServiceMockedModule as unknown as {
+  __get: (type: string, id: string) => Record<string, unknown> | undefined;
+  __createInputs: { name?: string; description?: string; customMetadata?: string }[];
   __reset: () => void;
 };
 
@@ -161,9 +179,9 @@ const KEY_ATTR: Record<string, string> = {
   'citadel-executions-test': 'executionId',
 };
 
-const stores = new Map<string, Map<string, any>>();
+const stores = new Map<string, Map<string, Record<string, unknown>>>();
 
-function store(tableName: string): Map<string, any> {
+function store(tableName: string): Map<string, Record<string, unknown>> {
   let s = stores.get(tableName);
   if (!s) {
     s = new Map();
@@ -204,14 +222,23 @@ function splitTopLevel(expr: string): string[] {
  *   - `SET #x = list_append(if_not_exists(#x, :empty), :new)` (importBlueprint)
  * Upsert semantics (creates the row when absent) match DynamoDB UpdateItem.
  */
-function applyUpdate(input: any): { Attributes?: any } {
+interface FakeUpdateInput {
+  TableName?: string;
+  Key?: Record<string, string>;
+  ExpressionAttributeNames?: Record<string, string>;
+  ExpressionAttributeValues?: Record<string, unknown>;
+  UpdateExpression?: string;
+  ReturnValues?: string;
+}
+
+function applyUpdate(input: FakeUpdateInput): { Attributes?: Record<string, unknown> } {
   const tableName = input.TableName as string;
   const attr = keyAttrOf(tableName);
-  const keyVal = input.Key[attr];
+  const keyVal = input.Key![attr];
   const s = store(tableName);
-  const item: any = { ...(s.get(keyVal) ?? { [attr]: keyVal }) };
+  const item: Record<string, unknown> = { ...(s.get(keyVal) ?? { [attr]: keyVal }) };
   const names: Record<string, string> = input.ExpressionAttributeNames ?? {};
-  const values: Record<string, any> = input.ExpressionAttributeValues ?? {};
+  const values: Record<string, unknown> = input.ExpressionAttributeValues ?? {};
   const resolveName = (token: string) =>
     token.startsWith('#') ? names[token] : token;
 
@@ -228,8 +255,8 @@ function applyUpdate(input: any): { Attributes?: any } {
     );
     if (listAppend) {
       const baseAttr = resolveName(listAppend[1]);
-      const base = item[baseAttr] ?? values[listAppend[2]];
-      item[lhs] = [...base, ...values[listAppend[3]]];
+      const base = (item[baseAttr] ?? values[listAppend[2]]) as unknown[];
+      item[lhs] = [...base, ...(values[listAppend[3]] as unknown[])];
     } else if (rhs.startsWith(':')) {
       item[lhs] = values[rhs];
     } else {
@@ -242,23 +269,23 @@ function applyUpdate(input: any): { Attributes?: any } {
 
 /** (Re)installs the fake handlers — must run after every ddbMock.reset(). */
 function installFakeDdb(): void {
-  ddbMock.on(GetCommand).callsFake((input: any) => {
+  ddbMock.on(GetCommand).callsFake((input: { TableName: string; Key: Record<string, string> }) => {
     const attr = keyAttrOf(input.TableName);
     return { Item: store(input.TableName).get(input.Key[attr]) };
   });
-  ddbMock.on(PutCommand).callsFake((input: any) => {
+  ddbMock.on(PutCommand).callsFake((input: { TableName: string; Item: Record<string, unknown> }) => {
     const attr = keyAttrOf(input.TableName);
-    store(input.TableName).set(input.Item[attr], { ...input.Item });
+    store(input.TableName).set(input.Item[attr] as string, { ...input.Item });
     return {};
   });
-  ddbMock.on(UpdateCommand).callsFake((input: any) => applyUpdate(input));
-  ddbMock.on(BatchGetCommand).callsFake((input: any) => {
-    const responses: Record<string, any[]> = {};
-    for (const [tableName, spec] of Object.entries<any>(input.RequestItems)) {
+  ddbMock.on(UpdateCommand).callsFake((input: FakeUpdateInput) => applyUpdate(input));
+  ddbMock.on(BatchGetCommand).callsFake((input: { RequestItems: Record<string, { Keys: Record<string, string>[] }> }) => {
+    const responses: Record<string, Record<string, unknown>[]> = {};
+    for (const [tableName, spec] of Object.entries(input.RequestItems)) {
       const attr = keyAttrOf(tableName);
-      responses[tableName] = spec.Keys.map((k: any) =>
+      responses[tableName] = spec.Keys.map((k) =>
         store(tableName).get(k[attr]),
-      ).filter(Boolean);
+      ).filter((row): row is Record<string, unknown> => Boolean(row));
     }
     return { Responses: responses };
   });
@@ -271,12 +298,12 @@ function installFakeDdb(): void {
  * extractOrgFromEvent resolve the org without a Cognito round-trip (the
  * claim-first path pinned by the sibling workflow/execution tests).
  */
-function makeEvent(fieldName: string, args: any, sub = 'user-123') {
+function makeEvent<E>(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): E {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub, claims: { sub }, 'custom:organization': 'org-1' },
-  } as any;
+  } as unknown as E;
 }
 
 const BLUEPRINT_ID = 'bp-echo-1';
@@ -324,15 +351,25 @@ function eventsOfType(detailType: string) {
     .filter((e) => e.DetailType === detailType);
 }
 
+/** Loose row view for asserting on resolver results in this seam test. */
+interface TestRow {
+  [key: string]: unknown;
+  appId?: string;
+  workflowId?: string;
+  executionId?: string;
+  status?: string;
+  definition?: string;
+}
+
 /** Runs createApp + importBlueprint and returns { appId, workflow }. */
-async function createAppAndImport(): Promise<{ appId: string; workflow: any }> {
+async function createAppAndImport(): Promise<{ appId: string; workflow: TestRow }> {
   const app = (await registryHandler(
     makeEvent('createApp', {
       input: { name: 'Import Test App', orgId: 'org-1' },
     }),
     mockContext,
     jest.fn(),
-  )) as any;
+  )) as TestRow;
 
   const workflow = (await workflowHandler(
     makeEvent('importBlueprint', {
@@ -346,7 +383,7 @@ async function createAppAndImport(): Promise<{ appId: string; workflow: any }> {
     }),
     mockContext,
     jest.fn(),
-  )) as any;
+  )) as TestRow;
 
   return { appId: app.appId, workflow };
 }
@@ -383,7 +420,7 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
       }),
       mockContext,
       jest.fn(),
-    )) as any;
+    )) as TestRow;
 
     // Live bug #1: the description that reached the registry must be
     // non-empty — defaulted to the app name.
@@ -412,7 +449,7 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
       }),
       mockContext,
       jest.fn(),
-    )) as any;
+    )) as TestRow;
 
     // The regression this seam test exists for: the id handed back by
     // createApp resolves — no 'App not found'.
@@ -432,7 +469,7 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
       makeEvent('publishWorkflow', { workflowId: imported.workflowId }),
       mockContext,
       jest.fn(),
-    )) as any;
+    )) as TestRow;
 
     expect(published.status).toBe('PUBLISHED');
     expect(
@@ -444,7 +481,7 @@ describe('cross-resolver integration — createApp → importBlueprint → publi
       makeEvent('startExecution', { workflowId: imported.workflowId }),
       mockContext,
       jest.fn(),
-    )) as any;
+    )) as TestRow;
 
     expect(execution.executionId).toBeDefined();
     expect(execution.workflowId).toBe(imported.workflowId);

@@ -14,7 +14,7 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 // Mock https module for CFN response
 const mockHttpsRequest = jest.fn();
 jest.mock('https', () => ({
-  request: (...args: any[]) => {
+  request: (...args: unknown[]) => {
     mockHttpsRequest(...args);
     const req = {
       on: jest.fn(),
@@ -224,7 +224,7 @@ describe('seed-blueprints Lambda', () => {
 
     test('handles ConditionalCheckFailedException gracefully on re-deploy', async () => {
       const conditionalError = new Error('The conditional request failed');
-      (conditionalError as any).name = 'ConditionalCheckFailedException';
+      conditionalError.name = 'ConditionalCheckFailedException';
       ddbMock.on(PutCommand).rejects(conditionalError);
 
       // Should not throw — idempotent behavior

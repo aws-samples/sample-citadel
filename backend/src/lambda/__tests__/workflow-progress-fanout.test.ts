@@ -7,7 +7,7 @@
 
 // Mock global fetch before any imports
 const mockFetch = jest.fn();
-(global as any).fetch = mockFetch;
+global.fetch = mockFetch as unknown as typeof fetch;
 
 // Mock SignatureV4
 const mockSign = jest.fn();
@@ -31,12 +31,15 @@ jest.mock('@aws-sdk/client-cloudwatch', () => ({
   CloudWatchClient: jest.fn().mockImplementation(() => ({ send: mockCwSend })),
   PutMetricDataCommand: jest
     .fn()
-    .mockImplementation((input: any) => ({ __command: 'PutMetricData', input })),
+    .mockImplementation((input: unknown) => ({ __command: 'PutMetricData', input })),
 }));
 
+import type { Context, Callback } from 'aws-lambda';
 import { handler } from '../workflow-progress-fanout';
 
-function makeEventBridgeEvent(detailType: string, detail: Record<string, any>) {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+function makeEventBridgeEvent(detailType: string, detail: Record<string, unknown>): HandlerEvent {
   return {
     version: '0',
     id: 'evt-123',
@@ -47,8 +50,11 @@ function makeEventBridgeEvent(detailType: string, detail: Record<string, any>) {
     'detail-type': detailType,
     detail,
     resources: [],
-  } as any;
+  } as unknown as HandlerEvent;
 }
+
+const mockContext = {} as Context;
+const mockCallback: Callback<void> = () => undefined;
 
 describe('workflow-progress-fanout', () => {
   beforeAll(() => {
@@ -96,9 +102,7 @@ describe('workflow-progress-fanout', () => {
       };
 
       await handler(
-        makeEventBridgeEvent('workflow.node.started', detail),
-        {} as any,
-        {} as any,
+        makeEventBridgeEvent('workflow.node.started', detail), mockContext, mockCallback
       );
 
       // Verify fetch was called
@@ -132,9 +136,7 @@ describe('workflow-progress-fanout', () => {
       };
 
       await handler(
-        makeEventBridgeEvent('workflow.started', detail),
-        {} as any,
-        {} as any,
+        makeEventBridgeEvent('workflow.started', detail), mockContext, mockCallback
       );
 
       // Verify SignatureV4.sign was called to sign the request
@@ -173,9 +175,7 @@ describe('workflow-progress-fanout', () => {
       };
 
       await handler(
-        makeEventBridgeEvent(eventType, detail),
-        {} as any,
-        {} as any,
+        makeEventBridgeEvent(eventType, detail), mockContext, mockCallback
       );
 
       expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -204,9 +204,7 @@ describe('workflow-progress-fanout', () => {
 
       await expect(
         handler(
-          makeEventBridgeEvent('workflow.failed', detail),
-          {} as any,
-          {} as any,
+          makeEventBridgeEvent('workflow.failed', detail), mockContext, mockCallback
         ),
       ).rejects.toThrow(/AppSync mutation failed/);
     });
@@ -229,9 +227,7 @@ describe('workflow-progress-fanout', () => {
 
       await expect(
         handler(
-          makeEventBridgeEvent('workflow.node.completed', detail),
-          {} as any,
-          {} as any,
+          makeEventBridgeEvent('workflow.node.completed', detail), mockContext, mockCallback
         ),
       ).rejects.toThrow(/AppSync mutation failed/);
     });
@@ -251,9 +247,7 @@ describe('workflow-progress-fanout', () => {
 
       await expect(
         handler(
-          makeEventBridgeEvent('workflow.completed', detail),
-          {} as any,
-          {} as any,
+          makeEventBridgeEvent('workflow.completed', detail), mockContext, mockCallback
         ),
       ).resolves.toBeUndefined();
     });
@@ -277,7 +271,7 @@ describe('workflow-progress-fanout', () => {
       };
 
       await expect(
-        handler(makeEventBridgeEvent('workflow.node.failed', detail), {} as any, {} as any),
+        handler(makeEventBridgeEvent('workflow.node.failed', detail), mockContext, mockCallback),
       ).rejects.toThrow(/AppSync mutation failed/);
 
       // At least one structured error log carries the executionId.
@@ -302,7 +296,7 @@ describe('workflow-progress-fanout', () => {
       };
 
       await expect(
-        handler(makeEventBridgeEvent('workflow.failed', detail), {} as any, {} as any),
+        handler(makeEventBridgeEvent('workflow.failed', detail), mockContext, mockCallback),
       ).rejects.toThrow(/AppSync mutation failed/);
 
       expect(mockCwSend).toHaveBeenCalledTimes(1);
@@ -319,7 +313,7 @@ describe('workflow-progress-fanout', () => {
         timestamp: '2024-01-15T10:30:00Z',
       };
 
-      await handler(makeEventBridgeEvent('workflow.started', detail), {} as any, {} as any);
+      await handler(makeEventBridgeEvent('workflow.started', detail), mockContext, mockCallback);
 
       expect(mockCwSend).not.toHaveBeenCalled();
     });
@@ -335,7 +329,7 @@ describe('workflow-progress-fanout', () => {
       };
 
       await expect(
-        handler(makeEventBridgeEvent('workflow.failed', detail), {} as any, {} as any),
+        handler(makeEventBridgeEvent('workflow.failed', detail), mockContext, mockCallback),
       ).rejects.toThrow(/AppSync mutation failed/);
     });
   });
@@ -352,9 +346,7 @@ describe('workflow-progress-fanout', () => {
       };
 
       await handler(
-        makeEventBridgeEvent('workflow.started', detail),
-        {} as any,
-        {} as any,
+        makeEventBridgeEvent('workflow.started', detail), mockContext, mockCallback
       );
 
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
