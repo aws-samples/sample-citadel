@@ -33,18 +33,13 @@ import {
 import { workflowApiService } from '../services/workflowApiService';
 import { appApiService } from '../services/appApiService';
 import { agentConfigService, type AgentConfig } from '../services/agentConfigService';
+import { isPlaceholderAgentId } from '../utils/blueprintPlaceholders';
 
 interface ImportBlueprintDialogProps {
   blueprint: BlueprintData | null;
   open: boolean;
   onClose: () => void;
   onImported?: () => void;
-}
-
-const PLACEHOLDER_PREFIX = 'placeholder-';
-
-function isPlaceholderSlot(slot: string): boolean {
-  return slot.startsWith(PLACEHOLDER_PREFIX);
 }
 
 /** Parse the (possibly double-encoded AWSJSON) definition into its node list. */
@@ -114,7 +109,7 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
     if (!open || !blueprint) return;
     const initial: Record<string, string> = {};
     for (const slot of extractAgentSlots(blueprint.definition)) {
-      initial[slot] = isPlaceholderSlot(slot) ? '' : slot;
+      initial[slot] = isPlaceholderAgentId(slot) ? '' : slot;
     }
     setAgentMapping(initial);
     agentConfigService
@@ -125,14 +120,14 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
 
   if (!blueprint) return null;
 
-  const unmappedPlaceholders = slots.filter((slot) => isPlaceholderSlot(slot) && !agentMapping[slot]);
+  const unmappedPlaceholders = slots.filter((slot) => isPlaceholderAgentId(slot) && !agentMapping[slot]);
   const hasUnmappedPlaceholders = unmappedPlaceholders.length > 0;
 
   const optionsForSlot = (slot: string): Array<{ value: string; label: string }> => {
     const opts = agents.map((a) => ({ value: a.agentId, label: agentDisplayName(a) }));
     // "plus the current value": preserve a real (non-placeholder) slot's current
     // agentId as a selectable option even if it is not in the catalog.
-    if (!isPlaceholderSlot(slot) && !agents.some((a) => a.agentId === slot)) {
+    if (!isPlaceholderAgentId(slot) && !agents.some((a) => a.agentId === slot)) {
       opts.unshift({ value: slot, label: `Current: ${slot}` });
     }
     return opts;
@@ -254,7 +249,7 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
               </div>
 
               {slots.map((slot) => {
-                const placeholder = isPlaceholderSlot(slot);
+                const placeholder = isPlaceholderAgentId(slot);
                 return (
                   <div key={slot} className="flex flex-col gap-1" data-testid={`agent-slot-${slot}`}>
                     <label className="text-xs text-muted-foreground flex items-center gap-2">

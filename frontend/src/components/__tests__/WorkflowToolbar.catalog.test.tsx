@@ -347,6 +347,128 @@ describe('WorkflowToolbar catalog behavior', () => {
     });
   });
 
+  describe('Load → placeholder templates', () => {
+    // A seeded template definition whose nodes reference placeholder-* agent
+    // slots (no real agents exist for them in the catalog).
+    const placeholderDefinition = {
+      ...blueprintDefinition,
+      id: 'bp-def-tmpl',
+      name: 'Template Flow',
+      nodes: [
+        { id: 'n1', agentId: 'placeholder-analyzer', position: { x: 0, y: 0 }, configuration: {} },
+        { id: 'n2', agentId: 'placeholder-writer', position: { x: 200, y: 0 }, configuration: {} },
+      ],
+    };
+
+    const placeholderBlueprint = {
+      workflowId: 'bp-tmpl-1',
+      name: 'Template Flow',
+      description: 'Seeded template with placeholder agents',
+      status: 'PUBLISHED',
+      isBlueprint: true,
+      definition: JSON.stringify(placeholderDefinition),
+      metadata: JSON.stringify({ category: 'template' }),
+    };
+
+    const mixedCatalog = [mockBlueprints[0], placeholderBlueprint];
+
+    beforeEach(() => {
+      (workflowApiService.listBlueprints as jest.Mock).mockResolvedValue({
+        items: mixedCatalog,
+        nextToken: null,
+      });
+    });
+
+    it('renders a placeholder template row disabled with aria-disabled and the agent-mapping hint', async () => {
+      const user = userEvent.setup();
+      renderToolbar({ nodes: [] });
+
+      await user.click(screen.getByRole('button', { name: /load blueprint from catalog/i }));
+
+      const templateRow = await screen.findByRole('button', {
+        name: /load blueprint template flow/i,
+      });
+      expect(templateRow).toBeDisabled();
+      expect(templateRow).toHaveAttribute('aria-disabled', 'true');
+      expect(
+        screen.getByText(/requires agent mapping — import this template into an app instead/i)
+      ).toBeInTheDocument();
+    });
+
+    it('does not invoke the load handler (no load, no error toast) when a placeholder row is clicked', async () => {
+      const user = userEvent.setup();
+      const onLoad = jest.fn();
+      renderToolbar({ nodes: [], onLoad });
+
+      await user.click(screen.getByRole('button', { name: /load blueprint from catalog/i }));
+      const templateRow = await screen.findByRole('button', {
+        name: /load blueprint template flow/i,
+      });
+
+      // Brute-force dispatch (bypasses user-event's disabled checks) — the
+      // handler must still not run.
+      fireEvent.click(templateRow);
+      // Drain any microtask chains a (wrongly) started async load would queue.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(onLoad).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it('keeps a normal blueprint row enabled and loadable alongside a placeholder row', async () => {
+      const user = userEvent.setup();
+      const onLoad = jest.fn();
+      renderToolbar({ nodes: [], onLoad });
+
+      await user.click(screen.getByRole('button', { name: /load blueprint from catalog/i }));
+
+      const normalRow = await screen.findByRole('button', { name: /load blueprint two step/i });
+      expect(normalRow).toBeEnabled();
+
+      await user.click(normalRow);
+
+      await waitFor(() => expect(onLoad).toHaveBeenCalledTimes(1));
+      const [loadedNodes] = onLoad.mock.calls[0];
+      expect(loadedNodes).toHaveLength(2);
+    });
+
+    it('search still filters across placeholder and normal blueprints', async () => {
+      const user = userEvent.setup();
+      renderToolbar({ nodes: [] });
+
+      await user.click(screen.getByRole('button', { name: /load blueprint from catalog/i }));
+      await screen.findByText('Template Flow');
+
+      const search = screen.getByLabelText(/search blueprints/i);
+
+      await user.type(search, 'Template');
+      expect(screen.getByText('Template Flow')).toBeInTheDocument();
+      expect(screen.queryByText('Two Step')).not.toBeInTheDocument();
+
+      await user.clear(search);
+      await user.type(search, 'Two Step');
+      expect(screen.getByText('Two Step')).toBeInTheDocument();
+      expect(screen.queryByText('Template Flow')).not.toBeInTheDocument();
+    });
+
+    it('treats a blueprint whose definition fails to parse as non-placeholder (row stays enabled)', async () => {
+      const user = userEvent.setup();
+      (workflowApiService.listBlueprints as jest.Mock).mockResolvedValue({
+        items: [{ ...placeholderBlueprint, name: 'Broken Def', definition: 'not-json{{' }],
+        nextToken: null,
+      });
+      renderToolbar({ nodes: [] });
+
+      await user.click(screen.getByRole('button', { name: /load blueprint from catalog/i }));
+
+      const brokenRow = await screen.findByRole('button', { name: /load blueprint broken def/i });
+      expect(brokenRow).toBeEnabled();
+      expect(
+        screen.queryByText(/requires agent mapping — import this template into an app instead/i)
+      ).not.toBeInTheDocument();
+    });
+  });
+
   describe('Import button', () => {
     it('renders Import before Export in DOM order and imports a JSON file', async () => {
       const onLoad = jest.fn();
