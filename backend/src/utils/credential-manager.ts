@@ -31,8 +31,8 @@ export async function storeCredentials(
   connectorType: string,
   integrationId: string,
   orgId: string,
-  credentials: any,
-  config: any
+  credentials: Record<string, unknown>,
+  config: Record<string, unknown>
 ): Promise<StoreCredentialsResult> {
   // Read connector spec from registry
   const spec = getConnectorSpec(connectorType);
@@ -41,7 +41,7 @@ export async function storeCredentials(
   }
   
   // Build secret value based on connector's authentication config
-  const secretValue: Record<string, any> = {};
+  const secretValue: Record<string, unknown> = {};
   
   // For IAM_ROLE authentication, only executionRoleArn is required
   // For CONFIGURABLE authentication (MCP_SERVER), fields are conditionally required
@@ -185,7 +185,7 @@ export async function getAgentInvocationSecret(secretRef: string): Promise<strin
  * @param spec - Connector specification
  * @returns true if credentials appear to be in old format
  */
-function isOldCredentialFormat(secretData: any, spec: ConnectorSpec): boolean {
+function isOldCredentialFormat(secretData: Record<string, unknown>, spec: ConnectorSpec): boolean {
   // Check if any expected authentication fields are missing
   for (const field of spec.authentication.fields) {
     if (secretData[field] === undefined) {
@@ -220,8 +220,8 @@ function isOldCredentialFormat(secretData: any, spec: ConnectorSpec): boolean {
  * @param spec - Connector specification
  * @returns Migrated credentials in new format
  */
-function migrateOldCredentials(secretData: any, spec: ConnectorSpec): any {
-  const migrated: Record<string, any> = { ...secretData };
+function migrateOldCredentials(secretData: Record<string, unknown>, spec: ConnectorSpec): Record<string, unknown> {
+  const migrated: Record<string, unknown> = { ...secretData };
   
   // Migrate legacy field names to new format
   const fieldMappings: Record<string, string> = {
@@ -280,7 +280,7 @@ function migrateOldCredentials(secretData: any, spec: ConnectorSpec): any {
 export async function retrieveCredentials(
   secretArn: string,
   connectorType: string
-): Promise<any> {
+): Promise<Record<string, unknown>> {
   // Retrieve secret from Secrets Manager
   const response = await secretsManager.send(new GetSecretValueCommand({
     SecretId: secretArn
@@ -308,7 +308,7 @@ export async function retrieveCredentials(
   
   // Return credentials in expected format
   // Validate that all expected fields are present
-  const credentials: Record<string, any> = {};
+  const credentials: Record<string, unknown> = {};
   const isConfigurable = spec.authentication.method === 'CONFIGURABLE';
   
   for (const field of spec.authentication.fields) {
@@ -354,8 +354,8 @@ export async function retrieveCredentials(
 export async function updateCredentials(
   secretArn: string,
   connectorType: string,
-  credentials: any,
-  config: any
+  credentials: Record<string, unknown>,
+  config: Record<string, unknown>
 ): Promise<void> {
   const spec = getConnectorSpec(connectorType);
   if (!spec) {
@@ -363,7 +363,7 @@ export async function updateCredentials(
   }
   
   // Build updated secret value
-  const secretValue: Record<string, any> = {};
+  const secretValue: Record<string, unknown> = {};
   
   for (const field of spec.authentication.fields) {
     if (credentials[field]) {
@@ -420,7 +420,7 @@ export async function deleteCredentials(secretArn: string): Promise<void> {
 export async function storeConfiguration(
   connectorType: string,
   ssmParameterPrefix: string,
-  config: any
+  config: Record<string, unknown>
 ): Promise<void> {
   const spec = getConnectorSpec(connectorType);
   if (!spec) {
@@ -458,13 +458,13 @@ export async function storeConfiguration(
 export async function retrieveConfiguration(
   connectorType: string,
   ssmParameterPrefix: string
-): Promise<any> {
+): Promise<Record<string, unknown>> {
   const spec = getConnectorSpec(connectorType);
   if (!spec) {
     throw new Error(`Unknown connector type: ${connectorType}`);
   }
   
-  const config: Record<string, any> = {};
+  const config: Record<string, unknown> = {};
   
   for (const paramName of spec.configuration.ssmParameters) {
     try {

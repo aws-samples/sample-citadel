@@ -62,13 +62,13 @@ describe('Credential Manager - Property-Based Tests', () => {
             ssmMock.reset();
 
             // Build valid credentials based on connector spec
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               credentials[field] = `test-${field}-${Math.random()}`;
             }
 
             // Build valid config
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             for (const field of spec.configuration.required) {
               config[field] = `test-${field}-${Math.random()}`;
             }
@@ -133,13 +133,13 @@ describe('Credential Manager - Property-Based Tests', () => {
             if (!spec || spec.authentication.fields.length === 0) return true;
 
             // Build incomplete credentials (missing last required field)
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (let i = 0; i < spec.authentication.fields.length - 1; i++) {
               const field = spec.authentication.fields[i];
               credentials[field] = `test-${field}-${Math.random()}`;
             }
 
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
 
             // Property: storeCredentials should throw error for missing required fields
             await expect(
@@ -167,12 +167,12 @@ describe('Credential Manager - Property-Based Tests', () => {
             secretsManagerMock.reset();
             ssmMock.reset();
 
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               credentials[field] = `test-${field}-${Math.random()}`;
             }
 
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             for (const field of spec.configuration.required) {
               config[field] = `test-${field}-${Math.random()}`;
             }
@@ -216,12 +216,12 @@ describe('Credential Manager - Property-Based Tests', () => {
         ssmMock.reset();
 
         const spec = getConnectorSpec(connectorType)!;
-        const credentials: Record<string, any> = {};
+        const credentials: Record<string, unknown> = {};
         for (const field of spec.authentication.fields) {
           credentials[field] = `test-${field}`;
         }
 
-        const config: Record<string, any> = {};
+        const config: Record<string, unknown> = {};
         for (const field of spec.configuration.required) {
           config[field] = `test-${field}`;
         }
@@ -247,12 +247,12 @@ describe('Credential Manager - Property-Based Tests', () => {
         ssmMock.reset();
 
         const spec = getConnectorSpec(connectorType)!;
-        const credentials: Record<string, any> = {};
+        const credentials: Record<string, unknown> = {};
         for (const field of spec.authentication.fields) {
           credentials[field] = `test-${field}`;
         }
 
-        const config: Record<string, any> = {};
+        const config: Record<string, unknown> = {};
         for (const field of spec.configuration.required) {
           config[field] = `test-${field}`;
         }
@@ -278,12 +278,12 @@ describe('Credential Manager - Property-Based Tests', () => {
         ssmMock.reset();
 
         const spec = getConnectorSpec(connectorType)!;
-        const credentials: Record<string, any> = {};
+        const credentials: Record<string, unknown> = {};
         for (const field of spec.authentication.fields) {
           credentials[field] = `test-${field}`;
         }
 
-        const config: Record<string, any> = {};
+        const config: Record<string, unknown> = {};
         for (const field of spec.configuration.required) {
           config[field] = `test-${field}`;
         }
@@ -309,12 +309,12 @@ describe('Credential Manager - Property-Based Tests', () => {
         ssmMock.reset();
 
         const spec = getConnectorSpec(connectorType)!;
-        const credentials: Record<string, any> = {};
+        const credentials: Record<string, unknown> = {};
         for (const field of spec.authentication.fields) {
           credentials[field] = `test-${field}`;
         }
 
-        const config: Record<string, any> = {};
+        const config: Record<string, unknown> = {};
 
         secretsManagerMock.on(CreateSecretCommand).resolves({
           ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:test',
@@ -379,12 +379,12 @@ describe('Credential Manager - Property-Based Tests', () => {
             secretsManagerMock.reset();
             ssmMock.reset();
 
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               credentials[field] = `test-${field}`;
             }
 
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             for (const field of spec.configuration.required) {
               config[field] = `test-config-${field}`;
             }
@@ -434,12 +434,12 @@ describe('Credential Manager - Property-Based Tests', () => {
             secretsManagerMock.reset();
             ssmMock.reset();
 
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               credentials[field] = `test-${field}`;
             }
 
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             for (const field of spec.configuration.required) {
               config[field] = `test-${field}`;
             }
@@ -478,12 +478,12 @@ describe('Credential Manager - Property-Based Tests', () => {
             secretsManagerMock.reset();
             ssmMock.reset();
 
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               credentials[field] = `sensitive-${field}`;
             }
 
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             for (const field of spec.configuration.required) {
               config[field] = `config-${field}`;
             }
@@ -542,7 +542,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             secretsManagerMock.reset();
 
             // Build valid credentials based on connector spec
-            const storedCredentials: Record<string, any> = {};
+            const storedCredentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               storedCredentials[field] = `test-${field}-value`;
             }
@@ -595,7 +595,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             secretsManagerMock.reset();
 
             // Build incomplete credentials (missing last required field)
-            const incompleteCredentials: Record<string, any> = {};
+            const incompleteCredentials: Record<string, unknown> = {};
             for (let i = 0; i < spec.authentication.fields.length - 1; i++) {
               const field = spec.authentication.fields[i];
               incompleteCredentials[field] = `test-${field}-value`;
@@ -629,7 +629,7 @@ describe('Credential Manager - Property-Based Tests', () => {
         secretsManagerMock.reset();
         const spec = getConnectorSpec(connectorType)!;
         
-        const credentials: Record<string, any> = {};
+        const credentials: Record<string, unknown> = {};
         for (const field of spec.authentication.fields) {
           credentials[field] = `test-${field}`;
         }
@@ -653,7 +653,7 @@ describe('Credential Manager - Property-Based Tests', () => {
         secretsManagerMock.reset();
         const spec = getConnectorSpec(connectorType)!;
         
-        const credentials: Record<string, any> = {};
+        const credentials: Record<string, unknown> = {};
         for (const field of spec.authentication.fields) {
           credentials[field] = `test-${field}`;
         }
@@ -677,7 +677,7 @@ describe('Credential Manager - Property-Based Tests', () => {
         secretsManagerMock.reset();
         const spec = getConnectorSpec(connectorType)!;
         
-        const credentials: Record<string, any> = {};
+        const credentials: Record<string, unknown> = {};
         for (const field of spec.authentication.fields) {
           credentials[field] = `test-${field}`;
         }
@@ -701,7 +701,7 @@ describe('Credential Manager - Property-Based Tests', () => {
         secretsManagerMock.reset();
         const spec = getConnectorSpec(connectorType)!;
         
-        const credentials: Record<string, any> = {};
+        const credentials: Record<string, unknown> = {};
         for (const field of spec.authentication.fields) {
           credentials[field] = `test-${field}`;
         }
@@ -924,7 +924,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             };
 
             // Build valid config based on connector type
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             if (connectorType === 'AWS_LAMBDA') {
               config.lambdaArn = `arn:aws:lambda:us-east-1:${accountId}:function:TestFunction`;
               config.toolSchema = JSON.stringify({
@@ -994,7 +994,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             ssmMock.reset();
 
             // Build credentials based on auth method
-            const credentials: Record<string, any> = {
+            const credentials: Record<string, unknown> = {
               authMethod
             };
 
@@ -1093,7 +1093,7 @@ describe('Credential Manager - Property-Based Tests', () => {
               executionRoleArn: `arn:aws:iam::123456789012:role/TestRole-${integrationId}`
             };
 
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             if (connectorType === 'AWS_LAMBDA') {
               config.lambdaArn = 'arn:aws:lambda:us-east-1:123456789012:function:TestFunction';
               config.toolSchema = JSON.stringify({ name: 'test', description: 'test', inputSchema: { type: 'object' } });
@@ -1193,7 +1193,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             secretsManagerMock.reset();
 
             // Build stored credentials based on auth method
-            const storedCredentials: Record<string, any> = {
+            const storedCredentials: Record<string, unknown> = {
               authMethod
             };
 
@@ -1290,7 +1290,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             ssmMock.reset();
 
             // Build credentials
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             if (connectorType === 'AWS_LAMBDA' || connectorType === 'AWS_SMITHY') {
               credentials.executionRoleArn = `arn:aws:iam::123456789012:role/TestRole-${integrationId}`;
             } else {
@@ -1299,7 +1299,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             }
 
             // Build config based on connector type
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             if (connectorType === 'AWS_LAMBDA') {
               config.lambdaArn = `arn:aws:lambda:us-east-1:123456789012:function:Function-${integrationId}`;
               config.toolSchema = JSON.stringify({
@@ -1376,7 +1376,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             ssmMock.reset();
 
             // Build credentials with sensitive data
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             if (connectorType === 'AWS_LAMBDA' || connectorType === 'AWS_SMITHY') {
               credentials.executionRoleArn = `arn:aws:iam::123456789012:role/SensitiveRole-${integrationId}`;
             } else {
@@ -1385,7 +1385,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             }
 
             // Build config
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             if (connectorType === 'AWS_LAMBDA') {
               config.lambdaArn = `arn:aws:lambda:us-east-1:123456789012:function:Function-${integrationId}`;
               config.toolSchema = JSON.stringify({ name: 'test', description: 'test', inputSchema: { type: 'object' } });
@@ -1440,7 +1440,7 @@ describe('Credential Manager - Property-Based Tests', () => {
             secretsManagerMock.reset();
             ssmMock.reset();
 
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             if (connectorType === 'AWS_LAMBDA' || connectorType === 'AWS_SMITHY') {
               credentials.executionRoleArn = `arn:aws:iam::123456789012:role/TestRole`;
             } else {
@@ -1448,7 +1448,7 @@ describe('Credential Manager - Property-Based Tests', () => {
               credentials.apiKey = 'test-key';
             }
 
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             if (connectorType === 'AWS_LAMBDA') {
               config.lambdaArn = 'arn:aws:lambda:us-east-1:123456789012:function:TestFunction';
               config.toolSchema = JSON.stringify({ name: 'test', description: 'test', inputSchema: { type: 'object' } });

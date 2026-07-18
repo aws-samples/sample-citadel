@@ -39,10 +39,7 @@ import {
 } from '@aws-sdk/client-cloudwatch';
 import {
   IAMClient,
-  GetRoleCommand,
   GetRolePolicyCommand,
-  GetRoleCommandOutput,
-  GetRolePolicyCommandOutput,
 } from '@aws-sdk/client-iam';
 import {
   STSClient,

@@ -22,6 +22,7 @@ import {
   DynamoDBDocumentClient,
   PutCommand,
   ScanCommand,
+  type ScanCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
@@ -53,6 +54,20 @@ function stubSettings(value: string) {
   });
 }
 
+/** Shape of the snapshot row the handler writes — typed view for assertions. */
+interface SnapshotRow {
+  snapshotId: string;
+  kind: string;
+  timestamp: number;
+  expiresAt: number;
+  env: string;
+  partial: boolean;
+  authorityUnits: Array<Record<string, unknown>>;
+  compositionContracts: Array<Record<string, unknown>>;
+  constitutionalLayers: Array<Record<string, unknown>>;
+  caseLaw: Array<Record<string, unknown>>;
+}
+
 describe('governance-graph-snapshot handler', () => {
   test('skips early when settings.enabled === false', async () => {
     stubSettings(
@@ -82,7 +97,7 @@ describe('governance-graph-snapshot handler', () => {
     const scanCalls = ddbMock.commandCalls(ScanCommand);
     expect(scanCalls.length).toBeGreaterThanOrEqual(4);
     const tables = new Set(
-      scanCalls.map((c) => (c.args[0].input as any).TableName),
+      scanCalls.map((c) => c.args[0].input.TableName),
     );
     expect(tables).toContain('citadel-authority-units-test');
     expect(tables).toContain('citadel-composition-contracts-test');
@@ -94,7 +109,7 @@ describe('governance-graph-snapshot handler', () => {
     stubSettings(
       '{"enabled":true,"retentionDays":7,"captureMode":"daily"}',
     );
-    ddbMock.on(ScanCommand).callsFake((input: any) => {
+    ddbMock.on(ScanCommand).callsFake((input: ScanCommandInput) => {
       const t: string = input?.TableName ?? '';
       if (t === 'citadel-authority-units-test') {
         return Promise.resolve({ Items: [{ unitId: 'u-1' }] });
@@ -122,7 +137,7 @@ describe('governance-graph-snapshot handler', () => {
     // Inspect the snapshot row written.
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
-    const item = puts[0].args[0].input.Item as any;
+    const item = puts[0].args[0].input.Item as unknown as SnapshotRow;
     expect(item.kind).toBe('full');
     expect(item.snapshotId).toBe(result.snapshotId);
     expect(item.timestamp).toBeGreaterThanOrEqual(before);
@@ -146,7 +161,7 @@ describe('governance-graph-snapshot handler', () => {
 
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
-    expect((puts[0].args[0].input as any).TableName).toBe(
+    expect(puts[0].args[0].input.TableName).toBe(
       'citadel-governance-graph-snapshots-test',
     );
   });
@@ -166,9 +181,9 @@ describe('governance-graph-snapshot handler', () => {
     expect(md.MetricName).toBe('Count');
     expect(md.Value).toBe(1);
     const dims = md.Dimensions ?? [];
-    const statusDim = dims.find((d: any) => d.Name === 'Status');
+    const statusDim = dims.find((d) => d.Name === 'Status');
     expect(statusDim?.Value).toBe('Success');
-    const partialDim = dims.find((d: any) => d.Name === 'Partial');
+    const partialDim = dims.find((d) => d.Name === 'Partial');
     expect(partialDim?.Value).toBe('false');
   });
 
@@ -176,7 +191,7 @@ describe('governance-graph-snapshot handler', () => {
     stubSettings(
       '{"enabled":true,"retentionDays":30,"captureMode":"daily"}',
     );
-    ddbMock.on(ScanCommand).callsFake((input: any) => {
+    ddbMock.on(ScanCommand).callsFake((input: ScanCommandInput) => {
       const t: string = input?.TableName ?? '';
       if (t === 'citadel-case-law-test') {
         return Promise.reject(new Error('throttled'));
@@ -193,7 +208,7 @@ describe('governance-graph-snapshot handler', () => {
     // Snapshot row records partial:true and an empty caseLaw array.
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
-    const item = puts[0].args[0].input.Item as any;
+    const item = puts[0].args[0].input.Item as unknown as SnapshotRow;
     expect(item.partial).toBe(true);
     expect(item.caseLaw).toEqual([]);
 
@@ -203,9 +218,9 @@ describe('governance-graph-snapshot handler', () => {
     expect(metrics).toHaveLength(1);
     const dims =
       metrics[0].args[0].input.MetricData![0].Dimensions ?? [];
-    const statusDim = dims.find((d: any) => d.Name === 'Status');
+    const statusDim = dims.find((d) => d.Name === 'Status');
     expect(statusDim?.Value).toBe('Success');
-    const partialDim = dims.find((d: any) => d.Name === 'Partial');
+    const partialDim = dims.find((d) => d.Name === 'Partial');
     expect(partialDim?.Value).toBe('true');
   });
 
@@ -228,7 +243,7 @@ describe('governance-graph-snapshot handler', () => {
     expect(metrics).toHaveLength(1);
     const dims =
       metrics[0].args[0].input.MetricData![0].Dimensions ?? [];
-    const statusDim = dims.find((d: any) => d.Name === 'Status');
+    const statusDim = dims.find((d) => d.Name === 'Status');
     expect(statusDim?.Value).toBe('Failure');
   });
 
@@ -276,7 +291,7 @@ describe('governance-graph-snapshot handler', () => {
     const scanCalls = ddbMock.commandCalls(ScanCommand);
     expect(scanCalls.length).toBeGreaterThanOrEqual(4);
     const tables = new Set(
-      scanCalls.map((c) => (c.args[0].input as any).TableName),
+      scanCalls.map((c) => c.args[0].input.TableName),
     );
     expect(tables).toContain('citadel-authority-units-test');
     expect(tables).toContain('citadel-composition-contracts-test');
