@@ -19,7 +19,7 @@ import {
   FAILED_STATUSES,
 } from '../document-ingestion-shared';
 
-function emittedDetail(callIndex: number): any {
+function emittedDetail(callIndex: number): Record<string, unknown> {
   const calls = eventBridgeMock.commandCalls(PutEventsCommand);
   return JSON.parse(calls[callIndex].args[0].input.Entries![0].Detail as string);
 }

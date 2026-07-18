@@ -16,7 +16,13 @@ process.env.FABRICATION_JOBS_TABLE = 'citadel-fabrication-jobs-test';
 
 import { handler } from '../fabricator-queue-resolver';
 
-const row = (over: Record<string, any>) => ({
+type HandlerEvent = Parameters<typeof handler>[0];
+
+/** Build the minimal AppSync event the resolver reads (info.fieldName + arguments). */
+const makeEvent = (args: { projectId?: string } = {}): HandlerEvent =>
+  ({ info: { fieldName: 'getFabricatorQueue' }, arguments: args }) as unknown as HandlerEvent;
+
+const row = (over: Record<string, unknown>) => ({
   orchestrationId: '0',
   agentUseId: 'req-1',
   status: 'PENDING',
@@ -46,7 +52,7 @@ describe('fabricator-queue-resolver', () => {
       ],
     });
 
-    const result = await handler({ info: { fieldName: 'getFabricatorQueue' }, arguments: {} } as any);
+    const result = await handler(makeEvent());
 
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(1);
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
@@ -68,10 +74,7 @@ describe('fabricator-queue-resolver', () => {
       Items: [row({ agentUseId: 'req-9', status: 'FAILED', errorMessage: 'boom' })],
     });
 
-    const result = await handler({
-      info: { fieldName: 'getFabricatorQueue' },
-      arguments: { projectId: 'proj-42' },
-    } as any);
+    const result = await handler(makeEvent({ projectId: 'proj-42' }));
 
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
@@ -98,7 +101,7 @@ describe('fabricator-queue-resolver', () => {
       ],
     });
 
-    const result = await handler({ info: { fieldName: 'getFabricatorQueue' }, arguments: {} } as any);
+    const result = await handler(makeEvent());
 
     expect(result[0].agentName).toBe('FabricatedAgentX');
   });
@@ -115,7 +118,7 @@ describe('fabricator-queue-resolver', () => {
       ],
     });
 
-    const result = await handler({ info: { fieldName: 'getFabricatorQueue' }, arguments: {} } as any);
+    const result = await handler(makeEvent());
 
     expect(result[0].agentName).toBe('agent-use-77');
   });
@@ -133,7 +136,7 @@ describe('fabricator-queue-resolver', () => {
       ],
     });
 
-    const result = await handler({ info: { fieldName: 'getFabricatorQueue' }, arguments: {} } as any);
+    const result = await handler(makeEvent());
 
     expect(result[0].submittedAt).toBe('2026-06-10T12:34:56.000Z');
   });
@@ -150,7 +153,7 @@ describe('fabricator-queue-resolver', () => {
       ],
     });
 
-    const result = await handler({ info: { fieldName: 'getFabricatorQueue' }, arguments: {} } as any);
+    const result = await handler(makeEvent());
 
     expect(result[0].agentName).toBe('RealName');
     expect(result[0].submittedAt).toBe('2026-06-05T00:00:00.000Z');
@@ -158,13 +161,13 @@ describe('fabricator-queue-resolver', () => {
 
   test('returns [] on a DynamoDB error', async () => {
     ddbMock.on(ScanCommand).rejects(new Error('ddb down'));
-    const result = await handler({ info: { fieldName: 'getFabricatorQueue' }, arguments: {} } as any);
+    const result = await handler(makeEvent());
     expect(result).toEqual([]);
   });
 
   test('returns [] when FABRICATION_JOBS_TABLE is unset', async () => {
     delete process.env.FABRICATION_JOBS_TABLE;
-    const result = await handler({ info: { fieldName: 'getFabricatorQueue' }, arguments: {} } as any);
+    const result = await handler(makeEvent());
     expect(result).toEqual([]);
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
   });

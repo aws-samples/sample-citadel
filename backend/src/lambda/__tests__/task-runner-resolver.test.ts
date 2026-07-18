@@ -16,7 +16,7 @@ describe('task-runner-resolver', () => {
     eventBridgeMock.reset();
   });
 
-  const makeEvent = (fieldName: string, args: any) => ({
+  const makeEvent = (fieldName: string, args: Record<string, unknown>) => ({
     info: { fieldName },
     arguments: args,
   });

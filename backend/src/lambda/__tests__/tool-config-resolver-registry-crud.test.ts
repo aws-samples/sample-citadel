@@ -24,15 +24,17 @@ const mockDeleteResource = jest.fn();
 const mockListResources = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
 const mockSearchResources = jest.fn();
-const mockSerializeCustomMetadata = jest.fn((meta: any) => JSON.stringify(meta));
-const mockDeserializeCustomMetadata = jest.fn((json: string | null, defaults: any) => {
-  if (!json) return defaults;
-  try {
-    return { ...defaults, ...JSON.parse(json) };
-  } catch {
-    return defaults;
-  }
-});
+const mockSerializeCustomMetadata = jest.fn((meta: unknown) => JSON.stringify(meta));
+const mockDeserializeCustomMetadata = jest.fn(
+  (json: string | null, defaults: Record<string, unknown>) => {
+    if (!json) return defaults;
+    try {
+      return { ...defaults, ...JSON.parse(json) };
+    } catch {
+      return defaults;
+    }
+  },
+);
 const mockToRegistryStatus = jest.fn((state: string) => {
   const map: Record<string, string> = { active: 'APPROVED', inactive: 'DEPRECATED', maintenance: 'DRAFT' };
   return map[state] || 'DEPRECATED';
@@ -41,7 +43,19 @@ const mockToInternalState = jest.fn((status: string) => {
   const map: Record<string, string> = { APPROVED: 'active', DEPRECATED: 'inactive', DRAFT: 'maintenance' };
   return map[status] || 'inactive';
 });
-const mockMapToToolConfig = jest.fn((record: any) => {
+
+/** Registry record fixture shape consumed by the mock mappers. */
+interface RegistryRecordFixture {
+  recordId: string;
+  name?: string;
+  description?: string;
+  status: string;
+  customDescriptorContent?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+const mockMapToToolConfig = jest.fn((record: RegistryRecordFixture) => {
   const meta = record.customDescriptorContent
     ? (() => { try { return JSON.parse(record.customDescriptorContent); } catch { return {}; } })()
     : {};
@@ -57,7 +71,7 @@ const mockMapToToolConfig = jest.fn((record: any) => {
     updatedAt: record.updatedAt?.toISOString?.() ?? record.updatedAt,
   };
 });
-const mockMapToAgentConfig = jest.fn((record: any) => ({
+const mockMapToAgentConfig = jest.fn((record: RegistryRecordFixture) => ({
   agentId: record.recordId,
   config: record.description || '',
   state: 'active',
@@ -116,7 +130,11 @@ describe('Registry-backed CRUD functions (tasks 7.2–7.6)', () => {
     process.env = originalEnv;
   });
 
-  const makeEvent = (fieldName: string, args: any, identity?: any) => ({
+  const makeEvent = (
+    fieldName: string,
+    args: Record<string, unknown>,
+    identity?: Record<string, unknown>,
+  ) => ({
     info: { fieldName },
     arguments: args,
     identity: identity ?? {
@@ -626,7 +644,9 @@ describe('Registry-backed CRUD functions (tasks 7.2–7.6)', () => {
     const { RegistryService: ActualRegistryService } = jest.requireActual(
       '../../services/registry-service',
     );
-    let realService: any;
+    let realService: {
+      mapToToolConfig: (record: Record<string, unknown>) => { config: string };
+    };
 
     beforeEach(() => {
       realService = new ActualRegistryService({

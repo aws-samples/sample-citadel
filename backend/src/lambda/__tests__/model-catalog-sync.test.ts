@@ -109,12 +109,14 @@ beforeEach(() => {
   ddbMock.on(PutCommand).resolves({});
 });
 
-function putItems(): any[] {
-  return ddbMock.commandCalls(PutCommand).map((c) => c.args[0].input.Item as any);
+function putItems(): Record<string, unknown>[] {
+  return ddbMock
+    .commandCalls(PutCommand)
+    .map((c) => c.args[0].input.Item as Record<string, unknown>);
 }
 
-function putFor(modelKey: string): any {
-  return putItems().find((i) => i.modelKey === modelKey);
+function putFor(modelKey: string): Record<string, unknown> {
+  return putItems().find((i) => i.modelKey === modelKey)!;
 }
 
 describe('model-catalog-sync', () => {

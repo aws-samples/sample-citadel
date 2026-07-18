@@ -5,7 +5,9 @@ import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from '@aws-sdk/li
 import {
   BedrockAgentClient,
   GetKnowledgeBaseDocumentsCommand,
+  type GetKnowledgeBaseDocumentsCommandOutput,
   IngestKnowledgeBaseDocumentsCommand,
+  type IngestKnowledgeBaseDocumentsCommandOutput,
 } from '@aws-sdk/client-bedrock-agent';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
@@ -24,7 +26,11 @@ import { _resetKbIdCache } from '../document-ingestion-shared';
 const NOW_ISO = new Date().toISOString();
 const OLD_ISO = new Date(Date.now() - 20 * 60 * 1000).toISOString(); // 20 min ago
 
-const job = (overrides: Record<string, any> = {}) => ({
+/** Partial Bedrock responses are cast to the full outputs at the mock boundary. */
+type KbDocsOutput = GetKnowledgeBaseDocumentsCommandOutput;
+type IngestOutput = IngestKnowledgeBaseDocumentsCommandOutput;
+
+const job = (overrides: Record<string, unknown> = {}) => ({
   projectId: 'proj-1',
   documentKey: 'proj-1/a.pdf',
   fileName: 'a.pdf',
@@ -38,7 +44,7 @@ const job = (overrides: Record<string, any> = {}) => ({
 });
 
 /** Mock the GSI: return `rows` for the IN_PROGRESS partition, empty otherwise. */
-function mockJobs(rows: any[]) {
+function mockJobs(rows: Record<string, unknown>[]) {
   ddbMock.on(QueryCommand, { ExpressionAttributeValues: { ':status': 'IN_PROGRESS' } }).resolves({ Items: rows });
   ddbMock.on(QueryCommand, { ExpressionAttributeValues: { ':status': 'STARTING' } }).resolves({ Items: [] });
   ddbMock.on(QueryCommand, { ExpressionAttributeValues: { ':status': 'PENDING' } }).resolves({ Items: [] });
@@ -85,7 +91,7 @@ describe('document-ingestion-poller', () => {
     mockJobs([job()]);
     bedrockMock.on(GetKnowledgeBaseDocumentsCommand).resolves({
       documentDetails: [{ status: 'INDEXED', identifier: { custom: { id: 'proj-1/a.pdf' } } }],
-    } as any);
+    } as unknown as KbDocsOutput);
 
     await handler();
 
@@ -100,7 +106,7 @@ describe('document-ingestion-poller', () => {
     mockJobs([job({ triggered: true })]);
     bedrockMock.on(GetKnowledgeBaseDocumentsCommand).resolves({
       documentDetails: [{ status: 'INDEXED', identifier: { custom: { id: 'proj-1/a.pdf' } } }],
-    } as any);
+    } as unknown as KbDocsOutput);
 
     await handler();
 
@@ -112,7 +118,7 @@ describe('document-ingestion-poller', () => {
     mockJobs([job()]);
     bedrockMock.on(GetKnowledgeBaseDocumentsCommand).resolves({
       documentDetails: [{ status: 'FAILED', statusReason: 'bad doc', identifier: { custom: { id: 'proj-1/a.pdf' } } }],
-    } as any);
+    } as unknown as KbDocsOutput);
 
     await handler();
 
@@ -132,7 +138,7 @@ describe('document-ingestion-poller', () => {
         statusReason: 'You submitted multiple requests for the same document',
         identifier: { custom: { id: 'proj-1/a.pdf' } },
       }],
-    } as any);
+    } as unknown as KbDocsOutput);
 
     await handler();
 
@@ -148,7 +154,7 @@ describe('document-ingestion-poller', () => {
     mockJobs([job({ createdAt: OLD_ISO, status: 'IN_PROGRESS' })]);
     bedrockMock.on(GetKnowledgeBaseDocumentsCommand).resolves({
       documentDetails: [{ status: 'IN_PROGRESS', identifier: { custom: { id: 'proj-1/a.pdf' } } }],
-    } as any);
+    } as unknown as KbDocsOutput);
 
     await handler();
 
@@ -162,7 +168,7 @@ describe('document-ingestion-poller', () => {
     mockJobs(rows);
     bedrockMock.on(GetKnowledgeBaseDocumentsCommand).resolves({
       documentDetails: rows.map((r) => ({ status: 'IN_PROGRESS', identifier: { custom: { id: r.documentKey } } })),
-    } as any);
+    } as unknown as KbDocsOutput);
 
     await handler();
 
@@ -173,7 +179,7 @@ describe('document-ingestion-poller', () => {
     mockJobs([job()]);
     bedrockMock.on(GetKnowledgeBaseDocumentsCommand).resolves({
       documentDetails: [{ status: 'INDEXED', identifier: { custom: { id: 'proj-1/a.pdf' } } }],
-    } as any);
+    } as unknown as KbDocsOutput);
     ddbMock.on(UpdateCommand).rejects(condFailed());
 
     const result = await handler();
@@ -193,7 +199,7 @@ describe('document-ingestion-poller', () => {
     const FIVE_MIN_AGO = new Date(Date.now() - 5 * 60 * 1000).toISOString(); // > grace, < maxAge
 
     /** Put `rows` in the given status GSI partition, empty for the others. */
-    function mockJobsIn(status: string, rows: any[]) {
+    function mockJobsIn(status: string, rows: Record<string, unknown>[]) {
       for (const s of ['IN_PROGRESS', 'STARTING', 'PENDING']) {
         ddbMock
           .on(QueryCommand, { ExpressionAttributeValues: { ':status': s } })
@@ -206,11 +212,11 @@ describe('document-ingestion-poller', () => {
     beforeEach(() => {
       bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'STARTING', identifier: { custom: { id: 'proj-1/a.pdf' } } }],
-      } as any);
+      } as unknown as IngestOutput);
       // Document not present yet in the KB.
       bedrockMock.on(GetKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'NOT_FOUND', identifier: { custom: { id: 'proj-1/a.pdf' } } }],
-      } as any);
+      } as unknown as KbDocsOutput);
     });
 
     test('STARTING older than START_GRACE_MS with absent doc re-invokes startIngestion', async () => {

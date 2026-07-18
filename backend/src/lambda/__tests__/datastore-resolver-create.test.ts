@@ -67,12 +67,14 @@ process.env.DATASTORES_TABLE = 'TestDataStoresTable';
 
 import { handler } from '../datastore-resolver';
 
+type HandlerEvent = Parameters<typeof handler>[0];
+
 describe('createDataStore - config enrichment', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     // Default: QueryCommand returns empty (no idempotent match)
     // PutCommand succeeds, UpdateCommand succeeds
-    mockDynamoSend.mockImplementation((cmd: any) => {
+    mockDynamoSend.mockImplementation((cmd: { _type?: string }) => {
       if (cmd._type === 'Query') return Promise.resolve({ Items: [] });
       if (cmd._type === 'Put') return Promise.resolve({});
       if (cmd._type === 'Update') return Promise.resolve({ Attributes: { dataStoreId: 'test-uuid', status: 'CONNECTED', version: 1 } });
@@ -80,11 +82,12 @@ describe('createDataStore - config enrichment', () => {
     });
   });
 
-  const makeCreateEvent = (input: Record<string, any>) => ({
-    info: { fieldName: 'createDataStore' },
-    arguments: { input },
-    identity: { username: 'test-user' },
-  });
+  const makeCreateEvent = (input: Record<string, unknown>): HandlerEvent =>
+    ({
+      info: { fieldName: 'createDataStore' },
+      arguments: { input },
+      identity: { username: 'test-user' },
+    }) as unknown as HandlerEvent;
 
   test('injects input.name into config as name field for CREATE_NEW', async () => {
     const event = makeCreateEvent({
@@ -97,7 +100,7 @@ describe('createDataStore - config enrichment', () => {
       clientRequestToken: 'tok-123',
     });
 
-    await handler(event as any);
+    await handler(event);
 
     // The adapter.provision should receive config with name field set
     expect(mockAdapter.provision).toHaveBeenCalledTimes(1);
@@ -116,7 +119,7 @@ describe('createDataStore - config enrichment', () => {
       clientRequestToken: 'tok-456',
     });
 
-    await handler(event as any);
+    await handler(event);
 
     const provisionConfig = mockAdapter.provision.mock.calls[0][0];
     // Existing config.name should be preserved
@@ -134,7 +137,7 @@ describe('createDataStore - config enrichment', () => {
       clientRequestToken: 'tok-789',
     });
 
-    await handler(event as any);
+    await handler(event);
 
     expect(mockAdapter.connect).toHaveBeenCalledTimes(1);
     const connectConfig = mockAdapter.connect.mock.calls[0][0];

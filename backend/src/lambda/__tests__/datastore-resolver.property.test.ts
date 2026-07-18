@@ -70,6 +70,30 @@ process.env.DATASTORES_TABLE = 'TestDataStoresTable';
 // Import handler after all mocks
 import { handler } from '../datastore-resolver';
 
+type HandlerEvent = Parameters<typeof handler>[0];
+
+/**
+ * Shape produced by the lib-dynamodb command mocks at the top of this file
+ * (each command constructor is replaced by `{ _type, input }`).
+ */
+interface FakeCommand {
+  _type: 'Put' | 'Get' | 'Update' | 'Delete' | 'Query';
+  input: {
+    Item?: Record<string, unknown>;
+    Key?: Record<string, unknown>;
+    ExpressionAttributeValues?: Record<string, unknown>;
+  };
+}
+
+/** Fields the assertions below read off resolver results. */
+interface DataStoreResult {
+  dataStoreId?: string;
+  usage?: string;
+  status?: string;
+  type?: string;
+  capabilities?: unknown;
+}
+
 // ---- Generators ----
 
 const dataStoreTypeArb = fc.constantFrom(
@@ -96,12 +120,12 @@ const clientRequestTokenArb = fc.stringMatching(
   /^tok-[a-f0-9]{8}$/
 );
 
-function makeAppSyncEvent(fieldName: string, args: Record<string, any>): any {
+function makeAppSyncEvent(fieldName: string, args: Record<string, unknown>): HandlerEvent {
   return {
     info: { fieldName },
     arguments: args,
     identity: { username: 'test-user' },
-  };
+  } as unknown as HandlerEvent;
 }
 
 // ---- Tests ----
@@ -139,9 +163,9 @@ describe('Property 13: Resolver cleans up failed entry on mutation failure', () 
           mockDynamoSend.mockReset();
 
           // Track DeleteCommand calls to verify cleanup
-          const deleteInputs: any[] = [];
+          const deleteInputs: FakeCommand["input"][] = [];
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Query') {
               return Promise.resolve({ Items: [] });
             }
@@ -183,7 +207,7 @@ describe('Property 13: Resolver cleans up failed entry on mutation failure', () 
           // Verify that a DeleteCommand was sent to clean up the failed entry
           expect(deleteInputs.length).toBeGreaterThanOrEqual(1);
           const cleanupDelete = deleteInputs.find(
-            (d: any) => d?.Key?.dataStoreId !== undefined
+            (d) => d?.Key?.dataStoreId !== undefined
           );
           expect(cleanupDelete).toBeDefined();
         }
@@ -219,7 +243,7 @@ describe('Property 14: Idempotent creation via clientRequestToken', () => {
           };
 
           // The QueryCommand for idempotency check returns the existing item
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Query') {
               return Promise.resolve({ Items: [existingItem] });
             }
@@ -238,7 +262,7 @@ describe('Property 14: Idempotent creation via clientRequestToken', () => {
             },
           });
 
-          const result = await handler(event) as any;
+          const result = await handler(event) as DataStoreResult;
 
           // Should return the existing item
           expect(result).toEqual(existingItem);
@@ -246,7 +270,7 @@ describe('Property 14: Idempotent creation via clientRequestToken', () => {
 
           // Should NOT have called PutCommand (no new item created)
           const putCalls = mockDynamoSend.mock.calls.filter(
-            ([cmd]: any) => cmd._type === 'Put'
+            ([cmd]: [FakeCommand]) => cmd._type === "Put"
           );
           expect(putCalls).toHaveLength(0);
         }
@@ -280,12 +304,12 @@ describe('Property 15: Optimistic locking rejects stale versions', () => {
           // GetCommand always returns the item with currentVersion
           // UpdateCommand always fails with ConditionalCheckFailedException
           // (simulating another process bumping the version)
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Get') {
               return Promise.resolve({ Item: existingItem });
             }
             if (cmd._type === 'Update') {
-              const err: any = new Error('Conditional check failed');
+              const err = new Error("Conditional check failed");
               err.name = 'ConditionalCheckFailedException';
               return Promise.reject(err);
             }
@@ -323,12 +347,12 @@ describe('Property 15: Optimistic locking rejects stale versions', () => {
             version: currentVersion,
           };
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Get') {
               return Promise.resolve({ Item: existingItem });
             }
             if (cmd._type === 'Update') {
-              const err: any = new Error('Conditional check failed');
+              const err = new Error("Conditional check failed");
               err.name = 'ConditionalCheckFailedException';
               return Promise.reject(err);
             }
@@ -367,15 +391,15 @@ describe('Property 1: Usage Field Round-Trip', () => {
           mockDynamoSend.mockReset();
 
           // Track what gets persisted via PutCommand
-          let persistedItem: any = null;
+          let persistedItem: Record<string, unknown> | null = null;
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Query') {
               // Idempotency check — no existing item
               return Promise.resolve({ Items: [] });
             }
             if (cmd._type === 'Put') {
-              persistedItem = cmd.input.Item;
+              persistedItem = cmd.input.Item ?? null;
               return Promise.resolve({});
             }
             if (cmd._type === 'Update') {
@@ -408,10 +432,10 @@ describe('Property 1: Usage Field Round-Trip', () => {
 
           // Now getDataStore should return the same usage
           const getEvent = makeAppSyncEvent('getDataStore', {
-            dataStoreId: persistedItem.dataStoreId,
+            dataStoreId: persistedItem!.dataStoreId,
           });
 
-          const result = await handler(getEvent) as any;
+          const result = await handler(getEvent) as DataStoreResult;
           expect(result.usage).toBe(usage);
         }
       ),
@@ -429,14 +453,14 @@ describe('Property 1: Usage Field Round-Trip', () => {
         async (name, type, category, orgId) => {
           mockDynamoSend.mockReset();
 
-          let persistedItem: any = null;
+          let persistedItem: Record<string, unknown> | null = null;
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Query') {
               return Promise.resolve({ Items: [] });
             }
             if (cmd._type === 'Put') {
-              persistedItem = cmd.input.Item;
+              persistedItem = cmd.input.Item ?? null;
               return Promise.resolve({});
             }
             if (cmd._type === 'Update') {
@@ -465,10 +489,10 @@ describe('Property 1: Usage Field Round-Trip', () => {
           await handler(createEvent);
 
           const getEvent = makeAppSyncEvent('getDataStore', {
-            dataStoreId: persistedItem.dataStoreId,
+            dataStoreId: persistedItem!.dataStoreId,
           });
 
-          const result = await handler(getEvent) as any;
+          const result = await handler(getEvent) as DataStoreResult;
           expect(result.usage).toBe('BOTH');
         }
       ),
@@ -485,7 +509,7 @@ describe('Property 1: Usage Field Round-Trip', () => {
           mockDynamoSend.mockReset();
 
           // Simulate an existing item with initialUsage
-          let storedItem: any = {
+          let storedItem: Record<string, unknown> = {
             dataStoreId: 'ds-update-usage',
             name: 'Test Store',
             type: 'S3',
@@ -497,7 +521,7 @@ describe('Property 1: Usage Field Round-Trip', () => {
             config: JSON.stringify({ bucketName: 'test' }),
           };
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Get') {
               return Promise.resolve({ Item: { ...storedItem } });
             }
@@ -530,7 +554,7 @@ describe('Property 1: Usage Field Round-Trip', () => {
             dataStoreId: 'ds-update-usage',
           });
 
-          const result = await handler(getEvent) as any;
+          const result = await handler(getEvent) as DataStoreResult;
           expect(result.usage).toBe(newUsage);
         }
       ),
@@ -554,7 +578,7 @@ describe('Property 2: Usage Field Backward Compatibility', () => {
           mockDynamoSend.mockReset();
 
           // Legacy item — no usage field
-          const legacyItem: any = {
+          const legacyItem: Record<string, unknown> = {
             dataStoreId: 'ds-legacy-compat',
             name,
             type,
@@ -567,7 +591,7 @@ describe('Property 2: Usage Field Backward Compatibility', () => {
           // Explicitly ensure no usage field
           delete legacyItem.usage;
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Get') {
               return Promise.resolve({ Item: { ...legacyItem } });
             }
@@ -578,7 +602,7 @@ describe('Property 2: Usage Field Backward Compatibility', () => {
             dataStoreId: 'ds-legacy-compat',
           });
 
-          const result = await handler(getEvent) as any;
+          const result = await handler(getEvent) as DataStoreResult;
           expect(result.usage).toBe('BOTH');
         }
       ),
@@ -613,7 +637,7 @@ describe('Property 2: Usage Field Backward Compatibility', () => {
             config: JSON.stringify({}),
           }));
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Query') {
               return Promise.resolve({ Items: legacyItems });
             }
@@ -624,7 +648,7 @@ describe('Property 2: Usage Field Backward Compatibility', () => {
             orgId,
           });
 
-          const result = await handler(listEvent) as any[];
+          const result = await handler(listEvent) as DataStoreResult[];
           for (const item of result) {
             expect(item.usage).toBe('BOTH');
           }
@@ -670,7 +694,7 @@ describe('Property 5: Discovery API Returns Only CONNECTED Stores with Correct C
           const orgStores = stores.map((s) => ({ ...s, orgId }));
 
           // Mock DynamoDB query to return all org stores
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Query') {
               return Promise.resolve({ Items: orgStores });
             }
@@ -681,7 +705,7 @@ describe('Property 5: Discovery API Returns Only CONNECTED Stores with Correct C
             orgId,
           });
 
-          const result = await handler(event) as any[];
+          const result = await handler(event) as DataStoreResult[];
 
           // Assert only CONNECTED stores are returned
           const connectedStores = orgStores.filter((s) => s.status === 'CONNECTED');
@@ -707,7 +731,7 @@ describe('Property 5: Discovery API Returns Only CONNECTED Stores with Correct C
           // All stores CONNECTED so we only test usage filtering
           const orgStores = stores.map((s) => ({ ...s, orgId, status: 'CONNECTED' }));
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Query') {
               return Promise.resolve({ Items: orgStores });
             }
@@ -719,7 +743,7 @@ describe('Property 5: Discovery API Returns Only CONNECTED Stores with Correct C
             usage: usageFilter,
           });
 
-          const result = await handler(event) as any[];
+          const result = await handler(event) as DataStoreResult[];
 
           // Compute expected filtered stores
           const filterUpper = usageFilter.toUpperCase();
@@ -749,7 +773,7 @@ describe('Property 5: Discovery API Returns Only CONNECTED Stores with Correct C
           // All stores CONNECTED
           const orgStores = stores.map((s) => ({ ...s, orgId, status: 'CONNECTED' }));
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Query') {
               return Promise.resolve({ Items: orgStores });
             }
@@ -760,11 +784,11 @@ describe('Property 5: Discovery API Returns Only CONNECTED Stores with Correct C
             orgId,
           });
 
-          const result = await handler(event) as any[];
+          const result = await handler(event) as DataStoreResult[];
 
           // Assert capabilities match the operations registry
           for (const item of result) {
-            const expectedCapabilities = getDataStoreOperations(item.type);
+            const expectedCapabilities = getDataStoreOperations(item.type!);
             expect(item.capabilities).toEqual(expectedCapabilities);
           }
         }
@@ -786,7 +810,7 @@ describe('Property 5: Discovery API Returns Only CONNECTED Stores with Correct C
             { dataStoreId: 'ds-prov0001', status: 'PROVISIONING', orgId, type: 'DYNAMODB', usage: 'operational' },
           ];
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Query') {
               return Promise.resolve({ Items: nonConnectedStores });
             }
@@ -797,7 +821,7 @@ describe('Property 5: Discovery API Returns Only CONNECTED Stores with Correct C
             orgId,
           });
 
-          const result = await handler(event) as any[];
+          const result = await handler(event) as DataStoreResult[];
           expect(result).toEqual([]);
         }
       ),

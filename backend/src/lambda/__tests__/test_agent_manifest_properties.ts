@@ -110,7 +110,7 @@ describe('Property 32: Agent manifest validation', () => {
 
     fc.assert(
       fc.property(validManifestArb, fieldsToRemoveArb, (manifest, fieldsToRemove) => {
-        const incomplete: Record<string, any> = { ...manifest };
+        const incomplete: Record<string, unknown> = { ...manifest };
         for (const field of fieldsToRemove) {
           delete incomplete[field];
         }
@@ -146,7 +146,7 @@ describe('Property 32: Agent manifest validation', () => {
 
     fc.assert(
       fc.property(validManifestArb, fieldsToCorruptArb, nonStringArb, (manifest, fieldsToCorrupt, badValue) => {
-        const corrupted: Record<string, any> = { ...manifest };
+        const corrupted: Record<string, unknown> = { ...manifest };
         for (const field of fieldsToCorrupt) {
           corrupted[field] = badValue;
         }

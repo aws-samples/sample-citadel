@@ -140,6 +140,40 @@ function makeEvent(
   };
 }
 
+/**
+ * Structural view of the CreateGatewayTarget input fields these tests assert
+ * on. The SDK models `targetConfiguration` / `credentialProvider` as tagged
+ * unions whose members are awkward to narrow in assertions; this interface
+ * types exactly the paths the tests read (unknown+narrowing convention).
+ */
+interface CreateTargetInput {
+  name?: string;
+  targetConfiguration: {
+    mcp: {
+      openApiSchema?: unknown;
+      lambda?: { lambdaArn?: string; toolSchema?: { inlinePayload: unknown[] } };
+      smithyModel?: { serviceType?: string };
+      mcpServer?: { serverUrl?: string };
+    };
+  };
+  credentialProviderConfigurations: Array<{
+    credentialProviderType: string;
+    credentialProvider?: {
+      apiKeyCredentialProvider?: {
+        providerArn: string;
+        credentialLocation?: string;
+        credentialParameterName?: string;
+        credentialPrefix?: string;
+      };
+      oauthCredentialProvider?: {
+        providerArn: string;
+        grantType?: string;
+        scopes?: string[];
+      };
+    };
+  }>;
+}
+
 function integrationItem(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     PK: 'ORG#org-1',
@@ -229,7 +263,7 @@ describe('gateway-registration-handler — connect dispatch', () => {
 
     const calls = bedrockMock.commandCalls(CreateGatewayTargetCommand);
     expect(calls.length).toBe(1);
-    const input = calls[0].args[0].input as any;
+    const input = calls[0].args[0].input as unknown as CreateTargetInput;
     expect(input.name).toBe('confluence-conf-123');
     // Confluence path uses the openApiSchema target shape, not lambda/smithy/mcpServer.
     expect(input.targetConfiguration.mcp.openApiSchema).toBeDefined();
@@ -266,7 +300,7 @@ describe('gateway-registration-handler — connect dispatch', () => {
 
     const calls = bedrockMock.commandCalls(CreateGatewayTargetCommand);
     expect(calls.length).toBe(1);
-    const input = calls[0].args[0].input as any;
+    const input = calls[0].args[0].input as unknown as CreateTargetInput;
     expect(input.targetConfiguration.mcp.lambda).toBeDefined();
     expect(input.credentialProviderConfigurations[0].credentialProviderType).toBe(
       'GATEWAY_IAM_ROLE',
@@ -296,7 +330,7 @@ describe('gateway-registration-handler — connect dispatch', () => {
 
     const calls = bedrockMock.commandCalls(CreateGatewayTargetCommand);
     expect(calls.length).toBe(1);
-    const input = calls[0].args[0].input as any;
+    const input = calls[0].args[0].input as unknown as CreateTargetInput;
     expect(input.targetConfiguration.mcp.smithyModel).toBeDefined();
     expect(input.credentialProviderConfigurations[0].credentialProviderType).toBe(
       'GATEWAY_IAM_ROLE',
@@ -330,7 +364,7 @@ describe('gateway-registration-handler — connect dispatch', () => {
 
     const calls = bedrockMock.commandCalls(CreateGatewayTargetCommand);
     expect(calls.length).toBe(1);
-    const input = calls[0].args[0].input as any;
+    const input = calls[0].args[0].input as unknown as CreateTargetInput;
     expect(input.targetConfiguration.mcp.mcpServer).toBeDefined();
     expect(input.targetConfiguration.mcp.mcpServer.serverUrl).toBe('https://mcp.example.com');
   });
@@ -393,7 +427,7 @@ describe('gateway-registration-handler — registerConfluence (gap-9)', () => {
 
     const calls = bedrockMock.commandCalls(CreateGatewayTargetCommand);
     expect(calls.length).toBe(1);
-    const input = calls[0].args[0].input as any;
+    const input = calls[0].args[0].input as unknown as CreateTargetInput;
     const providerArn =
       input.credentialProviderConfigurations[0].credentialProvider.apiKeyCredentialProvider
         .providerArn;
@@ -418,7 +452,7 @@ describe('gateway-registration-handler — registerConfluence (gap-9)', () => {
       }),
     );
 
-    const input = bedrockMock.commandCalls(CreateGatewayTargetCommand)[0].args[0].input as any;
+    const input = bedrockMock.commandCalls(CreateGatewayTargetCommand)[0].args[0].input as unknown as CreateTargetInput;
     const apiKey =
       input.credentialProviderConfigurations[0].credentialProvider.apiKeyCredentialProvider;
     expect(apiKey.providerArn).toBe(REAL_PROVIDER_ARN);
@@ -443,10 +477,10 @@ describe('gateway-registration-handler — registerConfluence (gap-9)', () => {
 
     const updates = ddbMock.commandCalls(UpdateCommand);
     expect(updates.length).toBe(1);
-    const updateInput = updates[0].args[0].input as any;
-    expect(updateInput.ExpressionAttributeValues[':status']).toBe('CONNECTED');
-    expect(updateInput.ExpressionAttributeValues[':gatewayTargetId']).toBe('tgt-conf-3');
-    expect(updateInput.ExpressionAttributeValues[':agentCoreRegistered']).toBe(true);
+    const updateInput = updates[0].args[0].input;
+    expect(updateInput.ExpressionAttributeValues![':status']).toBe('CONNECTED');
+    expect(updateInput.ExpressionAttributeValues![':gatewayTargetId']).toBe('tgt-conf-3');
+    expect(updateInput.ExpressionAttributeValues![':agentCoreRegistered']).toBe(true);
   });
 
   test('on ConflictException: idempotent, falls back to existing gatewayTargetId', async () => {
@@ -459,7 +493,7 @@ describe('gateway-registration-handler — registerConfluence (gap-9)', () => {
     ddbMock.on(QueryCommand).resolves({ Items: [recordWithExistingTarget] });
     ddbMock.on(UpdateCommand).resolves({});
 
-    const conflict: any = new Error('Target already exists');
+    const conflict = new Error('Target already exists');
     conflict.name = 'ConflictException';
     bedrockMock.on(CreateGatewayTargetCommand).rejects(conflict);
 
@@ -474,9 +508,9 @@ describe('gateway-registration-handler — registerConfluence (gap-9)', () => {
 
     const updates = ddbMock.commandCalls(UpdateCommand);
     expect(updates.length).toBe(1);
-    const updateInput = updates[0].args[0].input as any;
-    expect(updateInput.ExpressionAttributeValues[':status']).toBe('CONNECTED');
-    expect(updateInput.ExpressionAttributeValues[':gatewayTargetId']).toBe(
+    const updateInput = updates[0].args[0].input;
+    expect(updateInput.ExpressionAttributeValues![':status']).toBe('CONNECTED');
+    expect(updateInput.ExpressionAttributeValues![':gatewayTargetId']).toBe(
       'tgt-conf-existing',
     );
   });
@@ -499,7 +533,7 @@ describe('gateway-registration-handler — registerConfluence (gap-9)', () => {
 
     const updates = ddbMock.commandCalls(UpdateCommand);
     expect(updates.length).toBe(1);
-    expect((updates[0].args[0].input as any).ExpressionAttributeValues[':status']).toBe(
+    expect(updates[0].args[0].input.ExpressionAttributeValues![':status']).toBe(
       'CONNECTION_FAILED',
     );
     // Bedrock must not be called when the precondition fails.
@@ -542,7 +576,7 @@ describe('gateway-registration-handler — registerLambda / registerSmithy', () 
     );
 
     const input = bedrockMock.commandCalls(CreateGatewayTargetCommand)[0].args[0]
-      .input as any;
+      .input as unknown as CreateTargetInput;
     expect(input.targetConfiguration.mcp.lambda.lambdaArn).toBe(
       'arn:aws:lambda:us-east-1:123456789012:function:Fn',
     );
@@ -581,10 +615,10 @@ describe('gateway-registration-handler — registerLambda / registerSmithy', () 
       }),
     );
 
-    const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input as any;
-    expect(update.ExpressionAttributeValues[':gatewayTargetId']).toBe('tgt-lam-2');
-    expect(update.ExpressionAttributeValues[':status']).toBe('CONNECTED');
-    expect(update.ExpressionAttributeValues[':targetStatus']).toBe('READY');
+    const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(update.ExpressionAttributeValues![':gatewayTargetId']).toBe('tgt-lam-2');
+    expect(update.ExpressionAttributeValues![':status']).toBe('CONNECTED');
+    expect(update.ExpressionAttributeValues![':targetStatus']).toBe('READY');
   });
 
   test('Smithy: builds payload with GATEWAY_IAM_ROLE + smithyModel.serviceType', async () => {
@@ -609,7 +643,7 @@ describe('gateway-registration-handler — registerLambda / registerSmithy', () 
     );
 
     const input = bedrockMock.commandCalls(CreateGatewayTargetCommand)[0].args[0]
-      .input as any;
+      .input as unknown as CreateTargetInput;
     expect(input.targetConfiguration.mcp.smithyModel.serviceType).toBe('dynamodb');
     expect(input.credentialProviderConfigurations[0].credentialProviderType).toBe(
       'GATEWAY_IAM_ROLE',
@@ -659,18 +693,18 @@ describe('gateway-registration-handler — registerMcpServer (2LO and 3LO)', () 
     );
 
     const input = bedrockMock.commandCalls(CreateGatewayTargetCommand)[0].args[0]
-      .input as any;
+      .input as unknown as CreateTargetInput;
     const oauthCp =
       input.credentialProviderConfigurations[0].credentialProvider.oauthCredentialProvider;
     expect(oauthCp.providerArn).toBe(oauthArn);
     expect(oauthCp.grantType).toBe('CLIENT_CREDENTIALS');
     expect(oauthCp.scopes).toEqual(['read:tools']);
 
-    const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input as any;
-    expect(update.ExpressionAttributeValues[':gatewayTargetId']).toBe('tgt-mcp-2lo');
-    expect(update.ExpressionAttributeValues[':status']).toBe('CONNECTED');
-    expect(update.ExpressionAttributeValues[':targetStatus']).toBe('READY');
-    expect(update.ExpressionAttributeValues[':authorizationUrl']).toBeUndefined();
+    const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(update.ExpressionAttributeValues![':gatewayTargetId']).toBe('tgt-mcp-2lo');
+    expect(update.ExpressionAttributeValues![':status']).toBe('CONNECTED');
+    expect(update.ExpressionAttributeValues![':targetStatus']).toBe('READY');
+    expect(update.ExpressionAttributeValues![':authorizationUrl']).toBeUndefined();
   });
 
   test('3LO (AUTHORIZATION_CODE): CREATE_PENDING_AUTH → persists authorizationUrl + CONNECTING', async () => {
@@ -702,7 +736,7 @@ describe('gateway-registration-handler — registerMcpServer (2LO and 3LO)', () 
       targetId: 'tgt-mcp-3lo',
       status: 'CREATE_PENDING_AUTH',
       authorizationData: { oauth2: { authorizationUrl: idpAuthUrl } },
-    } as any);
+    });
 
     await handler(
       makeEvent('integration.connect.requested', {
@@ -715,18 +749,18 @@ describe('gateway-registration-handler — registerMcpServer (2LO and 3LO)', () 
     );
 
     const input = bedrockMock.commandCalls(CreateGatewayTargetCommand)[0].args[0]
-      .input as any;
+      .input as unknown as CreateTargetInput;
     expect(
       input.credentialProviderConfigurations[0].credentialProvider.oauthCredentialProvider
         .grantType,
     ).toBe('AUTHORIZATION_CODE');
 
-    const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input as any;
-    expect(update.ExpressionAttributeValues[':status']).toBe('CONNECTING');
-    expect(update.ExpressionAttributeValues[':agentCoreRegistered']).toBe(false);
-    expect(update.ExpressionAttributeValues[':gatewayTargetId']).toBe('tgt-mcp-3lo');
-    expect(update.ExpressionAttributeValues[':targetStatus']).toBe('CREATE_PENDING_AUTH');
-    expect(update.ExpressionAttributeValues[':authorizationUrl']).toBe(idpAuthUrl);
+    const update = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(update.ExpressionAttributeValues![':status']).toBe('CONNECTING');
+    expect(update.ExpressionAttributeValues![':agentCoreRegistered']).toBe(false);
+    expect(update.ExpressionAttributeValues![':gatewayTargetId']).toBe('tgt-mcp-3lo');
+    expect(update.ExpressionAttributeValues![':targetStatus']).toBe('CREATE_PENDING_AUTH');
+    expect(update.ExpressionAttributeValues![':authorizationUrl']).toBe(idpAuthUrl);
   });
 });
 
@@ -814,7 +848,7 @@ describe('gateway-registration-handler — handleDisconnect ordering', () => {
     });
     const callOrder = setupOrderTracking();
     // Override target to reject with a non-RNF error.
-    const validationErr: any = new Error('Validation failed');
+    const validationErr = new Error('Validation failed');
     validationErr.name = 'ValidationException';
     bedrockMock.on(DeleteGatewayTargetCommand).rejects(validationErr);
 
@@ -856,7 +890,7 @@ describe('gateway-registration-handler — handleDisconnect ordering', () => {
       ],
     });
     const callOrder = setupOrderTracking();
-    const rnf: any = new Error('Target not found');
+    const rnf = new Error('Target not found');
     rnf.name = 'ResourceNotFoundException';
     bedrockMock.on(DeleteGatewayTargetCommand).rejects(rnf);
 

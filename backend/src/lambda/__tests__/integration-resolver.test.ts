@@ -29,12 +29,12 @@ const eventBridgeMock = mockClient(EventBridgeClient);
 // MCP_SERVER tests don't need to also stub the AgentCore Identity SDK calls
 // for CreateApiKey/CreateOauth2 commands.
 jest.mock('../../utils/credential-provider-manager', () => ({
-  createOrUpsertApiKeyProvider: jest.fn(async ({ integrationId }: any) => ({
+  createOrUpsertApiKeyProvider: jest.fn(async ({ integrationId }: { integrationId: string }) => ({
     credentialProviderArn: `arn:aws:bedrock-agentcore:us-east-1:111:api-key-credential-provider/integration-${integrationId}-api-key`,
     internalSecretArn: 'arn:aws:secretsmanager:us-east-1:111:secret:apikey-test',
     rawResponse: {},
   })),
-  createOrUpsertOauth2Provider: jest.fn(async ({ integrationId }: any) => ({
+  createOrUpsertOauth2Provider: jest.fn(async ({ integrationId }: { integrationId: string }) => ({
     credentialProviderArn: `arn:aws:bedrock-agentcore:us-east-1:111:oauth2-credential-provider/integration-${integrationId}-oauth`,
     callbackUrl: 'https://agentcore.aws/oauth/callback/test',
     internalSecretArn: 'arn:aws:secretsmanager:us-east-1:111:secret:oauth-test',
@@ -53,6 +53,33 @@ jest.mock('../../utils/oauth-metadata', () => {
 
 // Import the handler after mocking
 import { handler } from '../integration-resolver';
+// These resolve to the jest.mock factories above (jest.mock is hoisted),
+// replacing the previous inline `require()` calls.
+import * as credentialProviderManager from '../../utils/credential-provider-manager';
+import * as oauthMetadata from '../../utils/oauth-metadata';
+
+type HandlerEvent = Parameters<typeof handler>[0];
+
+/** Result fields read by the assertions in this file. */
+interface IntegrationResult {
+  integrationType?: string;
+  gatewayTargetId?: string;
+  status?: string;
+  targetStatus?: string;
+  success?: boolean;
+  credentialProviderArn?: string;
+  agentCoreCallbackUrl?: string;
+  authorizationUrl?: string;
+}
+
+/**
+ * Invokes the handler with a partially-specified AppSync event literal.
+ * The handler's real signature is a single-event async function; tests
+ * build structural event literals, so the cast is centralized here.
+ */
+async function invoke<T = IntegrationResult>(event: Record<string, unknown>): Promise<T> {
+  return (await handler(event as unknown as HandlerEvent)) as T;
+}
 
 describe('Integration Resolver - Unit Tests', () => {
   beforeEach(() => {
@@ -129,7 +156,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'test-user' }
       };
       
-      const result = await handler(event as any);
+      const result = await invoke(event);
       
       expect(result).toBeDefined();
       expect(result.integrationType).toBe('AWS_LAMBDA');
@@ -156,9 +183,6 @@ describe('Integration Resolver - Unit Tests', () => {
       // credential-provider provisioning (target creation is async). When
       // provisioning rejects, the resolver must roll back the secret and
       // re-throw with a `Failed to provision credential provider` prefix.
-      /* eslint-disable @typescript-eslint/no-var-requires */
-      const credentialProviderManager = require('../../utils/credential-provider-manager');
-      /* eslint-enable @typescript-eslint/no-var-requires */
       const upsertApiKeyMock =
         credentialProviderManager.createOrUpsertApiKeyProvider as jest.Mock;
 
@@ -191,7 +215,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'test-user' },
       };
 
-      await expect(handler(event as any)).rejects.toThrow(
+      await expect(invoke(event)).rejects.toThrow(
         /Failed to provision credential provider/,
       );
 
@@ -202,7 +226,7 @@ describe('Integration Resolver - Unit Tests', () => {
       expect(deleteSecretCalls.length).toBeGreaterThan(0);
 
       // Restore default mock for downstream tests in this file.
-      upsertApiKeyMock.mockImplementation(async ({ integrationId }: any) => ({
+      upsertApiKeyMock.mockImplementation(async ({ integrationId }: { integrationId: string }) => ({
         credentialProviderArn: `arn:aws:bedrock-agentcore:us-east-1:111:api-key-credential-provider/integration-${integrationId}-api-key`,
         internalSecretArn: 'arn:aws:secretsmanager:us-east-1:111:secret:apikey-test',
         rawResponse: {},
@@ -247,7 +271,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'test-user' }
       };
       
-      const result = await handler(event as any);
+      const result = await invoke(event);
       
       expect(result).toBeDefined();
       expect(result.integrationType).toBe('AWS_SMITHY');
@@ -297,7 +321,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'test-user' }
       };
       
-      const result = await handler(event as any);
+      const result = await invoke(event);
       
       expect(result).toBeDefined();
       expect(result.integrationType).toBe('MCP_SERVER');
@@ -349,7 +373,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'test-user' }
       };
       
-      const result = await handler(event as any);
+      const result = await invoke(event);
       
       expect(result).toBeDefined();
       expect(result.integrationType).toBe('MCP_SERVER');
@@ -413,7 +437,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'test-user' }
       };
       
-      const result = await handler(event as any);
+      const result = await invoke(event);
       
       expect(result.success).toBe(true);
       // P3.A: deleteIntegration emits an event and marks DDB targetStatus=DELETING.
@@ -461,7 +485,7 @@ describe('Integration Resolver - Unit Tests', () => {
       
       // Mock gateway target deletion to throw ResourceNotFoundException —
       // treated as success per the P2.A strict-ordering contract.
-      const rnf: any = new Error('Gateway target not found');
+      const rnf = new Error('Gateway target not found');
       rnf.name = 'ResourceNotFoundException';
       bedrockAgentMock.on(DeleteGatewayTargetCommand).rejects(rnf);
       
@@ -480,7 +504,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'test-user' }
       };
       
-      const result = await handler(event as any);
+      const result = await invoke(event);
       
       // Should still succeed when target was already gone (RNF = idempotent).
       expect(result.success).toBe(true);
@@ -526,7 +550,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'test-user' }
       };
       
-      const result = await handler(event as any);
+      const result = await invoke(event);
       
       expect(result.success).toBe(true);
       // Verify gateway API was NOT called
@@ -590,7 +614,7 @@ describe('Integration Resolver - Unit Tests', () => {
       
       // This will fail at connection test but we can verify SSM retrieval
       try {
-        await handler(event as any);
+        await invoke(event);
       } catch (error) {
         // Expected to fail at connection test
       }
@@ -642,7 +666,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'test-user' }
       };
       
-      await handler(event as any);
+      await invoke(event);
       
       // Check that logs don't contain the actual role ARN
       const logCalls = consoleSpy.mock.calls;
@@ -662,10 +686,6 @@ describe('Integration Resolver - Unit Tests', () => {
   // (P2.B) and the Phase 1 credential-provider-manager.
   // ────────────────────────────────────────────────────────────────────────
   describe('P2.A: createIntegration MCP_SERVER credential-provider wiring', () => {
-    /* eslint-disable @typescript-eslint/no-var-requires */
-    const credentialProviderManager = require('../../utils/credential-provider-manager');
-    const oauthMetadata = require('../../utils/oauth-metadata');
-    /* eslint-enable @typescript-eslint/no-var-requires */
     const upsertOauth2Mock = credentialProviderManager.createOrUpsertOauth2Provider as jest.Mock;
     const upsertApiKeyMock = credentialProviderManager.createOrUpsertApiKeyProvider as jest.Mock;
     const deleteOauth2Mock = credentialProviderManager.deleteOauth2Provider as jest.Mock;
@@ -710,7 +730,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'tester' },
       };
 
-      const result = await handler(event as any);
+      const result = await invoke(event);
 
       expect(upsertOauth2Mock).toHaveBeenCalledTimes(1);
       const provisionCall = upsertOauth2Mock.mock.calls[0][0];
@@ -733,7 +753,7 @@ describe('Integration Resolver - Unit Tests', () => {
 
       // The DDB record persists credentialProviderArn + agentCoreCallbackUrl.
       const putCalls = dynamoMock.commandCalls(PutCommand);
-      const persisted = putCalls[putCalls.length - 1].args[0].input.Item as any;
+      const persisted = putCalls[putCalls.length - 1].args[0].input.Item as Record<string, unknown>;
       // P3.A: gatewayTargetId is set later by the handler; resolver leaves it undefined.
       expect(persisted.gatewayTargetId).toBeUndefined();
       expect(persisted.targetStatus).toBe('PENDING');
@@ -786,10 +806,10 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'tester' },
       };
 
-      const result = await handler(event as any);
+      const result = await invoke(event);
 
       const putCalls = dynamoMock.commandCalls(PutCommand);
-      const persisted = putCalls[putCalls.length - 1].args[0].input.Item as any;
+      const persisted = putCalls[putCalls.length - 1].args[0].input.Item as Record<string, unknown>;
       expect(persisted.targetStatus).toBe('PENDING');
       // Resolver does not yet know the IdP authorization URL — handler
       // populates it after sync-target creation.
@@ -839,7 +859,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'tester' },
       };
 
-      await handler(event as any);
+      await invoke(event);
 
       expect(discoverMock).toHaveBeenCalledWith(
         'https://idp.example.com/.well-known/oauth-authorization-server',
@@ -870,7 +890,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'tester' },
       };
 
-      await handler(event as any);
+      await invoke(event);
 
       expect(upsertApiKeyMock).toHaveBeenCalledTimes(1);
       expect(upsertOauth2Mock).not.toHaveBeenCalled();
@@ -878,7 +898,7 @@ describe('Integration Resolver - Unit Tests', () => {
       expect(provisionCall.apiKey).toBe('k-1');
 
       const putCalls = dynamoMock.commandCalls(PutCommand);
-      const persisted = putCalls[putCalls.length - 1].args[0].input.Item as any;
+      const persisted = putCalls[putCalls.length - 1].args[0].input.Item as Record<string, unknown>;
       expect(persisted.credentialProviderArn).toMatch(/api-key-credential-provider/);
       expect(persisted.credentialProviderType).toBe('API_KEY');
       // API_KEY flow returns no callbackUrl from AgentCore.
@@ -902,7 +922,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'tester' },
       };
 
-      await expect(handler(event as any)).rejects.toThrow(/grantType/);
+      await expect(invoke(event)).rejects.toThrow(/grantType/);
       // None of the AgentCore-side calls should have run.
       expect(upsertOauth2Mock).not.toHaveBeenCalled();
       expect(bedrockAgentMock.commandCalls(CreateGatewayTargetCommand).length).toBe(0);
@@ -942,7 +962,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'tester' },
       };
 
-      const result = await handler(event as any);
+      const result = await invoke(event);
 
       expect(result.authorizationUrl).toBe(idpAuthUrl);
       expect(result.status).toBe('CONNECTING');
@@ -952,9 +972,6 @@ describe('Integration Resolver - Unit Tests', () => {
   });
 
   describe('P2.A: deleteIntegration ordering', () => {
-    /* eslint-disable @typescript-eslint/no-var-requires */
-    const credentialProviderManager = require('../../utils/credential-provider-manager');
-    /* eslint-enable @typescript-eslint/no-var-requires */
     const deleteOauth2Mock = credentialProviderManager.deleteOauth2Provider as jest.Mock;
     const deleteApiKeyMock = credentialProviderManager.deleteApiKeyProvider as jest.Mock;
 
@@ -1004,7 +1021,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'tester' },
       };
 
-      const result = await handler(event as any);
+      const result = await invoke(event);
 
       expect(result.success).toBe(true);
 
@@ -1034,8 +1051,8 @@ describe('Integration Resolver - Unit Tests', () => {
       // Resolver flips DDB targetStatus to DELETING via UpdateCommand
       // (no DeleteCommand — that's the handler's job).
       expect(dynamoMock.commandCalls(UpdateCommand).length).toBe(1);
-      const updateInput = dynamoMock.commandCalls(UpdateCommand)[0].args[0].input as any;
-      expect(updateInput.ExpressionAttributeValues[':ts']).toBe('DELETING');
+      const updateInput = dynamoMock.commandCalls(UpdateCommand)[0].args[0].input;
+      expect(updateInput.ExpressionAttributeValues![':ts']).toBe('DELETING');
       expect(dynamoMock.commandCalls(DeleteCommand).length).toBe(0);
     });
 
@@ -1072,7 +1089,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'tester' },
       };
 
-      await expect(handler(event as any)).rejects.toThrow(/EventBridge unreachable/);
+      await expect(invoke(event)).rejects.toThrow(/EventBridge unreachable/);
       // No teardown performed: the handler is what does cred / secret / DDB
       // cleanup, and it never received the event.
       expect(deleteOauth2Mock).not.toHaveBeenCalled();
@@ -1110,7 +1127,7 @@ describe('Integration Resolver - Unit Tests', () => {
         identity: { username: 'tester' },
       };
 
-      const result = await handler(event as any);
+      const result = await invoke(event);
       expect(result.success).toBe(true);
       // Resolver MUST NOT call provider deprovision (that's the handler's
       // job, and the legacy record signals there's no provider to delete).

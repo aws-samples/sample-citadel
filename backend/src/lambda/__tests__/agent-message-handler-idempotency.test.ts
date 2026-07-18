@@ -47,7 +47,7 @@ const makeEvent = (id: string, messageId?: string) =>
       userId: 'system',
       timestamp: new Date().toISOString(),
     },
-  }) as any;
+  }) as unknown as Parameters<typeof handler>[0];
 
 describe('agent-message-handler idempotency key (Finding #1)', () => {
   beforeEach(() => {

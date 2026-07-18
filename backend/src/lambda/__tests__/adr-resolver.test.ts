@@ -36,6 +36,7 @@ import {
   reopenADR,
   supersedeADR,
   handler,
+  type ADRInput,
 } from '../adr-resolver';
 import { __resetGovernanceNotifierForTest } from '../../utils/notifier-base';
 import { LifecycleManager, ADR_TRANSITIONS } from '../../adapters/lifecycle';
@@ -52,7 +53,7 @@ function mockAuthContextFor(role: 'architect' | 'developer'): AuthContext {
   };
 }
 
-function baseInput(overrides: Record<string, unknown> = {}): any {
+function baseInput(overrides: Record<string, unknown> = {}): ADRInput {
   return {
     projectId: 'proj-1',
     title: 'Use PostgreSQL over MySQL',
@@ -63,7 +64,7 @@ function baseInput(overrides: Record<string, unknown> = {}): any {
     revisitConditions: ['Team skills shift', 'Vendor contract change'],
     sourceRoundIds: ['round-1'],
     ...overrides,
-  };
+  } as unknown as ADRInput;
 }
 
 describe('adr-resolver', () => {
@@ -145,7 +146,7 @@ describe('adr-resolver', () => {
     test('rejects non-array constraints as ValidationError', async () => {
       const auth = mockAuthContextFor('architect');
       await expect(
-        createADR(baseInput({ constraints: 'not-an-array' as any }), auth)
+        createADR(baseInput({ constraints: 'not-an-array' }), auth)
       ).rejects.toThrow(/ValidationError.*array/);
     });
   });
@@ -281,7 +282,7 @@ describe('adr-resolver', () => {
         .on(GetCommand, { TableName: 'citadel-adrs-test', Key: { adrId: 'adr-new' } })
         .resolves({ Item: newAdr });
       const ccfError = new Error('The conditional request failed');
-      (ccfError as any).name = 'ConditionalCheckFailedException';
+      ccfError.name = 'ConditionalCheckFailedException';
       ddbMock.on(UpdateCommand).rejects(ccfError);
 
       const auth = mockAuthContextFor('architect');
@@ -362,7 +363,10 @@ describe('adr-resolver', () => {
 
     test('createADR dispatch routes to createADR function and enforces permission', async () => {
       ddbMock.on(PutCommand).resolves({});
-      const result: any = await handler(makeEvent('createADR', { input: baseInput() }));
+      const result = (await handler(makeEvent('createADR', { input: baseInput() }))) as {
+        status: string;
+        version: number;
+      };
       expect(result.status).toBe('PROPOSED');
       expect(result.version).toBe(1);
     });
@@ -370,13 +374,13 @@ describe('adr-resolver', () => {
     test('getADR dispatch', async () => {
       const existing = { adrId: 'adr-1', projectId: 'proj-1', status: 'PROPOSED', version: 1, title: 't', sourceRoundIds: [] };
       ddbMock.on(GetCommand).resolves({ Item: existing });
-      const result: any = await handler(makeEvent('getADR', { adrId: 'adr-1' }));
+      const result = await handler(makeEvent('getADR', { adrId: 'adr-1' }));
       expect(result).toEqual(existing);
     });
 
     test('listADRsForProject dispatch', async () => {
       ddbMock.on(QueryCommand).resolves({ Items: [] });
-      const result: any = await handler(makeEvent('listADRsForProject', { projectId: 'proj-1' }));
+      const result = await handler(makeEvent('listADRsForProject', { projectId: 'proj-1' }));
       expect(result).toEqual([]);
     });
 
@@ -441,7 +445,7 @@ describe('adr-resolver', () => {
               sourceRoundIds,
               severity,
             };
-            const adr = await createADR(input as any, auth);
+            const adr = await createADR(input, auth);
             expect(adr.status).toBe('PROPOSED');
             expect(adr.version).toBe(1);
             expect(adr.adrId).toMatch(/^[0-9a-f-]{36}$/i);
@@ -521,7 +525,7 @@ describe('adr-resolver', () => {
       expect(puts).toHaveLength(1);
       expect(puts[0].args[0].input.TableName).toBe(AUDIT_TABLE);
       expect(puts[0].args[0].input.ConditionExpression).toMatch(/attribute_not_exists\(attemptId\)/);
-      const pendingRow = puts[0].args[0].input.Item as any;
+      const pendingRow = puts[0].args[0].input.Item as Record<string, unknown>;
       expect(pendingRow.authResult).toBe('PENDING');
       expect(pendingRow.adrId).toBe('adr-1');
       expect(pendingRow.projectId).toBe('proj-1');
@@ -564,7 +568,7 @@ describe('adr-resolver', () => {
 
       const { puts, updates } = auditCommands();
       expect(puts).toHaveLength(1);
-      expect((puts[0].args[0].input.Item as any).authResult).toBe('PENDING');
+      expect((puts[0].args[0].input.Item as Record<string, unknown>).authResult).toBe('PENDING');
       expect(updates).toHaveLength(1);
       expect(updates[0].args[0].input.ExpressionAttributeValues![':ar']).toBe('ALLOWED');
 
@@ -600,7 +604,7 @@ describe('adr-resolver', () => {
 
       const { puts, updates } = auditCommands();
       expect(puts).toHaveLength(1);
-      expect((puts[0].args[0].input.Item as any).authResult).toBe('PENDING');
+      expect((puts[0].args[0].input.Item as Record<string, unknown>).authResult).toBe('PENDING');
       // Two audit-table updates: first ALLOWED, then transitionError.
       expect(updates).toHaveLength(2);
       expect(updates[0].args[0].input.ExpressionAttributeValues![':ar']).toBe('ALLOWED');
@@ -629,7 +633,7 @@ describe('adr-resolver', () => {
 
       const { puts, updates } = auditCommands();
       expect(puts).toHaveLength(1);
-      const row = puts[0].args[0].input.Item as any;
+      const row = puts[0].args[0].input.Item as Record<string, unknown>;
       expect(row.adrId).toBe('ghost-adr');
       expect(row.projectId).toBe('');
       expect(row.authResult).toBe('PENDING');
@@ -691,7 +695,7 @@ describe('adr-resolver', () => {
       ddbMock.on(GetCommand).resolves({ Item: locked });
       ddbMock.on(PutCommand).resolves({});
       const ccf = new Error('The conditional request failed');
-      (ccf as any).name = 'ConditionalCheckFailedException';
+      ccf.name = 'ConditionalCheckFailedException';
       ddbMock
         .on(UpdateCommand, { TableName: AUDIT_TABLE })
         .resolves({})
@@ -794,7 +798,7 @@ describe('adr-resolver', () => {
               .filter((c) => c.args[0].input.TableName === AUDIT_TABLE);
             expect(auditPuts.length).toBeGreaterThanOrEqual(1);
             // And the row is PENDING at insert-time.
-            expect((auditPuts[0].args[0].input.Item as any).authResult).toBe('PENDING');
+            expect((auditPuts[0].args[0].input.Item as Record<string, unknown>).authResult).toBe('PENDING');
           },
         ),
         { numRuns: 100 },
@@ -870,7 +874,7 @@ describe('adr-resolver', () => {
         arguments: { adrId: 'adr-1', proposedChange: 'p', revisitConditionMatched: true, reason: 'r' },
         identity: { sub: 'user-architect', username: 'architect', 'custom:role': 'architect' },
       };
-      const result: any = await handler(event);
+      const result = (await handler(event)) as { status: string; version: number };
       expect(result.status).toBe('REOPENED');
       expect(result.version).toBe(4);
     });

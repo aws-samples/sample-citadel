@@ -14,7 +14,7 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 
 import { handler } from '../fabricator-request-resolver';
 
-const makeEvent = (fieldName: string, args: any) => ({
+const makeEvent = (fieldName: string, args: Record<string, unknown>) => ({
   info: { fieldName },
   arguments: args,
 });

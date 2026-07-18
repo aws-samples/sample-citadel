@@ -20,20 +20,34 @@ const mockGetResource = jest.fn();
 const mockUpdateResource = jest.fn();
 const mockDeleteResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
-const mockSerializeCustomMetadata = jest.fn((meta: any) => JSON.stringify(meta));
-const mockDeserializeCustomMetadata = jest.fn((json: string | null, defaults: any) => {
-  if (!json) return defaults;
-  try {
-    return { ...defaults, ...JSON.parse(json) };
-  } catch {
-    return defaults;
-  }
-});
+const mockSerializeCustomMetadata = jest.fn((meta: unknown) => JSON.stringify(meta));
+const mockDeserializeCustomMetadata = jest.fn(
+  (json: string | null, defaults: Record<string, unknown>) => {
+    if (!json) return defaults;
+    try {
+      return { ...defaults, ...JSON.parse(json) };
+    } catch {
+      return defaults;
+    }
+  },
+);
 const mockToRegistryStatus = jest.fn((state: string) => {
   const map: Record<string, string> = { active: 'APPROVED', inactive: 'DEPRECATED', maintenance: 'DRAFT' };
   return map[state] || 'DEPRECATED';
 });
-const mockMapToAgentConfig = jest.fn((record: any) => ({
+
+/** Registry record fixture shape consumed by the mock mapper. */
+interface RegistryRecordFixture {
+  recordId: string;
+  name?: string;
+  description?: string;
+  status?: string;
+  customDescriptorContent?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+const mockMapToAgentConfig = jest.fn((record: RegistryRecordFixture) => ({
   agentId: record.recordId,
   config: record.description || '',
   state: 'active',
@@ -393,7 +407,7 @@ describe('Registry-backed CRUD functions (task 6.4)', () => {
 
       // Stub mapToAgentConfig to map status → state using the same logic as
       // the real implementation for the statuses this test exercises.
-      mockMapToAgentConfig.mockImplementation((record: any) => ({
+      mockMapToAgentConfig.mockImplementation((record: RegistryRecordFixture) => ({
         agentId: record.recordId,
         config: record.description || '',
         state: record.status === 'PENDING_APPROVAL' || record.status === 'APPROVED'

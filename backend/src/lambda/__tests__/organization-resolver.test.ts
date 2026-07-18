@@ -41,7 +41,7 @@ describe('organization-resolver', () => {
   // REAL AppSync $context shape: the field name lives under `info.fieldName`,
   // with `arguments` and `identity` alongside — matching project-resolver.test.ts
   // and docs/RESOLVER_GUIDE.md.
-  const makeEvent = (fieldName: string, args: any) => ({
+  const makeEvent = (fieldName: string, args: Record<string, unknown>) => ({
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-1' },
@@ -63,7 +63,7 @@ describe('organization-resolver', () => {
 
       const putCalls = dynamoMock.commandCalls(PutCommand);
       expect(putCalls).toHaveLength(1);
-      expect((putCalls[0].args[0].input.Item as any).description).toBe('A test org');
+      expect((putCalls[0].args[0].input.Item as Record<string, unknown>).description).toBe('A test org');
     });
 
     test('creates organization with a blank description and writes NO undefined attribute', async () => {
@@ -157,7 +157,7 @@ describe('organization-resolver', () => {
 
       const listUsersCalls = cognitoMock.commandCalls(ListUsersCommand);
       expect(listUsersCalls.length).toBeGreaterThanOrEqual(1);
-      const listInput = listUsersCalls[0].args[0].input as any;
+      const listInput = listUsersCalls[0].args[0].input;
       expect(listInput.UserPoolId).toBe('us-east-1_testpool');
       const filterStr = listInput.Filter === undefined ? '' : String(listInput.Filter);
       expect(filterStr.includes('custom:')).toBe(false);

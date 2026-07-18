@@ -12,6 +12,20 @@ jest.mock('uuid', () => ({ v4: jest.fn().mockReturnValue('msg-uuid-123') }));
 
 import { handler } from '../conversation-resolver';
 
+type HandlerEvent = Parameters<typeof handler>[0];
+
+/** Invoke the one-parameter handler and cast the result to the expected field shape. */
+async function invoke<T>(event: HandlerEvent): Promise<T> {
+  return (await handler(event)) as T;
+}
+
+/** Result shape of sendMessage / sendMessageToAgent. */
+interface MessageResult {
+  id: string;
+  projectId: string;
+  message: string;
+}
+
 describe('conversation-resolver', () => {
   beforeEach(() => {
     dynamoMock.reset();
@@ -25,25 +39,26 @@ describe('conversation-resolver', () => {
     delete process.env.EVENT_BUS_NAME;
   });
 
-  const makeEvent = (fieldName: string, args: any) => ({
-    info: { fieldName },
-    arguments: args,
-    identity: { sub: 'user-123', username: 'testuser' },
-  });
+  const makeEvent = (fieldName: string, args: Record<string, unknown>): HandlerEvent =>
+    ({
+      info: { fieldName },
+      arguments: args,
+      identity: { sub: 'user-123', username: 'testuser' },
+    }) as unknown as HandlerEvent;
 
   describe('sendMessage', () => {
     test('stores message in DynamoDB and publishes USER_INPUT to EventBridge', async () => {
       dynamoMock.on(PutCommand).resolves({});
       eventBridgeMock.on(PutEventsCommand).resolves({});
 
-      const result = await handler(makeEvent('sendMessage', {
+      const result = await invoke<MessageResult>(makeEvent('sendMessage', {
         projectId: 'proj-1',
         message: {
           agentId: 'agent-1',
           message: 'Hello agent',
           messageType: 'USER_INPUT',
         },
-      }) as any);
+      }));
 
       expect(result.id).toBe('msg-uuid-123');
       expect(result.projectId).toBe('proj-1');
@@ -63,7 +78,7 @@ describe('conversation-resolver', () => {
           message: 'System notification',
           messageType: 'SYSTEM_NOTIFICATION',
         },
-      }) as any);
+      }));
 
       expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(0);
     });
@@ -72,14 +87,14 @@ describe('conversation-resolver', () => {
       dynamoMock.on(PutCommand).resolves({});
       eventBridgeMock.on(PutEventsCommand).rejects(new Error('EB down'));
 
-      const result = await handler(makeEvent('sendMessage', {
+      const result = await invoke<MessageResult>(makeEvent('sendMessage', {
         projectId: 'proj-1',
         message: {
           agentId: 'agent-1',
           message: 'Hello',
           messageType: 'USER_INPUT',
         },
-      }) as any);
+      }));
 
       // Should still return the message (stored in DDB)
       expect(result.id).toBeDefined();
@@ -96,9 +111,11 @@ describe('conversation-resolver', () => {
             // No LastEvaluatedKey -> nextToken should be null.
           });
     
-          const result = await handler(makeEvent('getConversationHistory', {
-            projectId: 'proj-1',
-          }) as any);
+          const result = await invoke<{ items: unknown[]; nextToken: string | null }>(
+            makeEvent('getConversationHistory', {
+              projectId: 'proj-1',
+            }),
+          );
     
           // Resolver now returns {items, nextToken} for cursor pagination.
           expect(result.items).toHaveLength(2);
@@ -113,9 +130,11 @@ describe('conversation-resolver', () => {
             LastEvaluatedKey: { projectId: 'proj-1', timestamp: '2025-01-01T00:00:00Z' },
           });
     
-          const result = await handler(makeEvent('getConversationHistory', {
-            projectId: 'proj-1',
-          }) as any);
+          const result = await invoke<{ items: unknown[]; nextToken: string }>(
+            makeEvent('getConversationHistory', {
+              projectId: 'proj-1',
+            }),
+          );
     
           expect(result.items).toHaveLength(1);
           expect(typeof result.nextToken).toBe('string');
@@ -129,9 +148,11 @@ describe('conversation-resolver', () => {
     test('returns empty items list when no messages', async () => {
           dynamoMock.on(QueryCommand).resolves({ Items: [] });
     
-          const result = await handler(makeEvent('getConversationHistory', {
-            projectId: 'proj-1',
-          }) as any);
+          const result = await invoke<{ items: unknown[]; nextToken: string | null }>(
+            makeEvent('getConversationHistory', {
+              projectId: 'proj-1',
+            }),
+          );
     
           expect(result.items).toEqual([]);
           expect(result.nextToken).toBeNull();
@@ -143,11 +164,11 @@ describe('conversation-resolver', () => {
       dynamoMock.on(PutCommand).resolves({});
       eventBridgeMock.on(PutEventsCommand).resolves({});
 
-      const result = await handler(makeEvent('sendMessageToAgent', {
+      const result = await invoke<MessageResult>(makeEvent('sendMessageToAgent', {
         projectId: 'proj-1',
         agentId: 'agent-1',
         message: 'Direct message',
-      }) as any);
+      }));
 
       expect(result.id).toBeDefined();
       expect(result.message).toBe('Direct message');
@@ -167,7 +188,7 @@ describe('conversation-resolver', () => {
 
       const result = await handler(makeEvent('publishConversationMessage', {
         input,
-      }) as any);
+      }));
 
       expect(result).toEqual(input);
     });
@@ -175,7 +196,7 @@ describe('conversation-resolver', () => {
 
   test('throws on unknown field', async () => {
     await expect(
-      handler(makeEvent('unknownField', {}) as any)
+      handler(makeEvent('unknownField', {}))
     ).rejects.toThrow('Unknown field');
   });
 });

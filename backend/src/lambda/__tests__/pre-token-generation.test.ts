@@ -8,7 +8,15 @@
  */
 import { handler } from '../pre-token-generation';
 
-function makeEvent(overrides: Partial<any> = {}): any {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+/** Loose overrides: request.userAttributes merges, everything else replaces. */
+interface EventOverrides extends Record<string, unknown> {
+  request?: { userAttributes?: Record<string, string> };
+  response?: unknown;
+}
+
+function makeEvent(overrides: EventOverrides = {}): HandlerEvent {
   return {
     version: '1',
     triggerSource: 'TokenGeneration_HostedAuth',
@@ -26,7 +34,7 @@ function makeEvent(overrides: Partial<any> = {}): any {
     },
     response: overrides.response ?? {},
     ...overrides,
-  };
+  } as unknown as HandlerEvent;
 }
 
 describe('pre-token-generation', () => {

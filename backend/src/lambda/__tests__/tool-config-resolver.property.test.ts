@@ -44,13 +44,28 @@ const dataStoreTypeArb = fc.constantFrom(
 
 const operationIdArb = fc.stringMatching(/^[a-z][a-z_]{2,20}$/);
 
-const integrationBindingArb = fc.record({
+/** Binding shapes generated below; `direction` is absent in the legacy arbs. */
+interface IntegrationBinding {
+  integrationId: string;
+  integrationType: string;
+  operations?: string[] | undefined;
+  direction?: string;
+}
+
+interface DataStoreBinding {
+  dataStoreId: string;
+  dataStoreType: string;
+  operations?: string[] | undefined;
+  direction?: string;
+}
+
+const integrationBindingArb: fc.Arbitrary<IntegrationBinding> = fc.record({
   integrationId: fc.stringMatching(/^int-[a-z0-9]{6,12}$/),
   integrationType: integrationTypeArb,
   operations: fc.option(fc.array(operationIdArb, { minLength: 1, maxLength: 5 }), { nil: undefined }),
 });
 
-const dataStoreBindingArb = fc.record({
+const dataStoreBindingArb: fc.Arbitrary<DataStoreBinding> = fc.record({
   dataStoreId: fc.stringMatching(/^ds-[a-z0-9]{6,12}$/),
   dataStoreType: dataStoreTypeArb,
   operations: fc.option(fc.array(operationIdArb, { minLength: 1, maxLength: 5 }), { nil: undefined }),
@@ -58,7 +73,22 @@ const dataStoreBindingArb = fc.record({
 
 const toolIdArb = fc.stringMatching(/^tool-[a-z0-9]{4,12}$/);
 
-function makeEvent(fieldName: string, args: Record<string, any>): any {
+/**
+ * Shape produced by the lib-dynamodb command mocks at the top of this file
+ * (each command constructor is replaced by `{ _type, input }`).
+ */
+interface FakeCommand {
+  _type: 'Put' | 'Get' | 'Scan' | 'Delete';
+  input: { Item?: Record<string, unknown> };
+}
+
+/** Result fields the assertions below read off resolver results. */
+interface ToolConfigResult {
+  integrationBindings?: IntegrationBinding[] | null;
+  dataStoreBindings?: DataStoreBinding[] | null;
+}
+
+function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
@@ -91,9 +121,9 @@ describe('Property 1: ToolConfig Binding Round-Trip', () => {
           mockDynamoSend.mockReset();
 
           // Capture what PutCommand receives so we can return it from GetCommand
-          let storedItem: any = null;
+          let storedItem: Record<string, unknown> | null = null;
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Put') {
               storedItem = { ...cmd.input.Item };
               return Promise.resolve({});
@@ -106,7 +136,7 @@ describe('Property 1: ToolConfig Binding Round-Trip', () => {
 
           const configObj = { name: `tool_${toolId}`, filename: `${toolId}.py`, version: '1', description: 'test' };
 
-          const input: Record<string, any> = {
+          const input: Record<string, unknown> = {
             toolId,
             config: JSON.stringify(configObj),
           };
@@ -122,11 +152,11 @@ describe('Property 1: ToolConfig Binding Round-Trip', () => {
           await handler(makeEvent('createToolConfig', { input }));
 
           // Read it back
-          const result = await handler(makeEvent('getToolConfig', { toolId }));
+          const result = await handler(makeEvent("getToolConfig", { toolId })) as ToolConfigResult;
 
           // Assert bindings round-trip
           if (integrationBindings.length > 0) {
-            const expectedIntBindings = integrationBindings.map((b: any) => ({
+            const expectedIntBindings = integrationBindings.map((b) => ({
               ...b,
               direction: b.direction ? b.direction.toUpperCase() : 'BIDIRECTIONAL',
             }));
@@ -137,7 +167,7 @@ describe('Property 1: ToolConfig Binding Round-Trip', () => {
           }
 
           if (dataStoreBindings.length > 0) {
-            const expectedDsBindings = dataStoreBindings.map((b: any) => ({
+            const expectedDsBindings = dataStoreBindings.map((b) => ({
               ...b,
               direction: b.direction ? b.direction.toUpperCase() : 'BIDIRECTIONAL',
             }));
@@ -176,9 +206,9 @@ describe('Property 2: Partial Update Preserves Unrelated Bindings', () => {
           mockDynamoSend.mockReset();
 
           // In-memory store keyed by toolId
-          let storedItem: any = null;
+          let storedItem: Record<string, unknown> | null = null;
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Put') {
               storedItem = { ...cmd.input.Item };
               return Promise.resolve({});
@@ -213,17 +243,17 @@ describe('Property 2: Partial Update Preserves Unrelated Bindings', () => {
           }));
 
           // Step 3: Read back and verify
-          const result: any = await handler(makeEvent('getToolConfig', { toolId }));
+          const result = await handler(makeEvent("getToolConfig", { toolId })) as ToolConfigResult;
 
           // integrationBindings should reflect the update
-          const expectedUpdatedInt = updatedIntBindings.map((b: any) => ({
+          const expectedUpdatedInt = updatedIntBindings.map((b) => ({
             ...b,
             direction: b.direction ? b.direction.toUpperCase() : 'BIDIRECTIONAL',
           }));
           expect(result.integrationBindings).toEqual(expectedUpdatedInt);
 
           // dataStoreBindings should be preserved unchanged
-          const expectedOriginalDs = originalDsBindings.map((b: any) => ({
+          const expectedOriginalDs = originalDsBindings.map((b) => ({
             ...b,
             direction: b.direction ? b.direction.toUpperCase() : 'BIDIRECTIONAL',
           }));
@@ -244,9 +274,9 @@ describe('Property 2: Partial Update Preserves Unrelated Bindings', () => {
         async (toolId, originalIntBindings, originalDsBindings, updatedDsBindings) => {
           mockDynamoSend.mockReset();
 
-          let storedItem: any = null;
+          let storedItem: Record<string, unknown> | null = null;
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Put') {
               storedItem = { ...cmd.input.Item };
               return Promise.resolve({});
@@ -280,17 +310,17 @@ describe('Property 2: Partial Update Preserves Unrelated Bindings', () => {
           }));
 
           // Step 3: Read back and verify
-          const result: any = await handler(makeEvent('getToolConfig', { toolId }));
+          const result = await handler(makeEvent("getToolConfig", { toolId })) as ToolConfigResult;
 
           // dataStoreBindings should reflect the update
-          const expectedUpdatedDs = updatedDsBindings.map((b: any) => ({
+          const expectedUpdatedDs = updatedDsBindings.map((b) => ({
             ...b,
             direction: b.direction ? b.direction.toUpperCase() : 'BIDIRECTIONAL',
           }));
           expect(result.dataStoreBindings).toEqual(expectedUpdatedDs);
 
           // integrationBindings should be preserved unchanged
-          const expectedOriginalInt = originalIntBindings.map((b: any) => ({
+          const expectedOriginalInt = originalIntBindings.map((b) => ({
             ...b,
             direction: b.direction ? b.direction.toUpperCase() : 'BIDIRECTIONAL',
           }));
@@ -343,9 +373,9 @@ describe('Property 3: Direction Field Round-Trip', () => {
         async (toolId, integrationBindings, dataStoreBindings) => {
           mockDynamoSend.mockReset();
 
-          let storedItem: any = null;
+          let storedItem: Record<string, unknown> | null = null;
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Put') {
               storedItem = JSON.parse(JSON.stringify(cmd.input.Item));
               return Promise.resolve({});
@@ -371,7 +401,7 @@ describe('Property 3: Direction Field Round-Trip', () => {
           }));
 
           // Read back
-          const result: any = await handler(makeEvent('getToolConfig', { toolId }));
+          const result = await handler(makeEvent("getToolConfig", { toolId })) as ToolConfigResult;
 
           // Assert integration bindings direction round-trip
           expect(result.integrationBindings).toBeDefined();
@@ -422,15 +452,15 @@ describe('Property 4: Direction Field Backward Compatibility', () => {
 
           // Simulate legacy DynamoDB item — bindings have NO direction field
           const legacyIntBindings = integrationBindings.map((b) => {
-            const { direction: _direction, ...rest } = b as any;
+            const { direction: _direction, ...rest } = b;
             return rest;
           });
           const legacyDsBindings = dataStoreBindings.map((b) => {
-            const { direction: _direction, ...rest } = b as any;
+            const { direction: _direction, ...rest } = b;
             return rest;
           });
 
-          const legacyItem: any = {
+          const legacyItem: Record<string, unknown> = {
             toolId,
             config: { name: `tool_${toolId}`, filename: `${toolId}.py`, version: '1', description: 'test' },
             state: 'active',
@@ -441,7 +471,7 @@ describe('Property 4: Direction Field Backward Compatibility', () => {
             updatedAt: '2025-01-01T00:00:00Z',
           };
 
-          mockDynamoSend.mockImplementation((cmd: any) => {
+          mockDynamoSend.mockImplementation((cmd: FakeCommand) => {
             if (cmd._type === 'Get') {
               return Promise.resolve({
                 Item: JSON.parse(JSON.stringify(legacyItem)),
@@ -450,7 +480,7 @@ describe('Property 4: Direction Field Backward Compatibility', () => {
             return Promise.resolve({});
           });
 
-          const result: any = await handler(makeEvent('getToolConfig', { toolId }));
+          const result = await handler(makeEvent("getToolConfig", { toolId })) as ToolConfigResult;
 
           // Every integration binding should have direction = 'bidirectional'
           expect(result.integrationBindings).toBeDefined();

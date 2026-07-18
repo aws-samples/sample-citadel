@@ -11,7 +11,7 @@ import { handler } from '../app-component-registration-handler';
 
 function makeEventBridgeEvent(
   detailType: string,
-  detail: Record<string, any>,
+  detail: Record<string, unknown>,
 ) {
   return {
     version: '0',
@@ -22,7 +22,7 @@ function makeEventBridgeEvent(
     region: 'us-east-1',
     'detail-type': detailType,
     detail,
-  } as any;
+  } as unknown as Parameters<typeof handler>[0];
 }
 
 describe('app-component-registration-handler', () => {

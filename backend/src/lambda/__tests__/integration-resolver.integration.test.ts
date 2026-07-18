@@ -12,7 +12,7 @@
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, QueryCommand, PutCommand, DeleteCommand, QueryCommandInput } from "@aws-sdk/lib-dynamodb";
 import { v4 as uuidv4 } from 'uuid';
 
 const REGION = process.env.AWS_REGION || 'ap-southeast-2';
@@ -24,8 +24,23 @@ const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION
 // Test org ID — unique per test run to avoid collisions
 const TEST_ORG_ID = `test-org-${uuidv4()}`;
 
+/** Shape of the seeded test rows (plus any extra override fields). */
+interface TestIntegrationItem {
+  PK: string;
+  SK: string;
+  integrationId: string;
+  integrationType: string;
+  name: string;
+  status: string;
+  orgId: string;
+  gatewayTargetId?: string;
+  [key: string]: unknown;
+}
+
 // Helper: insert a test integration directly into DynamoDB
-async function insertTestIntegration(overrides: Record<string, any> = {}) {
+async function insertTestIntegration(
+  overrides: Record<string, unknown> = {},
+): Promise<TestIntegrationItem> {
   const id = uuidv4();
   const item = {
     PK: `ORG#${TEST_ORG_ID}`,
@@ -48,7 +63,7 @@ async function insertTestIntegration(overrides: Record<string, any> = {}) {
       authMethod: 'API_KEY',
     },
     ...overrides,
-  };
+  } as TestIntegrationItem;
 
   await dynamodb.send(new PutCommand({ TableName: TABLE_NAME, Item: item }));
   return item;
@@ -61,7 +76,7 @@ async function deleteTestIntegration(pk: string, sk: string) {
 
 // Helper: query integrations for the test org (mirrors resolver logic)
 async function queryIntegrations(orgId: string, integrationType?: string) {
-  const params: any = {
+  const params: QueryCommandInput = {
     TableName: TABLE_NAME,
     KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
     ExpressionAttributeValues: {
@@ -93,12 +108,12 @@ describeOrSkip('Integration Resolver — Real AWS Integration Tests', () => {
   });
 
   describe('listIntegrations returns only connected integrations', () => {
-    let connectedConfluence: any;
-    let configuredConfluence: any;
-    let testedSlack: any;
-    let connectedLambda: any;
-    let disconnectedMcp: any;
-    let connectionFailedJira: any;
+    let connectedConfluence: TestIntegrationItem;
+    let configuredConfluence: TestIntegrationItem;
+    let testedSlack: TestIntegrationItem;
+    let connectedLambda: TestIntegrationItem;
+    let disconnectedMcp: TestIntegrationItem;
+    let connectionFailedJira: TestIntegrationItem;
 
     beforeAll(async () => {
       // Seed integrations with various statuses
@@ -153,16 +168,16 @@ describeOrSkip('Integration Resolver — Real AWS Integration Tests', () => {
 
     test('filtering by CONNECTED status returns only connected integrations', async () => {
       const all = await queryIntegrations(TEST_ORG_ID);
-      const connected = all.filter((item: any) => item.status === 'CONNECTED');
+      const connected = all.filter((item) => item.status === 'CONNECTED');
 
       expect(connected.length).toBe(2);
-      const names = connected.map((i: any) => i.name).sort();
+      const names = connected.map((i) => i.name).sort();
       expect(names).toEqual(['Connected Confluence', 'Connected Lambda']);
     });
 
     test('filtering by type + CONNECTED narrows results correctly', async () => {
       const all = await queryIntegrations(TEST_ORG_ID, 'CONFLUENCE');
-      const connected = all.filter((item: any) => item.status === 'CONNECTED');
+      const connected = all.filter((item) => item.status === 'CONNECTED');
 
       expect(connected.length).toBe(1);
       expect(connected[0].name).toBe('Connected Confluence');
@@ -170,9 +185,9 @@ describeOrSkip('Integration Resolver — Real AWS Integration Tests', () => {
 
     test('non-connected statuses are excluded', async () => {
       const all = await queryIntegrations(TEST_ORG_ID);
-      const connected = all.filter((item: any) => item.status === 'CONNECTED');
+      const connected = all.filter((item) => item.status === 'CONNECTED');
 
-      const connectedIds = connected.map((i: any) => i.integrationId);
+      const connectedIds = connected.map((i) => i.integrationId);
       expect(connectedIds).not.toContain(configuredConfluence.integrationId);
       expect(connectedIds).not.toContain(testedSlack.integrationId);
       expect(connectedIds).not.toContain(disconnectedMcp.integrationId);
@@ -181,7 +196,7 @@ describeOrSkip('Integration Resolver — Real AWS Integration Tests', () => {
 
     test('AgentCore types (AWS_LAMBDA) with CONNECTED status include gatewayTargetId', async () => {
       const all = await queryIntegrations(TEST_ORG_ID, 'AWS_LAMBDA');
-      const connected = all.filter((item: any) => item.status === 'CONNECTED');
+      const connected = all.filter((item) => item.status === 'CONNECTED');
 
       expect(connected.length).toBe(1);
       expect(connected[0].gatewayTargetId).toBe('target-fake-123');
@@ -197,7 +212,7 @@ describeOrSkip('Integration Resolver — Real AWS Integration Tests', () => {
   });
 
   describe('listIntegrations with only non-connected integrations', () => {
-    let configuredOnly: any;
+    let configuredOnly: TestIntegrationItem;
 
     beforeAll(async () => {
       configuredOnly = await insertTestIntegration({
@@ -210,7 +225,7 @@ describeOrSkip('Integration Resolver — Real AWS Integration Tests', () => {
 
     test('returns empty when filtering for CONNECTED and none exist', async () => {
       const all = await queryIntegrations(TEST_ORG_ID, 'GITHUB');
-      const connected = all.filter((item: any) => item.status === 'CONNECTED');
+      const connected = all.filter((item) => item.status === 'CONNECTED');
       expect(connected.length).toBe(0);
     });
   });

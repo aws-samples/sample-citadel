@@ -126,14 +126,14 @@ const storedAgentResponse = (): string | undefined => {
   return puts.length ? puts[puts.length - 1].input?.Item?.message : undefined;
 };
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.CONVERSATIONS_TABLE = 'conv-table';
   process.env.APPSYNC_ENDPOINT = 'https://example.appsync-api.us-east-1.amazonaws.com/graphql';
   process.env.IDEMPOTENCY_TABLE = 'idem-table';
   process.env.AWS_REGION = 'us-east-1';
   process.env.ENVIRONMENT = 'dev';
   process.env.ACCOUNT_ID = DEPLOY_ACCOUNT;
-  const mod = require('../agent-message-handler');
+  const mod = await import('../agent-message-handler');
   handler = mod.handler;
   resetCaches = mod._resetCaches;
 });

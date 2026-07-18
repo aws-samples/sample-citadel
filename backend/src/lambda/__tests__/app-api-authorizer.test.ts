@@ -47,7 +47,7 @@ function makeEvent(overrides: Partial<AuthorizerEvent> = {}): AuthorizerEvent {
   };
 }
 
-function makeActiveKeyItem(overrides: Record<string, any> = {}) {
+function makeActiveKeyItem(overrides: Record<string, unknown> = {}) {
   return {
     appId: `${TEST_APP_ID}#APIKEY#${TEST_KEY_ID}`,
     groupId: `APP#${TEST_APP_ID}`,
@@ -138,7 +138,7 @@ describe('valid active key returns Allow', () => {
     expect(input.KeyConditionExpression).toContain('groupId');
     expect(
       input.KeyConditionExpression!.includes('APIKEY') ||
-      (input.ExpressionAttributeValues as any)[':sk']?.includes('APIKEY')
+      (input.ExpressionAttributeValues as Record<string, string>)[':sk']?.includes('APIKEY')
     ).toBe(true);
   });
 
@@ -183,7 +183,7 @@ describe('missing x-api-key header returns 401', () => {
       stageVariables: { appId: TEST_APP_ID },
       requestContext: { http: { sourceIp: TEST_SOURCE_IP } },
     };
-    delete (event as any).headers;
+    delete (event as { headers?: unknown }).headers;
 
     await expect(
       handler(event, undefined, makeDeps()),

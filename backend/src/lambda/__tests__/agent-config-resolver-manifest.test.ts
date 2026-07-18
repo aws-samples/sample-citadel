@@ -20,7 +20,7 @@ describe('publishAgentManifest', () => {
     delete process.env.AGENT_CONFIG_TABLE;
   });
 
-  const makeEvent = (fieldName: string, args: any) => ({
+  const makeEvent = (fieldName: string, args: Record<string, unknown>) => ({
     info: { fieldName },
     arguments: args,
   });

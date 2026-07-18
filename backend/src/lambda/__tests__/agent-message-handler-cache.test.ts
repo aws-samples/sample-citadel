@@ -16,7 +16,7 @@
  */
 jest.mock('@aws-sdk/client-ssm', () => ({
   SSMClient: jest.fn(() => ({ send: jest.fn() })),
-  GetParameterCommand: jest.fn((params: any) => params),
+  GetParameterCommand: jest.fn((params: unknown) => params),
 }));
 
 jest.mock('@aws-sdk/credential-provider-node', () => {
@@ -28,7 +28,7 @@ jest.mock('@aws-sdk/credential-provider-node', () => {
   const stableInnerFn = jest.fn();
   const provider = jest.fn(() => stableInnerFn);
   // Attach the inner fn to the provider for easy retrieval in tests.
-  (provider as any).__innerMock = stableInnerFn;
+  (provider as jest.Mock & { __innerMock?: jest.Mock }).__innerMock = stableInnerFn;
   return { defaultProvider: provider };
 });
 
@@ -80,7 +80,9 @@ beforeEach(() => {
     // ``__innerMock`` attached in the jest.mock factory above. This
     // overrides the mock.results[0] lookup because the first call may have
     // happened at import time before our reset logic ran.
-    mockDefaultProvider = (credentialModule.defaultProvider as any).__innerMock as jest.Mock;
+    mockDefaultProvider = (
+      credentialModule.defaultProvider as jest.Mock & { __innerMock: jest.Mock }
+    ).__innerMock;
   mockDefaultProvider.mockReset();
   credentialModule.defaultProvider.mockClear();
 

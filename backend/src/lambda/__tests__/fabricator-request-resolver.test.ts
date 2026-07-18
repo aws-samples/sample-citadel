@@ -19,7 +19,7 @@ process.env.FABRICATION_JOBS_TABLE = 'citadel-fabrication-jobs-test';
 
 import { handler } from '../fabricator-request-resolver';
 
-const makeEvent = (fieldName: string, input: any) => ({
+const makeEvent = (fieldName: string, input: Record<string, unknown>) => ({
   info: { fieldName },
   arguments: { input },
   identity: { sub: 'user-123' },

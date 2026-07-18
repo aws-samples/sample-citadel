@@ -222,7 +222,7 @@ describe('agent-design-assessment-resolver', () => {
 
     test('5. ConditionalCheckFailedException from pre-existing row propagates', async () => {
       const ccf = new Error('The conditional request failed');
-      (ccf as any).name = 'ConditionalCheckFailedException';
+      ccf.name = 'ConditionalCheckFailedException';
       ddbMock.on(PutCommand).rejects(ccf);
       const auth = authContextFor('architect');
       await expect(
@@ -489,7 +489,7 @@ describe('agent-design-assessment-resolver', () => {
       fieldName: string,
       args: Record<string, unknown>,
       role: 'architect' | 'developer' = 'architect',
-    ): any {
+    ): Record<string, unknown> {
       return {
         info: { fieldName },
         arguments: args,
@@ -499,19 +499,19 @@ describe('agent-design-assessment-resolver', () => {
 
     test('21. dispatches startAgentDesignAssessment', async () => {
       ddbMock.on(PutCommand).resolves({});
-      const result = await handler(
+      const result = (await handler(
         event('startAgentDesignAssessment', { projectId: 'proj-1' }),
-      );
-      expect((result as any).projectId).toBe('proj-1');
-      expect((result as any).archetypeStatus).toBe('PENDING');
+      )) as { projectId: string; archetypeStatus: string };
+      expect(result.projectId).toBe('proj-1');
+      expect(result.archetypeStatus).toBe('PENDING');
     });
 
     test('22. dispatches getAgentDesignAssessment', async () => {
       ddbMock.on(GetCommand).resolves({ Item: existingAssessment() });
-      const result = await handler(
+      const result = (await handler(
         event('getAgentDesignAssessment', { projectId: 'proj-1' }, 'developer'),
-      );
-      expect((result as any)?.projectId).toBe('proj-1');
+      )) as { projectId: string } | null;
+      expect(result?.projectId).toBe('proj-1');
     });
 
     test('23. dispatches submitAgentDesignAssessment with full input object', async () => {
@@ -520,8 +520,10 @@ describe('agent-design-assessment-resolver', () => {
         .resolvesOnce({ Item: existingAssessment() })
         .resolvesOnce({ Item: completedAssessment() });
       ddbMock.on(TransactWriteCommand).resolves({});
-      const result = await handler(event('submitAgentDesignAssessment', validInput()));
-      expect((result as any).archetypeStatus).toBe('CLASSIFIED');
+      const result = (await handler(event('submitAgentDesignAssessment', validInput()))) as {
+        archetypeStatus: string;
+      };
+      expect(result.archetypeStatus).toBe('CLASSIFIED');
     });
 
     test('24. unknown fieldName throws', async () => {
@@ -621,10 +623,11 @@ describe('agent-design-assessment-resolver', () => {
             // (It may still throw for some other reason, but not ValidationError.)
             try {
               await submitAgentDesignAssessment(input, auth);
-            } catch (e: any) {
-              if (/ValidationError/.test(String(e?.message))) {
+            } catch (e) {
+              const message = e instanceof Error ? e.message : String(e);
+              if (/ValidationError/.test(message)) {
                 throw new Error(
-                  `Unexpected ValidationError on valid ranking: ${e.message}`,
+                  `Unexpected ValidationError on valid ranking: ${message}`,
                 );
               }
               // Any other error class is acceptable for this property.
