@@ -6,17 +6,19 @@ import {
 } from '@aws-sdk/client-redshift';
 import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
 import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
+import { SdkError, AwsCredentialFields } from './sdk-types';
 
 export class RedshiftAdapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = 'datastore';
   readonly spec: ConnectorSpec = { type: 'REDSHIFT', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['clusterIdentifier'], optional: [], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, any>): RedshiftClient {
-    if (creds?.accessKeyId && creds?.secretAccessKey && creds?.sessionToken) {
+  private makeClient(creds?: Record<string, unknown>): RedshiftClient {
+    const c = creds as AwsCredentialFields | undefined;
+    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
       return new RedshiftClient({
         credentials: {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
+          accessKeyId: c.accessKeyId,
+          secretAccessKey: c.secretAccessKey,
+          sessionToken: c.sessionToken,
         },
       });
     }
@@ -24,7 +26,7 @@ export class RedshiftAdapter implements ConnectorAdapter {
   }
 
   requiredPolicies(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     accountId: string,
     region: string
   ): RequiredPolicies {
@@ -60,15 +62,15 @@ export class RedshiftAdapter implements ConnectorAdapter {
   }
 
   async provision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     const client = this.makeClient(credentials);
     const identifier =
-      config.clusterIdentifier ?? `citadel-redshift-${Date.now()}`;
+      (config.clusterIdentifier as string | undefined) ?? `citadel-redshift-${Date.now()}`;
 
-    const masterUsername = credentials?.masterUsername ?? config.masterUsername;
-    const masterPassword = credentials?.masterPassword ?? config.masterPassword;
+    const masterUsername = (credentials?.masterUsername ?? config.masterUsername) as string | undefined;
+    const masterPassword = (credentials?.masterPassword ?? config.masterPassword) as string | undefined;
 
     if (!masterUsername || !masterPassword) {
       throw new ProvisioningError(
@@ -87,11 +89,13 @@ export class RedshiftAdapter implements ConnectorAdapter {
       throw new ProvisioningError('masterPassword must contain at least one digit.');
     }
 
-    const nodeType = config.nodeType ?? 'ra3.xlplus';
+    const nodeType = (config.nodeType as string | undefined) ?? 'ra3.xlplus';
     // ra3.xlplus, ra3.4xlarge, ra3.16xlarge require multi-node (min 2 nodes)
     const MULTI_NODE_TYPES = ['ra3.xlplus', 'ra3.4xlarge', 'ra3.16xlarge'];
     const isMultiNode = MULTI_NODE_TYPES.includes(nodeType);
-    const numberOfNodes = isMultiNode ? Math.max(config.numberOfNodes ?? 2, 2) : (config.numberOfNodes ?? 1);
+    const numberOfNodes = isMultiNode
+      ? Math.max((config.numberOfNodes as number | undefined) ?? 2, 2)
+      : ((config.numberOfNodes as number | undefined) ?? 1);
     const clusterType = numberOfNodes > 1 ? 'multi-node' : 'single-node';
 
     try {
@@ -111,34 +115,35 @@ export class RedshiftAdapter implements ConnectorAdapter {
         `arn:aws:redshift:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:cluster:${identifier}`;
 
       return { resourceArn: arn };
-    } catch (error: any) {
-      if (error.name === 'ClusterAlreadyExistsFault') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'ClusterAlreadyExistsFault') {
         return {
           resourceArn: `arn:aws:redshift:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:cluster:${identifier}`,
         };
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied creating Redshift cluster ${identifier}`,
-          error
+          err
         );
       }
       throw new ProvisioningError(
-        `Failed to create Redshift cluster ${identifier}: ${error.message}`,
-        error
+        `Failed to create Redshift cluster ${identifier}: ${err.message}`,
+        err
       );
     }
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const identifier = config.clusterIdentifier;
+    const identifier = config.clusterIdentifier as string | undefined;
 
     try {
       const response = await client.send(
@@ -153,43 +158,44 @@ export class RedshiftAdapter implements ConnectorAdapter {
           true
         );
       }
-    } catch (error: any) {
-      if (error instanceof ConnectionError) {
-        throw error;
+    } catch (error) {
+      const err = error as SdkError;
+      if (err instanceof ConnectionError) {
+        throw err;
       }
-      if (error.name === 'ClusterNotFoundFault') {
+      if (err.name === 'ClusterNotFoundFault') {
         throw new ResourceNotFoundError(
           `Redshift cluster ${identifier} does not exist`,
-          error
+          err
         );
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied accessing Redshift cluster ${identifier}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to connect to Redshift cluster ${identifier}: ${error.message}`,
+        `Failed to connect to Redshift cluster ${identifier}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op: disconnecting from Redshift doesn't require cleanup
   }
 
   async deprovision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const identifier = config.clusterIdentifier;
+    const identifier = config.clusterIdentifier as string | undefined;
 
     try {
       await client.send(
@@ -198,20 +204,21 @@ export class RedshiftAdapter implements ConnectorAdapter {
           SkipFinalClusterSnapshot: true,
         })
       );
-    } catch (error: any) {
-      if (error.name === 'ClusterNotFoundFault') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'ClusterNotFoundFault') {
         return; // Already gone
       }
-      throw error;
+      throw err;
     }
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     const client = this.makeClient(credentials);
-    const identifier = config.clusterIdentifier;
+    const identifier = config.clusterIdentifier as string | undefined;
 
     try {
       const response = await client.send(
@@ -230,21 +237,22 @@ export class RedshiftAdapter implements ConnectorAdapter {
           numberOfNodes: cluster?.NumberOfNodes,
         },
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       return {
         success: false,
-        message: `Failed to connect to Redshift cluster ${identifier}: ${error.message}`,
-        details: { errorName: error.name },
+        message: `Failed to connect to Redshift cluster ${identifier}: ${err.message}`,
+        details: { errorName: err.name },
       };
     }
   }
 
   async getMetrics(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     const client = this.makeClient();
-    const identifier = config.clusterIdentifier;
+    const identifier = config.clusterIdentifier as string | undefined;
 
     try {
       const response = await client.send(
@@ -261,20 +269,21 @@ export class RedshiftAdapter implements ConnectorAdapter {
         size: `${estimatedStorageGB} GB`,
         records: numberOfNodes,
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied describing Redshift cluster ${identifier}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to get metrics for Redshift cluster ${identifier}: ${error.message}`,
+        `Failed to get metrics for Redshift cluster ${identifier}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }

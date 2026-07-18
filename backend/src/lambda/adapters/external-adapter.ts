@@ -4,6 +4,7 @@ import {
   RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult,
 } from '../../adapters/base';
 import { ProvisioningError, ConnectionError } from './errors';
+import { SdkError } from './sdk-types';
 
 export class ExternalDatabaseAdapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = 'datastore';
@@ -14,7 +15,7 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
   }
 
   requiredPolicies(
-    _config: Record<string, any>,
+    _config: Record<string, unknown>,
     _accountId: string,
     _region: string
   ): RequiredPolicies {
@@ -22,8 +23,8 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
   }
 
   async provision(
-    _config: Record<string, any>,
-    _credentials?: Record<string, any>
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     throw new ProvisioningError(
       `Provisioning is not supported for external ${this.kind} data stores`
@@ -31,8 +32,8 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const result = await this.testConnection(config, credentials);
     if (!result.success) {
@@ -42,13 +43,13 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op for external stores
   }
 
   async testConnection(
-    config: Record<string, any>,
-    _credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     switch (this.kind) {
       case 'mongodb':
@@ -66,17 +67,17 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
   }
 
   async getMetrics(
-    _config: Record<string, any>,
+    _config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     return { size: '0 MB', records: 0 };
   }
 
   private async testMongoConnection(
-    config: Record<string, any>
+    config: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     try {
-      const url = new URL(config.connectionString);
+      const url = new URL(config.connectionString as string);
       const host = url.hostname;
       const port = url.port ? parseInt(url.port, 10) : 27017;
       const reachable = await this.tcpCheck(host, port, 5000);
@@ -91,19 +92,20 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
         success: false,
         message: `Failed to reach MongoDB at ${host}:${port}`,
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       return {
         success: false,
-        message: `Invalid MongoDB connection string: ${error.message}`,
+        message: `Invalid MongoDB connection string: ${err.message}`,
       };
     }
   }
 
   private async testApiConnection(
-    config: Record<string, any>
+    config: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     try {
-      new URL(config.baseUrl);
+      new URL(config.baseUrl as string);
       return {
         success: true,
         message: `API URL is well-formed: ${config.baseUrl}`,
@@ -118,10 +120,10 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
   }
 
   private async testTcpConnection(
-    config: Record<string, any>
+    config: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
-    const host = config.host;
-    const port = config.port;
+    const host = config.host as string | undefined;
+    const port = config.port as number | undefined;
     if (!host || !port) {
       return {
         success: false,

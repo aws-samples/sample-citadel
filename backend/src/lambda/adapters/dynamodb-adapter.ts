@@ -23,17 +23,19 @@ import {
   PermissionError,
   ResourceNotFoundError,
 } from './errors';
+import { SdkError, AwsCredentialFields } from './sdk-types';
 
 export class DynamoDBAdapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = 'datastore';
   readonly spec: ConnectorSpec = { type: 'DYNAMODB', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['tableName'], optional: ['partitionKey', 'sortKey'], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, any>): DynamoDBClient {
-    if (creds?.accessKeyId && creds?.secretAccessKey && creds?.sessionToken) {
+  private makeClient(creds?: Record<string, unknown>): DynamoDBClient {
+    const c = creds as AwsCredentialFields | undefined;
+    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
       return new DynamoDBClient({
         credentials: {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
+          accessKeyId: c.accessKeyId,
+          secretAccessKey: c.secretAccessKey,
+          sessionToken: c.sessionToken,
         },
       });
     }
@@ -41,11 +43,11 @@ export class DynamoDBAdapter implements ConnectorAdapter {
   }
 
   requiredPolicies(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     accountId: string,
     region: string
   ): RequiredPolicies {
-    const tableName = config.tableName;
+    const tableName = config.tableName as string | undefined;
     const tableArn = `arn:aws:dynamodb:${region}:${accountId}:table/${tableName}`;
 
     return {
@@ -71,13 +73,13 @@ export class DynamoDBAdapter implements ConnectorAdapter {
   }
 
   async provision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     const client = this.makeClient(credentials);
-    const tableName = config.tableName;
-    const partitionKey = config.partitionKey || 'pk';
-    const sortKey = config.sortKey || undefined;
+    const tableName = config.tableName as string | undefined;
+    const partitionKey = (config.partitionKey as string | undefined) || 'pk';
+    const sortKey = (config.sortKey as string | undefined) || undefined;
 
     try {
       const keySchema = [
@@ -97,21 +99,22 @@ export class DynamoDBAdapter implements ConnectorAdapter {
           BillingMode: BillingMode.PAY_PER_REQUEST,
         })
       );
-    } catch (error: any) {
-      if (error.name === 'ResourceInUseException') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'ResourceInUseException') {
         // Idempotent success — table already exists
       } else if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied creating table ${tableName}`,
-          error
+          err
         );
       } else {
         throw new ProvisioningError(
-          `Failed to create table ${tableName}: ${error.message}`,
-          error
+          `Failed to create table ${tableName}: ${err.message}`,
+          err
         );
       }
     }
@@ -122,11 +125,11 @@ export class DynamoDBAdapter implements ConnectorAdapter {
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const tableName = config.tableName;
+    const tableName = config.tableName as string | undefined;
 
     try {
       const response = await client.send(
@@ -139,62 +142,64 @@ export class DynamoDBAdapter implements ConnectorAdapter {
           true
         );
       }
-    } catch (error: any) {
-      if (error instanceof ConnectionError) {
-        throw error;
+    } catch (error) {
+      const err = error as SdkError;
+      if (err instanceof ConnectionError) {
+        throw err;
       }
       if (
-        error.name === 'ResourceNotFoundException'
+        err.name === 'ResourceNotFoundException'
       ) {
         throw new ResourceNotFoundError(
           `Table ${tableName} does not exist`,
-          error
+          err
         );
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied accessing table ${tableName}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to connect to table ${tableName}: ${error.message}`,
+        `Failed to connect to table ${tableName}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op: disconnecting from DynamoDB doesn't require cleanup
   }
 
   async deprovision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const tableName = config.tableName;
+    const tableName = config.tableName as string | undefined;
 
     try {
       await client.send(new DeleteTableCommand({ TableName: tableName }));
-    } catch (error: any) {
-      if (error.name === 'ResourceNotFoundException') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'ResourceNotFoundException') {
         return; // Already gone
       }
-      throw error;
+      throw err;
     }
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     const client = this.makeClient(credentials);
-    const tableName = config.tableName;
+    const tableName = config.tableName as string | undefined;
 
     try {
       const response = await client.send(
@@ -210,21 +215,22 @@ export class DynamoDBAdapter implements ConnectorAdapter {
           tableSizeBytes: table?.TableSizeBytes ?? 0,
         },
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       return {
         success: false,
-        message: `Failed to connect to table ${tableName}: ${error.message}`,
-        details: { errorName: error.name },
+        message: `Failed to connect to table ${tableName}: ${err.message}`,
+        details: { errorName: err.name },
       };
     }
   }
 
   async getMetrics(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     const client = this.makeClient();
-    const tableName = config.tableName;
+    const tableName = config.tableName as string | undefined;
 
     try {
       const response = await client.send(
@@ -238,20 +244,21 @@ export class DynamoDBAdapter implements ConnectorAdapter {
         size: `${sizeMB} MB`,
         records: table?.ItemCount ?? 0,
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied describing table ${tableName}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to get metrics for table ${tableName}: ${error.message}`,
+        `Failed to get metrics for table ${tableName}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }

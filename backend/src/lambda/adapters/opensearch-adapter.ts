@@ -7,17 +7,19 @@ import {
 } from '@aws-sdk/client-opensearchserverless';
 import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
 import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
+import { SdkError, AwsCredentialFields } from './sdk-types';
 
 export class OpenSearchAdapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = 'datastore';
   readonly spec: ConnectorSpec = { type: 'OPENSEARCH', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['collectionName'], optional: [], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, any>): OpenSearchServerlessClient {
-    if (creds?.accessKeyId && creds?.secretAccessKey && creds?.sessionToken) {
+  private makeClient(creds?: Record<string, unknown>): OpenSearchServerlessClient {
+    const c = creds as AwsCredentialFields | undefined;
+    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
       return new OpenSearchServerlessClient({
         credentials: {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
+          accessKeyId: c.accessKeyId,
+          secretAccessKey: c.secretAccessKey,
+          sessionToken: c.sessionToken,
         },
       });
     }
@@ -25,7 +27,7 @@ export class OpenSearchAdapter implements ConnectorAdapter {
   }
 
   requiredPolicies(
-    _config: Record<string, any>,
+    _config: Record<string, unknown>,
     accountId: string,
     region: string
   ): RequiredPolicies {
@@ -61,11 +63,11 @@ export class OpenSearchAdapter implements ConnectorAdapter {
   }
 
   async provision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     const client = this.makeClient(credentials);
-    const name = config.collectionName ?? `citadel-os-${Date.now()}`;
+    const name = (config.collectionName as string | undefined) ?? `citadel-os-${Date.now()}`;
     const type = config.collectionType === 'VECTORSEARCH' ? 'VECTORSEARCH' : 'SEARCH';
     const policyName = `aifos-${name.substring(0, 30)}`;
 
@@ -80,9 +82,10 @@ export class OpenSearchAdapter implements ConnectorAdapter {
           AWSOwnedKey: true,
         }),
       }));
-    } catch (error: any) {
-      if (error.name !== 'ConflictException') {
-        throw new ProvisioningError(`Failed to create encryption policy for ${name}: ${error.message}`, error);
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name !== 'ConflictException') {
+        throw new ProvisioningError(`Failed to create encryption policy for ${name}: ${err.message}`, err);
       }
     }
 
@@ -101,9 +104,10 @@ export class OpenSearchAdapter implements ConnectorAdapter {
           AllowFromPublic: true,
         }]),
       }));
-    } catch (error: any) {
-      if (error.name !== 'ConflictException') {
-        throw new ProvisioningError(`Failed to create network policy for ${name}: ${error.message}`, error);
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name !== 'ConflictException') {
+        throw new ProvisioningError(`Failed to create network policy for ${name}: ${err.message}`, err);
       }
     }
 
@@ -117,35 +121,36 @@ export class OpenSearchAdapter implements ConnectorAdapter {
         `arn:aws:aoss:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:collection/${name}`;
 
       return { resourceArn: arn };
-    } catch (error: any) {
-      if (error.name === 'ConflictException') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'ConflictException') {
         return {
           resourceArn: `arn:aws:aoss:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:collection/${name}`,
         };
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied creating OpenSearch collection ${name}`,
-          error
+          err
         );
       }
       throw new ProvisioningError(
-        `Failed to create OpenSearch collection ${name}: ${error.message}`,
-        error
+        `Failed to create OpenSearch collection ${name}: ${err.message}`,
+        err
       );
     }
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const names = config.collectionName ? [config.collectionName] : undefined;
-    const ids = config.collectionId ? [config.collectionId] : undefined;
+    const names = config.collectionName ? [config.collectionName as string] : undefined;
+    const ids = config.collectionId ? [config.collectionId as string] : undefined;
 
     try {
       const response = await client.send(
@@ -163,57 +168,59 @@ export class OpenSearchAdapter implements ConnectorAdapter {
           true
         );
       }
-    } catch (error: any) {
-      if (error instanceof ConnectionError || error instanceof ResourceNotFoundError) {
-        throw error;
+    } catch (error) {
+      const err = error as SdkError;
+      if (err instanceof ConnectionError || err instanceof ResourceNotFoundError) {
+        throw err;
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied accessing OpenSearch collection`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to connect to OpenSearch collection: ${error.message}`,
+        `Failed to connect to OpenSearch collection: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op: disconnecting from OpenSearch doesn't require cleanup
   }
 
   async deprovision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const collectionId = config.collectionId;
+    const collectionId = config.collectionId as string | undefined;
 
     try {
       await client.send(
         new DeleteCollectionCommand({ id: collectionId })
       );
-    } catch (error: any) {
-      if (error.name === 'ResourceNotFoundException') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'ResourceNotFoundException') {
         return; // Already gone
       }
-      throw error;
+      throw err;
     }
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     const client = this.makeClient(credentials);
-    const names = config.collectionName ? [config.collectionName] : undefined;
-    const ids = config.collectionId ? [config.collectionId] : undefined;
+    const names = config.collectionName ? [config.collectionName as string] : undefined;
+    const ids = config.collectionId ? [config.collectionId as string] : undefined;
 
     try {
       const response = await client.send(
@@ -235,17 +242,18 @@ export class OpenSearchAdapter implements ConnectorAdapter {
           endpoint: collection.collectionEndpoint,
         },
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       return {
         success: false,
-        message: `Failed to connect to OpenSearch collection: ${error.message}`,
-        details: { errorName: error.name },
+        message: `Failed to connect to OpenSearch collection: ${err.message}`,
+        details: { errorName: err.name },
       };
     }
   }
 
   async getMetrics(
-    _config: Record<string, any>,
+    _config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     // OpenSearch Serverless doesn't expose size via API

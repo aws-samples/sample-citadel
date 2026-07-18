@@ -23,17 +23,19 @@ import {
   PermissionError,
   ResourceNotFoundError,
 } from './errors';
+import { SdkError, AwsCredentialFields } from './sdk-types';
 
 export class S3Adapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = 'datastore';
   readonly spec: ConnectorSpec = { type: 'S3', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['bucketName'], optional: ['versioning'], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, any>): S3Client {
-    if (creds?.accessKeyId && creds?.secretAccessKey && creds?.sessionToken) {
+  private makeClient(creds?: Record<string, unknown>): S3Client {
+    const c = creds as AwsCredentialFields | undefined;
+    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
       return new S3Client({
         credentials: {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
+          accessKeyId: c.accessKeyId,
+          secretAccessKey: c.secretAccessKey,
+          sessionToken: c.sessionToken,
         },
       });
     }
@@ -41,11 +43,11 @@ export class S3Adapter implements ConnectorAdapter {
   }
 
   requiredPolicies(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     _accountId: string,
     _region: string
   ): RequiredPolicies {
-    const bucketName = config.bucketName;
+    const bucketName = config.bucketName as string | undefined;
     const bucketArn = `arn:aws:s3:::${bucketName}`;
 
     return {
@@ -78,11 +80,11 @@ export class S3Adapter implements ConnectorAdapter {
   }
 
   async provision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     const client = this.makeClient(credentials);
-    const rawBucketName = config.bucketName;
+    const rawBucketName = config.bucketName as string | undefined;
 
     if (!rawBucketName) {
       throw new ProvisioningError(
@@ -100,21 +102,22 @@ export class S3Adapter implements ConnectorAdapter {
 
     try {
       await client.send(new CreateBucketCommand({ Bucket: bucketName }));
-    } catch (error: any) {
-      if (error.name === 'BucketAlreadyOwnedByYou') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'BucketAlreadyOwnedByYou') {
         // Idempotent success — bucket already exists and is owned by us
       } else if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied creating bucket ${bucketName}`,
-          error
+          err
         );
       } else {
         throw new ProvisioningError(
-          `Failed to create bucket ${bucketName}: ${error.message}`,
-          error
+          `Failed to create bucket ${bucketName}: ${err.message}`,
+          err
         );
       }
     }
@@ -127,19 +130,20 @@ export class S3Adapter implements ConnectorAdapter {
             VersioningConfiguration: { Status: 'Enabled' },
           })
         );
-      } catch (error: any) {
+      } catch (error) {
+        const err = error as SdkError;
         if (
-          error.name === 'AccessDenied' ||
-          error.name === 'AccessDeniedException'
+          err.name === 'AccessDenied' ||
+          err.name === 'AccessDeniedException'
         ) {
           throw new PermissionError(
             `Permission denied enabling versioning on bucket ${bucketName}`,
-            error
+            err
           );
         }
         throw new ProvisioningError(
-          `Failed to enable versioning on bucket ${bucketName}: ${error.message}`,
-          error
+          `Failed to enable versioning on bucket ${bucketName}: ${err.message}`,
+          err
         );
       }
     }
@@ -150,49 +154,50 @@ export class S3Adapter implements ConnectorAdapter {
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const bucketName = config.bucketName;
+    const bucketName = config.bucketName as string | undefined;
 
     try {
       await client.send(new HeadBucketCommand({ Bucket: bucketName }));
-    } catch (error: any) {
-      if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) {
         throw new ResourceNotFoundError(
           `Bucket ${bucketName} does not exist`,
-          error
+          err
         );
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException' ||
-        error.$metadata?.httpStatusCode === 403
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException' ||
+        err.$metadata?.httpStatusCode === 403
       ) {
         throw new PermissionError(
           `Permission denied accessing bucket ${bucketName}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to connect to bucket ${bucketName}: ${error.message}`,
+        `Failed to connect to bucket ${bucketName}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op: disconnecting from S3 doesn't require cleanup
   }
 
   async deprovision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const bucketName = config.bucketName;
+    const bucketName = config.bucketName as string | undefined;
 
     // Empty the bucket first (DeleteBucket requires an empty bucket)
     try {
@@ -222,11 +227,12 @@ export class S3Adapter implements ConnectorAdapter {
           ? listResponse.NextContinuationToken
           : undefined;
       } while (continuationToken);
-    } catch (error: any) {
-      if (error.name === 'NoSuchBucket') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'NoSuchBucket') {
         return; // Already gone
       }
-      throw error;
+      throw err;
     }
 
     // Delete the bucket
@@ -234,11 +240,11 @@ export class S3Adapter implements ConnectorAdapter {
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     const client = this.makeClient(credentials);
-    const bucketName = config.bucketName;
+    const bucketName = config.bucketName as string | undefined;
 
     try {
       await client.send(new HeadBucketCommand({ Bucket: bucketName }));
@@ -246,21 +252,22 @@ export class S3Adapter implements ConnectorAdapter {
         success: true,
         message: `Successfully connected to bucket ${bucketName}`,
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       return {
         success: false,
-        message: `Failed to connect to bucket ${bucketName}: ${error.message}`,
-        details: { errorName: error.name },
+        message: `Failed to connect to bucket ${bucketName}: ${err.message}`,
+        details: { errorName: err.name },
       };
     }
   }
 
   async getMetrics(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     const client = this.makeClient();
-    const bucketName = config.bucketName;
+    const bucketName = config.bucketName as string | undefined;
 
     try {
       let objectCount = 0;
@@ -283,20 +290,21 @@ export class S3Adapter implements ConnectorAdapter {
         size: `${objectCount} objects`,
         records: objectCount,
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied listing objects in bucket ${bucketName}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to get metrics for bucket ${bucketName}: ${error.message}`,
+        `Failed to get metrics for bucket ${bucketName}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }

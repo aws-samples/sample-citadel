@@ -6,17 +6,19 @@ import {
 } from '@aws-sdk/client-elasticache';
 import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
 import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
+import { SdkError, AwsCredentialFields } from './sdk-types';
 
 export class ElastiCacheAdapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = 'datastore';
   readonly spec: ConnectorSpec = { type: 'ELASTICACHE_REDIS', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['replicationGroupId'], optional: [], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, any>): ElastiCacheClient {
-    if (creds?.accessKeyId && creds?.secretAccessKey && creds?.sessionToken) {
+  private makeClient(creds?: Record<string, unknown>): ElastiCacheClient {
+    const c = creds as AwsCredentialFields | undefined;
+    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
       return new ElastiCacheClient({
         credentials: {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
+          accessKeyId: c.accessKeyId,
+          secretAccessKey: c.secretAccessKey,
+          sessionToken: c.sessionToken,
         },
       });
     }
@@ -24,7 +26,7 @@ export class ElastiCacheAdapter implements ConnectorAdapter {
   }
 
   requiredPolicies(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     accountId: string,
     region: string
   ): RequiredPolicies {
@@ -56,12 +58,12 @@ export class ElastiCacheAdapter implements ConnectorAdapter {
   }
 
   async provision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     const client = this.makeClient(credentials);
     const identifier =
-      config.cacheClusterId ?? `citadel-redis-${Date.now()}`;
+      (config.cacheClusterId as string | undefined) ?? `citadel-redis-${Date.now()}`;
 
     // Retry up to 3 times for transient IAM propagation errors
     const maxRetries = 3;
@@ -72,7 +74,7 @@ export class ElastiCacheAdapter implements ConnectorAdapter {
             CacheClusterId: identifier,
             Engine: 'redis',
             CacheNodeType: 'cache.t3.micro',
-            NumCacheNodes: config.numCacheNodes ?? 1,
+            NumCacheNodes: (config.numCacheNodes as number | undefined) ?? 1,
           })
         );
 
@@ -81,32 +83,33 @@ export class ElastiCacheAdapter implements ConnectorAdapter {
           `arn:aws:elasticache:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:cluster:${identifier}`;
 
         return { resourceArn: arn };
-      } catch (error: any) {
-        if (error.name === 'CacheClusterAlreadyExistsFault') {
+      } catch (error) {
+        const err = error as SdkError;
+        if (err.name === 'CacheClusterAlreadyExistsFault') {
           return {
             resourceArn: `arn:aws:elasticache:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:cluster:${identifier}`,
           };
         }
         // Retry on transient IAM/credentials propagation errors
         if (
-          (error.name === 'InvalidCredentialsException' || error.name === 'ServiceLinkedRoleNotFoundFault') &&
+          (err.name === 'InvalidCredentialsException' || err.name === 'ServiceLinkedRoleNotFoundFault') &&
           attempt < maxRetries
         ) {
           await new Promise((resolve) => setTimeout(resolve, 5000 * (attempt + 1)));
           continue;
         }
         if (
-          error.name === 'AccessDenied' ||
-          error.name === 'AccessDeniedException'
+          err.name === 'AccessDenied' ||
+          err.name === 'AccessDeniedException'
         ) {
           throw new PermissionError(
             `Permission denied creating ElastiCache cluster ${identifier}`,
-            error
+            err
           );
         }
         throw new ProvisioningError(
-          `Failed to create ElastiCache cluster ${identifier}: ${error.message}`,
-          error
+          `Failed to create ElastiCache cluster ${identifier}: ${err.message}`,
+          err
         );
       }
     }
@@ -114,11 +117,11 @@ export class ElastiCacheAdapter implements ConnectorAdapter {
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const identifier = config.cacheClusterId;
+    const identifier = config.cacheClusterId as string | undefined;
 
     try {
       const response = await client.send(
@@ -133,62 +136,64 @@ export class ElastiCacheAdapter implements ConnectorAdapter {
           true
         );
       }
-    } catch (error: any) {
-      if (error instanceof ConnectionError) {
-        throw error;
+    } catch (error) {
+      const err = error as SdkError;
+      if (err instanceof ConnectionError) {
+        throw err;
       }
-      if (error.name === 'CacheClusterNotFoundFault') {
+      if (err.name === 'CacheClusterNotFoundFault') {
         throw new ResourceNotFoundError(
           `ElastiCache cluster ${identifier} does not exist`,
-          error
+          err
         );
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied accessing ElastiCache cluster ${identifier}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to connect to ElastiCache cluster ${identifier}: ${error.message}`,
+        `Failed to connect to ElastiCache cluster ${identifier}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op: disconnecting from ElastiCache doesn't require cleanup
   }
 
   async deprovision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const identifier = config.cacheClusterId;
+    const identifier = config.cacheClusterId as string | undefined;
 
     try {
       await client.send(
         new DeleteCacheClusterCommand({ CacheClusterId: identifier })
       );
-    } catch (error: any) {
-      if (error.name === 'CacheClusterNotFoundFault') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'CacheClusterNotFoundFault') {
         return; // Already gone
       }
-      throw error;
+      throw err;
     }
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     const client = this.makeClient(credentials);
-    const identifier = config.cacheClusterId;
+    const identifier = config.cacheClusterId as string | undefined;
 
     try {
       const response = await client.send(
@@ -207,21 +212,22 @@ export class ElastiCacheAdapter implements ConnectorAdapter {
           engineVersion: cluster?.EngineVersion,
         },
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       return {
         success: false,
-        message: `Failed to connect to ElastiCache cluster ${identifier}: ${error.message}`,
-        details: { errorName: error.name },
+        message: `Failed to connect to ElastiCache cluster ${identifier}: ${err.message}`,
+        details: { errorName: err.name },
       };
     }
   }
 
   async getMetrics(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     const client = this.makeClient();
-    const identifier = config.cacheClusterId;
+    const identifier = config.cacheClusterId as string | undefined;
 
     try {
       const response = await client.send(
@@ -236,20 +242,21 @@ export class ElastiCacheAdapter implements ConnectorAdapter {
         size: `${numCacheNodes} node(s)`,
         records: numCacheNodes,
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied describing ElastiCache cluster ${identifier}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to get metrics for ElastiCache cluster ${identifier}: ${error.message}`,
+        `Failed to get metrics for ElastiCache cluster ${identifier}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
