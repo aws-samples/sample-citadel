@@ -42,13 +42,20 @@ const arbToolConfig = fc.record({
   ),
 });
 
+// Real tool lists cannot contain duplicate toolIds: legacy rows are keyed by the
+// `toolId` DynamoDB partition key (backend/lib/arbiter-stack.ts:430) and Registry
+// rows use the service-unique recordId as toolId (backend/src/services/registry-service.ts:1274),
+// with the merged list deduped across sources (backend/src/lambda/tool-config-resolver.ts:263-289).
+const arbUniqueToolConfigs = (constraints: { minLength?: number; maxLength?: number }) =>
+  fc.uniqueArray(arbToolConfig, { selector: (t) => t.toolId, ...constraints });
+
 // --- Tests ---
 
 describe('computeAutoSelectedResources', () => {
   it('returns all unique dataStoreIds from selected tools bindings', () => {
     fc.assert(
       fc.property(
-        fc.array(arbToolConfig, { minLength: 1, maxLength: 10 }),
+        arbUniqueToolConfigs({ minLength: 1, maxLength: 10 }),
         (tools) => {
           const selectedToolIds = tools.map((t) => t.toolId);
           const result = computeAutoSelectedResources(selectedToolIds, tools as any);
@@ -73,7 +80,7 @@ describe('computeAutoSelectedResources', () => {
   it('returns all unique integrationIds from selected tools bindings', () => {
     fc.assert(
       fc.property(
-        fc.array(arbToolConfig, { minLength: 1, maxLength: 10 }),
+        arbUniqueToolConfigs({ minLength: 1, maxLength: 10 }),
         (tools) => {
           const selectedToolIds = tools.map((t) => t.toolId);
           const result = computeAutoSelectedResources(selectedToolIds, tools as any);
@@ -97,7 +104,7 @@ describe('computeAutoSelectedResources', () => {
   it('returns empty arrays when no tools are selected', () => {
     fc.assert(
       fc.property(
-        fc.array(arbToolConfig, { minLength: 0, maxLength: 5 }),
+        arbUniqueToolConfigs({ minLength: 0, maxLength: 5 }),
         (tools) => {
           const result = computeAutoSelectedResources([], tools as any);
           expect(result.dataStoreIds).toEqual([]);
@@ -111,7 +118,7 @@ describe('computeAutoSelectedResources', () => {
   it('returns empty arrays when selected tools have no bindings', () => {
     fc.assert(
       fc.property(
-        fc.array(arbToolId, { minLength: 1, maxLength: 5 }),
+        fc.uniqueArray(arbToolId, { minLength: 1, maxLength: 5 }),
         (toolIds) => {
           const toolsWithNoBindings = toolIds.map((id) => ({
             toolId: id,
@@ -132,7 +139,7 @@ describe('computeAutoSelectedResources', () => {
   it('only includes bindings from selected tools, not all tools', () => {
     fc.assert(
       fc.property(
-        fc.array(arbToolConfig, { minLength: 2, maxLength: 10 }),
+        arbUniqueToolConfigs({ minLength: 2, maxLength: 10 }),
         (tools) => {
           // Select only the first tool
           const selectedToolIds = [tools[0].toolId];
