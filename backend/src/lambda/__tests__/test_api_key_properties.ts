@@ -565,8 +565,8 @@ describe('Property 11: API key rotation atomicity', () => {
           const txCalls = ddbMockPBT.commandCalls(TransactWriteCommand);
           const transactItems = txCalls[0].args[0].input.TransactItems!;
 
-          const putItems = transactItems.filter((t: any) => t.Put);
-          const updateItems = transactItems.filter((t: any) => t.Update);
+          const putItems = transactItems.filter((t) => t.Put);
+          const updateItems = transactItems.filter((t) => t.Update);
 
           expect(putItems).toHaveLength(1);
           expect(updateItems).toHaveLength(1);
@@ -589,7 +589,7 @@ describe('Property 12: Maximum active API keys enforcement', () => {
   });
 
   /** Helper to generate N mock active key items */
-  function makeMockActiveKeys(appId: string, count: number): Array<Record<string, any>> {
+  function makeMockActiveKeys(appId: string, count: number): Array<Record<string, unknown>> {
     return Array.from({ length: count }, (_, i) => ({
       appId: `${appId}#APIKEY#key-${i}`,
       groupId: `APP#${appId}`,

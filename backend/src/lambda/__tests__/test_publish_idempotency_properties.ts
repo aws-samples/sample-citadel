@@ -17,7 +17,8 @@ import {
   CreateAuthorizerCommand,
   DeleteApiCommand,
 } from '@aws-sdk/client-apigatewayv2';
-import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { STSClient } from '@aws-sdk/client-sts';
 import { IAMClient } from '@aws-sdk/client-iam';
@@ -44,7 +45,7 @@ const mockPolicyManager = {
 
 function makeDeps() {
   return {
-    docClient: DynamoDBDocumentClient.from(new (require('@aws-sdk/client-dynamodb').DynamoDBClient)({})),
+    docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
     apiGwClient: new ApiGatewayV2Client({}),
     eventBridgeClient: new EventBridgeClient({}),
     policyManager: mockPolicyManager,

@@ -21,14 +21,37 @@ jest.mock('../../utils/appsync', () => ({
 
 import { handler } from '../agent-resolver';
 
+type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
+
+/** Result shape returned by the agent-status field resolvers. */
+interface AgentStatusResult {
+  agentId: string;
+  status: string;
+  progress?: number;
+}
+
+/** Invokes the handler and casts the result. */
+async function invoke<T = AgentStatusResult>(event: HandlerEvent): Promise<T> {
+  return (await invokeHandler(event)) as T;
+}
+
 /**
  * Configure dynamoMock to dispatch GetCommand calls per-table.
  * Returns the project Item from `projectItem` and the agent-status
  * Item from `agentStatusItem`. Either may be `undefined` to simulate
  * "row not found".
  */
-function mockDynamoGets(projectItem: any, agentStatusItem: any) {
-  dynamoMock.on(GetCommand).callsFake((input: any) => {
+function mockDynamoGets(
+  projectItem: Record<string, unknown> | undefined,
+  agentStatusItem: Record<string, unknown> | undefined,
+) {
+  dynamoMock.on(GetCommand).callsFake((input: { TableName?: string }) => {
     if (input.TableName === 'test-projects') {
       return projectItem ? { Item: projectItem } : {};
     }
@@ -55,14 +78,18 @@ describe('agent-resolver', () => {
    * is the canonical caller-org reader path (see backend/src/utils/auth-event.ts);
    * setting it here keeps the test off the Cognito AdminGetUser fallback.
    */
-  const makeEvent = (fieldName: string, args: any, orgId: string | null = 'org-1') => ({
+  const makeEvent = (
+    fieldName: string,
+    args: Record<string, unknown>,
+    orgId: string | null = 'org-1',
+  ): HandlerEvent => ({
     info: { fieldName },
     arguments: args,
     identity: {
       sub: 'user-123',
       claims: orgId ? { sub: 'user-123', 'custom:organization': orgId } : { sub: 'user-123' },
     },
-  });
+  }) as unknown as HandlerEvent;
 
   describe('getAgentStatus', () => {
     test('returns agent status when found and caller org matches project organization', async () => {
@@ -77,10 +104,10 @@ describe('agent-resolver', () => {
         },
       );
 
-      const result = await handler(makeEvent('getAgentStatus', {
+      const result = await invoke(makeEvent('getAgentStatus', {
         projectId: 'proj-1',
         agentId: 'agent-1',
-      }) as any, {} as any, {} as any);
+      }));
 
       expect(result.agentId).toBe('agent-1');
       expect(result.status).toBe('PROCESSING');
@@ -94,10 +121,10 @@ describe('agent-resolver', () => {
         undefined, // agent-status row not found
       );
 
-      const result = await handler(makeEvent('getAgentStatus', {
+      const result = await invoke<AgentStatusResult | null>(makeEvent('getAgentStatus', {
         projectId: 'proj-1',
         agentId: 'agent-new',
-      }) as any, {} as any, {} as any);
+      }));
 
       expect(result!.status).toBe('IDLE');
       expect(result!.agentId).toBe('agent-new');
@@ -120,17 +147,17 @@ describe('agent-resolver', () => {
       );
 
       await expect(
-        handler(makeEvent('getAgentStatus', {
+        invoke(makeEvent('getAgentStatus', {
           projectId: 'proj-1',
           agentId: 'agent-1',
-        }) as any, {} as any, {} as any),
+        })),
       ).rejects.toThrow('Access denied');
 
       // Pin ordering: agent-status table must NOT be read on a tenant-mismatch
       // (closes the existence-oracle leak).
       const agentStatusReads = dynamoMock
         .commandCalls(GetCommand)
-        .filter((c) => (c.args[0].input as any).TableName === 'test-agent-status');
+        .filter((c) => c.args[0].input.TableName === 'test-agent-status');
       expect(agentStatusReads).toHaveLength(0);
     });
 
@@ -145,17 +172,17 @@ describe('agent-resolver', () => {
         },
       );
 
-      const result = await handler(makeEvent('getAgentStatus', {
+      const result = await invoke<AgentStatusResult | null>(makeEvent('getAgentStatus', {
         projectId: 'missing',
         agentId: 'agent-1',
-      }) as any, {} as any, {} as any);
+      }));
 
       // null — not the legacy default IDLE — so a caller cannot use the
       // default response as an existence oracle for arbitrary projectIds.
       expect(result).toBeNull();
       const agentStatusReads = dynamoMock
         .commandCalls(GetCommand)
-        .filter((c) => (c.args[0].input as any).TableName === 'test-agent-status');
+        .filter((c) => c.args[0].input.TableName === 'test-agent-status');
       expect(agentStatusReads).toHaveLength(0);
     });
   });
@@ -167,11 +194,11 @@ describe('agent-resolver', () => {
       dynamoMock.on(PutCommand).resolves({});
       eventBridgeMock.on(PutEventsCommand).resolves({});
 
-      const result = await handler(makeEvent('updateAgentStatus', {
+      const result = await invoke(makeEvent('updateAgentStatus', {
         projectId: 'proj-1',
         agentId: 'agent-1',
         status: { status: 'COMPLETED', progress: 100 },
-      }) as any, {} as any, {} as any);
+      }));
 
       expect(result.status).toBe('COMPLETED');
       expect(result.progress).toBe(100);
@@ -189,15 +216,15 @@ describe('agent-resolver', () => {
       // PutCommand IS mocked with a sentinel response — if the resolver fails to
       // throw before the write, we must catch the leak via the call-count assertion.
       mockDynamoGets({ id: 'proj-1', organization: 'org-other' }, undefined);
-      dynamoMock.on(PutCommand).resolves({ Attributes: { status: 'LEAKED' } } as any);
+      dynamoMock.on(PutCommand).resolves({ Attributes: { status: 'LEAKED' } });
       eventBridgeMock.on(PutEventsCommand).resolves({});
 
       await expect(
-        handler(makeEvent('updateAgentStatus', {
+        invoke(makeEvent('updateAgentStatus', {
           projectId: 'proj-1',
           agentId: 'agent-1',
           status: { status: 'COMPLETED', progress: 100 },
-        }) as any, {} as any, {} as any),
+        })),
       ).rejects.toThrow('Access denied');
 
       // Pin ordering: the Put must NOT have run on a tenant mismatch.
@@ -208,14 +235,14 @@ describe('agent-resolver', () => {
 
     test('returns null and does NOT write when project not found (write path)', async () => {
       mockDynamoGets(undefined, undefined); // project not found
-      dynamoMock.on(PutCommand).resolves({ Attributes: { status: 'LEAKED' } } as any);
+      dynamoMock.on(PutCommand).resolves({ Attributes: { status: 'LEAKED' } });
       eventBridgeMock.on(PutEventsCommand).resolves({});
 
-      const result = await handler(makeEvent('updateAgentStatus', {
+      const result = await invoke<AgentStatusResult | null>(makeEvent('updateAgentStatus', {
         projectId: 'missing',
         agentId: 'agent-1',
         status: { status: 'COMPLETED', progress: 100 },
-      }) as any, {} as any, {} as any);
+      }));
 
       // null — mirrors getAgentStatus existence-oracle behavior, and prevents
       // a caller from probing arbitrary projectIds via successful writes.
@@ -227,7 +254,7 @@ describe('agent-resolver', () => {
 
   test('throws on unknown field', async () => {
     await expect(
-      handler(makeEvent('unknownField', {}) as any, {} as any, {} as any)
+      invoke(makeEvent('unknownField', {}))
     ).rejects.toThrow('Unknown field');
   });
 });

@@ -14,12 +14,20 @@ jest.mock('../../utils/appsync', () => ({
 
 import { handler } from '../workflow-resolver';
 
-function makeEvent(fieldName: string, args: any, sub = 'user-123') {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
+
+function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
   return {
     info: { fieldName },
     arguments: args,
     identity: { sub, claims: { sub } },
-  } as any;
+  } as unknown as HandlerEvent;
 }
 
 function mockCognitoOrg(orgId: string) {
@@ -155,7 +163,7 @@ describe('Property 5: Optimistic Lock Conflict Detection', () => {
 
           // Act: try to update with stale version (currentVersion - 1)
           await expect(
-            handler(
+            invokeHandler(
               makeEvent('updateWorkflow', {
                 input: {
                   workflowId: 'wf-prop',
@@ -163,8 +171,6 @@ describe('Property 5: Optimistic Lock Conflict Detection', () => {
                   version: currentVersion - 1,
                 },
               }),
-              {} as any,
-              {} as any,
             ),
           ).rejects.toThrow(/Conflict/);
         },

@@ -35,8 +35,8 @@ const componentTypeArb = fc.constantFrom('agent' as const, 'tool' as const);
 
 function makeEventBridgeEvent(
   detailType: string,
-  detail: Record<string, any>,
-) {
+  detail: Record<string, unknown>,
+): Parameters<typeof handler>[0] {
   return {
     version: '0',
     id: 'test-event-id',
@@ -44,9 +44,9 @@ function makeEventBridgeEvent(
     account: '123456789012',
     time: '2024-01-01T00:00:00Z',
     region: 'us-east-1',
-    'detail-type': detailType,
+    "detail-type": detailType,
     detail,
-  } as any;
+  } as unknown as Parameters<typeof handler>[0];
 }
 
 function buildEvent(

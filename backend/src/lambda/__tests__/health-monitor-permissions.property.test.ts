@@ -79,7 +79,7 @@ describe('Health Monitor: permission error handling', () => {
         async (stores) => {
           const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
 
-          const getAdapterFn = (_store: any) => ({
+          const getAdapterFn = (_store: MockDataStore) => ({
             testConnection: async () => ({
               success: false,
               message: 'Permission denied accessing bucket test-bucket',
@@ -89,7 +89,7 @@ describe('Health Monitor: permission error handling', () => {
 
           const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
             const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as any, errorMessage: errMsg });
+            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
           };
 
           await processHealthChecks(stores, getAdapterFn, updateStoreFn);
@@ -112,7 +112,7 @@ describe('Health Monitor: permission error handling', () => {
         async (stores) => {
           const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
 
-          const getAdapterFn = (_store: any) => ({
+          const getAdapterFn = (_store: MockDataStore) => ({
             testConnection: async () => ({
               success: false,
               message: 'Connection timed out',
@@ -122,7 +122,7 @@ describe('Health Monitor: permission error handling', () => {
 
           const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
             const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as any, errorMessage: errMsg });
+            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
           };
 
           await processHealthChecks(stores, getAdapterFn, updateStoreFn);
@@ -145,7 +145,7 @@ describe('Health Monitor: permission error handling', () => {
         async (stores) => {
           const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
 
-          const getAdapterFn = (_store: any) => ({
+          const getAdapterFn = (_store: MockDataStore) => ({
             testConnection: async () => ({
               success: false,
               message: 'Access denied',
@@ -155,7 +155,7 @@ describe('Health Monitor: permission error handling', () => {
 
           const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
             const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as any, errorMessage: errMsg });
+            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
           };
 
           await processHealthChecks(stores, getAdapterFn, updateStoreFn);
@@ -179,9 +179,9 @@ describe('Health Monitor: permission error handling', () => {
         async (stores) => {
           const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
 
-          const getAdapterFn = (_store: any) => ({
+          const getAdapterFn = (_store: MockDataStore) => ({
             testConnection: async () => {
-              const err: any = new Error('User: arn:aws:iam::123:role/foo is not authorized');
+              const err = new Error('User: arn:aws:iam::123:role/foo is not authorized');
               err.name = 'AccessDeniedException';
               throw err;
             },
@@ -189,7 +189,7 @@ describe('Health Monitor: permission error handling', () => {
 
           const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
             const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as any, errorMessage: errMsg });
+            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
           };
 
           await processHealthChecks(stores, getAdapterFn, updateStoreFn);
@@ -212,7 +212,7 @@ describe('Health Monitor: permission error handling', () => {
         async (stores) => {
           const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
 
-          const getAdapterFn = (_store: any) => ({
+          const getAdapterFn = (_store: MockDataStore) => ({
             testConnection: async () => ({
               success: true,
               message: 'OK',
@@ -221,7 +221,7 @@ describe('Health Monitor: permission error handling', () => {
 
           const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
             const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as any, errorMessage: errMsg });
+            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
           };
 
           await processHealthChecks(stores, getAdapterFn, updateStoreFn);
@@ -244,7 +244,7 @@ describe('Health Monitor: permission error handling', () => {
         async (stores) => {
           const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
 
-          const getAdapterFn = (_store: any) => ({
+          const getAdapterFn = (_store: MockDataStore) => ({
             testConnection: async () => ({
               success: false,
               message: 'Failed to connect to bucket test-bucket: UnknownError',
@@ -254,7 +254,7 @@ describe('Health Monitor: permission error handling', () => {
 
           const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
             const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as any, errorMessage: errMsg });
+            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
           };
 
           await processHealthChecks(stores, getAdapterFn, updateStoreFn);

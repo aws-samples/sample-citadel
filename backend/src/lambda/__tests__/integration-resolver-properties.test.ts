@@ -28,7 +28,14 @@ const bedrockAgentMock = mockClient(BedrockAgentCoreControlClient);
 const eventBridgeMock = mockClient(EventBridgeClient);
 
 // Import the handler after mocking
-import { handler } from '../integration-resolver';
+import { handler } from "../integration-resolver";
+
+type HandlerEvent = Parameters<typeof handler>[0];
+
+/** Invokes the handler with a partially-specified AppSync event literal. */
+async function invoke(event: Record<string, unknown>): Promise<{ success?: boolean }> {
+  return (await handler(event as unknown as HandlerEvent)) as { success?: boolean };
+}
 
 describe('Integration Resolver - Property-Based Tests', () => {
   beforeEach(() => {
@@ -93,7 +100,7 @@ describe('Integration Resolver - Property-Based Tests', () => {
             ssmMock.onAnyCommand().resolves({});
             
             // Capture DynamoDB Put command
-            let capturedItem: any = null;
+            let capturedItem: Record<string, unknown> | null = null;
             dynamoMock.onAnyCommand().callsFake((input) => {
               if (input.constructor.name === 'PutCommand') {
                 capturedItem = input.input.Item;
@@ -102,8 +109,8 @@ describe('Integration Resolver - Property-Based Tests', () => {
             });
             
             // Build input based on connector type
-            let credentials: any;
-            let config: any;
+            let credentials: Record<string, unknown>;
+            let config: Record<string, unknown>;
             
             switch (connectorType) {
               case 'AWS_LAMBDA':
@@ -182,20 +189,20 @@ describe('Integration Resolver - Property-Based Tests', () => {
             };
             
             try {
-              await handler(event as any);
+              await invoke(event);
               
               // Property: Gateway target ID should be stored in DynamoDB
               expect(capturedItem).toBeTruthy();
-              expect(capturedItem.gatewayTargetId).toBe(mockTargetId);
-              expect(capturedItem.gatewayTargetId).toBeTruthy();
-              expect(typeof capturedItem.gatewayTargetId).toBe('string');
+              expect(capturedItem!.gatewayTargetId).toBe(mockTargetId);
+              expect(capturedItem!.gatewayTargetId).toBeTruthy();
+              expect(typeof capturedItem!.gatewayTargetId).toBe('string');
               
               // Verify other required fields are present
-              expect(capturedItem.integrationId).toBeTruthy();
-              expect(capturedItem.integrationType).toBe(connectorType);
-              expect(capturedItem.orgId).toBe(orgId);
-              expect(capturedItem.name).toBe(integrationName);
-              expect(capturedItem.status).toBe('CONFIGURED');
+              expect(capturedItem!.integrationId).toBeTruthy();
+              expect(capturedItem!.integrationType).toBe(connectorType);
+              expect(capturedItem!.orgId).toBe(orgId);
+              expect(capturedItem!.name).toBe(integrationName);
+              expect(capturedItem!.status).toBe('CONFIGURED');
               
               // Verify gateway API was called
               expect(bedrockAgentMock.calls().length).toBeGreaterThan(0);
@@ -233,7 +240,7 @@ describe('Integration Resolver - Property-Based Tests', () => {
             ssmMock.onAnyCommand().resolves({});
             
             // Capture DynamoDB Put command
-            let capturedItem: any = null;
+            let capturedItem: Record<string, unknown> | null = null;
             dynamoMock.onAnyCommand().callsFake((input) => {
               if (input.constructor.name === 'PutCommand') {
                 capturedItem = input.input.Item;
@@ -270,11 +277,11 @@ describe('Integration Resolver - Property-Based Tests', () => {
             };
             
             try {
-              await handler(event as any);
+              await invoke(event);
               
               // Property: Gateway target ID should NOT be stored for non-AgentCore types
               expect(capturedItem).toBeTruthy();
-              expect(capturedItem.gatewayTargetId).toBeUndefined();
+              expect(capturedItem!.gatewayTargetId).toBeUndefined();
               
               // Verify gateway API was NOT called
               expect(bedrockAgentMock.calls().length).toBe(0);
@@ -373,7 +380,7 @@ describe('Integration Resolver - Property-Based Tests', () => {
             };
             
             try {
-              const result = await handler(event as any);
+              const result = await invoke(event);
               
               // Property: Gateway target should be deleted
               expect(gatewayDeleteCalled).toBe(true);
@@ -454,7 +461,7 @@ describe('Integration Resolver - Property-Based Tests', () => {
             };
             
             try {
-              const result = await handler(event as any);
+              const result = await invoke(event);
               
               // Property: Gateway target delete should NOT be called
               expect(result.success).toBe(true);
@@ -536,7 +543,7 @@ describe('Integration Resolver - Property-Based Tests', () => {
             };
             
             try {
-              const result = await handler(event as any);
+              const result = await invoke(event);
               
               // Property: Deletion should succeed even if gateway cleanup fails
               expect(result.success).toBe(true);

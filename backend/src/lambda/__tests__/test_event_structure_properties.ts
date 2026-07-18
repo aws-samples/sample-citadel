@@ -206,8 +206,11 @@ import { buildInvokeEventDetail } from '../utils/invoke-event-builder';
 
 // ── Property 6 Generators ───────────────────────────────────
 
+/** Recursive JSON value type generated below. */
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
 /** Arbitrary JSON object for request body */
-const jsonValueArb: fc.Arbitrary<any> = fc.letrec(tie => ({
+const jsonValueArb: fc.Arbitrary<JsonValue> = fc.letrec<{ value: JsonValue }>(tie => ({
   value: fc.oneof(
     fc.string(),
     fc.integer(),

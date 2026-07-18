@@ -94,7 +94,7 @@ function buildMockDeps(
   const perStoreGetAdapter = (store: MockDataStore) => {
     const health = healthMap.get(store.dataStoreId)!;
     return {
-      testConnection: async (_config: any, _creds?: any) => {
+      testConnection: async (_config: unknown, _creds?: unknown) => {
         if (health.healthy) {
           return { success: true, message: 'OK' };
         } else {
