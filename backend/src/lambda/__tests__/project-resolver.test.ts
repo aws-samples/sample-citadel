@@ -24,7 +24,13 @@ import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { mockClient } from 'aws-sdk-client-mock';
 import * as fc from 'fast-check';
 
-import { GovernanceArchetype, ProjectArchetypeStatus } from '../../types';
+import { GovernanceArchetype, ProjectArchetypeStatus, type Project } from '../../types';
+// Namespace imports so jest.spyOn can patch the sibling resolver modules the
+// phase-transition gates call at runtime (same module-registry objects the
+// previous require() calls returned).
+import * as adrResolver from '../adr-resolver';
+import * as execspecResolver from '../execspec-resolver';
+import * as assessmentResolver from '../agent-design-assessment-resolver';
 import { __resetGovernanceNotifierForTest } from '../../utils/notifier-base';
 import { __resetGovernanceFlagCacheForTest } from '../../utils/governance-flag';
 
@@ -42,11 +48,21 @@ jest.mock('uuid', () => ({ v4: jest.fn().mockReturnValue('project-uuid-1') }));
 // Import after mocks are registered
 import { handler } from '../project-resolver';
 
-const makeEvent = (fieldName: string, args: any) => ({
-  info: { fieldName },
-  arguments: args,
-  identity: { sub: 'user-123' },
-});
+type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's Handler type declares legacy required context and callback
+// parameters, but the implementation is a one-parameter async (event)
+// function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments. Every
+// operation exercised in this file resolves a Project.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<Project>;
+
+const makeEvent = (fieldName: string, args: Record<string, unknown>) =>
+  ({
+    info: { fieldName },
+    arguments: args,
+    identity: { sub: 'user-123' },
+  }) as unknown as HandlerEvent;
 
 describe('project-resolver — archetype attributes', () => {
   beforeEach(() => {
@@ -73,12 +89,10 @@ describe('project-resolver — archetype attributes', () => {
     test('new project is created with archetypeStatus=PENDING and no archetype/confidence', async () => {
       dynamoMock.on(PutCommand).resolves({});
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('createProject', {
           input: { name: 'Legacy DB migration', description: 'Mono schema' },
-        }) as any,
-        {} as any,
-        {} as any
+        }),
       );
 
       // Response shape
@@ -89,7 +103,7 @@ describe('project-resolver — archetype attributes', () => {
       // Persisted shape — inspect the PutCommand payload
       const putCalls = dynamoMock.commandCalls(PutCommand);
       expect(putCalls).toHaveLength(1);
-      const persisted = putCalls[0].args[0].input.Item as any;
+      const persisted = putCalls[0].args[0].input.Item as Record<string, unknown>;
       expect(persisted.archetypeStatus).toBe('PENDING');
       expect(persisted.archetype).toBeUndefined();
       expect(persisted.archetypeConfidence).toBeUndefined();
@@ -121,7 +135,7 @@ describe('project-resolver — archetype attributes', () => {
         },
       });
 
-      const result = await handler(
+      const result = await invokeHandler(
         makeEvent('updateProject', {
           id: 'proj-1',
           input: {
@@ -129,9 +143,7 @@ describe('project-resolver — archetype attributes', () => {
             archetypeConfidence: 0.85,
             archetypeStatus: 'CLASSIFIED',
           },
-        }) as any,
-        {} as any,
-        {} as any
+        }),
       );
 
       expect(result.archetype).toBe('MONOLITHIC_DB');
@@ -141,8 +153,8 @@ describe('project-resolver — archetype attributes', () => {
       // Confirm the UpdateCommand's expression carried the new attrs through
       const updateCalls = dynamoMock.commandCalls(UpdateCommand);
       expect(updateCalls).toHaveLength(1);
-      const updateInput = updateCalls[0].args[0].input as any;
-      const values = updateInput.ExpressionAttributeValues as Record<string, any>;
+      const updateInput = updateCalls[0].args[0].input;
+      const values = updateInput.ExpressionAttributeValues as Record<string, unknown>;
       expect(values[':archetype']).toBe('MONOLITHIC_DB');
       expect(values[':archetypeConfidence']).toBeCloseTo(0.85);
       expect(values[':archetypeStatus']).toBe('CLASSIFIED');
@@ -163,10 +175,8 @@ describe('project-resolver — archetype attributes', () => {
         },
       });
 
-      const result = await handler(
-        makeEvent('getProject', { id: 'legacy-1' }) as any,
-        {} as any,
-        {} as any
+      const result = await invokeHandler(
+        makeEvent('getProject', { id: 'legacy-1' }),
       );
 
       expect(result.archetypeStatus).toBe('PENDING');
@@ -194,7 +204,7 @@ describe('project-resolver — archetype attributes', () => {
         identity: { sub: 'user-123', 'custom:organization': 'org-claim' },
       };
 
-      const result = await handler(claimEvent as any, {} as any, {} as any);
+      const result = await invokeHandler(claimEvent as unknown as HandlerEvent);
 
       expect(result.id).toBe('proj-claim');
       expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
@@ -251,7 +261,7 @@ describe('phase-transition gates', () => {
   let specSpy: jest.SpyInstance;
   let assessmentSpy: jest.SpyInstance;
 
-  const makeExistingProject = (overrides: Partial<Record<string, any>> = {}) => ({
+  const makeExistingProject = (overrides: Record<string, unknown> = {}) => ({
     id: 'proj-gate-1',
     name: 'Gate Test',
     description: 'fixture',
@@ -292,13 +302,13 @@ describe('phase-transition gates', () => {
     // Spy on sibling resolver modules (C7/C10/C3 data sources). Each test
     // overrides the return value as needed. Default: empty arrays / null.
     adrSpy = jest
-      .spyOn(require('../adr-resolver'), 'listADRsForProject')
+      .spyOn(adrResolver, 'listADRsForProject')
       .mockResolvedValue([]);
     specSpy = jest
-      .spyOn(require('../execspec-resolver'), 'listExecutionSpecifications')
+      .spyOn(execspecResolver, 'listExecutionSpecifications')
       .mockResolvedValue([]);
     assessmentSpy = jest
-      .spyOn(require('../agent-design-assessment-resolver'), 'getAgentDesignAssessment')
+      .spyOn(assessmentResolver, 'getAgentDesignAssessment')
       .mockResolvedValue(null);
   });
 
@@ -316,10 +326,10 @@ describe('phase-transition gates', () => {
   const bypassEvents = () => {
     const out: Array<Record<string, unknown>> = [];
     for (const call of eventBridgeMock.commandCalls(PutEventsCommand)) {
-      const entries = (call.args[0].input as any).Entries ?? [];
+      const entries = call.args[0].input.Entries ?? [];
       for (const e of entries) {
         if (e.DetailType === 'governance.grandfathered.bypass') {
-          out.push(JSON.parse(e.Detail));
+          out.push(JSON.parse(e.Detail as string));
         }
       }
     }
@@ -334,13 +344,11 @@ describe('phase-transition gates', () => {
     adrSpy.mockResolvedValue([{ status: 'PROPOSED' }, { status: 'REOPENED' }]);
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateProject', {
           id: existing.id,
           input: { status: 'PLANNING_COMPLETE' },
-        }) as any,
-        {} as any,
-        {} as any,
+        }),
       ),
     ).rejects.toThrow(/PLANNING_COMPLETE requires at least one LOCKED ADR/);
 
@@ -358,13 +366,11 @@ describe('phase-transition gates', () => {
       Attributes: { ...existing, status: 'PLANNING_COMPLETE', version: 1 },
     });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateProject', {
         id: existing.id,
         input: { status: 'PLANNING_COMPLETE' },
-      }) as any,
-      {} as any,
-      {} as any,
+      }),
     );
 
     expect(result.status).toBe('PLANNING_COMPLETE');
@@ -383,13 +389,11 @@ describe('phase-transition gates', () => {
       Attributes: { ...existing, status: 'PLANNING_COMPLETE', version: 1 },
     });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateProject', {
         id: existing.id,
         input: { status: 'PLANNING_COMPLETE' },
-      }) as any,
-      {} as any,
-      {} as any,
+      }),
     );
 
     expect(result.status).toBe('PLANNING_COMPLETE');
@@ -411,13 +415,11 @@ describe('phase-transition gates', () => {
     assessmentSpy.mockResolvedValue(null);
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateProject', {
           id: existing.id,
           input: { status: 'IN_PROGRESS' },
-        }) as any,
-        {} as any,
-        {} as any,
+        }),
       ),
     ).rejects.toThrow(/IN_PROGRESS requires a completed AgentDesignAssessment/);
 
@@ -436,13 +438,11 @@ describe('phase-transition gates', () => {
       Attributes: { ...existing, status: 'IN_PROGRESS', version: 1 },
     });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateProject', {
         id: existing.id,
         input: { status: 'IN_PROGRESS' },
-      }) as any,
-      {} as any,
-      {} as any,
+      }),
     );
 
     expect(result.status).toBe('IN_PROGRESS');
@@ -461,13 +461,11 @@ describe('phase-transition gates', () => {
     specSpy.mockResolvedValue([{ status: 'DRAFT' }, { status: 'IN_REVIEW' }]);
 
     await expect(
-      handler(
+      invokeHandler(
         makeEvent('updateProject', {
           id: existing.id,
           input: { status: 'IMPLEMENTATION_READY' },
-        }) as any,
-        {} as any,
-        {} as any,
+        }),
       ),
     ).rejects.toThrow(
       /IMPLEMENTATION_READY requires at least one APPROVED ExecutionSpecification/,
@@ -488,13 +486,11 @@ describe('phase-transition gates', () => {
       Attributes: { ...existing, status: 'IMPLEMENTATION_READY', version: 1 },
     });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateProject', {
         id: existing.id,
         input: { status: 'IMPLEMENTATION_READY' },
-      }) as any,
-      {} as any,
-      {} as any,
+      }),
     );
 
     expect(result.status).toBe('IMPLEMENTATION_READY');
@@ -514,13 +510,11 @@ describe('phase-transition gates', () => {
       Attributes: { ...existing, status: 'DESIGN_COMPLETE', version: 1 },
     });
 
-    const result = await handler(
+    const result = await invokeHandler(
       makeEvent('updateProject', {
         id: existing.id,
         input: { status: 'DESIGN_COMPLETE' },
-      }) as any,
-      {} as any,
-      {} as any,
+      }),
     );
 
     expect(result.status).toBe('DESIGN_COMPLETE');

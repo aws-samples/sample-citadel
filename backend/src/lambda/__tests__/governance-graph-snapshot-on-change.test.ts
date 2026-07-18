@@ -20,12 +20,13 @@ process.env.CASE_LAW_TABLE = 'citadel-case-law-test';
 process.env.GRAPH_SNAPSHOTS_TABLE =
   'citadel-governance-graph-snapshots-test';
 
-import type { DynamoDBStreamEvent } from 'aws-lambda';
+import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
 import { mockClient } from 'aws-sdk-client-mock';
 import {
   DynamoDBDocumentClient,
   PutCommand,
   ScanCommand,
+  type ScanCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
@@ -58,9 +59,24 @@ function stubSettings(value: string): void {
   });
 }
 
+/** Shape of the snapshot row the handler writes — typed view for assertions. */
+interface SnapshotRow {
+  snapshotId: string;
+  kind: string;
+  trigger: string;
+  timestamp: number;
+  expiresAt: number;
+  env: string;
+  partial: boolean;
+  authorityUnits: Array<Record<string, unknown>>;
+  compositionContracts: Array<Record<string, unknown>>;
+  constitutionalLayers: Array<Record<string, unknown>>;
+  caseLaw: Array<Record<string, unknown>>;
+}
+
 /** Build a minimal DynamoDB stream event with N synthetic records. */
 function streamEvent(n: number, eventName: 'INSERT' | 'MODIFY' | 'REMOVE' = 'MODIFY'): DynamoDBStreamEvent {
-  const records = Array.from({ length: n }, (_, i) => ({
+  const records: DynamoDBRecord[] = Array.from({ length: n }, (_, i) => ({
     eventID: `evt-${i}`,
     eventName,
     eventVersion: '1.1',
@@ -75,12 +91,12 @@ function streamEvent(n: number, eventName: 'INSERT' | 'MODIFY' | 'REMOVE' = 'MOD
       StreamViewType: 'NEW_AND_OLD_IMAGES',
     },
   }));
-  return { Records: records as any };
+  return { Records: records };
 }
 
 describe('governance-graph-snapshot-on-change handler', () => {
   test('empty event — returns ok with reason=empty, no scans, no put, no metric', async () => {
-    const result = await handler({ Records: [] } as any);
+    const result = await handler({ Records: [] });
 
     expect(result.ok).toBe(true);
     expect(result.snapshotId).toBeNull();
@@ -112,7 +128,7 @@ describe('governance-graph-snapshot-on-change handler', () => {
     stubSettings(
       '{"enabled":true,"retentionDays":7,"captureMode":"on-change"}',
     );
-    ddbMock.on(ScanCommand).callsFake((input: any) => {
+    ddbMock.on(ScanCommand).callsFake((input: ScanCommandInput) => {
       const t: string = input?.TableName ?? '';
       if (t === 'citadel-authority-units-test') {
         return Promise.resolve({ Items: [{ unitId: 'u-1' }] });
@@ -140,7 +156,7 @@ describe('governance-graph-snapshot-on-change handler', () => {
 
     const scanCalls = ddbMock.commandCalls(ScanCommand);
     const tables = new Set(
-      scanCalls.map((c) => (c.args[0].input as any).TableName),
+      scanCalls.map((c) => c.args[0].input.TableName),
     );
     expect(tables).toContain('citadel-authority-units-test');
     expect(tables).toContain('citadel-composition-contracts-test');
@@ -149,7 +165,7 @@ describe('governance-graph-snapshot-on-change handler', () => {
 
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
-    const item = puts[0].args[0].input.Item as any;
+    const item = puts[0].args[0].input.Item as unknown as SnapshotRow;
     expect(item.kind).toBe('full');
     expect(item.trigger).toBe('OnChange');
     expect(item.snapshotId).toBe(result.snapshotId);
@@ -192,7 +208,7 @@ describe('governance-graph-snapshot-on-change handler', () => {
 
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
-    expect((puts[0].args[0].input as any).TableName).toBe(
+    expect(puts[0].args[0].input.TableName).toBe(
       'citadel-governance-graph-snapshots-test',
     );
   });
@@ -212,11 +228,11 @@ describe('governance-graph-snapshot-on-change handler', () => {
     expect(md.MetricName).toBe('Count');
     expect(md.Value).toBe(1);
     const dims = md.Dimensions ?? [];
-    const triggerDim = dims.find((d: any) => d.Name === 'Trigger');
+    const triggerDim = dims.find((d) => d.Name === 'Trigger');
     expect(triggerDim?.Value).toBe('OnChange');
-    const statusDim = dims.find((d: any) => d.Name === 'Status');
+    const statusDim = dims.find((d) => d.Name === 'Status');
     expect(statusDim?.Value).toBe('Success');
-    const partialDim = dims.find((d: any) => d.Name === 'Partial');
+    const partialDim = dims.find((d) => d.Name === 'Partial');
     expect(partialDim?.Value).toBe('false');
   });
 
@@ -224,7 +240,7 @@ describe('governance-graph-snapshot-on-change handler', () => {
     stubSettings(
       '{"enabled":true,"retentionDays":30,"captureMode":"on-change"}',
     );
-    ddbMock.on(ScanCommand).callsFake((input: any) => {
+    ddbMock.on(ScanCommand).callsFake((input: ScanCommandInput) => {
       const t: string = input?.TableName ?? '';
       if (t === 'citadel-case-law-test') {
         return Promise.reject(new Error('throttled'));
@@ -240,7 +256,7 @@ describe('governance-graph-snapshot-on-change handler', () => {
 
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
-    const item = puts[0].args[0].input.Item as any;
+    const item = puts[0].args[0].input.Item as unknown as SnapshotRow;
     expect(item.partial).toBe(true);
     expect(item.caseLaw).toEqual([]);
 
@@ -249,9 +265,9 @@ describe('governance-graph-snapshot-on-change handler', () => {
     expect(metrics).toHaveLength(1);
     const md = metrics[0].args[0].input.MetricData![0];
     const dims = md.Dimensions ?? [];
-    const statusDim = dims.find((d: any) => d.Name === 'Status');
+    const statusDim = dims.find((d) => d.Name === 'Status');
     expect(statusDim?.Value).toBe('Success');
-    const partialDim = dims.find((d: any) => d.Name === 'Partial');
+    const partialDim = dims.find((d) => d.Name === 'Partial');
     expect(partialDim?.Value).toBe('true');
   });
 
@@ -270,7 +286,7 @@ describe('governance-graph-snapshot-on-change handler', () => {
     expect(metrics).toHaveLength(1);
     const md = metrics[0].args[0].input.MetricData![0];
     const dims = md.Dimensions ?? [];
-    const statusDim = dims.find((d: any) => d.Name === 'Status');
+    const statusDim = dims.find((d) => d.Name === 'Status');
     expect(statusDim?.Value).toBe('Failure');
   });
 
@@ -287,7 +303,7 @@ describe('governance-graph-snapshot-on-change handler', () => {
     expect(metrics).toHaveLength(1);
     const md = metrics[0].args[0].input.MetricData![0];
     const dims = md.Dimensions ?? [];
-    const statusDim = dims.find((d: any) => d.Name === 'Status');
+    const statusDim = dims.find((d) => d.Name === 'Status');
     expect(statusDim?.Value).toBe('Failure');
   });
 
@@ -326,7 +342,7 @@ describe('governance-graph-snapshot-on-change handler', () => {
 
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
-    const item = puts[0].args[0].input.Item as any;
+    const item = puts[0].args[0].input.Item as unknown as SnapshotRow;
     expect(item.trigger).toBe('OnChange');
   });
 });

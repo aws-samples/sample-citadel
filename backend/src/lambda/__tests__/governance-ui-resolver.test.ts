@@ -26,8 +26,16 @@ import {
   PutCommand,
   QueryCommand,
   ScanCommand,
+  type ScanCommandInput,
 } from '@aws-sdk/lib-dynamodb';
-import { SSMClient, GetParameterCommand, GetParameterHistoryCommand, PutParameterCommand } from '@aws-sdk/client-ssm';
+import {
+  SSMClient,
+  GetParameterCommand,
+  GetParameterHistoryCommand,
+  PutParameterCommand,
+  type GetParameterCommandInput,
+  type PutParameterCommandInput,
+} from '@aws-sdk/client-ssm';
 import {
   CloudWatchClient,
   GetMetricStatisticsCommand,
@@ -40,6 +48,8 @@ import {
   IAMClient,
   GetRoleCommand,
   GetRolePolicyCommand,
+  type GetRoleCommandInput,
+  type GetRolePolicyCommandInput,
 } from '@aws-sdk/client-iam';
 import {
   STSClient,
@@ -207,7 +217,9 @@ interface PartialEvent {
   identity?: Record<string, unknown>;
 }
 
-function makeEvent({ fieldName, args = {}, identity = {} }: PartialEvent): any {
+type HandlerEvent = Parameters<typeof handler>[0];
+
+function makeEvent({ fieldName, args = {}, identity = {} }: PartialEvent): HandlerEvent {
   return {
     arguments: args,
     identity,
@@ -216,7 +228,7 @@ function makeEvent({ fieldName, args = {}, identity = {} }: PartialEvent): any {
     source: null,
     prev: null,
     stash: {},
-  };
+  } as unknown as HandlerEvent;
 }
 
 function makeDdbRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -480,7 +492,7 @@ describe('getReconcilerStatus', () => {
   test('returns zero defaults when SSM throws ParameterNotFound', async () => {
     isAdminFromEventMock.mockReturnValue(true);
     const err = new Error('Parameter not found');
-    (err as any).name = 'ParameterNotFound';
+    err.name = 'ParameterNotFound';
     ssmMock.on(GetParameterCommand).rejects(err);
 
     const result = (await handler(
@@ -1194,7 +1206,7 @@ describe('getRolloutReadiness real checks (Wave 2.B)', () => {
     // ScanCommand responses (governance-ledger reads see ledger-shaped
     // rows; authority-units reads see makeUnits).
     const telOneOldTs = Math.floor(Date.now() / 1000) - 10 * 86_400;
-    ddbMock.on(ScanCommand).callsFake((input: any) => {
+    ddbMock.on(ScanCommand).callsFake((input: ScanCommandInput) => {
       if (input.TableName === 'citadel-governance-ledger-test') {
         if (input.Select === 'COUNT') {
           // tel-2: total >= 100, mismatches < 0.5%.
@@ -1690,7 +1702,7 @@ describe('setGovernanceMode', () => {
     targetMode?: string;
     acknowledgement?: string;
     reason?: string | null;
-  }): any {
+  }): HandlerEvent {
     return makeEvent({
       fieldName: 'setGovernanceMode',
       args: { input },
@@ -1715,7 +1727,7 @@ describe('setGovernanceMode', () => {
     putShouldFailOn?: 'enforce' | 'effective_at' | null;
   }) {
     const { currentMode, currentEffectiveAt, putShouldFailOn } = opts;
-    ssmMock.on(GetParameterCommand).callsFake((input: any) => {
+    ssmMock.on(GetParameterCommand).callsFake((input: GetParameterCommandInput) => {
       const name: string = input?.Name ?? '';
       if (name.includes('/enforce/')) {
         return Promise.resolve({ Parameter: { Value: currentMode } });
@@ -1725,7 +1737,7 @@ describe('setGovernanceMode', () => {
       }
       return Promise.resolve({});
     });
-    ssmMock.on(PutParameterCommand).callsFake((input: any) => {
+    ssmMock.on(PutParameterCommand).callsFake((input: PutParameterCommandInput) => {
       const name: string = input?.Name ?? '';
       if (putShouldFailOn === 'enforce' && name.includes('/enforce/')) {
         return Promise.reject(new Error('SSM enforce write failed'));
@@ -2047,7 +2059,7 @@ describe('markReadinessCheckVerified', () => {
     checkId?: string;
     expiresInDays?: number | null;
     note?: string | null;
-  }, identity: Record<string, unknown> = { sub: 'verifier-sub-1' }): any {
+  }, identity: Record<string, unknown> = { sub: 'verifier-sub-1' }): HandlerEvent {
     return makeEvent({
       fieldName: 'markReadinessCheckVerified',
       args: { input },
@@ -2219,7 +2231,7 @@ describe('getRolloutReadiness verification overlay (Wave 2.B.2)', () => {
   function stubSsmForManual(
     map: Record<string, { value?: string; throws?: boolean } | undefined>,
   ) {
-    ssmMock.on(GetParameterCommand).callsFake((input: any) => {
+    ssmMock.on(GetParameterCommand).callsFake((input: GetParameterCommandInput) => {
       const name: string = input?.Name ?? '';
       const m = name.match(
         /\/citadel\/governance\/readiness\/manual\/[^/]+\/([^/]+)$/,
@@ -2307,7 +2319,7 @@ describe('getRolloutReadiness verification overlay (Wave 2.B.2)', () => {
   test('2 manual verified + 8 real PASS → passCount = 10, stubCount = 1', async () => {
     // Real-check happy paths (data-1, data-2, data-3, tel-1, tel-2, tel-3, rb-1, rb-2):
     const telOneOldTs = Math.floor(Date.now() / 1000) - 10 * 86_400;
-    ddbMock.on(ScanCommand).callsFake((input: any) => {
+    ddbMock.on(ScanCommand).callsFake((input: ScanCommandInput) => {
       if (input.TableName === 'citadel-governance-ledger-test') {
         if (input.Select === 'COUNT') {
           // tel-2: total >= 100, mismatches < 0.5%.
@@ -2347,7 +2359,7 @@ describe('getRolloutReadiness verification overlay (Wave 2.B.2)', () => {
         expiresAt: futureExpiry,
         note: null,
       });
-    ssmMock.on(GetParameterCommand).callsFake((input: any) => {
+    ssmMock.on(GetParameterCommand).callsFake((input: GetParameterCommandInput) => {
       const name: string = input?.Name ?? '';
       if (name.endsWith('/enforce/dev')) {
         // rb-1 PASS path
@@ -2395,7 +2407,7 @@ describe('getRolloutReadiness verification overlay (Wave 2.B.2)', () => {
 
   test('all 3 manual verified + all 8 real PASS → passCount = 11, stubCount = 0', async () => {
     const telOneOldTs = Math.floor(Date.now() / 1000) - 10 * 86_400;
-    ddbMock.on(ScanCommand).callsFake((input: any) => {
+    ddbMock.on(ScanCommand).callsFake((input: ScanCommandInput) => {
       if (input.TableName === 'citadel-governance-ledger-test') {
         if (input.Select === 'COUNT') {
           const isMismatch =
@@ -2432,7 +2444,7 @@ describe('getRolloutReadiness verification overlay (Wave 2.B.2)', () => {
         expiresAt: futureExpiry,
         note: null,
       });
-    ssmMock.on(GetParameterCommand).callsFake((input: any) => {
+    ssmMock.on(GetParameterCommand).callsFake((input: GetParameterCommandInput) => {
       const name: string = input?.Name ?? '';
       if (name.endsWith('/enforce/dev')) {
         return Promise.resolve({ Parameter: { Value: 'permissive' } });
@@ -2478,7 +2490,7 @@ describe('getRolloutReadiness verification overlay (Wave 2.B.2)', () => {
         expiresAt: futureExpiry,
         note: null,
       });
-    ssmMock.on(GetParameterCommand).callsFake((input: any) => {
+    ssmMock.on(GetParameterCommand).callsFake((input: GetParameterCommandInput) => {
       const name: string = input?.Name ?? '';
       const m = name.match(
         /\/citadel\/governance\/readiness\/manual\/[^/]+\/([^/]+)$/,
@@ -2995,7 +3007,7 @@ describe('publishGovernanceFinding', () => {
         source: null,
         prev: null,
         stash: {},
-      } as any),
+      } as unknown as HandlerEvent),
     ).rejects.toThrow(/Forbidden: publishGovernanceFinding is IAM-only/);
   });
 
@@ -4637,7 +4649,7 @@ describe('constitutionalRule mutations (Wave 4.C.2)', () => {
   function adminMutEvent(
     fieldName: 'addConstitutionalRule' | 'updateConstitutionalRule' | 'deleteConstitutionalRule',
     input: Record<string, unknown>,
-  ): any {
+  ): HandlerEvent {
     return makeEvent({
       fieldName,
       args: { input },
@@ -4680,7 +4692,7 @@ describe('constitutionalRule mutations (Wave 4.C.2)', () => {
     async (fieldName, input) => {
       isAdminFromEventMock.mockReturnValue(false);
       await expect(
-        handler(adminMutEvent(fieldName as any, input as any)),
+        handler(adminMutEvent(fieldName, input)),
       ).rejects.toThrow('Forbidden: admin required');
     },
   );
@@ -4693,7 +4705,7 @@ describe('constitutionalRule mutations (Wave 4.C.2)', () => {
     '%s: acknowledgement string mismatch throws',
     async (fieldName, input) => {
       await expect(
-        handler(adminMutEvent(fieldName as any, input as any)),
+        handler(adminMutEvent(fieldName, input)),
       ).rejects.toThrow('Acknowledgement string mismatch');
     },
   );
@@ -4706,7 +4718,7 @@ describe('constitutionalRule mutations (Wave 4.C.2)', () => {
     async (fieldName, input) => {
       ddbMock.on(GetCommand).resolves({ Item: makeStoredLayerRow({ layerId: 'l1' }) });
       await expect(
-        handler(adminMutEvent(fieldName as any, input as any)),
+        handler(adminMutEvent(fieldName, input)),
       ).rejects.toThrow('Invalid operator: bogus');
     },
   );
@@ -5080,7 +5092,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
       | 'unrevokeCaseLaw'
       | 'updateCaseLawPrecedence',
     input: Record<string, unknown>,
-  ): any {
+  ): HandlerEvent {
     return makeEvent({
       fieldName,
       args: { input },
@@ -5126,7 +5138,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
     async (fieldName, input) => {
       isAdminFromEventMock.mockReturnValue(false);
       await expect(
-        handler(adminCaseLawEvent(fieldName as any, input as any)),
+        handler(adminCaseLawEvent(fieldName, input)),
       ).rejects.toThrow('Forbidden: admin required');
     },
   );
@@ -5142,7 +5154,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
     '%s: acknowledgement string mismatch throws',
     async (fieldName, input) => {
       await expect(
-        handler(adminCaseLawEvent(fieldName as any, input as any)),
+        handler(adminCaseLawEvent(fieldName, input)),
       ).rejects.toThrow('Acknowledgement string mismatch');
     },
   );
@@ -5162,7 +5174,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
     async (fieldName, input) => {
       ddbMock.on(GetCommand).resolves({ Item: undefined });
       await expect(
-        handler(adminCaseLawEvent(fieldName as any, input as any)),
+        handler(adminCaseLawEvent(fieldName, input)),
       ).rejects.toThrow('Case-law entry not found: missing');
     },
   );
@@ -5178,7 +5190,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
     '%s: empty caseId throws',
     async (fieldName, input) => {
       await expect(
-        handler(adminCaseLawEvent(fieldName as any, input as any)),
+        handler(adminCaseLawEvent(fieldName, input)),
       ).rejects.toThrow('caseId must be non-empty');
     },
   );
@@ -5237,7 +5249,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
     // mutation skipped the UpdateItem entirely.
     const sendSpy = jest.spyOn(
       DynamoDBDocumentClient.prototype,
-      'send' as any,
+      'send',
     );
 
     const result = (await handler(
@@ -5254,7 +5266,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
     // no second GetCommand for re-projection. Assert by inspecting
     // every call's command name.
     const sendCallNames = sendSpy.mock.calls.map(
-      (call) => (call[0] as any)?.constructor?.name ?? 'unknown',
+      (call) => (call[0] as object | undefined)?.constructor?.name ?? 'unknown',
     );
     expect(sendCallNames).toEqual(['GetCommand']);
 
@@ -5386,7 +5398,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
 
       const sendSpy = jest.spyOn(
         DynamoDBDocumentClient.prototype,
-        'send' as any,
+        'send',
       );
 
       await expect(
@@ -5417,7 +5429,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
     // Spy on send so we can assert the UpdateCommand was issued.
     const sendSpy = jest.spyOn(
       DynamoDBDocumentClient.prototype,
-      'send' as any,
+      'send',
     );
 
     const result = (await handler(
@@ -5433,7 +5445,7 @@ describe('caseLaw mutations (Wave 4.D.2)', () => {
     // The UpdateCommand was issued — the primary write succeeded; only
     // the audit event emit failed.
     const sendCallNames = sendSpy.mock.calls.map(
-      (call) => (call[0] as any)?.constructor?.name ?? 'unknown',
+      (call) => (call[0] as object | undefined)?.constructor?.name ?? 'unknown',
     );
     expect(sendCallNames).toContain('UpdateCommand');
     sendSpy.mockRestore();
@@ -5470,7 +5482,7 @@ describe('authorityGraphHistorySettings (Wave 4.E.A)', () => {
   const SETTINGS_PARAM_PREFIX =
     '/citadel/governance/authority-graph-history/';
 
-  function settingsEvent(fieldName: string, args?: any): any {
+  function settingsEvent(fieldName: string, args?: Record<string, unknown>): HandlerEvent {
     return makeEvent({
       fieldName,
       args: args ?? {},
@@ -5487,7 +5499,7 @@ describe('authorityGraphHistorySettings (Wave 4.E.A)', () => {
     // freshly written JSON (mirrors the real SSM behaviour).
     let liveValue: string | null =
       opts.storedValue === undefined ? null : opts.storedValue;
-    ssmMock.on(GetParameterCommand).callsFake((input: any) => {
+    ssmMock.on(GetParameterCommand).callsFake((input: GetParameterCommandInput) => {
       const name: string = input?.Name ?? '';
       if (name.startsWith(SETTINGS_PARAM_PREFIX)) {
         if (liveValue === null) {
@@ -5497,7 +5509,7 @@ describe('authorityGraphHistorySettings (Wave 4.E.A)', () => {
       }
       return Promise.resolve({});
     });
-    ssmMock.on(PutParameterCommand).callsFake((input: any) => {
+    ssmMock.on(PutParameterCommand).callsFake((input: PutParameterCommandInput) => {
       const name: string = input?.Name ?? '';
       if (name.startsWith(SETTINGS_PARAM_PREFIX)) {
         if (putShouldFail) {
@@ -5603,14 +5615,14 @@ describe('authorityGraphHistorySettings (Wave 4.E.A)', () => {
 
     const scanCalls = ddbMock.commandCalls(ScanCommand);
     expect(scanCalls).toHaveLength(1);
-    const scanInput: any = scanCalls[0].args[0].input;
+    const scanInput = scanCalls[0].args[0].input;
     expect(scanInput.TableName).toBe(
       'citadel-governance-graph-snapshots-test',
     );
     expect(scanInput.FilterExpression).toBe('#ts >= :since');
-    expect(scanInput.ExpressionAttributeNames['#ts']).toBe('timestamp');
+    expect(scanInput.ExpressionAttributeNames?.['#ts']).toBe('timestamp');
     // 30 days * 86400 seconds.
-    expect(typeof scanInput.ExpressionAttributeValues[':since']).toBe(
+    expect(typeof scanInput.ExpressionAttributeValues?.[':since']).toBe(
       'number',
     );
     expect(scanInput.Limit).toBe(5000);
@@ -5855,7 +5867,7 @@ describe('authorityGraphHistorySettings (Wave 4.E.A)', () => {
 // ---------------------------------------------------------------------------
 
 describe('listAuthorityGraphSnapshots (Wave 4.E.B)', () => {
-  function snapshotEvent(args?: any): any {
+  function snapshotEvent(args?: Record<string, unknown>): HandlerEvent {
     return makeEvent({
       fieldName: 'listAuthorityGraphSnapshots',
       args: args ?? {},
@@ -5893,15 +5905,15 @@ describe('listAuthorityGraphSnapshots (Wave 4.E.B)', () => {
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     await handler(snapshotEvent());
     const call = ddbMock.commandCalls(QueryCommand)[0];
-    const input: any = call.args[0].input;
+    const input = call.args[0].input;
     expect(input.IndexName).toBe('kind-timestamp-index');
     expect(input.KeyConditionExpression).toBe(
       'kind = :full AND #ts BETWEEN :since AND :until',
     );
-    expect(input.ExpressionAttributeValues[':full']).toBe('full');
-    expect(input.ExpressionAttributeNames['#ts']).toBe('timestamp');
-    const sinceTs = input.ExpressionAttributeValues[':since'];
-    const untilTs = input.ExpressionAttributeValues[':until'];
+    expect(input.ExpressionAttributeValues?.[':full']).toBe('full');
+    expect(input.ExpressionAttributeNames?.['#ts']).toBe('timestamp');
+    const sinceTs = input.ExpressionAttributeValues?.[':since'] as number;
+    const untilTs = input.ExpressionAttributeValues?.[':until'] as number;
     expect(typeof sinceTs).toBe('number');
     expect(typeof untilTs).toBe('number');
     // 365 day default window.
@@ -6012,9 +6024,9 @@ describe('listAuthorityGraphSnapshots (Wave 4.E.B)', () => {
     const untilTs = Math.floor(Date.now() / 1000);
     const sinceTs = untilTs - 1000 * 86400; // 1000 days back, > 365 cap
     await handler(snapshotEvent({ sinceTs, untilTs }));
-    const input: any = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
-    const effectiveSince = input.ExpressionAttributeValues[':since'];
-    const effectiveUntil = input.ExpressionAttributeValues[':until'];
+    const input = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    const effectiveSince = input.ExpressionAttributeValues?.[':since'] as number;
+    const effectiveUntil = input.ExpressionAttributeValues?.[':until'] as number;
     expect(effectiveUntil - effectiveSince).toBe(365 * 86400);
   });
 
@@ -6032,7 +6044,7 @@ describe('listAuthorityGraphSnapshots (Wave 4.E.B)', () => {
 });
 
 describe('getAuthorityGraphSnapshot (Wave 4.E.B)', () => {
-  function snapshotEvent(snapshotId: string): any {
+  function snapshotEvent(snapshotId: string): HandlerEvent {
     return makeEvent({
       fieldName: 'getAuthorityGraphSnapshot',
       args: { snapshotId },
@@ -6939,7 +6951,7 @@ describe('getTrustPath', () => {
   test('datastore without crossAccountRoleArn → hops = [lambda, scoped]', async () => {
     isAdminFromEventMock.mockReturnValue(true);
     armSts();
-    iamMock.on(GetRoleCommand).callsFake(async (input: any) => ({
+    iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => ({
       Role: {
         RoleName: input.RoleName,
         AssumeRolePolicyDocument: makeTrustPolicy('arn:aws:iam::1:role/x'),
@@ -6949,7 +6961,7 @@ describe('getTrustPath', () => {
         CreateDate: new Date(),
       },
     }));
-    iamMock.on(GetRolePolicyCommand).callsFake(async (input: any) => ({
+    iamMock.on(GetRolePolicyCommand).callsFake(async (input: GetRolePolicyCommandInput) => ({
       RoleName: input.RoleName,
       PolicyName: 'DataStoreAccess',
       PolicyDocument: makeInlinePolicy(['s3:GetObject'], ['arn:aws:s3:::b/*']),
@@ -6976,7 +6988,7 @@ describe('getTrustPath', () => {
   test('datastore with crossAccountRoleArn → hops = [lambda, cross-account, scoped]', async () => {
     isAdminFromEventMock.mockReturnValue(true);
     armSts();
-    iamMock.on(GetRoleCommand).callsFake(async (input: any) => ({
+    iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => ({
       Role: {
         RoleName: input.RoleName,
         AssumeRolePolicyDocument: makeTrustPolicy('arn:aws:iam::1:role/x'),
@@ -7014,7 +7026,7 @@ describe('getTrustPath', () => {
   test('integration path queries by GSI and emits scoped role with citadel-int- prefix', async () => {
     isAdminFromEventMock.mockReturnValue(true);
     armSts();
-    iamMock.on(GetRoleCommand).callsFake(async (input: any) => ({
+    iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => ({
       Role: {
         RoleName: input.RoleName,
         AssumeRolePolicyDocument: makeTrustPolicy('arn:aws:iam::1:role/x'),
@@ -7051,7 +7063,7 @@ describe('getTrustPath', () => {
   test('agent path uses RegistryService and emits citadel-agent- prefix', async () => {
     isAdminFromEventMock.mockReturnValue(true);
     armSts();
-    iamMock.on(GetRoleCommand).callsFake(async (input: any) => ({
+    iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => ({
       Role: {
         RoleName: input.RoleName,
         AssumeRolePolicyDocument: makeTrustPolicy('arn:aws:iam::1:role/x'),
@@ -7090,9 +7102,9 @@ describe('getTrustPath', () => {
     isAdminFromEventMock.mockReturnValue(true);
     armSts();
     // Lambda role lookup succeeds; scoped role lookup throws NoSuchEntity.
-    iamMock.on(GetRoleCommand).callsFake(async (input: any) => {
+    iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => {
       if (input.RoleName === 'citadel-ds-ds-1') {
-        const err: any = new Error('NoSuchEntity');
+        const err = new Error('NoSuchEntity');
         err.name = 'NoSuchEntityException';
         throw err;
       }
@@ -7133,7 +7145,7 @@ describe('getTrustPath', () => {
   test('GetRolePolicy missing → hop has empty inlinePolicy + note', async () => {
     isAdminFromEventMock.mockReturnValue(true);
     armSts();
-    iamMock.on(GetRoleCommand).callsFake(async (input: any) => ({
+    iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => ({
       Role: {
         RoleName: input.RoleName,
         AssumeRolePolicyDocument: makeTrustPolicy('arn:aws:iam::1:role/x'),
@@ -7143,9 +7155,9 @@ describe('getTrustPath', () => {
         CreateDate: new Date(),
       },
     }));
-    iamMock.on(GetRolePolicyCommand).callsFake(async (input: any) => {
+    iamMock.on(GetRolePolicyCommand).callsFake(async (input: GetRolePolicyCommandInput) => {
       if (input.RoleName === 'citadel-ds-ds-1') {
-        const err: any = new Error('NoSuchEntity');
+        const err = new Error('NoSuchEntity');
         err.name = 'NoSuchEntityException';
         throw err;
       }
@@ -7178,7 +7190,7 @@ describe('getTrustPath', () => {
   test('totalActions / totalResources reflect inline policy contents', async () => {
     isAdminFromEventMock.mockReturnValue(true);
     armSts();
-    iamMock.on(GetRoleCommand).callsFake(async (input: any) => ({
+    iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => ({
       Role: {
         RoleName: input.RoleName,
         AssumeRolePolicyDocument: makeTrustPolicy('arn:aws:iam::1:role/x'),
@@ -7214,7 +7226,7 @@ describe('getTrustPath', () => {
   test('trust policy parses Principal.AWS array shape', async () => {
     isAdminFromEventMock.mockReturnValue(true);
     armSts();
-    iamMock.on(GetRoleCommand).callsFake(async (input: any) => ({
+    iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => ({
       Role: {
         RoleName: input.RoleName,
         AssumeRolePolicyDocument: makeTrustPolicy([
@@ -7252,7 +7264,7 @@ describe('getTrustPath', () => {
   test('5-min cache: same args within window avoid second GetRole call', async () => {
     isAdminFromEventMock.mockReturnValue(true);
     armSts();
-    iamMock.on(GetRoleCommand).callsFake(async (input: any) => ({
+    iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => ({
       Role: {
         RoleName: input.RoleName,
         AssumeRolePolicyDocument: makeTrustPolicy('arn:aws:iam::1:role/x'),
@@ -7298,7 +7310,7 @@ describe('getTrustPath', () => {
       ddbMock.on(GetCommand, { TableName: 'citadel-datastores-test' }).resolves({
         Item: { dataStoreId: 'ds-1' },
       });
-      iamMock.on(GetRoleCommand).callsFake(async (input: any) => ({
+      iamMock.on(GetRoleCommand).callsFake(async (input: GetRoleCommandInput) => ({
         Role: {
           RoleName: input.RoleName,
           AssumeRolePolicyDocument: makeTrustPolicy('arn:aws:iam::1:role/x'),
@@ -7464,7 +7476,7 @@ describe('getResourceIamDrift', () => {
       .resolves({
         Item: { dataStoreId: 'ds-1', type: 's3', config: {} },
       });
-    const noSuch: any = new Error('NoSuchEntity');
+    const noSuch = new Error('NoSuchEntity');
     noSuch.name = 'NoSuchEntityException';
     iamMock.on(GetRolePolicyCommand).rejects(noSuch);
 

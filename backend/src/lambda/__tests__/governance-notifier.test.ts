@@ -10,7 +10,7 @@
 
 // Mock global fetch before any imports (handler uses node 18+ global fetch).
 const mockFetch = jest.fn();
-(global as any).fetch = mockFetch;
+global.fetch = mockFetch as unknown as typeof fetch;
 
 const mockSign = jest.fn();
 jest.mock('@smithy/signature-v4', () => ({

@@ -1,6 +1,6 @@
-import { AppSyncResolverHandler } from 'aws-lambda';
+import { AppSyncResolverEvent, AppSyncResolverHandler } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanCommand, QueryCommand, type NativeAttributeValue } from '@aws-sdk/lib-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { v4 as uuidv4 } from 'uuid';
 import { getUserId } from '../utils/appsync';
@@ -43,6 +43,10 @@ interface Project {
   owner: string;
   description?: string;
   requirements?: string;
+  /** Tenant the project belongs to — persisted on create, used for org-scoped access checks. */
+  organization?: string;
+  /** D-02 optimistic-locking counter — absent on rows written before locking landed. */
+  version?: number;
   // governance archetype classification.
   // archetypeStatus defaults to PENDING when absent; normaliseArchetype
   // handles grandfathering for DDB rows written before this story.
@@ -50,6 +54,53 @@ interface Project {
   archetypeConfidence?: number;
   archetypeStatus?: 'PENDING' | 'CLASSIFIED' | 'PENDING_ESCALATION';
 }
+
+/** Filter accepted by listProjects — mirrors the GraphQL ProjectFilter input. */
+interface ProjectFilter {
+  status?: string;
+  createdAfter?: string;
+  createdBefore?: string;
+}
+
+/** Input accepted by createProject — mirrors the GraphQL CreateProjectInput. */
+interface CreateProjectInput {
+  name: string;
+  description?: string;
+  requirements?: string;
+}
+
+/** Input accepted by updateProject — mirrors the GraphQL UpdateProjectInput. */
+interface UpdateProjectInput {
+  name?: string;
+  description?: string;
+  requirements?: string;
+  status?: string;
+  archetype?: 'MONOLITHIC_DB' | 'ENTERPRISE_APP_SPRAWL' | 'HYBRID_IT_OT';
+  archetypeConfidence?: number;
+  archetypeStatus?: 'PENDING' | 'CLASSIFIED' | 'PENDING_ESCALATION';
+}
+
+/** File descriptor accepted by uploadDocument. */
+interface UploadDocumentFile {
+  bucket?: string;
+  key?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Union of the arguments AppSync passes for the fields this resolver serves.
+ * Compile-time shape only — AppSync populates just the fields relevant to
+ * each GraphQL operation at runtime.
+ */
+interface HandlerArgs {
+  id: string;
+  filter?: ProjectFilter;
+  input: CreateProjectInput & UpdateProjectInput;
+  projectId: string;
+  file: UploadDocumentFile;
+}
+
+type ResolverEvent = AppSyncResolverEvent<HandlerArgs>;
 
 /**
  * Normalises archetype attributes on a Project read from DynamoDB.
@@ -68,7 +119,7 @@ function normaliseArchetype<T extends Partial<Project> | null | undefined>(proje
   return project;
 }
 
-export const handler: AppSyncResolverHandler<any, unknown> = async (event) => {
+export const handler: AppSyncResolverHandler<HandlerArgs, unknown> = async (event) => {
   console.log('Project resolver event:', JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
@@ -96,7 +147,7 @@ export const handler: AppSyncResolverHandler<any, unknown> = async (event) => {
   }
 };
 
-async function getProject(id: string, userId: string, event: any): Promise<Project | null> {
+async function getProject(id: string, userId: string, event: ResolverEvent): Promise<Project | null> {
   const command = new GetCommand({
     TableName: PROJECTS_TABLE,
     Key: { id },
@@ -108,7 +159,7 @@ async function getProject(id: string, userId: string, event: any): Promise<Proje
     return null;
   }
 
-  const project = result.Item as any;
+  const project = result.Item as Project;
 
   // Check if user has access to this project
   // Allow access if: user is owner OR user is in same organization
@@ -125,7 +176,7 @@ async function getProject(id: string, userId: string, event: any): Promise<Proje
   return normaliseArchetype(project) as Project;
 }
 
-async function listProjects(filter: any, userId: string, event: any): Promise<{ items: Project[]; nextToken?: string }> {
+async function listProjects(filter: ProjectFilter | undefined, userId: string, event: ResolverEvent): Promise<{ items: Project[]; nextToken?: string }> {
   // Get user's organization
   const userOrganization = await extractOrgFromEvent(event);
 
@@ -170,17 +221,17 @@ async function listProjects(filter: any, userId: string, event: any): Promise<{ 
       items = items.filter(item => item.status === filter.status);
     }
     if (filter.createdAfter) {
-      items = items.filter(item => item.createdAt >= filter.createdAfter);
+      items = items.filter(item => item.createdAt >= filter.createdAfter!);
     }
     if (filter.createdBefore) {
-      items = items.filter(item => item.createdAt <= filter.createdBefore);
+      items = items.filter(item => item.createdAt <= filter.createdBefore!);
     }
   }
 
   return { items: items.map((p) => normaliseArchetype(p)!) };
 }
 
-async function createProject(input: any, userId: string, event: any): Promise<Project> {
+async function createProject(input: CreateProjectInput, userId: string, event: ResolverEvent): Promise<Project> {
   const now = new Date().toISOString();
   const projectId = uuidv4();
 
@@ -215,7 +266,7 @@ async function createProject(input: any, userId: string, event: any): Promise<Pr
     // new projects start PENDING; archetype/archetypeConfidence
     // stay absent until an archetype classifier populates them.
     archetypeStatus: 'PENDING',
-  } as any;
+  };
 
   const command = new PutCommand({
     TableName: PROJECTS_TABLE,
@@ -293,7 +344,7 @@ async function checkC7Adr(project: Project): Promise<void> {
     return;
   }
   const adrs = await listADRsForProject(project.id);
-  if (!adrs.some((a: any) => a.status === 'LOCKED')) {
+  if (!adrs.some((a) => a.status === 'LOCKED')) {
     throw new Error(
       'ValidationError: PLANNING_COMPLETE requires at least one LOCKED ADR',
     );
@@ -306,7 +357,7 @@ async function checkC10Spec(project: Project): Promise<void> {
     return;
   }
   const specs = await listExecutionSpecifications(project.id);
-  if (!specs.some((s: any) => s.status === 'APPROVED')) {
+  if (!specs.some((s) => s.status === 'APPROVED')) {
     throw new Error(
       'ValidationError: IMPLEMENTATION_READY requires at least one APPROVED ExecutionSpecification',
     );
@@ -334,7 +385,7 @@ async function emitBypass(
   }
 }
 
-async function updateProject(id: string, input: any, userId: string, event: any): Promise<Project> {
+async function updateProject(id: string, input: UpdateProjectInput, userId: string, event: ResolverEvent): Promise<Project> {
   // First check if project exists and user has access
   const existingProject = await getProject(id, userId, event);
   if (!existingProject) {
@@ -344,7 +395,7 @@ async function updateProject(id: string, input: any, userId: string, event: any)
   const now = new Date().toISOString();
   const updateExpression: string[] = [];
   const expressionAttributeNames: Record<string, string> = {};
-  const expressionAttributeValues: Record<string, any> = {};
+  const expressionAttributeValues: Record<string, NativeAttributeValue> = {};
 
   if (input.name) {
     updateExpression.push('#name = :name');
@@ -368,9 +419,9 @@ async function updateProject(id: string, input: any, userId: string, event: any)
     // When status is changing (not same-status write), route through the
     // LifecycleManager hook so C3/C7/C10 governance preconditions are
     // enforced (or bypassed + telemetry-logged for grandfathered projects).
-    if (input.status && input.status !== (existingProject as any).status) {
+    if (input.status && input.status !== existingProject.status) {
       await projectPhaseGuard(
-        (existingProject as any).status,
+        existingProject.status,
         input.status,
         existingProject as Project,
         userId,
@@ -411,7 +462,7 @@ async function updateProject(id: string, input: any, userId: string, event: any)
   expressionAttributeValues[':updatedAt'] = now;
 
   // D-02: Optimistic locking — increment version with conditional write
-  const currentVersion = (existingProject as any).version || 0;
+  const currentVersion = existingProject.version || 0;
   updateExpression.push('#version = :nextVersion');
   expressionAttributeNames['#version'] = 'version';
   expressionAttributeValues[':nextVersion'] = currentVersion + 1;
@@ -450,7 +501,7 @@ async function updateProject(id: string, input: any, userId: string, event: any)
   }
 }
 
-async function uploadDocument(projectId: string, file: any, userId: string, event: any): Promise<unknown> {
+async function uploadDocument(projectId: string, file: UploadDocumentFile, userId: string, event: ResolverEvent): Promise<unknown> {
   // Check if user has access to this project
   const project = await getProject(projectId, userId, event);
   if (!project) {

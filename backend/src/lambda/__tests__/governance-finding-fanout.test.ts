@@ -9,7 +9,7 @@
 
 // Mock global fetch before any imports (handler uses node 18+ global fetch).
 const mockFetch = jest.fn();
-(global as any).fetch = mockFetch;
+global.fetch = mockFetch as unknown as typeof fetch;
 
 // Mock SignatureV4 + Sha256 + credential provider so the signer never
 // reaches AWS in unit tests.
@@ -28,6 +28,11 @@ jest.mock('@aws-sdk/credential-provider-node', () => ({
   defaultProvider: jest.fn().mockReturnValue('mock-credentials'),
 }));
 
+import type {
+  AttributeValue,
+  DynamoDBRecord,
+  DynamoDBStreamEvent,
+} from 'aws-lambda';
 import { mockClient } from 'aws-sdk-client-mock';
 import {
   CloudWatchClient,
@@ -39,6 +44,12 @@ import {
   projectRow,
   __resetForTest,
 } from '../governance-finding-fanout';
+
+// aws-lambda's DynamoDBStreamHandler type declares legacy required context
+// and callback parameters, but the implementation is a one-parameter async
+// (event) function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: DynamoDBStreamEvent) => Promise<void>;
 
 const cwMock = mockClient(CloudWatchClient);
 
@@ -56,9 +67,9 @@ function BOOL(v: boolean) {
 
 function makeRecord(opts: {
   eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
-  newImage?: Record<string, any>;
+  newImage?: Record<string, AttributeValue>;
   eventID?: string;
-}) {
+}): DynamoDBRecord {
   return {
     eventID: opts.eventID ?? 'rec-1',
     eventName: opts.eventName ?? 'INSERT',
@@ -73,7 +84,7 @@ function makeRecord(opts: {
       SizeBytes: 100,
       StreamViewType: 'NEW_AND_OLD_IMAGES',
     },
-  } as any;
+  };
 }
 
 const validNewImage = {
@@ -194,10 +205,8 @@ describe('projectRow', () => {
 
 describe('governance-finding-fanout handler', () => {
   test('projects an INSERT record and POSTs the publishGovernanceFinding mutation', async () => {
-    await handler(
-      { Records: [makeRecord({ newImage: validNewImage })] } as any,
-      {} as any,
-      {} as any,
+    await invokeHandler(
+      { Records: [makeRecord({ newImage: validNewImage })] },
     );
 
     expect(mockSign).toHaveBeenCalledTimes(1);
@@ -232,14 +241,12 @@ describe('governance-finding-fanout handler', () => {
   });
 
   test('skips MODIFY records (defence-in-depth past the EventSourceMapping filter)', async () => {
-    await handler(
+    await invokeHandler(
       {
         Records: [
           makeRecord({ eventName: 'MODIFY', newImage: validNewImage }),
         ],
-      } as any,
-      {} as any,
-      {} as any,
+      },
     );
 
     expect(mockFetch).not.toHaveBeenCalled();
@@ -247,24 +254,20 @@ describe('governance-finding-fanout handler', () => {
   });
 
   test('skips REMOVE records', async () => {
-    await handler(
+    await invokeHandler(
       {
         Records: [
           makeRecord({ eventName: 'REMOVE', newImage: undefined }),
         ],
-      } as any,
-      {} as any,
-      {} as any,
+      },
     );
 
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   test('skips records with missing NewImage and does not metricise', async () => {
-    await handler(
-      { Records: [makeRecord({ newImage: undefined })] } as any,
-      {} as any,
-      {} as any,
+    await invokeHandler(
+      { Records: [makeRecord({ newImage: undefined })] },
     );
     expect(mockFetch).not.toHaveBeenCalled();
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
@@ -278,10 +281,8 @@ describe('governance-finding-fanout handler', () => {
       timestamp: N(1715000000),
     };
 
-    await handler(
-      { Records: [makeRecord({ newImage: malformed })] } as any,
-      {} as any,
-      {} as any,
+    await invokeHandler(
+      { Records: [makeRecord({ newImage: malformed })] },
     );
 
     // No AppSync call (projectRow returned null).
@@ -305,10 +306,8 @@ describe('governance-finding-fanout handler — failure paths', () => {
     mockFetch.mockResolvedValue({ ok: false, status: 500 });
 
     await expect(
-      handler(
-        { Records: [makeRecord({ newImage: validNewImage })] } as any,
-        {} as any,
-        {} as any,
+      invokeHandler(
+        { Records: [makeRecord({ newImage: validNewImage })] },
       ),
     ).resolves.toBeUndefined();
 
@@ -322,10 +321,8 @@ describe('governance-finding-fanout handler — failure paths', () => {
     mockFetch.mockResolvedValue({ ok: false, status: 400 });
 
     await expect(
-      handler(
-        { Records: [makeRecord({ newImage: validNewImage })] } as any,
-        {} as any,
-        {} as any,
+      invokeHandler(
+        { Records: [makeRecord({ newImage: validNewImage })] },
       ),
     ).resolves.toBeUndefined();
 
@@ -340,15 +337,13 @@ describe('governance-finding-fanout handler — failure paths', () => {
     });
 
     await expect(
-      handler(
+      invokeHandler(
         {
           Records: [
             makeRecord({ eventID: 'rec-a', newImage: validNewImage }),
             makeRecord({ eventID: 'rec-b', newImage: validNewImage }),
           ],
-        } as any,
-        {} as any,
-        {} as any,
+        },
       ),
     ).resolves.toBeUndefined();
 
@@ -363,10 +358,8 @@ describe('governance-finding-fanout handler — failure paths', () => {
     cwMock.on(PutMetricDataCommand).rejects(new Error('cw down'));
 
     await expect(
-      handler(
-        { Records: [makeRecord({ newImage: validNewImage })] } as any,
-        {} as any,
-        {} as any,
+      invokeHandler(
+        { Records: [makeRecord({ newImage: validNewImage })] },
       ),
     ).resolves.toBeUndefined();
   });
@@ -378,16 +371,14 @@ describe('governance-finding-fanout handler — failure paths', () => {
       .mockResolvedValueOnce({ ok: false, status: 502 })
       .mockResolvedValueOnce({ ok: true, status: 200 });
 
-    await handler(
+    await invokeHandler(
       {
         Records: [
           makeRecord({ eventID: 'r-1', newImage: validNewImage }),
           makeRecord({ eventID: 'r-2', newImage: validNewImage }),
           makeRecord({ eventID: 'r-3', newImage: validNewImage }),
         ],
-      } as any,
-      {} as any,
-      {} as any,
+      },
     );
 
     expect(mockFetch).toHaveBeenCalledTimes(3);
@@ -399,10 +390,8 @@ describe('governance-finding-fanout handler — failure paths', () => {
     delete process.env.APPSYNC_ENDPOINT;
 
     await expect(
-      handler(
-        { Records: [makeRecord({ newImage: validNewImage })] } as any,
-        {} as any,
-        {} as any,
+      invokeHandler(
+        { Records: [makeRecord({ newImage: validNewImage })] },
       ),
     ).resolves.toBeUndefined();
 
@@ -416,7 +405,7 @@ describe('governance-finding-fanout handler — failure paths', () => {
 
   test('handles an empty Records array', async () => {
     await expect(
-      handler({ Records: [] } as any, {} as any, {} as any),
+      invokeHandler({ Records: [] }),
     ).resolves.toBeUndefined();
     expect(mockFetch).not.toHaveBeenCalled();
   });
