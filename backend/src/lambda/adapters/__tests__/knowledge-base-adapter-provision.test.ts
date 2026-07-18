@@ -48,6 +48,9 @@ jest.mock('@aws-sdk/client-opensearchserverless', () => ({
 }));
 
 import { KnowledgeBaseAdapter } from '../knowledge-base-adapter';
+import { CreateKnowledgeBaseCommand } from '@aws-sdk/client-bedrock-agent';
+import { CreateRoleCommand, DeleteRolePolicyCommand, DeleteRoleCommand } from '@aws-sdk/client-iam';
+import { CreateCollectionCommand, CreateSecurityPolicyCommand } from '@aws-sdk/client-opensearchserverless';
 
 describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
   let adapter: KnowledgeBaseAdapter;
@@ -67,7 +70,7 @@ describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
     // Default: IAM role creation succeeds
     mockIamSend.mockResolvedValue({ Role: { Arn: 'arn:aws:iam::123456789012:role/citadel-kb-service-role-test' } });
     // Default: AOSS operations succeed
-    mockOssSend.mockImplementation((cmd: any) => {
+    mockOssSend.mockImplementation((cmd: { _type: string }) => {
       if (cmd._type === 'CreateSecurityPolicy') return Promise.resolve({ securityPolicyDetail: {} });
       if (cmd._type === 'CreateAccessPolicy') return Promise.resolve({ accessPolicyDetail: {} });
       if (cmd._type === 'CreateCollection') return Promise.resolve({
@@ -88,8 +91,10 @@ describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
       return Promise.resolve({});
     });
 
-    // Stub createVectorIndex to avoid real HTTP calls
-    (adapter as any).createVectorIndex = jest.fn().mockResolvedValue(undefined);
+    // Stub createVectorIndex (private) to avoid real HTTP calls
+    (adapter as unknown as { createVectorIndex: jest.Mock }).createVectorIndex = jest
+      .fn()
+      .mockResolvedValue(undefined);
   });
 
   test('creates a Bedrock service role when roleArn is not provided', async () => {
@@ -103,10 +108,9 @@ describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
 
     await adapter.provision({ name: 'test-kb' });
 
-    const { CreateRoleCommand } = require('@aws-sdk/client-iam');
     expect(CreateRoleCommand).toHaveBeenCalled();
-    const createRoleInput = CreateRoleCommand.mock.calls[0][0];
-    const trustPolicy = JSON.parse(createRoleInput.AssumeRolePolicyDocument);
+    const createRoleInput = jest.mocked(CreateRoleCommand).mock.calls[0][0];
+    const trustPolicy = JSON.parse(String(createRoleInput.AssumeRolePolicyDocument));
     expect(trustPolicy.Statement[0].Principal.Service).toBe('bedrock.amazonaws.com');
   });
 
@@ -121,9 +125,8 @@ describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
 
     await adapter.provision({ name: 'test-kb' });
 
-    const { CreateCollectionCommand } = require('@aws-sdk/client-opensearchserverless');
     expect(CreateCollectionCommand).toHaveBeenCalled();
-    const collInput = CreateCollectionCommand.mock.calls[0][0];
+    const collInput = jest.mocked(CreateCollectionCommand).mock.calls[0][0];
     expect(collInput.type).toBe('VECTORSEARCH');
   });
 
@@ -138,10 +141,9 @@ describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
 
     await adapter.provision({ name: 'test-kb' });
 
-    const { CreateSecurityPolicyCommand } = require('@aws-sdk/client-opensearchserverless');
     // Should have created both encryption and network policies
-    const secPolicyCalls = CreateSecurityPolicyCommand.mock.calls;
-    const types = secPolicyCalls.map((c: any) => c[0].type);
+    const secPolicyCalls = jest.mocked(CreateSecurityPolicyCommand).mock.calls;
+    const types = secPolicyCalls.map((c) => c[0].type);
     expect(types).toContain('encryption');
     expect(types).toContain('network');
   });
@@ -157,18 +159,16 @@ describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
 
     await adapter.provision({ name: 'test-kb' });
 
-    const { CreateKnowledgeBaseCommand } = require('@aws-sdk/client-bedrock-agent');
     expect(CreateKnowledgeBaseCommand).toHaveBeenCalled();
-    const kbInput = CreateKnowledgeBaseCommand.mock.calls[0][0];
+    const kbInput = jest.mocked(CreateKnowledgeBaseCommand).mock.calls[0][0];
     expect(kbInput.storageConfiguration).toBeDefined();
-    expect(kbInput.storageConfiguration.type).toBe('OPENSEARCH_SERVERLESS');
-    expect(kbInput.storageConfiguration.opensearchServerlessConfiguration.collectionArn).toContain('arn:aws:aoss:');
+    expect(kbInput.storageConfiguration?.type).toBe('OPENSEARCH_SERVERLESS');
+    expect(kbInput.storageConfiguration?.opensearchServerlessConfiguration?.collectionArn).toContain('arn:aws:aoss:');
   });
 
   test('uses provided roleArn without creating a new service role', async () => {
     mockIamSend.mockClear();
-    const { CreateRoleCommand } = require('@aws-sdk/client-iam');
-    CreateRoleCommand.mockClear();
+    jest.mocked(CreateRoleCommand).mockClear();
 
     mockSend.mockResolvedValueOnce({
       knowledgeBase: {
@@ -186,8 +186,8 @@ describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
 
     expect(CreateRoleCommand).not.toHaveBeenCalled();
 
-    const { CreateKnowledgeBaseCommand } = require('@aws-sdk/client-bedrock-agent');
-    const kbInput = CreateKnowledgeBaseCommand.mock.calls[CreateKnowledgeBaseCommand.mock.calls.length - 1][0];
+    const kbCalls = jest.mocked(CreateKnowledgeBaseCommand).mock.calls;
+    const kbInput = kbCalls[kbCalls.length - 1][0];
     expect(kbInput.roleArn).toBe('arn:aws:iam::123456789012:role/my-custom-role');
   });
 
@@ -202,9 +202,8 @@ describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
 
     await adapter.provision({ name: 'test-kb' });
 
-    const { CreateKnowledgeBaseCommand } = require('@aws-sdk/client-bedrock-agent');
-    const kbInput = CreateKnowledgeBaseCommand.mock.calls[0][0];
-    expect(kbInput.knowledgeBaseConfiguration.vectorKnowledgeBaseConfiguration.embeddingModelArn).toContain('amazon.titan-embed-text-v2');
+    const kbInput = jest.mocked(CreateKnowledgeBaseCommand).mock.calls[0][0];
+    expect(kbInput.knowledgeBaseConfiguration?.vectorKnowledgeBaseConfiguration?.embeddingModelArn).toContain('amazon.titan-embed-text-v2');
   });
 
   test('returns empty provision policies so Lambda credentials are used', () => {
@@ -217,7 +216,6 @@ describe('KnowledgeBaseAdapter.provision - service role and defaults', () => {
 
     await adapter.deprovision({ knowledgeBaseId: 'KB123', serviceRoleName: 'citadel-ds-kb-svc-KB123' });
 
-    const { DeleteRolePolicyCommand, DeleteRoleCommand } = require('@aws-sdk/client-iam');
     expect(DeleteRolePolicyCommand).toHaveBeenCalled();
     expect(DeleteRoleCommand).toHaveBeenCalled();
   });

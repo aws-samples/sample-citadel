@@ -4,7 +4,9 @@ import {
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
+  DataStoreError,
 } from '../errors';
+import { ElastiCacheClient, CreateCacheClusterCommand } from '@aws-sdk/client-elasticache';
 
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-elasticache', () => {
@@ -54,7 +56,6 @@ describe('ElastiCacheAdapter', () => {
     });
 
     it('sends CreateCacheClusterCommand with redis engine and cache.t3.micro', async () => {
-      const { CreateCacheClusterCommand } = require('@aws-sdk/client-elasticache');
       mockSend.mockResolvedValueOnce({ CacheCluster: {} });
       await adapter.provision(config);
       expect(CreateCacheClusterCommand).toHaveBeenCalledWith(
@@ -69,7 +70,7 @@ describe('ElastiCacheAdapter', () => {
 
     it('handles CacheClusterAlreadyExistsFault as idempotent success', async () => {
       const sdkError = new Error('Already exists');
-      (sdkError as any).name = 'CacheClusterAlreadyExistsFault';
+      sdkError.name = 'CacheClusterAlreadyExistsFault';
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.provision(config);
       expect(result.resourceArn).toContain('my-test-cluster');
@@ -77,21 +78,21 @@ describe('ElastiCacheAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.provision(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalError';
+      sdkError.name = 'InternalError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.provision(config);
         fail('Expected ProvisioningError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -113,28 +114,28 @@ describe('ElastiCacheAdapter', () => {
 
     it('throws ResourceNotFoundError when cluster does not exist', async () => {
       const sdkError = new Error('Not found');
-      (sdkError as any).name = 'CacheClusterNotFoundFault';
+      sdkError.name = 'CacheClusterNotFoundFault';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
     });
 
     it('throws PermissionError on AccessDeniedException', async () => {
       const sdkError = new Error('Forbidden');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError with cause', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.connect(config);
         fail('Expected ConnectionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -180,14 +181,14 @@ describe('ElastiCacheAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError', async () => {
       const sdkError = new Error('Timeout');
-      (sdkError as any).name = 'RequestTimeout';
+      sdkError.name = 'RequestTimeout';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
     });
@@ -195,7 +196,6 @@ describe('ElastiCacheAdapter', () => {
 
   describe('scoped credentials', () => {
     it('constructs client with provided credentials', async () => {
-      const { ElastiCacheClient } = require('@aws-sdk/client-elasticache');
       mockSend.mockResolvedValueOnce({
         CacheClusters: [{ CacheClusterStatus: 'available' }],
       });

@@ -3,11 +3,16 @@ import {
   RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult,
 } from '../../adapters/base';
 import { ProvisioningError, ConnectionError, PermissionError, ValidationError } from './errors';
+import { SdkError } from './sdk-types';
 
-function getDatabricksSQL() {
+/** Constructor type of DBSQLClient, resolved from the module's type surface. */
+type DBSQLClientCtor = (typeof import('@databricks/sql'))['DBSQLClient'];
+
+async function getDatabricksSQL(): Promise<DBSQLClientCtor> {
   try {
-    const mod = require('@databricks/sql');
-    return mod.DBSQLClient ?? mod.default?.DBSQLClient;
+    const mod = await import('@databricks/sql');
+    return (mod.DBSQLClient ??
+      (mod as unknown as { default?: { DBSQLClient?: DBSQLClientCtor } }).default?.DBSQLClient) as DBSQLClientCtor;
   } catch {
     throw new ConnectionError('@databricks/sql is not installed. Install it to use the Databricks adapter.');
   }
@@ -19,7 +24,7 @@ export class DatabricksAdapter implements ConnectorAdapter {
   private readonly kind = 'databricks';
 
   requiredPolicies(
-    _config: Record<string, any>,
+    _config: Record<string, unknown>,
     _accountId: string,
     _region: string
   ): RequiredPolicies {
@@ -27,8 +32,8 @@ export class DatabricksAdapter implements ConnectorAdapter {
   }
 
   async provision(
-    _config: Record<string, any>,
-    _credentials?: Record<string, any>
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     throw new ProvisioningError(
       `Provisioning is not supported for external ${this.kind} data stores`
@@ -36,8 +41,8 @@ export class DatabricksAdapter implements ConnectorAdapter {
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const result = await this.testConnection(config, credentials);
     if (!result.success) {
@@ -47,13 +52,13 @@ export class DatabricksAdapter implements ConnectorAdapter {
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op for external stores
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     if (!config.host) {
       throw new ValidationError('Missing required Databricks config field: host');
@@ -62,20 +67,20 @@ export class DatabricksAdapter implements ConnectorAdapter {
       throw new ValidationError('Missing required Databricks config field: httpPath');
     }
 
-    const token = credentials?.token ?? config.token;
+    const token = (credentials?.token ?? config.token) as string | undefined;
     if (!token) {
       throw new ValidationError(
         'Missing required Databricks credential: token'
       );
     }
 
-    let client: any;
+    let client: InstanceType<DBSQLClientCtor> | undefined;
     try {
-      const DBSQLClient = getDatabricksSQL();
+      const DBSQLClient = await getDatabricksSQL();
       client = new DBSQLClient();
       await client.connect({
-        host: config.host,
-        path: config.httpPath,
+        host: config.host as string,
+        path: config.httpPath as string,
         token,
       });
 
@@ -89,31 +94,32 @@ export class DatabricksAdapter implements ConnectorAdapter {
           httpPath: config.httpPath,
         },
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       if (client) {
         try { await client.close(); } catch { /* ignore cleanup errors */ }
       }
 
       if (
-        error.message?.includes('401') ||
-        error.message?.includes('Unauthorized') ||
-        error.message?.includes('authentication')
+        err.message?.includes('401') ||
+        err.message?.includes('Unauthorized') ||
+        err.message?.includes('authentication')
       ) {
         throw new PermissionError(
           `Authentication failed for Databricks workspace at ${config.host}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to connect to Databricks workspace at ${config.host}: ${error.message}`,
+        `Failed to connect to Databricks workspace at ${config.host}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
 
   async getMetrics(
-    _config: Record<string, any>,
+    _config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     return { size: '0 MB', records: 0 };

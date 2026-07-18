@@ -4,7 +4,9 @@ import {
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
+  DataStoreError,
 } from '../errors';
+import { S3Client } from '@aws-sdk/client-s3';
 
 // Mock the entire @aws-sdk/client-s3 module
 const mockSend = jest.fn();
@@ -70,7 +72,7 @@ describe('S3Adapter', () => {
 
     it('handles BucketAlreadyOwnedByYou as idempotent success', async () => {
       const sdkError = new Error('Bucket already owned by you');
-      (sdkError as any).name = 'BucketAlreadyOwnedByYou';
+      sdkError.name = 'BucketAlreadyOwnedByYou';
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.provision(config);
       expect(result.resourceArn).toBe('arn:aws:s3:::my-test-bucket');
@@ -78,34 +80,34 @@ describe('S3Adapter', () => {
 
     it('wraps AccessDenied in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDenied';
+      sdkError.name = 'AccessDenied';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.provision(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps unknown SDK errors in ProvisioningError', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalError';
+      sdkError.name = 'InternalError';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.provision(config)).rejects.toThrow(ProvisioningError);
     });
 
     it('preserves the original SDK error as cause', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalError';
+      sdkError.name = 'InternalError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.provision(config);
         fail('Expected ProvisioningError');
-      } catch (err: any) {
-        expect(err.cause).toBe(sdkError);
+      } catch (err) {
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
     it('wraps versioning AccessDenied in PermissionError', async () => {
       mockSend.mockResolvedValueOnce({}); // CreateBucket succeeds
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDenied';
+      sdkError.name = 'AccessDenied';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(
         adapter.provision({ ...config, versioning: true })
@@ -121,34 +123,34 @@ describe('S3Adapter', () => {
 
     it('throws ResourceNotFoundError when bucket does not exist', async () => {
       const sdkError = new Error('Not Found');
-      (sdkError as any).name = 'NotFound';
+      sdkError.name = 'NotFound';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
     });
 
     it('throws PermissionError on AccessDenied', async () => {
       const sdkError = new Error('Forbidden');
-      (sdkError as any).name = 'AccessDenied';
+      sdkError.name = 'AccessDenied';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
     });
 
     it('throws ConnectionError on other errors', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(ConnectionError);
     });
 
     it('preserves SDK error as cause in ConnectionError', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.connect(config);
         fail('Expected ConnectionError');
-      } catch (err: any) {
-        expect(err.cause).toBe(sdkError);
+      } catch (err) {
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -169,7 +171,7 @@ describe('S3Adapter', () => {
 
     it('returns failure when HeadBucket fails', async () => {
       const sdkError = new Error('Not Found');
-      (sdkError as any).name = 'NotFound';
+      sdkError.name = 'NotFound';
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.testConnection(config);
       expect(result.success).toBe(false);
@@ -204,14 +206,14 @@ describe('S3Adapter', () => {
 
     it('wraps AccessDenied in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDenied';
+      sdkError.name = 'AccessDenied';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError', async () => {
       const sdkError = new Error('Timeout');
-      (sdkError as any).name = 'TimeoutError';
+      sdkError.name = 'TimeoutError';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
     });
@@ -219,7 +221,6 @@ describe('S3Adapter', () => {
 
   describe('scoped credentials', () => {
     it('constructs client with provided credentials', async () => {
-      const { S3Client } = require('@aws-sdk/client-s3');
       mockSend.mockResolvedValueOnce({});
       const creds = {
         accessKeyId: 'AKIA...',
@@ -237,7 +238,6 @@ describe('S3Adapter', () => {
     });
 
     it('constructs default client when no credentials provided', async () => {
-      const { S3Client } = require('@aws-sdk/client-s3');
       mockSend.mockResolvedValueOnce({});
       await adapter.connect(config);
       expect(S3Client).toHaveBeenCalledWith({});

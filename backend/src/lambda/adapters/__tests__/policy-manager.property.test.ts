@@ -1,4 +1,6 @@
 import * as fc from 'fast-check';
+import type { IAMClient } from '@aws-sdk/client-iam';
+import type { STSClient } from '@aws-sdk/client-sts';
 import { PolicyManager } from '../../../utils/policy-manager';
 import { PolicyStatement } from '../../../adapters/base';
 
@@ -33,15 +35,18 @@ const crossAccountRoleArnArb = accountIdArb.map(
 
 // ---- Mocks ----
 
-function makeMockIamClient(capturedCalls: Record<string, any[]> = {}) {
+/** Captured IAM command inputs, keyed by command constructor name. */
+type CapturedCalls = Record<string, Array<Record<string, string>>>;
+
+function makeMockIamClient(capturedCalls: CapturedCalls = {}) {
   return {
-    send: jest.fn().mockImplementation((cmd: any) => {
+    send: jest.fn().mockImplementation((cmd: { input: Record<string, string> }) => {
       const name = cmd.constructor.name;
       if (!capturedCalls[name]) capturedCalls[name] = [];
       capturedCalls[name].push(cmd.input);
       return Promise.resolve({});
     }),
-  } as any;
+  } as unknown as IAMClient;
 }
 
 function makeMockStsClient(
@@ -50,7 +55,7 @@ function makeMockStsClient(
   region = 'us-east-1'
 ) {
   return {
-    send: jest.fn().mockImplementation((cmd: any) => {
+    send: jest.fn().mockImplementation((cmd: object) => {
       if (cmd.constructor.name === 'GetCallerIdentityCommand') {
         return Promise.resolve({ Account: accountId, Arn: callerArn });
       }
@@ -66,7 +71,7 @@ function makeMockStsClient(
       return Promise.resolve({});
     }),
     config: { region: () => Promise.resolve(region) },
-  } as any;
+  } as unknown as STSClient;
 }
 
 // Feature: datastore-adapter-pattern, Property 2: PolicyManager policy document generation
@@ -79,7 +84,7 @@ describe('Property 2: PolicyManager policy document generation', () => {
         policyStatementsArb,
         accountIdArb,
         async (dataStoreId, policies, accountId) => {
-          const capturedCalls: Record<string, any[]> = {};
+          const capturedCalls: CapturedCalls = {};
           const iamClient = makeMockIamClient(capturedCalls);
           const callerArn = `arn:aws:sts::${accountId}:assumed-role/LambdaRole/session`;
           const stsClient = makeMockStsClient(accountId, callerArn);
@@ -127,7 +132,7 @@ describe('Property 3: PolicyManager cross-account trust policy', () => {
         accountIdArb,
         crossAccountRoleArnArb,
         async (dataStoreId, policies, accountId, crossAccountRoleArn) => {
-          const capturedCalls: Record<string, any[]> = {};
+          const capturedCalls: CapturedCalls = {};
           const iamClient = makeMockIamClient(capturedCalls);
           const callerArn = `arn:aws:sts::${accountId}:assumed-role/LambdaRole/session`;
           const stsClient = makeMockStsClient(accountId, callerArn);
@@ -156,7 +161,7 @@ describe('Property 3: PolicyManager cross-account trust policy', () => {
         policyStatementsArb,
         accountIdArb,
         async (dataStoreId, policies, accountId) => {
-          const capturedCalls: Record<string, any[]> = {};
+          const capturedCalls: CapturedCalls = {};
           const iamClient = makeMockIamClient(capturedCalls);
           const callerArn = `arn:aws:sts::${accountId}:assumed-role/LambdaRole/session`;
           const stsClient = makeMockStsClient(accountId, callerArn);
@@ -198,7 +203,7 @@ describe('Property 4: Retry mechanism correctness', () => {
             return 'success';
           };
 
-          const pm = new PolicyManager({} as any, {} as any);
+          const pm = new PolicyManager({} as unknown as IAMClient, {} as unknown as STSClient);
           const result = await pm.retryWithBackoff(fn, maxRetries, baseDelayMs);
           expect(result).toBe('success');
           expect(attempts).toBe(failCount + 1);
@@ -220,14 +225,14 @@ describe('Property 4: Retry mechanism correctness', () => {
             throw new Error(`Attempt ${attempts} failed`);
           };
 
-          const pm = new PolicyManager({} as any, {} as any);
+          const pm = new PolicyManager({} as unknown as IAMClient, {} as unknown as STSClient);
           try {
             await pm.retryWithBackoff(fn, maxRetries, baseDelayMs);
             fail('Expected error to be thrown');
-          } catch (error: any) {
+          } catch (error) {
             // Should have attempted maxRetries + 1 times (initial + retries)
             expect(attempts).toBe(maxRetries + 1);
-            expect(error.message).toBe(`Attempt ${maxRetries + 1} failed`);
+            expect((error as Error).message).toBe(`Attempt ${maxRetries + 1} failed`);
           }
         }
       ),
@@ -265,7 +270,7 @@ describe('Property 4: Retry mechanism correctness', () => {
               return 'success';
             };
 
-            const pm = new PolicyManager({} as any, {} as any);
+            const pm = new PolicyManager({} as unknown as IAMClient, {} as unknown as STSClient);
             const result = await pm.retryWithBackoff(fn, maxRetries, baseDelayMs);
 
             expect(result).toBe('success');

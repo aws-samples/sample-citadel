@@ -3,10 +3,11 @@ import {
   RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult,
 } from '../../adapters/base';
 import { ProvisioningError, ConnectionError, PermissionError, ValidationError } from './errors';
+import { SdkError } from './sdk-types';
 
-function getSnowflakeSDK() {
+async function getSnowflakeSDK(): Promise<typeof import('snowflake-sdk')> {
   try {
-    return require('snowflake-sdk');
+    return await import('snowflake-sdk');
   } catch {
     throw new ConnectionError('snowflake-sdk is not installed. Install it to use the Snowflake adapter.');
   }
@@ -18,7 +19,7 @@ export class SnowflakeAdapter implements ConnectorAdapter {
   private readonly kind = 'snowflake';
 
   requiredPolicies(
-    _config: Record<string, any>,
+    _config: Record<string, unknown>,
     _accountId: string,
     _region: string
   ): RequiredPolicies {
@@ -26,8 +27,8 @@ export class SnowflakeAdapter implements ConnectorAdapter {
   }
 
   async provision(
-    _config: Record<string, any>,
-    _credentials?: Record<string, any>
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     throw new ProvisioningError(
       `Provisioning is not supported for external ${this.kind} data stores`
@@ -35,8 +36,8 @@ export class SnowflakeAdapter implements ConnectorAdapter {
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const result = await this.testConnection(config, credentials);
     if (!result.success) {
@@ -46,13 +47,13 @@ export class SnowflakeAdapter implements ConnectorAdapter {
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op for external stores
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     const missing: string[] = [];
     if (!config.accountIdentifier) missing.push('accountIdentifier');
@@ -65,8 +66,8 @@ export class SnowflakeAdapter implements ConnectorAdapter {
       );
     }
 
-    const username = credentials?.username ?? config.username;
-    const password = credentials?.password ?? config.password;
+    const username = (credentials?.username ?? config.username) as string | undefined;
+    const password = (credentials?.password ?? config.password) as string | undefined;
 
     if (!username || !password) {
       throw new ValidationError(
@@ -75,24 +76,24 @@ export class SnowflakeAdapter implements ConnectorAdapter {
     }
 
     try {
-      const snowflake = getSnowflakeSDK();
+      const snowflake = await getSnowflakeSDK();
       const connection = snowflake.createConnection({
-        account: config.accountIdentifier,
+        account: config.accountIdentifier as string,
         username,
         password,
-        warehouse: config.warehouse,
-        database: config.database,
-        schema: config.schema,
+        warehouse: config.warehouse as string,
+        database: config.database as string,
+        schema: config.schema as string | undefined,
       });
 
       await new Promise<void>((resolve, reject) => {
-        connection.connect((err: any) => {
+        connection.connect((err) => {
           if (err) reject(err);
           else resolve();
         });
       });
 
-      connection.destroy((err: any) => {
+      connection.destroy((err) => {
         if (err) console.error('Error destroying Snowflake connection:', err);
       });
 
@@ -105,26 +106,27 @@ export class SnowflakeAdapter implements ConnectorAdapter {
           database: config.database,
         },
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       if (
-        error.code === '390100' ||
-        error.message?.includes('Incorrect username or password')
+        err.code === '390100' ||
+        err.message?.includes('Incorrect username or password')
       ) {
         throw new PermissionError(
           `Authentication failed for Snowflake account ${config.accountIdentifier}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to connect to Snowflake account ${config.accountIdentifier}: ${error.message}`,
+        `Failed to connect to Snowflake account ${config.accountIdentifier}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
 
   async getMetrics(
-    _config: Record<string, any>,
+    _config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     return { size: '0 MB', records: 0 };

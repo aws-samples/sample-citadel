@@ -1,4 +1,5 @@
 import { SnowflakeAdapter } from '../snowflake-adapter';
+import type { SdkError } from '../sdk-types';
 import {
   ProvisioningError,
   ConnectionError,
@@ -12,7 +13,7 @@ const mockDestroy = jest.fn();
 const mockCreateConnection = jest.fn();
 
 jest.mock('snowflake-sdk', () => ({
-  createConnection: (...args: any[]) => {
+  createConnection: (...args: unknown[]) => {
     mockCreateConnection(...args);
     return { connect: mockConnect, destroy: mockDestroy };
   },
@@ -107,16 +108,16 @@ describe('SnowflakeAdapter', () => {
     });
 
     it('wraps authentication errors in PermissionError', async () => {
-      const sdkError = new Error('Incorrect username or password');
-      (sdkError as any).code = '390100';
+      const sdkError: SdkError = new Error('Incorrect username or password');
+      sdkError.code = '390100';
       mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(sdkError));
 
       try {
         await adapter.testConnection(validConfig);
         fail('Expected PermissionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(PermissionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
@@ -127,9 +128,9 @@ describe('SnowflakeAdapter', () => {
       try {
         await adapter.testConnection(validConfig);
         fail('Expected ConnectionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
@@ -140,9 +141,9 @@ describe('SnowflakeAdapter', () => {
       try {
         await adapter.testConnection(validConfig);
         fail('Expected DataStoreError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(DataStoreError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 

@@ -4,7 +4,9 @@ import {
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
+  DataStoreError,
 } from '../errors';
+import { TimestreamWriteClient, CreateTableCommand } from '@aws-sdk/client-timestream-write';
 
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-timestream-write', () => {
@@ -61,7 +63,6 @@ describe('TimestreamAdapter', () => {
     });
 
     it('creates a table when tableName is in config', async () => {
-      const { CreateTableCommand } = require('@aws-sdk/client-timestream-write');
       mockSend
         .mockResolvedValueOnce({ Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db' } })
         .mockResolvedValueOnce({ Table: { Arn: 'arn:aws:timestream:us-east-1:123:table/my-test-db/my-table' } });
@@ -78,7 +79,7 @@ describe('TimestreamAdapter', () => {
 
     it('handles ConflictException on database creation as idempotent success', async () => {
       const sdkError = new Error('Already exists');
-      (sdkError as any).name = 'ConflictException';
+      sdkError.name = 'ConflictException';
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.provision(config);
       expect(result.resourceArn).toContain('my-test-db');
@@ -86,7 +87,7 @@ describe('TimestreamAdapter', () => {
 
     it('handles ConflictException on table creation as idempotent success', async () => {
       const tableError = new Error('Table already exists');
-      (tableError as any).name = 'ConflictException';
+      tableError.name = 'ConflictException';
       mockSend
         .mockResolvedValueOnce({ Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db' } })
         .mockRejectedValueOnce(tableError);
@@ -98,27 +99,27 @@ describe('TimestreamAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.provision(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalError';
+      sdkError.name = 'InternalError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.provision(config);
         fail('Expected ProvisioningError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
     it('propagates non-ConflictException table errors as ProvisioningError', async () => {
       const tableError = new Error('Validation failed');
-      (tableError as any).name = 'ValidationException';
+      tableError.name = 'ValidationException';
       mockSend
         .mockResolvedValueOnce({ Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db' } })
         .mockRejectedValueOnce(tableError);
@@ -138,28 +139,28 @@ describe('TimestreamAdapter', () => {
 
     it('throws ResourceNotFoundError when database does not exist', async () => {
       const sdkError = new Error('Not found');
-      (sdkError as any).name = 'ResourceNotFoundException';
+      sdkError.name = 'ResourceNotFoundException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
     });
 
     it('throws PermissionError on AccessDeniedException', async () => {
       const sdkError = new Error('Forbidden');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError with cause', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.connect(config);
         fail('Expected ConnectionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
@@ -208,14 +209,14 @@ describe('TimestreamAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError', async () => {
       const sdkError = new Error('Timeout');
-      (sdkError as any).name = 'RequestTimeout';
+      sdkError.name = 'RequestTimeout';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
     });
@@ -223,7 +224,6 @@ describe('TimestreamAdapter', () => {
 
   describe('scoped credentials', () => {
     it('constructs client with provided credentials', async () => {
-      const { TimestreamWriteClient } = require('@aws-sdk/client-timestream-write');
       mockSend.mockResolvedValueOnce({
         Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db', DatabaseName: 'my-test-db' },
       });

@@ -6,17 +6,19 @@ import {
 } from '@aws-sdk/client-lakeformation';
 import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
 import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
+import { SdkError, AwsCredentialFields } from './sdk-types';
 
 export class LakeFormationAdapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = 'datastore';
   readonly spec: ConnectorSpec = { type: 'LAKE_FORMATION', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['databaseName'], optional: [], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, any>): LakeFormationClient {
-    if (creds?.accessKeyId && creds?.secretAccessKey && creds?.sessionToken) {
+  private makeClient(creds?: Record<string, unknown>): LakeFormationClient {
+    const c = creds as AwsCredentialFields | undefined;
+    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
       return new LakeFormationClient({
         credentials: {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
+          accessKeyId: c.accessKeyId,
+          secretAccessKey: c.secretAccessKey,
+          sessionToken: c.sessionToken,
         },
       });
     }
@@ -24,7 +26,7 @@ export class LakeFormationAdapter implements ConnectorAdapter {
   }
 
   requiredPolicies(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     accountId: string,
     region: string
   ): RequiredPolicies {
@@ -54,11 +56,11 @@ export class LakeFormationAdapter implements ConnectorAdapter {
   }
 
   async provision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     const client = this.makeClient(credentials);
-    const resourceArn = config.resourceArn;
+    const resourceArn = config.resourceArn as string;
 
     try {
       await client.send(
@@ -69,29 +71,30 @@ export class LakeFormationAdapter implements ConnectorAdapter {
       );
 
       return { resourceArn };
-    } catch (error: any) {
-      if (error.name === 'AlreadyExistsException') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'AlreadyExistsException') {
         return { resourceArn };
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied registering Lake Formation resource ${resourceArn}`,
-          error
+          err
         );
       }
       throw new ProvisioningError(
-        `Failed to register Lake Formation resource ${resourceArn}: ${error.message}`,
-        error
+        `Failed to register Lake Formation resource ${resourceArn}: ${err.message}`,
+        err
       );
     }
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
 
@@ -104,59 +107,61 @@ export class LakeFormationAdapter implements ConnectorAdapter {
           'Lake Formation data lake settings do not exist'
         );
       }
-    } catch (error: any) {
-      if (error instanceof ResourceNotFoundError) {
-        throw error;
+    } catch (error) {
+      const err = error as SdkError;
+      if (err instanceof ResourceNotFoundError) {
+        throw err;
       }
-      if (error.name === 'EntityNotFoundException') {
+      if (err.name === 'EntityNotFoundException') {
         throw new ResourceNotFoundError(
           'Lake Formation data lake settings not found',
-          error
+          err
         );
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           'Permission denied accessing Lake Formation settings',
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to connect to Lake Formation: ${error.message}`,
+        `Failed to connect to Lake Formation: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op: disconnecting from Lake Formation doesn't require cleanup
   }
 
   async deprovision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const resourceArn = config.resourceArn;
+    const resourceArn = config.resourceArn as string;
 
     try {
       await client.send(
         new DeregisterResourceCommand({ ResourceArn: resourceArn })
       );
-    } catch (error: any) {
-      if (error.name === 'EntityNotFoundException') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'EntityNotFoundException') {
         return; // Already gone
       }
-      throw error;
+      throw err;
     }
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     const client = this.makeClient(credentials);
 
@@ -173,17 +178,18 @@ export class LakeFormationAdapter implements ConnectorAdapter {
           trustedResourceOwners: settings?.TrustedResourceOwners ?? [],
         },
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       return {
         success: false,
-        message: `Failed to connect to Lake Formation: ${error.message}`,
-        details: { errorName: error.name },
+        message: `Failed to connect to Lake Formation: ${err.message}`,
+        details: { errorName: err.name },
       };
     }
   }
 
   async getMetrics(
-    _config: Record<string, any>,
+    _config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     const client = this.makeClient();
@@ -195,20 +201,21 @@ export class LakeFormationAdapter implements ConnectorAdapter {
         size: '0 MB',
         records: 0,
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           'Permission denied accessing Lake Formation metrics',
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to get Lake Formation metrics: ${error.message}`,
+        `Failed to get Lake Formation metrics: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }

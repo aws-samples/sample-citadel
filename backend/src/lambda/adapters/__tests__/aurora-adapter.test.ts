@@ -4,7 +4,9 @@ import {
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
+  DataStoreError,
 } from '../errors';
+import { RDSClient, CreateDBClusterCommand } from '@aws-sdk/client-rds';
 
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-rds', () => {
@@ -66,7 +68,6 @@ describe('AuroraAdapter', () => {
     });
 
     it('uses aurora-postgresql engine for postgres adapter', async () => {
-      const { CreateDBClusterCommand } = require('@aws-sdk/client-rds');
       mockSend.mockResolvedValueOnce({ DBCluster: {} });
       await postgresAdapter.provision(config, creds);
       expect(CreateDBClusterCommand).toHaveBeenCalledWith(
@@ -75,7 +76,6 @@ describe('AuroraAdapter', () => {
     });
 
     it('uses aurora-mysql engine for mysql adapter', async () => {
-      const { CreateDBClusterCommand } = require('@aws-sdk/client-rds');
       mockSend.mockResolvedValueOnce({ DBCluster: {} });
       await mysqlAdapter.provision(config, creds);
       expect(CreateDBClusterCommand).toHaveBeenCalledWith(
@@ -89,7 +89,7 @@ describe('AuroraAdapter', () => {
 
     it('handles DBClusterAlreadyExistsFault as idempotent success', async () => {
       const sdkError = new Error('Already exists');
-      (sdkError as any).name = 'DBClusterAlreadyExistsFault';
+      sdkError.name = 'DBClusterAlreadyExistsFault';
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await postgresAdapter.provision(config, creds);
       expect(result.resourceArn).toContain('my-test-cluster');
@@ -97,21 +97,21 @@ describe('AuroraAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(postgresAdapter.provision(config, creds)).rejects.toThrow(PermissionError);
     });
 
     it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalError';
+      sdkError.name = 'InternalError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await postgresAdapter.provision(config, creds);
         fail('Expected ProvisioningError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -133,28 +133,28 @@ describe('AuroraAdapter', () => {
 
     it('throws ResourceNotFoundError when cluster does not exist', async () => {
       const sdkError = new Error('Not found');
-      (sdkError as any).name = 'DBClusterNotFoundFault';
+      sdkError.name = 'DBClusterNotFoundFault';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(postgresAdapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
     });
 
     it('throws PermissionError on AccessDeniedException', async () => {
       const sdkError = new Error('Forbidden');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(postgresAdapter.connect(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError with cause', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await postgresAdapter.connect(config);
         fail('Expected ConnectionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -201,14 +201,14 @@ describe('AuroraAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(postgresAdapter.getMetrics(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError', async () => {
       const sdkError = new Error('Timeout');
-      (sdkError as any).name = 'RequestTimeout';
+      sdkError.name = 'RequestTimeout';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(postgresAdapter.getMetrics(config)).rejects.toThrow(ConnectionError);
     });
@@ -216,7 +216,6 @@ describe('AuroraAdapter', () => {
 
   describe('scoped credentials', () => {
     it('constructs client with provided credentials', async () => {
-      const { RDSClient } = require('@aws-sdk/client-rds');
       mockSend.mockResolvedValueOnce({
         DBClusters: [{ Status: 'available' }],
       });

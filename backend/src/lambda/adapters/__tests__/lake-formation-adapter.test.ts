@@ -4,7 +4,9 @@ import {
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
+  DataStoreError,
 } from '../errors';
+import { LakeFormationClient } from '@aws-sdk/client-lakeformation';
 
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-lakeformation', () => {
@@ -58,7 +60,7 @@ describe('LakeFormationAdapter', () => {
 
     it('handles AlreadyExistsException as idempotent success', async () => {
       const sdkError = new Error('Already exists');
-      (sdkError as any).name = 'AlreadyExistsException';
+      sdkError.name = 'AlreadyExistsException';
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.provision(config);
       expect(result.resourceArn).toBe('arn:aws:s3:::my-data-lake-bucket');
@@ -66,21 +68,21 @@ describe('LakeFormationAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.provision(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalError';
+      sdkError.name = 'InternalError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.provision(config);
         fail('Expected ProvisioningError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -103,28 +105,28 @@ describe('LakeFormationAdapter', () => {
 
     it('throws ResourceNotFoundError on EntityNotFoundException', async () => {
       const sdkError = new Error('Not found');
-      (sdkError as any).name = 'EntityNotFoundException';
+      sdkError.name = 'EntityNotFoundException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
     });
 
     it('throws PermissionError on AccessDeniedException', async () => {
       const sdkError = new Error('Forbidden');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError with cause', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.connect(config);
         fail('Expected ConnectionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -178,14 +180,14 @@ describe('LakeFormationAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError', async () => {
       const sdkError = new Error('Timeout');
-      (sdkError as any).name = 'RequestTimeout';
+      sdkError.name = 'RequestTimeout';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
     });
@@ -193,7 +195,6 @@ describe('LakeFormationAdapter', () => {
 
   describe('scoped credentials', () => {
     it('constructs client with provided credentials', async () => {
-      const { LakeFormationClient } = require('@aws-sdk/client-lakeformation');
       mockSend.mockResolvedValueOnce({
         DataLakeSettings: {
           DataLakeAdmins: [],

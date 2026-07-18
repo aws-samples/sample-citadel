@@ -4,7 +4,9 @@ import {
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
+  DataStoreError,
 } from '../errors';
+import { KeyspacesClient } from '@aws-sdk/client-keyspaces';
 
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-keyspaces', () => {
@@ -66,7 +68,7 @@ describe('KeyspacesAdapter', () => {
 
     it('handles ConflictException as idempotent success', async () => {
       const sdkError = new Error('Already exists');
-      (sdkError as any).name = 'ConflictException';
+      sdkError.name = 'ConflictException';
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.provision(config);
       expect(result.resourceArn).toContain('my_test_keyspace');
@@ -74,21 +76,21 @@ describe('KeyspacesAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.provision(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalError';
+      sdkError.name = 'InternalError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.provision(config);
         fail('Expected ProvisioningError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -104,28 +106,28 @@ describe('KeyspacesAdapter', () => {
 
     it('throws ResourceNotFoundError when keyspace does not exist', async () => {
       const sdkError = new Error('Not found');
-      (sdkError as any).name = 'ResourceNotFoundException';
+      sdkError.name = 'ResourceNotFoundException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
     });
 
     it('throws PermissionError on AccessDeniedException', async () => {
       const sdkError = new Error('Forbidden');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError with cause', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.connect(config);
         fail('Expected ConnectionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
@@ -173,14 +175,14 @@ describe('KeyspacesAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError', async () => {
       const sdkError = new Error('Timeout');
-      (sdkError as any).name = 'RequestTimeout';
+      sdkError.name = 'RequestTimeout';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
     });
@@ -188,7 +190,6 @@ describe('KeyspacesAdapter', () => {
 
   describe('scoped credentials', () => {
     it('constructs client with provided credentials', async () => {
-      const { KeyspacesClient } = require('@aws-sdk/client-keyspaces');
       mockSend.mockResolvedValueOnce({
         keyspaceName: 'my_test_keyspace',
         resourceArn: 'arn:aws:cassandra:us-east-1:123:/keyspace/my_test_keyspace',

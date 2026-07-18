@@ -11,6 +11,7 @@ import {
 import {
   ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError,
 } from './errors';
+import { SdkError, AwsCredentialFields } from './sdk-types';
 
 export class AuroraAdapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = 'datastore';
@@ -20,13 +21,14 @@ export class AuroraAdapter implements ConnectorAdapter {
     this.spec = { type: engine === 'postgres' ? 'AURORA_POSTGRESQL' : 'AURORA_MYSQL', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['clusterIdentifier'], optional: [], ssmParameters: [] } };
   }
 
-  private makeClient(creds?: Record<string, any>): RDSClient {
-    if (creds?.accessKeyId && creds?.secretAccessKey && creds?.sessionToken) {
+  private makeClient(creds?: Record<string, unknown>): RDSClient {
+    const c = creds as AwsCredentialFields | undefined;
+    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
       return new RDSClient({
         credentials: {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
+          accessKeyId: c.accessKeyId,
+          secretAccessKey: c.secretAccessKey,
+          sessionToken: c.sessionToken,
         },
       });
     }
@@ -34,7 +36,7 @@ export class AuroraAdapter implements ConnectorAdapter {
   }
 
   requiredPolicies(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     accountId: string,
     region: string
   ): RequiredPolicies {
@@ -62,17 +64,17 @@ export class AuroraAdapter implements ConnectorAdapter {
   }
 
   async provision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     const client = this.makeClient(credentials);
     const identifier =
-      config.dbClusterIdentifier ??
+      (config.dbClusterIdentifier as string | undefined) ??
       `citadel-aurora-${this.engine}-${Date.now()}`;
     const engineName = this.engine === 'postgres' ? 'aurora-postgresql' : 'aurora-mysql';
 
-    const masterUsername = credentials?.masterUsername ?? config.masterUsername;
-    const masterPassword = credentials?.masterPassword ?? config.masterPassword;
+    const masterUsername = (credentials?.masterUsername ?? config.masterUsername) as string | undefined;
+    const masterPassword = (credentials?.masterPassword ?? config.masterPassword) as string | undefined;
 
     if (!masterUsername || !masterPassword) {
       throw new ProvisioningError(
@@ -103,34 +105,35 @@ export class AuroraAdapter implements ConnectorAdapter {
         `arn:aws:rds:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:cluster:${identifier}`;
 
       return { resourceArn: arn };
-    } catch (error: any) {
-      if (error.name === 'DBClusterAlreadyExistsFault') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'DBClusterAlreadyExistsFault') {
         return {
           resourceArn: `arn:aws:rds:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:cluster:${identifier}`,
         };
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied creating Aurora cluster ${identifier}`,
-          error
+          err
         );
       }
       throw new ProvisioningError(
-        `Failed to create Aurora cluster ${identifier}: ${error.message}`,
-        error
+        `Failed to create Aurora cluster ${identifier}: ${err.message}`,
+        err
       );
     }
   }
 
   async connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const identifier = config.dbClusterIdentifier;
+    const identifier = config.dbClusterIdentifier as string | undefined;
 
     try {
       const response = await client.send(
@@ -145,43 +148,44 @@ export class AuroraAdapter implements ConnectorAdapter {
           true
         );
       }
-    } catch (error: any) {
-      if (error instanceof ConnectionError) {
-        throw error;
+    } catch (error) {
+      const err = error as SdkError;
+      if (err instanceof ConnectionError) {
+        throw err;
       }
-      if (error.name === 'DBClusterNotFoundFault') {
+      if (err.name === 'DBClusterNotFoundFault') {
         throw new ResourceNotFoundError(
           `Aurora cluster ${identifier} does not exist`,
-          error
+          err
         );
       }
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied accessing Aurora cluster ${identifier}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to connect to Aurora cluster ${identifier}: ${error.message}`,
+        `Failed to connect to Aurora cluster ${identifier}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // No-op: disconnecting from Aurora doesn't require cleanup
   }
 
   async deprovision(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void> {
     const client = this.makeClient(credentials);
-    const identifier = config.dbClusterIdentifier;
+    const identifier = config.dbClusterIdentifier as string | undefined;
 
     try {
       await client.send(
@@ -190,20 +194,21 @@ export class AuroraAdapter implements ConnectorAdapter {
           SkipFinalSnapshot: true,
         })
       );
-    } catch (error: any) {
-      if (error.name === 'DBClusterNotFoundFault') {
+    } catch (error) {
+      const err = error as SdkError;
+      if (err.name === 'DBClusterNotFoundFault') {
         return; // Already gone
       }
-      throw error;
+      throw err;
     }
   }
 
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     const client = this.makeClient(credentials);
-    const identifier = config.dbClusterIdentifier;
+    const identifier = config.dbClusterIdentifier as string | undefined;
 
     try {
       const response = await client.send(
@@ -222,21 +227,22 @@ export class AuroraAdapter implements ConnectorAdapter {
           engine: cluster?.Engine,
         },
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       return {
         success: false,
-        message: `Failed to connect to Aurora cluster ${identifier}: ${error.message}`,
-        details: { errorName: error.name },
+        message: `Failed to connect to Aurora cluster ${identifier}: ${err.message}`,
+        details: { errorName: err.name },
       };
     }
   }
 
   async getMetrics(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     _resourceArn?: string
   ): Promise<MetricsResult> {
     const client = this.makeClient();
-    const identifier = config.dbClusterIdentifier;
+    const identifier = config.dbClusterIdentifier as string | undefined;
 
     try {
       const response = await client.send(
@@ -251,20 +257,21 @@ export class AuroraAdapter implements ConnectorAdapter {
         size: `${allocatedGB} GB`,
         records: 0, // Aurora doesn't expose row count via API
       };
-    } catch (error: any) {
+    } catch (error) {
+      const err = error as SdkError;
       if (
-        error.name === 'AccessDenied' ||
-        error.name === 'AccessDeniedException'
+        err.name === 'AccessDenied' ||
+        err.name === 'AccessDeniedException'
       ) {
         throw new PermissionError(
           `Permission denied describing Aurora cluster ${identifier}`,
-          error
+          err
         );
       }
       throw new ConnectionError(
-        `Failed to get metrics for Aurora cluster ${identifier}: ${error.message}`,
+        `Failed to get metrics for Aurora cluster ${identifier}: ${err.message}`,
         true,
-        error
+        err
       );
     }
   }

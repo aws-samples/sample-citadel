@@ -44,9 +44,9 @@ describe('AwsGenericAdapter', () => {
       try {
         await adapter.provision(config);
         fail('Expected NotImplementedError');
-      } catch (err: any) {
-        expect(err.message).toContain('opensearch');
-        expect(err.message).toContain('provision');
+      } catch (err) {
+        expect((err as Error).message).toContain('opensearch');
+        expect((err as Error).message).toContain('provision');
       }
     });
 
@@ -69,9 +69,9 @@ describe('AwsGenericAdapter', () => {
       try {
         await adapter.connect(config);
         fail('Expected NotImplementedError');
-      } catch (err: any) {
-        expect(err.message).toContain('opensearch');
-        expect(err.message).toContain('connect');
+      } catch (err) {
+        expect((err as Error).message).toContain('opensearch');
+        expect((err as Error).message).toContain('connect');
       }
     });
   });
@@ -85,9 +85,9 @@ describe('AwsGenericAdapter', () => {
       try {
         await adapter.disconnect(config);
         fail('Expected NotImplementedError');
-      } catch (err: any) {
-        expect(err.message).toContain('opensearch');
-        expect(err.message).toContain('disconnect');
+      } catch (err) {
+        expect((err as Error).message).toContain('opensearch');
+        expect((err as Error).message).toContain('disconnect');
       }
     });
   });
@@ -101,9 +101,9 @@ describe('AwsGenericAdapter', () => {
       try {
         await adapter.testConnection(config);
         fail('Expected NotImplementedError');
-      } catch (err: any) {
-        expect(err.message).toContain('opensearch');
-        expect(err.message).toContain('testConnection');
+      } catch (err) {
+        expect((err as Error).message).toContain('opensearch');
+        expect((err as Error).message).toContain('testConnection');
       }
     });
   });
@@ -117,9 +117,9 @@ describe('AwsGenericAdapter', () => {
       try {
         await adapter.getMetrics(config);
         fail('Expected NotImplementedError');
-      } catch (err: any) {
-        expect(err.message).toContain('opensearch');
-        expect(err.message).toContain('getMetrics');
+      } catch (err) {
+        expect((err as Error).message).toContain('opensearch');
+        expect((err as Error).message).toContain('getMetrics');
       }
     });
   });
@@ -132,9 +132,9 @@ describe('AwsGenericAdapter', () => {
       try {
         await a.testConnection({});
         fail('Expected NotImplementedError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(NotImplementedError);
-        expect(err.message).toContain(svc);
+        expect((err as Error).message).toContain(svc);
       }
     });
   });
