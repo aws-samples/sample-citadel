@@ -12,6 +12,20 @@ const s3Mock = mockClient(S3Client);
 
 import { handler } from '../agent-code-resolver';
 
+type HandlerEvent = Parameters<typeof handler>[0];
+
+/** Result shape of getAgentCode / updateAgentCode. */
+interface AgentCodeResult {
+  agentId: string;
+  code: string;
+  version: string | null;
+}
+
+/** Invoke the one-parameter handler and cast the result to the expected field shape. */
+async function invoke<T = AgentCodeResult>(event: HandlerEvent): Promise<T> {
+  return (await handler(event)) as T;
+}
+
 describe('agent-code-resolver', () => {
   beforeEach(() => {
     dynamoMock.reset();
@@ -25,10 +39,11 @@ describe('agent-code-resolver', () => {
     delete process.env.AGENT_CONFIG_TABLE;
   });
 
-  const makeEvent = (fieldName: string, args: any) => ({
-    info: { fieldName },
-    arguments: args,
-  });
+  const makeEvent = (fieldName: string, args: Record<string, unknown>): HandlerEvent =>
+    ({
+      info: { fieldName },
+      arguments: args,
+    }) as unknown as HandlerEvent;
 
   describe('getAgentCode', () => {
     test('returns code from S3 using filename from config', async () => {
@@ -42,12 +57,12 @@ describe('agent-code-resolver', () => {
       const sdkStream = sdkStreamMixin(stream);
 
       s3Mock.on(GetObjectCommand).resolves({
-        Body: sdkStream as any,
+        Body: sdkStream,
         VersionId: 'v1',
         LastModified: new Date('2025-01-01'),
       });
 
-      const result = await handler(makeEvent('getAgentCode', { agentId: 'a1' }) as any);
+      const result = await invoke(makeEvent('getAgentCode', { agentId: 'a1' }));
 
       expect(result.agentId).toBe('a1');
       expect(result.code).toBe('def handler(): pass');
@@ -63,7 +78,7 @@ describe('agent-code-resolver', () => {
       noSuchKeyError.name = 'NoSuchKey';
       s3Mock.on(GetObjectCommand).rejects(noSuchKeyError);
 
-      const result = await handler(makeEvent('getAgentCode', { agentId: 'a1' }) as any);
+      const result = await invoke(makeEvent('getAgentCode', { agentId: 'a1' }));
 
       expect(result.agentId).toBe('a1');
       expect(result.code).toContain('def handler');
@@ -74,7 +89,7 @@ describe('agent-code-resolver', () => {
       dynamoMock.on(GetCommand).resolves({});
 
       await expect(
-        handler(makeEvent('getAgentCode', { agentId: 'missing' }) as any)
+        handler(makeEvent('getAgentCode', { agentId: 'missing' }))
       ).rejects.toThrow('Agent config not found');
     });
   });
@@ -86,9 +101,9 @@ describe('agent-code-resolver', () => {
       });
       s3Mock.on(PutObjectCommand).resolves({ VersionId: 'v2' });
 
-      const result = await handler(makeEvent('updateAgentCode', {
+      const result = await invoke(makeEvent('updateAgentCode', {
         input: { agentId: 'a1', code: 'print("hello")' },
-      }) as any);
+      }));
 
       expect(result.agentId).toBe('a1');
       expect(result.code).toBe('print("hello")');
@@ -104,12 +119,12 @@ describe('agent-code-resolver', () => {
       await expect(
         handler(makeEvent('updateAgentCode', {
           input: { agentId: 'missing', code: 'x' },
-        }) as any)
+        }))
       ).rejects.toThrow('Failed to update agent code');
     });
   });
 
   test('throws on unknown field', async () => {
-    await expect(handler(makeEvent('unknownField', {}) as any)).rejects.toThrow('Unknown field');
+    await expect(handler(makeEvent('unknownField', {}))).rejects.toThrow('Unknown field');
   });
 });

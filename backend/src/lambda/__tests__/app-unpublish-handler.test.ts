@@ -199,13 +199,14 @@ describe('unpublishApp — full teardown', () => {
     // Key is appId only — AppsTable has no sort key.
     const metaUpdate = updateCalls.find(
       (c) =>
-        (c.args[0].input.Key as any)?.appId === 'app-1' &&
-        (c.args[0].input.Key as any)?.sortId === undefined &&
-        (c.args[0].input.ExpressionAttributeValues as any)?.[':v_status'] ===
-          'DRAFT',
+        (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === 'app-1' &&
+        (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined &&
+        (c.args[0].input.ExpressionAttributeValues as Record<string, unknown> | undefined)?.[
+          ':v_status'
+        ] === 'DRAFT',
     );
     expect(metaUpdate).toBeDefined();
-    const values = metaUpdate!.args[0].input.ExpressionAttributeValues as any;
+    const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
     expect(values[':v_status']).toBe('DRAFT');
     expect(typeof values[':v_updatedAt']).toBe('string');
   });

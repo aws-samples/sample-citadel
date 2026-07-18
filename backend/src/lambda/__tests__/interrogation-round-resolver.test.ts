@@ -115,8 +115,8 @@ describe('interrogation-round-resolver', () => {
       expect(put.ConditionExpression).toMatch(
         /attribute_not_exists\(projectId\).*attribute_not_exists\(roundN\)/,
       );
-      expect((put.Item as any).status).toBe('IN_PROGRESS');
-      expect((put.Item as any).roundN).toBe(7);
+      expect((put.Item as Record<string, unknown>).status).toBe('IN_PROGRESS');
+      expect((put.Item as Record<string, unknown>).roundN).toBe(7);
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
       expect(ebCalls).toHaveLength(1);
@@ -400,9 +400,9 @@ describe('interrogation-round-resolver', () => {
 
     test('dispatches startInterrogationRound', async () => {
       ddbMock.on(PutCommand).resolves({});
-      const result: any = await handler(
+      const result = (await handler(
         makeEvent('startInterrogationRound', { projectId: 'proj-1', roundN: 1 }),
-      );
+      )) as { status: string };
       expect(result.status).toBe('IN_PROGRESS');
     });
 
@@ -416,7 +416,7 @@ describe('interrogation-round-resolver', () => {
 
     test('dispatches listInterrogationRounds', async () => {
       ddbMock.on(QueryCommand).resolves({ Items: [] });
-      const result: any = await handler(
+      const result = await handler(
         makeEvent('listInterrogationRounds', { projectId: 'proj-1' }),
       );
       expect(result).toEqual([]);

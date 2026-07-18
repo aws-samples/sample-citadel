@@ -38,8 +38,8 @@ function makeDeps() {
 }
 
 /** Creates a mock APIKEY# item as it would appear in DynamoDB. */
-function makeKeyItem(overrides: Record<string, any> = {}) {
-  const keyId = overrides.keyId || 'key-existing-1';
+function makeKeyItem(overrides: Record<string, unknown> = {}) {
+  const keyId = (overrides.keyId as string | undefined) || 'key-existing-1';
   return {
     appId: `${TEST_APP_ID}#APIKEY#${keyId}`,
     groupId: `APP#${TEST_APP_ID}`,
@@ -55,7 +55,7 @@ function makeKeyItem(overrides: Record<string, any> = {}) {
 }
 
 /** Generates N active key items for max-keys testing. */
-function makeActiveKeys(count: number): Array<Record<string, any>> {
+function makeActiveKeys(count: number): Array<Record<string, unknown>> {
   return Array.from({ length: count }, (_, i) =>
     makeKeyItem({ keyId: `key-${i}`, name: `key-${i}`, status: 'ACTIVE' }),
   );
@@ -370,8 +370,8 @@ describe('rotateAppApiKey', () => {
     // Should have at least 2 items: one Put for new key, one Update for old key
     expect(transactItems.length).toBeGreaterThanOrEqual(2);
 
-    const putItem = transactItems.find((t: any) => t.Put);
-    const updateItem = transactItems.find((t: any) => t.Update);
+    const putItem = transactItems.find((t) => t.Put);
+    const updateItem = transactItems.find((t) => t.Update);
 
     expect(putItem).toBeDefined();
     expect(updateItem).toBeDefined();

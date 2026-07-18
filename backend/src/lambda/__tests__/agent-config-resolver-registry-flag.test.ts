@@ -6,7 +6,7 @@ import { isRegistryEnabled, getRegistryService, _resetRegistryService } from '..
 // Mock the RegistryService module so we don't need real AWS SDK clients
 jest.mock('../../services/registry-service', () => {
   return {
-    RegistryService: jest.fn().mockImplementation((config: any) => ({
+    RegistryService: jest.fn().mockImplementation((config: { registryId: string; region?: string }) => ({
       getRegistryId: () => config.registryId,
       _config: config,
     })),
@@ -82,7 +82,7 @@ describe('feature flag and registry service initialization', () => {
       process.env.REGISTRY_ID = 'test-registry-456';
       delete process.env.AWS_REGION;
 
-      const service = getRegistryService() as any;
+      const service = getRegistryService() as unknown as { _config: { region?: string } };
       expect(service._config.region).toBe('us-east-1');
     });
 

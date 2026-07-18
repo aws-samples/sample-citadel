@@ -5,6 +5,7 @@ import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import {
   BedrockAgentClient,
   GetKnowledgeBaseDocumentsCommand,
+  type GetKnowledgeBaseDocumentsCommandOutput,
 } from '@aws-sdk/client-bedrock-agent';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { DynamoDBDocumentClient, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
@@ -24,6 +25,38 @@ jest.mock('../../utils/appsync', () => ({
 }));
 
 import { handler } from '../document-upload-resolver';
+
+type HandlerEvent = Parameters<typeof handler>[0];
+
+// aws-lambda's AppSyncResolverHandler declares legacy required context and
+// callback parameters, but the implementation is a one-parameter async
+// (event) function that never uses them — invoke through the real signature
+// (single cast here) so calls don't pass superfluous arguments.
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
+
+/** Result shape of generateDocumentUploadUrl. */
+interface UploadUrlResult {
+  uploadUrl: string;
+  documentKey: string;
+  expiresIn: number;
+}
+
+/** Per-document row returned by listProjectDocuments. */
+interface ProjectDocumentResult {
+  documentKey: string;
+  status: string;
+  statusReason?: string;
+}
+
+/** Result shape of getDocumentIngestionStatus. */
+interface IngestionStatusResult {
+  status: string;
+}
+
+/** Invokes the handler and casts the result to the expected field shape. */
+async function invoke<T>(event: HandlerEvent): Promise<T> {
+  return (await invokeHandler(event)) as T;
+}
 
 describe('document-upload-resolver', () => {
   beforeEach(() => {
@@ -50,22 +83,23 @@ describe('document-upload-resolver', () => {
     delete process.env.INGESTION_TABLE;
   });
 
-  const makeEvent = (fieldName: string, args: any) => ({
-    info: { fieldName },
-    arguments: args,
-    identity: { sub: 'user-123' },
-  });
+  const makeEvent = (fieldName: string, args: Record<string, unknown>): HandlerEvent =>
+    ({
+      info: { fieldName },
+      arguments: args,
+      identity: { sub: 'user-123' },
+    }) as unknown as HandlerEvent;
 
   describe('generateDocumentUploadUrl', () => {
     test('returns signed URL for valid PDF upload', async () => {
-      const result = await handler(makeEvent('generateDocumentUploadUrl', {
+      const result = await invoke<UploadUrlResult>(makeEvent('generateDocumentUploadUrl', {
         input: {
           projectId: 'proj-1',
           fileName: 'report.pdf',
           fileType: 'application/pdf',
           fileSize: 1024,
         },
-      }) as any);
+      }));
 
       expect(result.uploadUrl).toBe('https://signed-url.example.com/upload');
       expect(result.documentKey).toContain('proj-1');
@@ -74,65 +108,65 @@ describe('document-upload-resolver', () => {
 
     test('rejects files exceeding 10MB', async () => {
       await expect(
-        handler(makeEvent('generateDocumentUploadUrl', {
+        invokeHandler(makeEvent('generateDocumentUploadUrl', {
           input: {
             projectId: 'proj-1',
             fileName: 'huge.pdf',
             fileType: 'application/pdf',
             fileSize: 11 * 1024 * 1024,
           },
-        }) as any)
+        }))
       ).rejects.toThrow('exceeds maximum');
     });
 
     test('rejects unsupported file types', async () => {
       await expect(
-        handler(makeEvent('generateDocumentUploadUrl', {
+        invokeHandler(makeEvent('generateDocumentUploadUrl', {
           input: {
             projectId: 'proj-1',
             fileName: 'image.png',
             fileType: 'image/png',
             fileSize: 1024,
           },
-        }) as any)
+        }))
       ).rejects.toThrow('not allowed');
     });
 
     test('accepts DOCX files', async () => {
-      const result = await handler(makeEvent('generateDocumentUploadUrl', {
+      const result = await invoke<UploadUrlResult>(makeEvent('generateDocumentUploadUrl', {
         input: {
           projectId: 'proj-1',
           fileName: 'doc.docx',
           fileType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
           fileSize: 2048,
         },
-      }) as any);
+      }));
 
       expect(result.uploadUrl).toBeDefined();
     });
 
     test('accepts TXT files', async () => {
-      const result = await handler(makeEvent('generateDocumentUploadUrl', {
+      const result = await invoke<UploadUrlResult>(makeEvent('generateDocumentUploadUrl', {
         input: {
           projectId: 'proj-1',
           fileName: 'notes.txt',
           fileType: 'text/plain',
           fileSize: 512,
         },
-      }) as any);
+      }));
 
       expect(result.uploadUrl).toBeDefined();
     });
 
     test('accepts Markdown files', async () => {
-      const result = await handler(makeEvent('generateDocumentUploadUrl', {
+      const result = await invoke<UploadUrlResult>(makeEvent('generateDocumentUploadUrl', {
         input: {
           projectId: 'proj-1',
           fileName: 'readme.md',
           fileType: 'text/markdown',
           fileSize: 256,
         },
-      }) as any);
+      }));
 
       expect(result.uploadUrl).toBeDefined();
     });
@@ -141,22 +175,22 @@ describe('document-upload-resolver', () => {
   describe('retired client-side ingestion fields', () => {
     test('ingestDocument is no longer a handled field', async () => {
       await expect(
-        handler(makeEvent('ingestDocument', {
+        invokeHandler(makeEvent('ingestDocument', {
           projectId: 'proj-1',
           documentKey: 'proj-1/a.pdf',
-        }) as any)
+        }))
       ).rejects.toThrow('Unknown field');
     });
 
     test('notifyDocumentReady is no longer a handled field', async () => {
       await expect(
-        handler(makeEvent('notifyDocumentReady', {
+        invokeHandler(makeEvent('notifyDocumentReady', {
           projectId: 'proj-1',
           documentKey: 'proj-1/a.pdf',
           fileName: 'a.pdf',
           fileSize: 2048,
           fileType: 'application/pdf',
-        }) as any)
+        }))
       ).rejects.toThrow('Unknown field');
     });
   });
@@ -177,14 +211,16 @@ describe('document-upload-resolver', () => {
         ],
       });
 
-      const result = await handler(makeEvent('listProjectDocuments', { projectId: 'proj-1' }) as any);
+      const result = await invoke<ProjectDocumentResult[]>(
+        makeEvent('listProjectDocuments', { projectId: 'proj-1' }),
+      );
 
       expect(result).toHaveLength(2);
-      const a = result.find((r: any) => r.documentKey === 'proj-1/a.pdf');
-      const b = result.find((r: any) => r.documentKey === 'proj-1/b.pdf');
-      expect(a.status).toBe('INDEXED');
-      expect(b.status).toBe('FAILED');
-      expect(b.statusReason).toBe('oops');
+      const a = result.find((r) => r.documentKey === 'proj-1/a.pdf');
+      const b = result.find((r) => r.documentKey === 'proj-1/b.pdf');
+      expect(a!.status).toBe('INDEXED');
+      expect(b!.status).toBe('FAILED');
+      expect(b!.statusReason).toBe('oops');
       // Source of truth is the table — no KB query needed.
       expect(bedrockMock.commandCalls(GetKnowledgeBaseDocumentsCommand)).toHaveLength(0);
     });
@@ -198,9 +234,11 @@ describe('document-upload-resolver', () => {
       ddbMock.on(QueryCommand).rejects(new Error('table unavailable'));
       bedrockMock.on(GetKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'INDEXED', identifier: { custom: { id: 'proj-1/a.pdf' } } }],
-      } as any);
+      } as unknown as GetKnowledgeBaseDocumentsCommandOutput);
 
-      const result = await handler(makeEvent('listProjectDocuments', { projectId: 'proj-1' }) as any);
+      const result = await invoke<ProjectDocumentResult[]>(
+        makeEvent('listProjectDocuments', { projectId: 'proj-1' }),
+      );
 
       expect(result).toHaveLength(1);
       expect(result[0].status).toBe('INDEXED');
@@ -216,7 +254,9 @@ describe('document-upload-resolver', () => {
       });
       bedrockMock.on(GetKnowledgeBaseDocumentsCommand).rejects(new Error('throttled'));
 
-      const result = await handler(makeEvent('listProjectDocuments', { projectId: 'proj-1' }) as any);
+      const result = await invoke<ProjectDocumentResult[]>(
+        makeEvent('listProjectDocuments', { projectId: 'proj-1' }),
+      );
 
       expect(result).toHaveLength(1);
       expect(result[0].status).toBe('UNKNOWN');
@@ -232,7 +272,9 @@ describe('document-upload-resolver', () => {
         Item: { projectId: 'proj-1', documentKey: 'proj-1/a.pdf', status: 'INDEXED', updatedAt: '2026-01-01T00:00:00Z' },
       });
 
-      const result = await handler(makeEvent('getDocumentIngestionStatus', { documentKey: 'proj-1/a.pdf' }) as any);
+      const result = await invoke<IngestionStatusResult>(
+        makeEvent('getDocumentIngestionStatus', { documentKey: 'proj-1/a.pdf' }),
+      );
 
       expect(result.status).toBe('INDEXED');
       expect(bedrockMock.commandCalls(GetKnowledgeBaseDocumentsCommand)).toHaveLength(0);
@@ -243,9 +285,11 @@ describe('document-upload-resolver', () => {
       ddbMock.on(GetCommand).resolves({ Item: undefined });
       bedrockMock.on(GetKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'PARTIALLY_INDEXED', identifier: { custom: { id: 'proj-1/a.pdf' } } }],
-      } as any);
+      } as unknown as GetKnowledgeBaseDocumentsCommandOutput);
 
-      const result = await handler(makeEvent('getDocumentIngestionStatus', { documentKey: 'proj-1/a.pdf' }) as any);
+      const result = await invoke<IngestionStatusResult>(
+        makeEvent('getDocumentIngestionStatus', { documentKey: 'proj-1/a.pdf' }),
+      );
 
       expect(result.status).toBe('PARTIALLY_INDEXED');
     });
@@ -253,7 +297,7 @@ describe('document-upload-resolver', () => {
 
   test('throws on unknown field', async () => {
     await expect(
-      handler(makeEvent('unknownField', {}) as any)
+      invokeHandler(makeEvent('unknownField', {}))
     ).rejects.toThrow('Unknown field');
   });
 });

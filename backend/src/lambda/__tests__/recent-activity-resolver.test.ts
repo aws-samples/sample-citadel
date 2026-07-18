@@ -1,8 +1,9 @@
 import { getRecentActivity } from '../recent-activity-resolver';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 const mockSend = jest.fn();
 const mockDeps = {
-  docClient: { send: mockSend } as any,
+  docClient: { send: mockSend } as unknown as DynamoDBDocumentClient,
   projectsTable: 'projects',
   agentConfigTable: 'agents',
   workflowsTable: 'workflows',

@@ -51,7 +51,7 @@ describe('model-config-resolver', () => {
   });
 
   // Generic placeholder catalog entries — NO real model ids.
-  const catalogEntry = (modelKey: string, status: string): any => ({
+  const catalogEntry = (modelKey: string, status: string): Record<string, unknown> => ({
     modelKey,
     provider: 'vendor',
     baseModelId: `${modelKey}-base`,

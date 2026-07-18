@@ -13,25 +13,36 @@ const mockListResources = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
 const mockGetResource = jest.fn();
 const mockUpdateResource = jest.fn();
-const mockMapToAgentConfig = jest.fn((record: any) => ({
+/** Registry record fixture shape consumed by the mock mapper. */
+interface RegistryRecordFixture {
+  recordId: string;
+  name?: string;
+  description?: string;
+  status?: string;
+  customDescriptorContent?: string;
+}
+
+const mockMapToAgentConfig = jest.fn((record: RegistryRecordFixture | undefined) => ({
   agentId: record?.recordId,
   state: 'active',
 }));
-const mockSerializeCustomMetadata = jest.fn((meta: any) => JSON.stringify(meta));
+const mockSerializeCustomMetadata = jest.fn((meta: unknown) => JSON.stringify(meta));
 const mockToRegistryStatus = jest.fn((state: string) =>
   state === 'active' ? 'APPROVED' : state === 'inactive' ? 'DEPRECATED' : 'DRAFT',
 );
 // Faithful to the real registry-service: the activation gate (US-IMP) added to
 // activateProjectAgents reads customMetadata via deserializeCustomMetadata.
 // These records carry no governanceAttestation, so the gate is a no-op here.
-const mockDeserializeCustomMetadata = jest.fn((json: string | null, defaults: any) => {
-  if (!json) return defaults;
-  try {
-    return { ...defaults, ...JSON.parse(json) };
-  } catch {
-    return defaults;
-  }
-});
+const mockDeserializeCustomMetadata = jest.fn(
+  (json: string | null, defaults: Record<string, unknown>) => {
+    if (!json) return defaults;
+    try {
+      return { ...defaults, ...JSON.parse(json) };
+    } catch {
+      return defaults;
+    }
+  },
+);
 
 jest.mock('../../services/registry-service', () => ({
   RegistryService: jest.fn().mockImplementation(() => ({
@@ -93,7 +104,7 @@ describe('agent-config-resolver', () => {
     delete process.env.AGENT_CONFIG_TABLE;
   });
 
-  const makeEvent = (fieldName: string, args: any) => ({
+  const makeEvent = (fieldName: string, args: Record<string, unknown>) => ({
     info: { fieldName },
     arguments: args,
   });
@@ -278,13 +289,15 @@ describe('updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)'
     mockGetResource.mockReset();
     mockUpdateResource
       .mockReset()
-      .mockImplementation(async (_type: string, id: string, input: any) => ({
-        recordId: id,
-        name: input.name,
-        description: input.description,
-        status: 'UPDATING',
-        customDescriptorContent: input.customMetadata,
-      }));
+      .mockImplementation(
+        async (_type: string, id: string, input: { name?: string; description?: string; customMetadata?: string }) => ({
+          recordId: id,
+          name: input.name,
+          description: input.description,
+          status: 'UPDATING',
+          customDescriptorContent: input.customMetadata,
+        }),
+      );
     mockComputeTrustPath.mockReset();
     mockAssumeAnalysisRoleClient.mockReset();
     mockGetGovernanceEnforce.mockReset().mockResolvedValue('strict');

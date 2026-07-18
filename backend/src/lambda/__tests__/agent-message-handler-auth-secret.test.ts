@@ -129,13 +129,13 @@ function getSecretValueCalls(): string[] {
     .map((c) => c.input!.SecretId as string);
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   process.env.CONVERSATIONS_TABLE = 'conv-table';
   process.env.APPSYNC_ENDPOINT = 'https://example.appsync-api.us-east-1.amazonaws.com/graphql';
   process.env.IDEMPOTENCY_TABLE = 'idem-table';
   process.env.AWS_REGION = 'us-east-1';
   process.env.ENVIRONMENT = 'dev';
-  const mod = require('../agent-message-handler');
+  const mod = await import('../agent-message-handler');
   handler = mod.handler;
   resetCaches = mod._resetCaches;
 });

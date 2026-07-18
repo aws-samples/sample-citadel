@@ -26,7 +26,7 @@ import {
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { mockClient } from 'aws-sdk-client-mock';
 import * as fc from 'fast-check';
-import type { AuthContext } from '../../types';
+import type { AuthContext, ExecutionSpecificationInput } from '../../types';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const ebMock = mockClient(EventBridgeClient);
@@ -67,14 +67,14 @@ function validUri(projectId = 'proj-1', suffix = 'narrative.md'): string {
   return `s3://citadel-governance-transcripts-dev-123456789012-us-west-2/projects/${projectId}/${suffix}`;
 }
 
-function baseInput(overrides: Record<string, unknown> = {}): any {
+function baseInput(overrides: Record<string, unknown> = {}): ExecutionSpecificationInput {
   return {
     projectId: 'proj-1',
     sourceAdrIds: ['adr-1'],
     structuredPayload: JSON.stringify({ modules: ['auth', 'billing'] }),
     narrativeS3Uri: validUri(),
     ...overrides,
-  };
+  } as unknown as ExecutionSpecificationInput;
 }
 
 function existingSpec(overrides: Record<string, unknown> = {}) {
@@ -164,7 +164,7 @@ describe('execspec-resolver', () => {
       const auth = authContextFor('architect');
       await expect(
         createExecutionSpecification(
-          baseInput({ sourceAdrIds: 'not-an-array' as any }),
+          baseInput({ sourceAdrIds: 'not-an-array' }),
           auth,
         ),
       ).rejects.toThrow(/ValidationError.*sourceAdrIds/);
@@ -332,7 +332,7 @@ describe('execspec-resolver', () => {
       const pending = existingSpec({ status: 'PENDING_REVIEW', version: 2 });
       ddbMock.on(GetCommand).resolves({ Item: pending });
       const ccf = new Error('The conditional request failed');
-      (ccf as any).name = 'ConditionalCheckFailedException';
+      ccf.name = 'ConditionalCheckFailedException';
       ddbMock.on(UpdateCommand).rejects(ccf);
 
       const auth = authContextFor('architect');
@@ -424,21 +424,23 @@ describe('execspec-resolver', () => {
       expect(detail.rejectedBy).toBe('user-developer');
 
       // Audit log lines present and ordered.
-      const logPayloads = logSpy.mock.calls.map((args) => args[0]);
+      const logPayloads = logSpy.mock.calls.map(
+        (args) => args[0] as Record<string, unknown> | undefined,
+      );
       // At least one line with phase='audit' and authResult='PENDING'.
       const pendingAudit = logPayloads.find(
-        (p: any) => p && p.phase === 'audit' && p.authResult === 'PENDING',
+        (p) => p && p.phase === 'audit' && p.authResult === 'PENDING',
       );
       expect(pendingAudit).toBeDefined();
-      expect(pendingAudit.specId).toBe('spec-1');
-      expect(pendingAudit.attemptedBy).toBe('user-developer');
-      expect(pendingAudit.reason).toBe('not convincing');
+      expect(pendingAudit!.specId).toBe('spec-1');
+      expect(pendingAudit!.attemptedBy).toBe('user-developer');
+      expect(pendingAudit!.reason).toBe('not convincing');
 
       const outcomeAudit = logPayloads.find(
-        (p: any) => p && p.phase === 'audit-outcome' && p.authResult === 'DENIED',
+        (p) => p && p.phase === 'audit-outcome' && p.authResult === 'DENIED',
       );
       expect(outcomeAudit).toBeDefined();
-      expect(outcomeAudit.attemptId).toBe(pendingAudit.attemptId);
+      expect(outcomeAudit!.attemptId).toBe(pendingAudit!.attemptId);
 
       logSpy.mockRestore();
     });
@@ -475,12 +477,14 @@ describe('execspec-resolver', () => {
             // Many combinations throw (denied, invalid transition) — that's fine.
           }
 
-          const logPayloads = logSpy.mock.calls.map((args) => args[0]);
+          const logPayloads = logSpy.mock.calls.map(
+            (args) => args[0] as Record<string, unknown> | undefined,
+          );
           const pendingAudit = logPayloads.find(
-            (p: any) => p && p.phase === 'audit' && p.authResult === 'PENDING',
+            (p) => p && p.phase === 'audit' && p.authResult === 'PENDING',
           );
           expect(pendingAudit).toBeDefined();
-          expect(pendingAudit.specId).toBe('spec-1');
+          expect(pendingAudit!.specId).toBe('spec-1');
           // Invariant: event emitted too (allowed AND denied branches both emit).
           // If the transition validation fails AFTER auth succeeds, the event is
           // still emitted before the transition check — asserted below when
@@ -509,8 +513,8 @@ describe('execspec-resolver', () => {
       expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(1);
 
       const outcomeAudit = logSpy.mock.calls
-        .map((a) => a[0])
-        .find((p: any) => p && p.phase === 'audit-outcome' && p.authResult === 'ALLOWED');
+        .map((a) => a[0] as Record<string, unknown> | undefined)
+        .find((p) => p && p.phase === 'audit-outcome' && p.authResult === 'ALLOWED');
       expect(outcomeAudit).toBeDefined();
       logSpy.mockRestore();
     });
@@ -651,24 +655,24 @@ describe('execspec-resolver', () => {
 
     test('createExecutionSpecification dispatch (architect, valid input)', async () => {
       ddbMock.on(PutCommand).resolves({});
-      const result: any = await handler(
+      const result = (await handler(
         makeEvent('createExecutionSpecification', { input: baseInput() }),
-      );
+      )) as { status: string; version: number };
       expect(result.status).toBe('DRAFT');
       expect(result.version).toBe(1);
     });
 
     test('getExecutionSpecification dispatch', async () => {
       ddbMock.on(GetCommand).resolves({ Item: existingSpec() });
-      const result: any = await handler(
+      const result = (await handler(
         makeEvent('getExecutionSpecification', { specId: 'spec-1' }),
-      );
+      )) as { specId: string };
       expect(result.specId).toBe('spec-1');
     });
 
     test('listExecutionSpecifications dispatch', async () => {
       ddbMock.on(QueryCommand).resolves({ Items: [] });
-      const result: any = await handler(
+      const result = await handler(
         makeEvent('listExecutionSpecifications', { projectId: 'proj-1' }),
       );
       expect(result).toEqual([]);

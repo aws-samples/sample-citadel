@@ -64,16 +64,23 @@ process.env.DATASTORES_TABLE = 'TestDataStoresTable';
 
 import { handler } from '../datastore-resolver';
 
+type HandlerEvent = Parameters<typeof handler>[0];
+
 describe('deleteDataStore - infrastructure cleanup', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  const makeDeleteEvent = (dataStoreId: string) => ({
-    info: { fieldName: 'deleteDataStore' },
-    arguments: { dataStoreId },
-    identity: { username: 'test-user' },
-  });
+  const makeDeleteEvent = (dataStoreId: string): HandlerEvent =>
+    ({
+      info: { fieldName: 'deleteDataStore' },
+      arguments: { dataStoreId },
+      identity: { username: 'test-user' },
+    }) as unknown as HandlerEvent;
+
+  /** Invokes the handler and casts the result to the delete-result shape. */
+  const invokeDelete = async (dataStoreId: string): Promise<{ success: boolean }> =>
+    (await handler(makeDeleteEvent(dataStoreId))) as { success: boolean };
 
   test('calls adapter.deprovision for CREATE_NEW data stores', async () => {
     // Mock getDataStore returning a provisioned store
@@ -92,7 +99,7 @@ describe('deleteDataStore - infrastructure cleanup', () => {
     mockDynamoSend.mockResolvedValue({});
     mockSecretsSend.mockResolvedValue({});
 
-    const result = await handler(makeDeleteEvent('ds-123') as any);
+    const result = await invokeDelete('ds-123');
 
     expect(result.success).toBe(true);
     expect(mockAdapter.deprovision).toHaveBeenCalledWith(
@@ -116,7 +123,7 @@ describe('deleteDataStore - infrastructure cleanup', () => {
     mockDynamoSend.mockResolvedValue({});
     mockSecretsSend.mockResolvedValue({});
 
-    const result = await handler(makeDeleteEvent('ds-456') as any);
+    const result = await invokeDelete('ds-456');
 
     expect(result.success).toBe(true);
     expect(mockAdapter.deprovision).not.toHaveBeenCalled();
@@ -140,7 +147,7 @@ describe('deleteDataStore - infrastructure cleanup', () => {
     mockDynamoSend.mockResolvedValue({});
     mockSecretsSend.mockResolvedValue({});
 
-    await handler(makeDeleteEvent('ds-789') as any);
+    await handler(makeDeleteEvent('ds-789'));
 
     expect(callOrder).toEqual(['disconnect', 'deprovision']);
   });
@@ -161,7 +168,7 @@ describe('deleteDataStore - infrastructure cleanup', () => {
     mockDynamoSend.mockResolvedValue({});
     mockSecretsSend.mockResolvedValue({});
 
-    const result = await handler(makeDeleteEvent('ds-fail') as any);
+    const result = await invokeDelete('ds-fail');
 
     // Should still succeed — deprovision failure is non-fatal
     expect(result.success).toBe(true);

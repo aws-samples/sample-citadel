@@ -162,17 +162,33 @@ function fullyCompliantEvidence(projectId: string) {
   return { adrs, specs, rounds, assessment };
 }
 
-function installEvidence(ev: ReturnType<typeof emptyEvidence>): void {
-  jest.spyOn(adrResolver, 'listADRsForProject').mockResolvedValue(ev.adrs as any);
+/** Resolver return types, used to cast loose test fixtures at the mock boundary. */
+type ADRList = Awaited<ReturnType<typeof adrResolver.listADRsForProject>>;
+type SpecList = Awaited<ReturnType<typeof execSpecResolver.listExecutionSpecifications>>;
+type RoundList = Awaited<ReturnType<typeof roundResolver.listInterrogationRounds>>;
+type AssessmentResult = Awaited<ReturnType<typeof assessmentResolver.getAgentDesignAssessment>>;
+
+/** Loose evidence fixture shape accepted by installEvidence. */
+interface EvidenceFixture {
+  adrs: ReadonlyArray<Record<string, unknown>>;
+  specs: ReadonlyArray<Record<string, unknown>>;
+  rounds: ReadonlyArray<Record<string, unknown>>;
+  assessment: Record<string, unknown> | null;
+}
+
+function installEvidence(ev: EvidenceFixture): void {
+  jest
+    .spyOn(adrResolver, 'listADRsForProject')
+    .mockResolvedValue(ev.adrs as unknown as ADRList);
   jest
     .spyOn(execSpecResolver, 'listExecutionSpecifications')
-    .mockResolvedValue(ev.specs as any);
+    .mockResolvedValue(ev.specs as unknown as SpecList);
   jest
     .spyOn(roundResolver, 'listInterrogationRounds')
-    .mockResolvedValue(ev.rounds as any);
+    .mockResolvedValue(ev.rounds as unknown as RoundList);
   jest
     .spyOn(assessmentResolver, 'getAgentDesignAssessment')
-    .mockResolvedValue(ev.assessment as any);
+    .mockResolvedValue(ev.assessment as unknown as AssessmentResult);
 }
 
 describe('program-review-resolver', () => {
@@ -341,8 +357,8 @@ describe('program-review-resolver', () => {
 
       const puts = ddbMock.commandCalls(PutCommand);
       expect(puts).toHaveLength(2);
-      const firstItem = puts[0].args[0].input.Item as any;
-      const secondItem = puts[1].args[0].input.Item as any;
+      const firstItem = puts[0].args[0].input.Item as Record<string, unknown>;
+      const secondItem = puts[1].args[0].input.Item as Record<string, unknown>;
       expect(firstItem.reviewId).toBe(first.reviewId);
       expect(secondItem.reviewId).toBe(second.reviewId);
       expect(firstItem.reviewId).not.toBe(secondItem.reviewId);
@@ -409,7 +425,7 @@ describe('program-review-resolver', () => {
                 : null,
             };
 
-            installEvidence(ev as any);
+            installEvidence(ev);
 
             const a = await runProgramReview(projectId, authContextFor('architect'));
             const b = await runProgramReview(projectId, authContextFor('architect'));
@@ -446,16 +462,16 @@ describe('program-review-resolver', () => {
     test('15. developer denied BEFORE any evidence fetch or DDB write', async () => {
       const adrSpy = jest
         .spyOn(adrResolver, 'listADRsForProject')
-        .mockResolvedValue([] as any);
+        .mockResolvedValue([]);
       const specSpy = jest
         .spyOn(execSpecResolver, 'listExecutionSpecifications')
-        .mockResolvedValue([] as any);
+        .mockResolvedValue([]);
       const roundSpy = jest
         .spyOn(roundResolver, 'listInterrogationRounds')
-        .mockResolvedValue([] as any);
+        .mockResolvedValue([]);
       const assessSpy = jest
         .spyOn(assessmentResolver, 'getAgentDesignAssessment')
-        .mockResolvedValue(null as any);
+        .mockResolvedValue(null);
       ddbMock.on(PutCommand).resolves({});
 
       await expect(
@@ -559,7 +575,7 @@ describe('program-review-resolver', () => {
         arguments: { projectId: 'proj-1' },
         identity: { sub: 'user-architect', 'custom:role': 'architect' },
       };
-      const result = (await handler(event)) as any;
+      const result = (await handler(event)) as { projectId: string; results: unknown[] };
       expect(result.projectId).toBe('proj-1');
       expect(result.results).toHaveLength(20);
     });
@@ -573,7 +589,7 @@ describe('program-review-resolver', () => {
         arguments: { reviewId: 'rv-1' },
         identity: { sub: 'user-architect', 'custom:role': 'architect' },
       };
-      const result = (await handler(event)) as any;
+      const result = (await handler(event)) as { reviewId: string };
       expect(result.reviewId).toBe('rv-1');
     });
 
@@ -584,7 +600,7 @@ describe('program-review-resolver', () => {
         arguments: { projectId: 'proj-x' },
         identity: { sub: 'user-architect', 'custom:role': 'architect' },
       };
-      const result = (await handler(event)) as any;
+      const result = await handler(event);
       expect(Array.isArray(result)).toBe(true);
     });
 

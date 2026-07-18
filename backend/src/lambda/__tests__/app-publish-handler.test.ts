@@ -26,9 +26,11 @@ import {
   validatePublishPreconditions,
   provisionApiGateway,
   publishApp,
+  buildStatusTransitionEvent,
   AppMetadata,
   ComponentItem,
 } from '../app-publish-handler';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { PolicyManager } from '../../utils/policy-manager';
 
 // ── Mocks ───────────────────────────────────────────────────
@@ -65,7 +67,7 @@ function makeAgentBinding(agentId: string, status: string = 'READY'): ComponentI
   };
 }
 
-function makeConfigSchema(schema: Record<string, any> = {
+function makeConfigSchema(schema: Record<string, unknown> = {
   type: 'object',
   properties: { apiKey: { type: 'string' } },
   required: ['apiKey'],
@@ -73,7 +75,7 @@ function makeConfigSchema(schema: Record<string, any> = {
   return { sortId: 'CONFIG#schema', schema };
 }
 
-function makeConfigValues(values: Record<string, any> = {
+function makeConfigValues(values: Record<string, unknown> = {
   apiKey: 'sk-test',
   adminEmail: 'admin@example.com',
 }): ComponentItem {
@@ -191,7 +193,7 @@ describe('validatePublishPreconditions (extended)', () => {
     });
 
   test('multi-agent app errors when workflowIds is undefined', () => {
-      const metadata = makeMetadata({ workflowIds: undefined as any });
+      const metadata = makeMetadata({ workflowIds: undefined });
       const components: ComponentItem[] = [
         makeAgentBinding('agent-1', 'READY'),
         makeAgentBinding('agent-2', 'READY'),
@@ -509,14 +511,14 @@ describe('publishApp', () => {
     deleteRole: jest.fn().mockResolvedValue(undefined),
   } as unknown as PolicyManager;
 
-  let defaultDeps: any;
+  let defaultDeps: Parameters<typeof publishApp>[2];
 
   beforeEach(() => {
     setupDefaultMocks();
     (mockPolicyManager.getAccountContext as jest.Mock).mockClear();
     (mockPolicyManager.ensureRole as jest.Mock).mockClear();
     defaultDeps = {
-      docClient: DynamoDBDocumentClient.from(new (require('@aws-sdk/client-dynamodb').DynamoDBClient)({})),
+      docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
       apiGwClient: new ApiGatewayV2Client({}),
       eventBridgeClient: new EventBridgeClient({}),
       policyManager: mockPolicyManager,
@@ -624,13 +626,17 @@ describe('publishApp', () => {
     // Key is appId only (AppsTable has no sort key).
     const metaUpdate = updateCalls.find(
       (c) =>
-        (c.args[0].input.Key as any)?.appId === 'app-1' &&
-        (c.args[0].input.Key as any)?.sortId === undefined &&
-        (c.args[0].input.ExpressionAttributeValues as any)?.[':v_status'] ===
-          'PUBLISHED',
+        (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === 'app-1' &&
+        (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined &&
+        (c.args[0].input.ExpressionAttributeValues as Record<string, unknown> | undefined)?.[
+          ':v_status'
+        ] === 'PUBLISHED',
     );
     expect(metaUpdate).toBeDefined();
-    const metaValues = metaUpdate!.args[0].input.ExpressionAttributeValues as any;
+    const metaValues = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<
+      string,
+      unknown
+    >;
     expect(metaValues[':v_status']).toBe('PUBLISHED');
     expect(typeof metaValues[':v_updatedAt']).toBe('string');
 
@@ -696,7 +702,6 @@ describe('publishApp', () => {
 // ── Task 5.1: Status Transition Event Structure Tests ────────
 
 describe('buildStatusTransitionEvent', () => {
-  const { buildStatusTransitionEvent } = require('../app-publish-handler');
 
   describe('ACTIVE → PUBLISHED event', () => {
     const detail = {

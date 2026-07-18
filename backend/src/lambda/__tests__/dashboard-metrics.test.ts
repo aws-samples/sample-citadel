@@ -1,9 +1,10 @@
 import { getDashboardMetrics } from '../app-metrics-handler';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 // Mock DynamoDB
 const mockSend = jest.fn();
 const mockDeps = {
-  docClient: { send: mockSend } as any,
+  docClient: { send: mockSend } as unknown as DynamoDBDocumentClient,
   appsTable: 'test-apps-table',
 };
 

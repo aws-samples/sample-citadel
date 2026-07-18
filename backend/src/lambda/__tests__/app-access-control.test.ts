@@ -38,8 +38,8 @@ function makeDeps() {
   };
 }
 
-function makeAccessItem(overrides: Record<string, any> = {}) {
-  const userId = overrides.userId || TEST_USER_ID;
+function makeAccessItem(overrides: Record<string, unknown> = {}) {
+  const userId = (overrides.userId as string | undefined) || TEST_USER_ID;
   return {
     appId: `${TEST_APP_ID}#ACCESS#${userId}`,
     groupId: `APP#${TEST_APP_ID}`,

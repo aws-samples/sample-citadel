@@ -5,9 +5,11 @@ import { DynamoDBDocumentClient, PutCommand, UpdateCommand, GetCommand } from '@
 import {
   BedrockAgentClient,
   IngestKnowledgeBaseDocumentsCommand,
+  type IngestKnowledgeBaseDocumentsCommandOutput,
 } from '@aws-sdk/client-bedrock-agent';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { mockClient } from 'aws-sdk-client-mock';
+import type { S3Event } from 'aws-lambda';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const bedrockMock = mockClient(BedrockAgentClient);
@@ -16,11 +18,14 @@ const ssmMock = mockClient(SSMClient);
 import { handler, shouldProcessKey, parseKey, decodeS3Key } from '../document-ingestion-start';
 import { _resetKbIdCache } from '../document-ingestion-shared';
 
-const makeS3Event = (records: { key: string; size?: number }[]) => ({
+/** Partial Bedrock ingest responses are cast to the full output at the mock boundary. */
+type IngestOutput = IngestKnowledgeBaseDocumentsCommandOutput;
+
+const makeS3Event = (records: { key: string; size?: number }[]): S3Event => ({
   Records: records.map((r) => ({
     s3: { object: { key: r.key, size: r.size ?? 123 }, bucket: { name: 'docs' } },
   })),
-}) as any;
+}) as unknown as S3Event;
 
 function condFailed(): Error {
   const e = new Error('conditional');
@@ -67,13 +72,13 @@ describe('document-ingestion-start', () => {
     ddbMock.on(UpdateCommand).resolves({});
     bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
       documentDetails: [{ status: 'IN_PROGRESS', identifier: { custom: { id: 'proj-1/report.pdf' } } }],
-    } as any);
+    } as unknown as IngestOutput);
 
     await handler(makeS3Event([{ key: 'proj-1/report.pdf', size: 500 }]));
 
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
-    const item = puts[0].args[0].input.Item as any;
+    const item = puts[0].args[0].input.Item as Record<string, unknown>;
     expect(item.status).toBe('STARTING');
     expect(item.triggered).toBe(false);
     expect(item.projectId).toBe('proj-1');
@@ -91,7 +96,7 @@ describe('document-ingestion-start', () => {
     ddbMock.on(UpdateCommand).resolves({});
     bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
       documentDetails: [{ status: 'IN_PROGRESS' }],
-    } as any);
+    } as unknown as IngestOutput);
 
     await handler(makeS3Event([
       { key: 'proj-1/report.pdf' },
@@ -118,7 +123,7 @@ describe('document-ingestion-start', () => {
     ddbMock.on(UpdateCommand).resolves({});
     bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
       documentDetails: [{ status: 'FAILED', statusReason: 'parse error', identifier: { custom: { id: 'proj-1/bad.pdf' } } }],
-    } as any);
+    } as unknown as IngestOutput);
 
     await handler(makeS3Event([{ key: 'proj-1/bad.pdf' }]));
 
@@ -142,7 +147,7 @@ describe('document-ingestion-start', () => {
           statusReason: 'You submitted multiple requests for the same document',
           identifier: { custom: { id: 'proj-1/dup.pdf' } },
         }],
-      } as any);
+      } as unknown as IngestOutput);
 
       await handler(makeS3Event([{ key: 'proj-1/dup.pdf' }]));
 
@@ -162,7 +167,7 @@ describe('document-ingestion-start', () => {
       ddbMock.on(UpdateCommand).resolves({});
       bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'INDEXED', identifier: { custom: { id: 'proj-1/fast.pdf' } } }],
-      } as any);
+      } as unknown as IngestOutput);
 
       await handler(makeS3Event([{ key: 'proj-1/fast.pdf' }]));
 
@@ -176,7 +181,7 @@ describe('document-ingestion-start', () => {
       ddbMock.on(UpdateCommand).resolves({});
       bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'STARTING', identifier: { custom: { id: 'proj-1/s.pdf' } } }],
-      } as any);
+      } as unknown as IngestOutput);
 
       await handler(makeS3Event([{ key: 'proj-1/s.pdf' }]));
 
@@ -199,7 +204,7 @@ describe('document-ingestion-start', () => {
       ddbMock.on(UpdateCommand).resolves({});
       bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'IN_PROGRESS' }],
-      } as any);
+      } as unknown as IngestOutput);
 
       await handler(makeS3Event([{ key: 'proj-1/report.pdf', size: 999 }]));
 
@@ -226,7 +231,7 @@ describe('document-ingestion-start', () => {
       ddbMock.on(UpdateCommand).resolves({});
       bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'IN_PROGRESS' }],
-      } as any);
+      } as unknown as IngestOutput);
 
       await handler(makeS3Event([{ key: 'proj-1/report.pdf' }]));
 
@@ -242,7 +247,7 @@ describe('document-ingestion-start', () => {
       ddbMock.on(UpdateCommand).resolves({});
       bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'IN_PROGRESS' }],
-      } as any);
+      } as unknown as IngestOutput);
 
       await handler(makeS3Event([{ key: 'proj-1/report.pdf' }]));
 
@@ -257,7 +262,7 @@ describe('document-ingestion-start', () => {
       ddbMock.on(UpdateCommand).resolves({});
       bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'IN_PROGRESS' }],
-      } as any);
+      } as unknown as IngestOutput);
 
       await handler(makeS3Event([{ key: 'proj-1/fresh.pdf' }]));
 
@@ -275,7 +280,7 @@ describe('document-ingestion-start', () => {
       ddbMock.on(UpdateCommand).rejects(condFailed());
       bedrockMock.on(IngestKnowledgeBaseDocumentsCommand).resolves({
         documentDetails: [{ status: 'IN_PROGRESS' }],
-      } as any);
+      } as unknown as IngestOutput);
 
       await expect(handler(makeS3Event([{ key: 'proj-1/report.pdf' }]))).resolves.toBeUndefined();
 

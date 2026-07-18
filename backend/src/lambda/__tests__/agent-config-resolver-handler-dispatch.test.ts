@@ -23,20 +23,34 @@ const mockUpdateResource = jest.fn();
 const mockDeleteResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
 const mockSearchResources = jest.fn();
-const mockSerializeCustomMetadata = jest.fn((meta: any) => JSON.stringify(meta));
-const mockDeserializeCustomMetadata = jest.fn((json: string | null, defaults: any) => {
-  if (!json) return defaults;
-  try {
-    return { ...defaults, ...JSON.parse(json) };
-  } catch {
-    return defaults;
-  }
-});
+const mockSerializeCustomMetadata = jest.fn((meta: unknown) => JSON.stringify(meta));
+const mockDeserializeCustomMetadata = jest.fn(
+  (json: string | null, defaults: Record<string, unknown>) => {
+    if (!json) return defaults;
+    try {
+      return { ...defaults, ...JSON.parse(json) };
+    } catch {
+      return defaults;
+    }
+  },
+);
 const mockToRegistryStatus = jest.fn((state: string) => {
   const map: Record<string, string> = { active: 'APPROVED', inactive: 'DEPRECATED', maintenance: 'DRAFT' };
   return map[state] || 'DEPRECATED';
 });
-const mockMapToAgentConfig = jest.fn((record: any) => {
+
+/** Registry record fixture shape consumed by the mock mapper. */
+interface RegistryRecordFixture {
+  recordId: string;
+  name?: string;
+  description?: string;
+  status?: string;
+  customDescriptorContent?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+const mockMapToAgentConfig = jest.fn((record: RegistryRecordFixture) => {
   // Mirror the real mapper's orgId behaviour so handler-dispatch tests that
   // don't care about orgId still see a record whose orgId matches the
   // caller's org fixture below.
@@ -84,7 +98,11 @@ const defaultIdentity = {
   claims: { 'custom:organization': 'test-org-a' },
 };
 
-const makeEvent = (fieldName: string, args: any = {}, identity: any = defaultIdentity) => ({
+const makeEvent = (
+  fieldName: string,
+  args: Record<string, unknown> = {},
+  identity: Record<string, unknown> = defaultIdentity,
+) => ({
   info: { fieldName },
   arguments: args,
   identity,
@@ -395,10 +413,12 @@ describe('handler switch dispatch (task 6.5)', () => {
         sub: 'admin-user',
         claims: { 'custom:organization': 'admin-home-org', 'custom:role': 'admin' },
       };
-      const result = await handler(makeEvent('listAgentConfigs', {}, adminIdentity));
+      const result = (await handler(makeEvent('listAgentConfigs', {}, adminIdentity))) as Array<{
+        agentId: string;
+      }>;
 
       expect(result).toHaveLength(2);
-      const ids = result.map((a: any) => a.agentId).sort();
+      const ids = result.map((a) => a.agentId).sort();
       expect(ids).toEqual(['agent-a', 'agent-b']);
     });
 

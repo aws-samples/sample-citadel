@@ -62,6 +62,8 @@ jest.mock('../../services/registry-service', () => {
 
 import { handler } from '../agent-import-manifest-result-handler';
 
+type HandlerEvent = Parameters<typeof handler>[0];
+
 const idem = jest.requireMock('../../utils/idempotency') as {
   __keys: string[];
   __reset: () => void;
@@ -110,7 +112,7 @@ const proposedEvent = (detailOverrides: Record<string, unknown> = {}) =>
       status: 'proposed',
       ...detailOverrides,
     },
-  }) as any;
+  }) as unknown as HandlerEvent;
 
 const failedEvent = (detailOverrides: Record<string, unknown> = {}) =>
   ({
@@ -125,7 +127,7 @@ const failedEvent = (detailOverrides: Record<string, unknown> = {}) =>
       status: 'failed',
       ...detailOverrides,
     },
-  }) as any;
+  }) as unknown as HandlerEvent;
 
 const writtenMeta = (callIndex = 0) =>
   JSON.parse(mockUpdateResource.mock.calls[callIndex][2].customMetadata);
@@ -242,7 +244,7 @@ describe('agent-import-manifest-result-handler', () => {
         'detail-type': 'agent.fabricated',
         source: 'citadel.backend',
         detail: { importId: 'imp-1' },
-      } as any);
+      } as unknown as HandlerEvent);
       expect(mockUpdateResource).not.toHaveBeenCalled();
     });
 

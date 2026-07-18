@@ -18,7 +18,7 @@ describe('tool-config-resolver', () => {
     delete process.env.TOOLS_CONFIG_TABLE;
   });
 
-  const makeEvent = (fieldName: string, args: any) => ({
+  const makeEvent = (fieldName: string, args: Record<string, unknown>) => ({
     info: { fieldName },
     arguments: args,
   });

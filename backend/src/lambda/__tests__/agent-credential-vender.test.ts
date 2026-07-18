@@ -13,11 +13,13 @@ jest.mock('../../utils/policy-manager', () => {
     assumeScopedRole: mockAssumeScopedRole,
   }));
   // Static methods
-  (MockPolicyManager as any).getRoleName = (id: string, scope: string) => {
+  (MockPolicyManager as unknown as { getRoleName: (id: string, scope: string) => string }).getRoleName = (id: string, scope: string) => {
     const prefixes: Record<string, string> = { datastore: 'citadel-ds-', integration: 'citadel-int-', agent: 'citadel-agent-' };
     return `${prefixes[scope] || 'citadel-ds-'}${id}`;
   };
-  (MockPolicyManager as any).buildPolicyDocument = (policies: any[]) => ({
+  (MockPolicyManager as unknown as {
+    buildPolicyDocument: (policies: Array<{ actions: string[]; resources: string[] }>) => unknown;
+  }).buildPolicyDocument = (policies: Array<{ actions: string[]; resources: string[] }>) => ({
     Version: '2012-10-17',
     Statement: policies.map(p => ({ Effect: 'Allow', Action: p.actions, Resource: p.resources })),
   });
