@@ -17,6 +17,7 @@ jest.mock('@aws-sdk/client-bedrock-agent', () => {
 
 import { KnowledgeBaseAdapter } from '../knowledge-base-adapter';
 import { PermissionError } from '../errors';
+import { BedrockAgentClient, DeleteKnowledgeBaseCommand } from '@aws-sdk/client-bedrock-agent';
 
 describe('KnowledgeBaseAdapter.deprovision', () => {
   let adapter: KnowledgeBaseAdapter;
@@ -36,7 +37,6 @@ describe('KnowledgeBaseAdapter.deprovision', () => {
 
     await adapter.deprovision!({ knowledgeBaseId: 'kb-12345' });
 
-    const { DeleteKnowledgeBaseCommand } = require('@aws-sdk/client-bedrock-agent');
     expect(DeleteKnowledgeBaseCommand).toHaveBeenCalledWith({
       knowledgeBaseId: 'kb-12345',
     });
@@ -45,7 +45,7 @@ describe('KnowledgeBaseAdapter.deprovision', () => {
 
   test('succeeds gracefully if knowledge base already deleted', async () => {
     const sdkError = new Error('Not found');
-    (sdkError as any).name = 'ResourceNotFoundException';
+    sdkError.name = 'ResourceNotFoundException';
     mockSend.mockRejectedValueOnce(sdkError);
 
     await expect(
@@ -55,7 +55,7 @@ describe('KnowledgeBaseAdapter.deprovision', () => {
 
   test('throws PermissionError on AccessDeniedException', async () => {
     const sdkError = new Error('Access Denied');
-    (sdkError as any).name = 'AccessDeniedException';
+    sdkError.name = 'AccessDeniedException';
     mockSend.mockRejectedValueOnce(sdkError);
 
     await expect(
@@ -64,7 +64,6 @@ describe('KnowledgeBaseAdapter.deprovision', () => {
   });
 
   test('uses scoped credentials when provided', async () => {
-    const { BedrockAgentClient } = require('@aws-sdk/client-bedrock-agent');
     mockSend.mockResolvedValueOnce({});
 
     await adapter.deprovision!(
@@ -83,7 +82,7 @@ describe('KnowledgeBaseAdapter.deprovision', () => {
 
   test('propagates unexpected errors', async () => {
     const sdkError = new Error('Internal failure');
-    (sdkError as any).name = 'InternalServerError';
+    sdkError.name = 'InternalServerError';
     mockSend.mockRejectedValueOnce(sdkError);
 
     await expect(

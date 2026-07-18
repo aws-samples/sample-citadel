@@ -16,6 +16,11 @@ import { S3TablesAdapter } from '../s3-tables-adapter';
 import { SageMakerLakehouseAdapter } from '../sagemaker-lakehouse-adapter';
 import { SageMakerFeatureStoreAdapter } from '../sagemaker-feature-store-adapter';
 import { KnowledgeBaseAdapter } from '../knowledge-base-adapter';
+import { NotImplementedError } from '../../../adapters/errors';
+import type { ConnectorAdapter } from '../../../adapters/base';
+
+/** Adapter with a concrete provision method (all datastore adapters under test). */
+type ProvisioningAdapter = ConnectorAdapter & Required<Pick<ConnectorAdapter, 'provision'>>;
 
 // --- Mock all AWS SDK modules ---
 const mockS3Send = jest.fn();
@@ -153,14 +158,9 @@ const allMocks = [
 // every integration failure across the registry. The adapter now throws
 // NotImplementedError so unimplemented connector types fail loudly.
 describe('Property 10: Generic adapter throws NotImplementedError instead of faking success', () => {
-  // NotImplementedError lives in the canonical adapters/errors module; this
-  // import is local to the property so the surrounding describe blocks remain
-  // untouched.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { NotImplementedError } = require('../../../adapters/errors');
-
-  const serviceNameArb = fc.constantFrom(
-    'knowledge-base', 'aurora-postgresql', 'aurora-mysql', 'redshift',
+  // NotImplementedError is imported from the canonical adapters/errors module
+  // at the top of this file.
+  const serviceNameArb = fc.constantFrom(    'knowledge-base', 'aurora-postgresql', 'aurora-mysql', 'redshift',
     'lake-formation', 'opensearch', 'neptune', 'timestream',
     'documentdb', 'elasticache-redis', 'keyspaces', 'qldb',
     'sagemaker-feature-store'
@@ -206,9 +206,9 @@ describe('Property 10: Generic adapter throws NotImplementedError instead of fak
         try {
           await adapter.testConnection({});
           fail('Expected NotImplementedError');
-        } catch (err: any) {
+        } catch (err) {
           expect(err).toBeInstanceOf(NotImplementedError);
-          expect(err.message).toContain(serviceName);
+          expect((err as Error).message).toContain(serviceName);
         }
       }),
       { numRuns: 100 }
@@ -226,10 +226,10 @@ describe('Property 16: Adapter idempotent provisioning on already-exists', () =>
   // Each adapter entry: [name, adapter factory, mockSend, config, credentials, alreadyExistsErrorName]
   const adapterCases: Array<{
     name: string;
-    create: () => any;
+    create: () => ProvisioningAdapter;
     mock: jest.Mock;
-    config: Record<string, any>;
-    creds?: Record<string, any>;
+    config: Record<string, unknown>;
+    creds?: Record<string, string>;
     errorName: string;
   }> = [
     {
@@ -360,14 +360,14 @@ describe('Property 16: Adapter idempotent provisioning on already-exists', () =>
             allMocks.forEach((m) => m.mockReset());
             const adapter = create();
             const err = new Error(errorMessage);
-            (err as any).name = errorName;
+            err.name = errorName;
             // Use mockRejectedValue (persistent) so multi-call adapters get the error on every call
             mock.mockRejectedValue(err);
             // For adapters that use multiple SDK clients (e.g. KnowledgeBase uses OSS + Bedrock),
             // also mock the OSS client to reject with the same error
             if (mock !== mockOssSend) {
               const ossErr = new Error(errorMessage);
-              (ossErr as any).name = errorName;
+              ossErr.name = errorName;
               mockOssSend.mockRejectedValue(ossErr);
             }
 

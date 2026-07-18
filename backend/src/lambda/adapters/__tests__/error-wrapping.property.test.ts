@@ -18,6 +18,10 @@ import { KnowledgeBaseAdapter } from '../knowledge-base-adapter';
 import { SnowflakeAdapter } from '../snowflake-adapter';
 import { DatabricksAdapter } from '../databricks-adapter';
 import { DataStoreError } from '../errors';
+import type { ConnectorAdapter } from '../../../adapters/base';
+
+/** Adapter with a concrete provision method (all datastore adapters under test). */
+type ProvisioningAdapter = ConnectorAdapter & Required<Pick<ConnectorAdapter, 'provision'>>;
 
 // Feature: datastore-adapter-pattern, Property 1: Adapter SDK error wrapping
 // Validates: Requirements 2.4
@@ -177,7 +181,7 @@ const sdkErrorMessageArb = fc.string({ minLength: 1, maxLength: 100 });
 
 function makeSdkError(name: string, message: string): Error {
   const err = new Error(message);
-  (err as any).name = name;
+  err.name = name;
   return err;
 }
 
@@ -198,10 +202,10 @@ describe('Property 1: Adapter SDK error wrapping', () => {
   // Helper: test that provision wraps SDK errors for adapters using mockSend pattern
   function testProvisionWrapping(
     name: string,
-    createAdapter: () => any,
+    createAdapter: () => ProvisioningAdapter,
     mockSend: jest.Mock,
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, string>
   ) {
     it(`${name}.provision wraps SDK errors in DataStoreError with cause`, async () => {
       const adapter = createAdapter();
@@ -211,9 +215,9 @@ describe('Property 1: Adapter SDK error wrapping', () => {
           mockSend.mockRejectedValueOnce(sdkError);
           try {
             await adapter.provision(config, credentials);
-          } catch (thrown: any) {
+          } catch (thrown) {
             expect(thrown).toBeInstanceOf(DataStoreError);
-            expect(thrown.cause).toBe(sdkError);
+            expect((thrown as DataStoreError).cause).toBe(sdkError);
           }
         }),
         { numRuns: 100 }
@@ -258,9 +262,9 @@ describe('Property 1: Adapter SDK error wrapping', () => {
         mockBedrockAgentSend.mockRejectedValue(sdkError);
         try {
           await adapter.provision(config);
-        } catch (thrown: any) {
+        } catch (thrown) {
           expect(thrown).toBeInstanceOf(DataStoreError);
-          expect(thrown.cause).toBe(sdkError);
+          expect((thrown as DataStoreError).cause).toBe(sdkError);
         }
       }),
       { numRuns: 100 }
@@ -278,9 +282,9 @@ describe('Property 1: Adapter SDK error wrapping', () => {
         mockSnowflakeConnect.mockImplementation((cb: (err: unknown) => void) => cb(sdkError));
         try {
           await adapter.testConnection(config);
-        } catch (thrown: any) {
+        } catch (thrown) {
           expect(thrown).toBeInstanceOf(DataStoreError);
-          expect(thrown.cause).toBe(sdkError);
+          expect((thrown as DataStoreError).cause).toBe(sdkError);
         }
       }),
       { numRuns: 100 }
@@ -299,9 +303,9 @@ describe('Property 1: Adapter SDK error wrapping', () => {
         mockDatabricksClose.mockResolvedValueOnce(undefined);
         try {
           await adapter.testConnection(config);
-        } catch (thrown: any) {
+        } catch (thrown) {
           expect(thrown).toBeInstanceOf(DataStoreError);
-          expect(thrown.cause).toBe(sdkError);
+          expect((thrown as DataStoreError).cause).toBe(sdkError);
         }
       }),
       { numRuns: 100 }

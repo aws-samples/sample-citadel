@@ -99,9 +99,9 @@ describe('DatabricksAdapter', () => {
       try {
         await adapter.testConnection(validConfig);
         fail('Expected PermissionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(PermissionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
@@ -113,9 +113,9 @@ describe('DatabricksAdapter', () => {
       try {
         await adapter.testConnection(validConfig);
         fail('Expected ConnectionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
@@ -127,9 +127,9 @@ describe('DatabricksAdapter', () => {
       try {
         await adapter.testConnection(validConfig);
         fail('Expected DataStoreError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(DataStoreError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 

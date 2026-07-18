@@ -4,7 +4,9 @@ import {
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
+  DataStoreError,
 } from '../errors';
+import { DynamoDBClient, CreateTableCommand } from '@aws-sdk/client-dynamodb';
 
 // Mock the entire @aws-sdk/client-dynamodb module
 const mockSend = jest.fn();
@@ -73,7 +75,6 @@ describe('DynamoDBAdapter', () => {
     });
 
     it('uses default partition key "pk" and no sort key when sortKey not provided', async () => {
-      const { CreateTableCommand } = require('@aws-sdk/client-dynamodb');
       mockSend.mockResolvedValueOnce({});
       await adapter.provision(config);
       expect(CreateTableCommand).toHaveBeenCalledWith(
@@ -91,7 +92,6 @@ describe('DynamoDBAdapter', () => {
     });
 
     it('uses custom partition and sort keys from config', async () => {
-      const { CreateTableCommand } = require('@aws-sdk/client-dynamodb');
       mockSend.mockResolvedValueOnce({});
       await adapter.provision({
         ...config,
@@ -110,7 +110,7 @@ describe('DynamoDBAdapter', () => {
 
     it('handles ResourceInUseException as idempotent success', async () => {
       const sdkError = new Error('Table already exists');
-      (sdkError as any).name = 'ResourceInUseException';
+      sdkError.name = 'ResourceInUseException';
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.provision(config);
       expect(result.resourceArn).toContain('my-test-table');
@@ -118,27 +118,27 @@ describe('DynamoDBAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.provision(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps unknown SDK errors in ProvisioningError', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalServerError';
+      sdkError.name = 'InternalServerError';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.provision(config)).rejects.toThrow(ProvisioningError);
     });
 
     it('preserves the original SDK error as cause', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalServerError';
+      sdkError.name = 'InternalServerError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.provision(config);
         fail('Expected ProvisioningError');
-      } catch (err: any) {
-        expect(err.cause).toBe(sdkError);
+      } catch (err) {
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -160,34 +160,34 @@ describe('DynamoDBAdapter', () => {
 
     it('throws ResourceNotFoundError when table does not exist', async () => {
       const sdkError = new Error('Table not found');
-      (sdkError as any).name = 'ResourceNotFoundException';
+      sdkError.name = 'ResourceNotFoundException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
     });
 
     it('throws PermissionError on AccessDeniedException', async () => {
       const sdkError = new Error('Forbidden');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
     });
 
     it('throws ConnectionError on other errors', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(ConnectionError);
     });
 
     it('preserves SDK error as cause in ConnectionError', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.connect(config);
         fail('Expected ConnectionError');
-      } catch (err: any) {
-        expect(err.cause).toBe(sdkError);
+      } catch (err) {
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
@@ -219,7 +219,7 @@ describe('DynamoDBAdapter', () => {
 
     it('returns failure when DescribeTable fails', async () => {
       const sdkError = new Error('Not Found');
-      (sdkError as any).name = 'ResourceNotFoundException';
+      sdkError.name = 'ResourceNotFoundException';
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.testConnection(config);
       expect(result.success).toBe(false);
@@ -263,14 +263,14 @@ describe('DynamoDBAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError', async () => {
       const sdkError = new Error('Timeout');
-      (sdkError as any).name = 'TimeoutError';
+      sdkError.name = 'TimeoutError';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
     });
@@ -278,7 +278,6 @@ describe('DynamoDBAdapter', () => {
 
   describe('scoped credentials', () => {
     it('constructs client with provided credentials', async () => {
-      const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
       mockSend.mockResolvedValueOnce({
         Table: { TableStatus: 'ACTIVE' },
       });
@@ -298,7 +297,6 @@ describe('DynamoDBAdapter', () => {
     });
 
     it('constructs default client when no credentials provided', async () => {
-      const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
       mockSend.mockResolvedValueOnce({
         Table: { TableStatus: 'ACTIVE' },
       });

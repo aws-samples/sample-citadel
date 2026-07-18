@@ -18,7 +18,7 @@ jest.mock('net', () => ({
         handlers[event] = cb;
         mockOn(event, cb);
       },
-      connect: (...args: any[]) => {
+      connect: (...args: unknown[]) => {
         mockConnect(...args);
         // By default trigger 'connect' event on next tick
         if (handlers['connect']) {
@@ -113,8 +113,8 @@ describe('Property 7: External adapter provision throws ProvisioningError', () =
         try {
           await adapter.provision({});
           fail('Expected ProvisioningError');
-        } catch (err: any) {
-          expect(err.message).toContain(kind);
+        } catch (err) {
+          expect((err as Error).message).toContain(kind);
         }
       }),
       { numRuns: 100 }

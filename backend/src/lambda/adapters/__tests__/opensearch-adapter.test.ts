@@ -4,7 +4,9 @@ import {
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
+  DataStoreError,
 } from '../errors';
+import { OpenSearchServerlessClient, CreateCollectionCommand, BatchGetCollectionCommand } from '@aws-sdk/client-opensearchserverless';
 
 const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-opensearchserverless', () => {
@@ -24,7 +26,7 @@ describe('OpenSearchAdapter', () => {
     adapter = new OpenSearchAdapter();
     mockSend.mockReset();
     // Default: security policy calls succeed, other calls need explicit mocking
-    mockSend.mockImplementation((cmd: any) => {
+    mockSend.mockImplementation((cmd: { _type: string }) => {
       if (cmd._type === 'CreateSecurityPolicy') return Promise.resolve({ securityPolicyDetail: {} });
       return Promise.resolve({});
     });
@@ -65,7 +67,7 @@ describe('OpenSearchAdapter', () => {
   describe('provision', () => {
     beforeEach(() => {
       // Default: security policies succeed, collection creation succeeds
-      mockSend.mockImplementation((cmd: any) => {
+      mockSend.mockImplementation((cmd: { _type: string }) => {
         if (cmd._type === 'CreateSecurityPolicy') return Promise.resolve({ securityPolicyDetail: {} });
         if (cmd._type === 'CreateCollection') return Promise.resolve({
           createCollectionDetail: { arn: 'arn:aws:aoss:us-east-1:123:collection/my-test-collection' },
@@ -80,7 +82,6 @@ describe('OpenSearchAdapter', () => {
     });
 
     it('uses SEARCH type by default', async () => {
-      const { CreateCollectionCommand } = require('@aws-sdk/client-opensearchserverless');
       await adapter.provision(config);
       expect(CreateCollectionCommand).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'SEARCH' })
@@ -88,7 +89,6 @@ describe('OpenSearchAdapter', () => {
     });
 
     it('uses VECTORSEARCH type when specified in config', async () => {
-      const { CreateCollectionCommand } = require('@aws-sdk/client-opensearchserverless');
       await adapter.provision({ ...config, collectionType: 'VECTORSEARCH' });
       expect(CreateCollectionCommand).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'VECTORSEARCH' })
@@ -97,8 +97,8 @@ describe('OpenSearchAdapter', () => {
 
     it('handles ConflictException as idempotent success', async () => {
       const sdkError = new Error('Already exists');
-      (sdkError as any).name = 'ConflictException';
-      mockSend.mockImplementation((cmd: any) => {
+      sdkError.name = 'ConflictException';
+      mockSend.mockImplementation((cmd: { _type: string }) => {
         if (cmd._type === 'CreateSecurityPolicy') return Promise.resolve({ securityPolicyDetail: {} });
         if (cmd._type === 'CreateCollection') return Promise.reject(sdkError);
         return Promise.resolve({});
@@ -109,8 +109,8 @@ describe('OpenSearchAdapter', () => {
 
     it('wraps AccessDeniedException in PermissionError', async () => {
       const sdkError = new Error('Access Denied');
-      (sdkError as any).name = 'AccessDeniedException';
-      mockSend.mockImplementation((cmd: any) => {
+      sdkError.name = 'AccessDeniedException';
+      mockSend.mockImplementation((cmd: { _type: string }) => {
         if (cmd._type === 'CreateSecurityPolicy') return Promise.resolve({ securityPolicyDetail: {} });
         if (cmd._type === 'CreateCollection') return Promise.reject(sdkError);
         return Promise.resolve({});
@@ -120,8 +120,8 @@ describe('OpenSearchAdapter', () => {
 
     it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
       const sdkError = new Error('Something broke');
-      (sdkError as any).name = 'InternalError';
-      mockSend.mockImplementation((cmd: any) => {
+      sdkError.name = 'InternalError';
+      mockSend.mockImplementation((cmd: { _type: string }) => {
         if (cmd._type === 'CreateSecurityPolicy') return Promise.resolve({ securityPolicyDetail: {} });
         if (cmd._type === 'CreateCollection') return Promise.reject(sdkError);
         return Promise.resolve({});
@@ -129,14 +129,13 @@ describe('OpenSearchAdapter', () => {
       try {
         await adapter.provision(config);
         fail('Expected ProvisioningError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
     it('generates a name when collectionName is not in config', async () => {
-      const { CreateCollectionCommand } = require('@aws-sdk/client-opensearchserverless');
       await adapter.provision({});
       expect(CreateCollectionCommand).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -168,26 +167,25 @@ describe('OpenSearchAdapter', () => {
 
     it('throws PermissionError on AccessDeniedException', async () => {
       const sdkError = new Error('Forbidden');
-      (sdkError as any).name = 'AccessDeniedException';
+      sdkError.name = 'AccessDeniedException';
       mockSend.mockRejectedValueOnce(sdkError);
       await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
     });
 
     it('wraps other errors in ConnectionError with cause', async () => {
       const sdkError = new Error('Network issue');
-      (sdkError as any).name = 'NetworkingError';
+      sdkError.name = 'NetworkingError';
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.connect(config);
         fail('Expected ConnectionError');
-      } catch (err: any) {
+      } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
-        expect(err.cause).toBe(sdkError);
+        expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
     it('uses collectionId when collectionName is not provided', async () => {
-      const { BatchGetCollectionCommand } = require('@aws-sdk/client-opensearchserverless');
       mockSend.mockResolvedValueOnce({
         collectionDetails: [{ name: 'test', status: 'ACTIVE' }],
       });
@@ -244,7 +242,6 @@ describe('OpenSearchAdapter', () => {
 
   describe('scoped credentials', () => {
     it('constructs client with provided credentials', async () => {
-      const { OpenSearchServerlessClient } = require('@aws-sdk/client-opensearchserverless');
       mockSend.mockResolvedValueOnce({
         collectionDetails: [{ name: 'test', status: 'ACTIVE' }],
       });
