@@ -3,6 +3,7 @@ import json
 import os
 from strands.tools import tool
 from tools.kb import kb_query, load_json_from_s3, save_json_to_s3, s3_get, s3_put
+from tools.converse_utils import extract_text
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import bedrock, AGENT_MODEL_ID
 
@@ -108,7 +109,7 @@ After the section content, add a final line in this exact format (do not omit it
         messages=[{'role': 'user', 'content': [{'text': user_message}]}],
         inferenceConfig={'maxTokens': 8192},
     )
-    return response['output']['message']['content'][0]['text']
+    return extract_text(response)
 
 
 @tool
@@ -234,7 +235,7 @@ Return JSON:
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
         inferenceConfig={'maxTokens': 2048},
     )
-    raw = response['output']['message']['content'][0]['text']
+    raw = extract_text(response)
     import re
     match = re.search(r'\{.*\}', raw, re.DOTALL)
     return json.loads(match.group(0)) if match else {}
@@ -430,7 +431,7 @@ Current defaults:
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
         inferenceConfig={'maxTokens': 2048},
     )
-    raw = response['output']['message']['content'][0]['text']
+    raw = extract_text(response)
     import re
     match = re.search(r'\{.*\}', raw, re.DOTALL)
     if not match:

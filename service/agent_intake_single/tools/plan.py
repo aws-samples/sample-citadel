@@ -3,6 +3,7 @@ import json
 import os
 from strands.tools import tool
 from tools.kb import s3_get, s3_put, load_json_from_s3, save_json_to_s3
+from tools.converse_utils import extract_text
 from tools.design import SECTION_KEY, RESOURCING_KEY, RESOURCING_INPUTS_KEY, SYSTEM_PROMPT, _assessment_summary, _rolling_summary
 from config import bedrock, AGENT_MODEL_ID
 
@@ -52,7 +53,7 @@ Write in markdown. Start with ## {section['title']}. Be specific and concise —
             messages=[{'role': 'user', 'content': [{'text': prompt}]}],
             inferenceConfig={'maxTokens': 4096},
         )
-        content = response['output']['message']['content'][0]['text']
+        content = extract_text(response)
         parts.append(content)
         parts.append("\n\n---\n\n")
 
@@ -206,7 +207,7 @@ Current config:
             inferenceConfig={'maxTokens': 256},
         )
         import re
-        raw = response['output']['message']['content'][0]['text']
+        raw = extract_text(response)
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         if match:
             config = json.loads(match.group(0))
