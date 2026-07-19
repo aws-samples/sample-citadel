@@ -35,7 +35,7 @@ export interface ProvisionResult {
 export interface ConnectionTestResult {
   success: boolean;
   message: string;
-  details?: Record<string, any>;
+  details?: Record<string, unknown>;
 }
 
 export interface MetricsResult {
@@ -81,44 +81,44 @@ export interface ConnectorAdapter {
   readonly spec: ConnectorSpec;
 
   requiredPolicies(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     accountId: string,
     region: string
   ): RequiredPolicies;
 
   testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult>;
 
   connect(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void>;
 
-  disconnect(config: Record<string, any>): Promise<void>;
+  disconnect(config: Record<string, unknown>): Promise<void>;
 
   /** DataStore-only: provision a new resource */
   provision?(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ProvisionResult>;
 
   /** DataStore-only: destroy a provisioned resource */
   deprovision?(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<void>;
 
   /** DataStore-only: get resource metrics */
   getMetrics?(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     resourceArn?: string
   ): Promise<MetricsResult>;
 
   /** Validate credentials and configuration against the spec */
   validate?(
-    credentials: any,
-    config: any
+    credentials: Record<string, unknown>,
+    config: Record<string, unknown>
   ): ValidationResult;
 }

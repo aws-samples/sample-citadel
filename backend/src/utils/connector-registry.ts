@@ -314,7 +314,8 @@ export function getConnectorSpec(type: string): ConnectorSpec | undefined {
 /**
  * Validate credentials against connector specification
  */
-export function validateCredentials(type: string, credentials: any): ValidationResult {
+export function validateCredentials(type: string, credentials: unknown): ValidationResult {
+  const creds = credentials as Record<string, unknown>;
   const spec = getConnectorSpec(type);
   
   if (!spec) {
@@ -329,13 +330,13 @@ export function validateCredentials(type: string, credentials: any): ValidationR
   // For CONFIGURABLE auth method (MCP_SERVER), only authMethod is required
   // Other fields are conditionally required based on authMethod value
   if (spec.authentication.method === AuthenticationMethod.CONFIGURABLE) {
-    if (!credentials.authMethod) {
+    if (!creds.authMethod) {
       errors.push('Missing required field: authMethod');
     } else {
       // Validate conditional fields based on authMethod
-      if (credentials.authMethod === 'API_KEY' && !credentials.apiKey) {
+      if (creds.authMethod === 'API_KEY' && !creds.apiKey) {
         errors.push('Missing required field: apiKey for API_KEY authentication');
-      } else if (credentials.authMethod === 'OAUTH2') {
+      } else if (creds.authMethod === 'OAUTH2') {
         const oauth2Result = validateMcpServerOauth2Config(credentials);
         if (!oauth2Result.valid) {
           errors.push(...oauth2Result.errors);
@@ -346,7 +347,7 @@ export function validateCredentials(type: string, credentials: any): ValidationR
   } else {
     // For other auth methods, all fields are required
     for (const field of spec.authentication.fields) {
-      if (!credentials[field]) {
+      if (!creds[field]) {
         errors.push(`Missing required field: ${field}`);
       }
     }
@@ -361,7 +362,8 @@ export function validateCredentials(type: string, credentials: any): ValidationR
 /**
  * Validate configuration against connector specification
  */
-export function validateConfiguration(type: string, config: any): ValidationResult {
+export function validateConfiguration(type: string, config: unknown): ValidationResult {
+  const cfg = config as Record<string, unknown>;
   const spec = getConnectorSpec(type);
   
   if (!spec) {
@@ -375,7 +377,7 @@ export function validateConfiguration(type: string, config: any): ValidationResu
   
   // Check all required configuration fields are present
   for (const field of spec.configuration.required) {
-    if (!config[field]) {
+    if (!cfg[field]) {
       errors.push(`Missing required field: ${field}`);
     }
   }
@@ -444,11 +446,12 @@ function isHttpsUrl(value: unknown): boolean {
  *     (defaults to CLIENT_SECRET_BASIC on the normalized output when omitted)
  */
 export function validateMcpServerOauth2Config(
-  creds: any
+  credentials: unknown
 ): McpServerOauth2ValidationResult {
-  if (!creds || typeof creds !== 'object') {
+  if (!credentials || typeof credentials !== 'object') {
     return { valid: false, errors: ['Credentials must be an object'] };
   }
+  const creds = credentials as Record<string, unknown>;
 
   const errors: string[] = [];
 
@@ -542,19 +545,19 @@ export function validateMcpServerOauth2Config(
   const normalized: McpServerOauth2Config = {
     authMethod: 'OAUTH2',
     grantType: grantType as McpServerGrantType,
-    clientId: creds.clientId,
-    clientSecret: creds.clientSecret,
-    scopes: [...creds.scopes],
+    clientId: creds.clientId as string,
+    clientSecret: creds.clientSecret as string,
+    scopes: [...(creds.scopes as string[])],
     clientAuthenticationMethod
   };
   if (hasDiscovery) {
-    normalized.discoveryUrl = creds.discoveryUrl;
+    normalized.discoveryUrl = creds.discoveryUrl as string;
   }
   if (hasToken) {
-    normalized.tokenUrl = creds.tokenUrl;
+    normalized.tokenUrl = creds.tokenUrl as string;
   }
   if (hasAuthorization) {
-    normalized.authorizationUrl = creds.authorizationUrl;
+    normalized.authorizationUrl = creds.authorizationUrl as string;
   }
 
   return { valid: true, errors: [], normalized };

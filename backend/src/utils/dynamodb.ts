@@ -14,7 +14,7 @@ export interface PaginatedResult<T> {
   nextToken?: string;
 }
 
-export async function getItem<T extends Record<string, any>>(tableName: string, key: Record<string, any>): Promise<T | null> {
+export async function getItem<T extends Record<string, unknown>>(tableName: string, key: Record<string, unknown>): Promise<T | null> {
   try {
     const command = new GetCommand({
       TableName: tableName,
@@ -29,7 +29,7 @@ export async function getItem<T extends Record<string, any>>(tableName: string, 
   }
 }
 
-export async function putItem<T extends Record<string, any>>(tableName: string, item: T): Promise<void> {
+export async function putItem<T extends Record<string, unknown>>(tableName: string, item: T): Promise<void> {
   try {
     const command = new PutCommand({
       TableName: tableName,
@@ -43,12 +43,12 @@ export async function putItem<T extends Record<string, any>>(tableName: string, 
   }
 }
 
-export async function updateItem<T extends Record<string, any>>(
+export async function updateItem<T extends Record<string, unknown>>(
   tableName: string,
-  key: Record<string, any>,
+  key: Record<string, unknown>,
   updateExpression: string,
   expressionAttributeNames?: Record<string, string>,
-  expressionAttributeValues?: Record<string, any>
+  expressionAttributeValues?: Record<string, unknown>
 ): Promise<T> {
   try {
     const command = new UpdateCommand({
@@ -68,7 +68,7 @@ export async function updateItem<T extends Record<string, any>>(
   }
 }
 
-export async function deleteItem(tableName: string, key: Record<string, any>): Promise<void> {
+export async function deleteItem(tableName: string, key: Record<string, unknown>): Promise<void> {
   try {
     const command = new DeleteCommand({
       TableName: tableName,
@@ -82,10 +82,10 @@ export async function deleteItem(tableName: string, key: Record<string, any>): P
   }
 }
 
-export async function queryItems<T extends Record<string, any>>(
+export async function queryItems<T extends Record<string, unknown>>(
   tableName: string,
   keyConditionExpression: string,
-  expressionAttributeValues: Record<string, any>,
+  expressionAttributeValues: Record<string, unknown>,
   options?: PaginationOptions & {
     indexName?: string;
     filterExpression?: string;
@@ -118,12 +118,12 @@ export async function queryItems<T extends Record<string, any>>(
   }
 }
 
-export async function scanItems<T extends Record<string, any>>(
+export async function scanItems<T extends Record<string, unknown>>(
   tableName: string,
   options?: PaginationOptions & {
     filterExpression?: string;
     expressionAttributeNames?: Record<string, string>;
-    expressionAttributeValues?: Record<string, any>;
+    expressionAttributeValues?: Record<string, unknown>;
   }
 ): Promise<PaginatedResult<T>> {
   try {
@@ -148,14 +148,14 @@ export async function scanItems<T extends Record<string, any>>(
   }
 }
 
-export function buildUpdateExpression(updates: Record<string, any>): {
+export function buildUpdateExpression(updates: Record<string, unknown>): {
   updateExpression: string;
   expressionAttributeNames: Record<string, string>;
-  expressionAttributeValues: Record<string, any>;
+  expressionAttributeValues: Record<string, unknown>;
 } {
   const setExpressions: string[] = [];
   const expressionAttributeNames: Record<string, string> = {};
-  const expressionAttributeValues: Record<string, any> = {};
+  const expressionAttributeValues: Record<string, unknown> = {};
 
   Object.entries(updates).forEach(([key, value]) => {
     const nameKey = `#${key}`;

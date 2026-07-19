@@ -314,7 +314,7 @@ describe('AgentCore Validation - Property-Based Tests', () => {
           ),
           (nonString) => {
             // Property: Non-string input should throw
-            expect(() => validateToolSchemaJSON(nonString as any)).toThrow(ValidationError);
+            expect(() => validateToolSchemaJSON(nonString as never)).toThrow(ValidationError);
             
             return true;
           }
@@ -391,7 +391,7 @@ describe('AgentCore Validation - Property-Based Tests', () => {
           ),
           (nonString) => {
             // Property: Non-string input should throw
-            expect(() => validateAWSRegion(nonString as any)).toThrow(ValidationError);
+            expect(() => validateAWSRegion(nonString as never)).toThrow(ValidationError);
             
             return true;
           }
@@ -494,7 +494,7 @@ describe('AgentCore Validation - Property-Based Tests', () => {
           ),
           (nonString) => {
             // Property: Non-string input should throw
-            expect(() => validateHTTPSUrl(nonString as any)).toThrow(ValidationError);
+            expect(() => validateHTTPSUrl(nonString as never)).toThrow(ValidationError);
             
             return true;
           }

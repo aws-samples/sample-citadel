@@ -37,14 +37,14 @@ export class BaseIntegrationAdapter implements ConnectorAdapter {
   }
 
   requiredPolicies(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     accountId: string,
     region: string
   ): RequiredPolicies {
     const connect = computeIntegrationPolicies(
-      config.integrationId || '',
+      (config.integrationId as string | undefined) || '',
       this.spec.type,
-      config,
+      config as Parameters<typeof computeIntegrationPolicies>[2],
       accountId,
       region
     );
@@ -52,8 +52,8 @@ export class BaseIntegrationAdapter implements ConnectorAdapter {
   }
 
   async testConnection(
-    _config: Record<string, any>,
-    _credentials?: Record<string, any>
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     // Fail loudly for any connector type that has not provided a real
     // implementation. Previously this returned `{ success: true, message: '...
@@ -64,17 +64,20 @@ export class BaseIntegrationAdapter implements ConnectorAdapter {
   }
 
   async connect(
-    _config: Record<string, any>,
-    _credentials?: Record<string, any>
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<void> {
     // Default no-op; integrations connect via EventBridge events
   }
 
-  async disconnect(_config: Record<string, any>): Promise<void> {
+  async disconnect(_config: Record<string, unknown>): Promise<void> {
     // Default no-op
   }
 
-  validate(credentials: any, config: any): ValidationResult {
+  validate(
+    credentials: Record<string, unknown> | undefined,
+    config: Record<string, unknown> | undefined
+  ): ValidationResult {
     const errors: string[] = [];
     const auth = this.spec.authentication;
 

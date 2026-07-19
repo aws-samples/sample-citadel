@@ -7,9 +7,12 @@ const cognitoClient = new CognitoIdentityProviderClient({});
  *  - `identity['custom:organization']` (Cognito user pool auth mode)
  *  - `identity.claims['custom:organization']` (some proxy/IAM modes)
  */
-function readClaim(event: any, name: string): string | undefined {
-  const identity = event?.identity || {};
-  return identity[name] ?? identity.claims?.[name];
+type IdentityBag = Record<string, unknown> & { claims?: Record<string, unknown> | null };
+type EventWithIdentity = { identity?: IdentityBag | null } | null | undefined;
+
+function readClaim(event: unknown, name: string): string | undefined {
+  const identity: IdentityBag = (event as EventWithIdentity)?.identity || {};
+  return (identity[name] ?? identity.claims?.[name]) as string | undefined;
 }
 
 /**
@@ -24,12 +27,12 @@ function readClaim(event: any, name: string): string | undefined {
  * api-key auth). Callers are responsible for deciding whether null means
  * "deny" or "allow through".
  */
-export async function extractOrgFromEvent(event: any): Promise<string | null> {
+export async function extractOrgFromEvent(event: unknown): Promise<string | null> {
   const claimOrg = readClaim(event, 'custom:organization');
   if (claimOrg) return claimOrg;
 
-  const identity = event?.identity || {};
-  const userId = identity.sub || identity.username;
+  const identity: IdentityBag = (event as EventWithIdentity)?.identity || {};
+  const userId = (identity.sub || identity.username) as string | undefined;
   if (!userId) return null;
 
   const userPoolId = process.env.USER_POOL_ID;
@@ -56,7 +59,7 @@ export async function extractOrgFromEvent(event: any): Promise<string | null> {
  * mode: a JS array under standard JWT decoding, but some proxies/auth modes
  * flatten it to a comma-separated string. Both shapes are tolerated.
  */
-export function isAdminFromEvent(event: any): boolean {
+export function isAdminFromEvent(event: unknown): boolean {
   // Path 1: explicit custom:role claim equals 'admin'.
   if (readClaim(event, 'custom:role') === 'admin') return true;
 
@@ -92,7 +95,7 @@ export function isAdminFromEvent(event: any): boolean {
  * "admin OR <role>" semantics should compose
  * `isAdminFromEvent(event) || hasRoleFromEvent(event, role)`.
  */
-export function hasRoleFromEvent(event: any, role: string): boolean {
+export function hasRoleFromEvent(event: unknown, role: string): boolean {
   // Path 1: explicit custom:role claim equals the requested role.
   if (readClaim(event, 'custom:role') === role) return true;
 

@@ -47,10 +47,10 @@ describe('BaseIntegrationAdapter', () => {
       try {
         await adapter.testConnection({});
         fail('Expected NotImplementedError');
-      } catch (err: any) {
+      } catch (err: unknown) {
         expect(err).toBeInstanceOf(NotImplementedError);
-        expect(err.message).toContain('TEST_INT');
-        expect(err.message).toContain('testConnection');
+        expect((err as Error).message).toContain('TEST_INT');
+        expect((err as Error).message).toContain('testConnection');
       }
     });
 
@@ -58,8 +58,8 @@ describe('BaseIntegrationAdapter', () => {
       try {
         await adapter.testConnection({});
         fail('Expected NotImplementedError');
-      } catch (err: any) {
-        expect(err.name).toBe('NotImplementedError');
+      } catch (err: unknown) {
+        expect((err as Error).name).toBe('NotImplementedError');
       }
     });
 
@@ -71,8 +71,8 @@ describe('BaseIntegrationAdapter', () => {
       try {
         await confluenceAdapter.testConnection({});
         fail('Expected NotImplementedError');
-      } catch (err: any) {
-        expect(err.message).toContain('CONFLUENCE');
+      } catch (err: unknown) {
+        expect((err as Error).message).toContain('CONFLUENCE');
       }
     });
   });
@@ -80,8 +80,8 @@ describe('BaseIntegrationAdapter', () => {
   describe('subclasses overriding testConnection still work', () => {
     class WorkingIntegrationAdapter extends BaseIntegrationAdapter {
       async testConnection(
-        _config: Record<string, any>,
-        _credentials?: Record<string, any>
+        _config: Record<string, unknown>,
+        _credentials?: Record<string, unknown>
       ): Promise<ConnectionTestResult> {
         return { success: true, message: 'overridden' };
       }

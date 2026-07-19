@@ -26,7 +26,7 @@ export function computeIntegrationPolicies(
     secretArn?: string;
     ssmParameterPrefix?: string;
     gatewayTargetId?: string;
-    config?: Record<string, any>;
+    config?: Record<string, unknown>;
   },
   accountId: string,
   region: string
@@ -67,7 +67,7 @@ export function computeIntegrationPolicies(
   if (integrationType === 'AWS_LAMBDA' && context.config?.lambdaArn) {
     policies.push({
       actions: ['lambda:InvokeFunction'],
-      resources: [context.config.lambdaArn],
+      resources: [context.config.lambdaArn as string],
     });
   }
 

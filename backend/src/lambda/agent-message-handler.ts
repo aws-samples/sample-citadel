@@ -86,7 +86,10 @@ function getAgentSourceRegistry(): AgentSourceAdapterRegistry {
 function buildImportRegistry(
   credentialProvider?: InvokeCredentials,
 ): AgentSourceAdapterRegistry {
+  // Lazy require keeps credential-manager out of the cold-start path — hoisting to a
+  // top-level import would load it on every invocation. User-approved suppression (2026-07-19).
   const { getAgentInvocationSecret } =
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     require("../utils/credential-manager") as typeof import("../utils/credential-manager");
   return buildDefaultAgentSourceRegistry({
     resolveSecret: (ref: string) => getAgentInvocationSecret(ref),

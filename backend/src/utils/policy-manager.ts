@@ -22,7 +22,7 @@ import { PermissionError } from '../adapters/errors';
 
 export type PolicyScope = 'datastore' | 'integration' | 'agent';
 
-export interface ScopedCredentials {
+export type ScopedCredentials = {
   accessKeyId: string;
   secretAccessKey: string;
   sessionToken: string;
@@ -57,7 +57,7 @@ export class PolicyManager {
     return { accountId, region: typeof region === 'string' ? region : 'us-east-1' };
   }
 
-  private static isScope(value: any): value is PolicyScope {
+  private static isScope(value: unknown): value is PolicyScope {
     return value === 'datastore' || value === 'integration' || value === 'agent';
   }
 
@@ -127,9 +127,10 @@ export class PolicyManager {
           { Key: 'Scope', Value: scope },
         ],
       }));
-    } catch (error: any) {
-      if (error.name !== 'EntityAlreadyExistsException') {
-        throw new PermissionError(`Failed to create IAM role ${roleName}: ${error.message}`, error);
+    } catch (error: unknown) {
+      const err = error as Error;
+      if (err.name !== 'EntityAlreadyExistsException') {
+        throw new PermissionError(`Failed to create IAM role ${roleName}: ${err.message}`, err);
       }
     }
 
@@ -140,8 +141,9 @@ export class PolicyManager {
         PolicyName: INLINE_POLICY_NAME,
         PolicyDocument: JSON.stringify(policyDocument),
       }));
-    } catch (error: any) {
-      throw new PermissionError(`Failed to attach policy to role ${roleName}: ${error.message}`, error);
+    } catch (error: unknown) {
+      const err = error as Error;
+      throw new PermissionError(`Failed to attach policy to role ${roleName}: ${err.message}`, err);
     }
   }
 
@@ -214,17 +216,19 @@ export class PolicyManager {
         RoleName: roleName,
         PolicyName: INLINE_POLICY_NAME,
       }));
-    } catch (error: any) {
-      if (error.name !== 'NoSuchEntityException') {
-        throw new PermissionError(`Failed to delete policy from role ${roleName}: ${error.message}`, error);
+    } catch (error: unknown) {
+      const err = error as Error;
+      if (err.name !== 'NoSuchEntityException') {
+        throw new PermissionError(`Failed to delete policy from role ${roleName}: ${err.message}`, err);
       }
     }
 
     try {
       await this.iamClient.send(new DeleteRoleCommand({ RoleName: roleName }));
-    } catch (error: any) {
-      if (error.name !== 'NoSuchEntityException') {
-        throw new PermissionError(`Failed to delete IAM role ${roleName}: ${error.message}`, error);
+    } catch (error: unknown) {
+      const err = error as Error;
+      if (err.name !== 'NoSuchEntityException') {
+        throw new PermissionError(`Failed to delete IAM role ${roleName}: ${err.message}`, err);
       }
     }
   }
@@ -242,8 +246,8 @@ export class PolicyManager {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         return await fn();
-      } catch (error: any) {
-        lastError = error;
+      } catch (error: unknown) {
+        lastError = error as Error;
         if (attempt < maxRetries) {
           const delay = baseDelayMs * Math.pow(2, attempt);
           await new Promise((resolve) => setTimeout(resolve, delay));
@@ -253,7 +257,7 @@ export class PolicyManager {
     throw lastError;
   }
 
-  static buildPolicyDocument(policies: PolicyStatement[]): Record<string, any> {
+  static buildPolicyDocument(policies: PolicyStatement[]): Record<string, unknown> {
     return {
       Version: '2012-10-17',
       Statement: policies.map((p) => ({

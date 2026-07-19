@@ -7,7 +7,12 @@ export class ValidationError extends Error {
   }
 }
 
-export function validateProjectInput(input: any): void {
+export function validateProjectInput(rawInput: unknown): void {
+  const input = rawInput as {
+    name?: string;
+    description?: string;
+    requirements?: string;
+  };
   if (!input.name || typeof input.name !== 'string') {
     throw new ValidationError('Project name is required and must be a string', 'name');
   }
@@ -78,7 +83,8 @@ export function sanitizeString(input: string, maxLength: number = 1000): string 
   return escaped.trim().substring(0, maxLength);
 }
 
-export function validatePaginationInput(input: any): void {
+export function validatePaginationInput(rawInput: unknown): void {
+  const input = rawInput as { limit?: number; nextToken?: string };
   if (input.limit && (typeof input.limit !== 'number' || input.limit < 1 || input.limit > 100)) {
     throw new ValidationError('Limit must be a number between 1 and 100', 'limit');
   }
@@ -88,7 +94,8 @@ export function validatePaginationInput(input: any): void {
   }
 }
 
-export function validateS3Object(s3Object: any): void {
+export function validateS3Object(rawS3Object: unknown): void {
+  const s3Object = rawS3Object as { bucket?: string; key?: string; region?: string };
   if (!s3Object.bucket || typeof s3Object.bucket !== 'string') {
     throw new ValidationError('S3 bucket is required and must be a string', 'bucket');
   }
@@ -170,12 +177,17 @@ export function validateToolSchemaJSON(jsonString: string): void {
   }
 
   // Validate JSON syntax
-  let schema: any;
+  let parsed: unknown;
   try {
-    schema = JSON.parse(jsonString);
+    parsed = JSON.parse(jsonString);
   } catch (error) {
     throw new ValidationError('Tool schema must be valid JSON', 'toolSchema');
   }
+  const schema = parsed as {
+    name?: string;
+    description?: string;
+    inputSchema?: { type?: string };
+  };
 
   // Ensure schema is an object (not null, array, or primitive)
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {

@@ -49,9 +49,13 @@ export class ConnectionTesterIntegrationAdapter extends BaseIntegrationAdapter {
    * value is returned unchanged.
    */
   async testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
-    return runConnectionTest(this.spec.type, credentials, config);
+    return runConnectionTest(
+      this.spec.type,
+      credentials as Parameters<typeof runConnectionTest>[1],
+      config as Parameters<typeof runConnectionTest>[2]
+    );
   }
 }
