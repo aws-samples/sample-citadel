@@ -160,6 +160,55 @@ def _internal_update_progress(session_id: str, phase: str, progress: int, change
     return f"{phase} progress: {progress}%"
 
 
+# Post-fabrication flow marker (design: resumable, consent-gated state machine).
+# Stored as a single JSON string attribute so a corrupt payload degrades to
+# "no marker" (failure mode 17) instead of poisoning every read.
+POSTFAB_SORT_KEY = 'intake:postfab'
+
+
+def get_postfab_marker(session_id: str) -> dict:
+    """Read the intake:postfab marker for a session.
+
+    Returns {} when absent, unreadable, or corrupt — callers treat that as a
+    fresh flow and re-derive from live queries. Never raises.
+    """
+    try:
+        resp = _table().get_item(Key={'p_key': session_id, 's_key': POSTFAB_SORT_KEY})
+        item = resp.get('Item')
+        if not item:
+            return {}
+        marker = json.loads(item.get('marker') or '{}')
+        return marker if isinstance(marker, dict) else {}
+    except Exception as e:
+        logger.warning('postfab marker read failed for %s: %s', session_id, e)
+        return {}
+
+
+def set_postfab_marker(session_id: str, **updates) -> dict:
+    """Merge ``updates`` into the intake:postfab marker and persist it.
+
+    Best-effort write (the governed mutation that preceded it is the durable
+    unit of work); always stamps updatedAt and invalidates the cached Agent so
+    the baked-in stage stays current. Returns the merged marker.
+    """
+    marker = get_postfab_marker(session_id)
+    marker.update(updates)
+    marker['updatedAt'] = datetime.now().isoformat() + 'Z'
+    try:
+        _table().put_item(Item={
+            'p_key': session_id,
+            's_key': POSTFAB_SORT_KEY,
+            'marker': json.dumps(marker),
+        })
+    except Exception as e:
+        logger.warning('postfab marker write failed for %s: %s', session_id, e)
+    try:
+        _invalidate_agent_cache(session_id)
+    except Exception as e:
+        logger.warning('Cache invalidation failed for session %s: %s', session_id, e)
+    return marker
+
+
 def _invalidate_agent_cache(session_id: str) -> None:
     """Evict the session's cached Agent so its baked-in progress is rebuilt.
 

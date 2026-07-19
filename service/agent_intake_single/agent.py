@@ -35,7 +35,11 @@ from tools.design import (
 )
 from tools.plan import generate_business_plan, generate_commercial_plan, get_planning_doc, update_planning_doc
 from tools.fabricate import plan_fabrication, confirm_fabrication_plan, list_factory_agents
-from tools.state import get_intake_state, update_intake_progress
+from tools.postfab import (
+    check_fabrication_status, activate_agents, create_agent_app,
+    generate_process_blueprint, import_blueprint_to_app,
+)
+from tools.state import get_intake_state, update_intake_progress, get_postfab_marker
 from tools.kb import kb_query as _kb_query
 from strands.tools import tool
 
@@ -159,6 +163,27 @@ If the user wants to build / deploy the agents from the technical design:
 If the user asks what agents have been built or what's in the factory:
   Call list_factory_agents() and present the results.
 
+--- PHASE 8: POST-FABRICATION (activation → app → blueprint → workflow) ---
+
+A fabrication is "in flight" whenever implementation has started and the post-fabrication state above is not 'workflow_imported' or 'done'. While in flight, at the START of every turn call check_fabrication_status(session_id="{session_id}") BEFORE replying, and act on the result. You cannot receive push notifications — polling on each turn is how you detect completion. Never promise unprompted follow-up such as "I'll let you know" — always invite the user to ask ("check back with me any time").
+
+Each post-fabrication tool returns JSON with a 'summary', a 'consent_question', and an 'actions' list. Relay the summary conversationally, ask the consent question, and render the actions as the actions block. In this phase, action labels are verb-first with NO emojis; "Not now" defers, "Stop here" ends the flow.
+
+Progression (NEVER skip a step, NEVER auto-proceed — always end with the actions block and wait for the user's explicit choice; a decline means stop, and deferring with "Not now" is always allowed):
+
+1) check_fabrication_status: while agents are building, report progress. When it reports all agents terminal, OFFER activation. A partial success is still success — offer to activate the ones that built, and keep the failed ones for review.
+2) On explicit confirm → activate_agents(session_id="{session_id}"). Report per-agent results (activated / already active / failed). If it reports nothing could be matched to this session, relay that explanation and stop — do not invent a workaround.
+3) Once activated → call create_agent_app(session_id="{session_id}") with NO confirmed_name first: it returns a proposed name from the project. Present the proposal and let the user confirm or rename; only then call create_agent_app(session_id="{session_id}", confirmed_name=<their chosen name>).
+4) Once the app exists → on confirm call generate_process_blueprint(session_id="{session_id}"). If it reports the agents are still being set up, relay that and offer "Try again" — the button IS the retry; never claim you will retry on your own.
+5) Once the blueprint is published → on confirm call import_blueprint_to_app(session_id="{session_id}"). The imported workflow is a draft in the app's Workflows tab for the user to review and publish on the canvas.
+
+Copy rules for this phase:
+- Every completion: say what changed and where to see it (Apps list, agent list, Workflows tab, canvas).
+- Every failure: say what succeeded, what didn't, ONE plain-language reason, and ONE recommended next action. Never surface raw error text, status codes, or enums.
+- One question per turn. Never label a decline as destructive.
+- The flow is resumable: the tools tell you what is already done — state it plainly and resume from the next step. Re-running a completed step is safe.
+- Never mention tool names, field keys, agent IDs, or record IDs to the user.
+
 --- INTERACTIVE RESPONSES ---
 
 When you need the user to choose between options (yes/no, select a value, confirm/reject), include an actions block at the END of your message using this exact format:
@@ -213,12 +238,14 @@ def get_agent(session_id: str) -> Agent:
     if session_id not in _agent_cache:
         # Load current state to bake into system prompt
         state = json.loads(get_intake_state(session_id=session_id))
+        postfab_stage = get_postfab_marker(session_id).get('stage') or 'not_started'
         state_summary = (
             f"Current phase: {state['phase']} | "
             f"Assessment: {state['assessment_progress']}% | "
             f"Design: {state['design_progress']}% | "
             f"Planning: {state['planning_progress']}% | "
-            f"Implementation: {state['implementation_progress']}%"
+            f"Implementation: {state['implementation_progress']}% | "
+            f"Post-fabrication: {postfab_stage}"
         )
         _agent_cache[session_id] = Agent(
             model=AGENT_MODEL,
@@ -249,6 +276,11 @@ def get_agent(session_id: str) -> Agent:
                 plan_fabrication,
                 confirm_fabrication_plan,
                 list_factory_agents,
+                check_fabrication_status,
+                activate_agents,
+                create_agent_app,
+                generate_process_blueprint,
+                import_blueprint_to_app,
             ],
             system_prompt=SYSTEM_PROMPT.format(session_id=session_id, state_summary=state_summary),
         )
