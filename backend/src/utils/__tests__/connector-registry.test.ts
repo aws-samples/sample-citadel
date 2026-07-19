@@ -154,7 +154,7 @@ describe('Connector Registry - Property-Based Tests', () => {
             const spec = getConnectorSpec(connectorType);
             
             // Build valid credentials
-            const validCredentials: Record<string, any> = {};
+            const validCredentials: Record<string, unknown> = {};
             for (const field of spec!.authentication.fields) {
               validCredentials[field] = `test-${field}-value`;
             }
@@ -193,7 +193,7 @@ describe('Connector Registry - Property-Based Tests', () => {
             }
             
             // Build credentials missing one required field
-            const incompleteCredentials: Record<string, any> = {};
+            const incompleteCredentials: Record<string, unknown> = {};
             for (let i = 0; i < spec!.authentication.fields.length - 1; i++) {
               const field = spec!.authentication.fields[i];
               incompleteCredentials[field] = `test-${field}-value`;
@@ -219,7 +219,7 @@ describe('Connector Registry - Property-Based Tests', () => {
             const spec = getConnectorSpec(connectorType);
             
             // Build valid configuration
-            const validConfig: Record<string, any> = {};
+            const validConfig: Record<string, unknown> = {};
             for (const field of spec!.configuration.required) {
               validConfig[field] = `test-${field}-value`;
             }
@@ -249,7 +249,7 @@ describe('Connector Registry - Property-Based Tests', () => {
             }
             
             // Build configuration missing one required field
-            const incompleteConfig: Record<string, any> = {};
+            const incompleteConfig: Record<string, unknown> = {};
             for (let i = 0; i < spec!.configuration.required.length - 1; i++) {
               const field = spec!.configuration.required[i];
               incompleteConfig[field] = `test-${field}-value`;

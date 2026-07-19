@@ -11,7 +11,7 @@ interface LogContext {
   projectId?: string;
   agentId?: string;
   correlationId?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 interface LogEntry extends LogContext {
@@ -132,10 +132,15 @@ class Logger {
 export const logger = new Logger();
 
 // Helper function to create context from Lambda event
-export function createLogContext(event: any): LogContext {
+export function createLogContext(event: unknown): LogContext {
+  const e = event as {
+    requestContext?: { requestId?: string };
+    identity?: { sub?: string; username?: string };
+    arguments?: { correlationId?: string };
+  };
   return {
-    requestId: event.requestContext?.requestId,
-    userId: event.identity?.sub || event.identity?.username,
-    correlationId: event.arguments?.correlationId,
+    requestId: e.requestContext?.requestId,
+    userId: e.identity?.sub || e.identity?.username,
+    correlationId: e.arguments?.correlationId,
   };
 }

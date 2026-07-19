@@ -36,18 +36,20 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
      * Serialize configuration to backend format
      * This simulates what happens when storing credentials and config
      */
+    type ConfigBag = Record<string, unknown>;
+
     function serializeConfiguration(
       connectorType: string,
-      credentials: any,
-      config: any
-    ): { secretData: any; ssmData: any } {
+      credentials: ConfigBag,
+      config: ConfigBag
+    ): { secretData: ConfigBag; ssmData: ConfigBag } {
       const spec = getConnectorSpec(connectorType);
       if (!spec) {
         throw new Error(`Unknown connector type: ${connectorType}`);
       }
 
       // Build secret value (what goes into Secrets Manager)
-      const secretData: Record<string, any> = {};
+      const secretData: Record<string, unknown> = {};
       
       // Add authentication fields
       for (const field of spec.authentication.fields) {
@@ -64,7 +66,7 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
       }
 
       // Build SSM data (what goes into SSM Parameter Store)
-      const ssmData: Record<string, any> = {};
+      const ssmData: Record<string, unknown> = {};
       
       for (const paramName of spec.configuration.ssmParameters) {
         // Convert param-name to paramName (camelCase)
@@ -86,16 +88,16 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
      */
     function deserializeConfiguration(
       connectorType: string,
-      secretData: any,
-      ssmData: any
-    ): { credentials: any; config: any } {
+      secretData: ConfigBag,
+      ssmData: ConfigBag
+    ): { credentials: ConfigBag; config: ConfigBag } {
       const spec = getConnectorSpec(connectorType);
       if (!spec) {
         throw new Error(`Unknown connector type: ${connectorType}`);
       }
 
       // Extract credentials from secret data
-      const credentials: Record<string, any> = {};
+      const credentials: Record<string, unknown> = {};
       for (const field of spec.authentication.fields) {
         if (secretData[field] !== undefined) {
           credentials[field] = secretData[field];
@@ -103,7 +105,7 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
       }
 
       // Extract configuration from both secret data and SSM data
-      const config: Record<string, any> = {};
+      const config: Record<string, unknown> = {};
       
       // Get config fields from secret data
       for (const configField of spec.configuration.required) {
@@ -129,8 +131,8 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
      * Handles the case where SSM parameter names might be in different formats
      */
     function areConfigurationsEquivalent(
-      original: { credentials: any; config: any },
-      roundtrip: { credentials: any; config: any },
+      original: { credentials: ConfigBag; config: ConfigBag },
+      roundtrip: { credentials: ConfigBag; config: ConfigBag },
       connectorType: string
     ): boolean {
       const spec = getConnectorSpec(connectorType);
@@ -179,13 +181,13 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             }
 
             // Generate valid credentials
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               credentials[field] = `test-${field}-${Math.random().toString(36).substring(7)}`;
             }
 
             // Generate valid configuration
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             for (const field of spec.configuration.required) {
               // If this field is also in authentication fields, use the same value
               if (spec.authentication.fields.includes(field)) {
@@ -250,13 +252,13 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             }
 
             // Generate valid credentials
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               credentials[field] = `test-${field}-value`;
             }
 
             // Generate only required configuration (no optional fields)
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             for (const field of spec.configuration.required) {
               config[field] = `test-${field}-value`;
             }
@@ -300,14 +302,14 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             }
 
             // Generate credentials with various data types
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               // Use string values as per the secret structure
               credentials[field] = `test-${field}-value`;
             }
 
             // Generate config with various data types
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             for (const field of spec.configuration.required) {
               config[field] = `test-${field}-value`;
             }
@@ -421,13 +423,13 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             }
 
             // Generate credentials
-            const credentials: Record<string, any> = {};
+            const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
               credentials[field] = `cred-${field}-value`;
             }
 
             // Generate config including fields that go into secret
-            const config: Record<string, any> = {};
+            const config: Record<string, unknown> = {};
             for (const field of spec.configuration.required) {
               config[field] = `config-${field}-value`;
             }

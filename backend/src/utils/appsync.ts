@@ -3,7 +3,7 @@ import { AppSyncResolverEvent, AppSyncIdentityIAM, AppSyncIdentityCognito, AppSy
 /**
  * Extracts the field name from an AppSync resolver event
  */
-export function getFieldName(event: AppSyncResolverEvent<any, any>): string {
+export function getFieldName(event: AppSyncResolverEvent<unknown, unknown>): string {
   return event.info.fieldName;
 }
 
@@ -46,27 +46,27 @@ export function getUserId(identity: AppSyncIdentityIAM | AppSyncIdentityCognito 
 /**
  * Type guard to check if identity is Cognito User Pool
  */
-export function isCognitoUserPoolIdentity(identity: any): identity is AppSyncIdentityCognito {
-  return identity && 'sub' in identity;
+export function isCognitoUserPoolIdentity(identity: unknown): identity is AppSyncIdentityCognito {
+  return !!identity && 'sub' in (identity as object);
 }
 
 /**
  * Type guard to check if identity is IAM
  */
-export function isIAMIdentity(identity: any): identity is AppSyncIdentityIAM {
-  return identity && 'userArn' in identity;
+export function isIAMIdentity(identity: unknown): identity is AppSyncIdentityIAM {
+  return !!identity && 'userArn' in (identity as object);
 }
 
 /**
  * Type guard to check if identity is OIDC
  */
-export function isOIDCIdentity(identity: any): identity is AppSyncIdentityOIDC {
-  return identity && 'claims' in identity;
+export function isOIDCIdentity(identity: unknown): identity is AppSyncIdentityOIDC {
+  return !!identity && 'claims' in (identity as object);
 }
 
 /**
  * Type guard to check if identity is Lambda authorizer
  */
-export function isLambdaIdentity(identity: any): identity is AppSyncIdentityLambda {
-  return identity && 'resolverContext' in identity;
+export function isLambdaIdentity(identity: unknown): identity is AppSyncIdentityLambda {
+  return !!identity && 'resolverContext' in (identity as object);
 }

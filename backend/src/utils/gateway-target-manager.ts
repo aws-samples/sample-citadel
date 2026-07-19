@@ -32,6 +32,8 @@ import {
   CreateGatewayTargetCommandInput,
   DeleteGatewayTargetCommand,
   GetGatewayTargetCommand,
+  GetGatewayTargetCommandOutput,
+  OAuthCredentialProvider,
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import type { McpServerOauth2Config } from './connector-registry';
 import {
@@ -51,8 +53,8 @@ import { discoverOAuthEndpoints } from './oauth-metadata';
 export interface GatewayTargetConfig {
   gatewayId: string;
   targetType: 'lambda' | 'smithyModel' | 'mcpServer';
-  targetPayload: any;
-  credentials?: any;
+  targetPayload: unknown;
+  credentials?: unknown;
 }
 
 export interface ToolSchema {
@@ -60,7 +62,7 @@ export interface ToolSchema {
   description: string;
   inputSchema: {
     type: string;
-    properties?: Record<string, any>;
+    properties?: Record<string, unknown>;
     required?: string[];
   };
 }
@@ -81,7 +83,7 @@ export interface ToolSchema {
  */
 export interface BuildTargetPayloadInput {
   integrationId: string;
-  config: any;
+  config: Record<string, unknown> | null | undefined;
   /** Required for MCP_SERVER (API_KEY or OAUTH2). Ignored by Lambda/Smithy. */
   credentialProviderArn?: string;
   /** Required for MCP_SERVER. Ignored by Lambda/Smithy. */
@@ -101,7 +103,12 @@ export interface BuildTargetPayloadInput {
 /**
  * Validate tool schema structure.
  */
-export function validateToolSchema(schema: any): void {
+export function validateToolSchema(schema: {
+  name?: unknown;
+  description?: unknown;
+  inputSchema?: { type?: unknown; [key: string]: unknown } | null;
+  [key: string]: unknown;
+}): void {
   if (!schema.name || typeof schema.name !== 'string') {
     throw new Error('Tool schema must include "name" field');
   }
@@ -201,15 +208,16 @@ export async function resolveOauth2Endpoints(
 export async function provisionCredentialProvider(
   integrationId: string,
   type: 'API_KEY' | 'OAUTH2',
-  credentials: any,
+  credentials: unknown,
 ): Promise<CredentialProviderResult> {
   if (type === 'API_KEY') {
-    if (!credentials || typeof credentials.apiKey !== 'string' || credentials.apiKey.length === 0) {
+    const apiKey = (credentials as { apiKey?: unknown } | null | undefined)?.apiKey;
+    if (!credentials || typeof apiKey !== 'string' || apiKey.length === 0) {
       throw new Error('provisionCredentialProvider(API_KEY): credentials.apiKey is required');
     }
     return createOrUpsertApiKeyProvider({
       integrationId,
-      apiKey: credentials.apiKey,
+      apiKey,
     });
   }
 
@@ -264,7 +272,7 @@ export function buildLambdaTargetPayload(
   input: BuildTargetPayloadInput,
 ): CreateGatewayTargetCommandInput {
   const config = input.config ?? {};
-  const toolSchema = JSON.parse(config.toolSchema);
+  const toolSchema = JSON.parse(config.toolSchema as string);
   validateToolSchema(toolSchema);
 
   return {
@@ -273,13 +281,13 @@ export function buildLambdaTargetPayload(
     targetConfiguration: {
       mcp: {
         lambda: {
-          lambdaArn: config.lambdaArn,
+          lambdaArn: config.lambdaArn as string,
           toolSchema: {
             inlinePayload: [toolSchema],
           },
         },
       },
-    } as any,
+    },
     credentialProviderConfigurations: [
       { credentialProviderType: 'GATEWAY_IAM_ROLE' as const },
     ],
@@ -297,13 +305,16 @@ export function buildSmithyTargetPayload(
   return {
     gatewayIdentifier: getRequiredGatewayId(),
     name: targetName(input.integrationId),
+    // The live AgentCore API accepts { serviceType } for smithyModel targets,
+    // but this SDK version declares smithyModel as ApiSchemaConfiguration.
+    // Preserve the wire payload; bridge the type mismatch without `any`.
     targetConfiguration: {
       mcp: {
         smithyModel: {
-          serviceType: config.serviceType,
+          serviceType: config.serviceType as string,
         },
       },
-    } as any,
+    } as unknown as CreateGatewayTargetCommandInput['targetConfiguration'],
     credentialProviderConfigurations: [
       { credentialProviderType: 'GATEWAY_IAM_ROLE' as const },
     ],
@@ -326,15 +337,20 @@ export function buildMCPServerTargetPayload(
 ): CreateGatewayTargetCommandInput {
   const config = input.config ?? {};
 
-  const targetConfiguration: any = {
+  // The live AgentCore API accepts { serverUrl } for mcpServer targets, but
+  // this SDK version declares a different McpServerTargetConfiguration shape.
+  // Preserve the wire payload; bridge the type mismatch without `any`.
+  const targetConfiguration = {
     mcp: {
       mcpServer: {
-        serverUrl: config.serverUrl,
+        serverUrl: config.serverUrl as string,
       },
     },
-  };
+  } as unknown as CreateGatewayTargetCommandInput['targetConfiguration'];
 
-  let credentialProviderConfigurations: any[];
+  let credentialProviderConfigurations: NonNullable<
+    CreateGatewayTargetCommandInput['credentialProviderConfigurations']
+  >;
 
   if (input.credentialProviderType === 'OAUTH2') {
     if (!input.credentialProviderArn) {
@@ -345,7 +361,7 @@ export function buildMCPServerTargetPayload(
     if (!input.oauthSettings) {
       throw new Error('buildMCPServerTargetPayload(OAUTH2): oauthSettings is required');
     }
-    const oauthCredentialProvider: any = {
+    const oauthCredentialProvider: OAuthCredentialProvider = {
       providerArn: input.credentialProviderArn,
       scopes: [...input.oauthSettings.scopes],
       grantType: input.oauthSettings.grantType,
@@ -449,7 +465,7 @@ export async function deleteTargetAndProvider(input: {
 /**
  * Get an AgentCore Gateway target by id.
  */
-export async function getTarget(targetId: string): Promise<any> {
+export async function getTarget(targetId: string): Promise<GetGatewayTargetCommandOutput> {
   const gatewayId = getRequiredGatewayId();
 
   const agentCoreClient = new BedrockAgentCoreControlClient({

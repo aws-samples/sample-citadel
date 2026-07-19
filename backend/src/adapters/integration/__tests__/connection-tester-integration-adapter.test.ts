@@ -27,7 +27,7 @@ import {
 
 const mockRunConnectionTest = jest.fn();
 jest.mock('../../../utils/connection-tester', () => ({
-  testConnection: (...args: any[]) => mockRunConnectionTest(...args),
+  testConnection: (...args: unknown[]) => mockRunConnectionTest(...args),
 }));
 
 const baseSpec: Omit<ConnectorSpec, 'category'> = {

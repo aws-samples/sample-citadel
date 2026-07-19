@@ -37,7 +37,7 @@ class TestDataStoreAdapter implements ConnectorAdapter {
   };
 
   requiredPolicies(
-    config: Record<string, any>,
+    config: Record<string, unknown>,
     _accountId: string,
     _region: string
   ): RequiredPolicies {
@@ -48,27 +48,30 @@ class TestDataStoreAdapter implements ConnectorAdapter {
   }
 
   async testConnection(
-    _config: Record<string, any>,
-    _credentials?: Record<string, any>
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     return { success: true, message: 'Connected' };
   }
 
-  async connect(_config: Record<string, any>, _credentials?: Record<string, any>): Promise<void> {}
-  async disconnect(_config: Record<string, any>): Promise<void> {}
+  async connect(_config: Record<string, unknown>, _credentials?: Record<string, unknown>): Promise<void> {}
+  async disconnect(_config: Record<string, unknown>): Promise<void> {}
 
   async provision(
-    config: Record<string, any>,
-    _credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<ProvisionResult> {
     return { resourceArn: `arn:aws:s3:::${config.bucketName}` };
   }
 
-  async getMetrics(_config: Record<string, any>): Promise<MetricsResult> {
+  async getMetrics(_config: Record<string, unknown>): Promise<MetricsResult> {
     return { size: '10 MB', records: 100 };
   }
 
-  validate(credentials: any, config: any): { valid: boolean; errors: string[] } {
+  validate(
+    credentials: Record<string, unknown>,
+    config: Record<string, unknown>
+  ): { valid: boolean; errors: string[] } {
     const errors: string[] = [];
     if (!config.bucketName) errors.push('Missing bucketName');
     return { valid: errors.length === 0, errors };
@@ -99,16 +102,19 @@ class TestIntegrationAdapter implements ConnectorAdapter {
   }
 
   async testConnection(
-    _config: Record<string, any>,
-    _credentials?: Record<string, any>
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     return { success: true, message: 'API reachable' };
   }
 
-  async connect(_config: Record<string, any>, _credentials?: Record<string, any>): Promise<void> {}
-  async disconnect(_config: Record<string, any>): Promise<void> {}
+  async connect(_config: Record<string, unknown>, _credentials?: Record<string, unknown>): Promise<void> {}
+  async disconnect(_config: Record<string, unknown>): Promise<void> {}
 
-  validate(credentials: any, config: any): { valid: boolean; errors: string[] } {
+  validate(
+    credentials: Record<string, unknown> | undefined,
+    config: Record<string, unknown> | undefined
+  ): { valid: boolean; errors: string[] } {
     const errors: string[] = [];
     if (!credentials?.apiToken) errors.push('Missing apiToken');
     if (!config?.baseUrl) errors.push('Missing baseUrl');

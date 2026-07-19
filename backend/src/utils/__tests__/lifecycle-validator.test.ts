@@ -106,9 +106,9 @@ describe('lifecycle-validator', () => {
       try {
         validateTransition('CREATED', 'TESTED');
         fail('Should have thrown');
-      } catch (error: any) {
-        expect(error.message).toContain('Valid transitions from CREATED');
-        expect(error.message).toContain('CONFIGURED');
+      } catch (error: unknown) {
+        expect((error as Error).message).toContain('Valid transitions from CREATED');
+        expect((error as Error).message).toContain('CONFIGURED');
       }
     });
   });

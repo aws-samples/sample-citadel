@@ -61,7 +61,7 @@ describe('seed-model-catalog Lambda', () => {
 
   test('swallows ConditionalCheckFailedException so re-runs never clobber operator changes', async () => {
     const conditionalError = new Error('The conditional request failed');
-    (conditionalError as any).name = 'ConditionalCheckFailedException';
+    conditionalError.name = 'ConditionalCheckFailedException';
     ddbMock.on(PutCommand).rejects(conditionalError);
 
     // Should not throw — idempotent behavior on re-deploy.

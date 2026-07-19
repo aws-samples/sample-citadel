@@ -98,17 +98,21 @@ export function hasPermission(authContext: AuthContext, permission: string): boo
   return false;
 }
 
-export function extractUserIdFromEvent(event: any): string {
-  return event.identity?.sub || event.identity?.username || 'anonymous';
+type IdentityBag = Record<string, unknown> & { sub?: string; username?: string };
+type EventWithIdentity = { identity?: IdentityBag | null };
+
+export function extractUserIdFromEvent(event: unknown): string {
+  const e = event as EventWithIdentity;
+  return e.identity?.sub || e.identity?.username || 'anonymous';
 }
 
-export function createAuthContext(event: any): AuthContext {
-  const identity = event.identity || {};
+export function createAuthContext(event: unknown): AuthContext {
+  const identity: IdentityBag = (event as EventWithIdentity).identity || {};
 
   return {
     userId: identity.sub || identity.username || 'anonymous',
     username: identity.username,
-    groups: identity['cognito:groups'] || [],
-    roles: identity['custom:role'] ? [identity['custom:role']] : [],
+    groups: (identity['cognito:groups'] as string[] | undefined) || [],
+    roles: identity['custom:role'] ? [identity['custom:role'] as string] : [],
   };
 }

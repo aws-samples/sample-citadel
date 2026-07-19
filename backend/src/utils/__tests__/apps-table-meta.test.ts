@@ -73,7 +73,7 @@ describe('apps-table-meta helpers', () => {
       expect(input.Key).toEqual({ appId: 'app-1' });
       expect(input.UpdateExpression).toMatch(/^SET /);
 
-      const values = input.ExpressionAttributeValues as Record<string, any>;
+      const values = input.ExpressionAttributeValues as Record<string, unknown>;
       expect(values).toEqual({
         ':v_orgId': 'org-1',
         ':v_name': 'My App',
@@ -113,7 +113,7 @@ describe('apps-table-meta helpers', () => {
       expect(calls).toHaveLength(1);
       const values = calls[0].args[0].input.ExpressionAttributeValues as Record<
         string,
-        any
+        unknown
       >;
       expect(values[':v_description']).toBe('');
       expect(values[':v_workflowIds']).toEqual([]);
@@ -188,7 +188,7 @@ describe('apps-table-meta helpers', () => {
         // @ts-expect-error — createdBy is a disallowed immutable field; passed at runtime to assert it is stripped
         createdBy: 'attacker',
         name: 'Allowed',
-      } as any);
+      } as Parameters<typeof updateAppMetaFields>[2]);
 
       expect(ok).toBe(true);
       const calls = ddbMock.commandCalls(UpdateCommand);
@@ -212,7 +212,7 @@ describe('apps-table-meta helpers', () => {
         appId: 'X',
         // @ts-expect-error — createdBy is a disallowed immutable field; passed at runtime to assert it is ignored
         createdBy: 'Y',
-      } as any);
+      } as Parameters<typeof updateAppMetaFields>[2]);
 
       expect(ok).toBe(true);
       expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);

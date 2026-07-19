@@ -16,16 +16,24 @@ import {
 import { BedrockAgentCoreControlClient } from '@aws-sdk/client-bedrock-agentcore-control';
 import { mockClient } from 'aws-sdk-client-mock';
 
+type McpTargetConfigView = {
+  mcp: {
+    lambda?: { lambdaArn?: string; toolSchema?: { inlinePayload?: unknown[] } };
+    smithyModel?: { serviceType?: string };
+    mcpServer?: { serverUrl?: string };
+  };
+};
+
 // P2.B: gateway-target-manager now delegates credential provisioning to the real
 // credential-provider-manager. Mock that module so property tests don't need to
 // stub the AgentCore Identity SDK responses for credential commands.
 jest.mock('../credential-provider-manager', () => ({
-  createOrUpsertApiKeyProvider: jest.fn(async ({ integrationId }: any) => ({
+  createOrUpsertApiKeyProvider: jest.fn(async ({ integrationId }: { integrationId: string }) => ({
     credentialProviderArn: `arn:aws:bedrock-agentcore:us-east-1:111:api-key/integration-${integrationId}`,
     internalSecretArn: 'arn:s',
     rawResponse: {},
   })),
-  createOrUpsertOauth2Provider: jest.fn(async ({ integrationId }: any) => ({
+  createOrUpsertOauth2Provider: jest.fn(async ({ integrationId }: { integrationId: string }) => ({
     credentialProviderArn: `arn:aws:bedrock-agentcore:us-east-1:111:oauth2/integration-${integrationId}`,
     callbackUrl: 'https://agentcore.aws/oauth/callback/x',
     internalSecretArn: 'arn:s',
@@ -90,9 +98,9 @@ describe('Gateway Target Manager - Property-Based Tests', () => {
               region: 'us-east-1',
             },
           });
-          expect((cmdInput.targetConfiguration as any).mcp.lambda).toBeDefined();
-          expect((cmdInput.targetConfiguration as any).mcp.smithyModel).toBeUndefined();
-          expect((cmdInput.targetConfiguration as any).mcp.mcpServer).toBeUndefined();
+          expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.lambda).toBeDefined();
+          expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.smithyModel).toBeUndefined();
+          expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.mcpServer).toBeUndefined();
           expect(cmdInput.credentialProviderConfigurations).toEqual([
             { credentialProviderType: 'GATEWAY_IAM_ROLE' },
           ]);
@@ -113,11 +121,11 @@ describe('Gateway Target Manager - Property-Based Tests', () => {
               integrationId,
               config: { serviceType, region: 'us-east-1' },
             });
-            expect((cmdInput.targetConfiguration as any).mcp.smithyModel.serviceType).toBe(
+            expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.smithyModel!.serviceType).toBe(
               serviceType,
             );
-            expect((cmdInput.targetConfiguration as any).mcp.lambda).toBeUndefined();
-            expect((cmdInput.targetConfiguration as any).mcp.mcpServer).toBeUndefined();
+            expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.lambda).toBeUndefined();
+            expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.mcpServer).toBeUndefined();
             expect(cmdInput.credentialProviderConfigurations).toEqual([
               { credentialProviderType: 'GATEWAY_IAM_ROLE' },
             ]);
@@ -134,7 +142,7 @@ describe('Gateway Target Manager - Property-Based Tests', () => {
           fc.uuid(),
           fc.constantFrom('API_KEY', 'OAUTH2', 'CUSTOM'),
           (integrationId, authMethod) => {
-            const baseInput: any = {
+            const baseInput: Parameters<typeof buildMCPServerTargetPayload>[0] = {
               integrationId,
               config: { serverUrl: `https://mcp-${integrationId}.example.com` },
             };
@@ -149,11 +157,11 @@ describe('Gateway Target Manager - Property-Based Tests', () => {
             // CUSTOM: no credential provider fields — builder emits an empty array.
 
             const cmdInput = buildMCPServerTargetPayload(baseInput);
-            expect((cmdInput.targetConfiguration as any).mcp.mcpServer.serverUrl).toBe(
+            expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.mcpServer!.serverUrl).toBe(
               `https://mcp-${integrationId}.example.com`,
             );
-            expect((cmdInput.targetConfiguration as any).mcp.lambda).toBeUndefined();
-            expect((cmdInput.targetConfiguration as any).mcp.smithyModel).toBeUndefined();
+            expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.lambda).toBeUndefined();
+            expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.smithyModel).toBeUndefined();
 
             if (authMethod === 'API_KEY') {
               expect(cmdInput.credentialProviderConfigurations).toHaveLength(1);

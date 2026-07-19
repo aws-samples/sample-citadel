@@ -10,8 +10,14 @@ import { NotImplementedError } from '../adapters/errors';
 export interface TestResult {
   success: boolean;
   message: string;
-  details: Record<string, any>;
+  details: Record<string, unknown>;
 }
+
+/**
+ * Credential/config bags parsed from Secrets Manager / SSM / DynamoDB JSON.
+ * Values are treated as opaque strings by every test function.
+ */
+export type ConnectionBag = Record<string, string | undefined>;
 
 /**
  * Test connection for a connector type
@@ -19,8 +25,8 @@ export interface TestResult {
  */
 export async function testConnection(
   connectorType: string,
-  credentials: any,
-  config?: any
+  credentials: ConnectionBag | undefined,
+  config?: ConnectionBag
 ): Promise<TestResult> {
   const spec = getConnectorSpec(connectorType);
   
@@ -56,13 +62,13 @@ export async function testConnection(
     // Route SaaS connectors by authentication method
     switch (spec.authentication.method) {
       case AuthenticationMethod.API_KEY:
-        return await testApiKeyConnection(connectorType, credentials, spec);
+        return await testApiKeyConnection(connectorType, credentials as ConnectionBag, spec);
       case AuthenticationMethod.BASIC_AUTH:
-        return await testBasicAuthConnection(connectorType, credentials, spec);
+        return await testBasicAuthConnection(connectorType, credentials as ConnectionBag, spec);
       case AuthenticationMethod.OAUTH2:
-        return await testOAuth2Connection(connectorType, credentials, spec);
+        return await testOAuth2Connection(connectorType, credentials as ConnectionBag, spec);
       case AuthenticationMethod.BEARER_TOKEN:
-        return await testBearerTokenConnection(connectorType, credentials, spec);
+        return await testBearerTokenConnection(connectorType, credentials as ConnectionBag, spec);
       default:
         return {
           success: false,
@@ -86,7 +92,7 @@ export async function testConnection(
  */
 export async function testApiKeyConnection(
   connectorType: string,
-  credentials: any,
+  credentials: ConnectionBag,
   spec: ConnectorSpec
 ): Promise<TestResult> {
   console.log(`Testing ${connectorType} connection...`);
@@ -178,7 +184,7 @@ export async function testApiKeyConnection(
  */
 export async function testBasicAuthConnection(
   connectorType: string,
-  credentials: any,
+  credentials: ConnectionBag,
   spec: ConnectorSpec
 ): Promise<TestResult> {
   const authHeader = Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64');
@@ -230,7 +236,7 @@ export async function testBasicAuthConnection(
  */
 export async function testOAuth2Connection(
   connectorType: string,
-  credentials: any,
+  credentials: ConnectionBag,
   _spec: ConnectorSpec
 ): Promise<TestResult> {
   // Validate required OAuth2 fields are present
@@ -278,7 +284,7 @@ export async function testOAuth2Connection(
  */
 export async function testBearerTokenConnection(
   connectorType: string,
-  credentials: any,
+  credentials: ConnectionBag,
   spec: ConnectorSpec
 ): Promise<TestResult> {
   if (!credentials.apiToken) {
@@ -323,8 +329,8 @@ export async function testBearerTokenConnection(
  * Assumes execution role and invokes Lambda function with test payload
  */
 export async function testLambdaConnection(
-  config: any,
-  credentials: any
+  config: ConnectionBag | undefined,
+  credentials: ConnectionBag | undefined
 ): Promise<TestResult> {
   try {
     // Validate required configuration
@@ -409,33 +415,35 @@ export async function testLambdaConnection(
         }
       };
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Lambda connection test error:', error);
-    
+
+    const err = error as Error & { code?: string };
+
     // Handle specific AWS errors
-    if (error.name === 'AccessDeniedException' || error.name === 'AccessDenied') {
+    if (err.name === 'AccessDeniedException' || err.name === 'AccessDenied') {
       return {
         success: false,
         message: 'Execution role lacks necessary permissions to invoke Lambda function',
         details: { 
-          error: error.message,
+          error: err.message,
           roleArn: credentials?.executionRoleArn
         }
       };
     }
     
-    if (error.name === 'ResourceNotFoundException') {
+    if (err.name === 'ResourceNotFoundException') {
       return {
         success: false,
         message: `Lambda function not found: ${config?.lambdaArn}`,
-        details: { error: error.message }
+        details: { error: err.message }
       };
     }
     
     return {
       success: false,
-      message: `Lambda test failed: ${error.message}`,
-      details: { error: error.message }
+      message: `Lambda test failed: ${err.message}`,
+      details: { error: err.message }
     };
   }
 }
@@ -445,8 +453,8 @@ export async function testLambdaConnection(
  * Assumes execution role and performs test operation on AWS service
  */
 export async function testSmithyConnection(
-  config: any,
-  credentials: any
+  config: ConnectionBag | undefined,
+  credentials: ConnectionBag | undefined
 ): Promise<TestResult> {
   try {
     // Validate required configuration
@@ -611,16 +619,18 @@ export async function testSmithyConnection(
           }
         };
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Smithy connection test error:', error);
-    
+
+    const err = error as Error & { code?: string };
+
     // Handle specific AWS errors
-    if (error.name === 'AccessDeniedException' || error.name === 'AccessDenied') {
+    if (err.name === 'AccessDeniedException' || err.name === 'AccessDenied') {
       return {
         success: false,
         message: `Execution role lacks permissions for ${config?.serviceType}`,
         details: { 
-          error: error.message,
+          error: err.message,
           roleArn: credentials?.executionRoleArn,
           serviceType: config?.serviceType
         }
@@ -629,9 +639,9 @@ export async function testSmithyConnection(
     
     return {
       success: false,
-      message: `${config?.serviceType} test failed: ${error.message}`,
+      message: `${config?.serviceType} test failed: ${err.message}`,
       details: { 
-        error: error.message,
+        error: err.message,
         serviceType: config?.serviceType
       }
     };
@@ -643,8 +653,8 @@ export async function testSmithyConnection(
  * Builds authorization header and calls MCP server tools/list endpoint
  */
 export async function testMCPServerConnection(
-  config: any,
-  credentials: any
+  config: ConnectionBag | undefined,
+  credentials: ConnectionBag | undefined
 ): Promise<TestResult> {
   try {
     // Validate required configuration
@@ -740,16 +750,18 @@ export async function testMCPServerConnection(
         }
       };
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('MCP server connection test error:', error);
-    
+
+    const err = error as Error & { code?: string };
+
     // Handle network errors
-    if (error.message.includes('fetch') || error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
+    if (err.message.includes('fetch') || err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') {
       return {
         success: false,
         message: `Unable to connect to MCP server at ${config?.serverUrl}`,
         details: { 
-          error: error.message,
+          error: err.message,
           serverUrl: config?.serverUrl
         }
       };
@@ -757,9 +769,9 @@ export async function testMCPServerConnection(
     
     return {
       success: false,
-      message: `MCP server test failed: ${error.message}`,
+      message: `MCP server test failed: ${err.message}`,
       details: { 
-        error: error.message,
+        error: err.message,
         serverUrl: config?.serverUrl
       }
     };

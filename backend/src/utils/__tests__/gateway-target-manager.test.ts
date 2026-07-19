@@ -40,6 +40,29 @@ import {
 } from '../credential-provider-manager';
 import { discoverOAuthEndpoints, OAuthMetadataError } from '../oauth-metadata';
 
+type McpTargetConfigView = {
+  mcp: {
+    lambda?: { lambdaArn?: string; toolSchema?: { inlinePayload?: unknown[] } };
+    smithyModel?: { serviceType?: string };
+    mcpServer?: { serverUrl?: string };
+  };
+};
+
+type CredentialProviderView = {
+  oauthCredentialProvider?: {
+    providerArn?: string;
+    scopes?: string[];
+    grantType?: string;
+    defaultReturnUrl?: string;
+  };
+  apiKeyCredentialProvider?: {
+    providerArn?: string;
+    credentialLocation?: string;
+    credentialParameterName?: string;
+    credentialPrefix?: string;
+  };
+};
+
 import {
   deleteTargetAndProvider,
   getTarget,
@@ -386,7 +409,7 @@ describe('Gateway Target Manager - Unit Tests', () => {
       const cpc = cmdInput.credentialProviderConfigurations![0];
       expect(cpc.credentialProviderType).toBe('OAUTH');
       expect(cpc.credentialProvider).toBeDefined();
-      const oauth = (cpc.credentialProvider as any).oauthCredentialProvider;
+      const oauth = (cpc.credentialProvider as CredentialProviderView).oauthCredentialProvider!;
       expect(oauth).toBeDefined();
       expect(oauth.providerArn).toBe(FAKE_OAUTH_ARN);
       expect(oauth.scopes).toEqual(['read', 'write']);
@@ -403,8 +426,8 @@ describe('Gateway Target Manager - Unit Tests', () => {
         oauthSettings: { scopes: ['read'], grantType: 'CLIENT_CREDENTIALS' },
       });
       const oauth = (
-        cmdInput.credentialProviderConfigurations![0].credentialProvider as any
-      ).oauthCredentialProvider;
+        cmdInput.credentialProviderConfigurations![0].credentialProvider as CredentialProviderView
+      ).oauthCredentialProvider!;
       expect(oauth.defaultReturnUrl).toBeUndefined();
     });
 
@@ -419,7 +442,7 @@ describe('Gateway Target Manager - Unit Tests', () => {
       expect(cmdInput.credentialProviderConfigurations).toHaveLength(1);
       const cpc = cmdInput.credentialProviderConfigurations![0];
       expect(cpc.credentialProviderType).toBe('API_KEY');
-      const apiKey = (cpc.credentialProvider as any).apiKeyCredentialProvider;
+      const apiKey = (cpc.credentialProvider as CredentialProviderView).apiKeyCredentialProvider!;
       expect(apiKey.providerArn).toBe(FAKE_APIKEY_ARN);
       expect(apiKey.credentialLocation).toBe('HEADER');
       expect(apiKey.credentialParameterName).toBe('Authorization');
@@ -456,11 +479,11 @@ describe('Gateway Target Manager - Unit Tests', () => {
         },
       });
 
-      expect((cmdInput.targetConfiguration as any).mcp.lambda.lambdaArn).toBe(
+      expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.lambda!.lambdaArn).toBe(
         'arn:aws:lambda:us-east-1:111:function:Foo',
       );
       expect(
-        (cmdInput.targetConfiguration as any).mcp.lambda.toolSchema.inlinePayload,
+        (cmdInput.targetConfiguration as McpTargetConfigView).mcp.lambda!.toolSchema!.inlinePayload,
       ).toHaveLength(1);
       expect(cmdInput.credentialProviderConfigurations).toEqual([
         { credentialProviderType: 'GATEWAY_IAM_ROLE' },
@@ -487,7 +510,7 @@ describe('Gateway Target Manager - Unit Tests', () => {
         config: { serviceType: 'dynamodb', region: 'us-east-1' },
       });
 
-      expect((cmdInput.targetConfiguration as any).mcp.smithyModel.serviceType).toBe('dynamodb');
+      expect((cmdInput.targetConfiguration as McpTargetConfigView).mcp.smithyModel!.serviceType).toBe('dynamodb');
       expect(cmdInput.credentialProviderConfigurations).toEqual([
         { credentialProviderType: 'GATEWAY_IAM_ROLE' },
       ]);

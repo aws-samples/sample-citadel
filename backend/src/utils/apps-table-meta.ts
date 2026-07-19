@@ -145,7 +145,7 @@ export async function updateAppMetaFields(
     'version',
   ];
   const sets: string[] = [];
-  const values: Record<string, any> = {};
+  const values: Record<string, unknown> = {};
   const names: Record<string, string> = {};
   for (const key of allowed) {
     if (partial[key] === undefined) continue;

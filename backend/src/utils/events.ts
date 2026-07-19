@@ -34,7 +34,7 @@ export async function publishEvent(event: AgentEvent): Promise<void> {
 export function createProjectEvent(
   eventType: string,
   projectId: string,
-  payload: any,
+  payload: unknown,
   correlationId?: string
 ): AgentEvent {
   return {
@@ -50,7 +50,7 @@ export function createAgentEvent(
   eventType: string,
   projectId: string,
   agentId: string,
-  payload: any,
+  payload: unknown,
   correlationId?: string
 ): AgentEvent {
   return {
