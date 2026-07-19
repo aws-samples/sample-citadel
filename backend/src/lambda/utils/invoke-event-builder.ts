@@ -16,7 +16,7 @@ export interface AppContext {
 }
 
 export interface InvokeEventDetail {
-  body: Record<string, any>;
+  body: Record<string, unknown>;
   headers: {
     'x-citadel-group-id': string;
     'x-citadel-app-name': string;
@@ -35,7 +35,7 @@ export interface InvokeEventDetail {
  * @returns The constructed event detail with body, injected headers, and requestId
  */
 export function buildInvokeEventDetail(
-  requestBody: Record<string, any>,
+  requestBody: Record<string, unknown>,
   appContext: AppContext,
   apiKeyId: string,
 ): InvokeEventDetail {

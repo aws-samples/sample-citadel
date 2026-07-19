@@ -5,7 +5,7 @@ interface AgentChatterInput {
   timestamp: string;
   source: string;
   detailType: string;
-  detail: any;
+  detail: unknown;
 }
 
 interface AgentChatterMessage {
@@ -13,7 +13,7 @@ interface AgentChatterMessage {
   timestamp: string;
   source: string;
   detailType: string;
-  detail: any;
+  detail: unknown;
 }
 
 export const handler = async (

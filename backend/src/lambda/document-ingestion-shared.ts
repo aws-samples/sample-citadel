@@ -117,6 +117,17 @@ export interface StartIngestionResult {
  * Returns the synchronously-reported status (often STARTING/IN_PROGRESS, but
  * can be FAILED immediately for malformed input).
  */
+/**
+ * Structural view of a Bedrock ingestion document detail. The runtime
+ * response nests status fields differently across SDK versions, so both
+ * layouts are modelled; the reader guards each access.
+ */
+interface IngestionDetailView {
+  status?: { status?: string; statusReason?: string; failureReasons?: string[] };
+  statusReason?: string;
+  failureReasons?: string[];
+}
+
 export async function startIngestion(projectId: string, documentKey: string): Promise<StartIngestionResult> {
   const { kbId, dsId } = await getKbIds();
   const bucket = process.env.DOCUMENT_BUCKET!;
@@ -146,7 +157,10 @@ export async function startIngestion(projectId: string, documentKey: string): Pr
     }],
   });
 
-  const response = (await bedrockAgentClient.send(command)) as any;
+  const response = (await bedrockAgentClient.send(command)) as {
+    documentDetails?: IngestionDetailView[];
+    ingestedDocuments?: IngestionDetailView[];
+  };
   console.log('startIngestion Bedrock response:', JSON.stringify(response));
   const detail = response.documentDetails?.[0] ?? response.ingestedDocuments?.[0];
   const status = (typeof detail?.status === 'string' ? detail?.status : detail?.status?.status) ?? 'UNKNOWN';

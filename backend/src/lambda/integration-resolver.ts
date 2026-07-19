@@ -60,9 +60,21 @@ function isAgentCoreType(integrationType: string): boolean {
  * For AWS_LAMBDA / AWS_SMITHY this returns `undefined` (they use
  * GATEWAY_IAM_ROLE and need no provider provisioning).
  */
+/**
+ * Loose credential payload as supplied by GraphQL input (AWSJSON-parsed).
+ * Field presence is validated at runtime per connector spec.
+ */
+interface IntegrationCredentialsInput {
+  authMethod?: string;
+  email?: string;
+  apiToken?: string;
+  apiKey?: string;
+  [field: string]: unknown;
+}
+
 function getCredentialProviderType(
   integrationType: string,
-  credentials: any,
+  credentials: IntegrationCredentialsInput | undefined,
 ): 'API_KEY' | 'OAUTH2' | undefined {
   if (integrationType === 'CONFLUENCE') return 'API_KEY';
   if (integrationType !== 'MCP_SERVER') return undefined;
@@ -78,7 +90,7 @@ function getCredentialProviderType(
  * format), falling back to ARN-pattern inference for defensive recovery.
  */
 function inferCredentialProviderType(
-  integration: any,
+  integration: { credentialProviderArn?: unknown; credentialProviderType?: unknown } | undefined,
 ): 'API_KEY' | 'OAUTH2' | undefined {
   if (!integration?.credentialProviderArn) return undefined;
   if (
@@ -101,7 +113,7 @@ function inferCredentialProviderType(
  */
 function buildCredentialProviderApiKey(
   integrationType: string,
-  credentials: any,
+  credentials: IntegrationCredentialsInput | undefined,
 ): string {
   if (integrationType === 'CONFLUENCE') {
     const email = credentials?.email;
@@ -141,7 +153,7 @@ interface ProvisionResult {
 async function provisionProviderForIntegration(
   integrationId: string,
   integrationType: string,
-  credentials: any,
+  credentials: IntegrationCredentialsInput | undefined,
 ): Promise<ProvisionResult> {
   const providerType = getCredentialProviderType(integrationType, credentials);
   if (!providerType) return {};
@@ -198,7 +210,34 @@ interface AppSyncEventIdentity {
   sub?: string;
 }
 
-interface AppSyncEvent extends Omit<AppSyncResolverEvent<any>, 'identity'> {
+/** Create-mutation input; credentials/config parsed from AWSJSON. */
+interface CreateIntegrationInput {
+  integrationType: string;
+  name: string;
+  orgId: string;
+  credentials: IntegrationCredentialsInput;
+  config: Record<string, unknown>;
+}
+
+/** Update-mutation input; only provided fields are written. */
+interface UpdateIntegrationInput {
+  integrationId: string;
+  name?: string;
+  status?: string;
+  credentials?: IntegrationCredentialsInput;
+  config?: Record<string, unknown>;
+}
+
+/** Merged view of every argument this resolver's fields receive. */
+interface IntegrationResolverArguments {
+  integrationId: string;
+  orgId: string;
+  integrationType?: string;
+  status?: string;
+  input: CreateIntegrationInput & UpdateIntegrationInput;
+}
+
+interface AppSyncEvent extends Omit<AppSyncResolverEvent<IntegrationResolverArguments>, 'identity'> {
   identity?: AppSyncEventIdentity;
 }
 
@@ -218,7 +257,7 @@ function sanitizeEventForLogging(event: AppSyncEvent): unknown {
     'rolearn',
   ];
 
-  const sanitizeObject = (obj: any): any => {
+  const sanitizeObject = (obj: unknown): unknown => {
     if (!obj || typeof obj !== 'object') {
       return obj;
     }
@@ -227,7 +266,7 @@ function sanitizeEventForLogging(event: AppSyncEvent): unknown {
       return obj.map(item => sanitizeObject(item));
     }
 
-    const sanitized: any = {};
+    const sanitized: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
       const lowerKey = key.toLowerCase();
       const isSensitive = sensitiveFields.some(field => lowerKey.includes(field));
@@ -250,7 +289,7 @@ function sanitizeEventForLogging(event: AppSyncEvent): unknown {
  * Sanitize Integration object for API response
  * Removes all sensitive credential fields from config
  */
-function sanitizeIntegrationForResponse(integration: any): unknown {
+function sanitizeIntegrationForResponse(integration: Record<string, unknown>): unknown {
   const sensitiveConfigFields = [
     'apiToken',
     'password',
@@ -265,7 +304,7 @@ function sanitizeIntegrationForResponse(integration: any): unknown {
   const sanitized = { ...integration };
 
   if (sanitized.config && typeof sanitized.config === 'object') {
-    const sanitizedConfig: any = {};
+    const sanitizedConfig: Record<string, unknown> = {};
 
     for (const [key, value] of Object.entries(sanitized.config)) {
       const isSensitive = sensitiveConfigFields.some(field =>
@@ -339,7 +378,7 @@ export async function handler(event: AppSyncEvent) {
  *
  * Other connector types (JIRA, SERVICENOW…) skip steps 3 and 5.
  */
-async function createIntegration(input: any, createdBy: string) {
+async function createIntegration(input: CreateIntegrationInput, createdBy: string) {
   const integrationId = uuidv4();
   const timestamp = new Date().toISOString();
 
@@ -419,7 +458,7 @@ async function createIntegration(input: any, createdBy: string) {
 
     // 3. Persist DDB record with all P3.A fields. `targetStatus: PENDING`
     //    signals the handler has not yet created the gateway target.
-    const integration: any = {
+    const integration: Record<string, unknown> = {
       PK: `ORG#${input.orgId}`,
       SK: `INTEGRATION#${input.integrationType}#${integrationId}`,
       integrationId,
@@ -505,7 +544,7 @@ async function createIntegration(input: any, createdBy: string) {
   }
 }
 
-async function updateIntegration(input: any) {
+async function updateIntegration(input: UpdateIntegrationInput) {
   const integration = await getIntegration(input.integrationId);
 
   const spec = getConnectorSpec(integration.integrationType);
@@ -514,7 +553,7 @@ async function updateIntegration(input: any) {
   }
 
   if (input.credentials) {
-    const secretValue: Record<string, any> = {};
+    const secretValue: Record<string, unknown> = {};
 
     for (const field of spec.authentication.fields) {
       if (input.credentials[field]) {
@@ -826,7 +865,13 @@ async function disconnectIntegration(integrationId: string) {
 }
 
 async function listIntegrations(orgId: string, integrationType?: string, status?: string) {
-  const params: any = {
+  const params: {
+    TableName: string;
+    KeyConditionExpression: string;
+    ExpressionAttributeValues: Record<string, string>;
+    FilterExpression?: string;
+    ExpressionAttributeNames?: Record<string, string>;
+  } = {
     TableName: INTEGRATIONS_TABLE,
     KeyConditionExpression: 'PK = :pk',
     ExpressionAttributeValues: {

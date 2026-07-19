@@ -6,7 +6,7 @@ const docClient = DynamoDBDocumentClient.from(client);
 
 const SESSION_MEMORY_TABLE = process.env.SESSION_MEMORY_TABLE!;
 
-export const handler = async (event: any) => {
+export const handler = async (event: { arguments: { sessionId: string } }) => {
   const sessionId = event.arguments.sessionId;
   const dimensions = ['technical', 'business', 'commercial', 'governance'];
   

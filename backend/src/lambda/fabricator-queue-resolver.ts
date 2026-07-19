@@ -27,7 +27,21 @@ interface FabricationQueueItem {
   status: FabricationStatus;
   submittedAt: string;
   errorMessage?: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
+}
+
+/** Fabrication-jobs DynamoDB row slice this resolver reads. */
+interface FabricationJobRow {
+  agentUseId: string;
+  agentName?: string;
+  agentId?: string;
+  taskDescription?: string;
+  status?: string;
+  submittedAt?: string;
+  updatedAt?: string;
+  errorMessage?: string;
+  orchestrationId?: string;
+  [key: string]: unknown;
 }
 
 /**
@@ -35,7 +49,7 @@ interface FabricationQueueItem {
  * frontend drawer already renders. agentUseId is the per-request key the UI
  * uses as requestId; orchestrationId + agentId travel in metadata.
  */
-function mapRow(item: Record<string, any>): FabricationQueueItem {
+function mapRow(item: FabricationJobRow): FabricationQueueItem {
   return {
     requestId: item.agentUseId,
     agentName: item.agentName || item.agentId || item.agentUseId || 'Unknown Agent',
@@ -72,7 +86,7 @@ export const handler = async (
   const projectId = event.arguments?.projectId;
 
   try {
-    let items: Record<string, any>[] = [];
+    let items: FabricationJobRow[] = [];
     if (projectId) {
       const response = await docClient.send(
         new QueryCommand({
@@ -81,7 +95,7 @@ export const handler = async (
           ExpressionAttributeValues: { ':pk': projectId },
         }),
       );
-      items = response.Items || [];
+      items = (response.Items || []) as FabricationJobRow[];
     } else {
       const response = await docClient.send(
         new ScanCommand({
@@ -89,7 +103,7 @@ export const handler = async (
           Limit: SCAN_LIMIT,
         }),
       );
-      items = response.Items || [];
+      items = (response.Items || []) as FabricationJobRow[];
     }
 
     const queueItems = items.map(mapRow);

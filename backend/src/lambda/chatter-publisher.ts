@@ -24,10 +24,10 @@ interface ChatterInput {
   timestamp: string;
   source: string;
   detailType: string;
-  detail: any;
+  detail: unknown;
 }
 
-async function executeGraphQL(query: string, variables: any) {
+async function executeGraphQL(query: string, variables: Record<string, unknown>) {
   const endpoint = new URL(APPSYNC_ENDPOINT);
   const signer = new SignatureV4({
     credentials: defaultProvider(),
@@ -64,7 +64,7 @@ async function executeGraphQL(query: string, variables: any) {
   return result.data;
 }
 
-export const handler = async (event: EventBridgeEvent<string, any>) => {
+export const handler = async (event: EventBridgeEvent<string, unknown>) => {
   console.log('Received EventBridge event:', JSON.stringify(event, null, 2));
 
   try {

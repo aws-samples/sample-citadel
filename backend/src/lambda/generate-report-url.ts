@@ -10,7 +10,7 @@ const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION || 'ap-
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 const PROJECTS_TABLE = process.env.PROJECTS_TABLE || 'citadel-projects-dev';
 
-export const handler = async (event: any) => {
+export const handler = async (event: { arguments: { projectId: string } }) => {
   const { projectId } = event.arguments;
 
   try {

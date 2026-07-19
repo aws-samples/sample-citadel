@@ -21,7 +21,9 @@ interface UpdateAgentCodeArgs {
   };
 }
 
-export const handler = async (event: AppSyncResolverEvent<any>) => {
+export const handler = async (
+  event: AppSyncResolverEvent<Partial<GetAgentCodeArgs & UpdateAgentCodeArgs>>,
+) => {
   console.log('Agent Code Resolver Event:', JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;

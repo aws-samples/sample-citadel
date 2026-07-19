@@ -35,7 +35,13 @@ interface UserManagementResponse {
   message?: string;
 }
 
-export const handler = async (event: any): Promise<any> => {
+/** AppSync event slice this resolver reads. */
+interface OrganizationResolverEvent {
+  info: { fieldName: string };
+  arguments: { input: CreateOrganizationInput; orgId: string };
+}
+
+export const handler = async (event: OrganizationResolverEvent): Promise<unknown> => {
   console.log('Organization resolver event:', JSON.stringify(event, null, 2));
 
   // AppSync delivers the operation name under event.info.fieldName (not

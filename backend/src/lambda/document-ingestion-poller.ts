@@ -53,7 +53,7 @@ interface JobRow {
 async function loadNonTerminalJobs(tableName: string): Promise<JobRow[]> {
   const byKey = new Map<string, JobRow>();
   for (const status of POLLABLE_STATUSES) {
-    let nextToken: Record<string, any> | undefined;
+    let nextToken: Record<string, unknown> | undefined;
     do {
       const resp = await ddb.send(new QueryCommand({
         TableName: tableName,

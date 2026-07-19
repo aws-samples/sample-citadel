@@ -143,7 +143,11 @@ async function sendMessage(event: AppSyncEvent) {
  * Get conversation history query handler
  */
 async function getConversationHistory(event: AppSyncEvent) {
-  const { projectId, limit, nextToken } = event.arguments as any;
+  const { projectId, limit, nextToken } = event.arguments as unknown as {
+    projectId: string;
+    limit?: number;
+    nextToken?: string;
+  };
 
   console.log("Getting conversation history for project:", projectId);
 
@@ -177,7 +181,9 @@ async function getConversationHistory(event: AppSyncEvent) {
  * Called by agent-message-handler Lambda to trigger subscriptions
  */
 async function publishConversationMessage(event: AppSyncEvent) {
-  const { input } = event.arguments as any;
+  const { input } = event.arguments as unknown as {
+    input: ConversationMessageInput & { id?: string };
+  };
 
   console.log("Publishing conversation message:", input.id);
 
@@ -190,7 +196,11 @@ async function publishConversationMessage(event: AppSyncEvent) {
  * Send message to agent (simplified interface for direct calls)
  */
 async function sendMessageToAgent(event: AppSyncEvent) {
-  const { projectId, agentId, message } = event.arguments as any;
+  const { projectId, agentId, message } = event.arguments as unknown as {
+    projectId: string;
+    agentId: string;
+    message: string;
+  };
   
   // Convert to sendMessage format
   const convertedEvent = {

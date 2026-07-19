@@ -11,7 +11,7 @@
     "watch": "tsc -w",
     "test": "jest",
     "test:integration": "jest --config jest.integration.config.js",
-    "lint": "eslint \"src/**/*.ts\" --max-warnings 421",
+    "lint": "eslint \"src/**/*.ts\" --max-warnings 183",
     "lint:fix": "eslint \"src/**/*.ts\" --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "cdk:synth": "cdk synth",

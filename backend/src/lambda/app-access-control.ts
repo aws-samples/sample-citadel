@@ -93,10 +93,19 @@ export function isAdmin(caller: CallerContext): boolean {
 /**
  * Queries all ACCESS# items for an app via GroupIndex.
  */
+/** ACCESS# component row slice this module reads. */
+interface AccessEntryRecord {
+  userId: string;
+  role: string;
+  grantedBy: string;
+  grantedAt: string;
+  [key: string]: unknown;
+}
+
 async function queryAccessEntries(
   appId: string,
   deps: AccessControlDeps,
-): Promise<Array<Record<string, any>>> {
+): Promise<AccessEntryRecord[]> {
   const result = await deps.docClient.send(new QueryCommand({
     TableName: deps.appsTable,
     IndexName: 'GroupIndex',
@@ -106,7 +115,7 @@ async function queryAccessEntries(
       ':sk': 'ACCESS#',
     },
   }));
-  return result.Items || [];
+  return (result.Items || []) as AccessEntryRecord[];
 }
 
 /**

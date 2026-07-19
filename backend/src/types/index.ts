@@ -43,7 +43,7 @@ export interface AgentStatus {
   currentTask?: string;
   progress?: number;
   lastUpdate: string;
-  metadata?: any;
+  metadata?: Record<string, unknown>;
   errorMessage?: string;
 }
 
@@ -54,7 +54,7 @@ export interface ConversationMessage {
   message: string;
   messageType: MessageType;
   timestamp: string;
-  metadata?: any;
+  metadata?: Record<string, unknown>;
   correlationId?: string;
 }
 
@@ -98,7 +98,7 @@ export interface AgentStatusInput {
   status: AgentStatusEnum;
   currentTask?: string;
   progress?: number;
-  metadata?: any;
+  metadata?: Record<string, unknown>;
   errorMessage?: string;
 }
 
@@ -116,7 +116,7 @@ export interface ConversationMessageInput {
   agentId: string;
   message: string;
   messageType: MessageType;
-  metadata?: any;
+  metadata?: Record<string, unknown>;
   correlationId?: string;
 }
 
@@ -300,7 +300,7 @@ export interface AgentEvent {
   eventType: string;
   projectId: string;
   agentId?: string;
-  payload: any;
+  payload: unknown;
   timestamp: string;
   correlationId?: string;
 }
@@ -313,18 +313,38 @@ export interface AuthContext {
   roles?: string[];
 }
 
+// Identity payload shape observed by the governance resolvers. Depending on
+// the AppSync auth mode, the role/group claims appear either at the top
+// level or nested under `claims`, so both locations are modelled.
+export interface GovernanceEventIdentity {
+  sub?: string;
+  username?: string;
+  'custom:role'?: string;
+  'cognito:groups'?: string[];
+  claims?: { 'custom:role'?: string; [claim: string]: unknown };
+}
+
+// Minimal AppSync event shape shared by the governance resolvers (ADR,
+// ExecutionSpecification, InterrogationRound, AgentDesignAssessment,
+// ProgramReview). TArgs is the resolver-specific merged arguments view.
+export interface GovernanceResolverEvent<TArgs = Record<string, unknown>> {
+  info?: { fieldName?: string };
+  identity?: GovernanceEventIdentity;
+  arguments: TArgs;
+}
+
 // Service layer integration types
 export interface ServiceLayerRequest {
   agentId: string;
   projectId: string;
   action: string;
-  payload: any;
+  payload: unknown;
   correlationId: string;
 }
 
 export interface ServiceLayerResponse {
   success: boolean;
-  data?: any;
+  data?: unknown;
   error?: string;
   correlationId: string;
 }

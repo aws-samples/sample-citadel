@@ -40,7 +40,27 @@ interface ModelConfig {
   updatedBy?: string;
 }
 
-export const handler = async (event: any) => {
+/** updateModelConfig mutation input (partial merge onto existing row). */
+interface UpdateModelConfigInput {
+  scope?: string;
+  globalDefaultKey?: string | null;
+  slotDefaults?: string | Record<string, unknown> | null;
+  localityMode?: string | null;
+}
+
+/** AppSync event slice this resolver reads. */
+interface ModelConfigResolverEvent {
+  info: { fieldName: string };
+  identity?: { username?: string; claims?: { sub?: string }; [claim: string]: unknown };
+  arguments: {
+    scope?: string;
+    modelKey: string;
+    status: string;
+    input: UpdateModelConfigInput;
+  };
+}
+
+export const handler = async (event: ModelConfigResolverEvent) => {
   console.log('Event:', JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
@@ -134,7 +154,7 @@ async function loadCatalog(): Promise<Record<string, ModelCatalogEntry>> {
  * config row, stamps updatedAt/updatedBy, persists it, and emits
  * MODEL_CONFIG_CHANGED.
  */
-async function updateModelConfig(input: any, event: any): Promise<ModelConfig> {
+async function updateModelConfig(input: UpdateModelConfigInput, event: ModelConfigResolverEvent): Promise<ModelConfig> {
   if (!isAdminFromEvent(event)) {
     throw new Error('Only administrators can update model configuration');
   }
@@ -236,7 +256,7 @@ async function updateModelConfig(input: any, event: any): Promise<ModelConfig> {
 async function setModelCatalogEntryStatus(
   modelKey: string,
   status: string,
-  event: any,
+  event: ModelConfigResolverEvent,
 ): Promise<ModelCatalogEntry> {
   if (!isAdminFromEvent(event)) {
     throw new Error('Only administrators can update model configuration');
@@ -288,7 +308,7 @@ async function setModelCatalogEntryStatus(
  * Lambda — this resolver never invokes that Lambda directly (no
  * lambda:InvokeFunction). Returns a lightweight acknowledgement.
  */
-async function syncModelCatalog(event: any) {
+async function syncModelCatalog(event: ModelConfigResolverEvent) {
   if (!isAdminFromEvent(event)) {
     throw new Error('Only administrators can trigger a model catalog sync');
   }

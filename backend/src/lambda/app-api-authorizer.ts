@@ -88,7 +88,7 @@ export function evaluateKeyAuthorization(
  */
 export const handler = async (
   event: AuthorizerEvent,
-  _context?: any,
+  _context?: unknown,
   deps: { docClient?: DynamoDBDocumentClient; appsTable?: string } = {},
 ): Promise<SimpleAuthorizerResult> => {
   const docClient = deps.docClient || getDocClient();
@@ -127,10 +127,12 @@ export const handler = async (
     const items = result.Items || [];
 
     // Find matching key by hash
-    const matchedKey = items.find((item: any) => item.hashedKey === hashedKey) as any;
+    const matchedKey = items.find((item) => item.hashedKey === hashedKey) as
+      | { status: string; expiresAt?: string; keyId?: string; appId?: string }
+      | undefined;
 
     // Evaluate authorization using pure decision logic
-    const decision = evaluateKeyAuthorization(matchedKey as any);
+    const decision = evaluateKeyAuthorization(matchedKey);
 
     logAudit({
       appId,
@@ -147,7 +149,7 @@ export const handler = async (
     // Best-effort async update of lastUsedAt
     docClient.send(new UpdateCommand({
       TableName: appsTable,
-      Key: { appId: matchedKey.appId },
+      Key: { appId: matchedKey!.appId },
       UpdateExpression: 'SET lastUsedAt = :now',
       ExpressionAttributeValues: {
         ':now': new Date().toISOString(),
@@ -160,7 +162,7 @@ export const handler = async (
       isAuthorized: true,
       context: {
         appId,
-        apiKeyId: matchedKey.keyId,
+        apiKeyId: matchedKey!.keyId as string,
       },
     };
   } catch (error) {
