@@ -415,8 +415,9 @@ function toJsonString(value: unknown): string | null {
  * Validates workflow definition structure before persistence (WF-01 AC 12).
  * Lightweight check: valid JSON, has nodes array and edges array.
  * Accepts either a JSON string or an already-parsed object (AppSync AWSJSON).
+ * Exported for the intake Python-client contract test (envelope round-trip).
  */
-function validateDefinitionStructure(definitionValue: unknown): { valid: boolean; errors: string[] } {
+export function validateDefinitionStructure(definitionValue: unknown): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
   let definition: unknown;
   if (typeof definitionValue === 'string') {

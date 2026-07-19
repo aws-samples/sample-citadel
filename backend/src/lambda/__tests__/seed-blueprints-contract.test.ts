@@ -10,7 +10,8 @@
  * overwritten when outdated (missing seedVersion or seedVersion < current)
  * but never when current, and user rows are never touched.
  *
- * KEEP IN SYNC: the envelope guard below mirrors isWorkflowDefinition (and
+ * KEEP IN SYNC: the envelope guard (imported from
+ * fixtures/workflow-envelope-guard.ts) mirrors isWorkflowDefinition (and
  * its isWorkflowNodeDefinition / isWorkflowEdgeDefinition sub-guards) in
  * frontend/src/types/workflow.ts field-for-field. The frontend guard carries
  * the reciprocal cross-reference comment — if either side changes shape,
@@ -20,6 +21,8 @@
 import { mockClient } from 'aws-sdk-client-mock';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { CloudFormationCustomResourceEvent, Context } from 'aws-lambda';
+
+import { isWorkflowDefinitionEnvelope } from './fixtures/workflow-envelope-guard';
 
 // Mock the https module so the CFN custom-resource response resolves locally.
 jest.mock('https', () => ({
@@ -54,84 +57,6 @@ const EXPECTED_CONDITION_EXPRESSION =
   'attribute_not_exists(workflowId) OR attribute_not_exists(seedVersion) OR seedVersion < :v';
 
 const NOW = '2026-07-17T00:00:00.000Z';
-
-// ─── Envelope guard: field-for-field mirror of the frontend type guards ───
-// Mirrors isWorkflowNodeDefinition in frontend/src/types/workflow.ts.
-function isWorkflowNodeDefinition(node: unknown): boolean {
-  if (node === null || typeof node !== 'object') {
-    return false;
-  }
-  const candidate = node as {
-    id?: unknown;
-    agentId?: unknown;
-    position?: unknown;
-    configuration?: unknown;
-  };
-  if (candidate.position === null || typeof candidate.position !== 'object') {
-    return false;
-  }
-  const position = candidate.position as { x?: unknown; y?: unknown };
-  return (
-    typeof candidate.id === 'string' &&
-    typeof candidate.agentId === 'string' &&
-    typeof position.x === 'number' &&
-    typeof position.y === 'number' &&
-    candidate.configuration !== null &&
-    typeof candidate.configuration === 'object'
-  );
-}
-
-// Mirrors isWorkflowEdgeDefinition in frontend/src/types/workflow.ts.
-function isWorkflowEdgeDefinition(edge: unknown): boolean {
-  if (edge === null || typeof edge !== 'object') {
-    return false;
-  }
-  const candidate = edge as {
-    id?: unknown;
-    source?: unknown;
-    target?: unknown;
-    sourceHandle?: unknown;
-    targetHandle?: unknown;
-  };
-  return (
-    typeof candidate.id === 'string' &&
-    typeof candidate.source === 'string' &&
-    typeof candidate.target === 'string' &&
-    typeof candidate.sourceHandle === 'string' &&
-    typeof candidate.targetHandle === 'string'
-  );
-}
-
-// Mirrors isWorkflowDefinition in frontend/src/types/workflow.ts.
-function isWorkflowDefinitionEnvelope(workflow: unknown): boolean {
-  if (workflow === null || typeof workflow !== 'object') {
-    return false;
-  }
-  const candidate = workflow as {
-    version?: unknown;
-    id?: unknown;
-    name?: unknown;
-    createdAt?: unknown;
-    updatedAt?: unknown;
-    nodes?: unknown;
-    edges?: unknown;
-  };
-  if (
-    typeof candidate.version !== 'string' ||
-    typeof candidate.id !== 'string' ||
-    typeof candidate.name !== 'string' ||
-    typeof candidate.createdAt !== 'string' ||
-    typeof candidate.updatedAt !== 'string' ||
-    !Array.isArray(candidate.nodes) ||
-    !Array.isArray(candidate.edges)
-  ) {
-    return false;
-  }
-  return (
-    candidate.nodes.every(isWorkflowNodeDefinition) &&
-    candidate.edges.every(isWorkflowEdgeDefinition)
-  );
-}
 
 // ─── CFN event/context fixtures ────────────────────────────────────────────
 function makeEvent(

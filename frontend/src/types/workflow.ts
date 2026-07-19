@@ -249,7 +249,7 @@ export function isWorkflowEdgeDefinition(edge: any): edge is WorkflowEdgeDefinit
 /**
  * Type guard to check if a value is a WorkflowDefinition
  *
- * KEEP IN SYNC: backend/src/lambda/__tests__/seed-blueprints-contract.test.ts
+ * KEEP IN SYNC: backend/src/lambda/__tests__/fixtures/workflow-envelope-guard.ts
  * mirrors this guard (and isWorkflowNodeDefinition / isWorkflowEdgeDefinition
  * above) field-for-field to assert every seeded blueprint envelope stays
  * loadable on the canvas. If this guard changes shape, update the backend
