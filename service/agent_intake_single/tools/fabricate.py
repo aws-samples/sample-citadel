@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import boto3
 from strands.tools import tool
 from tools.kb import s3_get, s3_put
+from tools.converse_utils import extract_text
 from config import bedrock, AGENT_MODEL_ID
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,7 @@ def _llm(system: str, user: str, max_tokens: int = 8192) -> str:
         messages=[{"role": "user", "content": [{"text": user}]}],
         inferenceConfig={"maxTokens": max_tokens},
     )
-    raw = resp["output"]["message"]["content"][0]["text"].strip()
+    raw = extract_text(resp)
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):

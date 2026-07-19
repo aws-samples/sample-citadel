@@ -4,6 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from strands.tools import tool
 from tools.kb import kb_query, load_json_from_s3, save_json_to_s3
+from tools.converse_utils import extract_text
 from config import bedrock, AWS_REGION
 from region import cross_region_prefix
 from model_config_loader import load_extraction_model_id
@@ -131,7 +132,7 @@ JSON only, no explanation."""
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
         inferenceConfig={'maxTokens': 256},
     )
-    raw = response['output']['message']['content'][0]['text'].strip()
+    raw = extract_text(response)
     # Strip markdown code fences if present
     if raw.startswith('```'):
         raw = raw.split('```')[1]
