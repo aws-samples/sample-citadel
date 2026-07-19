@@ -91,3 +91,16 @@ def test_postfab_stage_baked_into_state_summary():
     src = inspect.getsource(agent.get_agent)
     assert "get_postfab_marker" in src
     assert "Post-fabrication" in src
+
+
+def test_phase8_relays_next_steps_and_handles_show_me_how_to_publish():
+    prompt = agent.SYSTEM_PROMPT
+    assert "next_steps" in prompt
+    assert "Show me how to publish" in prompt
+    # walking through the steps is guidance only — no tool backs publishing
+    assert "no tool call" in prompt.lower()
+
+
+def test_phase8_never_claims_agent_publishes_on_users_behalf():
+    prompt = agent.SYSTEM_PROMPT
+    assert "NEVER offer or imply that you can publish" in prompt

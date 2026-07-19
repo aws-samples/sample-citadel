@@ -203,12 +203,35 @@ def _import_gate(app_name: str) -> tuple[str, list[dict]]:
     )
 
 
+def _publish_next_steps(app_name: str) -> list[str]:
+    """Ordered plain-language path from the draft workflow to a published app.
+
+    Mirrors the real click-path: publish the workflow (enables Run), then
+    Activate the app (the app-level Publish button stays hidden until then),
+    then Publish -> Confirm Publish, which shows the endpoint URL and API key
+    exactly once, after which the API Dashboard appears.
+    """
+    return [
+        f"Open '{app_name}' from your Apps list and go to its Workflows tab.",
+        "Publish the workflow from its card, or open it and use Publish on "
+        "the canvas — publishing the workflow is what enables Run.",
+        f"Back in the app header, select Activate — the app-level Publish "
+        f"button only appears once '{app_name}' is activated.",
+        "Select Publish, then Confirm Publish. You'll get the endpoint URL "
+        "and an API key — the API key is shown only once, so copy it right "
+        "away.",
+        "After publishing, an API Dashboard appears in the app so you can "
+        "watch requests, latency, and errors.",
+    ]
+
+
 def _final_gate(app_name: str) -> tuple[str, list[dict]]:
     return (
         f"Would you like to open '{app_name}' to review it?",
         [
             _action(f"Open '{app_name}'", f"Open {app_name}"),
-            _action("Publish without reviewing", "Publish the workflow without reviewing"),
+            _action("Show me how to publish",
+                    "Show me the steps to publish the workflow and the app"),
             _action("Done for now", "Done for now"),
         ],
     )
@@ -844,6 +867,7 @@ def import_blueprint_to_app(session_id: str) -> str:
             f"The workflow is already in '{app_name}' — you'll find it in the "
             f"Workflows tab of '{app_name}', saved as a draft.",
             question, actions, workflow_id=marker["workflowId"],
+            next_steps=_publish_next_steps(app_name),
         )
 
     if not marker.get("blueprintId") or not marker.get("appId"):
@@ -884,12 +908,17 @@ def import_blueprint_to_app(session_id: str) -> str:
     return _result(
         True, "imported",
         f"Added your workflow to '{app_name}' as a draft — you'll find it in "
-        f"the Workflows tab of '{app_name}', saved as a draft. Open the app's "
-        "canvas to review it, and publish from there when it looks right.",
+        f"the Workflows tab of '{app_name}', saved as a draft. When you're "
+        "ready to take it live, I can walk you through the steps to publish "
+        "the workflow and then the app.",
         question, actions, workflow_id=workflow_id,
+        next_steps=_publish_next_steps(app_name),
         recap=(
             f"All set. Here's what we did: activated {activated_count} agents, "
             f"created the app '{app_name}', and added your process to it as a "
-            f"draft workflow. You can open '{app_name}' from your Apps list any time."
+            f"draft workflow. You can open '{app_name}' from your Apps list any "
+            "time. Publishing the workflow and then the app is the last "
+            "stretch — it ends with an endpoint URL and an API key other "
+            "systems can use to call it."
         ),
     )

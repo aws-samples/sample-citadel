@@ -4,6 +4,11 @@ Contract:
 - Calls intakeImportBlueprintToApp with the marker's blueprintId/appId.
 - Result copy includes where-to-see-it: 'Workflows tab of <app>, saved as a
   draft'.
+- Success and already_done carry a structured next_steps list ordering
+  workflow publish before app Activate before app Publish, with the
+  one-time API-key warning.
+- Final gate offers 'Show me how to publish' (guidance), never a publish
+  action with no backing tool.
 - Idempotent via marker.workflowId; requires blueprint + app steps first.
 - Errors return the nothing-changed copy.
 
@@ -117,3 +122,64 @@ def test_error_returns_nothing_changed_copy(execute, marker_store):
     assert "FROBOZZ" not in json.dumps(result)
     assert marker_store["sess-1"].get("workflowId") is None
     _contract(result)
+
+
+def _step_index(steps, needle):
+    """Index of the first step containing needle (case-insensitive)."""
+    for i, step in enumerate(steps):
+        if needle in step.lower():
+            return i
+    raise AssertionError(f"no step contains {needle!r}: {steps}")
+
+
+def test_success_carries_ordered_next_steps_to_published(execute, marker_store):
+    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+
+    steps = result["next_steps"]
+    assert isinstance(steps, list) and all(isinstance(s, str) and s for s in steps)
+    workflow_publish = _step_index(steps, "publish the workflow")
+    app_activate = _step_index(steps, "activate")
+    app_publish = _step_index(steps, "confirm publish")
+    assert workflow_publish < app_activate < app_publish
+    _contract(result)
+
+
+def test_success_next_steps_warn_api_key_shown_only_once(execute, marker_store):
+    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+
+    joined = " ".join(result["next_steps"]).lower()
+    assert "api key" in joined
+    assert "only once" in joined
+
+
+def test_final_gate_offers_publish_guidance_not_unbacked_publish(execute, marker_store):
+    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+
+    labels = [a["label"] for a in result["actions"]]
+    assert "Show me how to publish" in labels
+    show = next(a for a in result["actions"] if a["label"] == "Show me how to publish")
+    assert show["value"] == "Show me the steps to publish the workflow and the app"
+    serialized = json.dumps(result["actions"]).lower()
+    assert "without reviewing" not in serialized
+
+
+def test_already_done_carries_same_next_steps(execute, marker_store):
+    first = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    second = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+
+    assert second["status"] == "already_done"
+    assert second["next_steps"] == first["next_steps"]
+    _contract(second)
+
+
+def test_summary_points_at_publish_steps_and_recap_mentions_endpoint_key(execute, marker_store):
+    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+
+    # keep the existing where-to-see-it sentence
+    assert "Workflows tab of 'Acme Claims'" in result["summary"]
+    assert "draft" in result["summary"]
+    # one-sentence pointer at the publish path
+    assert "steps to publish" in result["summary"].lower()
+    recap = result["recap"].lower()
+    assert "endpoint" in recap
+    assert "api key" in recap
