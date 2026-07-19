@@ -12,7 +12,7 @@ interface TaskCallback {
   queueUrl?: string;
   endpoint?: string;
   serverId?: string;
-  metadata?: any;
+  metadata?: unknown;
 }
 
 interface SubmitTaskInput {
@@ -20,7 +20,7 @@ interface SubmitTaskInput {
   callback?: TaskCallback;
 }
 
-export const handler = async (event: any) => {
+export const handler = async (event: { info: { fieldName: string }; arguments: { input: SubmitTaskInput } }) => {
   console.log('Event:', JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
@@ -50,7 +50,12 @@ async function submitTask(input: SubmitTaskInput) {
     // Send event to EventBridge for the Supervisor agent
     // The supervisor expects the detail to contain the task information
     // which it will pass to orchestrate() as initial_message
-    const detail: any = {
+    const detail: {
+      task: string;
+      orchestrationId: string;
+      timestamp: string;
+      callback?: TaskCallback;
+    } = {
       task: input.taskDetails,
       orchestrationId: orchestrationId,
       timestamp: new Date().toISOString(),

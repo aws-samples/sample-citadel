@@ -435,7 +435,12 @@ export async function getDashboardMetrics(
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
-export const handler = async (event: any): Promise<void> => {
+/** CloudWatch Logs subscription event shape. */
+interface LogsSubscriptionEvent {
+  awslogs: { data: string };
+}
+
+export const handler = async (event: LogsSubscriptionEvent): Promise<void> => {
   const appsTable = process.env.APPS_TABLE!;
   const deps: MetricsDeps = { docClient, appsTable };
 
@@ -444,7 +449,7 @@ export const handler = async (event: any): Promise<void> => {
   const decompressed = gunzipSync(payload);
   const logData = JSON.parse(decompressed.toString());
 
-  const messages: string[] = logData.logEvents.map((e: any) => e.message);
+  const messages: string[] = logData.logEvents.map((e: { message: string }) => e.message);
   const entries = parseAccessLogEntries(messages);
 
   await processMetricsEvent(entries, deps);

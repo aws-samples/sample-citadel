@@ -50,6 +50,8 @@ import type {
   SubmitAgentDesignAssessmentInput,
   DimensionComplexityInput,
   FourDimensionLiteral,
+  GovernanceEventIdentity,
+  GovernanceResolverEvent,
 } from '../types';
 import { ProjectArchetypeStatus } from '../types';
 
@@ -69,8 +71,23 @@ const FOUR_DIMENSIONS: readonly FourDimensionLiteral[] = [
 ];
 const EXPECTED_RANKS = [1, 2, 3, 4];
 
-function authContextFromEvent(event: any): AuthContext {
-  const identity = event?.identity || {};
+/**
+ * Merged view of every argument this resolver's fields receive.
+ * submitAgentDesignAssessment spreads its input at the top level of
+ * `arguments`, hence the Partial<SubmitAgentDesignAssessmentInput> base.
+ */
+interface AgentDesignAssessmentResolverArguments
+  extends Partial<SubmitAgentDesignAssessmentInput> {
+  projectId: string;
+}
+
+type AgentDesignAssessmentResolverEvent =
+  GovernanceResolverEvent<AgentDesignAssessmentResolverArguments>;
+
+function authContextFromEvent(
+  event: AgentDesignAssessmentResolverEvent,
+): AuthContext {
+  const identity: GovernanceEventIdentity = event?.identity || {};
   const claimRole = identity['custom:role'] ?? identity.claims?.['custom:role'];
   return {
     userId: identity.sub || identity.username || 'anonymous',
@@ -322,7 +339,7 @@ export async function submitAgentDesignAssessment(
   return after;
 }
 
-export const handler = async (event: any): Promise<unknown> => {
+export const handler = async (event: AgentDesignAssessmentResolverEvent): Promise<unknown> => {
   const fieldName = event?.info?.fieldName;
   const authContext = authContextFromEvent(event);
   try {

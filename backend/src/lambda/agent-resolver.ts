@@ -1,4 +1,4 @@
-import { AppSyncResolverHandler } from 'aws-lambda';
+import { AppSyncResolverHandler, AppSyncResolverEvent } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
@@ -20,11 +20,29 @@ interface AgentStatus {
   currentTask?: string;
   progress?: number;
   lastUpdate: string;
-  metadata?: any;
+  metadata?: Record<string, unknown>;
   errorMessage?: string;
 }
 
-export const handler: AppSyncResolverHandler<any, any> = async (event) => {
+/** updateAgentStatus mutation input shape. */
+interface AgentStatusInputShape {
+  status: string;
+  currentTask?: string;
+  progress?: number;
+  metadata?: Record<string, unknown>;
+  errorMessage?: string;
+}
+
+/** Merged view of every argument this resolver's fields receive. */
+interface AgentResolverArguments {
+  projectId: string;
+  agentId: string;
+  status: AgentStatusInputShape;
+}
+
+type AgentResolverEvent = AppSyncResolverEvent<AgentResolverArguments>;
+
+export const handler: AppSyncResolverHandler<AgentResolverArguments, unknown> = async (event) => {
   console.log('Agent resolver event:', JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
@@ -50,7 +68,7 @@ async function getAgentStatus(
   projectId: string,
   agentId: string,
   _userId: string,
-  event: any,
+  event: AgentResolverEvent,
 ): Promise<AgentStatus | null> {
   // Project-membership check (tenant isolation).
   //
@@ -107,9 +125,9 @@ async function getAgentStatus(
 async function updateAgentStatus(
   projectId: string,
   agentId: string,
-  statusInput: any,
+  statusInput: AgentStatusInputShape,
   _userId: string,
-  event: any,
+  event: AgentResolverEvent,
 ): Promise<AgentStatus | null> {
   // Project-membership check (tenant isolation) — write path.
   //
@@ -165,7 +183,7 @@ async function updateAgentStatus(
   return agentStatus;
 }
 
-async function emitEvent(eventType: string, detail: any): Promise<void> {
+async function emitEvent(eventType: string, detail: Record<string, unknown>): Promise<void> {
   const command = new PutEventsCommand({
     Entries: [
       {

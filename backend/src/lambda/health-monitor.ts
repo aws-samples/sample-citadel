@@ -43,13 +43,13 @@ interface DataStoreItem {
   config: string;
   errorMessage?: string | null;
   secretArn?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 interface AdapterLike {
   testConnection(
-    config: Record<string, any>,
-    credentials?: Record<string, any>
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>
   ): Promise<{ success: boolean; message: string }>;
 }
 
@@ -78,17 +78,20 @@ const PERMISSION_ERROR_NAMES = new Set([
  * the store's status should be preserved (not flipped to ERROR).
  */
 function isPermissionError(
-  testResult?: { details?: Record<string, any>; message?: string },
-  thrownError?: any,
+  testResult?: { details?: Record<string, unknown>; message?: string },
+  thrownError?: unknown,
 ): boolean {
+  // Structural view of the thrown value — health checks re-throw AWS SDK
+  // errors, so name/message are the fields of interest.
+  const err = thrownError as { name?: string; message?: string } | undefined;
   if (testResult?.details?.isPermissionError) return true;
-  if (testResult?.details?.errorName && PERMISSION_ERROR_NAMES.has(testResult.details.errorName)) return true;
-  if (thrownError?.name && PERMISSION_ERROR_NAMES.has(thrownError.name)) return true;
+  if (testResult?.details?.errorName && PERMISSION_ERROR_NAMES.has(testResult.details.errorName as string)) return true;
+  if (err?.name && PERMISSION_ERROR_NAMES.has(err.name)) return true;
   // Heuristic: check message for common permission phrases
-  const msg = (testResult?.message || thrownError?.message || '').toLowerCase();
+  const msg = (testResult?.message || err?.message || '').toLowerCase();
   if (msg.includes('access denied') || msg.includes('not authorized') || msg.includes('forbidden')) return true;
   // AWS SDK returns UnknownError when the caller has no permissions for the service at all
-  const errorName = (testResult?.details?.errorName || thrownError?.name || '').toLowerCase();
+  const errorName = ((testResult?.details?.errorName as string | undefined) || err?.name || '').toLowerCase();
   if (errorName === 'unknownerror') return true;
   return false;
 }
@@ -130,7 +133,7 @@ export async function processHealthChecks(
           const adapter = getAdapterFn(store);
 
           // Try to assume scoped role for this datastore
-          let scopedCreds: Record<string, any> | undefined;
+          let scopedCreds: Record<string, unknown> | undefined;
           try {
             const callerIdentity = await stsClient.send(new GetCallerIdentityCommand({}));
             const accountId = callerIdentity.Account!;

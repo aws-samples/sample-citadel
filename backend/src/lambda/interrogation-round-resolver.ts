@@ -46,7 +46,11 @@ import { LifecycleManager, ROUND_TRANSITIONS } from '../adapters/lifecycle';
 import { emitGovernanceEvent } from '../utils/notifier-base';
 import { hasPermission } from '../utils/auth';
 import { redactPII } from '../utils/redact-pii';
-import type { AuthContext } from '../types';
+import type {
+  AuthContext,
+  GovernanceEventIdentity,
+  GovernanceResolverEvent,
+} from '../types';
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -81,8 +85,22 @@ export interface InterrogationRound {
   transcriptSizeBytes?: number;
 }
 
-function authContextFromEvent(event: any): AuthContext {
-  const identity = event?.identity || {};
+/** Merged view of every argument this resolver's fields receive. */
+interface InterrogationRoundResolverArguments {
+  projectId: string;
+  roundN: number;
+  constraints: string[];
+  transcript: TranscriptMessage[];
+  stabilisedSummary: string;
+}
+
+type InterrogationRoundResolverEvent =
+  GovernanceResolverEvent<InterrogationRoundResolverArguments>;
+
+function authContextFromEvent(
+  event: InterrogationRoundResolverEvent,
+): AuthContext {
+  const identity: GovernanceEventIdentity = event?.identity || {};
   const claimRole = identity['custom:role'] ?? identity.claims?.['custom:role'];
   return {
     userId: identity.sub || identity.username || 'anonymous',
@@ -329,7 +347,7 @@ export async function stabiliseRound(
   return res.Attributes as InterrogationRound;
 }
 
-export const handler = async (event: any): Promise<unknown> => {
+export const handler = async (event: InterrogationRoundResolverEvent): Promise<unknown> => {
   const fieldName = event?.info?.fieldName;
   const authContext = authContextFromEvent(event);
   try {

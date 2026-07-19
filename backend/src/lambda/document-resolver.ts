@@ -75,7 +75,14 @@ async function generateDocumentPdf(projectId: string, documentKey: string): Prom
   return { url, expiresIn: 900 };
 }
 
-export const handler: AppSyncResolverHandler<any, any> = async (event) => {
+/** Merged view of every argument this resolver's fields receive. */
+interface DocumentResolverArguments {
+  projectId: string;
+  documentKey: string;
+  versionId?: string;
+}
+
+export const handler: AppSyncResolverHandler<DocumentResolverArguments, unknown> = async (event) => {
   const { info, arguments: args } = event;
   const { projectId, documentKey, versionId } = args;
 

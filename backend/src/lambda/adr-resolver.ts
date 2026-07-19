@@ -28,7 +28,13 @@ import { v4 as uuidv4 } from 'uuid';
 import { LifecycleManager, ADR_TRANSITIONS } from '../adapters/lifecycle';
 import { emitGovernanceEvent } from '../utils/notifier-base';
 import { hasPermission } from '../utils/auth';
-import type { AuthContext, ADRReopenAttempt, AuthResultLiteral } from '../types';
+import type {
+  AuthContext,
+  ADRReopenAttempt,
+  AuthResultLiteral,
+  GovernanceEventIdentity,
+  GovernanceResolverEvent,
+} from '../types';
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -63,8 +69,22 @@ export interface ADR extends ADRInput {
   supersededBy?: string;
 }
 
-function authContextFromEvent(event: any): AuthContext {
-  const identity = event?.identity || {};
+/** Merged view of every argument this resolver's fields receive. */
+interface ADRResolverArguments {
+  input: ADRInput;
+  adrId: string;
+  oldAdrId: string;
+  newAdrId: string;
+  proposedChange: string;
+  revisitConditionMatched: boolean;
+  reason: string;
+  projectId: string;
+}
+
+type ADRResolverEvent = GovernanceResolverEvent<ADRResolverArguments>;
+
+function authContextFromEvent(event: ADRResolverEvent): AuthContext {
+  const identity: GovernanceEventIdentity = event?.identity || {};
   const claimRole = identity['custom:role'] ?? identity.claims?.['custom:role'];
   return {
     userId: identity.sub || identity.username || 'anonymous',
@@ -409,7 +429,7 @@ export async function lockADR(adrId: string, authContext: AuthContext): Promise<
   return locked;
 }
 
-export const handler = async (event: any): Promise<unknown> => {
+export const handler = async (event: ADRResolverEvent): Promise<unknown> => {
   const fieldName = event?.info?.fieldName;
   const authContext = authContextFromEvent(event);
   try {

@@ -40,18 +40,18 @@ export interface AppMetadata {
   endpointUrl?: string;
   apiId?: string;
   version?: number;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface ComponentItem {
   sortId: string;
   agentId?: string;
   status?: string;
-  schema?: Record<string, any>;
-  values?: Record<string, any>;
+  schema?: Record<string, unknown>;
+  values?: Record<string, unknown>;
   actions?: string[];
   resources?: string[];
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface PublishResult {
@@ -107,8 +107,8 @@ export function generateApiKey(): ApiKeyGenResult {
 export function buildStatusTransitionEvent(
   fromStatus: string,
   toStatus: string,
-  detail: Record<string, any>,
-): { detailType: string; source: string; detail: Record<string, any> } {
+  detail: Record<string, unknown>,
+): { detailType: string; source: string; detail: Record<string, unknown> } {
   const detailType = `app.status.${fromStatus.toLowerCase()}_to_${toStatus.toLowerCase()}`;
   return {
     detailType,
@@ -165,7 +165,15 @@ export function validatePublishPreconditions(
       const validate = ajv.compile(configSchema.schema);
       const valid = validate(configValues.values);
       if (!valid) {
-        const validationErrors = (validate.errors || []).map((e: any) => {
+        // ErrorObject's compiled type defs lag the runtime shape here
+        // (instancePath); view the errors structurally without changing
+        // the runtime mapping.
+        const ajvErrors = (validate.errors || []) as Array<{
+          instancePath?: string;
+          message?: string;
+          params?: { missingProperty?: string };
+        }>;
+        const validationErrors = ajvErrors.map((e) => {
           const path = e.instancePath || (e.params?.missingProperty ? e.params.missingProperty : '');
           return `${path ? path + ': ' : ''}${e.message}`;
         }).join('; ');
@@ -257,7 +265,7 @@ async function ensureAccessLogGroup(
     logGroupNamePrefix: logGroupName,
     limit: 1,
   }));
-  const logGroup = describeResult.logGroups?.find((lg: any) => lg.logGroupName === logGroupName);
+  const logGroup = describeResult.logGroups?.find((lg) => lg.logGroupName === logGroupName);
   if (logGroup?.arn) {
     return logGroup.arn;
   }
@@ -680,7 +688,14 @@ export async function unpublishApp(
 
 // ── Lambda Handler ──────────────────────────────────────────
 
-export const handler = async (event: any): Promise<any> => {
+/** AppSync event slice this handler reads. */
+interface AppPublishResolverEvent {
+  info?: { fieldName?: string };
+  arguments: { appId: string };
+  identity?: { sub?: string; claims?: { sub?: string } };
+}
+
+export const handler = async (event: AppPublishResolverEvent): Promise<unknown> => {
   console.log('Publish handler event:', JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;

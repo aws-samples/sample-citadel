@@ -132,7 +132,7 @@ async function readJobsForProject(projectId: string): Promise<Map<string, { stat
     // caller falls back to the KB query path.
     throw new Error("INGESTION_TABLE not configured");
   }
-  let nextToken: Record<string, any> | undefined;
+  let nextToken: Record<string, unknown> | undefined;
   do {
     const resp = await ddb.send(new QueryCommand({
       TableName: tableName,
@@ -140,7 +140,7 @@ async function readJobsForProject(projectId: string): Promise<Map<string, { stat
       ExpressionAttributeValues: { ":pid": projectId },
       ExclusiveStartKey: nextToken,
     }));
-    for (const item of (resp.Items ?? []) as any[]) {
+    for (const item of (resp.Items ?? []) as Array<{ documentKey?: string; status?: string; statusReason?: string }>) {
       if (item.documentKey) map.set(item.documentKey, { status: item.status ?? "UNKNOWN", statusReason: item.statusReason });
     }
     nextToken = resp.LastEvaluatedKey;
@@ -238,7 +238,14 @@ async function deleteDocument(projectId: string, documentKey: string): Promise<{
 /**
  * Lambda handler
  */
-export const handler: AppSyncResolverHandler<any, any> = async (event) => {
+/** Merged view of every argument this resolver's fields receive. */
+interface DocumentUploadResolverArguments {
+  input: GenerateUploadUrlInput;
+  projectId: string;
+  documentKey: string;
+}
+
+export const handler: AppSyncResolverHandler<DocumentUploadResolverArguments, unknown> = async (event) => {
   console.log(
     "Document upload resolver event:",
     JSON.stringify(event, null, 2)

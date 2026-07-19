@@ -12,6 +12,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import * as vm from 'vm';
 
 // --- Clients ---
 
@@ -25,31 +26,53 @@ const TOOLS_BUCKET = process.env.TOOLS_BUCKET!;
 
 export interface ToolTestResult {
   success: boolean;
-  output?: any;
+  output?: unknown;
   error?: string;
   executionTimeMs: number;
 }
 
 export interface ToolTestHistoryEntry {
   success: boolean;
-  output?: any;
+  output?: unknown;
   error?: string;
   executionTimeMs: number;
   timestamp: string;
 }
 
+/** Binding slice the sandbox reads when resolving scoped credentials. */
+export interface SandboxBinding {
+  integrationId?: string;
+  dataStoreId?: string;
+}
+
+/** Tool-config slice the sandbox reads. Rows may carry more fields. */
+export interface SandboxToolConfig {
+  integrationBindings?: SandboxBinding[];
+  dataStoreBindings?: SandboxBinding[];
+}
+
+/**
+ * Shape of the module.exports a sandboxed tool may provide: either a
+ * callable handler, or an object exposing a `.handler` function.
+ */
+type SandboxToolFn = (
+  inputs: unknown,
+  credentials: Record<string, unknown>
+) => unknown;
+type SandboxToolExports = SandboxToolFn | { handler?: SandboxToolFn };
+
 export interface ExecuteToolDeps {
-  loadToolConfig: (toolId: string) => Promise<any>;
+  loadToolConfig: (toolId: string) => Promise<SandboxToolConfig | null>;
   loadToolCode: (toolId: string) => Promise<string>;
   resolveCredentials: (bindings: {
-    integrationBindings?: any[];
-    dataStoreBindings?: any[];
-  }) => Promise<Record<string, any>>;
+    integrationBindings?: SandboxBinding[];
+    dataStoreBindings?: SandboxBinding[];
+  }) => Promise<Record<string, unknown>>;
   executeCode: (
     code: string,
-    inputs: any,
-    credentials: any
-  ) => Promise<{ output: any }>;
+    inputs: unknown,
+    credentials: Record<string, unknown>
+  ) => Promise<{ output: unknown }>;
 }
 
 // --- Pure helper: history management (Req 7.9) ---
@@ -88,7 +111,7 @@ export function addToHistory<T>(
  */
 export async function executeTool(
   toolId: string,
-  inputs: any,
+  inputs: unknown,
   orgId: string,
   deps: ExecuteToolDeps,
   timeoutMs: number = 30000
@@ -119,7 +142,7 @@ export async function executeTool(
     }
 
     // 3. Resolve scoped credentials for the tool's bindings (Req 7.5)
-    let credentials: Record<string, any>;
+    let credentials: Record<string, unknown>;
     try {
       credentials = await deps.resolveCredentials({
         integrationBindings: toolConfig.integrationBindings || [],
@@ -197,24 +220,23 @@ function defaultDeps(): ExecuteToolDeps {
     resolveCredentials: async (bindings) => {
       // In production, this calls the Credential Vender to resolve
       // scoped credentials for each binding. Simplified here.
-      const creds: Record<string, any> = {};
+      const creds: Record<string, unknown> = {};
       const allBindings = [
         ...(bindings.integrationBindings || []),
         ...(bindings.dataStoreBindings || []),
       ];
       for (const binding of allBindings) {
-        const id = binding.integrationId || binding.dataStoreId;
+        const id = (binding.integrationId || binding.dataStoreId) as string;
         creds[id] = { scopedAccess: true, bindingId: id };
       }
       return creds;
     },
 
-    executeCode: async (code: string, inputs: any, credentials: any) => {
+    executeCode: async (code: string, inputs: unknown, credentials: Record<string, unknown>) => {
       // Execute tool code in an isolated VM context
-      const vm = require('vm');
       const sandbox = {
-        module: { exports: {} as any },
-        exports: {} as any,
+        module: { exports: {} as SandboxToolExports },
+        exports: {} as SandboxToolExports,
         require: () => {
           throw new Error('require is not allowed in sandbox');
         },
@@ -272,7 +294,7 @@ export async function handler(event: {
   const { toolId, inputs: inputsJson, orgId } = event.arguments;
 
   // Validate inputs
-  let inputs: any;
+  let inputs: unknown;
   try {
     inputs = JSON.parse(inputsJson);
   } catch {

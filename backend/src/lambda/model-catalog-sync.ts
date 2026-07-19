@@ -96,8 +96,12 @@ export async function syncModelCatalog(): Promise<{
   const modelSummaries = fmResp.modelSummaries || [];
 
   // 2. Inference profiles — paginated by nextToken.
-  // Untyped Bedrock summary shapes; kept `any[]` to avoid coupling to SDK internals.
-  const inferenceProfileSummaries: any[] = [];
+  // Structural view of the Bedrock summary shapes — only the fields this
+  // mapper reads, so we stay decoupled from SDK internals.
+  const inferenceProfileSummaries: Array<{
+    inferenceProfileId?: string;
+    models?: Array<{ modelArn?: string }>;
+  }> = [];
   let nextToken: string | undefined;
   do {
     const ipResp = await bedrock.send(
@@ -125,9 +129,13 @@ export async function syncModelCatalog(): Promise<{
   }
 
   // 4. Existing catalog rows, keyed by modelKey (scan is paginated).
-  // DynamoDB rows are schemaless here; `any` is intentional for the overlay merge.
-  const existingByKey: Record<string, any> = {};
-  let scanStartKey: Record<string, any> | undefined;
+  // DynamoDB rows are schemaless here; model them as unknown-valued records
+  // plus the two operator-owned fields the overlay merge preserves.
+  const existingByKey: Record<
+    string,
+    { status?: string; discoveredAt?: string; [key: string]: unknown }
+  > = {};
+  let scanStartKey: Record<string, unknown> | undefined;
   do {
     const scanResp = await docClient.send(
       new ScanCommand({

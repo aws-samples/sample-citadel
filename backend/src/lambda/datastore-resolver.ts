@@ -16,7 +16,7 @@ import {
 } from '@aws-sdk/client-secrets-manager';
 import { v4 as uuidv4 } from 'uuid';
 import { getAdapter } from './adapters/registry';
-import { PolicyManager } from '../utils/policy-manager';
+import { PolicyManager, type ScopedCredentials } from '../utils/policy-manager';
 import { getDataStoreOperations } from '../utils/operations-registry';
 import {
   ConflictError,
@@ -56,7 +56,53 @@ interface AppSyncEventIdentity {
   sub?: string;
 }
 
-interface AppSyncEvent extends Omit<AppSyncResolverEvent<any>, 'identity'> {
+/** Create-mutation input (validated at runtime; config/credentials AWSJSON). */
+interface CreateDataStoreInput {
+  orgId: string;
+  name: string;
+  type: string;
+  category: string;
+  provisionMode: string;
+  description?: string;
+  config: string | Record<string, unknown>;
+  credentials?: string | Record<string, unknown>;
+  usage?: string;
+  clientRequestToken?: string;
+}
+
+/** Update-mutation input; only provided fields are written. */
+interface UpdateDataStoreInput {
+  dataStoreId: string;
+  version: number;
+  name?: string;
+  description?: string;
+  config?: string | Record<string, unknown>;
+  usage?: string;
+}
+
+/** Merged view of every argument this resolver's fields receive. */
+interface DataStoreResolverArguments {
+  orgId: string;
+  category?: string;
+  dataStoreId: string;
+  usage?: string;
+  input: CreateDataStoreInput & UpdateDataStoreInput;
+}
+
+/** DynamoDB data-store row slice this resolver reads. */
+interface DataStoreRecord {
+  dataStoreId: string;
+  type: string;
+  config: string | Record<string, unknown>;
+  version: number;
+  provisionMode?: string;
+  secretArn?: string;
+  status?: string;
+  usage?: string;
+  [key: string]: unknown;
+}
+
+interface AppSyncEvent extends Omit<AppSyncResolverEvent<DataStoreResolverArguments>, 'identity'> {
   identity?: AppSyncEventIdentity;
 }
 
@@ -154,9 +200,9 @@ async function retryOptimisticLock<T>(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
-    } catch (error: any) {
+    } catch (error: unknown) {
       if (
-        error.name === 'ConditionalCheckFailedException' ||
+        (error instanceof Error && error.name === 'ConditionalCheckFailedException') ||
         error instanceof ConflictError
       ) {
         lastError = error;
@@ -178,11 +224,18 @@ async function retryOptimisticLock<T>(
 // --- Queries ---
 
 async function listDataStores(orgId: string, category?: string) {
-  const params: any = {
+  const params: {
+    TableName: string;
+    IndexName: string;
+    KeyConditionExpression: string;
+    ExpressionAttributeValues: Record<string, string>;
+    ScanIndexForward: boolean;
+    FilterExpression?: string;
+  } = {
     TableName: DATASTORES_TABLE,
     IndexName: 'OrgIndex',
     KeyConditionExpression: 'orgId = :orgId',
-    ExpressionAttributeValues: { ':orgId': orgId } as Record<string, any>,
+    ExpressionAttributeValues: { ':orgId': orgId },
     ScanIndexForward: false,
   };
 
@@ -200,7 +253,7 @@ async function listDataStores(orgId: string, category?: string) {
   return items;
 }
 
-async function getDataStore(dataStoreId: string) {
+async function getDataStore(dataStoreId: string): Promise<DataStoreRecord> {
   const result = await dynamodb.send(
     new GetCommand({
       TableName: DATASTORES_TABLE,
@@ -218,7 +271,7 @@ async function getDataStore(dataStoreId: string) {
   const item = result.Item;
   item.usage = (item.usage || 'both').toUpperCase();
 
-  return item;
+  return item as DataStoreRecord;
 }
 
 async function getDataStoreStats(orgId: string) {
@@ -308,7 +361,7 @@ async function listAvailableDataSources(orgId: string, usage?: string) {
 
 // --- Mutations ---
 
-async function createDataStore(input: any, createdBy: string) {
+async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
   const dataStoreId = uuidv4();
   const timestamp = new Date().toISOString();
 
@@ -365,7 +418,7 @@ async function createDataStore(input: any, createdBy: string) {
   }
 
   // Conditional PutItem to prevent duplicate dataStoreId
-  const item: Record<string, any> = {
+  const item: Record<string, unknown> = {
     dataStoreId,
     name: input.name,
     description: input.description || null,
@@ -423,7 +476,7 @@ async function createDataStore(input: any, createdBy: string) {
         ? adapter.requiredPolicies(config, accountId, region).provision
         : adapter.requiredPolicies(config, accountId, region).connect;
 
-    let scopedCredentials: Record<string, any> | undefined;
+    let scopedCredentials: ScopedCredentials | undefined;
     if (policies.length > 0) {
       await policyManager.ensureRole(
         dataStoreId,
@@ -514,7 +567,7 @@ async function createDataStore(input: any, createdBy: string) {
   }
 }
 
-async function updateDataStore(input: any) {
+async function updateDataStore(input: UpdateDataStoreInput) {
   const dataStoreId = input.dataStoreId;
   const existing = await getDataStore(dataStoreId);
 
@@ -525,7 +578,7 @@ async function updateDataStore(input: any) {
     );
   }
 
-  const updates: Record<string, any> = {
+  const updates: Record<string, unknown> = {
     updatedAt: new Date().toISOString(),
     version: existing.version + 1,
   };
@@ -552,7 +605,7 @@ async function updateDataStore(input: any) {
 
   const setExpressions: string[] = [];
   const exprNames: Record<string, string> = {};
-  const exprValues: Record<string, any> = {};
+  const exprValues: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(updates)) {
     const nameKey = `#${key}`;
@@ -590,7 +643,7 @@ async function updateDataStore(input: any) {
 }
 
 async function deleteDataStore(dataStoreId: string) {
-  let existing: Record<string, any> | undefined;
+  let existing: DataStoreRecord | undefined;
 
   try {
     existing = await getDataStore(dataStoreId);
@@ -608,7 +661,7 @@ async function deleteDataStore(dataStoreId: string) {
       : existing.config;
 
   // Get scoped credentials for infrastructure cleanup
-  let scopedCredentials: Record<string, any> | undefined;
+  let scopedCredentials: ScopedCredentials | undefined;
   try {
     const { accountId } = await policyManager.getAccountContext();
     scopedCredentials = await policyManager.assumeScopedRole(
@@ -680,7 +733,7 @@ async function connectDataStore(dataStoreId: string) {
         : existing.config;
 
     // Retrieve credentials from Secrets Manager if available
-    let credentials: Record<string, any> | undefined;
+    let credentials: Record<string, unknown> | undefined;
     if (existing.secretArn) {
       try {
         const secretResult = await secretsManager.send(
@@ -695,7 +748,7 @@ async function connectDataStore(dataStoreId: string) {
     // Set up scoped credentials if needed
     const { accountId, region } = await policyManager.getAccountContext();
     const policies = adapter.requiredPolicies(config, accountId, region).connect;
-    let scopedCredentials: Record<string, any> | undefined;
+    let scopedCredentials: ScopedCredentials | undefined;
 
     if (policies.length > 0) {
       await policyManager.ensureRole(
@@ -817,7 +870,7 @@ async function testDataStoreConnection(dataStoreId: string) {
       : existing.config;
 
   // Retrieve credentials if available
-  let credentials: Record<string, any> | undefined;
+  let credentials: Record<string, unknown> | undefined;
   if (existing.secretArn) {
     try {
       const secretResult = await secretsManager.send(
@@ -830,7 +883,7 @@ async function testDataStoreConnection(dataStoreId: string) {
   }
 
   // Set up scoped credentials if needed
-  let scopedCredentials: Record<string, any> | undefined;
+  let scopedCredentials: ScopedCredentials | undefined;
   const { accountId, region } = await policyManager.getAccountContext();
   const policies = adapter.requiredPolicies(config, accountId, region).connect;
 

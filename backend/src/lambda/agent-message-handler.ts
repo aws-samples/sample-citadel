@@ -54,7 +54,8 @@ let _agentConfigCache: Record<string, { config: AgentCoreConfig; cachedAt: numbe
 const SSM_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // ── SigV4 Credential Cache (per invocation) ─────────────────────────
-let _cachedCredentials: any = null;
+type SigV4Credentials = Awaited<ReturnType<ReturnType<typeof defaultProvider>>>;
+let _cachedCredentials: SigV4Credentials | null = null;
 
 // ── Agent-source adapter registry (import dispatch) ─────────────────
 // Lazily built so the legacy path pays nothing when import is disabled.
@@ -164,7 +165,7 @@ export function _resetCaches(): void {
   _agentSourceRegistry = null;
 }
 
-export async function getCredentials(): Promise<any> {
+export async function getCredentials(): Promise<SigV4Credentials> {
   if (!_cachedCredentials) {
     _cachedCredentials = await defaultProvider()();
   }
@@ -178,7 +179,7 @@ interface MessageSentToAgentEvent {
   messageId: string;
   userId: string;
   timestamp: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 interface AgentCoreConfig {
@@ -239,7 +240,7 @@ async function sendMessageToAgentCore(
   config: AgentCoreConfig,
   message: string,
   sessionId: string,
-  sessionAttributes?: Record<string, any>
+  sessionAttributes?: Record<string, unknown>
 ): Promise<string> {
   try {
     const region = config.region || process.env.AWS_REGION || "ap-southeast-2";
@@ -288,7 +289,7 @@ async function sendMessageToAgentCore(
 
         // Read the stream
         const chunks: string[] = [];
-        const stream = response.response as any;
+        const stream = response.response as unknown as AsyncIterable<Uint8Array>;
 
         // Convert stream to string
         for await (const chunk of stream) {
@@ -391,6 +392,18 @@ async function sendProgressUpdate(
   console.log("Progress update sent to frontend");
 }
 
+/** Conversation row persisted for an agent response. */
+interface StoredAgentMessage {
+  projectId: string;
+  timestamp: string;
+  id: string;
+  agentId: string;
+  message: string;
+  messageType: string;
+  correlationId: string;
+  metadata?: string;
+}
+
 /**
  * Store agent response in DynamoDB
  */
@@ -399,8 +412,8 @@ async function storeAgentResponse(
   agentId: string,
   message: string,
   correlationId: string,
-  metadata?: Record<string, any>
-): Promise<any> {
+  metadata?: Record<string, unknown>
+): Promise<StoredAgentMessage> {
   const messageId = uuidv4();
   const timestamp = new Date().toISOString();
 
@@ -429,7 +442,7 @@ async function storeAgentResponse(
 /**
  * Trigger AppSync mutation to fire subscriptions
  */
-async function triggerAppSyncMutation(messageRecord: any): Promise<void> {
+async function triggerAppSyncMutation(messageRecord: StoredAgentMessage): Promise<void> {
   const mutation = `
     mutation PublishMessage($input: PublishMessageInput!) {
       publishConversationMessage(input: $input) {
@@ -488,7 +501,7 @@ async function triggerAppSyncMutation(messageRecord: any): Promise<void> {
 
   const response = await fetch(APPSYNC_ENDPOINT, {
     method: signedRequest.method,
-    headers: signedRequest.headers as any,
+    headers: signedRequest.headers,
     body: signedRequest.body,
   });
 
@@ -763,7 +776,7 @@ export const handler = async (
     const sessionId = projectId;
 
     // Prepare session attributes
-    const sessionAttributes: Record<string, any> = {
+    const sessionAttributes: Record<string, unknown> = {
       projectId: projectId,
       userId: userId,
       messageId: messageId,

@@ -34,6 +34,7 @@ import {
 import {
   BedrockAgentCoreControlClient,
   CreateGatewayTargetCommand,
+  type CreateGatewayTargetCommandInput,
   DeleteGatewayTargetCommand,
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import {
@@ -206,7 +207,7 @@ async function registerConfluence(detail: IntegrationEvent): Promise<void> {
               },
             },
           },
-        } as any,
+        } as CreateGatewayTargetCommandInput['targetConfiguration'],
         credentialProviderConfigurations: [
           {
             credentialProviderType: 'API_KEY',
@@ -219,7 +220,7 @@ async function registerConfluence(detail: IntegrationEvent): Promise<void> {
               },
             },
           },
-        ] as any,
+        ] as CreateGatewayTargetCommandInput['credentialProviderConfigurations'],
       }),
     );
 
@@ -323,7 +324,9 @@ async function registerMcpServer(detail: IntegrationEvent): Promise<void> {
     // credentials (Secrets Manager). The credential provider ARN is the
     // pre-provisioned one; the gateway target receives scopes / grantType.
     const credentials = await retrieveOauthCredentialsFromSecret(integration.secretArn);
-    const grantType = credentials.grantType ?? 'CLIENT_CREDENTIALS';
+    const grantType = (credentials.grantType ?? 'CLIENT_CREDENTIALS') as NonNullable<
+      Parameters<typeof buildMCPServerTargetPayload>[0]['oauthSettings']
+    >['grantType'];
     const oauthSettings: NonNullable<
       Parameters<typeof buildMCPServerTargetPayload>[0]['oauthSettings']
     > = {
@@ -371,10 +374,14 @@ async function registerMcpServer(detail: IntegrationEvent): Promise<void> {
  */
 async function sendCreateGatewayTargetAndPersist(
   detail: IntegrationEvent,
-  cmdInput: any,
+  cmdInput: CreateGatewayTargetCommandInput,
 ): Promise<void> {
   try {
-    const response: any = await bedrockAgentCore.send(
+    const response: {
+      targetId?: string;
+      status?: string;
+      authorizationData?: { oauth2?: { authorizationUrl?: string } };
+    } = await bedrockAgentCore.send(
       new CreateGatewayTargetCommand({
         ...cmdInput,
         gatewayIdentifier: cmdInput.gatewayIdentifier ?? (await getGatewayId()),
@@ -598,7 +605,7 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
 // Helpers
 // ────────────────────────────────────────────────────────────────────────
 
-async function retrieveOauthCredentialsFromSecret(secretArn: string): Promise<any> {
+async function retrieveOauthCredentialsFromSecret(secretArn: string): Promise<Record<string, unknown>> {
   const resp = await secretsManager.send(new GetSecretValueCommand({ SecretId: secretArn }));
   if (!resp.SecretString) return {};
   try {
@@ -655,7 +662,7 @@ async function updateIntegrationAfterCreate(
     '#agentCoreRegistered': 'agentCoreRegistered',
     '#updatedAt': 'updatedAt',
   };
-  const exprValues: Record<string, any> = {
+  const exprValues: Record<string, unknown> = {
     ':status': input.status,
     ':agentCoreRegistered': input.agentCoreRegistered,
     ':updatedAt': now,
@@ -727,7 +734,7 @@ async function updateIntegrationStatus(
     '#agentCoreRegistered': 'agentCoreRegistered',
     '#updatedAt': 'updatedAt',
   };
-  const exprValues: Record<string, any> = {
+  const exprValues: Record<string, unknown> = {
     ':status': status,
     ':agentCoreRegistered': agentCoreRegistered,
     ':updatedAt': now,

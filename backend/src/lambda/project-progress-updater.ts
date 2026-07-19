@@ -7,7 +7,13 @@ const idempotencyGuard = new IdempotencyGuard(process.env.IDEMPOTENCY_TABLE!);
 
 const VALID_FIELDS = new Set(['assessment', 'design', 'planning', 'implementation']);
 
-export const handler = async (event: any) => {
+/** EventBridge fabrication-progress event slice this handler reads. */
+interface ProgressUpdateEvent {
+  id: string;
+  detail: { sessionId: string; phase: string; completionPercentage: number };
+}
+
+export const handler = async (event: ProgressUpdateEvent) => {
   console.log('Progress event:', JSON.stringify(event));
 
   const { executed } = await idempotencyGuard.withIdempotency(event.id, async () => {

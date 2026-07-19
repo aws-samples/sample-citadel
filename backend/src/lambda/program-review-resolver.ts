@@ -49,7 +49,11 @@ import { listExecutionSpecifications } from './execspec-resolver';
 import { listInterrogationRounds } from './interrogation-round-resolver';
 import { getAgentDesignAssessment } from './agent-design-assessment-resolver';
 import { hasPermission } from '../utils/auth';
-import type { AuthContext } from '../types';
+import type {
+  AuthContext,
+  GovernanceEventIdentity,
+  GovernanceResolverEvent,
+} from '../types';
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -118,13 +122,52 @@ try {
 }
 
 // ── Evidence + Evaluator types ──────────────────────────────────────
+// The evidence rows come from the sibling governance resolvers' DynamoDB
+// tables and may carry fields beyond the canonical shared types (e.g.
+// participantRoles, coverage, nonFunctionalConstraints). The structural
+// views below model exactly what the evaluators read, so canonical rows
+// remain assignable while the extra fields stay optional.
+
+interface AdrEvidence {
+  adrId: string;
+  status?: string;
+}
+
+interface SpecEvidence {
+  specId: string;
+  status?: string;
+  approvedBy?: string;
+  sourceAdrIds?: string[];
+  sourceDesignArtifactType?: string;
+  executorKind?: string;
+  narrativeReviewStatus?: string;
+}
+
+interface RoundEvidence {
+  roundN: number;
+  status?: string;
+  participantRoles?: string[];
+  injectedConstraintIds?: string[];
+}
+
+interface AssessmentDimensionEvidence {
+  dimension?: string;
+  coverage?: string;
+}
+
+interface AssessmentEvidence {
+  completedAt?: string | null;
+  archetypeStatus?: string;
+  dimensionRanking?: AssessmentDimensionEvidence[];
+  nonFunctionalConstraints?: string[];
+}
 
 interface Evidence {
   projectId: string;
-  adrs: any[];
-  specs: any[];
-  rounds: any[];
-  assessment: any | null;
+  adrs: AdrEvidence[];
+  specs: SpecEvidence[];
+  rounds: RoundEvidence[];
+  assessment: AssessmentEvidence | null;
 }
 
 interface EvaluatorOutput {
@@ -187,7 +230,7 @@ const EVALUATORS: Record<string, Evaluator> = {
   // status in {'STABILISED','COMPLETE'}.
   Q002: (ev) => {
     const hits = ev.rounds.filter(
-      (r: any) =>
+      (r) =>
         Array.isArray(r.participantRoles) &&
         r.participantRoles.includes('OPERATIONS') &&
         (r.status === 'STABILISED' || r.status === 'COMPLETE'),
@@ -196,7 +239,7 @@ const EVALUATORS: Record<string, Evaluator> = {
       ? {
           answer: 'PASS',
           evidenceRefs: hits
-            .map((r: any) => `InterrogationRound:${ev.projectId}:${r.roundN}`)
+            .map((r) => `InterrogationRound:${ev.projectId}:${r.roundN}`)
             .sort(),
           notes: null,
         }
@@ -220,7 +263,7 @@ const EVALUATORS: Record<string, Evaluator> = {
       };
     }
     const hit = a.dimensionRanking.find(
-      (d: any) =>
+      (d) =>
         d.dimension === 'INTEGRATION_ARCHAEOLOGY' && d.coverage === 'COMPLETE',
     );
     return hit
@@ -266,12 +309,12 @@ const EVALUATORS: Record<string, Evaluator> = {
 
   // Q005: Advisory multi-round loop (≥ 3 stabilised rounds).
   Q005: (ev) => {
-    const stabilised = ev.rounds.filter((r: any) => r.status === 'STABILISED');
+    const stabilised = ev.rounds.filter((r) => r.status === 'STABILISED');
     return stabilised.length >= 3
       ? {
           answer: 'PASS',
           evidenceRefs: stabilised
-            .map((r: any) => `InterrogationRound:${ev.projectId}:${r.roundN}`)
+            .map((r) => `InterrogationRound:${ev.projectId}:${r.roundN}`)
             .sort(),
           notes: null,
         }
@@ -284,11 +327,11 @@ const EVALUATORS: Record<string, Evaluator> = {
 
   // Q006: Decisions captured as locked ADRs.
   Q006: (ev) => {
-    const locked = ev.adrs.filter((a: any) => a.status === 'LOCKED');
+    const locked = ev.adrs.filter((a) => a.status === 'LOCKED');
     return locked.length >= 1
       ? {
           answer: 'PASS',
-          evidenceRefs: locked.map((a: any) => `ADR:${a.adrId}`).sort(),
+          evidenceRefs: locked.map((a) => `ADR:${a.adrId}`).sort(),
           notes: null,
         }
       : {
@@ -302,7 +345,7 @@ const EVALUATORS: Record<string, Evaluator> = {
   // PASS when ≥1 stabilised round has a non-empty injectedConstraintIds.
   Q007: (ev) => {
     const hits = ev.rounds.filter(
-      (r: any) =>
+      (r) =>
         r.status === 'STABILISED' &&
         Array.isArray(r.injectedConstraintIds) &&
         r.injectedConstraintIds.length > 0,
@@ -311,7 +354,7 @@ const EVALUATORS: Record<string, Evaluator> = {
       ? {
           answer: 'PASS',
           evidenceRefs: hits
-            .map((r: any) => `InterrogationRound:${ev.projectId}:${r.roundN}`)
+            .map((r) => `InterrogationRound:${ev.projectId}:${r.roundN}`)
             .sort(),
           notes: null,
         }
@@ -334,7 +377,7 @@ const EVALUATORS: Record<string, Evaluator> = {
       };
     }
     const stabilised = ev.rounds.filter(
-      (r: any) => r.status === 'STABILISED',
+      (r) => r.status === 'STABILISED',
     ).length;
     const ratio = stabilised / total;
     return ratio >= 0.75
@@ -355,7 +398,7 @@ const EVALUATORS: Record<string, Evaluator> = {
   // and executorKind ≠ 'DESIGN_AGENT'.
   Q009: (ev) => {
     const hits = ev.specs.filter(
-      (s: any) =>
+      (s) =>
         (s.sourceDesignArtifactType === 'ADR' ||
           s.sourceDesignArtifactType === 'AgentDesignAssessment') &&
         s.executorKind !== 'DESIGN_AGENT',
@@ -363,7 +406,7 @@ const EVALUATORS: Record<string, Evaluator> = {
     return hits.length > 0
       ? {
           answer: 'PASS',
-          evidenceRefs: hits.map((s: any) => `ExecutionSpecification:${s.specId}`).sort(),
+          evidenceRefs: hits.map((s) => `ExecutionSpecification:${s.specId}`).sort(),
           notes: null,
         }
       : {
@@ -377,7 +420,7 @@ const EVALUATORS: Record<string, Evaluator> = {
   // PASS when ≥1 spec with status='APPROVED' and approvedBy set.
   Q010: (ev) => {
     const hits = ev.specs.filter(
-      (s: any) =>
+      (s) =>
         s.status === 'APPROVED' &&
         typeof s.approvedBy === 'string' &&
         s.approvedBy.length > 0,
@@ -385,7 +428,7 @@ const EVALUATORS: Record<string, Evaluator> = {
     return hits.length > 0
       ? {
           answer: 'PASS',
-          evidenceRefs: hits.map((s: any) => `ExecutionSpecification:${s.specId}`).sort(),
+          evidenceRefs: hits.map((s) => `ExecutionSpecification:${s.specId}`).sort(),
           notes: null,
         }
       : {
@@ -400,17 +443,17 @@ const EVALUATORS: Record<string, Evaluator> = {
   // those IDs maps to an ADR whose status='LOCKED'.
   Q011: (ev) => {
     const lockedIds = new Set(
-      ev.adrs.filter((a: any) => a.status === 'LOCKED').map((a: any) => a.adrId),
+      ev.adrs.filter((a) => a.status === 'LOCKED').map((a) => a.adrId),
     );
     const hits = ev.specs.filter(
-      (s: any) =>
+      (s) =>
         Array.isArray(s.sourceAdrIds) &&
         s.sourceAdrIds.some((id: string) => lockedIds.has(id)),
     );
     return hits.length > 0
       ? {
           answer: 'PASS',
-          evidenceRefs: hits.map((s: any) => `ExecutionSpecification:${s.specId}`).sort(),
+          evidenceRefs: hits.map((s) => `ExecutionSpecification:${s.specId}`).sort(),
           notes: null,
         }
       : {
@@ -424,13 +467,13 @@ const EVALUATORS: Record<string, Evaluator> = {
   // PASS when ≥1 spec with narrativeReviewStatus='REVIEWED' and status='APPROVED'.
   Q012: (ev) => {
     const hits = ev.specs.filter(
-      (s: any) =>
+      (s) =>
         s.narrativeReviewStatus === 'REVIEWED' && s.status === 'APPROVED',
     );
     return hits.length > 0
       ? {
           answer: 'PASS',
-          evidenceRefs: hits.map((s: any) => `ExecutionSpecification:${s.specId}`).sort(),
+          evidenceRefs: hits.map((s) => `ExecutionSpecification:${s.specId}`).sort(),
           notes: null,
         }
       : {
@@ -464,8 +507,16 @@ function evaluate(
 
 // ── AppSync event → AuthContext ─────────────────────────────────────
 
-function authContextFromEvent(event: any): AuthContext {
-  const identity = event?.identity || {};
+/** Merged view of every argument this resolver's fields receive. */
+interface ProgramReviewArguments {
+  projectId: string;
+  reviewId: string;
+}
+
+type ProgramReviewResolverEvent = GovernanceResolverEvent<ProgramReviewArguments>;
+
+function authContextFromEvent(event: ProgramReviewResolverEvent): AuthContext {
+  const identity: GovernanceEventIdentity = event?.identity || {};
   const claimRole =
     identity['custom:role'] ?? identity.claims?.['custom:role'];
   return {
@@ -597,7 +648,7 @@ export async function listProgramReviewsForProject(
   return (res.Items as ProgramReview[] | undefined) ?? [];
 }
 
-export const handler = async (event: any): Promise<unknown> => {
+export const handler = async (event: ProgramReviewResolverEvent): Promise<unknown> => {
   const fieldName = event?.info?.fieldName;
   const authContext = authContextFromEvent(event);
   try {

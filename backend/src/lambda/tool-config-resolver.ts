@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
 import { getOperations } from '../utils/operations-registry';
-import { RegistryService } from '../services/registry-service';
+import { RegistryService, type ToolCustomMetadata } from '../services/registry-service';
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
 
 const client = new DynamoDBClient({});
@@ -76,14 +76,55 @@ export interface DataStoreBinding {
   direction?: BindingDirection;
 }
 
+/**
+ * Raw binding shapes as accepted from GraphQL input or read back from
+ * legacy DynamoDB rows. Required fields and direction casing are enforced
+ * at runtime by the validators/sanitizers below, so everything is optional
+ * and `direction` is a plain string here.
+ */
+interface RawIntegrationBinding {
+  integrationId?: string;
+  integrationType?: string;
+  operations?: string[];
+  direction?: string;
+}
+
+interface RawDataStoreBinding {
+  dataStoreId?: string;
+  dataStoreType?: string;
+  operations?: string[];
+  direction?: string;
+}
+
+/** Merged create/update mutation input (config required only on create). */
+interface ToolConfigMutationInput {
+  toolId: string;
+  config?: string | Record<string, unknown>;
+  state?: string;
+  categories?: string[];
+  icon?: string;
+  appId?: string;
+  integrationBindings?: RawIntegrationBinding[];
+  dataStoreBindings?: RawDataStoreBinding[];
+}
+
+/** Minimal slice of the AppSync event needed for org/admin extraction. */
+type OrgScopedEvent = { identity?: Record<string, unknown> };
+
+/** AppSync event shape as dispatched to this resolver's handler. */
+interface ToolConfigResolverEvent extends OrgScopedEvent {
+  info: { fieldName: string };
+  arguments: Record<string, unknown>;
+}
+
 interface ToolConfig {
   toolId: string;
   orgId: string;
-  config: any;
+  config: string | Record<string, unknown>;
   state: 'active' | 'inactive' | 'maintenance' | 'pending' | string;
   categories?: string[];
-  integrationBindings?: IntegrationBinding[] | null;
-  dataStoreBindings?: DataStoreBinding[] | null;
+  integrationBindings?: RawIntegrationBinding[] | null;
+  dataStoreBindings?: RawDataStoreBinding[] | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -92,7 +133,7 @@ interface ToolConfig {
 // Binding validation
 // ---------------------------------------------------------------------------
 
-export function validateIntegrationBindings(bindings: any[]): void {
+export function validateIntegrationBindings(bindings: RawIntegrationBinding[]): void {
   for (const binding of bindings) {
     if (!binding.integrationId || typeof binding.integrationId !== 'string') {
       throw new Error('Validation error: integrationBinding missing required field "integrationId"');
@@ -103,7 +144,7 @@ export function validateIntegrationBindings(bindings: any[]): void {
   }
 }
 
-export function validateDataStoreBindings(bindings: any[]): void {
+export function validateDataStoreBindings(bindings: RawDataStoreBinding[]): void {
   for (const binding of bindings) {
     if (!binding.dataStoreId || typeof binding.dataStoreId !== 'string') {
       throw new Error('Validation error: dataStoreBinding missing required field "dataStoreId"');
@@ -131,30 +172,30 @@ export function validateDataStoreBindings(bindings: any[]): void {
  *
  * Returns `null` if the input is falsy or no bindings survive the filter.
  */
-export function sanitizeIntegrationBindings(bindings: any): IntegrationBinding[] | null {
+export function sanitizeIntegrationBindings(bindings: unknown): IntegrationBinding[] | null {
   if (!Array.isArray(bindings) || bindings.length === 0) return null;
   const cleaned = bindings
-    .filter((b: any) =>
+    .filter((b) =>
       b &&
       typeof b.integrationId === 'string' && b.integrationId.length > 0 &&
       typeof b.integrationType === 'string' && b.integrationType.length > 0,
     )
-    .map((b: any) => ({
+    .map((b) => ({
       ...b,
       direction: b.direction ? String(b.direction).toUpperCase() : 'BIDIRECTIONAL',
     }));
   return cleaned.length > 0 ? cleaned : null;
 }
 
-export function sanitizeDataStoreBindings(bindings: any): DataStoreBinding[] | null {
+export function sanitizeDataStoreBindings(bindings: unknown): DataStoreBinding[] | null {
   if (!Array.isArray(bindings) || bindings.length === 0) return null;
   const cleaned = bindings
-    .filter((b: any) =>
+    .filter((b) =>
       b &&
       typeof b.dataStoreId === 'string' && b.dataStoreId.length > 0 &&
       typeof b.dataStoreType === 'string' && b.dataStoreType.length > 0,
     )
-    .map((b: any) => ({
+    .map((b) => ({
       ...b,
       direction: b.direction ? String(b.direction).toUpperCase() : 'BIDIRECTIONAL',
     }));
@@ -166,7 +207,7 @@ export function sanitizeDataStoreBindings(bindings: any): DataStoreBinding[] | n
 // Handler (task 7.5)
 // ---------------------------------------------------------------------------
 
-export const handler = async (event: any) => {
+export const handler = async (event: ToolConfigResolverEvent) => {
   console.log('Event:', JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
@@ -176,9 +217,9 @@ export const handler = async (event: any) => {
   // `username`, API key leaves it undefined). Mirror the fabricator pattern
   // (fabricator-request-resolver.ts) so we stay consistent across resolvers.
   const requestedBy =
-    (event.identity && ('sub' in event.identity ? event.identity.sub : undefined)) ||
-    (event.identity && ('username' in event.identity ? event.identity.username : undefined)) ||
-    'unknown';
+    ((event.identity && ('sub' in event.identity ? event.identity.sub : undefined)) ||
+      (event.identity && ('username' in event.identity ? event.identity.username : undefined)) ||
+      'unknown') as string;
 
   try {
     const registryEnabled = isRegistryEnabled();
@@ -191,29 +232,29 @@ export const handler = async (event: any) => {
 
       case 'getToolConfig':
         return registryEnabled
-          ? await getToolConfigRegistry(event.arguments.toolId, event)
-          : await getToolConfig(event.arguments.toolId);
+          ? await getToolConfigRegistry(event.arguments.toolId as string, event)
+          : await getToolConfig(event.arguments.toolId as string);
 
       case 'createToolConfig':
         return registryEnabled
-          ? await createToolConfigRegistry(event.arguments.input, requestedBy, event)
-          : await createToolConfig(event.arguments.input);
+          ? await createToolConfigRegistry(event.arguments.input as ToolConfigMutationInput, requestedBy, event)
+          : await createToolConfig(event.arguments.input as ToolConfigMutationInput);
 
       case 'updateToolConfig':
         return registryEnabled
-          ? await updateToolConfigRegistry(event.arguments.input, requestedBy, event)
-          : await updateToolConfig(event.arguments.input);
+          ? await updateToolConfigRegistry(event.arguments.input as ToolConfigMutationInput, requestedBy, event)
+          : await updateToolConfig(event.arguments.input as ToolConfigMutationInput);
 
       case 'deleteToolConfig':
         return registryEnabled
-          ? await deleteToolConfigRegistry(event.arguments.toolId)
-          : await deleteToolConfig(event.arguments.toolId);
+          ? await deleteToolConfigRegistry(event.arguments.toolId as string)
+          : await deleteToolConfig(event.arguments.toolId as string);
 
       case 'listIntegrationOperations':
-        return getOperations(event.arguments.integrationType);
+        return getOperations(event.arguments.integrationType as string);
 
       case 'searchToolConfigs':
-        return await searchToolConfigs(event.arguments.query);
+        return await searchToolConfigs(event.arguments.query as string);
 
       default:
         throw new Error(`Unknown field: ${fieldName}`);
@@ -237,7 +278,7 @@ export const handler = async (event: any) => {
  * returned. A non-admin caller without an orgId receives an empty list
  * with a warning.
  */
-export async function listToolConfigsRegistry(event?: any): Promise<ToolConfig[]> {
+export async function listToolConfigsRegistry(event?: OrgScopedEvent): Promise<ToolConfig[]> {
   const callerOrgId = event !== undefined ? await extractOrgFromEvent(event) : null;
   const admin = event !== undefined ? isAdminFromEvent(event) : false;
 
@@ -295,7 +336,7 @@ export async function listToolConfigsRegistry(event?: any): Promise<ToolConfig[]
  * Cross-org access is reported as not-found (404-style, not 403) so we
  * don't leak existence across tenants. Admins bypass the org check.
  */
-export async function getToolConfigRegistry(toolId: string, event?: any): Promise<ToolConfig | null> {
+export async function getToolConfigRegistry(toolId: string, event?: OrgScopedEvent): Promise<ToolConfig | null> {
   const registryService = getRegistryService();
   const callerOrgId = event !== undefined ? await extractOrgFromEvent(event) : null;
   const admin = event !== undefined ? isAdminFromEvent(event) : false;
@@ -326,7 +367,7 @@ export async function getToolConfigRegistry(toolId: string, event?: any): Promis
  * record. Defaults to `'unknown'` so other callers (e.g. internal scripts)
  * still work unchanged.
  */
-export async function createToolConfigRegistry(input: any, userId: string = 'unknown', event?: any): Promise<ToolConfig> {
+export async function createToolConfigRegistry(input: ToolConfigMutationInput, userId: string = 'unknown', event?: OrgScopedEvent): Promise<ToolConfig> {
   // Validate bindings before Registry write
   if (input.integrationBindings && Array.isArray(input.integrationBindings)) {
     validateIntegrationBindings(input.integrationBindings);
@@ -355,7 +396,7 @@ export async function createToolConfigRegistry(input: any, userId: string = 'unk
     config,
     createdBy: userId,
     orgId,
-  });
+  } as ToolCustomMetadata);
 
   const record = await registryService.createResource('tool', input.toolId, {
     name: parsedConfig.name || input.toolId,
@@ -386,7 +427,7 @@ export async function createToolConfigRegistry(input: any, userId: string = 'unk
  * prior `createdBy` get the current caller's id on first edit; existing
  * values are preserved so we never clobber a known creator.
  */
-export async function updateToolConfigRegistry(input: any, userId: string = 'unknown', event?: any): Promise<ToolConfig> {
+export async function updateToolConfigRegistry(input: ToolConfigMutationInput, userId: string = 'unknown', event?: OrgScopedEvent): Promise<ToolConfig> {
   // Validate bindings before Registry write
   if (input.integrationBindings && Array.isArray(input.integrationBindings)) {
     validateIntegrationBindings(input.integrationBindings);
@@ -440,7 +481,7 @@ export async function updateToolConfigRegistry(input: any, userId: string = 'unk
 
   // Defensive parse: legacy records may carry free-text in description
   // rather than JSON. State-only toggles must not crash on malformed data.
-  let parsedNewConfig: any = {};
+  let parsedNewConfig: Record<string, unknown> = {};
   if (newConfig && typeof newConfig === 'string') {
     try {
       parsedNewConfig = JSON.parse(newConfig);
@@ -470,11 +511,11 @@ export async function updateToolConfigRegistry(input: any, userId: string = 'unk
     config: newConfig,
     createdBy: existingMeta.createdBy ?? userId,
     orgId: preservedOrgId,
-  });
+  } as ToolCustomMetadata);
 
   const record = await registryService.updateResource('tool', input.toolId, {
-    name: parsedNewConfig.name || existing.name,
-    description: parsedNewConfig.description ?? '',
+    name: (parsedNewConfig.name as string | undefined) || existing.name,
+    description: (parsedNewConfig.description as string | undefined) ?? '',
     customMetadata: updatedMeta,
   });
 
@@ -587,7 +628,7 @@ async function getToolConfig(toolId: string): Promise<ToolConfig | null> {
   };
 }
 
-async function createToolConfig(input: any): Promise<ToolConfig> {
+async function createToolConfig(input: ToolConfigMutationInput): Promise<ToolConfig> {
   const now = new Date().toISOString();
   const config = typeof input.config === 'string' ? JSON.parse(input.config) : input.config;
 
@@ -599,7 +640,7 @@ async function createToolConfig(input: any): Promise<ToolConfig> {
     validateDataStoreBindings(input.dataStoreBindings);
   }
 
-  const toolConfig: any = {
+  const toolConfig: ToolConfig = {
     toolId: input.toolId,
     orgId: '',
     config,
@@ -610,13 +651,13 @@ async function createToolConfig(input: any): Promise<ToolConfig> {
   };
 
   if (input.integrationBindings && Array.isArray(input.integrationBindings) && input.integrationBindings.length > 0) {
-    toolConfig.integrationBindings = input.integrationBindings.map((b: any) => ({
+    toolConfig.integrationBindings = input.integrationBindings.map((b) => ({
       ...b,
       direction: b.direction ? b.direction.toUpperCase() : 'BIDIRECTIONAL',
     }));
   }
   if (input.dataStoreBindings && Array.isArray(input.dataStoreBindings) && input.dataStoreBindings.length > 0) {
-    toolConfig.dataStoreBindings = input.dataStoreBindings.map((b: any) => ({
+    toolConfig.dataStoreBindings = input.dataStoreBindings.map((b) => ({
       ...b,
       direction: b.direction ? b.direction.toUpperCase() : 'BIDIRECTIONAL',
     }));
@@ -637,7 +678,7 @@ async function createToolConfig(input: any): Promise<ToolConfig> {
   };
 }
 
-async function updateToolConfig(input: any): Promise<ToolConfig> {
+async function updateToolConfig(input: ToolConfigMutationInput): Promise<ToolConfig> {
   const existing = await getToolConfig(input.toolId);
   if (!existing) {
     throw new Error(`Tool config not found: ${input.toolId}`);
@@ -669,7 +710,7 @@ async function updateToolConfig(input: any): Promise<ToolConfig> {
     ? input.dataStoreBindings
     : existing.dataStoreBindings;
 
-  const updatedItem: any = {
+  const updatedItem: ToolConfig = {
     toolId: input.toolId,
     orgId: existing.orgId || '',
     config: newConfig,

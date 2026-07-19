@@ -75,7 +75,15 @@ export async function setAppAuthConfig(
     throw new Error(`Auth config validation failed: ${errors.join('; ')}`);
   }
 
-  const item: Record<string, any> = {
+  const item: {
+    appId: string;
+    groupId: string;
+    sortId: string;
+    mode: string;
+    updatedAt: string;
+    issuerUrl?: string;
+    audience?: string;
+  } = {
     appId: `${appId}#CONFIG#auth`,
     groupId: `APP#${appId}`,
     sortId: 'CONFIG#auth',

@@ -103,7 +103,7 @@ async function writePendingFabricationStatus(
  * dependency; the `projectIdFromRegistryRecord` surface is used by this
  * resolver only.
  */
-function projectIdFromRegistryRecord(
+function _projectIdFromRegistryRecord(
   record: RegistryRecord,
 ): string | undefined {
   if (!record.customDescriptorContent) {
@@ -156,15 +156,22 @@ interface CreateToolRequest {
  * Python fabricator via `requested_by` on the SQS body, where it becomes
  * `createdBy` on the Registry record.
  */
-function extractRequestedBy(event: any): string {
+function extractRequestedBy(event: FabricatorRequestResolverEvent): string {
   return (
-    (event.identity && ('sub' in event.identity ? event.identity.sub : undefined)) ||
-    (event.identity && ('username' in event.identity ? event.identity.username : undefined)) ||
-    'unknown'
+    ((event.identity && ('sub' in event.identity ? event.identity.sub : undefined)) ||
+      (event.identity && ('username' in event.identity ? event.identity.username : undefined)) ||
+      'unknown') as string
   );
 }
 
-export const handler = async (event: any) => {
+/** AppSync event slice this resolver reads. */
+interface FabricatorRequestResolverEvent {
+  info: { fieldName: string };
+  identity?: Record<string, unknown>;
+  arguments: Record<string, unknown>;
+}
+
+export const handler = async (event: FabricatorRequestResolverEvent) => {
   console.log('Event:', JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
@@ -176,11 +183,11 @@ export const handler = async (event: any) => {
 
   try {
     if (fieldName === 'requestAgentCreation') {
-      return await requestAgentCreation(event.arguments.input, requestedBy, orgId);
+      return await requestAgentCreation(event.arguments.input as CreateAgentRequest, requestedBy, orgId);
     }
 
     if (fieldName === 'requestToolCreation') {
-      return await requestToolCreation(event.arguments.input, requestedBy, orgId);
+      return await requestToolCreation(event.arguments.input as CreateToolRequest, requestedBy, orgId);
     }
 
     throw new Error(`Unknown field: ${fieldName}`);
@@ -198,7 +205,7 @@ async function sendToFabricatorQueue(
   orgId: string | null,
   sourceProjectId?: string,
 ) {
-  const agent_input: Record<string, any> = { taskDetails };
+  const agent_input: Record<string, unknown> = { taskDetails };
   if (sourceProjectId) {
     // Picked up by arbiter/fabricator/index.py:928 where the
     // design_assessment_gate enforces preconditions.

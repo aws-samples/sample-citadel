@@ -81,7 +81,18 @@ async function isUserAdmin(username: string): Promise<boolean> {
   return groups.includes('admin');
 }
 
-export const handler = async (event: any) => {
+/** AppSync event slice this resolver reads: Cognito identity + arguments. */
+interface UserManagementResolverEvent {
+  info: { fieldName: string };
+  identity?: { username?: string; claims?: { username?: string } };
+  arguments: {
+    userId: string;
+    role: string;
+    input: AssignUserRoleInput & ChangePasswordInput & AdminCreateUserInput;
+  };
+}
+
+export const handler = async (event: UserManagementResolverEvent) => {
   console.log('Event:', JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
@@ -224,7 +235,7 @@ async function getUser(userId: string): Promise<User> {
   };
 }
 
-async function getCurrentUserProfile(event: any): Promise<User> {
+async function getCurrentUserProfile(event: UserManagementResolverEvent): Promise<User> {
   // Extract username from the Cognito identity
   const username = event.identity?.username || event.identity?.claims?.username;
   
@@ -235,7 +246,7 @@ async function getCurrentUserProfile(event: any): Promise<User> {
   return await getUser(username);
 }
 
-async function assignUserRole(input: AssignUserRoleInput, event: any) {
+async function assignUserRole(input: AssignUserRoleInput, event: UserManagementResolverEvent) {
   const { userId, role, organization } = input;
 
   // Verify the caller is an admin
@@ -306,7 +317,7 @@ async function assignUserRole(input: AssignUserRoleInput, event: any) {
   };
 }
 
-async function removeUserRole(userId: string, role: string, event: any) {
+async function removeUserRole(userId: string, role: string, event: UserManagementResolverEvent) {
   // Verify the caller is an admin
   const callerUsername = event.identity?.username || event.identity?.claims?.username;
   
@@ -390,7 +401,7 @@ async function listOrganizations() {
   });
 }
 
-async function changePassword(event: any, input: ChangePasswordInput) {
+async function changePassword(event: UserManagementResolverEvent, input: ChangePasswordInput) {
   const { newPassword } = input;
   
   // Get username from the Cognito identity
@@ -425,7 +436,7 @@ async function changePassword(event: any, input: ChangePasswordInput) {
   }
 }
 
-async function adminResetUserPassword(event: any, userId: string) {
+async function adminResetUserPassword(event: UserManagementResolverEvent, userId: string) {
   // Verify the caller is an admin
   const callerUsername = event.identity?.username || event.identity?.claims?.username;
   
@@ -466,7 +477,7 @@ async function adminResetUserPassword(event: any, userId: string) {
   }
 }
 
-async function adminCreateUser(event: any, input: AdminCreateUserInput) {
+async function adminCreateUser(event: UserManagementResolverEvent, input: AdminCreateUserInput) {
   // Verify the caller is an admin
   const callerUsername = event.identity?.username || event.identity?.claims?.username;
   
@@ -524,7 +535,7 @@ async function adminCreateUser(event: any, input: AdminCreateUserInput) {
   }
 }
 
-async function adminResendInvitation(event: any, userId: string) {
+async function adminResendInvitation(event: UserManagementResolverEvent, userId: string) {
   // Verify the caller is an admin
   const callerUsername = event.identity?.username || event.identity?.claims?.username;
   

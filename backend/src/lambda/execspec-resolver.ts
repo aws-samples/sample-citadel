@@ -51,6 +51,8 @@ import type {
   ExecutionSpecificationInput,
   ReviseExecutionSpecificationInput,
   SpecStatusLiteral,
+  GovernanceEventIdentity,
+  GovernanceResolverEvent,
 } from '../types';
 
 const dynamoClient = new DynamoDBClient({});
@@ -81,8 +83,18 @@ export function isNarrativeUriAllowed(uri: unknown): boolean {
   return typeof uri === 'string' && NARRATIVE_URI_ALLOWLIST.test(uri);
 }
 
-function authContextFromEvent(event: any): AuthContext {
-  const identity = event?.identity || {};
+/** Merged view of every argument this resolver's fields receive. */
+interface ExecSpecResolverArguments {
+  input: ExecutionSpecificationInput & ReviseExecutionSpecificationInput;
+  specId: string;
+  reason: string;
+  projectId: string;
+}
+
+type ExecSpecResolverEvent = GovernanceResolverEvent<ExecSpecResolverArguments>;
+
+function authContextFromEvent(event: ExecSpecResolverEvent): AuthContext {
+  const identity: GovernanceEventIdentity = event?.identity || {};
   const claimRole = identity['custom:role'] ?? identity.claims?.['custom:role'];
   return {
     userId: identity.sub || identity.username || 'anonymous',
@@ -376,7 +388,7 @@ export async function reviseExecutionSpecification(
   });
 }
 
-export const handler = async (event: any): Promise<unknown> => {
+export const handler = async (event: ExecSpecResolverEvent): Promise<unknown> => {
   const fieldName = event?.info?.fieldName;
   const authContext = authContextFromEvent(event);
   try {

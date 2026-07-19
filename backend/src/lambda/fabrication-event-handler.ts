@@ -26,7 +26,7 @@ const publishFabricationEventMutation = `
   }
 `;
 
-async function executeGraphQL(query: string, variables: any) {
+async function executeGraphQL(query: string, variables: Record<string, unknown>) {
   const endpoint = new URL(APPSYNC_ENDPOINT);
   const signer = new SignatureV4({
     credentials: defaultProvider(),

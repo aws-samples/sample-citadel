@@ -69,10 +69,23 @@ function generateKey(): { plaintext: string; hashed: string; prefix: string; key
 /**
  * Queries all APIKEY# items for an app via GroupIndex.
  */
+/** APIKEY# component row slice this module reads. */
+interface ApiKeyRecord {
+  keyId: string;
+  name: string;
+  status: string;
+  createdAt: string;
+  prefix: string;
+  hashedKey?: string;
+  expiresAt?: string;
+  lastUsedAt?: string;
+  [key: string]: unknown;
+}
+
 async function queryApiKeys(
   appId: string,
   deps: ApiKeyDeps,
-): Promise<Array<Record<string, any>>> {
+): Promise<ApiKeyRecord[]> {
   const result = await deps.docClient.send(new QueryCommand({
     TableName: deps.appsTable,
     IndexName: 'GroupIndex',
@@ -82,7 +95,7 @@ async function queryApiKeys(
       ':sk': 'APIKEY#',
     },
   }));
-  return result.Items || [];
+  return (result.Items || []) as ApiKeyRecord[];
 }
 
 /**
@@ -90,7 +103,7 @@ async function queryApiKeys(
  */
 async function emitApiKeyEvent(
   detailType: string,
-  detail: Record<string, any>,
+  detail: Record<string, unknown>,
   deps: ApiKeyDeps,
 ): Promise<void> {
   await deps.eventBridgeClient.send(new PutEventsCommand({
@@ -135,7 +148,18 @@ export async function createAppApiKey(
   const key = generateKey();
   const now = new Date().toISOString();
 
-  const item: Record<string, any> = {
+  const item: {
+    appId: string;
+    groupId: string;
+    sortId: string;
+    keyId: string;
+    name: string;
+    hashedKey: string;
+    prefix: string;
+    status: string;
+    createdAt: string;
+    expiresAt?: string;
+  } = {
     appId: `${appId}#APIKEY#${key.keyId}`,
     groupId: `APP#${appId}`,
     sortId: `APIKEY#${key.keyId}`,
@@ -260,7 +284,7 @@ export async function rotateAppApiKey(
   const newKey = generateKey();
   const now = new Date().toISOString();
 
-  const newKeyItem: Record<string, any> = {
+  const newKeyItem: Record<string, string> = {
     appId: `${appId}#APIKEY#${newKey.keyId}`,
     groupId: `APP#${appId}`,
     sortId: `APIKEY#${newKey.keyId}`,

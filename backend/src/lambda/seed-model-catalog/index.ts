@@ -111,7 +111,7 @@ async function sendCfnResponse(
   event: CloudFormationCustomResourceEvent,
   context: Context,
   status: 'SUCCESS' | 'FAILED',
-  data: Record<string, any>,
+  data: Record<string, unknown>,
 ): Promise<void> {
   const responseBody = JSON.stringify({
     Status: status,
