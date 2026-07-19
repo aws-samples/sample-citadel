@@ -1,4 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
+import { aws_appsync as appsyncCfn } from 'aws-cdk-lib';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -50,6 +52,17 @@ export interface ServicesStackProps extends cdk.StackProps {
   // — so test paths that construct ServicesStack without a registry still work.
   registryArn?: string;
   registryId?: string;
+  // Optional AppSync handles so the intake runtime can call the 4 IAM-only
+  // intake post-fabrication mutations over SigV4, and so this stack can host
+  // the backing intake-orchestration resolver (attached to BackendStack's API
+  // via the L1 CfnDataSource/CfnResolver cross-stack pattern — BackendStack
+  // itself sits at CloudFormation's 500-resource ceiling). Plain strings (not
+  // constructs) wired from BackendStack in app.ts — ServicesStack already
+  // consumes BackendStack outputs, so this adds no new cycle. Optional +
+  // conditionally wired so test paths without an API still synthesize.
+  appSyncApiArn?: string;
+  appSyncApiId?: string;
+  appSyncGraphqlUrl?: string;
 }
 
 export class ServicesStack extends cdk.Stack {
@@ -882,6 +895,9 @@ def handler(event, context):
           // plan_fabrication) can read fabricated agents from the AgentCore
           // Registry. Conditionally wired, mirroring the fabricator.
           ...(props.registryId && { REGISTRY_ID: props.registryId }),
+          // AppSync GraphQL endpoint for the SigV4-signed intake
+          // post-fabrication mutations. Conditionally wired like REGISTRY_ID.
+          ...(props.appSyncGraphqlUrl && { APPSYNC_GRAPHQL_URL: props.appSyncGraphqlUrl }),
           AGENT_MODEL: process.env.AGENT_MODEL || `${crossRegionPrefix(this.region)}.anthropic.claude-sonnet-4-6`,
           EXTRACTION_MODEL: process.env.EXTRACTION_MODEL || `${crossRegionPrefix(this.region)}.anthropic.claude-haiku-4-5-20251001-v1:0`,
           LANGFUSE_SECRET_KEY: '',
@@ -953,6 +969,31 @@ def handler(event, context):
         resources: [`arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/citadel-fabrication-jobs-${props.environment}`],
       }));
 
+      // Read access on the same fabrication-jobs table so the intake runtime's
+      // check_fabrication_status tool can poll per-agent build progress
+      // (Query by orchestrationId == session id). Kept as a separate statement
+      // from the PutItem grant above for auditability of the read/write split.
+      agentIntakeSingleRuntime.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query', 'dynamodb:GetItem'],
+        resources: [`arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/citadel-fabrication-jobs-${props.environment}`],
+      }));
+
+      // Least-privilege AppSync access for the intake post-fabrication flow:
+      // exactly the 4 IAM-only intake mutation field ARNs — never Mutation/*
+      // or the whole API. Conditional on the AppSync props (wired from
+      // BackendStack in app.ts) so registry-less/test synth paths still work.
+      if (props.appSyncApiArn) {
+        agentIntakeSingleRuntime.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
+          actions: ['appsync:GraphQL'],
+          resources: [
+            `${props.appSyncApiArn}/types/Mutation/fields/intakeActivateProjectAgents`,
+            `${props.appSyncApiArn}/types/Mutation/fields/intakeCreateApp`,
+            `${props.appSyncApiArn}/types/Mutation/fields/intakeCreateBlueprint`,
+            `${props.appSyncApiArn}/types/Mutation/fields/intakeImportBlueprintToApp`,
+          ],
+        }));
+      }
+
       // Least-privilege read access to the AgentCore Registry so the intake
       // runtime can list/get fabricated agent records for the factory catalog
       // (list_factory_agents / plan_fabrication). Mirrors the fabricator's
@@ -966,6 +1007,176 @@ def handler(event, context):
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }));
+      }
+
+      // ============================================================
+      // Intake orchestration resolver — the 4 IAM-only intake
+      // post-fabrication mutations (intakeActivateProjectAgents /
+      // intakeCreateApp / intakeCreateBlueprint / intakeImportBlueprintToApp)
+      // ============================================================
+      //
+      // Lives HERE (next to the intake runtime it serves), not in
+      // BackendStack: BackendStack sits at CloudFormation's 500-resource
+      // ceiling, so the Lambda + data source + 4 resolvers attach to the
+      // BackendStack-owned API via the same L1 CfnDataSource/CfnResolver
+      // cross-stack pattern as arbiter-stack's governance-ui resolver. The
+      // string-token props create a one-way ServicesStack → BackendStack
+      // dependency, which already exists.
+      //
+      // The handler is a thin router that delegates to the existing resolver
+      // cores, so its env/IAM is the union of the activation (agent-config),
+      // app (registry-agent-record) and workflow cores it bundles, plus
+      // PROJECTS/CONVERSATIONS read for server-side org/project derivation.
+      if (props.appSyncApiId && props.appSyncApiArn) {
+        const intakeOrchestrationResolverFn = new lambda.Function(
+          this,
+          'IntakeOrchestrationResolverFunction',
+          {
+            runtime: lambda.Runtime.NODEJS_24_X,
+            handler: 'intake-orchestration-resolver.handler',
+            code: lambda.Code.fromAsset('dist/lambda'),
+            environment: {
+              // Server-side session→project→org derivation (deterministic
+              // names — the tables are BackendStack-owned).
+              PROJECTS_TABLE: `citadel-projects-${props.environment}`,
+              CONVERSATIONS_TABLE: `citadel-conversations-${props.environment}`,
+              // workflow-resolver cores (createWorkflow/publishWorkflow/importBlueprint)
+              WORKFLOWS_TABLE: `citadel-workflows-${props.environment}`,
+              APPS_TABLE: `citadel-apps-${props.environment}`,
+              AGENT_CONFIG_TABLE: `citadel-agents-${props.environment}`,
+              EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+              // registry-backed cores (activateProjectAgents / createApp)
+              ...(props.registryId && { REGISTRY_ID: props.registryId }),
+              REGISTRY_ENABLED: 'true',
+              AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
+              // Governance activation gate (fails open to 'permissive')
+              ENVIRONMENT: props.environment,
+              ACCOUNT_ID: cdk.Stack.of(this).account,
+            },
+            timeout: cdk.Duration.seconds(30),
+            logGroup: new logs.LogGroup(this, 'IntakeOrchestrationResolverFunctionLogs', {
+              retention: logs.RetentionDays.ONE_WEEK,
+              removalPolicy: cdk.RemovalPolicy.DESTROY,
+            }),
+          },
+        );
+
+        // IAM — union of the delegated cores' least-privilege sets, expressed
+        // as explicit deterministic-name ARNs (the tables live on
+        // BackendStack; construct grants would need cross-stack imports).
+        // Actions are the exact commands the delegated cores issue — no
+        // Query/Scan or GSI access exists on these paths, so no /index/*
+        // wildcard is granted.
+        const tableArn = (name: string): string =>
+          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/${name}`;
+        // workflows + apps: createWorkflow/importBlueprint Put, publishWorkflow
+        // status Update, importBlueprint app Get + workflowIds append,
+        // upsertAppMeta Update, plus this resolver's own org-enforcement Gets.
+        intakeOrchestrationResolverFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+          resources: [
+            tableArn(`citadel-workflows-${props.environment}`),
+            tableArn(`citadel-apps-${props.environment}`),
+          ],
+        }));
+        // agent-config: read-only (verifyAgentsExist BatchGet).
+        intakeOrchestrationResolverFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem'],
+          resources: [tableArn(`citadel-agents-${props.environment}`)],
+        }));
+        // NEW relative to the reused cores: server-side orgId/projectId
+        // derivation (projects GetItem + conversations Scan by session id).
+        intakeOrchestrationResolverFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['dynamodb:GetItem', 'dynamodb:Scan'],
+          resources: [
+            tableArn(`citadel-projects-${props.environment}`),
+            tableArn(`citadel-conversations-${props.environment}`),
+          ],
+        }));
+        props.agentEventBus.grantPutEventsTo(intakeOrchestrationResolverFn);
+        // Registry record access for activation (list/get/updateStatus/submit)
+        // and app creation (create). Deliberately NARROWER than the general
+        // registry-agent-record resolver: no delete path exists here.
+        if (props.registryArn) {
+          intakeOrchestrationResolverFn.addToRolePolicy(new iam.PolicyStatement({
+            actions: [
+              'bedrock-agentcore:CreateRegistryRecord',
+              'bedrock-agentcore:UpdateRegistryRecord',
+              'bedrock-agentcore:UpdateRegistryRecordStatus',
+              'bedrock-agentcore:SubmitRegistryRecordForApproval',
+              'bedrock-agentcore:GetRegistryRecord',
+              'bedrock-agentcore:ListRegistryRecords',
+            ],
+            resources: [props.registryArn, `${props.registryArn}/*`],
+          }));
+        }
+        // US-ARB-014: createApp grants the per-app fabricator authority unit
+        // (table lives on ArbiterStack — explicit ARN, same pattern as the
+        // registry-agent-record resolver in backend-stack).
+        intakeOrchestrationResolverFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+          resources: [tableArn(`citadel-authority-units-${props.environment}`)],
+        }));
+        // Governance activation gate rollout flag (read-only; gate fails open).
+        intakeOrchestrationResolverFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['ssm:GetParameter'],
+          resources: [
+            `arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter/citadel/governance/enforce/${props.environment}`,
+            `arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter/citadel/governance/effective_at/${props.environment}`,
+          ],
+        }));
+
+        // L1 data source + resolvers against the BackendStack-owned API.
+        // Mapping-template literals match the L2 lambdaRequest()/lambdaResult()
+        // defaults so the runtime payload shape is identical to other
+        // resolvers.
+        const LAMBDA_REQUEST_MAPPING = `{
+  "version": "2017-02-28",
+  "operation": "Invoke",
+  "payload": $util.toJson($context)
+}`;
+        const LAMBDA_RESPONSE_MAPPING = `$util.toJson($ctx.result)`;
+
+        const intakeOrchestrationDataSourceRole = new iam.Role(
+          this,
+          'IntakeOrchestrationDataSourceRole',
+          { assumedBy: new iam.ServicePrincipal('appsync.amazonaws.com') },
+        );
+        intakeOrchestrationResolverFn.grantInvoke(intakeOrchestrationDataSourceRole);
+
+        const intakeOrchestrationDataSource = new appsyncCfn.CfnDataSource(
+          this,
+          'IntakeOrchestrationLambdaDataSource',
+          {
+            apiId: props.appSyncApiId,
+            name: 'IntakeOrchestrationLambdaDataSource',
+            type: 'AWS_LAMBDA',
+            serviceRoleArn: intakeOrchestrationDataSourceRole.roleArn,
+            lambdaConfig: { lambdaFunctionArn: intakeOrchestrationResolverFn.functionArn },
+          },
+        );
+
+        const intakeOrchestrationFields = [
+          'intakeActivateProjectAgents',
+          'intakeCreateApp',
+          'intakeCreateBlueprint',
+          'intakeImportBlueprintToApp',
+        ];
+        for (const fieldName of intakeOrchestrationFields) {
+          const resolver = new appsyncCfn.CfnResolver(
+            this,
+            `IntakeOrchestration_${fieldName}_Resolver`,
+            {
+              apiId: props.appSyncApiId,
+              typeName: 'Mutation',
+              fieldName,
+              dataSourceName: intakeOrchestrationDataSource.attrName,
+              requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+              responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+            },
+          );
+          resolver.addDependency(intakeOrchestrationDataSource);
+        }
       }
 
       // ── Outputs ──────────────────────────────────────────────────────────────

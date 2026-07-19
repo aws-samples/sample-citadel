@@ -768,7 +768,7 @@ async function searchAgentConfigsRegistry(query: string): Promise<AgentConfig[]>
 }
 
 /** Result of a bulk activation, grouped by per-agent outcome. */
-interface ActivateAgentsResult {
+export interface ActivateAgentsResult {
   activated: string[];
   failed: string[];
   alreadyActive: string[];

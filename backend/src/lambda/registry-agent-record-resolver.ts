@@ -564,7 +564,7 @@ async function emitEvent(eventType: string, detail: unknown): Promise<void> {
 // Entry point — single handler dispatched on event.info.fieldName
 // ---------------------------------------------------------------------------
 
-interface CreateAppInput {
+export interface CreateAppInput {
   orgId: string;
   name: string;
   description?: string;
@@ -848,7 +848,11 @@ function metaRowToAppShape(row: Record<string, unknown>): Record<string, unknown
   };
 }
 
-async function createApp(input: CreateAppInput, userId: string): Promise<unknown> {
+// Exported for reuse by intake-orchestration-resolver (IAM-only intake
+// mutations delegate to this core so app-creation governance — registry
+// record, #META mirror, fabricator authority grant, app.created event —
+// stays in exactly one place).
+export async function createApp(input: CreateAppInput, userId: string): Promise<unknown> {
   const now = new Date().toISOString();
   const appId = uuidv4();
 
