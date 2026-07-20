@@ -50,6 +50,11 @@ const servicesStack = new ServicesStack(app, `citadel-services-${environment}`, 
   appSyncApiArn: backendStack.appSyncApi.arn,
   appSyncApiId: backendStack.appSyncApi.apiId,
   appSyncGraphqlUrl: backendStack.appSyncApi.graphqlUrl,
+  // Cognito handles so the intake-orchestration resolver can resolve an
+  // org-less project's organization from the project owner's
+  // custom:organization attribute (AdminGetUser, scoped to this pool).
+  userPoolId: backendStack.userPool.userPoolId,
+  userPoolArn: backendStack.userPool.userPoolArn,
 });
 
 // Governance stack — AI-Accelerated Modernization Governance.

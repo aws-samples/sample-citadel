@@ -6,6 +6,10 @@
  * mocked here — their own behavior is covered by their own suites).
  */
 import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  CognitoIdentityProviderClient,
+  AdminGetUserCommand,
+} from '@aws-sdk/client-cognito-identity-provider';
 import { mockClient } from 'aws-sdk-client-mock';
 
 jest.mock('../agent-config-resolver', () => ({
@@ -26,6 +30,7 @@ import { createWorkflow, publishWorkflow, importBlueprint } from '../workflow-re
 import { handler } from '../intake-orchestration-resolver';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
+const cognitoMock = mockClient(CognitoIdentityProviderClient);
 
 const activateMock = activateProjectAgents as jest.MockedFunction<typeof activateProjectAgents>;
 const createAppMock = createApp as jest.MockedFunction<typeof createApp>;
@@ -64,6 +69,7 @@ const invoke = handler as (event: HandlerEvent) => Promise<unknown>;
 const SESSION_ID = 'sess-1111';
 const PROJECT_ID = 'proj-2222';
 const ORG_ID = 'org-1';
+const OWNER_SUB = 'owner-sub-3333';
 
 /** Wire the conversations scan → projectId and projects get → org/name. */
 function mockSessionLinkage(opts?: {
@@ -75,7 +81,7 @@ function mockSessionLinkage(opts?: {
     .resolves({ Items: opts?.conversationItems ?? [{ projectId: PROJECT_ID }] });
   const project =
     opts?.project === undefined
-      ? { id: PROJECT_ID, name: 'Alpha Project', organization: ORG_ID }
+      ? { id: PROJECT_ID, name: 'Alpha Project', organization: ORG_ID, owner: OWNER_SUB }
       : opts.project;
   ddbMock
     .on(GetCommand, { TableName: 'citadel-projects-test' })
@@ -88,6 +94,7 @@ describe('intake-orchestration-resolver', () => {
     process.env.CONVERSATIONS_TABLE = 'citadel-conversations-test';
     process.env.APPS_TABLE = 'citadel-apps-test';
     process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
+    process.env.USER_POOL_ID = 'us-west-2_testpool';
   });
 
   afterAll(() => {
@@ -95,10 +102,14 @@ describe('intake-orchestration-resolver', () => {
     delete process.env.CONVERSATIONS_TABLE;
     delete process.env.APPS_TABLE;
     delete process.env.WORKFLOWS_TABLE;
+    delete process.env.USER_POOL_ID;
   });
 
   beforeEach(() => {
     ddbMock.reset();
+    cognitoMock.reset();
+    // No stray fallback lookups succeed unless a test wires them explicitly.
+    cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
     jest.clearAllMocks();
   });
 
@@ -210,6 +221,38 @@ describe('intake-orchestration-resolver', () => {
       expect(activateMock).toHaveBeenCalledTimes(1);
       expect(result).toMatchObject({ matchedBy: null });
     });
+
+    test('finds the linked conversation row beyond the first Scan page', async () => {
+      // Dev-observed latent bug: Scan's Limit caps items EVALUATED (pre-
+      // filter), so with >Limit rows in the table the single-page lookup
+      // usually returned zero matches. The lookup must follow
+      // LastEvaluatedKey until the linked row is found.
+      const lastKey = { projectId: 'other-proj', timestamp: '2026-01-01T00:00:00Z' };
+      ddbMock
+        .on(ScanCommand, { TableName: 'citadel-conversations-test' })
+        .resolvesOnce({ Items: [], LastEvaluatedKey: lastKey })
+        .resolvesOnce({ Items: [{ projectId: PROJECT_ID }] });
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-projects-test' })
+        .resolves({ Item: { id: PROJECT_ID, name: 'Alpha', organization: ORG_ID } });
+      activateMock
+        .mockResolvedValueOnce({ activated: [], failed: [], alreadyActive: [] })
+        .mockResolvedValueOnce({ activated: ['agent-a'], failed: [], alreadyActive: [] });
+
+      const result = await invoke(
+        makeEvent('intakeActivateProjectAgents', { sessionId: SESSION_ID }),
+      );
+
+      // Pagination proof: the second page request continues from the first
+      // page's LastEvaluatedKey rather than restarting or stopping.
+      const scanCalls = ddbMock.commandCalls(ScanCommand);
+      expect(scanCalls).toHaveLength(2);
+      expect(scanCalls[0].args[0].input.ExclusiveStartKey).toBeUndefined();
+      expect(scanCalls[1].args[0].input.ExclusiveStartKey).toEqual(lastKey);
+      // The row found on page 2 drives the projectId fallback activation.
+      expect(activateMock).toHaveBeenNthCalledWith(2, PROJECT_ID);
+      expect(result).toMatchObject({ matchedBy: 'projectId' });
+    });
   });
 
   // ─── intakeCreateApp ─────────────────────────────────────────────────
@@ -242,13 +285,90 @@ describe('intake-orchestration-resolver', () => {
       expect(result).toEqual({ appId: 'rec123456789', name: 'My App' });
     });
 
-    test('throws when the organization cannot be determined', async () => {
-      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha' } });
+    test("falls back to the project owner's Cognito custom:organization when the project row is org-less", async () => {
+      // Dev-observed root cause: project-resolver writes
+      // `organization: userOrganization || undefined`, so users without the
+      // custom:organization claim create org-less projects. Self-healing:
+      // resolve the org the owner WOULD have carried, via AdminGetUser
+      // (mirrors utils/auth-event.ts extractOrgFromEvent's fallback).
+      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha', owner: OWNER_SUB } });
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [{ Name: 'custom:organization', Value: 'org-owner' }],
+      });
+      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
 
-      await expect(
-        invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' })),
-      ).rejects.toThrow(/organization/i);
-      expect(createAppMock).not.toHaveBeenCalled();
+      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+
+      const cognitoCalls = cognitoMock.commandCalls(AdminGetUserCommand);
+      expect(cognitoCalls).toHaveLength(1);
+      expect(cognitoCalls[0].args[0].input).toEqual({
+        UserPoolId: 'us-west-2_testpool',
+        Username: OWNER_SUB,
+      });
+      expect(createAppMock).toHaveBeenCalledWith(
+        expect.objectContaining({ orgId: 'org-owner' }),
+        expect.any(String),
+      );
+    });
+
+    test("falls back to 'default' when the owner carries no custom:organization claim", async () => {
+      // Terminal behavior mirrors the Cognito-auth path for an org-less
+      // caller: createApp (registry-agent-record-resolver.ts) never derives
+      // or validates org, and the frontend sends the literal fallback
+      // `selectedOrganization || 'default'` (AppBuilderWizard.tsx). A hard
+      // throw here would make intake STRICTER than the UI path it delegates
+      // to, which is exactly the dev failure being fixed.
+      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha', owner: OWNER_SUB } });
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [{ Name: 'email', Value: 'dev@example.com' }],
+      });
+      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+
+      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+
+      expect(createAppMock).toHaveBeenCalledWith(
+        expect.objectContaining({ orgId: 'default' }),
+        expect.any(String),
+      );
+    });
+
+    test("falls back to 'default' without a Cognito call when the project row has no owner", async () => {
+      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha' } });
+      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+
+      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+
+      expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
+      expect(createAppMock).toHaveBeenCalledWith(
+        expect.objectContaining({ orgId: 'default' }),
+        expect.any(String),
+      );
+    });
+
+    test('makes no Cognito call when the project row already carries an organization', async () => {
+      mockSessionLinkage();
+      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+
+      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+
+      expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
+      expect(createAppMock).toHaveBeenCalledWith(
+        expect.objectContaining({ orgId: ORG_ID }),
+        expect.any(String),
+      );
+    });
+
+    test("falls back to 'default' when Cognito AdminGetUser itself fails", async () => {
+      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha', owner: OWNER_SUB } });
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error('UserNotFoundException'));
+      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+
+      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+
+      expect(createAppMock).toHaveBeenCalledWith(
+        expect.objectContaining({ orgId: 'default' }),
+        expect.any(String),
+      );
     });
 
     test('throws a validation error when name is missing', async () => {

@@ -364,7 +364,11 @@ def confirm_fabrication_plan(session_id: str, plan_json: str) -> str:
     if external: summary += f"⚠️  External (manual): {', '.join(external)}\n"
 
     from tools.state import _internal_update_progress as update_intake_progress
-    update_intake_progress(session_id=session_id, phase='implementation', progress=100, change_summary=f'Fabrication confirmed: {len(queued)} build, {len(reuse)} reuse, {len(external)} external')
+    # Build-segment window: confirm = 10, fabrication events scale 10-60,
+    # post-fabrication milestones land 70-90, app publish finishes at 100.
+    # (This previously wrote 100 at queue time, completing the header's Build
+    # segment before a single agent had been built.)
+    update_intake_progress(session_id=session_id, phase='implementation', progress=10, change_summary=f'Fabrication confirmed: {len(queued)} build, {len(reuse)} reuse, {len(external)} external')
 
     return summary.strip()
 

@@ -924,6 +924,12 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
     createdAt: now,
     updatedAt: now,
     version: 1,
+    // Intake linkage mirrored onto the AppsTable METADATA row so the publish
+    // handler (which reads AppsTable, not the Registry) can finish the
+    // project's Build segment on publish. Optional — absent for UI-created apps.
+    ...(typeof input.sourceProjectId === 'string' && input.sourceProjectId.length > 0
+      ? { sourceProjectId: input.sourceProjectId }
+      : {}),
   });
   if (!metaMirrored) {
     console.error('createApp: AppsTable #META mirror write failed', {

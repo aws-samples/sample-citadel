@@ -137,3 +137,32 @@ def test_error_returns_nothing_changed_copy(execute, marker_store, monkeypatch):
     assert "PLUGH" not in json.dumps(result)
     assert marker_store["sess-1"].get("appId") is None
     _contract(result)
+
+
+def test_proposal_finds_linked_row_beyond_first_scan_page(execute, marker_store, monkeypatch):
+    """Scan's Limit caps items EVALUATED pre-filter, so the linked row is
+    routinely beyond page 1 once the conversations table grows. The lookup
+    must follow LastEvaluatedKey until the row is found."""
+    conv_table = mock.MagicMock()
+    conv_table.scan.side_effect = [
+        {"Items": [], "LastEvaluatedKey": {"projectId": "other", "timestamp": "t1"}},
+        {"Items": [{"projectId": "proj-1"}]},
+    ]
+    proj_table = mock.MagicMock()
+    proj_table.get_item.return_value = {"Item": {"name": "Acme Claims"}}
+    ddb = mock.MagicMock()
+    ddb.Table.side_effect = lambda name: conv_table if name == "conv-t" else proj_table
+    monkeypatch.setattr(postfab, "dynamodb", ddb)
+    monkeypatch.setattr(postfab, "CONVERSATIONS_TABLE", "conv-t")
+    monkeypatch.setattr(postfab, "PROJECTS_TABLE", "proj-t")
+
+    result = json.loads(postfab.create_agent_app(session_id="sess-1"))
+
+    assert result["status"] == "proposal"
+    assert result["proposed_name"] == "Acme Claims"
+    # Pagination proof: the second scan continues from LastEvaluatedKey.
+    assert conv_table.scan.call_count == 2
+    second_kwargs = conv_table.scan.call_args_list[1].kwargs
+    assert second_kwargs["ExclusiveStartKey"] == {"projectId": "other", "timestamp": "t1"}
+    # The project lookup used the page-2 linked projectId, not the session id.
+    proj_table.get_item.assert_called_once_with(Key={"id": "proj-1"})

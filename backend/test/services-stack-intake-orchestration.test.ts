@@ -32,6 +32,8 @@ const APPSYNC_API_ARN = `arn:aws:appsync:us-west-2:123456789012:apis/${APPSYNC_A
 const APPSYNC_URL = 'https://api123abc.appsync-api.us-west-2.amazonaws.com/graphql';
 const REGISTRY_ID = 'reg-orch123';
 const REGISTRY_ARN = 'arn:aws:bedrock-agentcore:us-west-2:123456789012:registry/reg-orch123';
+const USER_POOL_ID = 'us-west-2_orchpool';
+const USER_POOL_ARN = `arn:aws:cognito-idp:us-west-2:123456789012:userpool/${USER_POOL_ID}`;
 
 const INTAKE_FIELDS = [
   'intakeActivateProjectAgents',
@@ -44,15 +46,16 @@ const INTAKE_FIELD_ARNS = INTAKE_FIELDS.map(
   (f) => `${APPSYNC_API_ARN}/types/Mutation/fields/${f}`,
 );
 
-function buildStack(withAppSync: boolean): cdk.assertions.Template {
+function buildStack(withAppSync: boolean, withUserPool = withAppSync): cdk.assertions.Template {
   const app = new cdk.App();
-  const prereq = new cdk.Stack(app, `IntakeOrchPrereq${withAppSync ? 'A' : 'B'}`, {
+  const variant = `${withAppSync ? 'A' : 'B'}${withUserPool ? '' : 'NoPool'}`;
+  const prereq = new cdk.Stack(app, `IntakeOrchPrereq${variant}`, {
     env: { account: '123456789012', region: 'us-west-2' },
   });
   const bus = new events.EventBus(prereq, 'Bus', { eventBusName: 'orch-bus' });
   const bucket = new s3.Bucket(prereq, 'DocBucket');
 
-  const stack = new ServicesStack(app, `citadel-services-orchtest${withAppSync ? 'A' : 'B'}`, {
+  const stack = new ServicesStack(app, `citadel-services-orchtest${variant}`, {
     environment: 'test',
     agentEventBus: bus,
     documentBucket: bucket,
@@ -62,6 +65,10 @@ function buildStack(withAppSync: boolean): cdk.assertions.Template {
       appSyncApiArn: APPSYNC_API_ARN,
       appSyncApiId: APPSYNC_API_ID,
       appSyncGraphqlUrl: APPSYNC_URL,
+    }),
+    ...(withUserPool && {
+      userPoolId: USER_POOL_ID,
+      userPoolArn: USER_POOL_ARN,
     }),
     env: { account: '123456789012', region: 'us-west-2' },
   });
@@ -174,6 +181,54 @@ describe('ServicesStack — intake post-fabrication orchestration wiring', () =>
         ]),
       },
     });
+  });
+
+  // ─── owner-org Cognito fallback (org-less project self-healing) ─────
+
+  test('wires USER_POOL_ID into the resolver env for the owner-org Cognito fallback', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Handler: 'intake-orchestration-resolver.handler',
+      Environment: {
+        Variables: cdk.assertions.Match.objectLike({
+          USER_POOL_ID,
+        }),
+      },
+    });
+  });
+
+  test('grants the resolver cognito-idp:AdminGetUser scoped to exactly the user pool ARN', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: cdk.assertions.Match.arrayWith([
+          cdk.assertions.Match.objectLike({
+            Effect: 'Allow',
+            Action: 'cognito-idp:AdminGetUser',
+            Resource: USER_POOL_ARN,
+          }),
+        ]),
+      },
+    });
+    // Never the broad userpool/* fallback scope.
+    expect(JSON.stringify(template.findResources('AWS::IAM::Policy'))).not.toContain(
+      'userpool/*',
+    );
+  });
+
+  test('without user pool props, no USER_POOL_ID env and no AdminGetUser grant are synthesized', () => {
+    const noPool = buildStack(true, false);
+    const fns = Object.values(noPool.findResources('AWS::Lambda::Function')).filter(
+      (fn) =>
+        (fn.Properties as { Handler?: string }).Handler ===
+        'intake-orchestration-resolver.handler',
+    );
+    expect(fns).toHaveLength(1);
+    const envVars =
+      (fns[0].Properties as { Environment?: { Variables?: Record<string, unknown> } })
+        .Environment?.Variables ?? {};
+    expect(envVars).not.toHaveProperty('USER_POOL_ID');
+    expect(JSON.stringify(noPool.findResources('AWS::IAM::Policy'))).not.toContain(
+      'cognito-idp:AdminGetUser',
+    );
   });
 
   test('grants the resolver registry record actions WITHOUT the delete action', () => {

@@ -63,6 +63,15 @@ export interface ServicesStackProps extends cdk.StackProps {
   appSyncApiArn?: string;
   appSyncApiId?: string;
   appSyncGraphqlUrl?: string;
+  // Optional Cognito user pool handles so the intake-orchestration resolver
+  // can resolve an org-less project's organization from the project OWNER's
+  // `custom:organization` attribute (cognito-idp:AdminGetUser). Plain strings
+  // wired from BackendStack in app.ts, mirroring the ArbiterStack
+  // `userPoolArn` pattern. Optional + conditionally wired so test paths
+  // without a pool still synthesize (the resolver falls back gracefully when
+  // USER_POOL_ID is absent).
+  userPoolId?: string;
+  userPoolArn?: string;
 }
 
 export class ServicesStack extends cdk.Stack {
@@ -1049,6 +1058,11 @@ def handler(event, context):
               ...(props.registryId && { REGISTRY_ID: props.registryId }),
               REGISTRY_ENABLED: 'true',
               AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
+              // Owner-org Cognito fallback for org-less project rows
+              // (resolveOrgId → lookupUserOrganization). Optional: without
+              // it the resolver skips straight to the org-less caller
+              // default.
+              ...(props.userPoolId && { USER_POOL_ID: props.userPoolId }),
               // Governance activation gate (fails open to 'permissive')
               ENVIRONMENT: props.environment,
               ACCOUNT_ID: cdk.Stack.of(this).account,
@@ -1093,6 +1107,15 @@ def handler(event, context):
             tableArn(`citadel-conversations-${props.environment}`),
           ],
         }));
+        // Owner-org fallback for org-less project rows: AdminGetUser scoped
+        // to exactly the BackendStack user pool (mirrors the ArbiterStack
+        // governance-ui-resolver grant). Conditional with the env var above.
+        if (props.userPoolArn) {
+          intakeOrchestrationResolverFn.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['cognito-idp:AdminGetUser'],
+            resources: [props.userPoolArn],
+          }));
+        }
         props.agentEventBus.grantPutEventsTo(intakeOrchestrationResolverFn);
         // Registry record access for activation (list/get/updateStatus/submit)
         // and app creation (create). Deliberately NARROWER than the general

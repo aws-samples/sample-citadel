@@ -31,28 +31,38 @@ def _table():
     return dynamodb.Table(TABLE_NAME)
 
 
+def _find_linked_project_id(session_id: str) -> str | None:
+    """Paginated conversations lookup: the table is keyed PK=projectId/
+    SK=timestamp with no GSI on ``id``, so a filtered Scan is the only
+    correct read — and Scan's ``Limit`` caps items EVALUATED (pre-filter),
+    so a single page routinely misses the row once the table grows. Follow
+    LastEvaluatedKey until the linked row is found."""
+    table = dynamodb.Table(CONVERSATIONS_TABLE)
+    scan_kwargs = {
+        'FilterExpression': '#cid = :cid',
+        'ExpressionAttributeNames': {'#cid': 'id'},
+        'ExpressionAttributeValues': {':cid': session_id},
+        'ProjectionExpression': 'projectId',
+    }
+    while True:
+        resp = table.scan(**scan_kwargs)
+        for item in resp.get('Items', []):
+            if item.get('projectId'):
+                return item['projectId']
+        last_key = resp.get('LastEvaluatedKey')
+        if not last_key:
+            return None
+        scan_kwargs['ExclusiveStartKey'] = last_key
+
+
 def _update_project_status(session_id: str, phase: str, progress: int):
     """Update the project record's status and progress when phase milestones are reached."""
     if not PROJECTS_TABLE or not CONVERSATIONS_TABLE:
         return
     try:
-        # Look up project ID from conversation table
-        conv_table = dynamodb.Table(CONVERSATIONS_TABLE)
-        resp = conv_table.scan(
-            FilterExpression='#cid = :cid',
-            ExpressionAttributeNames={'#cid': 'id'},
-            ExpressionAttributeValues={':cid': session_id},
-            ProjectionExpression='projectId',
-            Limit=10,
-        )
-        items = resp.get('Items', [])
-        if not items:
-            # Try using session_id as projectId directly
-            project_id = session_id
-        else:
-            project_id = items[0].get('projectId')
-            if not project_id:
-                return
+        # Look up project ID from conversation table; fall back to using the
+        # session_id as the projectId when no row links the session.
+        project_id = _find_linked_project_id(session_id) or session_id
 
         # Determine project status based on phase completion
         if progress >= 100:
@@ -60,19 +70,40 @@ def _update_project_status(session_id: str, phase: str, progress: int):
         else:
             status = 'IN_PROGRESS'
 
-        # Update project - two calls to avoid reserved word conflicts
+        # Update project - two calls to avoid reserved word conflicts.
         projects_table = dynamodb.Table(PROJECTS_TABLE)
-        projects_table.update_item(
-            Key={'id': project_id},
-            UpdateExpression='SET progress.#phase = :prog, progress.currentPhase = :cp, progress.overall = :overall, updatedAt = :ts',
-            ExpressionAttributeNames={'#phase': phase},
-            ExpressionAttributeValues={
-                ':prog': progress,
-                ':cp': phase.upper(),
-                ':overall': min(100, progress * (PHASES.index(phase) + 1) * 25 // 100),
-                ':ts': datetime.now().isoformat() + 'Z',
-            },
-        )
+        try:
+            projects_table.update_item(
+                Key={'id': project_id},
+                UpdateExpression='SET progress.#phase = :prog, progress.currentPhase = :cp, progress.overall = :overall, updatedAt = :ts',
+                # Monotonic floor (mirrors project-progress-updater): a
+                # phase's progress only ever advances. A stale/lower value
+                # (e.g. the Phase 7 prompt's post-confirm update racing a
+                # higher fabrication value) is a conditional no-op.
+                ConditionExpression='attribute_not_exists(progress.#phase) OR progress.#phase < :prog',
+                ExpressionAttributeNames={'#phase': phase},
+                ExpressionAttributeValues={
+                    ':prog': progress,
+                    ':cp': phase.upper(),
+                    ':overall': min(100, progress * (PHASES.index(phase) + 1) * 25 // 100),
+                    ':ts': datetime.now().isoformat() + 'Z',
+                },
+            )
+        except Exception as cond_err:  # noqa: BLE001 — narrow re-raise below
+            resp = getattr(cond_err, 'response', None)
+            code = resp.get('Error', {}).get('Code', '') if isinstance(resp, dict) else ''
+            if (
+                code == 'ConditionalCheckFailedException'
+                or type(cond_err).__name__ == 'ConditionalCheckFailedException'
+            ):
+                # Stale progress — skip the status write too so a stale
+                # milestone can never flip a COMPLETED project backwards.
+                logger.info(
+                    'Skipping stale project progress for %s: %s=%s',
+                    project_id, phase, progress,
+                )
+                return
+            raise
         projects_table.update_item(
             Key={'id': project_id},
             UpdateExpression='SET #s = :s',

@@ -158,7 +158,7 @@ If the user wants to build / deploy the agents from the technical design:
   Ask the user to confirm or adjust the plan (e.g. mark something as external, skip an agent).
   Once confirmed, call confirm_fabrication_plan(session_id="{session_id}", plan_json=<confirmed plan JSON>).
   Tell the user what was queued, what will be reused, and what needs manual setup.
-  Call update_intake_progress(session_id="{session_id}", phase="implementation", progress=0, change_summary="Fabrication started — agents queued for build").
+  Call update_intake_progress(session_id="{session_id}", phase="implementation", progress=10, change_summary="Fabrication started — agents queued for build").
 
 If the user asks what agents have been built or what's in the factory:
   Call list_factory_agents() and present the results.

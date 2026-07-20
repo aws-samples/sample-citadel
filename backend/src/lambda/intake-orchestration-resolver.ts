@@ -23,7 +23,11 @@
  *    delegated cores' own org guards no-ops. Scoping is therefore enforced
  *    HERE: orgId/sourceProjectId are derived server-side from the session's
  *    conversations→project linkage and never read from client arguments, and
- *    cross-org app/blueprint access is rejected before delegation.
+ *    cross-org app/blueprint access is rejected before delegation. When the
+ *    linked project row is org-less (project-resolver writes `organization:
+ *    userOrganization || undefined`), the org falls back to the project
+ *    owner's Cognito `custom:organization`, then to the same literal an
+ *    org-less caller produces on the Cognito-auth path (see resolveOrgId).
  *  - Logging is restricted to identifiers (field, correlationId, ids) — no
  *    argument payloads are ever logged, so credentials cannot leak by
  *    construction.
@@ -32,6 +36,7 @@ import type { AppSyncResolverEvent } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { getUserId } from '../utils/appsync';
+import { lookupUserOrganization } from '../utils/auth-event';
 import { ValidationError, sanitizeString } from '../utils/validation';
 import { activateProjectAgents, type ActivateAgentsResult } from './agent-config-resolver';
 import { createApp } from './registry-agent-record-resolver';
@@ -120,10 +125,43 @@ interface SessionContext {
   sessionId: string;
   /** Conversations-linked project id; falls back to the sessionId itself. */
   projectId: string;
-  /** projects[projectId].organization — null when not derivable. */
+  /** projects[projectId].organization — null when the attribute is absent. */
   orgId: string | null;
   /** projects[projectId].name — null when the project row is absent. */
   projectName: string | null;
+  /** projects[projectId].owner — null when absent; drives the org fallback. */
+  owner: string | null;
+}
+
+/**
+ * Finds the conversations row carrying `id = sessionId` and returns its
+ * projectId. The table is keyed PK=projectId/SK=timestamp with no GSI on
+ * `id` (backend-stack.ts ConversationsTable), so a Query cannot target the
+ * session id — a filtered Scan is the only correct read. Scan `Limit` caps
+ * items EVALUATED (pre-filter), so a single page routinely misses the row
+ * once the table grows: follow LastEvaluatedKey to exhaustion, returning as
+ * soon as the linked row is found.
+ */
+async function findLinkedProjectId(sessionId: string): Promise<string | null> {
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const page = await docClient.send(
+      new ScanCommand({
+        TableName: conversationsTable(),
+        FilterExpression: '#cid = :cid',
+        ExpressionAttributeNames: { '#cid': 'id' },
+        ExpressionAttributeValues: { ':cid': sessionId },
+        ProjectionExpression: 'projectId',
+        ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),
+      }),
+    );
+    const linked = page.Items?.find((item) => typeof item.projectId === 'string');
+    if (linked) {
+      return linked.projectId as string;
+    }
+    exclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (exclusiveStartKey);
+  return null;
 }
 
 /**
@@ -134,21 +172,7 @@ interface SessionContext {
  * record's `organization` attribute (project-resolver `createProject`).
  */
 async function deriveSessionContext(sessionId: string): Promise<SessionContext> {
-  let projectId = sessionId;
-  const scan = await docClient.send(
-    new ScanCommand({
-      TableName: conversationsTable(),
-      FilterExpression: '#cid = :cid',
-      ExpressionAttributeNames: { '#cid': 'id' },
-      ExpressionAttributeValues: { ':cid': sessionId },
-      ProjectionExpression: 'projectId',
-      Limit: 10,
-    }),
-  );
-  const linked = scan.Items?.find((item) => typeof item.projectId === 'string');
-  if (linked) {
-    projectId = linked.projectId as string;
-  }
+  const projectId = (await findLinkedProjectId(sessionId)) ?? sessionId;
 
   const project = await docClient.send(
     new GetCommand({ TableName: projectsTable(), Key: { id: projectId } }),
@@ -158,18 +182,50 @@ async function deriveSessionContext(sessionId: string): Promise<SessionContext> 
       ? (project.Item.organization as string)
       : null;
   const projectName = typeof project.Item?.name === 'string' ? (project.Item.name as string) : null;
+  const owner =
+    typeof project.Item?.owner === 'string' && project.Item.owner.length > 0
+      ? (project.Item.owner as string)
+      : null;
 
-  return { sessionId, projectId, orgId, projectName };
+  return { sessionId, projectId, orgId, projectName, owner };
 }
 
-function requireOrg(ctx: SessionContext): string {
-  if (!ctx.orgId) {
-    throw new Error(
-      `Could not determine the organization for session ${ctx.sessionId}: ` +
-        'no linked project record carries an organization',
-    );
+/**
+ * Org value an org-less Cognito caller lands on. The delegated cores never
+ * derive or validate org — `createApp` consumes `input.orgId` verbatim
+ * (registry-agent-record-resolver.ts) and the schema makes it a required
+ * client-supplied string (`CreateAppInput.orgId: String!`). Users without
+ * an organization send the UI's literal fallback `selectedOrganization ||
+ * 'default'` (AppBuilderWizard.tsx), so the same literal keeps intake-made
+ * apps on exactly the downstream semantics (OrgIndex visibility, org-scoped
+ * listing) the UI path produces.
+ */
+const ORGLESS_CALLER_ORG = 'default';
+
+/**
+ * Org derivation fallback chain (self-healing — no data patch needed):
+ *  1. `project.organization` when the project row carries it.
+ *  2. The project owner's Cognito `custom:organization` via AdminGetUser —
+ *     project-resolver writes `organization: userOrganization || undefined`,
+ *     so users whose token lacked the claim at project creation produced
+ *     org-less rows; the owner attribute is the durable pointer back to the
+ *     org they belong to today.
+ *  3. `'default'` — exactly what an org-less caller produces on the
+ *     Cognito-auth createApp/createWorkflow paths (see ORGLESS_CALLER_ORG).
+ */
+async function resolveOrgId(ctx: SessionContext): Promise<string> {
+  if (ctx.orgId) {
+    return ctx.orgId;
   }
-  return ctx.orgId;
+  if (ctx.owner) {
+    const ownerOrg = await lookupUserOrganization(ctx.owner);
+    if (ownerOrg) {
+      log('resolveOrgId', ctx.sessionId, { orgSource: 'ownerCognitoAttribute' });
+      return ownerOrg;
+    }
+  }
+  log('resolveOrgId', ctx.sessionId, { orgSource: 'orglessCallerDefault' });
+  return ORGLESS_CALLER_ORG;
 }
 
 function log(fieldName: string, correlationId: string, detail: Record<string, unknown>): void {
@@ -240,7 +296,7 @@ async function intakeCreateApp(
       : sanitizeString(requireId(rawDescription, 'description'), 1000);
 
   const ctx = await deriveSessionContext(sessionId);
-  const orgId = requireOrg(ctx);
+  const orgId = await resolveOrgId(ctx);
 
   // Scoping fields are server-derived only: orgId from the linked project,
   // sourceProjectId from the sessionId (the fabrication orchestration key) so
@@ -301,7 +357,7 @@ async function intakeCreateBlueprint(
   }
 
   const ctx = await deriveSessionContext(sessionId);
-  const orgId = requireOrg(ctx);
+  const orgId = await resolveOrgId(ctx);
   const nodeCount = countNodes(definition);
 
   let workflowId: string;
@@ -371,7 +427,7 @@ async function intakeImportBlueprintToApp(
       : sanitizeString(requireId(rawName, 'name'), 100);
 
   const ctx = await deriveSessionContext(sessionId);
-  const orgId = requireOrg(ctx);
+  const orgId = await resolveOrgId(ctx);
 
   // Org enforcement happens HERE: the delegated core's own org guard relies
   // on extractOrgFromEvent, which is null for IAM callers.

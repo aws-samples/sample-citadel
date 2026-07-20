@@ -40,6 +40,10 @@ export interface AppMetadata {
   endpointUrl?: string;
   apiId?: string;
   version?: number;
+  /** Intake linkage: the originating intake session/project id, when the app
+   * was created by the intake flow (intakeCreateApp). Optional — apps created
+   * through the UI have no linkage. */
+  sourceProjectId?: string;
   [key: string]: unknown;
 }
 
@@ -516,6 +520,39 @@ export async function publishApp(
       EventBusName: deps.eventBusName,
     }],
   }));
+
+  // 8b. Build-segment completion (app published → implementation = 100).
+  // When the app originated from an intake project (sourceProjectId stamped
+  // by intakeCreateApp), emit the standard intake progress event. The
+  // existing citadel-progress-update rule routes it to
+  // project-progress-updater, whose monotonic + idempotent write finishes
+  // the project header's Build segment. Best-effort: progress telemetry must
+  // never fail the publish. Duplicate publishes cannot re-emit — the
+  // already-PUBLISHED idempotency check above returns before reaching here.
+  const sourceProjectId =
+    typeof metadata.sourceProjectId === 'string' && metadata.sourceProjectId.length > 0
+      ? metadata.sourceProjectId
+      : null;
+  if (sourceProjectId) {
+    try {
+      await deps.eventBridgeClient.send(new PutEventsCommand({
+        Entries: [{
+          Source: 'agent_intake.implementation',
+          DetailType: 'intake.progress.updated',
+          Detail: JSON.stringify({
+            sessionId: sourceProjectId,
+            phase: 'implementation',
+            completionPercentage: 100,
+            changeSummary: 'App published',
+            timestamp: new Date().toISOString(),
+          }),
+          EventBusName: deps.eventBusName,
+        }],
+      }));
+    } catch (err) {
+      console.error('publishApp: intake progress emission failed', { appId, err: String(err) });
+    }
+  }
 
   // 9. Return PublishResult
   const updatedApp: AppMetadata = {

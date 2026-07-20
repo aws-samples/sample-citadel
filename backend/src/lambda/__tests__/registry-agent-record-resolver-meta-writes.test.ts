@@ -154,6 +154,45 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
       // part of the key.
       expect(values[':v_sortId']).toBe(APP_META_SORT_VALUE);
     });
+
+    test('mirrors sourceProjectId onto the metadata row when the input carries it (intake linkage)', async () => {
+      const result = await invokeHandler(
+        makeEvent('createApp', {
+          input: {
+            name: 'Intake App',
+            orgId: 'org-1',
+            sourceProjectId: 'sess-42',
+          },
+        }),
+      );
+
+      const metaUpdate = ddbMock.commandCalls(UpdateCommand).find(
+        (c) =>
+          c.args[0].input.TableName === 'citadel-apps-test' &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === result.appId,
+      );
+      expect(metaUpdate).toBeDefined();
+      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[':v_sourceProjectId']).toBe('sess-42');
+    });
+
+    test('omits sourceProjectId from the metadata row when the input has none (backward compatible)', async () => {
+      const result = await invokeHandler(
+        makeEvent('createApp', {
+          input: { name: 'Plain App', orgId: 'org-1' },
+        }),
+      );
+
+      const metaUpdate = ddbMock.commandCalls(UpdateCommand).find(
+        (c) =>
+          c.args[0].input.TableName === 'citadel-apps-test' &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === result.appId,
+      );
+      expect(metaUpdate).toBeDefined();
+      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
+      expect(':v_sourceProjectId' in values).toBe(false);
+      expect(metaUpdate!.args[0].input.UpdateExpression).not.toContain('sourceProjectId');
+    });
   });
 
   describe('updateApp', () => {

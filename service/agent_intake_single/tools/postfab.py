@@ -29,7 +29,7 @@ from tools import appsync_client
 from tools.appsync_client import AppSyncError
 from tools.fabricate import PLAN_KEY, SECTION_KEY, _get_existing_agents, _llm
 from tools.kb import s3_get
-from tools.state import get_postfab_marker, set_postfab_marker
+from tools.state import get_postfab_marker, set_postfab_marker, _internal_update_progress
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,37 @@ _STAGE_ORDER = [
     "fabrication_pending", "built", "activated", "app_created",
     "blueprint_created", "workflow_imported", "done",
 ]
+
+# Build-segment milestone map (project header progress.implementation):
+# fabrication confirm = 10, fabrication in-flight scales 10-60 (fabricator
+# events), then each post-fabrication stage lands a fixed value; the backend
+# publish handler finishes the segment at 100 when the app is published.
+_STAGE_PROGRESS = {
+    "activated": 70,
+    "app_created": 80,
+    "blueprint_created": 85,
+    "workflow_imported": 90,
+}
+
+
+def _record_stage_progress(session_id: str, stage: str, summary: str) -> None:
+    """Best-effort Build-segment milestone — never fails the calling tool.
+
+    Routes through ``_internal_update_progress`` so all three sinks stay
+    consistent: session intake state (baked into the agent prompt), the UI
+    progress event, and the project record (whose write is monotonic, so an
+    idempotent re-run or out-of-order call can never regress the segment).
+    """
+    pct = _STAGE_PROGRESS.get(stage)
+    if pct is None:
+        return
+    try:
+        _internal_update_progress(session_id, "implementation", pct, summary)
+    except Exception as e:  # noqa: BLE001 — milestone telemetry must never break the flow
+        logger.warning(
+            "stage progress update failed session=%s stage=%s: %s",
+            session_id, stage, e,
+        )
 
 # --- GraphQL documents (selection sets per the phase-1 schema) ---------------
 
@@ -131,22 +162,39 @@ def _error_return(session_id: str, err: AppSyncError, step: str) -> str:
     )
 
 
+def _find_linked_project_id(session_id: str) -> str | None:
+    """Paginated conversations lookup: the table is keyed PK=projectId/
+    SK=timestamp with no GSI on ``id``, so a filtered Scan is the only
+    correct read — and Scan's ``Limit`` caps items EVALUATED (pre-filter),
+    so a single page routinely misses the row once the table grows. Follow
+    LastEvaluatedKey until the linked row is found."""
+    table = dynamodb.Table(CONVERSATIONS_TABLE)
+    scan_kwargs = dict(
+        FilterExpression="#cid = :cid",
+        ExpressionAttributeNames={"#cid": "id"},
+        ExpressionAttributeValues={":cid": session_id},
+        ProjectionExpression="projectId",
+    )
+    while True:
+        resp = table.scan(**scan_kwargs)
+        for item in resp.get("Items", []):
+            if item.get("projectId"):
+                return item["projectId"]
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            return None
+        scan_kwargs["ExclusiveStartKey"] = last_key
+
+
 def _derive_project_context(session_id: str) -> tuple[str, str | None]:
     """session -> conversations.projectId (fallback session_id) -> projects.name."""
     project_id = session_id
     project_name = None
     try:
         if CONVERSATIONS_TABLE:
-            resp = dynamodb.Table(CONVERSATIONS_TABLE).scan(
-                FilterExpression="#cid = :cid",
-                ExpressionAttributeNames={"#cid": "id"},
-                ExpressionAttributeValues={":cid": session_id},
-                ProjectionExpression="projectId",
-                Limit=10,
-            )
-            items = resp.get("Items", [])
-            if items and items[0].get("projectId"):
-                project_id = items[0]["projectId"]
+            linked = _find_linked_project_id(session_id)
+            if linked:
+                project_id = linked
     except Exception as e:
         logger.warning("conversation lookup failed session=%s: %s", session_id, e)
     try:
@@ -464,6 +512,7 @@ def activate_agents(session_id: str) -> str:
         )
 
     set_postfab_marker(session_id, stage="activated", activation=activation)
+    _record_stage_progress(session_id, "activated", "Agents activated")
     marker = get_postfab_marker(session_id)
     total = len(activated) + len(failed) + len(already)
 
@@ -565,6 +614,7 @@ def create_agent_app(session_id: str, confirmed_name: str = "") -> str:
         )
 
     set_postfab_marker(session_id, stage="app_created", appId=app_id, appName=app_name)
+    _record_stage_progress(session_id, "app_created", "Agent app created")
     question, actions = _blueprint_gate()
     return _result(
         True, "created",
@@ -795,6 +845,7 @@ def generate_process_blueprint(session_id: str) -> str:
     if status == "PUBLISHED" and outcome.get("blueprintId"):
         blueprint_id = outcome["blueprintId"]
         set_postfab_marker(session_id, stage="blueprint_created", blueprintId=blueprint_id)
+        _record_stage_progress(session_id, "blueprint_created", "Process blueprint published")
         node_count = outcome.get("nodeCount") or len(ordered_names)
         summary = (
             f"Done — the blueprint maps your {node_count} agents into "
@@ -902,6 +953,7 @@ def import_blueprint_to_app(session_id: str) -> str:
         )
 
     set_postfab_marker(session_id, stage="workflow_imported", workflowId=workflow_id)
+    _record_stage_progress(session_id, "workflow_imported", "Workflow imported into app")
     activation = marker.get("activation") or {}
     activated_count = len(activation.get("activated", [])) + len(activation.get("alreadyActive", []))
     question, actions = _final_gate(app_name)

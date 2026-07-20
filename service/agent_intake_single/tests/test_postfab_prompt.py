@@ -104,3 +104,13 @@ def test_phase8_relays_next_steps_and_handles_show_me_how_to_publish():
 def test_phase8_never_claims_agent_publishes_on_users_behalf():
     prompt = agent.SYSTEM_PROMPT
     assert "NEVER offer or imply that you can publish" in prompt
+
+
+def test_phase7_fabrication_started_progress_is_early_build_value():
+    """The post-confirm progress instruction must be an early-Build value (10,
+    the start of the fabrication window), NOT 0 — progress=0 regressed the
+    Build segment after confirm_fabrication_plan had already recorded the
+    confirm milestone."""
+    prompt = agent.SYSTEM_PROMPT
+    assert 'phase="implementation", progress=10' in prompt
+    assert 'phase="implementation", progress=0,' not in prompt
