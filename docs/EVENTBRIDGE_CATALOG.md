@@ -547,7 +547,7 @@ Published by the App Resolver during status transitions and component changes.
 | `app.published` | App API Gateway provisioned |
 | `app.status.active_to_archived` | App archived (ACTIVE → ARCHIVED) via updateApp shim handler |
 | `app.status.archived_to_draft` | App reactivated (ARCHIVED → DRAFT) via updateApp shim handler |
-| `app.status.draft_to_active` | App published (DRAFT → ACTIVE) via updateApp shim handler |
+| `app.status.draft_to_approved` | App approved (DRAFT → APPROVED) via updateApp shim handler |
 | `app.status.published` | App status change published via publishAppStatusEvent shim handler (IAM-authed passthrough) |
 | `app.updated` | App metadata updated via updateApp shim handler |
 | `app.workflow.bound` | Workflow bound to app via bindWorkflowToApp shim handler |

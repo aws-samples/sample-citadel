@@ -88,6 +88,58 @@ workflows. Clicking a row opens the execution detail sheet:
 
 The sheet refreshes live while the execution is still running.
 
+## Intake Post-Fabrication Path
+
+> Like [Workflows](#workflows) and [Executions](#executions), this section
+> describes **current** functionality. It is how an Agent App comes into
+> existence when the intake conversation drives the process end to end.
+
+After a fabrication completes, the intake agent
+(`service/agent_intake_single`) closes the loop conversationally. While a
+fabrication is in flight the agent polls build status at the start of every
+turn (it cannot receive push notifications), and offers activation once all
+agents are terminal — a partial success still offers to activate the agents
+that built. The flow
+is consent-gated — the agent never skips a step or auto-proceeds; each step
+runs only on the user's explicit confirmation, "Not now" defers, and a
+decline stops the flow. It is also resumable: each tool reports what is
+already done, and re-running a completed step is safe.
+
+The conversational steps map onto four IAM-only AppSync mutations served by
+a dedicated resolver Lambda
+(`backend/src/lambda/intake-orchestration-resolver.ts` — see the
+intake-orchestration pattern in [RESOLVER_GUIDE.md](./RESOLVER_GUIDE.md)):
+
+| Conversational step | Mutation | What it does |
+|---------------------|----------|--------------|
+| Activate agents | `intakeActivateProjectAgents(sessionId)` | Activates the fabricated agents. Matches the fabricator-stamped `sourceProjectId` by session id first, falling back to the conversations-linked project id; the result's `matchedBy` field reports which key matched (`null` when neither did) |
+| Create the app | `intakeCreateApp(sessionId, name, description)` | Creates the Agent App as a registry record in `DRAFT`. The agent proposes a name from the project and the user confirms or renames before this runs |
+| Generate the blueprint | `intakeCreateBlueprint(sessionId, name, definition)` | Composes a process blueprint from the technical design and fabrication plan, with real fabricated agents as steps, and creates + publishes it in one call. An `AGENTS_SYNCING` result is the retryable registry-sync race, surfaced to the user as "Try again" |
+| Import the workflow | `intakeImportBlueprintToApp(sessionId, blueprintId, appId, name)` | Imports the published blueprint into the app as a `DRAFT` workflow on the app's Workflows tab |
+
+All four mutations are declared `@aws_iam` only — they are called
+exclusively by the intake AgentCore runtime over SigV4 and are unreachable
+from user-pool clients.
+
+Starting states after the flow completes: the app is a `DRAFT` registry
+record and the imported workflow is a `DRAFT` on the app's **Workflows**
+tab. Neither is auto-published — the agent has no tool that publishes a
+workflow or an app. Instead, the conversation relays the real click-path as
+guidance:
+
+1. Open the app and go to its **Workflows** tab.
+2. **Publish** the workflow (from its card or the canvas) — publishing the
+   workflow is what enables **Run**.
+3. **Activate** the app — the app-level **Publish** button only appears once
+   the app is `APPROVED`.
+4. **Publish**, then **Confirm Publish** — this returns the endpoint URL and
+   the API key, which is shown only once.
+5. After publishing, the **API Dashboard** appears in the app.
+
+Note the workflow-publish step gates **Run** only; the app publish dialog
+treats unpublished workflows as a non-blocking warning, as described under
+[Workflows](#workflows).
+
 ## Where To Go Next
 
 - [docs/WORKFLOW_USER_GUIDE.md](./WORKFLOW_USER_GUIDE.md) — task-oriented
