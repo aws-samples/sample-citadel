@@ -86,7 +86,10 @@ describe('RegistryService CRUD operations', () => {
       expect(createCalls).toHaveLength(1);
       expect(createCalls[0].args[0].input).toEqual({
         registryId: 'test-registry',
-        name: 'My Agent',
+        // Names are sanitized to the registry constraint
+        // ^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$ before the call ('My Agent' would
+        // be rejected with a ValidationException — spaces are illegal).
+        name: 'My-Agent',
         description: 'A test agent',
         descriptorType: DescriptorType.CUSTOM,
         descriptors: {
@@ -114,7 +117,9 @@ describe('RegistryService CRUD operations', () => {
       const result = await service.createResource('agent', 'agent-2', input);
 
       expect(result.recordId).toBe('agent-2');
-      expect(result.name).toBe('Fallback Agent');
+      // The fallback record carries the sanitized name actually sent to the
+      // registry, not the raw input.
+      expect(result.name).toBe('Fallback-Agent');
       expect(result.status).toBe('DRAFT');
     });
   });
@@ -214,7 +219,8 @@ describe('RegistryService CRUD operations', () => {
       expect(calls[0].args[0].input).toEqual({
         registryId: 'test-registry',
         recordId: 'agent-1',
-        name: 'Updated Agent',
+        // Renames are sanitized with the same shared rule as creates.
+        name: 'Updated-Agent',
         description: { optionalValue: 'Updated desc' },
         descriptors: {
           optionalValue: {

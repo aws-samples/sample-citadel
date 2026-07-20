@@ -915,7 +915,10 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
   const metaMirrored = await upsertAppMeta(APPS_TABLE, {
     appId: record.recordId,
     orgId: input.orgId,
-    name: agentAppInput.name,
+    // The CREATED name (RegistryService sanitizes to the registry's
+    // ^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$ constraint) — not the raw input — so
+    // listApps (mirror) and getApp (registry) render the same name.
+    name: record.name || agentAppInput.name,
     description: agentAppInput.description,
     status: 'DRAFT',
     workflowIds: [],

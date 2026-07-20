@@ -76,9 +76,11 @@ def test_no_confirmed_name_returns_proposal_without_mutation(execute, marker_sto
     result = json.loads(postfab.create_agent_app(session_id="sess-1"))
 
     assert result["status"] == "proposal"
-    assert result["proposed_name"] == "Acme Claims"
+    # Proposals are pre-sanitized to the registry-safe form ('Acme Claims'
+    # would be rejected by the registry name constraint — spaces are illegal).
+    assert result["proposed_name"] == "Acme-Claims"
     execute.assert_not_called()
-    assert "Acme Claims" in result["consent_question"]
+    assert "Acme-Claims" in result["consent_question"]
     assert marker_store["sess-1"].get("appId") is None
     _contract(result)
 
@@ -159,10 +161,59 @@ def test_proposal_finds_linked_row_beyond_first_scan_page(execute, marker_store,
     result = json.loads(postfab.create_agent_app(session_id="sess-1"))
 
     assert result["status"] == "proposal"
-    assert result["proposed_name"] == "Acme Claims"
+    # Registry-safe pre-sanitized proposal (see the naming tests below).
+    assert result["proposed_name"] == "Acme-Claims"
     # Pagination proof: the second scan continues from LastEvaluatedKey.
     assert conv_table.scan.call_count == 2
     second_kwargs = conv_table.scan.call_args_list[1].kwargs
     assert second_kwargs["ExclusiveStartKey"] == {"projectId": "other", "timestamp": "t1"}
     # The project lookup used the page-2 linked projectId, not the session id.
     proj_table.get_item.assert_called_once_with(Key={"id": "proj-1"})
+
+
+def test_proposal_presanitizes_project_name_to_registry_safe_form(execute, marker_store, monkeypatch):
+    """The registry rejects names with spaces (^[a-zA-Z0-9][a-zA-Z0-9_\\-./]*$),
+    so the consent gate must show the registry-safe name that will actually
+    be created — not the raw project name."""
+    _project_tables(monkeypatch, [{"projectId": "proj-1"}], {"name": "Test - Ingest"})
+
+    result = json.loads(postfab.create_agent_app(session_id="sess-1"))
+
+    assert result["status"] == "proposal"
+    assert result["proposed_name"] == "Test-Ingest"
+    assert "Test-Ingest" in result["consent_question"]
+    assert "Test - Ingest" not in result["consent_question"]
+    execute.assert_not_called()
+    _contract(result)
+
+
+def test_proposal_dated_fallback_is_registry_safe(execute, marker_store, monkeypatch):
+    """The dated fallback ('Intake Request YYYY-MM-DD') carried spaces too —
+    the proposal must always satisfy the registry name constraint."""
+    import re
+
+    _project_tables(monkeypatch, [], None)
+
+    result = json.loads(postfab.create_agent_app(session_id="sess-1"))
+
+    assert result["status"] == "proposal"
+    assert re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$", result["proposed_name"])
+    _contract(result)
+
+
+def test_marker_and_copy_store_server_returned_name_not_input(execute, marker_store, monkeypatch):
+    """The server sanitizes the name it actually creates; the marker and the
+    conversational copy must echo the RETURNED name, never the raw input."""
+    _project_tables(monkeypatch, [{"projectId": "proj-1"}], {"name": "Test - Ingest"})
+    execute.return_value = {
+        "intakeCreateApp": {"appId": "app-9", "name": "Test-Ingest", "status": "DRAFT"}
+    }
+
+    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="Test - Ingest"))
+
+    assert result["ok"] is True
+    assert marker_store["sess-1"]["appName"] == "Test-Ingest"
+    assert result["app_name"] == "Test-Ingest"
+    assert "Created the app 'Test-Ingest'" in result["summary"]
+    assert "Test - Ingest" not in result["summary"]
+    _contract(result)

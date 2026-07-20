@@ -30,6 +30,7 @@ from tools.appsync_client import AppSyncError
 from tools.fabricate import PLAN_KEY, SECTION_KEY, _get_existing_agents, _llm
 from tools.kb import s3_get
 from tools.state import get_postfab_marker, set_postfab_marker, _internal_update_progress
+from tools.registry_name import sanitize_registry_name
 
 logger = logging.getLogger(__name__)
 
@@ -208,15 +209,22 @@ def _derive_project_context(session_id: str) -> tuple[str, str | None]:
 
 
 def _propose_app_name(session_id: str) -> str:
-    """Fallback chain: projects.name -> dated intake name -> short session tag."""
+    """Fallback chain: projects.name -> dated intake name -> short session tag.
+
+    The result is pre-sanitized to the registry-safe form (the backend
+    applies the same rules at creation) so the consent gate shows exactly
+    the name that will be created — never a name the registry would reject.
+    """
     _, project_name = _derive_project_context(session_id)
     if project_name:
-        return project_name
-    try:
-        return f"Intake Request {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
-    except Exception as e:  # noqa: BLE001 — naming must never block the flow
-        logger.warning("date-based app name failed session=%s: %s", session_id, e)
-        return f"Intake {session_id[:8]}"
+        raw = project_name
+    else:
+        try:
+            raw = f"Intake Request {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        except Exception as e:  # noqa: BLE001 — naming must never block the flow
+            logger.warning("date-based app name failed session=%s: %s", session_id, e)
+            raw = f"Intake {session_id[:8]}"
+    return sanitize_registry_name(raw)
 
 
 def _app_gate(session_id: str, marker: dict) -> tuple[str, list[dict]]:

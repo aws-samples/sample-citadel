@@ -20,6 +20,7 @@ import type {
   ListRegistryRecordsCommandOutput,
   RegistryRecordSummary,
 } from '@aws-sdk/client-bedrock-agentcore-control';
+import { sanitizeRegistryName } from '../utils/registry-name';
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -637,11 +638,16 @@ export class RegistryService {
     id: string,
     input: CreateResourceInput,
   ): Promise<RegistryRecord> {
+    // The Registry rejects names failing ^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$ with
+    // a ValidationException (live-verified: spaces are illegal). Every create
+    // caller — createApp (UI + intake), agent import, agent/tool config —
+    // flows through here, so this is THE shared sanitization point.
+    const safeName = sanitizeRegistryName(input.name);
     const createResult = await this.withRetry(() =>
       this.client.send(
         new CreateRegistryRecordCommand({
           registryId: this.registryId,
-          name: input.name,
+          name: safeName,
           description: input.description,
           // Use the literal 'CUSTOM' instead of DescriptorType.CUSTOM enum access.
           // governance-ui-resolver.ts is bundled with --external:@aws-sdk/* and
@@ -675,7 +681,7 @@ export class RegistryService {
     // Fallback: construct from input if get fails
     return {
       recordId,
-      name: input.name,
+      name: safeName,
       description: input.description,
       status: createResult.status ?? RegistryRecordStatusValues.DRAFT,
       customDescriptorContent: input.customMetadata,
@@ -790,7 +796,9 @@ export class RegistryService {
         new UpdateRegistryRecordCommand({
           registryId: this.registryId,
           recordId,
-          name: input.name,
+          // Renames hit the same name constraint as creates — sanitize with
+          // the shared rule (legal names pass through unchanged).
+          name: input.name != null ? sanitizeRegistryName(input.name) : input.name,
           description: input.description != null
             ? { optionalValue: input.description }
             : undefined,
