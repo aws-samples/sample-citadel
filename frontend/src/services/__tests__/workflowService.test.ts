@@ -199,3 +199,71 @@ describe('deserializeWorkflow — tolerant envelope handling', () => {
     }
   });
 });
+
+describe('deserializeWorkflow — node label prefers the definition name', () => {
+  // Intake-generated envelopes carry the human-readable step name per node;
+  // catalog configs for fabricated agents carry snake_case fabricator ids,
+  // so the definition name must win over the catalog fallback chain
+  // (agentConfig.name || config.name || agentId).
+  const fabricatedCatalog = new Map<string, AgentConfig>([
+    [
+      'rec-a',
+      {
+        agentId: 'rec-a',
+        name: 'ap_order_intake_agent_v1',
+        config: { name: 'ap_order_intake_agent_v1' },
+        state: 'active',
+      } as unknown as AgentConfig,
+    ],
+  ]);
+
+  const namedNodeDefinition = {
+    nodes: [
+      {
+        id: 'rec-a',
+        agentId: 'rec-a',
+        name: 'Order Intake',
+        position: { x: 100, y: 200 },
+        configuration: {},
+      },
+    ],
+    edges: [],
+  };
+
+  it('uses nodeDef.name as the canvas label when present', async () => {
+    const { nodes } = await deserializeWorkflow(
+      JSON.stringify(namedNodeDefinition),
+      fabricatedCatalog,
+    );
+
+    expect(nodes[0].data.label).toBe('Order Intake');
+  });
+
+  it('falls back to the catalog chain when the definition has no name', async () => {
+    const { nodes: legacy } = await deserializeWorkflow(
+      JSON.stringify(bareEchoDemoDefinition),
+      agentConfigMap,
+    );
+
+    expect(legacy[0].data.label).toBe('Demo Echo Agent');
+  });
+
+  it('rejects a node whose name is present but not a string (guard mirror)', async () => {
+    const badName = {
+      nodes: [
+        {
+          id: 'rec-a',
+          agentId: 'rec-a',
+          name: 123,
+          position: { x: 100, y: 200 },
+          configuration: {},
+        },
+      ],
+      edges: [],
+    };
+
+    await expect(
+      deserializeWorkflow(JSON.stringify(badName), fabricatedCatalog),
+    ).rejects.toMatchObject({ code: 'INVALID_WORKFLOW_STRUCTURE' });
+  });
+});

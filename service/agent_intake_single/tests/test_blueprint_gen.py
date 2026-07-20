@@ -3,9 +3,11 @@
 Contract:
 - Composes a canonical-envelope WorkflowDefinition from td_2.md +
   fabrication_plan.md via the LLM, with REAL registry recordIds as agentIds.
-- Envelope: version/id/name/createdAt/updatedAt + nodes(id, agentId,
+- Envelope: version/id/name/createdAt/updatedAt + nodes(id, agentId, name,
   position, configuration) + edges(id, source, target, sourceHandle 'output',
   targetHandle 'input'); positions follow x=100+300*depth, y=200+250*lane.
+  Node ``name`` is the human-readable step/agent name so the canvas never
+  falls back to showing raw registry recordIds.
 - Unresolvable/external agents are excluded and surfaced.
 - intakeCreateBlueprint result: PUBLISHED -> marker update + import consent;
   AGENTS_SYNCING -> retryable + approved waiting copy; VALIDATION_FAILED ->
@@ -103,12 +105,25 @@ def test_envelope_is_canonical(deps, marker_store):
         assert node["agentId"] in ("rec-a", "rec-b")
         assert set(node["position"].keys()) == {"x", "y"}
         assert node["configuration"] == {}
+        assert isinstance(node["name"], str) and node["name"]
     assert len(definition["edges"]) == 1
     edge = definition["edges"][0]
     assert edge["id"]
     assert edge["source"] == "rec-a" and edge["target"] == "rec-b"
     assert edge["sourceHandle"] == "output"
     assert edge["targetHandle"] == "input"
+
+
+def test_nodes_carry_display_names_from_step_mapping(deps, marker_store):
+    """Defect: nodes shipped only id=agentId=recordId, so the canvas label
+    chain (agentConfig.name || config.name || agentId) surfaced raw registry
+    recordIds on catalog miss. Each node must carry the human-readable
+    step/agent name used to compose the workflow."""
+    postfab.generate_process_blueprint(session_id="sess-1")
+
+    definition = _captured_definition(deps)
+    names_by_id = {n["id"]: n["name"] for n in definition["nodes"]}
+    assert names_by_id == {"rec-a": "AgentA", "rec-b": "AgentB"}
 
 
 def test_nodes_never_use_placeholders_or_names(deps, marker_store):

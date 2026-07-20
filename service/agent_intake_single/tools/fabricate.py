@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 
 SECTION_KEY = "{session_id}/design/td_2.md"
 PLAN_KEY = "{session_id}/planning/fabrication_plan.md"
+# Owned-section markers for the living plan document: the per-agent status
+# table sits between these so tools/plan_doc.py can regenerate it from live
+# state without touching any other prose. HTML comments — invisible in the
+# rendered markdown. Defined here (the document's author) so plan_doc can
+# import them without a circular import.
+PLAN_STATUS_BEGIN = "<!-- intake:agent-status:begin -->"
+PLAN_STATUS_END = "<!-- intake:agent-status:end -->"
 FABRICATOR_QUEUE_URL = os.getenv("FABRICATOR_QUEUE_URL", "")
 # Fabricated agents are written to the AgentCore Registry (via the arbiter's
 # store_agent_config_registry), NOT to a DynamoDB table — so the intake
@@ -340,13 +347,17 @@ def confirm_fabrication_plan(session_id: str, plan_json: str) -> str:
 
     plan = json.loads(plan_json)
 
-    # Write markdown plan to S3
+    # Write markdown plan to S3. The status table is wrapped in the owned-
+    # section markers so the plan-document refresher (tools/plan_doc.py) can
+    # regenerate it from live state as fabrication progresses.
     lines = ["# Fabrication Plan\n"]
+    lines.append(PLAN_STATUS_BEGIN)
     lines.append("| Agent | Action | Reason |")
     lines.append("|---|---|---|")
     for item in plan:
         emoji = {"build": "🔨", "reuse": "♻️", "external": "⚠️"}.get(item["action"], "")
         lines.append(f"| {item['name']} | {emoji} {item['action'].capitalize()} | {item['reason']} |")
+    lines.append(PLAN_STATUS_END)
 
     lines.append("\n## Agents to Build\n")
     build_agents = [a for a in plan if a["action"] == "build"]

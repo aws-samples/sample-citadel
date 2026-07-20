@@ -29,6 +29,7 @@ from tools import appsync_client
 from tools.appsync_client import AppSyncError
 from tools.fabricate import PLAN_KEY, SECTION_KEY, _get_existing_agents, _llm
 from tools.kb import s3_get
+from tools.plan_doc import refresh_plan_document
 from tools.state import get_postfab_marker, set_postfab_marker, _internal_update_progress
 from tools.registry_name import sanitize_registry_name
 
@@ -75,6 +76,12 @@ def _record_stage_progress(session_id: str, stage: str, summary: str) -> None:
     consistent: session intake state (baked into the agent prompt), the UI
     progress event, and the project record (whose write is monotonic, so an
     idempotent re-run or out-of-order call can never regress the segment).
+
+    Also refreshes the living fabrication-plan document — every artifact
+    stage (activated/app_created/blueprint_created/workflow_imported) funnels
+    through here, so the plan's status table and Delivered Artifacts section
+    stay current. Best-effort as well: a refresh failure never breaks the
+    calling tool.
     """
     pct = _STAGE_PROGRESS.get(stage)
     if pct is None:
@@ -84,6 +91,13 @@ def _record_stage_progress(session_id: str, stage: str, summary: str) -> None:
     except Exception as e:  # noqa: BLE001 — milestone telemetry must never break the flow
         logger.warning(
             "stage progress update failed session=%s stage=%s: %s",
+            session_id, stage, e,
+        )
+    try:
+        refresh_plan_document(session_id)
+    except Exception as e:  # noqa: BLE001 — plan doc is a projection, never blocks
+        logger.warning(
+            "plan document refresh failed session=%s stage=%s: %s",
             session_id, stage, e,
         )
 
@@ -428,6 +442,16 @@ def check_fabrication_status(session_id: str) -> str:
     # Terminal: advance fabrication_pending -> built, never regress a later stage.
     if status in ("complete", "partial") and _stage_rank(current_stage) <= _stage_rank("fabrication_pending"):
         set_postfab_marker(session_id, stage="built")
+        # Built detected: flip the plan document's stale 'will be auto-
+        # fabricated' rows to live statuses. Best-effort — never fails the
+        # status check.
+        try:
+            refresh_plan_document(session_id)
+        except Exception as e:  # noqa: BLE001 — plan doc is a projection, never blocks
+            logger.warning(
+                "plan document refresh failed session=%s stage=built: %s",
+                session_id, e,
+            )
 
     if status == "complete":
         return _result(
@@ -721,8 +745,14 @@ def _is_weakly_connected(node_ids: list[str], edges: list[tuple[str, str]]) -> b
     return len(seen) == len(node_ids)
 
 
-def _build_envelope(name: str, node_ids: list[str], edges: list[tuple[str, str]]) -> dict:
-    """Canonical WorkflowDefinition envelope (matches the seed-blueprint shape)."""
+def _build_envelope(name: str, node_ids: list[str], edges: list[tuple[str, str]],
+                    node_names: dict[str, str] | None = None) -> dict:
+    """Canonical WorkflowDefinition envelope (matches the seed-blueprint shape).
+
+    ``node_names`` maps node id (registry recordId) -> human-readable step/
+    agent name. Emitted as the optional per-node ``name`` so the canvas label
+    chain never falls back to showing a raw recordId on catalog miss.
+    """
     try:
         positions = _layout_positions(node_ids, edges)
         connected = _is_weakly_connected(node_ids, edges)
@@ -734,6 +764,7 @@ def _build_envelope(name: str, node_ids: list[str], edges: list[tuple[str, str]]
         positions = _layout_positions(node_ids, edges)
 
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    display = node_names or {}
     return {
         "version": "1.0.0",
         "id": str(uuid.uuid4()),
@@ -742,6 +773,7 @@ def _build_envelope(name: str, node_ids: list[str], edges: list[tuple[str, str]]
         "updatedAt": now,
         "nodes": [
             {"id": node_id, "agentId": node_id,
+             **({"name": display[node_id]} if display.get(node_id) else {}),
              "position": positions[node_id], "configuration": {}}
             for node_id in node_ids
         ],
@@ -842,6 +874,7 @@ def generate_process_blueprint(session_id: str) -> str:
     ]
     envelope = _build_envelope(
         f"{app_name} Process", [name_to_id[n] for n in ordered_names], edges,
+        node_names={name_to_id[n]: n for n in ordered_names},
     )
 
     try:
@@ -859,9 +892,12 @@ def generate_process_blueprint(session_id: str) -> str:
 
     if status == "PUBLISHED" and outcome.get("blueprintId"):
         blueprint_id = outcome["blueprintId"]
-        set_postfab_marker(session_id, stage="blueprint_created", blueprintId=blueprint_id)
-        _record_stage_progress(session_id, "blueprint_created", "Process blueprint published")
         node_count = outcome.get("nodeCount") or len(ordered_names)
+        # nodeCount rides in the marker so the plan document's Delivered
+        # Artifacts section can report the blueprint's step count.
+        set_postfab_marker(session_id, stage="blueprint_created",
+                           blueprintId=blueprint_id, nodeCount=node_count)
+        _record_stage_progress(session_id, "blueprint_created", "Process blueprint published")
         summary = (
             f"Done — the blueprint maps your {node_count} agents into "
             f"{node_count} connected steps."

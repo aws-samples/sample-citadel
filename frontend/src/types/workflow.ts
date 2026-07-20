@@ -98,6 +98,12 @@ export interface NodeResult {
 export interface WorkflowNodeDefinition {
   id: string;
   agentId: string;
+  /**
+   * Human-readable step/agent display name. Optional: intake-generated
+   * envelopes carry it so the canvas never falls back to showing a raw
+   * registry recordId; legacy/seeded definitions may omit it.
+   */
+  name?: string;
   position: { x: number; y: number };
   configuration: Record<string, any>;
   retryPolicy?: RetryPolicy;
@@ -224,6 +230,7 @@ export function isWorkflowNodeDefinition(node: any): node is WorkflowNodeDefinit
     typeof node === 'object' &&
     typeof node.id === 'string' &&
     typeof node.agentId === 'string' &&
+    (node.name === undefined || typeof node.name === 'string') &&
     typeof node.position === 'object' &&
     typeof node.position.x === 'number' &&
     typeof node.position.y === 'number' &&

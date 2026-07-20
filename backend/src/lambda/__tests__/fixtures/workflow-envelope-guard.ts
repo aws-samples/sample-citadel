@@ -21,6 +21,7 @@ export function isWorkflowNodeDefinition(node: unknown): boolean {
   const candidate = node as {
     id?: unknown;
     agentId?: unknown;
+    name?: unknown;
     position?: unknown;
     configuration?: unknown;
   };
@@ -31,6 +32,7 @@ export function isWorkflowNodeDefinition(node: unknown): boolean {
   return (
     typeof candidate.id === 'string' &&
     typeof candidate.agentId === 'string' &&
+    (candidate.name === undefined || typeof candidate.name === 'string') &&
     typeof position.x === 'number' &&
     typeof position.y === 'number' &&
     candidate.configuration !== null &&

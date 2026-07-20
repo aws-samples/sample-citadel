@@ -250,9 +250,11 @@ describe('Python intake client GraphQL documents match backend schema.graphql', 
  * service/agent_intake_single/tools/postfab.py, copied from the Python
  * fixture assertions in
  * service/agent_intake_single/tests/test_blueprint_gen.py
- * (test_envelope_is_canonical / test_positions_follow_layout_rule):
- * two resolved registry recordIds, layered positions (x=100+300*depth,
- * y=200+250*lane), one edge with output/input handles.
+ * (test_envelope_is_canonical / test_positions_follow_layout_rule /
+ * test_nodes_carry_display_names_from_step_mapping):
+ * two resolved registry recordIds with human-readable node names, layered
+ * positions (x=100+300*depth, y=200+250*lane), one edge with output/input
+ * handles.
  */
 const PYTHON_ENVELOPE_FIXTURE = {
   version: '1.0.0',
@@ -261,8 +263,20 @@ const PYTHON_ENVELOPE_FIXTURE = {
   createdAt: '2026-07-19T00:00:00.000000Z',
   updatedAt: '2026-07-19T00:00:00.000000Z',
   nodes: [
-    { id: 'rec-a', agentId: 'rec-a', position: { x: 100, y: 200 }, configuration: {} },
-    { id: 'rec-b', agentId: 'rec-b', position: { x: 400, y: 200 }, configuration: {} },
+    {
+      id: 'rec-a',
+      agentId: 'rec-a',
+      name: 'AgentA',
+      position: { x: 100, y: 200 },
+      configuration: {},
+    },
+    {
+      id: 'rec-b',
+      agentId: 'rec-b',
+      name: 'AgentB',
+      position: { x: 400, y: 200 },
+      configuration: {},
+    },
   ],
   edges: [
     {
@@ -307,6 +321,22 @@ describe('generate_process_blueprint envelope round-trips through the backend an
   it('rejects a node whose position is not {x: number, y: number}', () => {
     const node = { ...PYTHON_ENVELOPE_FIXTURE.nodes[0], position: { x: '100', y: 200 } };
     expect(isWorkflowNodeDefinition(node)).toBe(false);
+  });
+
+  it('rejects a node whose name is present but not a string', () => {
+    const node = { ...PYTHON_ENVELOPE_FIXTURE.nodes[0], name: 123 };
+    expect(isWorkflowNodeDefinition(node)).toBe(false);
+    expect(
+      isWorkflowDefinitionEnvelope({
+        ...PYTHON_ENVELOPE_FIXTURE,
+        nodes: [node, PYTHON_ENVELOPE_FIXTURE.nodes[1]],
+      }),
+    ).toBe(false);
+  });
+
+  it('accepts a node without a name (name is optional — legacy envelopes)', () => {
+    const { name: _dropped, ...nameless } = PYTHON_ENVELOPE_FIXTURE.nodes[0];
+    expect(isWorkflowNodeDefinition(nameless)).toBe(true);
   });
 
   it('validateDefinitionStructure rejects an envelope without a nodes array', () => {
