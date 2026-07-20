@@ -106,6 +106,16 @@ def test_phase8_never_claims_agent_publishes_on_users_behalf():
     assert "NEVER offer or imply that you can publish" in prompt
 
 
+def test_phase8_regenerate_blueprint_maps_to_explicit_tool_flag():
+    """The already-published branch offers a 'Regenerate the blueprint'
+    action; the prompt must map that choice (and only that choice) to
+    generate_process_blueprint(..., regenerate=True) so the agent never
+    regenerates without explicit consent."""
+    prompt = agent.SYSTEM_PROMPT
+    assert "Regenerate the blueprint" in prompt
+    assert "regenerate=True" in prompt
+
+
 def test_phase7_fabrication_started_progress_is_early_build_value():
     """The post-confirm progress instruction must be an early-Build value (10,
     the start of the fabrication window), NOT 0 — progress=0 regressed the

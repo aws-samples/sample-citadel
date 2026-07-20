@@ -9,7 +9,11 @@ Guarantees:
 - GraphQL errors surface as typed exceptions with a retryable classification
   (throttle / internal / timeout-style errors are retryable; validation is
   not).
-- HTTP 5xx / 429 and network timeouts get a bounded retry (<= MAX_RETRIES).
+- HTTP 5xx / 429 and network timeouts get a bounded retry (<= MAX_RETRIES) —
+  EXCEPT timeouts on the non-idempotent create mutations
+  (``NON_IDEMPOTENT_OPERATIONS``): a timed-out create may have executed
+  server-side, so it is raised immediately (retryable=True) and only ever
+  retried on explicit user consent.
 - Every log line carries the caller's session id (the intake correlation id).
 - Credentials and full response bodies are NEVER logged — only operation
   labels, error types, and HTTP status codes.
@@ -44,14 +48,34 @@ _RETRYABLE_MARKERS = (
     "unavailable", "timeout", "timed out",
 )
 
+# GraphQL errorType/message substrings that mean the request TIMED OUT while
+# possibly still executing (e.g. AppSync's Lambda execution timeout).
+_TIMEOUT_MARKERS = ("timeout", "timed out")
+
+# Mutations that CREATE a new resource per call. A timed-out request may
+# have executed server-side — live triplicate-create incident: intakeCreateApp
+# timed out client-side at 30s while the Lambda kept running and persisted
+# the app, and each automatic retry minted another one. These operations are
+# therefore NEVER auto-retried on a timeout-classified failure; the error
+# still surfaces retryable=True so the tool layer shows its standard
+# "Try again" consent (the server-side sourceProjectId idempotency guard
+# makes a user-consented retry safe). Reads and the idempotent mutations
+# (activate, import) keep the timeout auto-retry; throttles/5xx were never
+# executed, so their auto-retry stays for every operation.
+NON_IDEMPOTENT_OPERATIONS = frozenset({"intakeCreateApp", "intakeCreateBlueprint"})
+
 
 class AppSyncError(Exception):
-    """Base error for AppSync calls. ``retryable`` drives the caller's UX."""
+    """Base error for AppSync calls. ``retryable`` drives the caller's UX;
+    ``timed_out`` marks failures where the request may have executed anyway
+    (drives the non-idempotent no-auto-retry rule)."""
 
-    def __init__(self, message: str, retryable: bool = False, error_type: str | None = None):
+    def __init__(self, message: str, retryable: bool = False,
+                 error_type: str | None = None, timed_out: bool = False):
         super().__init__(message)
         self.retryable = retryable
         self.error_type = error_type
+        self.timed_out = timed_out
 
 
 class AppSyncTransportError(AppSyncError):
@@ -84,6 +108,11 @@ def _is_retryable_graphql_error(error: dict) -> bool:
     return any(marker in text for marker in _RETRYABLE_MARKERS)
 
 
+def _is_timeout_graphql_error(error: dict) -> bool:
+    text = f"{error.get('errorType', '')} {error.get('message', '')}".lower()
+    return any(marker in text for marker in _TIMEOUT_MARKERS)
+
+
 def _post_signed(body: str, session_id: str, operation: str):
     """One signed POST. Raises AppSyncTransportError on network/HTTP failure."""
     credentials = _get_credentials()
@@ -101,7 +130,15 @@ def _post_signed(body: str, session_id: str, operation: str):
             headers=dict(aws_request.headers),
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
-    except (requests_exceptions.ConnectionError, requests_exceptions.Timeout) as err:
+    # Timeout first: requests' ConnectTimeout subclasses BOTH Timeout and
+    # ConnectionError, and the timeout classification must win (it drives
+    # the non-idempotent no-auto-retry rule).
+    except requests_exceptions.Timeout as err:
+        raise AppSyncTransportError(
+            f"Network error calling AppSync for {operation}: {type(err).__name__}",
+            retryable=True, error_type=type(err).__name__, timed_out=True,
+        )
+    except requests_exceptions.ConnectionError as err:
         raise AppSyncTransportError(
             f"Network error calling AppSync for {operation}: {type(err).__name__}",
             retryable=True, error_type=type(err).__name__,
@@ -166,6 +203,15 @@ def execute(query: str, variables: dict, session_id: str) -> dict:
             )
             if not err.retryable:
                 raise
+            if err.timed_out and operation in NON_IDEMPOTENT_OPERATIONS:
+                # The request may have executed server-side — auto-retrying a
+                # create mints duplicates. Surface it (still retryable=True)
+                # so the tool offers the user-consented "Try again".
+                logger.warning(
+                    "appsync timeout on non-idempotent op — not auto-retrying "
+                    "op=%s session=%s", operation, session_id,
+                )
+                raise
             last_error = err
             continue
 
@@ -174,6 +220,7 @@ def execute(query: str, variables: dict, session_id: str) -> dict:
             first = errors[0] if isinstance(errors[0], dict) else {}
             error_type = str(first.get("errorType") or "GraphQLError")
             retryable = _is_retryable_graphql_error(first)
+            timed_out = _is_timeout_graphql_error(first)
             # Log the classification only — never the response body.
             logger.warning(
                 "appsync graphql error op=%s session=%s attempt=%d errorType=%s retryable=%s",
@@ -181,9 +228,17 @@ def execute(query: str, variables: dict, session_id: str) -> dict:
             )
             gql_error = AppSyncGraphQLError(
                 f"GraphQL error on {operation} ({error_type})",
-                retryable=retryable, error_type=error_type,
+                retryable=retryable, error_type=error_type, timed_out=timed_out,
             )
             if not retryable:
+                raise gql_error
+            if timed_out and operation in NON_IDEMPOTENT_OPERATIONS:
+                # Same rule as transport timeouts: a Lambda that hit its own
+                # execution timeout may already have persisted its writes.
+                logger.warning(
+                    "appsync timeout on non-idempotent op — not auto-retrying "
+                    "op=%s session=%s", operation, session_id,
+                )
                 raise gql_error
             last_error = gql_error
             continue

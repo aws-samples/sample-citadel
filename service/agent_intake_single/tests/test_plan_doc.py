@@ -200,6 +200,155 @@ def test_legacy_doc_gains_status_markers_for_future_runs(env):
     assert doc.index(fabricate.PLAN_STATUS_BEGIN) < doc.index("| AgentA |") < doc.index(fabricate.PLAN_STATUS_END)
 
 
+# --- markers must be INVISIBLE in CommonMark (react-markdown has no rehype-raw) --
+#
+# Live defect: the owned-section markers were HTML comments, which
+# react-markdown@10 + remarkGfm (no rehype-raw — XSS risk on LLM-authored
+# docs) renders as LITERAL TEXT. The markers must use the link-reference-
+# definition form `[//]: # (...)`, which CommonMark renders as nothing.
+# Read-side accepts BOTH forms; writes always emit the new form, so existing
+# docs self-migrate on their next refresh.
+
+import re as _re
+
+_INVISIBLE_MARKER = _re.compile(r"^\[//\]: # \(intake:[a-z-]+:(begin|end)\)$")
+
+# Exact byte shapes docs written before the switch carry.
+OLD_STATUS_BEGIN = "<!-- intake:agent-status:begin -->"
+OLD_STATUS_END = "<!-- intake:agent-status:end -->"
+OLD_ARTIFACTS_BEGIN = "<!-- intake:delivered-artifacts:begin -->"
+OLD_ARTIFACTS_END = "<!-- intake:delivered-artifacts:end -->"
+
+OLD_MARKER_DOC = (
+    "# Fabrication Plan\n\n"
+    f"{OLD_STATUS_BEGIN}\n"
+    "| Agent | Action | Reason |\n"
+    "|---|---|---|\n"
+    "| AgentA | 🔨 Build | Not yet in factory — will be auto-fabricated |\n"
+    f"{OLD_STATUS_END}\n"
+    "\n## Agents to Build\n\n"
+    "### AgentA\nDoes the intake triage.\n\n"
+    f"{OLD_ARTIFACTS_BEGIN}\n"
+    "## Delivered Artifacts\n"
+    "\n"
+    "- Agents activated: 1 ('AgentA') — recorded 2026-07-01 00:00 UTC\n"
+    f"{OLD_ARTIFACTS_END}"
+)
+
+
+def _assert_markers_invisible(doc):
+    lines = doc.split("\n")
+    markers = [
+        fabricate.PLAN_STATUS_BEGIN, fabricate.PLAN_STATUS_END,
+        plan_doc.ARTIFACTS_BEGIN, plan_doc.ARTIFACTS_END,
+    ]
+    for marker in markers:
+        # Link-reference-definition form — invisible in CommonMark.
+        assert _INVISIBLE_MARKER.fullmatch(marker), marker
+        assert marker in lines, f"{marker} not present as its own line"
+        index = lines.index(marker)
+        # A link reference definition absorbed into an adjacent paragraph or
+        # list renders as literal text — every marker needs blank-line
+        # separation from surrounding content.
+        if index > 0:
+            assert lines[index - 1].strip() == "", f"no blank line before {marker}"
+        if index < len(lines) - 1:
+            assert lines[index + 1].strip() == "", f"no blank line after {marker}"
+
+
+def test_emitted_markers_use_invisible_link_reference_form(env):
+    env.store[KEY] = LEGACY_DOC
+    env.jobs = [{"orchestrationId": SESSION, "agentUseId": "AgentA",
+                 "agentName": "AgentA", "status": "COMPLETED"}]
+    env.marker = dict(FULL_MARKER)
+
+    plan_doc.refresh_plan_document(SESSION)
+
+    doc = env.store[KEY]
+    assert "<!--" not in doc
+    _assert_markers_invisible(doc)
+
+
+def test_old_marker_doc_migrates_in_one_refresh(env):
+    env.store[KEY] = OLD_MARKER_DOC
+    env.jobs = [{"orchestrationId": SESSION, "agentUseId": "AgentA",
+                 "agentName": "AgentA", "status": "COMPLETED"}]
+    env.marker = {"stage": "activated",
+                  "activation": {"activated": ["AgentA"], "alreadyActive": [], "failed": []}}
+
+    plan_doc.refresh_plan_document(SESSION)
+
+    doc = env.store[KEY]
+    # Every old HTML-comment marker is gone after ONE refresh...
+    for old in (OLD_STATUS_BEGIN, OLD_STATUS_END, OLD_ARTIFACTS_BEGIN, OLD_ARTIFACTS_END):
+        assert old not in doc
+    assert "<!--" not in doc
+    # ...replaced by the invisible form, owned content intact.
+    _assert_markers_invisible(doc)
+    assert _row_cells(doc, "AgentA")[2] == "Built"
+    # The pre-existing artifact line keeps its first-written timestamp.
+    assert "- Agents activated: 1 ('AgentA') — recorded 2026-07-01 00:00 UTC" in doc
+
+
+def test_old_markers_migrate_even_when_content_is_unchanged(env):
+    """Self-migration must not depend on a status flip: the visible-marker
+    bug is itself the reason to rewrite."""
+    env.store[KEY] = OLD_MARKER_DOC
+    env.marker = {"stage": "activated",
+                  "activation": {"activated": ["AgentA"], "alreadyActive": [], "failed": []}}
+    # No jobs / registry — every status cell keeps its existing value.
+
+    plan_doc.refresh_plan_document(SESSION)
+
+    doc = env.store[KEY]
+    assert OLD_STATUS_BEGIN not in doc
+    assert OLD_ARTIFACTS_BEGIN not in doc
+    _assert_markers_invisible(doc)
+    # Owned content is preserved: same reason cell, same artifact timestamp.
+    assert _row_cells(doc, "AgentA")[2] == "Not yet in factory — will be auto-fabricated"
+    assert "recorded 2026-07-01 00:00 UTC" in doc
+
+
+def test_migrated_doc_double_run_is_byte_identical(env):
+    env.store[KEY] = OLD_MARKER_DOC
+    env.jobs = [{"orchestrationId": SESSION, "agentUseId": "AgentA",
+                 "agentName": "AgentA", "status": "COMPLETED"}]
+    env.marker = {"stage": "activated",
+                  "activation": {"activated": ["AgentA"], "alreadyActive": [], "failed": []}}
+
+    plan_doc.refresh_plan_document(SESSION)
+    migrated = env.store[KEY]
+    writes = len(env.put_calls)
+
+    plan_doc.refresh_plan_document(SESSION)
+
+    assert env.store[KEY] == migrated
+    assert len(env.put_calls) == writes
+
+
+def test_confirm_plan_emits_invisible_markers_with_blank_separation(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(fabricate, "s3_put", lambda key, body, *a, **k: captured.update({key: body}))
+    monkeypatch.setattr(fabricate, "FABRICATOR_QUEUE_URL", "https://sqs/q")
+    monkeypatch.setattr(fabricate, "_send_to_fabricator", mock.MagicMock())
+    import tools.state as state
+    monkeypatch.setattr(state, "_internal_update_progress", mock.MagicMock())
+
+    plan = json.dumps([{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}])
+    fabricate.confirm_fabrication_plan(SESSION, plan)
+
+    doc = captured[KEY]
+    assert "<!--" not in doc
+    lines = doc.split("\n")
+    for marker in (fabricate.PLAN_STATUS_BEGIN, fabricate.PLAN_STATUS_END):
+        assert _INVISIBLE_MARKER.fullmatch(marker)
+        index = lines.index(marker)
+        if index > 0:
+            assert lines[index - 1].strip() == ""
+        if index < len(lines) - 1:
+            assert lines[index + 1].strip() == ""
+
+
 # --- prose preservation ----------------------------------------------------------
 
 

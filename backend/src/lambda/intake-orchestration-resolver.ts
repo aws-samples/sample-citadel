@@ -40,35 +40,18 @@ import { lookupUserOrganization } from '../utils/auth-event';
 import { ValidationError, sanitizeString } from '../utils/validation';
 import {
   activateProjectAgents,
-  findProjectAgentRecords,
   type ActivateAgentsResult,
 } from './agent-config-resolver';
 import {
   createApp,
   ensureAppAgentBindings,
-  type EnsureBindingsResult,
+  findAppBySourceProjectId,
 } from './registry-agent-record-resolver';
 import { createWorkflow, publishWorkflow, importBlueprint } from './workflow-resolver';
 import {
   ensureAgentConfigRows,
   extractAgentIdsFromDefinition,
 } from './ensure-agent-config-rows';
-import { RegistryRecordStatusValues } from '../services/registry-service';
-
-/**
- * Registry statuses whose internal state is 'active' per
- * RegistryService.toInternalState — the SAME authority the binding core's
- * READY gate consults. PENDING_APPROVAL counts as active because
- * SubmitRegistryRecordForApproval is async: the intake flow binds agents
- * moments after activation submits them, before auto-approval lands.
- * (registry-sync's mirror intentionally differs — it surfaces 'pending' for
- * the agents-table cache — so it must NOT be used for gate-aligned checks.)
- */
-const ACTIVE_MAPPING_STATUSES = new Set<string>([
-  RegistryRecordStatusValues.APPROVED,
-  RegistryRecordStatusValues.UPDATING,
-  RegistryRecordStatusValues.PENDING_APPROVAL,
-]);
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -308,71 +291,6 @@ async function intakeActivateProjectAgents(
   return { ...bySession, matchedBy: null };
 }
 
-/**
- * Best-effort session-agent binding for intakeCreateApp. Resolves the
- * session's fabricated agents with the SAME registry match activation uses
- * (sourceProjectId === sessionId, falling back to the conversations-linked
- * projectId), keeps only currently-active records (authoritative
- * toInternalState(record.status) — agents whose activation failed stay
- * unbound rather than stranded at DESIGN), and delegates each bind to the
- * canonical binding core via ensureAppAgentBindings.
- *
- * NEVER throws: app creation must not be reported failed because a bind
- * failed. Outcomes are itemized in the log (identifiers/counts only).
- */
-async function bindSessionAgentsBestEffort(
-  sessionId: string,
-  ctx: SessionContext,
-  appId: string | undefined,
-  userId: string,
-): Promise<EnsureBindingsResult | null> {
-  if (typeof appId !== 'string' || appId.length === 0) {
-    return null;
-  }
-  try {
-    let records = await findProjectAgentRecords(sessionId);
-    let matchedBy: 'sessionId' | 'projectId' = 'sessionId';
-    if (records.length === 0 && ctx.projectId !== sessionId) {
-      records = await findProjectAgentRecords(ctx.projectId);
-      matchedBy = 'projectId';
-    }
-    const activeAgentIds = records
-      .filter((record) => ACTIVE_MAPPING_STATUSES.has(record.status ?? ''))
-      .map((record) => record.recordId);
-    if (activeAgentIds.length === 0) {
-      log('intakeCreateApp', sessionId, {
-        stage: 'ensureAppAgentBindings',
-        skipped: true,
-        matchedRecords: records.length,
-      });
-      return null;
-    }
-    const outcome = await ensureAppAgentBindings(appId, activeAgentIds, userId);
-    log('intakeCreateApp', sessionId, {
-      stage: 'ensureAppAgentBindings',
-      matchedBy,
-      bound: outcome.bound.length,
-      alreadyBound: outcome.alreadyBound.length,
-      failed: outcome.failed.length,
-      failedAgentIds: outcome.failed.map((f) => f.agentId),
-    });
-    return outcome;
-  } catch (error) {
-    // Best-effort by contract — the app exists; bindings can be healed by
-    // re-triggering the blueprint import conversationally.
-    console.error(
-      JSON.stringify({
-        resolver: 'intake-orchestration-resolver',
-        fieldName: 'intakeCreateApp',
-        correlationId: sessionId,
-        stage: 'ensureAppAgentBindings',
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
-    return null;
-  }
-}
-
 async function intakeCreateApp(
   sessionId: string,
   rawName: unknown,
@@ -391,10 +309,34 @@ async function intakeCreateApp(
   const ctx = await deriveSessionContext(sessionId);
   const orgId = await resolveOrgId(ctx);
 
+  // Idempotency guard (triplicate-create fix): a timed-out invocation may
+  // already have persisted the app — live incident: the app persisted ~1.2s
+  // in, the client gave up at 30s, and each consented retry minted another
+  // app (one consent → three apps). The app is findable by the SAME
+  // server-stamped sourceProjectId key it is created with below (mirrors the
+  // import path's alreadyImported pattern), so a retry returns the existing
+  // app instead of creating a duplicate.
+  const existing = await findAppBySourceProjectId(sessionId, orgId);
+  if (existing) {
+    log('intakeCreateApp', sessionId, {
+      alreadyCreated: true,
+      appId: (existing as { appId?: unknown }).appId,
+    });
+    return existing;
+  }
+
   // Scoping fields are server-derived only: orgId from the linked project,
   // sourceProjectId from the sessionId (the fabrication orchestration key) so
   // the app can be found again by the same key the fabricated agents carry.
-  const created = await createApp(
+  //
+  // Latency contract: NO inline session-agent binding here. Import-time
+  // ensureBindingsForDefinition is the binding point (~4.4s live at blueprint
+  // import), so this create returns in seconds with zero registry
+  // list-scans. Tradeoff, by design: the Agents tab populates at import —
+  // minutes later, conversationally — instead of at creation; the inline
+  // binding pass previously burned the remaining ~28s of the Lambda's 30s
+  // budget, which is what produced the timeout-and-retry duplicates.
+  return createApp(
     {
       orgId,
       name,
@@ -403,22 +345,6 @@ async function intakeCreateApp(
     },
     userId,
   );
-
-  // Associate the session's activated agents so the Agents tab and the
-  // "All agents are READY" publish precondition have bindings to evaluate.
-  // Partial failure never fails app creation.
-  const appId = (created as { appId?: unknown } | null)?.appId;
-  const bindingOutcome = await bindSessionAgentsBestEffort(
-    sessionId,
-    ctx,
-    typeof appId === 'string' ? appId : undefined,
-    userId,
-  );
-
-  // Prefer the post-binding projection (carries the new agentBindings) so
-  // the Python client can surface "linked N agents"; fall back to the
-  // create-time projection when nothing was bound.
-  return bindingOutcome?.finalApp ?? created;
 }
 
 /** Parses the agentIds out of publishWorkflow's missing-agents message. */

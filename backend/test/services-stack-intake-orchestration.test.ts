@@ -150,6 +150,32 @@ describe('ServicesStack — intake post-fabrication orchestration wiring', () =>
     });
   });
 
+  test('provisions the intake-orchestration resolver with 512MB memory', () => {
+    // Live triplicate-create incident: at the 128MB default the resolver ran
+    // its DDB/registry round trips slowly enough to exhaust the 30s timeout.
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Handler: 'intake-orchestration-resolver.handler',
+      MemorySize: 512,
+    });
+  });
+
+  test('grants the resolver Scan on the apps table for the createApp idempotency lookup', () => {
+    // findAppBySourceProjectId scans the AppsTable #META mirror for the
+    // session's sourceProjectId before creating — scoped to the apps table
+    // ONLY (never the workflows table).
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: cdk.assertions.Match.arrayWith([
+          cdk.assertions.Match.objectLike({
+            Effect: 'Allow',
+            Action: 'dynamodb:Scan',
+            Resource: 'arn:aws:dynamodb:us-west-2:123456789012:table/citadel-apps-test',
+          }),
+        ]),
+      },
+    });
+  });
+
   test('adds the intake-orchestration Lambda as an AppSync data source on the backend API', () => {
     template.hasResourceProperties('AWS::AppSync::DataSource', {
       ApiId: APPSYNC_API_ID,

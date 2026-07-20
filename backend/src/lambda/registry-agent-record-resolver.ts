@@ -848,6 +848,72 @@ function metaRowToAppShape(row: Record<string, unknown>): Record<string, unknown
   };
 }
 
+/**
+ * Finds the app created for an intake session by its server-stamped
+ * `sourceProjectId` — the intakeCreateApp idempotency guard (triplicate-
+ * create fix: one consent produced three apps when the client timed out and
+ * retried while the first invocation had already persisted the app).
+ *
+ * Reads the AppsTable #META mirror (createApp's upsertAppMeta stamps
+ * sourceProjectId there), scoped to the caller's org, then projects the live
+ * registry record exactly as createApp's return path does — a retry response
+ * is indistinguishable from the original create response. Deliberately NOT a
+ * registry list-scan: the mirror scan is the cheap read (the create path
+ * must return in seconds).
+ *
+ * Returns null when no mirror row matches, or when every matching row is
+ * stale (its registry record was deleted) — a fresh create is then correct.
+ *
+ * Exported for reuse by intake-orchestration-resolver.
+ */
+export async function findAppBySourceProjectId(
+  sourceProjectId: string,
+  orgId: string,
+): Promise<unknown | null> {
+  let nextToken: Record<string, NativeAttributeValue> | undefined = undefined;
+  do {
+    // Same explicit annotation as scanAllAppsViaMeta — breaks the
+    // let-variable flow-analysis cycle under TS 5.9.
+    const result: ScanCommandOutput = await getDocClient().send(
+      new ScanCommand({
+        TableName: APPS_TABLE,
+        FilterExpression: 'sortId = :meta AND sourceProjectId = :spid AND orgId = :org',
+        ExpressionAttributeValues: {
+          ':meta': APP_META_SORT_VALUE,
+          ':spid': sourceProjectId,
+          ':org': orgId,
+        },
+        ExclusiveStartKey: nextToken,
+      }),
+    );
+    for (const row of result.Items ?? []) {
+      if (typeof row.appId !== 'string' || row.appId.length === 0) {
+        continue;
+      }
+      let record: RegistryRecord | null = null;
+      try {
+        record = await getRegistryService().getResource('agent', row.appId);
+      } catch (err) {
+        if (!(err instanceof TypeMismatchError)) {
+          throw err;
+        }
+        // Type-mismatched record — treat as stale, same as a missing one.
+      }
+      if (record) {
+        return projectAgentAppNormalized(record);
+      }
+      // deleteApp removes the registry record first and the mirror row
+      // best-effort; a surviving mirror row must not resurrect a deleted
+      // app. Log and keep scanning.
+      console.warn('findAppBySourceProjectId: stale AppsTable mirror row (registry record gone)', {
+        appId: row.appId,
+      });
+    }
+    nextToken = result.LastEvaluatedKey;
+  } while (nextToken);
+  return null;
+}
+
 // Exported for reuse by intake-orchestration-resolver (IAM-only intake
 // mutations delegate to this core so app-creation governance — registry
 // record, #META mirror, fabricator authority grant, app.created event —

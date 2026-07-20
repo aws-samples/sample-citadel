@@ -43,7 +43,9 @@ from boto3.dynamodb.conditions import Key
 from tools.fabricate import (
     PLAN_KEY,
     PLAN_STATUS_BEGIN,
+    PLAN_STATUS_BEGIN_LEGACY,
     PLAN_STATUS_END,
+    PLAN_STATUS_END_LEGACY,
     _get_existing_agents,
 )
 from tools.kb import s3_get, s3_put
@@ -57,8 +59,19 @@ FABRICATION_JOBS_TABLE = os.environ.get("FABRICATION_JOBS_TABLE", "")
 
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 
-ARTIFACTS_BEGIN = "<!-- intake:delivered-artifacts:begin -->"
-ARTIFACTS_END = "<!-- intake:delivered-artifacts:end -->"
+# Delivered-artifacts markers, link-reference-definition form: invisible in
+# CommonMark. The UI renders these docs with react-markdown + remarkGfm and
+# NO rehype-raw (raw HTML on LLM-authored docs would be an XSS vector), so
+# the previous HTML-comment markers showed up as literal text. Read side
+# accepts BOTH forms; writes always emit the new form, so existing docs
+# self-migrate on their next refresh. Markers must sit on their own line
+# with blank-line separation or CommonMark absorbs them into the adjacent
+# paragraph/list and renders them visibly.
+ARTIFACTS_BEGIN = "[//]: # (intake:delivered-artifacts:begin)"
+ARTIFACTS_END = "[//]: # (intake:delivered-artifacts:end)"
+# Exact byte shapes docs written before the switch carry (read-side only).
+ARTIFACTS_BEGIN_LEGACY = "<!-- intake:delivered-artifacts:begin -->"
+ARTIFACTS_END_LEGACY = "<!-- intake:delivered-artifacts:end -->"
 
 # Human status phrases (copy rules: no raw enums in the document).
 _PHRASE_ACTIVE = "Active — ready to use"
@@ -128,18 +141,45 @@ def _status_phrase(agent_name: str, jobs: dict[str, str], registry: dict[str, di
     return None
 
 
-def _locate_table_region(lines: list[str]) -> tuple[int, int, bool] | None:
-    """(start, end, had_markers) for the owned status-table region.
+def _find_marker_line(lines: list[str], canonical: str, legacy: str) -> int | None:
+    """Index of the first line equal to either marker form, else None."""
+    for index, line in enumerate(lines):
+        if line == canonical or line == legacy:
+            return index
+    return None
 
-    With markers: the exclusive slice between them. Without (legacy docs
-    written before markers existed): the first markdown table whose header
-    carries Agent + Action, through its last consecutive ``|`` row.
+
+def _ensure_trailing_blank(lines: list[str]) -> list[str]:
+    """Guard so an owned region never directly follows non-blank content —
+    CommonMark would absorb the marker into the preceding paragraph/list."""
+    if lines and lines[-1].strip():
+        return lines + [""]
+    return lines
+
+
+def _ensure_leading_blank(lines: list[str]) -> list[str]:
+    """Guard so content never directly follows an owned region's end marker."""
+    if lines and lines[0].strip():
+        return [""] + lines
+    return lines
+
+
+def _locate_table_region(lines: list[str]) -> tuple[int, int, bool, bool] | None:
+    """(start, end, had_markers, legacy_markers) for the owned status-table
+    region.
+
+    With markers (either the canonical invisible form or the legacy HTML
+    comment): the exclusive slice between them. Without (legacy docs written
+    before markers existed): the first markdown table whose header carries
+    Agent + Action, through its last consecutive ``|`` row.
     """
-    if PLAN_STATUS_BEGIN in lines and PLAN_STATUS_END in lines:
-        begin = lines.index(PLAN_STATUS_BEGIN)
-        end = lines.index(PLAN_STATUS_END)
-        if end > begin:
-            return begin + 1, end, True
+    begin = _find_marker_line(lines, PLAN_STATUS_BEGIN, PLAN_STATUS_BEGIN_LEGACY)
+    end = _find_marker_line(lines, PLAN_STATUS_END, PLAN_STATUS_END_LEGACY)
+    if begin is not None and end is not None and end > begin:
+        legacy = (
+            lines[begin] == PLAN_STATUS_BEGIN_LEGACY or lines[end] == PLAN_STATUS_END_LEGACY
+        )
+        return begin + 1, end, True, legacy
     start = None
     for index, line in enumerate(lines):
         stripped = line.strip()
@@ -151,7 +191,7 @@ def _locate_table_region(lines: list[str]) -> tuple[int, int, bool] | None:
     end = start
     while end < len(lines) and lines[end].strip().startswith("|"):
         end += 1
-    return start, end, False
+    return start, end, False, False
 
 
 def _rebuild_status_table(table_lines: list[str], jobs: dict[str, str],
@@ -214,27 +254,52 @@ def _upsert_artifacts_section(lines: list[str], marker: dict) -> list[str]:
 
     Lines whose content (everything before the timestamp separator) is
     unchanged are reused verbatim so their first-written timestamp survives —
-    that is what makes a double run byte-identical.
+    that is what makes a double run byte-identical. Always emits the
+    canonical invisible markers with blank-line separation; a section
+    carrying legacy HTML-comment markers is migrated even when its content
+    has nothing new to say (the visible-marker bug is itself the reason to
+    rewrite).
     """
     entries = _artifact_entries(marker)
-    begin = lines.index(ARTIFACTS_BEGIN) if ARTIFACTS_BEGIN in lines else None
-    end = lines.index(ARTIFACTS_END) if ARTIFACTS_END in lines else None
+    begin = _find_marker_line(lines, ARTIFACTS_BEGIN, ARTIFACTS_BEGIN_LEGACY)
+    end = _find_marker_line(lines, ARTIFACTS_END, ARTIFACTS_END_LEGACY)
+    has_region = begin is not None and end is not None and end > begin
     existing_by_prefix: dict[str, str] = {}
-    if begin is not None and end is not None and end > begin:
+    if has_region:
         for line in lines[begin + 1:end]:
             if _TIMESTAMP_SEP in line:
                 existing_by_prefix[line.split(_TIMESTAMP_SEP)[0]] = line
     if not entries:
+        # Nothing delivered per the marker — leave the content alone, but
+        # still migrate a legacy-marker section to the invisible form.
+        if has_region and (
+            lines[begin] == ARTIFACTS_BEGIN_LEGACY or lines[end] == ARTIFACTS_END_LEGACY
+        ):
+            inner = list(lines[begin + 1:end])
+            while inner and not inner[0].strip():
+                inner.pop(0)
+            while inner and not inner[-1].strip():
+                inner.pop()
+            section = [ARTIFACTS_BEGIN, ""] + inner + ["", ARTIFACTS_END]
+            return (
+                _ensure_trailing_blank(lines[:begin])
+                + section
+                + _ensure_leading_blank(lines[end + 1:])
+            )
         return lines  # nothing delivered yet — leave the document alone
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    section = [ARTIFACTS_BEGIN, "## Delivered Artifacts", ""]
+    section = [ARTIFACTS_BEGIN, "", "## Delivered Artifacts", ""]
     for prefix in entries:
         section.append(existing_by_prefix.get(prefix) or f"{prefix}{_TIMESTAMP_SEP}{stamp}")
-    section.append(ARTIFACTS_END)
+    section += ["", ARTIFACTS_END]
 
-    if begin is not None and end is not None and end > begin:
-        return lines[:begin] + section + lines[end + 1:]
+    if has_region:
+        return (
+            _ensure_trailing_blank(lines[:begin])
+            + section
+            + _ensure_leading_blank(lines[end + 1:])
+        )
     appended = list(lines)
     if appended and appended[-1].strip():
         appended.append("")
@@ -263,14 +328,21 @@ def refresh_plan_document(session_id: str) -> None:
         lines = doc.split("\n")
         region = _locate_table_region(lines)
         if region is not None:
-            start, end, had_markers = region
+            start, end, had_markers, legacy_markers = region
             table, changed = _rebuild_status_table(lines[start:end], jobs, registry)
-            if changed:
+            # Legacy HTML-comment markers force a rewrite even when no cell
+            # changed: they render as literal text in the UI, and rewriting
+            # migrates them to the invisible canonical form.
+            if changed or legacy_markers:
                 if had_markers:
-                    lines = lines[:start] + table + lines[end:]
+                    before, after = lines[:start - 1], lines[end + 1:]
                 else:
-                    lines = (lines[:start] + [PLAN_STATUS_BEGIN] + table
-                             + [PLAN_STATUS_END] + lines[end:])
+                    before, after = lines[:start], lines[end:]
+                lines = (
+                    _ensure_trailing_blank(before)
+                    + [PLAN_STATUS_BEGIN, ""] + table + ["", PLAN_STATUS_END]
+                    + _ensure_leading_blank(after)
+                )
         lines = _upsert_artifacts_section(lines, marker)
 
         refreshed = "\n".join(lines)

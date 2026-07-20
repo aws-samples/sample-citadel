@@ -11,6 +11,7 @@
  */
 
 import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom';
 
 jest.mock('../../services/fabricatorQueueService', () => ({
@@ -251,6 +252,124 @@ describe('FabricationStatusPanel', () => {
       });
 
       await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    });
+  });
+
+  describe('collapsible agent list', () => {
+    function getTrigger(): HTMLElement {
+      return screen.getByRole('button', { name: /agent fabrication/i });
+    }
+
+    it('auto-collapses the agent list when fabrication completion flips true', async () => {
+      // Verified: FabricationQueueItem carries NO activation signal and the
+      // local `activated` flag only reflects this panel's own button (agents
+      // are usually activated conversationally) — so allBuilt is the
+      // strongest authoritative completion signal available to the panel.
+      mockGetQueue.mockResolvedValue(ITEMS); // PENDING + PROCESSING
+      let emit: (event: FabricationEvent) => void = () => {};
+      mockSubscribe.mockImplementation((onEvent: (event: FabricationEvent) => void) => {
+        emit = onEvent;
+        return () => {};
+      });
+
+      render(<FabricationStatusPanel projectId="proj-1" phaseActive />);
+      await screen.findByText('agent_alpha');
+      expect(getTrigger()).toHaveAttribute('aria-expanded', 'true');
+
+      act(() => {
+        emit({ type: 'COMPLETED', requestId: 'r1', timestamp: '2026-01-01T00:05:00Z' });
+        emit({ type: 'COMPLETED', requestId: 'r2', timestamp: '2026-01-01T00:06:00Z' });
+      });
+
+      await waitFor(() => expect(getTrigger()).toHaveAttribute('aria-expanded', 'false'));
+      // The list body is collapsed away.
+      expect(screen.queryByText('agent_alpha')).not.toBeInTheDocument();
+    });
+
+    it('does NOT auto-collapse when the user has toggled manually', async () => {
+      mockGetQueue.mockResolvedValue(ITEMS);
+      let emit: (event: FabricationEvent) => void = () => {};
+      mockSubscribe.mockImplementation((onEvent: (event: FabricationEvent) => void) => {
+        emit = onEvent;
+        return () => {};
+      });
+
+      render(<FabricationStatusPanel projectId="proj-1" phaseActive />);
+      await screen.findByText('agent_alpha');
+
+      // Manual collapse then expand — the user's choice wins forever after.
+      fireEvent.click(getTrigger());
+      await waitFor(() => expect(getTrigger()).toHaveAttribute('aria-expanded', 'false'));
+      fireEvent.click(getTrigger());
+      await waitFor(() => expect(getTrigger()).toHaveAttribute('aria-expanded', 'true'));
+
+      act(() => {
+        emit({ type: 'COMPLETED', requestId: 'r1', timestamp: '2026-01-01T00:05:00Z' });
+        emit({ type: 'COMPLETED', requestId: 'r2', timestamp: '2026-01-01T00:06:00Z' });
+      });
+
+      // Completion flipped true, but the panel stays expanded.
+      expect(await screen.findByText('agent_alpha')).toBeInTheDocument();
+      expect(getTrigger()).toHaveAttribute('aria-expanded', 'true');
+    });
+
+    it('trigger is keyboard-operable with correct aria-expanded wiring', async () => {
+      const user = userEvent.setup();
+      mockGetQueue.mockResolvedValue(ITEMS);
+      render(<FabricationStatusPanel projectId="proj-1" phaseActive />);
+      await screen.findByText('agent_alpha');
+
+      const trigger = getTrigger();
+      expect(trigger).toHaveAttribute('aria-expanded', 'true');
+      expect(trigger).toHaveAttribute('aria-controls');
+
+      trigger.focus();
+      await user.keyboard('{Enter}');
+      await waitFor(() => expect(trigger).toHaveAttribute('aria-expanded', 'false'));
+
+      await user.keyboard(' ');
+      await waitFor(() => expect(trigger).toHaveAttribute('aria-expanded', 'true'));
+    });
+
+    it('shows a status count badge with a polite live region when collapsed', async () => {
+      // All jobs already COMPLETED on first load — the panel auto-collapses
+      // and the header keeps an at-a-glance status count.
+      mockGetQueue.mockResolvedValue(COMPLETED_ITEMS);
+      render(<FabricationStatusPanel projectId="proj-1" phaseActive />);
+
+      await waitFor(() => expect(getTrigger()).toHaveAttribute('aria-expanded', 'false'));
+      const badgeText = screen.getByText('2 agents built');
+      expect(badgeText).toBeInTheDocument();
+      expect(badgeText).toHaveAttribute('aria-live', 'polite');
+    });
+
+    it('keeps Activate all agents and Refresh outside the trigger', async () => {
+      mockGetQueue.mockResolvedValue(COMPLETED_ITEMS);
+      render(<FabricationStatusPanel projectId="proj-1" phaseActive />);
+
+      const activate = await screen.findByLabelText('Activate all agents');
+      const refresh = screen.getByLabelText('Refresh fabrication status');
+      const trigger = getTrigger();
+      expect(trigger).not.toContainElement(activate);
+      expect(trigger).not.toContainElement(refresh);
+    });
+
+    it('activation still works from the header while collapsed', async () => {
+      mockGetQueue.mockResolvedValue(COMPLETED_ITEMS);
+      mockActivate.mockResolvedValue({
+        activated: ['agent_alpha', 'agent_beta'],
+        failed: [],
+        alreadyActive: [],
+      });
+      render(<FabricationStatusPanel projectId="proj-1" phaseActive />);
+      await waitFor(() => expect(getTrigger()).toHaveAttribute('aria-expanded', 'false'));
+
+      await act(async () => {
+        fireEvent.click(screen.getByLabelText('Activate all agents'));
+      });
+
+      expect(mockActivate).toHaveBeenCalledWith('proj-1');
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Activated 2 agents'));
     });
   });
 });

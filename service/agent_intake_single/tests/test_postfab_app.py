@@ -191,6 +191,31 @@ def test_error_returns_nothing_changed_copy(execute, marker_store, monkeypatch):
     _contract(result)
 
 
+def test_timeout_returns_standard_failure_envelope_with_try_again(execute, marker_store, monkeypatch):
+    """Client timeout on createApp (no auto-retry — the mutation is
+    non-idempotent): the tool relays the standard failure envelope with the
+    'Try again' consent. The server-side sourceProjectId idempotency guard
+    makes a user-consented retry safe."""
+    from tools.appsync_client import AppSyncTransportError
+
+    _project_tables(monkeypatch, [], None)
+    execute.side_effect = AppSyncTransportError(
+        "Network error calling AppSync for intakeCreateApp: ReadTimeout",
+        retryable=True, error_type="ReadTimeout", timed_out=True,
+    )
+
+    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My App"))
+
+    assert result["ok"] is False
+    assert result["retryable"] is True
+    assert "nothing has been changed" in result["summary"].lower()
+    labels = [a["label"] for a in result["actions"]]
+    assert "Try again" in labels
+    assert "Stop here" in labels
+    assert marker_store["sess-1"].get("appId") is None
+    _contract(result)
+
+
 def test_proposal_finds_linked_row_beyond_first_scan_page(execute, marker_store, monkeypatch):
     """Scan's Limit caps items EVALUATED pre-filter, so the linked row is
     routinely beyond page 1 once the conversations table grows. The lookup

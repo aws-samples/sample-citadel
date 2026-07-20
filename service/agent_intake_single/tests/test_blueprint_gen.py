@@ -126,6 +126,105 @@ def test_nodes_carry_display_names_from_step_mapping(deps, marker_store):
     assert names_by_id == {"rec-a": "AgentA", "rec-b": "AgentB"}
 
 
+# --- node names are HUMAN design-doc labels, never snake_case registry ids ------
+#
+# Live defect: fabricated agents register under snake_case names
+# ('invoice_intake_classifier_agent'), and the envelope carried those
+# verbatim — the canvas showed raw snake_case ids as step labels. The node
+# name must be the Title Case step label the design documents show, falling
+# back to a humanized form (underscores -> spaces, Title Case) when no
+# design label matches.
+
+SNAKE_TD2 = (
+    "## Agent Definitions\n"
+    "### Invoice Intake Classifier Agent\nClassifies incoming invoices.\n"
+    "### Payment Matching Agent\nMatches payments to invoices.\n"
+)
+SNAKE_PLAN = (
+    "| Agent | Action | Status |\n"
+    "|---|---|---|\n"
+    "| Invoice Intake Classifier Agent | Build | Built |\n"
+    "| Payment Matching Agent | Build | Built |\n"
+)
+SNAKE_REGISTRY = {
+    "invoice_intake_classifier_agent": {
+        "name": "invoice_intake_classifier_agent", "state": "active",
+        "recordId": "rec-a", "description": "", "sourceProjectId": "sess-1",
+    },
+    "payment_matching_agent": {
+        "name": "payment_matching_agent", "state": "active",
+        "recordId": "rec-b", "description": "", "sourceProjectId": "sess-1",
+    },
+    "unmapped_reporting_agent": {
+        "name": "unmapped_reporting_agent", "state": "active",
+        "recordId": "rec-c", "description": "", "sourceProjectId": "sess-1",
+    },
+}
+
+
+@pytest.fixture
+def snake_deps(monkeypatch):
+    ex = mock.MagicMock()
+    ex.return_value = {"intakeCreateBlueprint": {
+        "ok": True, "blueprintId": "bp-1", "status": "PUBLISHED",
+        "nodeCount": 3, "missing": None, "errors": None,
+    }}
+    monkeypatch.setattr(postfab.appsync_client, "execute", ex)
+    monkeypatch.setattr(postfab, "s3_get",
+                        lambda key: SNAKE_TD2 if "td_2" in key else SNAKE_PLAN)
+    monkeypatch.setattr(postfab, "_get_existing_agents", lambda: dict(SNAKE_REGISTRY))
+    monkeypatch.setattr(postfab, "_llm", mock.MagicMock(return_value=json.dumps([
+        {"agent": "invoice_intake_classifier_agent", "depends_on": []},
+        {"agent": "payment_matching_agent",
+         "depends_on": ["invoice_intake_classifier_agent"]},
+        {"agent": "unmapped_reporting_agent",
+         "depends_on": ["payment_matching_agent"]},
+    ])))
+    return ex
+
+
+def test_node_names_are_design_doc_labels_not_snake_ids(snake_deps, marker_store):
+    postfab.generate_process_blueprint(session_id="sess-1")
+
+    definition = _captured_definition(snake_deps)
+    names_by_id = {n["id"]: n["name"] for n in definition["nodes"]}
+    assert names_by_id["rec-a"] == "Invoice Intake Classifier Agent"
+    assert names_by_id["rec-b"] == "Payment Matching Agent"
+
+
+def test_node_name_fallback_humanizes_snake_case(snake_deps, marker_store):
+    """No design label matches 'unmapped_reporting_agent' — the fallback
+    humanizes the registry name: underscores -> spaces, Title Case."""
+    postfab.generate_process_blueprint(session_id="sess-1")
+
+    definition = _captured_definition(snake_deps)
+    names_by_id = {n["id"]: n["name"] for n in definition["nodes"]}
+    assert names_by_id["rec-c"] == "Unmapped Reporting Agent"
+
+
+def test_node_names_never_contain_underscores(snake_deps, marker_store):
+    postfab.generate_process_blueprint(session_id="sess-1")
+
+    definition = _captured_definition(snake_deps)
+    for node in definition["nodes"]:
+        assert "_" not in node["name"]
+        assert " " in node["name"]  # multi-word labels carry real spaces
+        # Title Case: every word leads with an uppercase letter.
+        assert all(w[:1].isupper() for w in node["name"].split() if w[:1].isalpha())
+
+
+def test_steps_payload_uses_the_same_human_labels(snake_deps, marker_store):
+    """The 'Show me the steps first' path reads result['steps'] — raw
+    snake_case ids must never reach the conversation (copy rules)."""
+    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+
+    assert result["steps"] == [
+        "Invoice Intake Classifier Agent",
+        "Payment Matching Agent",
+        "Unmapped Reporting Agent",
+    ]
+
+
 def test_nodes_never_use_placeholders_or_names(deps, marker_store):
     postfab.generate_process_blueprint(session_id="sess-1")
 
@@ -249,6 +348,98 @@ def test_idempotent_when_blueprint_already_published(deps, marker_store):
     deps.assert_not_called()
     assert result["status"] == "already_done"
     _contract(result)
+
+
+# --- regenerate consent (already_done must not return the old blueprint forever) --
+
+
+def test_already_done_offers_regenerate_action(deps, marker_store):
+    marker_store["sess-1"].update({"stage": "blueprint_created", "blueprintId": "bp-1"})
+
+    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+
+    deps.assert_not_called()
+    labels = [a["label"] for a in result["actions"]]
+    assert "Regenerate the blueprint" in labels
+    regen = next(a for a in result["actions"] if a["label"] == "Regenerate the blueprint")
+    assert regen["value"] == "Yes, regenerate the blueprint"
+    _contract(result)
+
+
+def test_regenerate_publishes_a_fresh_blueprint_and_reopens_import_gate(deps, marker_store):
+    marker_store["sess-1"].update({
+        "stage": "workflow_imported", "blueprintId": "bp-old", "workflowId": "wf-old",
+    })
+    deps.return_value = {"intakeCreateBlueprint": {
+        "ok": True, "blueprintId": "bp-2", "status": "PUBLISHED",
+        "nodeCount": 2, "missing": None, "errors": None,
+    }}
+
+    result = json.loads(
+        postfab.generate_process_blueprint(session_id="sess-1", regenerate=True)
+    )
+
+    deps.assert_called_once()
+    assert result["ok"] is True
+    assert result["status"] == "published"
+    assert result["blueprint_id"] == "bp-2"
+    # Marker points at the NEW blueprint and the stage re-opens the import
+    # gate (blueprint_created semantics) so the new blueprint imports as a
+    # fresh workflow — the backend's already-imported detection keys on the
+    # blueprint definition id, which is freshly generated here.
+    assert marker_store["sess-1"]["blueprintId"] == "bp-2"
+    assert marker_store["sess-1"]["stage"] == "blueprint_created"
+    assert "Acme Claims" in result["consent_question"]
+    _contract(result)
+
+
+def test_regenerate_mentions_old_workflow_remains_until_removed(deps, marker_store):
+    marker_store["sess-1"].update({
+        "stage": "workflow_imported", "blueprintId": "bp-old", "workflowId": "wf-old",
+    })
+    deps.return_value = {"intakeCreateBlueprint": {
+        "ok": True, "blueprintId": "bp-2", "status": "PUBLISHED",
+        "nodeCount": 2, "missing": None, "errors": None,
+    }}
+
+    result = json.loads(
+        postfab.generate_process_blueprint(session_id="sess-1", regenerate=True)
+    )
+
+    # Copy rules: mention the previously imported workflow stays in the app
+    # until the user removes it — without leaking raw ids.
+    assert "workflow already in 'Acme Claims'" in result["summary"]
+    assert "wf-old" not in result["summary"]
+    assert "bp-old" not in result["summary"]
+    _contract(result)
+
+
+def test_regenerate_without_prior_import_does_not_mention_old_workflow(deps, marker_store):
+    marker_store["sess-1"].update({"stage": "blueprint_created", "blueprintId": "bp-old"})
+    deps.return_value = {"intakeCreateBlueprint": {
+        "ok": True, "blueprintId": "bp-2", "status": "PUBLISHED",
+        "nodeCount": 2, "missing": None, "errors": None,
+    }}
+
+    result = json.loads(
+        postfab.generate_process_blueprint(session_id="sess-1", regenerate=True)
+    )
+
+    assert result["status"] == "published"
+    assert "workflow already in" not in result["summary"]
+    _contract(result)
+
+
+def test_regenerate_flag_ignored_when_nothing_published_yet(deps, marker_store):
+    """regenerate=True on a fresh session is just a normal generation —
+    never an error."""
+    result = json.loads(
+        postfab.generate_process_blueprint(session_id="sess-1", regenerate=True)
+    )
+
+    deps.assert_called_once()
+    assert result["status"] == "published"
+    assert marker_store["sess-1"]["blueprintId"] == "bp-1"
 
 
 def test_no_agents_result_offers_retry_actions_and_stands_alone(deps, marker_store, monkeypatch):

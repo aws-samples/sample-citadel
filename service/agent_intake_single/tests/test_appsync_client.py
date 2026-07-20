@@ -161,6 +161,98 @@ def test_network_timeout_retried(post):
     assert post.call_count == 2
 
 
+# --- non-idempotent mutations: never auto-retried on timeout -------------------
+#
+# Live triplicate-create incident: intakeCreateApp timed out client-side at
+# 30s while the Lambda kept running and persisted the app; the automatic
+# retry then created ANOTHER app (one consent -> three apps). A timed-out
+# request may have executed, so createApp/createBlueprint must surface the
+# timeout to the tool layer (retryable=True -> "Try again" consent; the
+# server-side idempotency guard makes a user-consented retry safe) instead
+# of auto-retrying. Reads and idempotent mutations keep the auto-retry.
+
+CREATE_APP_QUERY = """mutation IntakeCreateApp($sessionId: ID!, $name: String!) {
+  intakeCreateApp(sessionId: $sessionId, name: $name) { appId name status }
+}"""
+
+CREATE_BLUEPRINT_QUERY = """mutation IntakeCreateBlueprint($sessionId: ID!, $name: String!, $definition: AWSJSON!) {
+  intakeCreateBlueprint(sessionId: $sessionId, name: $name, definition: $definition) { ok blueprintId }
+}"""
+
+
+def test_create_app_network_timeout_not_auto_retried(post):
+    import requests as real_requests
+    post.side_effect = real_requests.exceptions.Timeout()
+
+    with pytest.raises(client.AppSyncTransportError) as exc:
+        client.execute(CREATE_APP_QUERY, {"sessionId": "s1", "name": "A"}, session_id="s1")
+
+    assert post.call_count == 1  # no automatic retry
+    # Still marked retryable: the tool layer turns this into the standard
+    # failure envelope with an explicit "Try again" consent.
+    assert exc.value.retryable is True
+
+
+def test_create_blueprint_network_timeout_not_auto_retried(post):
+    import requests as real_requests
+    post.side_effect = real_requests.exceptions.Timeout()
+
+    with pytest.raises(client.AppSyncTransportError) as exc:
+        client.execute(
+            CREATE_BLUEPRINT_QUERY,
+            {"sessionId": "s1", "name": "B", "definition": "{}"},
+            session_id="s1",
+        )
+
+    assert post.call_count == 1
+    assert exc.value.retryable is True
+
+
+def test_create_app_graphql_timeout_not_auto_retried(post):
+    # A Lambda that exceeds its own timeout surfaces as a GraphQL error with
+    # timeout wording — the side effects may already be persisted, so this is
+    # the same do-not-auto-retry class as a transport timeout.
+    post.return_value = _resp(200, {
+        "errors": [{"errorType": "Lambda:ExecutionTimeoutException",
+                    "message": "Execution timed out."}],
+        "data": None,
+    })
+
+    with pytest.raises(client.AppSyncGraphQLError) as exc:
+        client.execute(CREATE_APP_QUERY, {"sessionId": "s1", "name": "A"}, session_id="s1")
+
+    assert post.call_count == 1
+    assert exc.value.retryable is True
+
+
+def test_create_app_throttle_still_auto_retried(post):
+    # Throttled requests were never executed — auto-retry stays even for the
+    # non-idempotent mutations.
+    throttled = _resp(200, {"errors": [{"errorType": "ThrottlingException", "message": "slow down"}]})
+    ok = _resp(200, {"data": {"intakeCreateApp": {"appId": "a1"}}})
+    post.side_effect = [throttled, ok]
+
+    data = client.execute(CREATE_APP_QUERY, {"sessionId": "s1", "name": "A"}, session_id="s1")
+
+    assert data["intakeCreateApp"]["appId"] == "a1"
+    assert post.call_count == 2
+
+
+def test_import_mutation_timeout_still_auto_retried(post):
+    # intakeImportBlueprintToApp is server-side idempotent (already-imported
+    # detection) — the timeout auto-retry stays for it.
+    import requests as real_requests
+    import_query = """mutation IntakeImport($sessionId: ID!) {
+      intakeImportBlueprintToApp(sessionId: $sessionId) { workflowId }
+    }"""
+    post.side_effect = [real_requests.exceptions.Timeout(), _resp(200, {"data": {"ok": 1}})]
+
+    data = client.execute(import_query, {"sessionId": "s1"}, session_id="s1")
+
+    assert data == {"ok": 1}
+    assert post.call_count == 2
+
+
 def test_logs_have_session_id_and_no_secrets(post, caplog):
     canary = "CANARY_RESPONSE_VALUE"
     post.return_value = _resp(200, {"data": {"intakeCreateApp": {"appId": canary}}})

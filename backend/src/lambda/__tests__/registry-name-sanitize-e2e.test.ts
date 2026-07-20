@@ -157,6 +157,11 @@ describe('name sanitization end-to-end (live-constraint registry mock)', () => {
     ddbMock
       .on(ScanCommand, { TableName: 'citadel-conversations-test' })
       .resolves({ Items: [{ projectId: 'proj-1' }] });
+    // Pre-create idempotency lookup (findAppBySourceProjectId) scans the
+    // AppsTable — no existing app for this session, so create proceeds.
+    ddbMock
+      .on(ScanCommand, { TableName: 'citadel-apps-test' })
+      .resolves({ Items: [] });
     ddbMock
       .on(GetCommand, { TableName: 'citadel-projects-test' })
       .resolves({

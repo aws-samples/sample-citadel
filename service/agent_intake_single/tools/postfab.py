@@ -18,6 +18,7 @@ Copy rules baked in (UX review, task 11e23706):
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -689,6 +690,68 @@ most once. Return ONLY the JSON array, no markdown.
     return steps
 
 
+# --- human step labels (canvas node names) --------------------------------------
+#
+# Fabricated agents register under snake_case names
+# ('invoice_intake_classifier_agent'); the design documents show the human
+# Title Case labels ('Invoice Intake Classifier Agent'). Node names must be
+# the HUMAN labels — the canvas renders node.name verbatim, and raw
+# snake_case ids violate the copy rules.
+
+_AGENT_KEY_NORMALIZER = re.compile(r"[^a-z0-9]+")
+_TABLE_SEPARATOR_CHARS = frozenset("-: ")
+
+
+def _agent_label_key(name: str) -> str:
+    """Case/punctuation-insensitive key: 'Invoice Intake Classifier Agent'
+    and 'invoice_intake_classifier_agent' collide on purpose."""
+    return _AGENT_KEY_NORMALIZER.sub("_", name.lower()).strip("_")
+
+
+def _design_label_map(*documents: str) -> dict[str, str]:
+    """Candidate human labels from the design docs, keyed by normalized name.
+
+    Candidates: markdown headings (the plan's '### <Agent>' spec sections,
+    td_2 agent-definition headings) and first-column table cells (the plan's
+    status table). Non-agent candidates are harmless — they only matter when
+    a registry name normalizes to the same key. First writer wins.
+    """
+    labels: dict[str, str] = {}
+    for document in documents:
+        for line in (document or "").split("\n"):
+            stripped = line.strip()
+            candidate = None
+            if stripped.startswith("#"):
+                candidate = stripped.lstrip("#").strip()
+            elif stripped.startswith("|"):
+                cells = [c.strip() for c in stripped.strip("|").split("|")]
+                first = cells[0] if cells else ""
+                if first and first != "Agent" and not set(first) <= _TABLE_SEPARATOR_CHARS:
+                    candidate = first
+            if candidate:
+                key = _agent_label_key(candidate)
+                if key and key not in labels:
+                    labels[key] = candidate
+    return labels
+
+
+def _humanize_agent_name(name: str) -> str:
+    """snake_case -> Title Case with spaces ('payment_matching_agent' ->
+    'Payment Matching Agent'). Interior capitals survive ('AgentA')."""
+    words = [w for w in name.split("_") if w]
+    return " ".join(w[:1].upper() + w[1:] for w in words) or name
+
+
+def _display_step_label(registry_name: str, design_labels: dict[str, str]) -> str:
+    """The human step label for one registry agent name: the matching
+    design-doc label when one exists, else the humanized registry name.
+    Never returns underscores."""
+    label = design_labels.get(_agent_label_key(registry_name)) or registry_name
+    if "_" in label:
+        label = _humanize_agent_name(label)
+    return label
+
+
 def _layout_positions(node_ids: list[str], edges: list[tuple[str, str]]) -> dict[str, dict]:
     """Deterministic layered layout: x = 100 + 300*depth, y = 200 + 250*lane.
 
@@ -786,7 +849,7 @@ def _build_envelope(name: str, node_ids: list[str], edges: list[tuple[str, str]]
 
 
 @tool
-def generate_process_blueprint(session_id: str) -> str:
+def generate_process_blueprint(session_id: str, regenerate: bool = False) -> str:
     """Generate and publish the process blueprint (consent step 3 of 4).
 
     Composes the captured business process from the technical design and
@@ -795,6 +858,11 @@ def generate_process_blueprint(session_id: str) -> str:
 
     Args:
         session_id: The current session ID
+        regenerate: Pass True ONLY when the user explicitly chose the
+            'Regenerate the blueprint' action on an already-published
+            blueprint. Publishes a fresh blueprint and re-opens the import
+            gate; any workflow imported from the old blueprint stays in the
+            app until the user removes it there.
 
     Returns:
         JSON with the blueprint result, a conversational summary, and the
@@ -803,8 +871,19 @@ def generate_process_blueprint(session_id: str) -> str:
     marker = get_postfab_marker(session_id)
     app_name = marker.get("appName") or "your new app"
 
-    if marker.get("blueprintId") and _stage_rank(marker.get("stage")) >= _stage_rank("blueprint_created"):
+    already_published = (
+        marker.get("blueprintId")
+        and _stage_rank(marker.get("stage")) >= _stage_rank("blueprint_created")
+    )
+    if already_published and not regenerate:
         question, actions = _next_gate(session_id, marker)
+        # Consented regeneration escape hatch: without it this branch would
+        # return the old blueprint forever. Deferral actions stay last.
+        regen_action = _action("Regenerate the blueprint", "Yes, regenerate the blueprint")
+        if actions and actions[-1]["label"] in ("Not now", "Stop here", "Done for now"):
+            actions = actions[:-1] + [regen_action, actions[-1]]
+        else:
+            actions = actions + [regen_action]
         return _result(
             True, "already_done",
             "The process blueprint is already generated and published.",
@@ -867,6 +946,10 @@ def generate_process_blueprint(session_id: str) -> str:
         )
 
     name_to_id = {n: resolvable[n] for n in ordered_names}
+    # Node names are the HUMAN design-doc step labels (Title Case, spaces) —
+    # never the snake_case registry names the canvas would otherwise render.
+    design_labels = _design_label_map(td2, plan)
+    display_labels = {n: _display_step_label(n, design_labels) for n in ordered_names}
     edges = [
         (name_to_id[dep], name_to_id[step["agent"]])
         for step in steps if isinstance(step, dict) and step.get("agent") in name_to_id
@@ -874,7 +957,7 @@ def generate_process_blueprint(session_id: str) -> str:
     ]
     envelope = _build_envelope(
         f"{app_name} Process", [name_to_id[n] for n in ordered_names], edges,
-        node_names={name_to_id[n]: n for n in ordered_names},
+        node_names={name_to_id[n]: display_labels[n] for n in ordered_names},
     )
 
     try:
@@ -894,7 +977,11 @@ def generate_process_blueprint(session_id: str) -> str:
         blueprint_id = outcome["blueprintId"]
         node_count = outcome.get("nodeCount") or len(ordered_names)
         # nodeCount rides in the marker so the plan document's Delivered
-        # Artifacts section can report the blueprint's step count.
+        # Artifacts section can report the blueprint's step count. Stage is
+        # (re)set to blueprint_created — on a regeneration this deliberately
+        # re-opens the import gate: the fresh definition id means the
+        # backend's already-imported detection treats the next import as a
+        # new workflow rather than returning the old one.
         set_postfab_marker(session_id, stage="blueprint_created",
                            blueprintId=blueprint_id, nodeCount=node_count)
         _record_stage_progress(session_id, "blueprint_created", "Process blueprint published")
@@ -902,6 +989,13 @@ def generate_process_blueprint(session_id: str) -> str:
             f"Done — the blueprint maps your {node_count} agents into "
             f"{node_count} connected steps."
         )
+        if regenerate and marker.get("workflowId"):
+            # The old import is untouched: importing the new blueprint adds a
+            # second workflow; the user removes the old one from the app.
+            summary += (
+                f" The workflow already in '{app_name}' stays there until "
+                "you remove it from the app."
+            )
         if excluded:
             summary += (
                 f" Note: I left out {_join_names(excluded)} — "
@@ -911,7 +1005,7 @@ def generate_process_blueprint(session_id: str) -> str:
         return _result(
             True, "published", summary, question, actions,
             blueprint_id=blueprint_id, node_count=node_count,
-            steps=ordered_names, excluded=excluded,
+            steps=[display_labels[n] for n in ordered_names], excluded=excluded,
         )
 
     if status == "AGENTS_SYNCING":

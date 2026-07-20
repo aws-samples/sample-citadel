@@ -1068,6 +1068,10 @@ def handler(event, context):
               ACCOUNT_ID: cdk.Stack.of(this).account,
             },
             timeout: cdk.Duration.seconds(30),
+            // 512MB (from the 128 default): the live triplicate-create
+            // incident showed the 128MB resolver pacing its DDB/registry
+            // round trips slowly enough to exhaust the 30s timeout.
+            memorySize: 512,
             logGroup: new logs.LogGroup(this, 'IntakeOrchestrationResolverFunctionLogs', {
               retention: logs.RetentionDays.ONE_WEEK,
               removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -1092,6 +1096,14 @@ def handler(event, context):
             tableArn(`citadel-workflows-${props.environment}`),
             tableArn(`citadel-apps-${props.environment}`),
           ],
+        }));
+        // intakeCreateApp idempotency guard: findAppBySourceProjectId scans
+        // the AppsTable #META mirror for the session's sourceProjectId
+        // before creating. Scoped to the apps table ONLY — the workflows
+        // table needs no Scan on any intake path.
+        intakeOrchestrationResolverFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['dynamodb:Scan'],
+          resources: [tableArn(`citadel-apps-${props.environment}`)],
         }));
         // agent-config: verifyAgentsExist reads (Get/BatchGet) + the
         // dual-store healer's creation-only conditional Put

@@ -16,11 +16,21 @@ SECTION_KEY = "{session_id}/design/td_2.md"
 PLAN_KEY = "{session_id}/planning/fabrication_plan.md"
 # Owned-section markers for the living plan document: the per-agent status
 # table sits between these so tools/plan_doc.py can regenerate it from live
-# state without touching any other prose. HTML comments — invisible in the
-# rendered markdown. Defined here (the document's author) so plan_doc can
-# import them without a circular import.
-PLAN_STATUS_BEGIN = "<!-- intake:agent-status:begin -->"
-PLAN_STATUS_END = "<!-- intake:agent-status:end -->"
+# state without touching any other prose. Link-reference-definition form
+# (`[//]: # (...)`) — invisible in CommonMark. The UI renders these docs with
+# react-markdown + remarkGfm and NO rehype-raw (raw HTML would be an XSS
+# vector on LLM-authored content), which shows HTML comments as literal
+# text — hence this form, not `<!-- -->`. Each marker line must be
+# surrounded by blank lines or CommonMark absorbs it into the adjacent
+# paragraph/list and renders it visibly. Defined here (the document's
+# author) so plan_doc can import them without a circular import; plan_doc's
+# read side also accepts the legacy `<!-- -->` forms below and migrates
+# docs to this form on their next refresh.
+PLAN_STATUS_BEGIN = "[//]: # (intake:agent-status:begin)"
+PLAN_STATUS_END = "[//]: # (intake:agent-status:end)"
+# Exact byte shapes docs written before the switch carry (read-side only).
+PLAN_STATUS_BEGIN_LEGACY = "<!-- intake:agent-status:begin -->"
+PLAN_STATUS_END_LEGACY = "<!-- intake:agent-status:end -->"
 FABRICATOR_QUEUE_URL = os.getenv("FABRICATOR_QUEUE_URL", "")
 # Fabricated agents are written to the AgentCore Registry (via the arbiter's
 # store_agent_config_registry), NOT to a DynamoDB table — so the intake
@@ -349,14 +359,18 @@ def confirm_fabrication_plan(session_id: str, plan_json: str) -> str:
 
     # Write markdown plan to S3. The status table is wrapped in the owned-
     # section markers so the plan-document refresher (tools/plan_doc.py) can
-    # regenerate it from live state as fabrication progresses.
+    # regenerate it from live state as fabrication progresses. Blank lines
+    # around each marker keep the link-reference-definition form invisible
+    # (CommonMark absorbs it into an adjacent paragraph otherwise).
     lines = ["# Fabrication Plan\n"]
     lines.append(PLAN_STATUS_BEGIN)
+    lines.append("")
     lines.append("| Agent | Action | Reason |")
     lines.append("|---|---|---|")
     for item in plan:
         emoji = {"build": "🔨", "reuse": "♻️", "external": "⚠️"}.get(item["action"], "")
         lines.append(f"| {item['name']} | {emoji} {item['action'].capitalize()} | {item['reason']} |")
+    lines.append("")
     lines.append(PLAN_STATUS_END)
 
     lines.append("\n## Agents to Build\n")

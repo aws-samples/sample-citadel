@@ -19,6 +19,7 @@ jest.mock('../agent-config-resolver', () => ({
 jest.mock('../registry-agent-record-resolver', () => ({
   createApp: jest.fn(),
   ensureAppAgentBindings: jest.fn(),
+  findAppBySourceProjectId: jest.fn(),
 }));
 jest.mock('../workflow-resolver', () => ({
   createWorkflow: jest.fn(),
@@ -33,7 +34,11 @@ jest.mock('../ensure-agent-config-rows', () => ({
 }));
 
 import { activateProjectAgents, findProjectAgentRecords } from '../agent-config-resolver';
-import { createApp, ensureAppAgentBindings } from '../registry-agent-record-resolver';
+import {
+  createApp,
+  ensureAppAgentBindings,
+  findAppBySourceProjectId,
+} from '../registry-agent-record-resolver';
 import { createWorkflow, publishWorkflow, importBlueprint } from '../workflow-resolver';
 import { ensureAgentConfigRows } from '../ensure-agent-config-rows';
 import { handler } from '../intake-orchestration-resolver';
@@ -46,6 +51,9 @@ const findProjectAgentRecordsMock = findProjectAgentRecords as jest.MockedFuncti
   typeof findProjectAgentRecords
 >;
 const createAppMock = createApp as jest.MockedFunction<typeof createApp>;
+const findAppBySourceProjectIdMock = findAppBySourceProjectId as jest.MockedFunction<
+  typeof findAppBySourceProjectId
+>;
 const ensureAppAgentBindingsMock = ensureAppAgentBindings as jest.MockedFunction<
   typeof ensureAppAgentBindings
 >;
@@ -131,6 +139,8 @@ describe('intake-orchestration-resolver', () => {
     jest.clearAllMocks();
     // Healing is a no-op unless a test asserts on it explicitly.
     ensureAgentConfigRowsMock.mockResolvedValue({ ensured: [], existing: [], failed: [] });
+    // Idempotency guard: no pre-existing session app unless a test wires one.
+    findAppBySourceProjectIdMock.mockResolvedValue(null);
     // No session agents / no binding activity unless a test wires them.
     findProjectAgentRecordsMock.mockResolvedValue([]);
     ensureAppAgentBindingsMock.mockResolvedValue({
@@ -420,147 +430,63 @@ describe('intake-orchestration-resolver', () => {
       );
     });
 
-    // ── session-agent binding (Agents tab / publish precondition) ──────
+    // ── idempotency guard (triplicate-create fix) ──────────────────────
 
-    function fabricatedRecord(recordId: string, status: string) {
-      return {
-        recordId,
-        name: `fabricated_${recordId}`,
-        status,
-        customDescriptorContent: JSON.stringify({
-          state: 'inactive', // stale fabricator mirror — status is authoritative
-          manifest: { name: recordId, tools: [] },
-          sourceProjectId: SESSION_ID,
-        }),
-      };
-    }
-
-    test("binds the session's active agents to the created app via the binding core", async () => {
+    test('returns the existing session app without creating when one already exists', async () => {
+      // Live incident: the client timed out at 30s while the Lambda kept
+      // running; a user-consented retry then created a duplicate app (three
+      // apps from one consent). The guard: look the session's app up by the
+      // server-stamped sourceProjectId BEFORE creating.
       mockSessionLinkage();
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789', agentBindings: [] });
-      findProjectAgentRecordsMock.mockResolvedValueOnce([
-        fabricatedRecord('agt000000001', 'APPROVED'),
-        fabricatedRecord('agt000000002', 'PENDING_APPROVAL'),
-        fabricatedRecord('agt000000003', 'DRAFT'), // activation failed — not bound
-      ]);
-      const finalApp = {
-        appId: 'rec123456789',
-        agentBindings: [
-          { agentId: 'agt000000001', status: 'READY' },
-          { agentId: 'agt000000002', status: 'READY' },
-        ],
+      const existing = {
+        appId: 'rec-existing1',
+        name: 'My App',
+        status: 'DRAFT',
+        agentBindings: [{ agentId: 'agt000000001' }],
       };
-      ensureAppAgentBindingsMock.mockResolvedValueOnce({
-        bound: ['agt000000001', 'agt000000002'],
-        alreadyBound: [],
-        failed: [],
-        finalApp,
-      });
+      findAppBySourceProjectIdMock.mockResolvedValueOnce(existing);
 
       const result = await invoke(
         makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
       );
 
-      expect(findProjectAgentRecordsMock).toHaveBeenCalledWith(SESSION_ID);
-      // Only active-mapping statuses (APPROVED / PENDING_APPROVAL) are bound.
-      expect(ensureAppAgentBindingsMock).toHaveBeenCalledWith(
-        'rec123456789',
-        ['agt000000001', 'agt000000002'],
-        IAM_IDENTITY.userArn,
-      );
-      // The mutation response carries the bindings-inclusive projection so
-      // the Python client can surface "linked N agents".
-      expect(result).toBe(finalApp);
+      expect(findAppBySourceProjectIdMock).toHaveBeenCalledWith(SESSION_ID, ORG_ID);
+      expect(createAppMock).not.toHaveBeenCalled();
+      expect(result).toBe(existing);
     });
 
-    test('falls back to the conversations-linked projectId when no records match the sessionId', async () => {
+    test('creates the app when no existing app matches the session (lookup runs first)', async () => {
       mockSessionLinkage();
       createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
-      findProjectAgentRecordsMock
-        .mockResolvedValueOnce([]) // sessionId match — empty
-        .mockResolvedValueOnce([fabricatedRecord('agt000000009', 'APPROVED')]);
-      ensureAppAgentBindingsMock.mockResolvedValueOnce({
-        bound: ['agt000000009'],
-        alreadyBound: [],
-        failed: [],
-        finalApp: { appId: 'rec123456789' },
-      });
 
       await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
 
-      expect(findProjectAgentRecordsMock).toHaveBeenNthCalledWith(1, SESSION_ID);
-      expect(findProjectAgentRecordsMock).toHaveBeenNthCalledWith(2, PROJECT_ID);
-      expect(ensureAppAgentBindingsMock).toHaveBeenCalledWith(
-        'rec123456789',
-        ['agt000000009'],
-        IAM_IDENTITY.userArn,
+      expect(findAppBySourceProjectIdMock).toHaveBeenCalledWith(SESSION_ID, ORG_ID);
+      expect(createAppMock).toHaveBeenCalledTimes(1);
+      // The guard must run BEFORE the create so a retry can never race past it.
+      expect(findAppBySourceProjectIdMock.mock.invocationCallOrder[0]).toBeLessThan(
+        createAppMock.mock.invocationCallOrder[0],
       );
     });
 
-    test('skips binding entirely when the session has no active agents', async () => {
+    // ── no inline session-agent binding (latency fix) ──────────────────
+
+    test('does not bind session agents inline — import-time binding is the binding point', async () => {
+      // Live incident: the app persisted ~1.2s in, then the inline binding
+      // pass burned the remaining ~28s of the Lambda's 30s budget. Binding
+      // now happens exclusively at blueprint import (ensureBindingsForDefinition),
+      // so createApp must return the create-time projection in seconds with
+      // ZERO registry list-scans.
       mockSessionLinkage();
-      const created = { appId: 'rec123456789', agentBindings: [] };
+      const created = { appId: 'rec123456789', name: 'My App', agentBindings: [] };
       createAppMock.mockResolvedValueOnce(created);
-      findProjectAgentRecordsMock.mockResolvedValue([
-        fabricatedRecord('agt000000003', 'DRAFT'),
-      ]);
 
       const result = await invoke(
         makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
       );
 
+      expect(findProjectAgentRecordsMock).not.toHaveBeenCalled();
       expect(ensureAppAgentBindingsMock).not.toHaveBeenCalled();
-      expect(result).toBe(created);
-    });
-
-    test('app creation is not reported failed when binding throws (partial-failure semantics)', async () => {
-      mockSessionLinkage();
-      const created = { appId: 'rec123456789', agentBindings: [] };
-      createAppMock.mockResolvedValueOnce(created);
-      findProjectAgentRecordsMock.mockResolvedValueOnce([
-        fabricatedRecord('agt000000001', 'APPROVED'),
-      ]);
-      ensureAppAgentBindingsMock.mockRejectedValueOnce(new Error('registry unavailable'));
-
-      const result = await invoke(
-        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
-      );
-
-      expect(result).toBe(created);
-    });
-
-    test('app creation is not reported failed when session-agent lookup throws', async () => {
-      mockSessionLinkage();
-      const created = { appId: 'rec123456789' };
-      createAppMock.mockResolvedValueOnce(created);
-      findProjectAgentRecordsMock.mockRejectedValueOnce(new Error('registry list failed'));
-
-      const result = await invoke(
-        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
-      );
-
-      expect(result).toBe(created);
-      expect(ensureAppAgentBindingsMock).not.toHaveBeenCalled();
-    });
-
-    test('returns the createApp projection when bindings succeed but no finalApp projection is available', async () => {
-      mockSessionLinkage();
-      const created = { appId: 'rec123456789', agentBindings: [] };
-      createAppMock.mockResolvedValueOnce(created);
-      findProjectAgentRecordsMock.mockResolvedValueOnce([
-        fabricatedRecord('agt000000001', 'APPROVED'),
-      ]);
-      ensureAppAgentBindingsMock.mockResolvedValueOnce({
-        bound: [],
-        alreadyBound: ['agt000000001'],
-        failed: [],
-        finalApp: null,
-      });
-
-      const result = await invoke(
-        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
-      );
-
       expect(result).toBe(created);
     });
   });
