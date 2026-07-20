@@ -36,12 +36,16 @@ import tools.fabricate as fab
 def _client(records, details):
     """Build a mock bedrock-agentcore-control client.
 
+    Pinned to the REAL ListRegistryRecords response shape: summaries are
+    returned under the "registryRecords" key (live-verified; the backend's
+    registry-service.ts consumes the same key), NOT "records".
+
     Args:
         records: summary dicts returned by list_registry_records.
         details: {recordId: full record dict} returned by get_registry_record.
     """
     client = mock.MagicMock()
-    client.list_registry_records.return_value = {"records": records, "nextToken": None}
+    client.list_registry_records.return_value = {"registryRecords": records, "nextToken": None}
 
     def _get(registryId, recordId):  # noqa: N803 — boto3 kwarg names
         return details[recordId]
@@ -143,8 +147,8 @@ def test_get_existing_agents_skips_tool_records(monkeypatch):
 def test_get_existing_agents_paginates(monkeypatch):
     monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
     client = mock.MagicMock()
-    page1 = {"records": [{"name": "a1", "recordId": "r1", "status": "APPROVED"}], "nextToken": "tok"}
-    page2 = {"records": [{"name": "a2", "recordId": "r2", "status": "APPROVED"}], "nextToken": None}
+    page1 = {"registryRecords": [{"name": "a1", "recordId": "r1", "status": "APPROVED"}], "nextToken": "tok"}
+    page2 = {"registryRecords": [{"name": "a2", "recordId": "r2", "status": "APPROVED"}], "nextToken": None}
     client.list_registry_records.side_effect = [page1, page2]
     details = {
         "r1": _agent_detail("a1", "r1", "APPROVED", "first"),
@@ -176,3 +180,25 @@ def test_list_factory_agents_empty_message(monkeypatch):
     monkeypatch.setattr(fab, "REGISTRY_ID", "")
     out = fab.list_factory_agents()
     assert "No agents" in out
+
+
+def test_get_existing_agents_tolerates_legacy_records_key(monkeypatch):
+    """Fallback: older/local API stubs returned summaries under "records".
+
+    The primary key is "registryRecords" (the real API shape); when absent,
+    the legacy "records" key must still be honored so nothing regresses.
+    """
+    monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
+    client = mock.MagicMock()
+    client.list_registry_records.return_value = {
+        "records": [{"name": "ap-legacy-agent-v1", "recordId": "rl", "status": "APPROVED"}],
+        "nextToken": None,
+    }
+    details = {"rl": _agent_detail("ap-legacy-agent-v1", "rl", "APPROVED", "Legacy agent")}
+    client.get_registry_record.side_effect = lambda registryId, recordId: details[recordId]  # noqa: N803
+    monkeypatch.setattr(fab, "_get_registry_client", lambda: client)
+
+    result = fab._get_existing_agents()
+
+    assert "ap-legacy-agent-v1" in result
+    assert result["ap-legacy-agent-v1"]["recordId"] == "rl"

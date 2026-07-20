@@ -234,3 +234,24 @@ def test_idempotent_when_blueprint_already_published(deps, marker_store):
     deps.assert_not_called()
     assert result["status"] == "already_done"
     _contract(result)
+
+
+def test_no_agents_result_offers_retry_actions_and_stands_alone(deps, marker_store, monkeypatch):
+    """Structural guard against in-turn self-retry: the no_agents result must
+    carry Try again / Stop here actions like every other failure (the button
+    IS the retry), and its copy must stand alone as a complete reply."""
+    monkeypatch.setattr(postfab, "_get_existing_agents", lambda: {})
+
+    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+
+    assert result["ok"] is False
+    assert result["status"] == "no_agents"
+    deps.assert_not_called()
+    _contract(result)
+    labels = [a["label"] for a in result["actions"]]
+    assert "Try again" in labels
+    assert "Stop here" in labels
+    # Copy stands alone: a complete sentence with the nothing-changed
+    # reassurance, so a single reply reads cleanly without glued narration.
+    assert result["summary"].rstrip().endswith(".")
+    assert "Nothing has been changed" in result["summary"]

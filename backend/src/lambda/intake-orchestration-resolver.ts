@@ -41,6 +41,10 @@ import { ValidationError, sanitizeString } from '../utils/validation';
 import { activateProjectAgents, type ActivateAgentsResult } from './agent-config-resolver';
 import { createApp } from './registry-agent-record-resolver';
 import { createWorkflow, publishWorkflow, importBlueprint } from './workflow-resolver';
+import {
+  ensureAgentConfigRows,
+  extractAgentIdsFromDefinition,
+} from './ensure-agent-config-rows';
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -340,6 +344,30 @@ function countNodes(definition: string): number | null {
   return null;
 }
 
+/**
+ * Best-effort dual-store healing shared by the blueprint and import paths:
+ * ensure an agents-table row exists for every agentId referenced by the
+ * definition. Logs counts only; never throws (a failed heal simply leaves
+ * the delegated core's own agent-existence failure mode in place).
+ */
+async function healAgentConfigRows(
+  fieldName: string,
+  sessionId: string,
+  definitionJson: string,
+): Promise<void> {
+  const agentIds = extractAgentIdsFromDefinition(definitionJson);
+  if (agentIds.length === 0) {
+    return;
+  }
+  const healed = await ensureAgentConfigRows(agentIds);
+  log(fieldName, sessionId, {
+    stage: 'ensureAgentConfigRows',
+    ensured: healed.ensured.length,
+    existing: healed.existing.length,
+    failed: healed.failed.length,
+  });
+}
+
 async function intakeCreateBlueprint(
   sessionId: string,
   rawName: unknown,
@@ -379,6 +407,13 @@ async function intakeCreateBlueprint(
       errors: [message],
     };
   }
+
+  // Dual-store self-healing: fabricated agents are registry-only (the
+  // fabricator never writes the DynamoDB agents cache), so the publish
+  // gate's verifyAgentsExist BatchGet would report every node missing.
+  // Materialize any absent rows from the live registry records BEFORE the
+  // gate reads the table. Best-effort: the gate remains the authority.
+  await healAgentConfigRows('intakeCreateBlueprint', sessionId, definition);
 
   try {
     await publishWorkflow(workflowId, userId, event);
@@ -450,6 +485,15 @@ async function intakeImportBlueprintToApp(
   if (blueprintRow.Item.orgId !== orgId) {
     throw new Error('Access denied: the blueprint belongs to a different organization');
   }
+
+  // Dual-store self-healing for sessions resuming at the import step: the
+  // app's later publish path BatchGets the same agents table, so ensure the
+  // blueprint's referenced agents have rows now (best-effort).
+  const bpDefinition =
+    typeof blueprintRow.Item.definition === 'string'
+      ? blueprintRow.Item.definition
+      : JSON.stringify(blueprintRow.Item.definition ?? null);
+  await healAgentConfigRows('intakeImportBlueprintToApp', sessionId, bpDefinition);
 
   // agentMapping is the identity mapping — intake blueprints are composed
   // with REAL registry recordIds, never placeholders.

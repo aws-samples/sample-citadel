@@ -114,3 +114,22 @@ def test_phase7_fabrication_started_progress_is_early_build_value():
     prompt = agent.SYSTEM_PROMPT
     assert 'phase="implementation", progress=10' in prompt
     assert 'phase="implementation", progress=0,' not in prompt
+
+
+def test_phase8_failed_tool_result_means_one_reply_then_stop():
+    """Live transcript defect: the agent self-retried a failed post-fab tool
+    ~5x within one turn, gluing narration between attempts. The prompt must
+    pin the rule: ANY failed result -> compose ONE reply, present the
+    result's actions, STOP. The user's button click is the only retry."""
+    prompt = agent.SYSTEM_PROMPT
+    assert "compose ONE reply" in prompt
+    assert "never call the same tool again within the same turn" in prompt
+    assert "the user's action choice is the only retry" in prompt.lower()
+
+
+def test_phase8_no_self_retry_rule_covers_any_failure_not_just_sync():
+    """The rule must be generic (ANY failed post-fabrication tool result),
+    not scoped to the AGENTS_SYNCING case that already says 'the button IS
+    the retry'."""
+    prompt = agent.SYSTEM_PROMPT
+    assert "ANY post-fabrication tool result that is not a success" in prompt

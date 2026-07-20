@@ -183,6 +183,57 @@ describe('ServicesStack — intake post-fabrication orchestration wiring', () =>
     });
   });
 
+  test('grants the resolver create access on the agents table for dual-store healing', () => {
+    // ensureAgentConfigRows materializes missing rows with a creation-only
+    // conditional Put before publish/import — needs PutItem alongside the
+    // existing verifyAgentsExist reads.
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: cdk.assertions.Match.arrayWith([
+          cdk.assertions.Match.objectLike({
+            Effect: 'Allow',
+            Action: ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem'],
+            Resource: 'arn:aws:dynamodb:us-west-2:123456789012:table/citadel-agents-test',
+          }),
+        ]),
+      },
+    });
+  });
+
+  test('the agents-table grant stays least-privilege (no Update/Delete/Scan)', () => {
+    const agentsArn = 'arn:aws:dynamodb:us-west-2:123456789012:table/citadel-agents-test';
+    // Scope to the intake-orchestration resolver's role — other stack roles
+    // legitimately hold different agents-table permissions.
+    const functions = template.findResources('AWS::Lambda::Function');
+    const resolverFn = Object.values(functions).find(
+      (fn) => fn.Properties?.Handler === 'intake-orchestration-resolver.handler',
+    );
+    const roleId = (resolverFn?.Properties?.Role as { 'Fn::GetAtt': [string, string] })[
+      'Fn::GetAtt'
+    ][0];
+    const policies = template.findResources('AWS::IAM::Policy');
+    const statements = Object.values(policies)
+      .filter((policy) => JSON.stringify(policy.Properties?.Roles ?? []).includes(roleId))
+      .flatMap(
+        (policy) =>
+          (policy.Properties?.PolicyDocument?.Statement ?? []) as {
+            Action: string | string[];
+            Resource: unknown;
+          }[],
+      );
+    const agentsStatements = statements.filter(
+      (s) => JSON.stringify(s.Resource) === JSON.stringify(agentsArn),
+    );
+    expect(agentsStatements.length).toBeGreaterThan(0);
+    const allowed = new Set(['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem']);
+    for (const statement of agentsStatements) {
+      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+      for (const action of actions) {
+        expect(allowed).toContain(action);
+      }
+    }
+  });
+
   // ─── owner-org Cognito fallback (org-less project self-healing) ─────
 
   test('wires USER_POOL_ID into the resolver env for the owner-org Cognito fallback', () => {

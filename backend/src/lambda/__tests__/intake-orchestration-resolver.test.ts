@@ -23,10 +23,17 @@ jest.mock('../workflow-resolver', () => ({
   publishWorkflow: jest.fn(),
   importBlueprint: jest.fn(),
 }));
+jest.mock('../ensure-agent-config-rows', () => ({
+  // Real extractor (pure) + mocked healer so wiring order is observable.
+  extractAgentIdsFromDefinition: jest.requireActual('../ensure-agent-config-rows')
+    .extractAgentIdsFromDefinition,
+  ensureAgentConfigRows: jest.fn(),
+}));
 
 import { activateProjectAgents } from '../agent-config-resolver';
 import { createApp } from '../registry-agent-record-resolver';
 import { createWorkflow, publishWorkflow, importBlueprint } from '../workflow-resolver';
+import { ensureAgentConfigRows } from '../ensure-agent-config-rows';
 import { handler } from '../intake-orchestration-resolver';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -37,6 +44,9 @@ const createAppMock = createApp as jest.MockedFunction<typeof createApp>;
 const createWorkflowMock = createWorkflow as jest.MockedFunction<typeof createWorkflow>;
 const publishWorkflowMock = publishWorkflow as jest.MockedFunction<typeof publishWorkflow>;
 const importBlueprintMock = importBlueprint as jest.MockedFunction<typeof importBlueprint>;
+const ensureAgentConfigRowsMock = ensureAgentConfigRows as jest.MockedFunction<
+  typeof ensureAgentConfigRows
+>;
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
@@ -111,6 +121,8 @@ describe('intake-orchestration-resolver', () => {
     // No stray fallback lookups succeed unless a test wires them explicitly.
     cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
     jest.clearAllMocks();
+    // Healing is a no-op unless a test asserts on it explicitly.
+    ensureAgentConfigRowsMock.mockResolvedValue({ ensured: [], existing: [], failed: [] });
   });
 
   // ─── identity guard (defence-in-depth on top of @aws_iam) ────────────
@@ -521,6 +533,48 @@ describe('intake-orchestration-resolver', () => {
       ).rejects.toThrow(/definition/);
       expect(createWorkflowMock).not.toHaveBeenCalled();
     });
+
+    test('materializes agent-config rows for the definition agents BEFORE publishing', async () => {
+      // Bug B (dual-store gap): fabricated agents exist only in the registry,
+      // so publishWorkflow's verifyAgentsExist gate fails without healing.
+      mockSessionLinkage();
+      mockHappyCreate();
+
+      await invoke(
+        makeEvent('intakeCreateBlueprint', {
+          sessionId: SESSION_ID,
+          name: 'BP',
+          definition: DEFINITION_OBJ,
+        }),
+      );
+
+      expect(ensureAgentConfigRowsMock).toHaveBeenCalledWith(['rec1']);
+      // Healing must happen strictly before the publish gate reads the table.
+      expect(ensureAgentConfigRowsMock.mock.invocationCallOrder[0]).toBeLessThan(
+        publishWorkflowMock.mock.invocationCallOrder[0],
+      );
+    });
+
+    test('publishes even when healing reports failures (gate stays the authority)', async () => {
+      mockSessionLinkage();
+      mockHappyCreate();
+      ensureAgentConfigRowsMock.mockResolvedValueOnce({
+        ensured: [],
+        existing: [],
+        failed: ['rec1'],
+      });
+
+      const result = await invoke(
+        makeEvent('intakeCreateBlueprint', {
+          sessionId: SESSION_ID,
+          name: 'BP',
+          definition: DEFINITION_OBJ,
+        }),
+      );
+
+      expect(publishWorkflowMock).toHaveBeenCalled();
+      expect(result).toMatchObject({ ok: true, status: 'PUBLISHED' });
+    });
   });
 
   // ─── intakeImportBlueprintToApp ──────────────────────────────────────
@@ -614,6 +668,61 @@ describe('intake-orchestration-resolver', () => {
         expect.anything(),
       );
       expect(result).toBe(imported);
+    });
+
+    test('materializes agent-config rows for the blueprint agents BEFORE importing', async () => {
+      // Sessions resuming at the import step must be healed too — the app's
+      // later publish path BatchGets the same agents table.
+      mockSessionLinkage();
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
+        .resolves({ Item: { appId: APP_ID, orgId: ORG_ID } });
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-workflows-test', Key: { workflowId: BLUEPRINT_ID } })
+        .resolves({
+          Item: {
+            workflowId: BLUEPRINT_ID,
+            orgId: ORG_ID,
+            definition: JSON.stringify({
+              nodes: [
+                { id: 'rec-a', agentId: 'rec-a' },
+                { id: 'rec-b', agentId: 'rec-b' },
+              ],
+              edges: [],
+            }),
+          },
+        });
+      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
+
+      await invoke(
+        makeEvent('intakeImportBlueprintToApp', {
+          sessionId: SESSION_ID,
+          blueprintId: BLUEPRINT_ID,
+          appId: APP_ID,
+        }),
+      );
+
+      expect(ensureAgentConfigRowsMock).toHaveBeenCalledWith(['rec-a', 'rec-b']);
+      expect(ensureAgentConfigRowsMock.mock.invocationCallOrder[0]).toBeLessThan(
+        importBlueprintMock.mock.invocationCallOrder[0],
+      );
+    });
+
+    test('skips healing when the blueprint row carries no parseable definition', async () => {
+      mockSessionLinkage();
+      mockOrgOwnedRows(); // blueprint Item has no definition attribute
+      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
+
+      await invoke(
+        makeEvent('intakeImportBlueprintToApp', {
+          sessionId: SESSION_ID,
+          blueprintId: BLUEPRINT_ID,
+          appId: APP_ID,
+        }),
+      );
+
+      expect(ensureAgentConfigRowsMock).not.toHaveBeenCalled();
+      expect(importBlueprintMock).toHaveBeenCalled();
     });
   });
 });

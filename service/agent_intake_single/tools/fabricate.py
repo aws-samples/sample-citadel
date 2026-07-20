@@ -215,7 +215,13 @@ def _get_existing_agents() -> dict[str, dict]:
             response = client.list_registry_records(**kwargs)
             if not isinstance(response, dict):
                 break
-            for summary in response.get("records", []):
+            # Real API shape: summaries under "registryRecords" (matches the
+            # backend's registry-service.ts). Tolerate the legacy "records"
+            # key as a fallback for older/local stubs.
+            summaries = response.get("registryRecords")
+            if summaries is None:
+                summaries = response.get("records", [])
+            for summary in summaries:
                 if not isinstance(summary, dict):
                     continue
                 name = summary.get("name")

@@ -1093,9 +1093,12 @@ def handler(event, context):
             tableArn(`citadel-apps-${props.environment}`),
           ],
         }));
-        // agent-config: read-only (verifyAgentsExist BatchGet).
+        // agent-config: verifyAgentsExist reads (Get/BatchGet) + the
+        // dual-store healer's creation-only conditional Put
+        // (ensureAgentConfigRows) — deliberately NO Update/Delete: existing
+        // rows are never modified from this path.
         intakeOrchestrationResolverFn.addToRolePolicy(new iam.PolicyStatement({
-          actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem'],
+          actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:PutItem'],
           resources: [tableArn(`citadel-agents-${props.environment}`)],
         }));
         // NEW relative to the reused cores: server-side orgId/projectId

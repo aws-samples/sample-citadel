@@ -821,8 +821,9 @@ def generate_process_blueprint(session_id: str) -> str:
             False, "no_agents",
             "None of the process steps map to built agents yet, so there's "
             "nothing to put in the blueprint. Nothing has been changed.",
-            "Want me to check the build status?",
-            [_action("Check build status", "Check the build status"),
+            "Want me to try again, or check the build status first?",
+            [_action("Try again", "Try generating the blueprint again"),
+             _action("Check build status", "Check the build status"),
              _action("Stop here", "Stop here")],
             excluded=excluded,
         )
