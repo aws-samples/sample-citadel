@@ -97,7 +97,7 @@ _ACTIVATE_MUTATION = """mutation IntakeActivate($sessionId: ID!) {
 
 _CREATE_APP_MUTATION = """mutation IntakeCreateApp($sessionId: ID!, $name: String!, $description: String) {
   intakeCreateApp(sessionId: $sessionId, name: $name, description: $description) {
-    appId name status
+    appId name status agentBindings { agentId }
   }
 }"""
 
@@ -624,11 +624,17 @@ def create_agent_app(session_id: str, confirmed_name: str = "") -> str:
     set_postfab_marker(session_id, stage="app_created", appId=app_id, appName=app_name)
     _record_stage_progress(session_id, "app_created", "Agent app created")
     question, actions = _blueprint_gate()
-    return _result(
-        True, "created",
-        f"Created the app '{app_name}' — you'll find it in your Apps list.",
-        question, actions, app_id=app_id, app_name=app_name,
-    )
+    summary = f"Created the app '{app_name}' — you'll find it in your Apps list."
+    extras = {"app_id": app_id, "app_name": app_name}
+    # The backend binds the session's activated agents at creation; surface
+    # the count when the result carries them (itemized partial success: only
+    # successfully-linked agents appear in agentBindings).
+    linked = len(record.get("agentBindings") or [])
+    if linked:
+        noun = "agent" if linked == 1 else "agents"
+        summary += f" I've linked {linked} {noun} from this session to it."
+        extras["linked_agents"] = linked
+    return _result(True, "created", summary, question, actions, **extras)
 
 
 # --- tool 4: generate_process_blueprint -----------------------------------------
@@ -921,6 +927,24 @@ def import_blueprint_to_app(session_id: str) -> str:
     app_name = marker.get("appName") or "your new app"
 
     if marker.get("workflowId") and _stage_rank(marker.get("stage")) >= _stage_rank("workflow_imported"):
+        # Re-issue the (idempotent) import: the backend returns the existing
+        # workflow instead of duplicating it AND re-ensures the app's agent
+        # bindings — this heals apps whose workflow was imported before
+        # app-level bindings existed. Best-effort: the workflow IS imported,
+        # so a failed call never turns this answer into an error.
+        if marker.get("blueprintId") and marker.get("appId"):
+            try:
+                appsync_client.execute(
+                    _IMPORT_MUTATION,
+                    {"sessionId": session_id, "blueprintId": marker["blueprintId"],
+                     "appId": marker["appId"], "name": f"{app_name} Process"},
+                    session_id,
+                )
+            except AppSyncError as err:
+                logger.warning(
+                    "already_done binding heal failed session=%s type=%s",
+                    session_id, err.error_type,
+                )
         question, actions = _final_gate(app_name)
         return _result(
             True, "already_done",

@@ -116,6 +116,56 @@ def test_confirmed_name_creates_app_and_updates_marker(execute, marker_store, mo
     _contract(result)
 
 
+def test_created_summary_surfaces_linked_agents(execute, marker_store, monkeypatch):
+    # The backend binds the session's activated agents at creation; when the
+    # result carries them, the copy tells the user how many were linked.
+    _project_tables(monkeypatch, [{"projectId": "proj-1"}], {"name": "Acme Claims"})
+    execute.return_value = {"intakeCreateApp": {
+        "appId": "app-9", "name": "My Custom App", "status": "DRAFT",
+        "agentBindings": [{"agentId": "rec-a"}, {"agentId": "rec-b"}],
+    }}
+
+    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My Custom App"))
+
+    assert result["ok"] is True
+    assert "linked 2 agents" in result["summary"]
+    assert result["linked_agents"] == 2
+    _contract(result)
+
+
+def test_created_summary_singular_for_one_linked_agent(execute, marker_store, monkeypatch):
+    _project_tables(monkeypatch, [{"projectId": "proj-1"}], {"name": "Acme Claims"})
+    execute.return_value = {"intakeCreateApp": {
+        "appId": "app-9", "name": "My Custom App", "status": "DRAFT",
+        "agentBindings": [{"agentId": "rec-a"}],
+    }}
+
+    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My Custom App"))
+
+    assert "linked 1 agent" in result["summary"]
+    assert "linked 1 agents" not in result["summary"]
+    assert result["linked_agents"] == 1
+
+
+def test_created_summary_unchanged_when_no_bindings_returned(execute, marker_store, monkeypatch):
+    # Older backend / zero session agents: the structured field is absent and
+    # the copy stays exactly the established created sentence.
+    _project_tables(monkeypatch, [{"projectId": "proj-1"}], {"name": "Acme Claims"})
+    execute.return_value = {"intakeCreateApp": {"appId": "app-9", "name": "My Custom App", "status": "DRAFT"}}
+
+    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My Custom App"))
+
+    assert "linked" not in result["summary"]
+    assert "linked_agents" not in result
+
+
+def test_create_app_mutation_selects_agent_bindings(execute, marker_store):
+    # The GraphQL document must request the bindings for the copy above —
+    # pinned against the schema by the backend cross-layer contract test.
+    assert "agentBindings" in postfab._CREATE_APP_MUTATION
+    assert "agentId" in postfab._CREATE_APP_MUTATION
+
+
 def test_idempotent_when_app_already_created(execute, marker_store):
     marker_store["sess-1"] = {"stage": "app_created", "appId": "app-9", "appName": "Acme Claims"}
 

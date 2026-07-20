@@ -14,9 +14,11 @@ import { mockClient } from 'aws-sdk-client-mock';
 
 jest.mock('../agent-config-resolver', () => ({
   activateProjectAgents: jest.fn(),
+  findProjectAgentRecords: jest.fn(),
 }));
 jest.mock('../registry-agent-record-resolver', () => ({
   createApp: jest.fn(),
+  ensureAppAgentBindings: jest.fn(),
 }));
 jest.mock('../workflow-resolver', () => ({
   createWorkflow: jest.fn(),
@@ -30,8 +32,8 @@ jest.mock('../ensure-agent-config-rows', () => ({
   ensureAgentConfigRows: jest.fn(),
 }));
 
-import { activateProjectAgents } from '../agent-config-resolver';
-import { createApp } from '../registry-agent-record-resolver';
+import { activateProjectAgents, findProjectAgentRecords } from '../agent-config-resolver';
+import { createApp, ensureAppAgentBindings } from '../registry-agent-record-resolver';
 import { createWorkflow, publishWorkflow, importBlueprint } from '../workflow-resolver';
 import { ensureAgentConfigRows } from '../ensure-agent-config-rows';
 import { handler } from '../intake-orchestration-resolver';
@@ -40,7 +42,13 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
 
 const activateMock = activateProjectAgents as jest.MockedFunction<typeof activateProjectAgents>;
+const findProjectAgentRecordsMock = findProjectAgentRecords as jest.MockedFunction<
+  typeof findProjectAgentRecords
+>;
 const createAppMock = createApp as jest.MockedFunction<typeof createApp>;
+const ensureAppAgentBindingsMock = ensureAppAgentBindings as jest.MockedFunction<
+  typeof ensureAppAgentBindings
+>;
 const createWorkflowMock = createWorkflow as jest.MockedFunction<typeof createWorkflow>;
 const publishWorkflowMock = publishWorkflow as jest.MockedFunction<typeof publishWorkflow>;
 const importBlueprintMock = importBlueprint as jest.MockedFunction<typeof importBlueprint>;
@@ -123,6 +131,14 @@ describe('intake-orchestration-resolver', () => {
     jest.clearAllMocks();
     // Healing is a no-op unless a test asserts on it explicitly.
     ensureAgentConfigRowsMock.mockResolvedValue({ ensured: [], existing: [], failed: [] });
+    // No session agents / no binding activity unless a test wires them.
+    findProjectAgentRecordsMock.mockResolvedValue([]);
+    ensureAppAgentBindingsMock.mockResolvedValue({
+      bound: [],
+      alreadyBound: [],
+      failed: [],
+      finalApp: null,
+    });
   });
 
   // ─── identity guard (defence-in-depth on top of @aws_iam) ────────────
@@ -402,6 +418,150 @@ describe('intake-orchestration-resolver', () => {
         expect.objectContaining({ name: '&lt;b&gt;App&lt;/b&gt;' }),
         expect.any(String),
       );
+    });
+
+    // ── session-agent binding (Agents tab / publish precondition) ──────
+
+    function fabricatedRecord(recordId: string, status: string) {
+      return {
+        recordId,
+        name: `fabricated_${recordId}`,
+        status,
+        customDescriptorContent: JSON.stringify({
+          state: 'inactive', // stale fabricator mirror — status is authoritative
+          manifest: { name: recordId, tools: [] },
+          sourceProjectId: SESSION_ID,
+        }),
+      };
+    }
+
+    test("binds the session's active agents to the created app via the binding core", async () => {
+      mockSessionLinkage();
+      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789', agentBindings: [] });
+      findProjectAgentRecordsMock.mockResolvedValueOnce([
+        fabricatedRecord('agt000000001', 'APPROVED'),
+        fabricatedRecord('agt000000002', 'PENDING_APPROVAL'),
+        fabricatedRecord('agt000000003', 'DRAFT'), // activation failed — not bound
+      ]);
+      const finalApp = {
+        appId: 'rec123456789',
+        agentBindings: [
+          { agentId: 'agt000000001', status: 'READY' },
+          { agentId: 'agt000000002', status: 'READY' },
+        ],
+      };
+      ensureAppAgentBindingsMock.mockResolvedValueOnce({
+        bound: ['agt000000001', 'agt000000002'],
+        alreadyBound: [],
+        failed: [],
+        finalApp,
+      });
+
+      const result = await invoke(
+        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
+      );
+
+      expect(findProjectAgentRecordsMock).toHaveBeenCalledWith(SESSION_ID);
+      // Only active-mapping statuses (APPROVED / PENDING_APPROVAL) are bound.
+      expect(ensureAppAgentBindingsMock).toHaveBeenCalledWith(
+        'rec123456789',
+        ['agt000000001', 'agt000000002'],
+        IAM_IDENTITY.userArn,
+      );
+      // The mutation response carries the bindings-inclusive projection so
+      // the Python client can surface "linked N agents".
+      expect(result).toBe(finalApp);
+    });
+
+    test('falls back to the conversations-linked projectId when no records match the sessionId', async () => {
+      mockSessionLinkage();
+      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+      findProjectAgentRecordsMock
+        .mockResolvedValueOnce([]) // sessionId match — empty
+        .mockResolvedValueOnce([fabricatedRecord('agt000000009', 'APPROVED')]);
+      ensureAppAgentBindingsMock.mockResolvedValueOnce({
+        bound: ['agt000000009'],
+        alreadyBound: [],
+        failed: [],
+        finalApp: { appId: 'rec123456789' },
+      });
+
+      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+
+      expect(findProjectAgentRecordsMock).toHaveBeenNthCalledWith(1, SESSION_ID);
+      expect(findProjectAgentRecordsMock).toHaveBeenNthCalledWith(2, PROJECT_ID);
+      expect(ensureAppAgentBindingsMock).toHaveBeenCalledWith(
+        'rec123456789',
+        ['agt000000009'],
+        IAM_IDENTITY.userArn,
+      );
+    });
+
+    test('skips binding entirely when the session has no active agents', async () => {
+      mockSessionLinkage();
+      const created = { appId: 'rec123456789', agentBindings: [] };
+      createAppMock.mockResolvedValueOnce(created);
+      findProjectAgentRecordsMock.mockResolvedValue([
+        fabricatedRecord('agt000000003', 'DRAFT'),
+      ]);
+
+      const result = await invoke(
+        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
+      );
+
+      expect(ensureAppAgentBindingsMock).not.toHaveBeenCalled();
+      expect(result).toBe(created);
+    });
+
+    test('app creation is not reported failed when binding throws (partial-failure semantics)', async () => {
+      mockSessionLinkage();
+      const created = { appId: 'rec123456789', agentBindings: [] };
+      createAppMock.mockResolvedValueOnce(created);
+      findProjectAgentRecordsMock.mockResolvedValueOnce([
+        fabricatedRecord('agt000000001', 'APPROVED'),
+      ]);
+      ensureAppAgentBindingsMock.mockRejectedValueOnce(new Error('registry unavailable'));
+
+      const result = await invoke(
+        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
+      );
+
+      expect(result).toBe(created);
+    });
+
+    test('app creation is not reported failed when session-agent lookup throws', async () => {
+      mockSessionLinkage();
+      const created = { appId: 'rec123456789' };
+      createAppMock.mockResolvedValueOnce(created);
+      findProjectAgentRecordsMock.mockRejectedValueOnce(new Error('registry list failed'));
+
+      const result = await invoke(
+        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
+      );
+
+      expect(result).toBe(created);
+      expect(ensureAppAgentBindingsMock).not.toHaveBeenCalled();
+    });
+
+    test('returns the createApp projection when bindings succeed but no finalApp projection is available', async () => {
+      mockSessionLinkage();
+      const created = { appId: 'rec123456789', agentBindings: [] };
+      createAppMock.mockResolvedValueOnce(created);
+      findProjectAgentRecordsMock.mockResolvedValueOnce([
+        fabricatedRecord('agt000000001', 'APPROVED'),
+      ]);
+      ensureAppAgentBindingsMock.mockResolvedValueOnce({
+        bound: [],
+        alreadyBound: ['agt000000001'],
+        failed: [],
+        finalApp: null,
+      });
+
+      const result = await invoke(
+        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
+      );
+
+      expect(result).toBe(created);
     });
   });
 
@@ -723,6 +883,154 @@ describe('intake-orchestration-resolver', () => {
 
       expect(ensureAgentConfigRowsMock).not.toHaveBeenCalled();
       expect(importBlueprintMock).toHaveBeenCalled();
+    });
+
+    // ── binding-ensure: fresh import + already-imported healing ─────────
+
+    const BP_DEFINITION_ID = '4c2f5e94-0000-4000-8000-000000000001';
+
+    function blueprintDefinition(agentIds: string[]): string {
+      return JSON.stringify({
+        version: '1.0.0',
+        id: BP_DEFINITION_ID,
+        name: 'Proc',
+        nodes: agentIds.map((id) => ({ id, agentId: id, position: { x: 0, y: 0 }, configuration: {} })),
+        edges: [],
+      });
+    }
+
+    function mockBlueprintRow(agentIds: string[]): void {
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-workflows-test', Key: { workflowId: BLUEPRINT_ID } })
+        .resolves({
+          Item: { workflowId: BLUEPRINT_ID, orgId: ORG_ID, definition: blueprintDefinition(agentIds) },
+        });
+    }
+
+    test('ensures READY bindings for the imported workflow agents after a fresh import', async () => {
+      mockSessionLinkage();
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
+        .resolves({ Item: { appId: APP_ID, orgId: ORG_ID } }); // no workflowIds yet
+      mockBlueprintRow(['agt000000001', 'agt000000002']);
+      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
+      ensureAppAgentBindingsMock.mockResolvedValueOnce({
+        bound: ['agt000000001', 'agt000000002'],
+        alreadyBound: [],
+        failed: [],
+        finalApp: { appId: APP_ID },
+      });
+
+      const result = await invoke(
+        makeEvent('intakeImportBlueprintToApp', {
+          sessionId: SESSION_ID,
+          blueprintId: BLUEPRINT_ID,
+          appId: APP_ID,
+        }),
+      );
+
+      expect(ensureAppAgentBindingsMock).toHaveBeenCalledWith(
+        APP_ID,
+        ['agt000000001', 'agt000000002'],
+        IAM_IDENTITY.userArn,
+      );
+      // The import is the primary operation — bindings are ensured after it.
+      expect(importBlueprintMock.mock.invocationCallOrder[0]).toBeLessThan(
+        ensureAppAgentBindingsMock.mock.invocationCallOrder[0],
+      );
+      expect(result).toMatchObject({ workflowId: 'wf-new' });
+    });
+
+    test('returns the existing workflow and skips importBlueprint when the blueprint was already imported (heals bindings)', async () => {
+      // The conversational re-trigger path that heals a live app whose
+      // workflow was imported before bindings existed: matched by the
+      // blueprint definition id preserved through the import copy.
+      mockSessionLinkage();
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
+        .resolves({ Item: { appId: APP_ID, orgId: ORG_ID, workflowIds: ['wf-existing'] } });
+      mockBlueprintRow(['agt000000001']);
+      const existingWorkflow = {
+        workflowId: 'wf-existing',
+        appId: APP_ID,
+        orgId: ORG_ID,
+        status: 'DRAFT',
+        definition: blueprintDefinition(['agt000000001']),
+      };
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-workflows-test', Key: { workflowId: 'wf-existing' } })
+        .resolves({ Item: existingWorkflow });
+      ensureAppAgentBindingsMock.mockResolvedValueOnce({
+        bound: ['agt000000001'],
+        alreadyBound: [],
+        failed: [],
+        finalApp: { appId: APP_ID },
+      });
+
+      const result = await invoke(
+        makeEvent('intakeImportBlueprintToApp', {
+          sessionId: SESSION_ID,
+          blueprintId: BLUEPRINT_ID,
+          appId: APP_ID,
+          name: 'My App Process',
+        }),
+      );
+
+      expect(importBlueprintMock).not.toHaveBeenCalled();
+      expect(ensureAppAgentBindingsMock).toHaveBeenCalledWith(
+        APP_ID,
+        ['agt000000001'],
+        IAM_IDENTITY.userArn,
+      );
+      expect(result).toMatchObject({ workflowId: 'wf-existing' });
+    });
+
+    test('imports fresh when the app workflows do not match the blueprint definition id', async () => {
+      mockSessionLinkage();
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
+        .resolves({ Item: { appId: APP_ID, orgId: ORG_ID, workflowIds: ['wf-other'] } });
+      mockBlueprintRow(['agt000000001']);
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-workflows-test', Key: { workflowId: 'wf-other' } })
+        .resolves({
+          Item: {
+            workflowId: 'wf-other',
+            definition: JSON.stringify({ id: 'a-different-definition-id', nodes: [], edges: [] }),
+          },
+        });
+      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
+
+      const result = await invoke(
+        makeEvent('intakeImportBlueprintToApp', {
+          sessionId: SESSION_ID,
+          blueprintId: BLUEPRINT_ID,
+          appId: APP_ID,
+        }),
+      );
+
+      expect(importBlueprintMock).toHaveBeenCalled();
+      expect(result).toMatchObject({ workflowId: 'wf-new' });
+    });
+
+    test('import still succeeds when binding-ensure fails (best-effort healing)', async () => {
+      mockSessionLinkage();
+      ddbMock
+        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
+        .resolves({ Item: { appId: APP_ID, orgId: ORG_ID } });
+      mockBlueprintRow(['agt000000001']);
+      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
+      ensureAppAgentBindingsMock.mockRejectedValueOnce(new Error('registry unavailable'));
+
+      const result = await invoke(
+        makeEvent('intakeImportBlueprintToApp', {
+          sessionId: SESSION_ID,
+          blueprintId: BLUEPRINT_ID,
+          appId: APP_ID,
+        }),
+      );
+
+      expect(result).toMatchObject({ workflowId: 'wf-new' });
     });
   });
 });

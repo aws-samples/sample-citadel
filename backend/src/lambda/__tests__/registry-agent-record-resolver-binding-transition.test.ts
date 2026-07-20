@@ -136,7 +136,10 @@ function activeAgentRecord(recordId: string) {
   return {
     recordId,
     name: 'email_validator_agent',
-    status: 'ACTIVE',
+    // APPROVED is the authoritative active signal: the READY gate derives
+    // the agent's state from record.status via toInternalState, not from
+    // the descriptor mirror (which drifts — see the fabricated-agent tests).
+    status: 'APPROVED',
     customDescriptorContent: JSON.stringify({ state: 'active' }),
   };
 }
@@ -402,6 +405,103 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
         }),
       })
       .mockResolvedValueOnce(inactiveAgentRecord(AGENT_RECORD_ID));
+
+    await expect(
+      invokeHandler(
+        makeEvent('updateAgentBinding', {
+          input: {
+            appId: APP_RECORD_ID,
+            agentId: AGENT_RECORD_ID,
+            status: 'READY',
+          },
+        }),
+      ),
+    ).rejects.toThrow('Agent must be active before it can be marked as ready');
+  });
+
+  test('promotes to READY for a registry-fabricated agent whose descriptor still says inactive but whose record status is APPROVED', async () => {
+    // Dual-store regression: the fabricator writes descriptor
+    // `state: 'inactive'` and intakeActivateProjectAgents flips ONLY
+    // record.status → APPROVED (SubmitRegistryRecordForApproval never
+    // rewrites the descriptor). The authoritative state is
+    // toInternalState(record.status); the stale descriptor mirror must not
+    // block the READY promotion.
+    seedAppWithBinding(AGENT_RECORD_ID);
+    resolveRecordIdMock.mockResolvedValue(AGENT_RECORD_ID);
+    getResourceMock
+      .mockResolvedValueOnce({
+        recordId: APP_RECORD_ID,
+        name: 'Test App',
+        status: 'DRAFT',
+        customDescriptorContent: JSON.stringify({
+          appId: APP_RECORD_ID,
+          manifest: {
+            orgId: 'org-1',
+            version: 1,
+            status: 'DRAFT',
+            agentBindings: [
+              { agentId: AGENT_RECORD_ID, status: 'DESIGN', addedAt: 't' },
+            ],
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        recordId: AGENT_RECORD_ID,
+        name: 'fabricated_agent',
+        status: 'APPROVED',
+        customDescriptorContent: JSON.stringify({
+          categories: ['worker'],
+          state: 'inactive', // stale — never updated by activation
+          manifest: { name: 'fabricated_agent', tools: [] },
+          sourceProjectId: 'sess-1111',
+        }),
+      });
+
+    const result = await invokeHandler(
+      makeEvent('updateAgentBinding', {
+        input: {
+          appId: APP_RECORD_ID,
+          agentId: AGENT_RECORD_ID,
+          status: 'READY',
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      agentBindings: [
+        expect.objectContaining({ agentId: AGENT_RECORD_ID, status: 'READY' }),
+      ],
+    });
+  });
+
+  test('rejects READY when the descriptor claims active but the record status is DRAFT (drift false-positive closed)', async () => {
+    // The inverse drift: a descriptor whose `state` defaulted/stuck at
+    // 'active' must not let a non-activated (DRAFT) agent flip live.
+    seedAppWithBinding(AGENT_RECORD_ID);
+    resolveRecordIdMock.mockResolvedValue(AGENT_RECORD_ID);
+    getResourceMock
+      .mockResolvedValueOnce({
+        recordId: APP_RECORD_ID,
+        name: 'Test App',
+        status: 'DRAFT',
+        customDescriptorContent: JSON.stringify({
+          appId: APP_RECORD_ID,
+          manifest: {
+            orgId: 'org-1',
+            version: 1,
+            status: 'DRAFT',
+            agentBindings: [
+              { agentId: AGENT_RECORD_ID, status: 'DESIGN', addedAt: 't' },
+            ],
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        recordId: AGENT_RECORD_ID,
+        name: 'drifted_agent',
+        status: 'DRAFT',
+        customDescriptorContent: JSON.stringify({ state: 'active' }),
+      });
 
     await expect(
       invokeHandler(

@@ -10,6 +10,8 @@ Contract:
 - Final gate offers 'Show me how to publish' (guidance), never a publish
   action with no backing tool.
 - Idempotent via marker.workflowId; requires blueprint + app steps first.
+  The already_done branch still re-issues the idempotent mutation so the
+  backend heals missing app agent bindings (best-effort, never an error).
 - Errors return the nothing-changed copy.
 
 Run with:
@@ -90,14 +92,40 @@ def test_marker_updated_with_workflow_id(execute, marker_store):
     assert marker_store["sess-1"]["workflowId"] == "wf-1"
 
 
-def test_idempotent_second_call_makes_no_mutation(execute, marker_store):
+def test_idempotent_second_call_heals_via_backend_without_duplicating(execute, marker_store):
+    # The already_done branch STILL calls the (idempotent) mutation: the
+    # backend returns the existing workflow instead of duplicating it AND
+    # re-ensures the app's agent bindings — this is what heals a live app
+    # whose workflow was imported before bindings existed, when the user
+    # re-triggers the import conversationally.
     first = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
     second = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
 
-    assert execute.call_count == 1
+    assert execute.call_count == 2
+    variables = execute.call_args.args[1]
+    assert variables["blueprintId"] == "bp-1"
+    assert variables["appId"] == "app-9"
+    assert first["ok"] is True
+    assert second["ok"] is True
     assert second["status"] == "already_done"
     assert "already" in second["summary"].lower()
+    assert second["workflow_id"] == "wf-1"
     _contract(second)
+
+
+def test_already_done_still_returns_when_heal_call_fails(execute, marker_store):
+    # Healing is best-effort: the workflow IS imported, so a failing backend
+    # call must not turn the already_done answer into an error.
+    marker_store["sess-1"].update({"stage": "workflow_imported", "workflowId": "wf-1"})
+    execute.side_effect = AppSyncError("raw internal FROBOZZ", retryable=True)
+
+    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+
+    assert result["ok"] is True
+    assert result["status"] == "already_done"
+    assert result["workflow_id"] == "wf-1"
+    assert "FROBOZZ" not in json.dumps(result)
+    _contract(result)
 
 
 def test_requires_blueprint_first(execute, marker_store):

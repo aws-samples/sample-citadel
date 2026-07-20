@@ -38,13 +38,37 @@ import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dy
 import { getUserId } from '../utils/appsync';
 import { lookupUserOrganization } from '../utils/auth-event';
 import { ValidationError, sanitizeString } from '../utils/validation';
-import { activateProjectAgents, type ActivateAgentsResult } from './agent-config-resolver';
-import { createApp } from './registry-agent-record-resolver';
+import {
+  activateProjectAgents,
+  findProjectAgentRecords,
+  type ActivateAgentsResult,
+} from './agent-config-resolver';
+import {
+  createApp,
+  ensureAppAgentBindings,
+  type EnsureBindingsResult,
+} from './registry-agent-record-resolver';
 import { createWorkflow, publishWorkflow, importBlueprint } from './workflow-resolver';
 import {
   ensureAgentConfigRows,
   extractAgentIdsFromDefinition,
 } from './ensure-agent-config-rows';
+import { RegistryRecordStatusValues } from '../services/registry-service';
+
+/**
+ * Registry statuses whose internal state is 'active' per
+ * RegistryService.toInternalState — the SAME authority the binding core's
+ * READY gate consults. PENDING_APPROVAL counts as active because
+ * SubmitRegistryRecordForApproval is async: the intake flow binds agents
+ * moments after activation submits them, before auto-approval lands.
+ * (registry-sync's mirror intentionally differs — it surfaces 'pending' for
+ * the agents-table cache — so it must NOT be used for gate-aligned checks.)
+ */
+const ACTIVE_MAPPING_STATUSES = new Set<string>([
+  RegistryRecordStatusValues.APPROVED,
+  RegistryRecordStatusValues.UPDATING,
+  RegistryRecordStatusValues.PENDING_APPROVAL,
+]);
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -284,6 +308,71 @@ async function intakeActivateProjectAgents(
   return { ...bySession, matchedBy: null };
 }
 
+/**
+ * Best-effort session-agent binding for intakeCreateApp. Resolves the
+ * session's fabricated agents with the SAME registry match activation uses
+ * (sourceProjectId === sessionId, falling back to the conversations-linked
+ * projectId), keeps only currently-active records (authoritative
+ * toInternalState(record.status) — agents whose activation failed stay
+ * unbound rather than stranded at DESIGN), and delegates each bind to the
+ * canonical binding core via ensureAppAgentBindings.
+ *
+ * NEVER throws: app creation must not be reported failed because a bind
+ * failed. Outcomes are itemized in the log (identifiers/counts only).
+ */
+async function bindSessionAgentsBestEffort(
+  sessionId: string,
+  ctx: SessionContext,
+  appId: string | undefined,
+  userId: string,
+): Promise<EnsureBindingsResult | null> {
+  if (typeof appId !== 'string' || appId.length === 0) {
+    return null;
+  }
+  try {
+    let records = await findProjectAgentRecords(sessionId);
+    let matchedBy: 'sessionId' | 'projectId' = 'sessionId';
+    if (records.length === 0 && ctx.projectId !== sessionId) {
+      records = await findProjectAgentRecords(ctx.projectId);
+      matchedBy = 'projectId';
+    }
+    const activeAgentIds = records
+      .filter((record) => ACTIVE_MAPPING_STATUSES.has(record.status ?? ''))
+      .map((record) => record.recordId);
+    if (activeAgentIds.length === 0) {
+      log('intakeCreateApp', sessionId, {
+        stage: 'ensureAppAgentBindings',
+        skipped: true,
+        matchedRecords: records.length,
+      });
+      return null;
+    }
+    const outcome = await ensureAppAgentBindings(appId, activeAgentIds, userId);
+    log('intakeCreateApp', sessionId, {
+      stage: 'ensureAppAgentBindings',
+      matchedBy,
+      bound: outcome.bound.length,
+      alreadyBound: outcome.alreadyBound.length,
+      failed: outcome.failed.length,
+      failedAgentIds: outcome.failed.map((f) => f.agentId),
+    });
+    return outcome;
+  } catch (error) {
+    // Best-effort by contract — the app exists; bindings can be healed by
+    // re-triggering the blueprint import conversationally.
+    console.error(
+      JSON.stringify({
+        resolver: 'intake-orchestration-resolver',
+        fieldName: 'intakeCreateApp',
+        correlationId: sessionId,
+        stage: 'ensureAppAgentBindings',
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return null;
+  }
+}
+
 async function intakeCreateApp(
   sessionId: string,
   rawName: unknown,
@@ -305,7 +394,7 @@ async function intakeCreateApp(
   // Scoping fields are server-derived only: orgId from the linked project,
   // sourceProjectId from the sessionId (the fabrication orchestration key) so
   // the app can be found again by the same key the fabricated agents carry.
-  return createApp(
+  const created = await createApp(
     {
       orgId,
       name,
@@ -314,6 +403,22 @@ async function intakeCreateApp(
     },
     userId,
   );
+
+  // Associate the session's activated agents so the Agents tab and the
+  // "All agents are READY" publish precondition have bindings to evaluate.
+  // Partial failure never fails app creation.
+  const appId = (created as { appId?: unknown } | null)?.appId;
+  const bindingOutcome = await bindSessionAgentsBestEffort(
+    sessionId,
+    ctx,
+    typeof appId === 'string' ? appId : undefined,
+    userId,
+  );
+
+  // Prefer the post-binding projection (carries the new agentBindings) so
+  // the Python client can surface "linked N agents"; fall back to the
+  // create-time projection when nothing was bound.
+  return bindingOutcome?.finalApp ?? created;
 }
 
 /** Parses the agentIds out of publishWorkflow's missing-agents message. */
@@ -446,6 +551,100 @@ async function intakeCreateBlueprint(
   };
 }
 
+/**
+ * Extracts the top-level `id` a blueprint definition envelope carries.
+ * importBlueprint deep-copies the definition (only node agentIds are
+ * rewritten), so the id survives into the imported workflow — durable
+ * provenance linking an app workflow back to its source blueprint.
+ */
+function parseDefinitionId(definitionJson: string | null | undefined): string | null {
+  if (!definitionJson) {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(definitionJson);
+    const id = (parsed as { id?: unknown } | null)?.id;
+    return typeof id === 'string' && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Normalizes a workflow row's definition attribute to a JSON string. */
+function definitionString(item: Record<string, unknown>): string {
+  return typeof item.definition === 'string'
+    ? item.definition
+    : JSON.stringify(item.definition ?? null);
+}
+
+/**
+ * Finds an app workflow already imported from the blueprint (matched by the
+ * preserved definition id). Returns the workflow row, or null when the app
+ * has none.
+ */
+async function findExistingImportedWorkflow(
+  appItem: Record<string, unknown>,
+  blueprintDefinitionId: string | null,
+): Promise<Record<string, unknown> | null> {
+  if (!blueprintDefinitionId) {
+    return null;
+  }
+  const workflowIds = Array.isArray(appItem.workflowIds) ? appItem.workflowIds : [];
+  for (const workflowId of workflowIds) {
+    if (typeof workflowId !== 'string' || workflowId.length === 0) {
+      continue;
+    }
+    const row = await docClient.send(
+      new GetCommand({ TableName: workflowsTable(), Key: { workflowId } }),
+    );
+    if (!row.Item) {
+      continue;
+    }
+    if (parseDefinitionId(definitionString(row.Item)) === blueprintDefinitionId) {
+      return row.Item;
+    }
+  }
+  return null;
+}
+
+/**
+ * Best-effort READY-binding ensure for every agent a workflow definition
+ * references. Never throws — the import result stands regardless; a missed
+ * bind is healed on the next conversational re-trigger.
+ */
+async function ensureBindingsForDefinition(
+  fieldName: string,
+  sessionId: string,
+  appId: string,
+  definitionJson: string,
+  userId: string,
+): Promise<void> {
+  const agentIds = extractAgentIdsFromDefinition(definitionJson);
+  if (agentIds.length === 0) {
+    return;
+  }
+  try {
+    const outcome = await ensureAppAgentBindings(appId, agentIds, userId);
+    log(fieldName, sessionId, {
+      stage: 'ensureAppAgentBindings',
+      bound: outcome.bound.length,
+      alreadyBound: outcome.alreadyBound.length,
+      failed: outcome.failed.length,
+      failedAgentIds: outcome.failed.map((f) => f.agentId),
+    });
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        resolver: 'intake-orchestration-resolver',
+        fieldName,
+        correlationId: sessionId,
+        stage: 'ensureAppAgentBindings',
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
+
 async function intakeImportBlueprintToApp(
   sessionId: string,
   rawBlueprintId: unknown,
@@ -489,15 +688,47 @@ async function intakeImportBlueprintToApp(
   // Dual-store self-healing for sessions resuming at the import step: the
   // app's later publish path BatchGets the same agents table, so ensure the
   // blueprint's referenced agents have rows now (best-effort).
-  const bpDefinition =
-    typeof blueprintRow.Item.definition === 'string'
-      ? blueprintRow.Item.definition
-      : JSON.stringify(blueprintRow.Item.definition ?? null);
+  const bpDefinition = definitionString(blueprintRow.Item);
   await healAgentConfigRows('intakeImportBlueprintToApp', sessionId, bpDefinition);
+
+  // Idempotency: when the blueprint was already imported into this app
+  // (conversational re-trigger), return the existing workflow instead of
+  // duplicating it — and STILL ensure its agents are bound. This is the
+  // healing path for live apps whose workflow predates app-level bindings.
+  const existing = await findExistingImportedWorkflow(
+    appRow.Item,
+    parseDefinitionId(bpDefinition),
+  );
+  if (existing) {
+    log('intakeImportBlueprintToApp', sessionId, {
+      alreadyImported: true,
+      workflowId: existing.workflowId,
+    });
+    await ensureBindingsForDefinition(
+      'intakeImportBlueprintToApp',
+      sessionId,
+      appId,
+      definitionString(existing),
+      userId,
+    );
+    return existing;
+  }
 
   // agentMapping is the identity mapping — intake blueprints are composed
   // with REAL registry recordIds, never placeholders.
-  return importBlueprint(blueprintId, appId, name, {}, userId, event);
+  const imported = await importBlueprint(blueprintId, appId, name, {}, userId, event);
+
+  // Associate the workflow's agents with the app so the Agents tab and the
+  // "All agents are READY" publish precondition see them (best-effort).
+  await ensureBindingsForDefinition(
+    'intakeImportBlueprintToApp',
+    sessionId,
+    appId,
+    bpDefinition,
+    userId,
+  );
+
+  return imported;
 }
 
 const KNOWN_FIELDS = new Set([

@@ -6,6 +6,7 @@ import type {
   AgentCustomMetadata,
   AgentInvocationBlock,
   AgentOrigin,
+  RegistryRecord,
 } from '../services/registry-service';
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
 import { getGovernanceEnforce } from '../utils/governance-flag';
@@ -794,6 +795,21 @@ function extractSourceProjectId(customDescriptorContent: string | undefined): st
 }
 
 /**
+ * Lists the Registry agent records fabricated for a project/session:
+ * records whose customDescriptorContent carries
+ * `sourceProjectId === projectId`. This is THE canonical fabricated-agent
+ * match — activation (below) and the intake resolver's app-binding path
+ * (intakeCreateApp) both rely on it, so the two can never diverge.
+ */
+export async function findProjectAgentRecords(projectId: string): Promise<RegistryRecord[]> {
+  const registryService = getRegistryService();
+  const records = await registryService.listResources('agent');
+  return records.filter(
+    (record) => extractSourceProjectId(record.customDescriptorContent) === projectId,
+  );
+}
+
+/**
  * Activates every fabricated agent belonging to a project in one operation.
  *
  * Fabricated agents carry their originating `sourceProjectId` inside the
@@ -812,12 +828,8 @@ export async function activateProjectAgents(projectId: string): Promise<Activate
   const registryService = getRegistryService();
   const result: ActivateAgentsResult = { activated: [], failed: [], alreadyActive: [] };
 
-  const records = await registryService.listResources('agent');
+  const records = await findProjectAgentRecords(projectId);
   for (const record of records) {
-    if (extractSourceProjectId(record.customDescriptorContent) !== projectId) {
-      continue;
-    }
-
     const name = record.name || record.recordId;
 
     if (record.status === RegistryRecordStatusValues.APPROVED) {

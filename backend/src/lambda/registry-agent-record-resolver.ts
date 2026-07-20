@@ -1165,7 +1165,10 @@ async function unbindWorkflowFromApp(
   return projectAgentAppNormalized(updated);
 }
 
-async function updateAgentBinding(
+// Exported for reuse by intake-orchestration-resolver (via
+// ensureAppAgentBindings) — the canonical READY-promotion core. Export-only
+// refactor: behaviour is identical for the AppSync mutation path.
+export async function updateAgentBinding(
   input: {
     appId: string;
     agentId: string;
@@ -1212,8 +1215,19 @@ async function updateAgentBinding(
       }
       throw err;
     }
-    const targetManifest = parseDescriptor(targetAgent);
-    if (!targetAgent || targetManifest.state !== 'active') {
+    // The agent's state is derived from the AUTHORITATIVE record.status via
+    // toInternalState — never from the descriptor's `state` mirror, which
+    // drifts: the fabricator writes `state: 'inactive'` and activation
+    // (SubmitRegistryRecordForApproval) flips only record.status, so
+    // registry-fabricated agents carry a stale inactive descriptor while
+    // being genuinely active. The inverse drift (descriptor stuck 'active'
+    // on a DRAFT record) must equally not let a half-wired agent flip live.
+    // Matches the state-authority rule documented in agent-config-resolver's
+    // updateAgentConfig.
+    if (
+      !targetAgent ||
+      getRegistryService().toInternalState(targetAgent.status) !== 'active'
+    ) {
       throw new Error('Agent must be active before it can be marked as ready');
     }
   }
@@ -1262,7 +1276,10 @@ async function updateAgentBinding(
   return projectAgentAppNormalized(updated);
 }
 
-async function addAppComponent(
+// Exported for reuse by intake-orchestration-resolver (via
+// ensureAppAgentBindings) — the canonical agent-binding core. Export-only
+// refactor: behaviour is identical for the AppSync mutation path.
+export async function addAppComponent(
   appId: string,
   component: { type: string; data: string },
   userId: string,
@@ -1350,6 +1367,131 @@ async function addAppComponent(
   });
 
   return projectAgentAppNormalized(updated);
+}
+
+/** Itemized outcome of `ensureAppAgentBindings` (partial success by design). */
+export interface EnsureBindingsResult {
+  /** Agents newly bound (or promoted from a stray DESIGN binding) to READY. */
+  bound: string[];
+  /** Agents that already had a READY binding — untouched. */
+  alreadyBound: string[];
+  /** Per-agent failures; the rest of the batch is unaffected. */
+  failed: { agentId: string; error: string }[];
+  /**
+   * The app projection returned by the LAST successful core call (the same
+   * shape the binding mutations return), or null when nothing was written.
+   * Lets callers return a bindings-inclusive payload without an extra read.
+   */
+  finalApp: unknown | null;
+}
+
+/** Bounded retry for transient registry write conflicts (record UPDATING). */
+const BINDING_CONFLICT_MAX_ATTEMPTS = 3;
+const BINDING_CONFLICT_RETRY_DELAY_MS = 250;
+
+function isRegistryConflict(err: unknown): boolean {
+  const name = err instanceof Error ? err.name : '';
+  const message = err instanceof Error ? err.message : String(err);
+  return name === 'ConflictException' || /conflict|updating/i.test(message);
+}
+
+async function withConflictRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= BINDING_CONFLICT_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (!isRegistryConflict(err) || attempt === BINDING_CONFLICT_MAX_ATTEMPTS) {
+        throw err;
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, BINDING_CONFLICT_RETRY_DELAY_MS * attempt),
+      );
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Ensures every agent in `agentIds` is bound to the app at READY status,
+ * reusing the canonical binding cores (`addAppComponent` for the bind,
+ * `updateAgentBinding` for the READY promotion) — no binding invariant is
+ * re-implemented here.
+ *
+ * Exported for the intake post-fabrication resolver, whose apps are created
+ * with empty `agentBindings` and would otherwise fail the UI's
+ * "All agents are READY" publish precondition with nothing to evaluate.
+ *
+ * Semantics:
+ *  - idempotent: agents with an existing READY binding are skipped untouched
+ *    (no duplicate, no reset of `addedAt`/config fields);
+ *  - convergent: an existing DESIGN binding is promoted to READY without
+ *    being re-added (heals a previous partial failure);
+ *  - partial success: a per-agent failure (e.g. the READY activation gate)
+ *    is itemized in `failed` and never aborts the rest or throws;
+ *  - transient registry write conflicts are retried with a small bounded
+ *    budget (the registry briefly holds records in UPDATING between the
+ *    sequential per-agent writes).
+ *
+ * Throws only when the app record itself does not exist.
+ */
+export async function ensureAppAgentBindings(
+  appId: string,
+  agentIds: string[],
+  userId: string,
+): Promise<EnsureBindingsResult> {
+  const result: EnsureBindingsResult = {
+    bound: [],
+    alreadyBound: [],
+    failed: [],
+    finalApp: null,
+  };
+  const uniqueIds = [...new Set(agentIds)];
+  if (uniqueIds.length === 0) {
+    return result;
+  }
+
+  const record = await getRegistryService().getResource('agent', appId);
+  if (!record) {
+    throw new Error('App not found');
+  }
+  const existingBindings = readManifest(record).agentBindings || [];
+  const statusByAgentId = new Map(
+    existingBindings.map((b) => [b.agentId, b.status]),
+  );
+
+  for (const agentId of uniqueIds) {
+    const existingStatus = statusByAgentId.get(agentId);
+    if (existingStatus === 'READY') {
+      result.alreadyBound.push(agentId);
+      continue;
+    }
+    try {
+      if (existingStatus === undefined) {
+        // Not bound yet — canonical bind (lands at DESIGN)…
+        result.finalApp = await withConflictRetry(() =>
+          addAppComponent(
+            appId,
+            { type: 'agent', data: JSON.stringify({ agentId }) },
+            userId,
+          ),
+        );
+      }
+      // …then canonical promotion to READY (activation-gated). An existing
+      // DESIGN binding takes only this step, preserving its fields.
+      result.finalApp = await withConflictRetry(() =>
+        updateAgentBinding({ appId, agentId, status: 'READY' }, userId),
+      );
+      result.bound.push(agentId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('ensureAppAgentBindings: bind failed', { appId, agentId, error: message });
+      result.failed.push({ agentId, error: message });
+    }
+  }
+
+  return result;
 }
 
 async function removeAppComponent(

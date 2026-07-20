@@ -95,5 +95,23 @@ export function getMockRegistryService() {
     async resolveRecordId(_type: ResourceType, id: string): Promise<string> {
       return id;
     },
+    // Mirrors RegistryService.toInternalState EXACTLY (registry-service.ts) —
+    // gates that derive the agent's state from record.status must behave as
+    // in production. NOTE: deliberately NOT registry-sync's toInternalState,
+    // which maps PENDING_APPROVAL → 'pending' for the agents-table cache;
+    // the service maps it → 'active' (async auto-approval reflects intent).
+    toInternalState(status: string | undefined): string {
+      switch (status) {
+        case 'APPROVED':
+        case 'UPDATING':
+        case 'PENDING_APPROVAL':
+          return 'active';
+        case 'DRAFT':
+        case 'CREATING':
+          return 'maintenance';
+        default:
+          return 'inactive';
+      }
+    },
   };
 }
