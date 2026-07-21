@@ -2464,6 +2464,11 @@ export class BackendStack extends cdk.Stack {
           ACCOUNT_ID: this.account,
         },
         timeout: cdk.Duration.minutes(15), // Max timeout for agent interactions (extraction can be slow)
+        // Right-sized from the 128MB default (~1/12 vCPU): this handler does
+        // SigV4 request signing and AgentCore response-stream iteration,
+        // both CPU-bound. 512MB ≈ ~1/3 vCPU. Pinned by
+        // test/backend-stack-message-handler-memory.test.ts.
+        memorySize: 512,
         logGroup: new logs.LogGroup(this, 'AgentMessageHandlerFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
       }
     );

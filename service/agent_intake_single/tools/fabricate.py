@@ -8,7 +8,7 @@ import boto3
 from strands.tools import tool
 from tools.kb import s3_get, s3_put
 from tools.converse_utils import extract_text
-from config import bedrock, AGENT_MODEL_ID
+from config import bedrock, get_agent_model_id
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ def _write_pending_fabrication_status(session_id: str, agent: dict) -> None:
 
 def _llm(system: str, user: str, max_tokens: int = 8192) -> str:
     resp = bedrock.converse(
-        modelId=AGENT_MODEL_ID,
+        modelId=get_agent_model_id(),
         system=[{"text": system}],
         messages=[{"role": "user", "content": [{"text": user}]}],
         inferenceConfig={"maxTokens": max_tokens},

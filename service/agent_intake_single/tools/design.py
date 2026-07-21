@@ -5,7 +5,7 @@ from strands.tools import tool
 from tools.kb import kb_query, load_json_from_s3, save_json_to_s3, s3_get, s3_put
 from tools.converse_utils import extract_text
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import bedrock, AGENT_MODEL_ID
+from config import bedrock, get_agent_model_id
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), '..', 'templates')
 
@@ -104,7 +104,7 @@ After the section content, add a final line in this exact format (do not omit it
 <!-- summary: one sentence describing the key decisions or content of this section -->"""
 
     response = bedrock.converse(
-        modelId=AGENT_MODEL_ID,
+        modelId=get_agent_model_id(),
         system=[{'text': SYSTEM_PROMPT}],
         messages=[{'role': 'user', 'content': [{'text': user_message}]}],
         inferenceConfig={'maxTokens': 8192},
@@ -231,7 +231,7 @@ Return JSON:
 }}"""
 
     response = bedrock.converse(
-        modelId=AGENT_MODEL_ID,
+        modelId=get_agent_model_id(),
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
         inferenceConfig={'maxTokens': 2048},
     )
@@ -427,7 +427,7 @@ Current defaults:
 {json.dumps(defaults, indent=2)}"""
 
     response = bedrock.converse(
-        modelId=AGENT_MODEL_ID,
+        modelId=get_agent_model_id(),
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
         inferenceConfig={'maxTokens': 2048},
     )

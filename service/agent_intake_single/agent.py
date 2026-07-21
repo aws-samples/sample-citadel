@@ -8,6 +8,7 @@ from collections import OrderedDict
 import base64
 import json
 import os
+import time
 
 load_dotenv()
 
@@ -18,16 +19,20 @@ _lf_url = os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
 if _lf_pk and _lf_sk:
     _auth = base64.b64encode(f"{_lf_pk}:{_lf_sk}".encode()).decode()
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
     _telemetry = StrandsTelemetry()
+    # QW-D: BatchSpanProcessor queues spans and exports on a background
+    # thread. SimpleSpanProcessor blocked each span end on a synchronous
+    # HTTPS round-trip to Langfuse inside the request path. Same exporter,
+    # same endpoint; still entirely un-wired when the keys are absent.
     _telemetry.tracer_provider.add_span_processor(
-        SimpleSpanProcessor(OTLPSpanExporter(
+        BatchSpanProcessor(OTLPSpanExporter(
             endpoint=f"{_lf_url}/api/public/otel/v1/traces",
             headers={"Authorization": f"Basic {_auth}"},
         ))
     )
 
-from config import AGENT_MODEL
+from config import get_agent_model
 from tools.extract import extract_information, get_assessment_summary, update_assessment_field, get_next_assessment_question
 from tools.design import (
     generate_technical_design, get_design_structure, get_design_section, update_design_section,
@@ -40,6 +45,7 @@ from tools.postfab import (
     generate_process_blueprint, import_blueprint_to_app,
 )
 from tools.state import get_intake_state, update_intake_progress, get_postfab_marker
+from tools.emf import emit_turn_metrics
 from tools.kb import kb_query as _kb_query
 from strands.tools import tool
 
@@ -249,7 +255,7 @@ def get_agent(session_id: str) -> Agent:
             f"Post-fabrication: {postfab_stage}"
         )
         _agent_cache[session_id] = Agent(
-            model=AGENT_MODEL,
+            model=get_agent_model(),
             conversation_manager=SummarizingConversationManager(
                 summary_ratio=0.3,
                 preserve_recent_messages=10,
@@ -291,6 +297,9 @@ def get_agent(session_id: str) -> Agent:
 @app.entrypoint
 async def invoke(payload, context: RequestContext):
     """Agent Intake (single agent) — agentification consulting"""
+    # Wave 0 metric anchor: turn start (observability only — the streamed
+    # response below is byte-identical to the un-instrumented path).
+    turn_start = time.monotonic()
     session_id = payload.get("session_id", "")
     user_message = payload.get("prompt", "Hello!")
 
@@ -303,9 +312,21 @@ async def invoke(payload, context: RequestContext):
         messages = [{"text": f"I've uploaded a document. {user_message}".strip()}]
 
     stream = agent.stream_async(messages)
+    agent_result = None
     async for event in stream:
         if "data" in event:
             yield event["data"]
+        if "result" in event:
+            # Final strands event carries the AgentResult (event-loop metrics,
+            # accumulated usage, per-tool metrics). Captured for EMF only.
+            agent_result = event["result"]
+
+    # One EMF flush per completed turn; emit_turn_metrics never raises.
+    emit_turn_metrics(
+        session_id=session_id,
+        turn_duration_ms=(time.monotonic() - turn_start) * 1000.0,
+        agent_result=agent_result,
+    )
 
 
 if __name__ == "__main__":
