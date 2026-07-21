@@ -199,8 +199,81 @@ def _load_resourcing_template() -> dict:
         return json.load(f)
 
 
+# Token budgets for the resourcing-inputs extraction call. The old 2048
+# budget truncated the JSON on real designs (stopReason=max_tokens), which
+# then crashed json.loads — live-confirmed as 14 consecutive tool failures.
+RESOURCING_MAX_TOKENS = 4096
+RESOURCING_RETRY_MAX_TOKENS = 8192
+
+
+def _resourcing_error(reason: str) -> dict:
+    """Structured, retryable tool error (copy rules: what changed = nothing,
+    ONE plain-language reason, ONE next action — never raw error text)."""
+    return {
+        'error': {
+            'what_changed': 'Nothing was changed — no resourcing inputs were inferred.',
+            'reason': reason,
+            'next_action': 'Run the resourcing inference again shortly.',
+            'retryable': True,
+        }
+    }
+
+
+def _first_text_block(response: dict) -> str | None:
+    """First TEXT content block, skipping reasoningContent/toolUse blocks.
+    Returns None (instead of raising) when no text block exists."""
+    try:
+        return extract_text(response)
+    except ValueError:
+        return None
+
+
+def _find_balanced_json(raw: str) -> str | None:
+    """Return the first balanced top-level {...} block in ``raw``.
+
+    String-aware (braces inside JSON strings don't count). Scans only from
+    the FIRST '{': a truncated top-level object therefore yields None rather
+    than silently matching a small balanced inner object. Replaces the old
+    greedy r'\\{.*\\}' regex, which spanned to the LAST '}' in the reply and
+    broke on any trailing prose containing a brace.
+    """
+    start = raw.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return raw[start:i + 1]
+    return None
+
+
 def _extract_resourcing_inputs(session_id: str) -> dict:
-    """Use a single converse() call to extract agents+sizing and integrations+sizing from the design."""
+    """Use a single converse() call to extract agents+sizing and integrations+sizing from the design.
+
+    Robust against the three live failure modes:
+      - reasoningContent-only replies (no text block): one retry requesting
+        plain output, then a structured retryable error;
+      - stopReason=max_tokens truncation: one retry with a higher token
+        budget — a truncated body is NEVER json.loads'd;
+      - malformed / prose-wrapped JSON: balanced-brace extraction +
+        JSONDecodeError converted to a structured retryable error.
+    """
     section2 = s3_get(SECTION_KEY.format(session_id=session_id, section_id='2')) or ''
     section4 = s3_get(SECTION_KEY.format(session_id=session_id, section_id='4')) or ''
     section5 = s3_get(SECTION_KEY.format(session_id=session_id, section_id='5')) or ''
@@ -230,15 +303,45 @@ Return JSON:
   "hitl_points": <integer count of distinct HITL trigger points>
 }}"""
 
-    response = bedrock.converse(
-        modelId=get_agent_model_id(),
-        messages=[{'role': 'user', 'content': [{'text': prompt}]}],
-        inferenceConfig={'maxTokens': 2048},
-    )
-    raw = extract_text(response)
-    import re
-    match = re.search(r'\{.*\}', raw, re.DOTALL)
-    return json.loads(match.group(0)) if match else {}
+    def _converse(user_prompt: str, max_tokens: int) -> dict:
+        return bedrock.converse(
+            modelId=get_agent_model_id(),
+            messages=[{'role': 'user', 'content': [{'text': user_prompt}]}],
+            inferenceConfig={'maxTokens': max_tokens},
+        )
+
+    response = _converse(prompt, RESOURCING_MAX_TOKENS)
+
+    # (a) Select the TEXT block explicitly; if the reply carried only
+    # reasoningContent, retry ONCE steering the model to plain output.
+    raw = _first_text_block(response)
+    if raw is None:
+        response = _converse(
+            prompt + "\n\nIMPORTANT: reply with ONLY the JSON object as plain text — no reasoning, no markdown.",
+            RESOURCING_MAX_TOKENS,
+        )
+        raw = _first_text_block(response)
+        if raw is None:
+            return _resourcing_error('The model reply contained no readable text output.')
+
+    # (b) Respect stopReason: a max_tokens stop means the JSON body is
+    # truncated. Retry ONCE with a higher budget; never parse a truncated body.
+    if response.get('stopReason') == 'max_tokens':
+        response = _converse(prompt, RESOURCING_RETRY_MAX_TOKENS)
+        raw = _first_text_block(response)
+        if raw is None:
+            return _resourcing_error('The model reply contained no readable text output.')
+        if response.get('stopReason') == 'max_tokens':
+            return _resourcing_error('The model reply was cut short twice, so the data would be incomplete.')
+
+    # (c) Balanced-brace extraction + explicit decode handling.
+    body = _find_balanced_json(raw)
+    if body is None:
+        return _resourcing_error('The model reply did not contain a complete set of resourcing data.')
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return _resourcing_error('The model reply could not be read as resourcing data.')
 
 
 @tool

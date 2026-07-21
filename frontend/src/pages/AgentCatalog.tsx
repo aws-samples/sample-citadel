@@ -9,6 +9,7 @@ import { AgentCard } from '../components/AgentCard';
 import { TaskRunner } from '../components/TaskRunner';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { FabricationButton } from '../components/FabricationButton';
+import { summarizeFabricationQueue } from '../components/fabricationGrouping';
 import { FabricationTray } from '../components/FabricationTray';
 import { useFabricatorQueue } from '../hooks/useFabricatorQueue';
 import { cn } from '../components/ui/utils';
@@ -50,6 +51,7 @@ export function AgentCatalog() {
       loadAgents();
     },
   });
+  const queueSummary = summarizeFabricationQueue(queueItems);
 
   useEffect(() => {
     loadAgents();
@@ -314,7 +316,8 @@ export function AgentCatalog() {
           
           {/* Fabrication Button */}
           <FabricationButton
-            queueCount={queueItems.length}
+            activeCount={queueSummary.active}
+            completedCount={queueSummary.completed}
             onClick={() => setIsFabricationTrayOpen(true)}
           />
         </div>

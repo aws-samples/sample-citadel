@@ -481,9 +481,34 @@ export interface UpdateResourceInput {
 // Service class
 // ---------------------------------------------------------------------------
 
+/**
+ * Options for {@link RegistryService.listResources}.
+ */
+export interface ListResourcesOptions {
+  /**
+   * Remaining-time budget supplier — wire it to the Lambda
+   * `context.getRemainingTimeInMillis`. When the returned value drops below
+   * {@link minRemainingTimeMs}, listResources stops issuing Registry calls
+   * and returns the records completed so far (a partial list) instead of
+   * timing out the caller.
+   */
+  getRemainingTimeMs?: () => number;
+  /**
+   * Floor (ms) below which no further Registry calls are issued.
+   * Defaults to 5000.
+   */
+  minRemainingTimeMs?: number;
+}
+
 export class RegistryService {
   private readonly client: BedrockAgentCoreControlClient;
   private readonly registryId: string;
+
+  /**
+   * Upper bound on concurrent GetRegistryRecord calls issued while
+   * hydrating list summaries (the N+1 fix — see listResources).
+   */
+  private static readonly LIST_DETAIL_CONCURRENCY = 10;
 
   // ---------------------------------------------------------------------
   // resolveRecordId LRU cache
@@ -933,12 +958,50 @@ export class RegistryService {
    * Uses CUSTOM descriptorType filter since all our resources use CUSTOM
    * descriptors. The `type` parameter is reserved for future use when the
    * Registry supports finer-grained filtering.
+   *
+   * N+1 fix (live incident: 340 records × sequential GetRegistryRecord —
+   * each carrying SDK retries — blew the 30s resolver budget): detail
+   * fetches now run in PARALLEL with bounded concurrency
+   * ({@link RegistryService.LIST_DETAIL_CONCURRENCY}). A summary-only fast
+   * path is NOT possible for the current callers — the projection evidence:
+   *  - mapToAgentConfig/mapToToolConfig read `orgId` (the tenant filter in
+   *    listAgentConfigsRegistry / listToolConfigsRegistry) from
+   *    customDescriptorContent, which list summaries do not carry;
+   *  - the agent-vs-tool classification below is the inlineContent
+   *    `manifest` discriminator;
+   *  - findProjectAgentRecords / agent-import dedupe / governance workload
+   *    checks all read customDescriptorContent.
+   * So every record still needs its detail — fetched concurrently.
+   *
+   * When {@link ListResourcesOptions.getRemainingTimeMs} is supplied (wire
+   * it to the Lambda context.getRemainingTimeInMillis), the fetch
+   * short-circuits once the remaining budget drops below
+   * {@link ListResourcesOptions.minRemainingTimeMs}: no further Registry
+   * calls are issued and the records completed so far are returned as a
+   * PARTIAL list (with a warning) instead of timing out the resolver.
+   * Budget-skipped records are dropped entirely — NOT pushed as summaries —
+   * because a summary maps to orgId '' (system-shared), which would surface
+   * another tenant's records to every caller.
    */
-  async listResources(type: ResourceType): Promise<RegistryRecord[]> {
+  async listResources(
+    type: ResourceType,
+    options?: ListResourcesOptions,
+  ): Promise<RegistryRecord[]> {
+    const minRemainingTimeMs = options?.minRemainingTimeMs ?? 5000;
+    const budgetLow = (): boolean =>
+      options?.getRemainingTimeMs !== undefined &&
+      options.getRemainingTimeMs() < minRemainingTimeMs;
+
     const records: RegistryRecord[] = [];
     let nextToken: string | undefined;
+    let truncated = false;
 
     do {
+      if (budgetLow()) {
+        truncated = true;
+        break;
+      }
+
       const result: ListRegistryRecordsCommandOutput = await this.withRetry(
         () =>
           this.client.send(
@@ -950,16 +1013,38 @@ export class RegistryService {
           ),
       );
 
-      if (result.registryRecords) {
-        for (const rec of result.registryRecords) {
+      const summaries = result.registryRecords ?? [];
+
+      // Per-summary outcome, index-aligned so output order matches summary
+      // order regardless of GET completion order.
+      type DetailOutcome =
+        | { kind: 'full'; record: RegistryRecord }
+        | { kind: 'summary' } // GET failed — fall back to the summary shape
+        | { kind: 'filtered' } // wrong type for this listing — drop
+        | { kind: 'skipped' }; // time budget exhausted — drop (see note above)
+      const outcomes: DetailOutcome[] = new Array(summaries.length);
+
+      let cursor = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const i = cursor;
+          cursor += 1;
+          if (i >= summaries.length) return;
+          const rec = summaries[i];
           const recId = rec.recordId ?? '';
           if (!recId) {
-            records.push(this.summaryToRecord(rec));
+            outcomes[i] = { kind: 'summary' };
+            continue;
+          }
+          if (budgetLow()) {
+            truncated = true;
+            outcomes[i] = { kind: 'skipped' };
             continue;
           }
           try {
-            // Call SDK directly — do NOT call getResource/resolveRecordId here,
-            // which would recurse back into listResources for short ids.
+            // Call SDK directly — do NOT call getResource/resolveRecordId
+            // here, which would recurse back into listResources for short
+            // ids.
             const detail: GetRegistryRecordCommandOutput = await this.withRetry(
               () =>
                 this.client.send(
@@ -982,34 +1067,52 @@ export class RegistryService {
             // Filter by type using authoritative manifest-presence check:
             // agents always carry a `manifest` in customDescriptorContent;
             // tools store their config in the `description` field and have
-            // no manifest.
+            // no manifest. (A malformed inlineContent throws here and falls
+            // back to the summary shape — the pre-parallel behavior.)
             const meta = full.customDescriptorContent
               ? JSON.parse(full.customDescriptorContent)
               : {};
             const hasManifest = meta.manifest !== undefined;
-
-            if (type === 'agent' && !hasManifest) {
-              // Not an agent — agents always carry a manifest in
-              // customDescriptorContent. Skip tool records (which store
-              // their config in the `description` field instead).
-              continue;
-            }
-            if (type === 'tool' && hasManifest) {
-              // Not a tool — the presence of a manifest indicates this is
-              // an agent record.
-              continue;
-            }
-            records.push(full);
-            continue;
+            const typeMatches = type === 'agent' ? hasManifest : !hasManifest;
+            outcomes[i] = typeMatches
+              ? { kind: 'full', record: full }
+              : { kind: 'filtered' };
           } catch {
-            /* fall through */
+            outcomes[i] = { kind: 'summary' };
           }
-          records.push(this.summaryToRecord(rec));
+        }
+      };
+
+      const workerCount = Math.min(
+        RegistryService.LIST_DETAIL_CONCURRENCY,
+        Math.max(summaries.length, 1),
+      );
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+      for (let i = 0; i < summaries.length; i++) {
+        const outcome = outcomes[i];
+        if (outcome === undefined) continue;
+        switch (outcome.kind) {
+          case 'full':
+            records.push(outcome.record);
+            break;
+          case 'summary':
+            records.push(this.summaryToRecord(summaries[i]));
+            break;
+          case 'filtered':
+          case 'skipped':
+            break;
         }
       }
 
       nextToken = result.nextToken;
-    } while (nextToken);
+    } while (nextToken && !truncated);
+
+    if (truncated) {
+      console.warn(
+        `listResources(${type}): remaining time budget below ${minRemainingTimeMs}ms — returning partial list of ${records.length} records`,
+      );
+    }
 
     return records;
   }

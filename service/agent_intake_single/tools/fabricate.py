@@ -156,46 +156,30 @@ def _registry_state_from_status(status: str) -> str:
     return "inactive"
 
 
-def _get_registry_record_safe(client, record_id: str) -> dict | None:
-    """GetRegistryRecord for one record, returning None on any failure (logged).
-
-    Never raises — a single record's detail being unavailable must not abort
-    the whole catalog listing.
-    """
-    try:
-        resp = client.get_registry_record(registryId=REGISTRY_ID, recordId=record_id)
-        return resp if isinstance(resp, dict) else None
-    except Exception as e:  # noqa: BLE001 — per-record best effort, never raise
-        logger.warning("get_registry_record failed for %s: %s", record_id, e)
-        return None
-
-
-def _parse_inline_metadata(detail: dict) -> dict:
-    """Parse the CUSTOM descriptor inlineContent JSON from a registry record.
-
-    Returns {} when the content is missing or malformed (logged) — never raises.
-    """
-    try:
-        content = (
-            (detail.get("descriptors") or {})
-            .get("custom", {})
-            .get("inlineContent")
-        )
-        if not content:
-            return {}
-        parsed = json.loads(content)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception as e:  # noqa: BLE001 — malformed metadata must not raise
-        logger.warning("Failed to parse registry inlineContent: %s", e)
-        return {}
 
 
 def _get_existing_agents() -> dict[str, dict]:
-    """Return factory agents from the AgentCore Registry, keyed by record name.
+    """Return factory records from the AgentCore Registry, keyed by record name.
 
     Fabricated agents are persisted to the AgentCore Registry (via the arbiter's
     store_agent_config_registry), NEVER to a DynamoDB agent-config table — so
     the intake catalog must read the registry to see ap-*-agent-v1 agents.
+
+    Built from LIST-PAGE SUMMARIES ONLY — no per-record GetRegistryRecord
+    calls. The previous implementation issued one GET per record to read the
+    CUSTOM descriptor inlineContent (the agent/tool ``manifest`` discriminator
+    plus ``sourceProjectId``); at 340 live records that sequential N+1 (each
+    GET carrying SDK retries) blew the 30s tool budget. Every consumer
+    (plan_fabrication reuse-matching, list_factory_agents, postfab
+    _compose_steps, plan_doc) reads only name/state/recordId/description —
+    all present on summaries — and nothing consumed sourceProjectId, so the
+    GETs bought nothing the common path needs.
+
+    Documented tradeoff: without inlineContent the agent/tool discriminator
+    is invisible, so tool records sharing the registry are no longer filtered
+    out. Consumers match exact designed-agent names, so this surfaces only as
+    extra rows in the human-facing catalog — accepted in exchange for
+    removing the live timeout.
 
     Each value is::
 
@@ -204,13 +188,11 @@ def _get_existing_agents() -> dict[str, dict]:
             'state': <active|draft|inactive derived from record status>,
             'recordId': <registry recordId, for disambiguation>,
             'description': <human description>,
-            'sourceProjectId': <intake project id from custom metadata, or None>,
         }
 
-    Tool records (custom metadata without a ``manifest`` discriminator) are
-    excluded so only agents surface. Degrades gracefully: when REGISTRY_ID is
-    unset or the list call fails this logs and returns {} — it never raises, so
-    the intake agent stays usable even without registry visibility.
+    Degrades gracefully: when REGISTRY_ID is unset or the list call fails
+    this logs and returns {} — it never raises, so the intake agent stays
+    usable even without registry visibility.
     """
     if not REGISTRY_ID:
         logger.info("REGISTRY_ID unset; cannot list factory agents from registry")
@@ -245,23 +227,11 @@ def _get_existing_agents() -> dict[str, dict]:
                 record_id = summary.get("recordId")
                 if not name or not record_id:
                     continue
-                detail = _get_registry_record_safe(client, record_id)
-                meta = _parse_inline_metadata(detail) if detail else {}
-                # Agents always carry a `manifest` in custom metadata; tools do
-                # not (the manifest is the agent/tool discriminator). When we
-                # have detail and it is clearly a tool record, skip it so the
-                # factory catalog lists agents only. When detail is unavailable
-                # we include the record rather than guess.
-                if detail is not None and meta and "manifest" not in meta:
-                    continue
-                status = (detail.get("status") if detail else None) or summary.get("status", "")
-                description = (detail.get("description") if detail else None) or summary.get("description", "")
                 agents[name] = {
                     "name": name,
-                    "state": _registry_state_from_status(status),
+                    "state": _registry_state_from_status(summary.get("status", "")),
                     "recordId": record_id,
-                    "description": description or "",
-                    "sourceProjectId": meta.get("sourceProjectId"),
+                    "description": summary.get("description") or "",
                 }
             next_token = response.get("nextToken")
             if not isinstance(next_token, str) or not next_token:

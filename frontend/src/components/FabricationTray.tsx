@@ -9,7 +9,11 @@ import {
 import { FabricationQueueItem } from '../services/fabricatorQueueService';
 import { QueueItemCard } from './QueueItemCard';
 import { PackageOpen } from 'lucide-react';
-import { groupFabricationItems } from './fabricationGrouping';
+import {
+  groupFabricationItems,
+  summarizeFabricationQueue,
+  formatFabricationQueueSummary,
+} from './fabricationGrouping';
 
 interface FabricationTrayProps {
   isOpen: boolean;
@@ -38,6 +42,7 @@ export const FabricationTray: React.FC<FabricationTrayProps> = ({
   onNavigate,
 }) => {
   const groups = groupFabricationItems(queueItems);
+  const summary = summarizeFabricationQueue(queueItems);
 
   return (
     <Sheet open={isOpen} onOpenChange={onClose}>
@@ -45,7 +50,7 @@ export const FabricationTray: React.FC<FabricationTrayProps> = ({
         <SheetHeader>
           <SheetTitle className="text-foreground">Fabrication Queue</SheetTitle>
           <SheetDescription className="text-muted-foreground">
-            Monitor pending agent creation requests
+            {formatFabricationQueueSummary(summary)}
           </SheetDescription>
         </SheetHeader>
         <div className="flex flex-col mt-6 gap-4">

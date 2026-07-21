@@ -1444,9 +1444,13 @@ def store_tool_config_registry(
     Phase 2b) are serialized as JSON and stored in the CUSTOM descriptor's
     inlineContent. Tool records deliberately do NOT carry a ``manifest`` key —
     that is the agent/tool type discriminator (commit 0a42938) and must be
-    preserved. After creation the record status is moved to PUBLISHED so the
-    tool is immediately usable (PUBLISHED maps to internal state "active" for
-    fabricator-created tools, per Requirement 8.4).
+    preserved. After creation the record status is moved to APPROVED so the
+    tool is immediately usable (APPROVED maps to internal state "active" for
+    fabricator-created tools, per Requirement 8.4). APPROVED is the only
+    "usable" terminal value UpdateRegistryRecordStatus accepts — the service
+    enum is CREATE_FAILED, DRAFT, UPDATING, PENDING_APPROVAL, UPDATE_FAILED,
+    DEPRECATED, APPROVED, CREATING, REJECTED (a former "PUBLISHED" value
+    raised a live ValidationException here).
 
     Requirements:
     - REGISTRY_ID environment variable must be set with the Registry ID.
@@ -1522,7 +1526,7 @@ def store_tool_config_registry(
 
         # Custom metadata — serialized into the CUSTOM descriptor inlineContent.
         # state is recorded as "active" to match Requirement 8.4; status is
-        # set to PUBLISHED below via UpdateRegistryRecordStatus. The full
+        # set to APPROVED below via UpdateRegistryRecordStatus. The full
         # ``config`` dict and requester ``createdBy`` are preserved here so
         # that moving the executable config out of the top-level description
         # doesn't lose information (QB-013-2 post-boto3-1.42 refactor). Note
@@ -1571,16 +1575,21 @@ def store_tool_config_registry(
 
         print(
             f"[store_tool_config_registry] Record created (recordId={record_id}), "
-            f"setting status to PUBLISHED"
+            f"setting status to APPROVED"
         )
 
-        # Published status => internal state "active" for fabricator-created tools
-        # (Requirement 8.4). Unlike agents, tools are immediately usable after
-        # fabrication.
+        # APPROVED status => internal state "active" for fabricator-created
+        # tools (Requirement 8.4). Unlike agents, tools are immediately usable
+        # after fabrication. NOTE: UpdateRegistryRecordStatus validates status
+        # against the enum {CREATE_FAILED, DRAFT, UPDATING, PENDING_APPROVAL,
+        # UPDATE_FAILED, DEPRECATED, APPROVED, CREATING, REJECTED} — the old
+        # "PUBLISHED" value raised a live ValidationException. APPROVED is the
+        # value both the intake catalog (_registry_state_from_status) and the
+        # backend (toInternalState) map to "active".
         _get_registry_client().update_registry_record_status(
             registryId=registry_id,
             recordId=record_id,
-            status="PUBLISHED",
+            status="APPROVED",
             statusReason="Initial status set by Fabricator",
         )
 

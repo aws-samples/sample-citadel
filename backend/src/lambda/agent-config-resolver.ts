@@ -7,6 +7,7 @@ import type {
   AgentInvocationBlock,
   AgentOrigin,
   RegistryRecord,
+  ListResourcesOptions,
 } from '../services/registry-service';
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
 import { getGovernanceEnforce } from '../utils/governance-flag';
@@ -90,6 +91,27 @@ export function _resetRegistryService(): void {
   registryServiceInstance = null;
 }
 
+/**
+ * Minimal slice of the Lambda Context this resolver consumes. The runtime
+ * always invokes `handler(event, context)`; declaring the parameter keeps
+ * unit-test invocations (which omit it) compiling while letting the list
+ * path thread the remaining-time budget into the Registry N+1 fetch.
+ */
+export interface LambdaContextLike {
+  getRemainingTimeInMillis?: () => number;
+}
+
+/**
+ * Builds listResources options carrying the Lambda remaining-time budget so
+ * a large registry returns a partial list instead of timing out (live
+ * incident: 340 records × sequential GETs > 30s).
+ */
+function budgetOptionsFrom(context?: LambdaContextLike): ListResourcesOptions | undefined {
+  const getRemainingTimeInMillis = context?.getRemainingTimeInMillis;
+  if (typeof getRemainingTimeInMillis !== 'function') return undefined;
+  return { getRemainingTimeMs: () => getRemainingTimeInMillis.call(context) };
+}
+
 interface AgentConfig {
   agentId: string;
   orgId: string;
@@ -126,7 +148,7 @@ export interface RawAgentManifest {
   version?: unknown;
 }
 
-export const handler = async (event: AgentConfigResolverEvent) => {
+export const handler = async (event: AgentConfigResolverEvent, context?: LambdaContextLike) => {
   console.log('Event:', JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
@@ -137,7 +159,7 @@ export const handler = async (event: AgentConfigResolverEvent) => {
     switch (fieldName) {
       case 'listAgentConfigs':
         return registryEnabled
-          ? await listAgentConfigsRegistry(event)
+          ? await listAgentConfigsRegistry(event, context)
           : await listAgentConfigs();
 
       case 'getAgentConfig':
@@ -232,7 +254,10 @@ export async function getAgentConfigRegistry(agentId: string, event?: OrgScopedE
  * receives an empty list with a warning, so anonymous / api-key callers
  * never see cross-tenant data.
  */
-export async function listAgentConfigsRegistry(event?: OrgScopedEvent): Promise<AgentConfig[]> {
+export async function listAgentConfigsRegistry(
+  event?: OrgScopedEvent,
+  context?: LambdaContextLike,
+): Promise<AgentConfig[]> {
   const callerOrgId = event !== undefined ? await extractOrgFromEvent(event) : null;
   const admin = event !== undefined ? isAdminFromEvent(event) : false;
 
@@ -243,7 +268,10 @@ export async function listAgentConfigsRegistry(event?: OrgScopedEvent): Promise<
 
   // 1. Fetch Registry records and map to AgentConfig
   const registryService = getRegistryService();
-  const registryRecords = await registryService.listResources('agent');
+  const budgetOptions = budgetOptionsFrom(context);
+  const registryRecords = budgetOptions
+    ? await registryService.listResources('agent', budgetOptions)
+    : await registryService.listResources('agent');
   const allRegistryConfigs = registryRecords.map((record) =>
     registryService.mapToAgentConfig(record),
   );
