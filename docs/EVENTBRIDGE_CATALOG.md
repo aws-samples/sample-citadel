@@ -15,6 +15,7 @@ All async coordination in Citadel flows through a single EventBridge bus: `citad
 | `citadel.backend` | Backend | Lambda resolver events (project, agent, document lifecycle) |
 | `citadel.workflows` | Arbiter (StepRunner) | Workflow execution lifecycle events |
 | `citadel.apps` | Backend | App status transitions and component changes |
+| `agent_intake.<phase>` | Service (intake runtime), Arbiter (Fabricator), Backend (app publish handler) | Intake project-progress milestones — one source per phase: `agent_intake.assessment`, `agent_intake.design`, `agent_intake.planning`, `agent_intake.implementation` |
 | `task.request` | Backend | New task submissions for the Supervisor |
 | `task.completion` | Arbiter (Worker) | Worker agent task completion signals |
 | `supervisor` | Arbiter (Supervisor) | Supervisor chatter and direct responses |
@@ -564,6 +565,47 @@ Published by the Fabricator and consumed by the frontend via subscription fan-ou
 | `fabrication.completed` | Fabricator | Generic fabrication success |
 | `fabrication.failed` | Fabricator | Fabrication error |
 
+## Intake Progress Events (sources: `agent_intake.*`)
+
+The intake progress family drives the per-phase `progress` map on the project record (the project header's Assessment / Design / Planning / Build segments). A single detail-type, `intake.progress.updated`, is published on the agent bus by three emitters; the `source` encodes the phase as `agent_intake.<phase>` (`agent_intake.assessment`, `agent_intake.design`, `agent_intake.planning`, `agent_intake.implementation`).
+
+### Event Types
+
+| DetailType | Source | Producer | Description |
+|------------|--------|----------|-------------|
+| `intake.progress.updated` | `agent_intake.<phase>` (all four) | Intake runtime — `service/agent_intake_single/tools/state.py` `_publish_event` (via `update_intake_progress` / `_internal_update_progress`) | Conversational milestone updates in any phase (after extraction, go/no-go, each design section, completion). The post-fabrication Build milestones — agents activated 70, app created 80, blueprint published 85, workflow imported 90 — also flow through this emitter with `phase: implementation` |
+| `intake.progress.updated` | `agent_intake.implementation` | Fabricator — `arbiter/fabricator/index.py` `publish_intake_progress` | Per-agent fabrication build progress, scaled into the Build segment's 10–60 window (`10 + ((agent_index + 1) / total_agents) × 50`, capped at 60). A failed agent build emits `completionPercentage: -1` — a failure signal, not progress. Skipped entirely when `COMPLETION_BUS_NAME` or the session id is absent |
+| `intake.progress.updated` | `agent_intake.implementation` | Backend — `backend/src/lambda/app-publish-handler.ts` `publishApp` | Build-segment completion (`completionPercentage: 100`, `changeSummary: "App published"`) when the published app carries the intake linkage (`sourceProjectId` stamped by `intakeCreateApp`; absent for UI-created apps). Best-effort — the publish never fails on progress telemetry — and a duplicate publish cannot re-emit, because the already-PUBLISHED idempotency check returns before this step |
+
+### Event Schema
+
+```json
+{
+  "source": "agent_intake.<phase>",
+  "detail-type": "intake.progress.updated",
+  "detail": {
+    "sessionId": "string (intake session id — the projects-table row id the consumer updates)",
+    "phase": "assessment | design | planning | implementation",
+    "completionPercentage": "number (0-100; -1 = fabrication-failure signal)",
+    "changeSummary": "string (plain-language milestone description)",
+    "timestamp": "ISO 8601 (optional — the Fabricator emitter omits it)"
+  }
+}
+```
+
+### Routing and Consumer
+
+`ProgressUpdateRule` (BackendStack, `citadel-progress-update-{env}`) matches detail-type `intake.progress.updated` from the four `agent_intake.*` sources and targets the Project Progress Updater Lambda (`backend/src/lambda/project-progress-updater.ts`; retryAttempts 2, maxEventAge 2 hours).
+
+The consumer's write semantics make the family safe under duplicates, retries, and out-of-order delivery:
+
+- **Idempotent** — `IdempotencyGuard` keyed on the EventBridge event id; a redelivered event is a no-op.
+- **Monotonic** — the nested `progress.<phase>` write is guarded by a DynamoDB condition (`attribute_not_exists(progress.<phase>) OR progress.<phase> < :pct`), so a phase's progress only ever advances; a stale or lower concurrent value is a conditional no-op. (The intake runtime's own direct project write in `state.py` applies the same monotonic floor.)
+- **Failure signals ignored** — a negative `completionPercentage` (the Fabricator's failed-build convention) is skipped entirely: it can neither regress the segment nor write a negative value; the last real progress value stands.
+- **Clamped and validated** — values are capped at 100; an unknown `phase` is skipped.
+- **No skeleton rows** — when the `progress` map is missing, it is initialized only on an existing project row; events for sessions with no project record are skipped, never materialized into new rows.
+- **Derived fields** — each accepted write recomputes `progress.overall` (the rounded mean of the four phase values) and sets `progress.currentPhase` from the phase and whether it reached 100.
+
 ## EventBridge Rules (defined in CDK)
 
 ### ArbiterStack Rules
@@ -583,6 +625,12 @@ Published by the Fabricator and consumed by the frontend via subscription fan-ou
 | Rule | Event Pattern | Target |
 |------|--------------|--------|
 | `HealthCheckScheduleRule` | Schedule: every 15 minutes | Health Monitor Lambda |
+
+### BackendStack Rules
+
+| Rule | Event Pattern | Target |
+|------|--------------|--------|
+| `ProgressUpdateRule` | detailType: `intake.progress.updated`; source: `agent_intake.assessment`, `agent_intake.design`, `agent_intake.planning`, `agent_intake.implementation` | Project Progress Updater Lambda |
 
 ## Idempotency
 

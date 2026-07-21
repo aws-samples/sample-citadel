@@ -60,6 +60,11 @@ blueprint from your technical design, and imports it into the app. Because
 the blueprint's steps reference the real fabricated agents, there are no
 placeholder slots to remap.
 
+The workflow's nodes are named after the step names in your design
+documents — human-readable labels such as "Invoice Intake Classifier
+Agent", not internal agent identifiers — so the canvas reads like the
+process you designed.
+
 The imported workflow arrives as a `DRAFT` named `<app name> Process` on the
 app's Workflows tab, exactly like a catalog import. From there the standard
 flow in the rest of this guide applies: publish the workflow to enable Run,
@@ -68,6 +73,12 @@ walks you through those same steps — including that the app's Publish button
 appears only after you Activate the app, and that the API key is shown only
 once — but the agent never publishes on your behalf; you publish from the
 app's pages.
+
+If you later ask the intake conversation for the blueprint again, it offers
+a "Regenerate the blueprint" action rather than silently rebuilding: a
+fresh blueprint is published, and importing it adds a fresh workflow
+alongside the existing one — the earlier workflow stays on the app's
+Workflows tab until you remove it there.
 
 ### Worked example: Echo Demo Workflow
 

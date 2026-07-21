@@ -113,13 +113,84 @@ intake-orchestration pattern in [RESOLVER_GUIDE.md](./RESOLVER_GUIDE.md)):
 | Conversational step | Mutation | What it does |
 |---------------------|----------|--------------|
 | Activate agents | `intakeActivateProjectAgents(sessionId)` | Activates the fabricated agents. Matches the fabricator-stamped `sourceProjectId` by session id first, falling back to the conversations-linked project id; the result's `matchedBy` field reports which key matched (`null` when neither did) |
-| Create the app | `intakeCreateApp(sessionId, name, description)` | Creates the Agent App as a registry record in `DRAFT`. The agent proposes a name from the project and the user confirms or renames before this runs |
+| Create the app | `intakeCreateApp(sessionId, name, description)` | Creates the Agent App as a registry record in `DRAFT`. The agent proposes a name from the project — pre-sanitized to the registry-safe form, so it matches what gets created — and the user confirms or renames before this runs. Idempotent: a retry returns the session's existing app |
 | Generate the blueprint | `intakeCreateBlueprint(sessionId, name, definition)` | Composes a process blueprint from the technical design and fabrication plan, with real fabricated agents as steps, and creates + publishes it in one call. An `AGENTS_SYNCING` result is the retryable registry-sync race, surfaced to the user as "Try again" |
-| Import the workflow | `intakeImportBlueprintToApp(sessionId, blueprintId, appId, name)` | Imports the published blueprint into the app as a `DRAFT` workflow on the app's Workflows tab |
+| Import the workflow | `intakeImportBlueprintToApp(sessionId, blueprintId, appId, name)` | Imports the published blueprint into the app as a `DRAFT` workflow on the app's Workflows tab, and ensures the app's agent bindings. Re-running returns the existing workflow instead of duplicating it |
 
 All four mutations are declared `@aws_iam` only — they are called
 exclusively by the intake AgentCore runtime over SigV4 and are unreachable
 from user-pool clients.
+
+### App naming and idempotent creation
+
+The app is a registry record, and the AgentCore Registry constrains record
+names to `^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$` — spaces are illegal. The shared
+service layer sanitizes every name to that form at creation
+(`backend/src/utils/registry-name.ts`: illegal characters map to hyphens,
+hyphen runs collapse, the result is never empty), and the intake agent
+applies the identical rules to its proposal
+(`service/agent_intake_single/tools/registry_name.py`), so the consent gate
+shows exactly the name that will be created — a project called "Test -
+Ingest" is proposed as "Test-Ingest" up front, never silently renamed after
+the fact.
+
+App creation is idempotent by session. `intakeCreateApp` stamps the app
+with a server-derived `sourceProjectId` (the session id) and looks the app
+up by that same key before creating anything, so a consented retry — for
+example after a client timeout on a call that had in fact persisted the
+app — returns the session's existing app instead of minting a duplicate.
+
+By design, creation performs no agent binding pass (an inline binding pass
+previously consumed the creation call's timeout budget, and the resulting
+retries are what produced duplicate apps). The import step is the binding
+point: `intakeImportBlueprintToApp` ensures every agent the workflow
+references is bound to the app with a `READY` binding — on the first import
+and again on any conversational re-trigger, which also heals apps whose
+workflow predates app-level bindings. The practical effect is that the
+app's Agents tab populates at import time rather than at creation.
+
+### Build-phase progress
+
+The flow reports progress into the project header's Build segment as it
+goes. Confirming the fabrication plan marks the segment at 10; per-agent
+fabrication events scale within 10–60 while the builds run; and each
+completed step then lands a fixed milestone — agents activated 70, app
+created 80, blueprint published 85, workflow imported 90. Publishing the
+app completes the segment at 100 (emitted by the backend publish handler
+for intake-created apps). All of these writes are monotonic — progress only
+ever advances, so an idempotent re-run, a stale event, or out-of-order
+delivery can never move the segment backwards — and a failed agent build is
+a signal the updater ignores, not a regression. The event contract is
+cataloged under Intake Progress Events in
+[EVENTBRIDGE_CATALOG.md](./EVENTBRIDGE_CATALOG.md).
+
+### The living fabrication plan document
+
+The fabrication plan written at plan confirmation does not go stale — the
+flow keeps it a living document
+(`service/agent_intake_single/tools/plan_doc.py`). Whenever the agent
+checks build status and finds the builds terminal, and again at every
+post-fabrication milestone, it refreshes the plan document in place. The
+refresh regenerates only the sections it owns: the per-agent status table,
+recomputed from live build-job and registry state in plain phrases
+("Built", "Active — ready to use"), and a Delivered Artifacts section
+listing the activated agents, the app, the published blueprint with its
+step count, and the imported workflow, each entry keeping its
+first-recorded timestamp. Everything else in the document — including the
+authored agent specifications — is preserved byte for byte, an unchanged
+document is not rewritten, and a failed refresh never fails the step that
+triggered it.
+
+### Regenerating the blueprint
+
+Once the blueprint is published, asking the agent to generate it again does
+not silently rebuild it — the agent offers an explicit "Regenerate the
+blueprint" action instead. On consent, it composes and publishes a fresh
+blueprint and re-opens the import gate; importing then adds a fresh
+workflow to the app (a fresh blueprint means the already-imported detection
+treats the import as new rather than returning the earlier workflow). The
+workflow imported from the prior blueprint stays on the app until the user
+removes it there.
 
 Starting states after the flow completes: the app is a `DRAFT` registry
 record and the imported workflow is a `DRAFT` on the app's **Workflows**
