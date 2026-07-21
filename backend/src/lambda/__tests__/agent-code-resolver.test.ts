@@ -85,12 +85,21 @@ describe('agent-code-resolver', () => {
       expect(result.version).toBeNull();
     });
 
-    test('throws when agent config not found', async () => {
+    test('falls back to agentId.py in S3 when no DynamoDB config exists (registry-based agent)', async () => {
       dynamoMock.on(GetCommand).resolves({});
 
-      await expect(
-        handler(makeEvent('getAgentCode', { agentId: 'missing' }))
-      ).rejects.toThrow('Agent config not found');
+      const noSuchKeyError = new Error('NoSuchKey');
+      noSuchKeyError.name = 'NoSuchKey';
+      s3Mock.on(GetObjectCommand).rejects(noSuchKeyError);
+
+      const result = await invoke(makeEvent('getAgentCode', { agentId: 'missing' }));
+
+      expect(result.agentId).toBe('missing');
+      expect(result.code).toContain('def handler');
+      expect(result.version).toBeNull();
+
+      const getCalls = s3Mock.commandCalls(GetObjectCommand);
+      expect(getCalls[0].args[0].input.Key).toBe('agents/missing.py');
     });
   });
 
@@ -113,14 +122,19 @@ describe('agent-code-resolver', () => {
       expect(putCalls[0].args[0].input.Key).toBe('agents/my_agent.py');
     });
 
-    test('throws when agent config not found', async () => {
+    test('falls back to agentId.py in S3 when no DynamoDB config exists (registry-based agent)', async () => {
       dynamoMock.on(GetCommand).resolves({});
+      s3Mock.on(PutObjectCommand).resolves({ VersionId: 'v3' });
 
-      await expect(
-        handler(makeEvent('updateAgentCode', {
-          input: { agentId: 'missing', code: 'x' },
-        }))
-      ).rejects.toThrow('Failed to update agent code');
+      const result = await invoke(makeEvent('updateAgentCode', {
+        input: { agentId: 'missing', code: 'x' },
+      }));
+
+      expect(result.agentId).toBe('missing');
+      expect(result.code).toBe('x');
+
+      const putCalls = s3Mock.commandCalls(PutObjectCommand);
+      expect(putCalls[0].args[0].input.Key).toBe('agents/missing.py');
     });
   });
 
