@@ -38,7 +38,6 @@ export const AgentDetails: React.FC<AgentDetailsProps> = ({
   useEffect(() => {
     if (agentId && !isCreating) {
       loadAgent();
-      loadAgentCode();
     } else if (isCreating) {
       // Initialize form for creating new agent
       const initialConfig = {
@@ -98,7 +97,12 @@ def handler(event, context):
         let config = data.config;
         if (typeof config === 'string') {
           console.debug('Parsing config from string');
-          config = JSON.parse(config);
+          try {
+            config = config.trim() ? JSON.parse(config) : {};
+          } catch {
+            console.warn('Agent config is not valid JSON, treating as empty:', config);
+            config = {};
+          }
         }
         console.debug('Final config:', config);
         console.debug('Final config type:', typeof config);
@@ -114,6 +118,11 @@ def handler(event, context):
           agentId: agentWithParsedConfig.agentId,
           config: agentWithParsedConfig.config,
         });
+
+        // Load code using the agent's name (which matches the S3 key)
+        // rather than the recordId which doesn't have a corresponding file.
+        const codeLookupId = data.name || (config as any)?.name || agentId;
+        loadAgentCode(codeLookupId);
       }
     } catch (err: any) {
       setError(err.message || 'Failed to load agent');
@@ -122,11 +131,12 @@ def handler(event, context):
     }
   };
 
-  const loadAgentCode = async () => {
-    if (!agentId) return;
+  const loadAgentCode = async (nameOverride?: string) => {
+    const codeId = nameOverride || agentId;
+    if (!codeId) return;
 
     try {
-      const codeData = await agentConfigService.getAgentCode(agentId);
+      const codeData = await agentConfigService.getAgentCode(codeId);
       if (codeData) {
         console.debug('Loaded code length:', codeData.code.length);
         console.debug('Loaded code:', codeData.code);
@@ -263,7 +273,7 @@ def handler(event, context):
 
   const handleDelete = async () => {
     if (!agent) return;
-    if (!window.confirm(`Are you sure you want to delete agent "${agent.agentId}"?`)) {
+    if (!window.confirm(`Are you sure you want to delete agent "${agent.name || (agent.config as any)?.name || agent.agentId}"?`)) {
       return;
     }
 
@@ -332,7 +342,7 @@ def handler(event, context):
         <div className="agent-details-header">
           <div>
             <h2 className="agent-details-title">
-              {isCreating ? 'Create New Agent' : agent?.agentId}
+              {isCreating ? 'Create New Agent' : (agent?.name || (agent?.config as any)?.name || agent?.agentId)}
             </h2>
             {agent && !isCreating && (
               <div className="agent-details-meta">

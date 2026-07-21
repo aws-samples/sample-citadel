@@ -38,6 +38,7 @@ const getAgentConfigQuery = `
   query GetAgentConfig($agentId: String!) {
     getAgentConfig(agentId: $agentId) {
       agentId
+      name
       config
       state
       categories
@@ -51,6 +52,7 @@ const searchAgentConfigsQuery = `
   query SearchAgentConfigs($query: String!) {
     searchAgentConfigs(query: $query) {
       agentId
+      name
       config
       state
       categories

@@ -834,7 +834,7 @@ export function Integrations() {
                 
                 // Parse config if it's a string
                 const parsedConfig = typeof selectedIntegration.config === 'string' 
-                  ? JSON.parse(selectedIntegration.config) 
+                  ? (() => { try { return selectedIntegration.config.trim() ? JSON.parse(selectedIntegration.config) : {}; } catch { return {}; } })()
                   : selectedIntegration.config;
                 
                 if (connectorDef.formConfig.authFields && parsedConfig) {

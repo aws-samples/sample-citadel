@@ -35,7 +35,7 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
   const [showSandbox, setShowSandbox] = useState(false);
   // Parse config if it's a string
   const config = typeof tool.config === 'string' 
-    ? JSON.parse(tool.config) 
+    ? (() => { try { return tool.config.trim() ? JSON.parse(tool.config) : {}; } catch { return {}; } })()
     : tool.config;
 
   // Only show config button for admin and developer roles
