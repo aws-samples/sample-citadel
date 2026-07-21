@@ -19,6 +19,7 @@ import {
   InvokeAgentRuntimeCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 import { IdempotencyGuard } from "../utils/idempotency";
+import { emitMetrics } from "../utils/emf";
 import { sanitizeUntrustedAgentOutput } from "../utils/sanitize-agent-output";
 import { RegistryService } from "../services/registry-service";
 import type {
@@ -238,12 +239,21 @@ export async function getAgentConfig(agentId: string): Promise<AgentCoreConfig> 
 /**
  * Send message to AgentCore Runtime
  * Uses the bedrock-agentcore service API
+ *
+ * Wave 0 EMF instrumentation (OBSERVABILITY ONLY — response handling is
+ * unchanged): captures TimeToFirstToken_ms (just before the
+ * InvokeAgentRuntimeCommand send → first chunk observed in the stream loop),
+ * AgentTurnTotal_ms (send → stream fully consumed) and — when the caller
+ * provides its start time — HandlerOverhead_ms (handler start → invoke
+ * start). All three flush as ONE EMF line after the turn completes; the
+ * emitter never throws.
  */
 async function sendMessageToAgentCore(
   config: AgentCoreConfig,
   message: string,
   sessionId: string,
-  sessionAttributes?: Record<string, unknown>
+  sessionAttributes?: Record<string, unknown>,
+  timing?: { handlerStartMs: number }
 ): Promise<string> {
   try {
     const region = config.region || process.env.AWS_REGION || "ap-southeast-2";
@@ -271,6 +281,11 @@ async function sendMessageToAgentCore(
       qualifier: "DEFAULT",
     });
 
+    // Metric anchor: just before the InvokeAgentRuntimeCommand is sent.
+    const invokeStartMs = Date.now();
+    let firstChunkAtMs: number | undefined;
+    let streamEndAtMs: number | undefined;
+
     const response = await client.send(command);
 
     console.log("AgentCore invocation response:", {
@@ -296,11 +311,15 @@ async function sendMessageToAgentCore(
 
         // Convert stream to string
         for await (const chunk of stream) {
+          if (firstChunkAtMs === undefined) {
+            firstChunkAtMs = Date.now();
+          }
           if (chunk) {
             const chunkStr = Buffer.from(chunk).toString("utf-8");
             chunks.push(chunkStr);
           }
         }
+        streamEndAtMs = Date.now();
 
         const fullResponse = chunks.join("");
         console.log("Raw stream response:", fullResponse);
@@ -333,6 +352,7 @@ async function sendMessageToAgentCore(
       } else {
         // Non-streaming response
         const buffer = await response.response.transformToByteArray();
+        streamEndAtMs = Date.now();
         responseText = Buffer.from(buffer).toString("utf-8");
 
         // Try to parse as JSON
@@ -358,6 +378,23 @@ async function sendMessageToAgentCore(
       responseText.substring(0, 200) + (responseText.length > 200 ? "..." : "")
     );
     console.log("AgentCore invocation completed successfully");
+
+    // Wave 0 baseline metrics — one EMF flush per completed turn. sessionId
+    // and requestId are high-cardinality, so they ride as properties (log
+    // fields), never as dimensions. emitMetrics never throws.
+    emitMetrics({
+      metrics: [
+        ...(timing
+          ? [{ name: "HandlerOverhead_ms", value: invokeStartMs - timing.handlerStartMs }]
+          : []),
+        ...(firstChunkAtMs !== undefined
+          ? [{ name: "TimeToFirstToken_ms", value: firstChunkAtMs - invokeStartMs }]
+          : []),
+        { name: "AgentTurnTotal_ms", value: (streamEndAtMs ?? Date.now()) - invokeStartMs },
+      ],
+      properties: { sessionId, requestId: response.$metadata?.requestId },
+    });
+
     return responseText;
   } catch (error) {
     console.error("Failed to send message to AgentCore:", error);
@@ -723,6 +760,8 @@ async function dispatchImportedInvocation(
 export const handler = async (
   event: EventBridgeEvent<"message.sent_to_agent", MessageSentToAgentEvent>
 ): Promise<void> => {
+  // Wave 0 metric anchor: handler start (HandlerOverhead_ms = this → invoke start).
+  const handlerStartMs = Date.now();
   console.log("Received event:", JSON.stringify(event, null, 2));
 
   // Idempotency key: prefer the logical message id (deterministic for the
@@ -806,7 +845,8 @@ export const handler = async (
       agentConfig,
       message,
       sessionId,
-      sessionAttributes
+      sessionAttributes,
+      { handlerStartMs }
     );
 
     console.log(`Successfully received response from agent ${agentId}`);
