@@ -349,7 +349,7 @@ export function CreateAgentWizard({ onBack, onComplete, onRequestSubmitted }: Cr
 
             <div className="selection-grid">
               {availableTools.map((tool) => {
-                const config = typeof tool.config === 'string' ? JSON.parse(tool.config) : tool.config;
+                const config = typeof tool.config === 'string' ? (() => { try { return tool.config.trim() ? JSON.parse(tool.config) : {}; } catch { return {}; } })() : tool.config;
                 const isSelected = selectedTools.includes(tool.toolId);
 
                 return (

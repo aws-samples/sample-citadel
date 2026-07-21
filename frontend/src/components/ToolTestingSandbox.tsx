@@ -118,7 +118,7 @@ function matchFieldToBinding(
 }
 
 export function ToolTestingSandbox({ tool, orgId, onClose }: ToolTestingSandboxProps) {
-  const config = typeof tool.config === 'string' ? JSON.parse(tool.config) : tool.config;
+  const config = typeof tool.config === 'string' ? (() => { try { return tool.config.trim() ? JSON.parse(tool.config) : {}; } catch { return {}; } })() : tool.config;
   const schema = config?.schema?.properties;
   const hasSchema = schema && Object.keys(schema).length > 0;
 

@@ -111,6 +111,15 @@ const deleteToolConfigMutation = `
   }
 `;
 
+function safeParseConfig(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+  try {
+    return raw.trim() ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
 export const toolConfigService = {
   async listToolConfigs(): Promise<ToolConfig[]> {
     try {
@@ -120,7 +129,7 @@ export const toolConfigService = {
       
       return (response.listToolConfigs || []).map((tool: any) => ({
         ...tool,
-        config: typeof tool.config === 'string' ? JSON.parse(tool.config) : tool.config,
+        config: safeParseConfig(tool.config),
       }));
     } catch (error) {
       console.error('Error listing tool configs:', error);
@@ -140,7 +149,7 @@ export const toolConfigService = {
       
       return {
         ...tool,
-        config: typeof tool.config === 'string' ? JSON.parse(tool.config) : tool.config,
+        config: safeParseConfig(tool.config),
       };
     } catch (error) {
       console.error('Error getting tool config:', error);
@@ -157,7 +166,7 @@ export const toolConfigService = {
 
       return (response.searchToolConfigs || []).map((tool: any) => ({
         ...tool,
-        config: typeof tool.config === 'string' ? JSON.parse(tool.config) : tool.config,
+        config: safeParseConfig(tool.config),
       }));
     } catch (error) {
       console.warn('Semantic search failed, falling back to client-side filtering:', error);
@@ -202,7 +211,7 @@ export const toolConfigService = {
       const tool = response.createToolConfig;
       return {
         ...tool,
-        config: typeof tool.config === 'string' ? JSON.parse(tool.config) : tool.config,
+        config: safeParseConfig(tool.config),
       };
     } catch (error) {
       console.error('Error creating tool config:', error);
@@ -232,7 +241,7 @@ export const toolConfigService = {
       const tool = response.updateToolConfig;
       return {
         ...tool,
-        config: typeof tool.config === 'string' ? JSON.parse(tool.config) : tool.config,
+        config: safeParseConfig(tool.config),
       };
     } catch (error) {
       console.error('Error updating tool config:', error);

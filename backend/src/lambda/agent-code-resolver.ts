@@ -55,17 +55,24 @@ async function getAgentCode(args: GetAgentCodeArgs) {
 
     const configResponse = await docClient.send(getConfigCommand);
     
-    if (!configResponse.Item) {
-      throw new Error(`Agent config not found for agentId: ${agentId}`);
+    let filename: string;
+    if (configResponse.Item) {
+      // Parse config to get filename
+      let config = configResponse.Item.config;
+      if (typeof config === 'string') {
+        try {
+          config = JSON.parse(config);
+        } catch {
+          config = {};
+        }
+      }
+      filename = config.filename || `${agentId}.py`;
+    } else {
+      // Registry-based agent: DynamoDB has no record.
+      // Try using agentId directly as filename.
+      filename = `${agentId}.py`;
     }
 
-    // Parse config to get filename
-    let config = configResponse.Item.config;
-    if (typeof config === 'string') {
-      config = JSON.parse(config);
-    }
-
-    const filename = config.filename || `${agentId}.py`;
     const key = `agents/${filename}`;
 
     // Get code from S3
@@ -125,17 +132,23 @@ async function updateAgentCode(args: UpdateAgentCodeArgs) {
 
     const configResponse = await docClient.send(getConfigCommand);
     
-    if (!configResponse.Item) {
-      throw new Error(`Agent config not found for agentId: ${agentId}`);
+    let filename: string;
+    if (configResponse.Item) {
+      // Parse config to get filename
+      let config = configResponse.Item.config;
+      if (typeof config === 'string') {
+        try {
+          config = JSON.parse(config);
+        } catch {
+          config = {};
+        }
+      }
+      filename = config.filename || `${agentId}.py`;
+    } else {
+      // Registry-based agent: DynamoDB has no record.
+      filename = `${agentId}.py`;
     }
 
-    // Parse config to get filename
-    let config = configResponse.Item.config;
-    if (typeof config === 'string') {
-      config = JSON.parse(config);
-    }
-
-    const filename = config.filename || `${agentId}.py`;
     const key = `agents/${filename}`;
 
     // Update code in S3
