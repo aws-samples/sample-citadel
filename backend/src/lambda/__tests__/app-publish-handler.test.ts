@@ -809,3 +809,106 @@ describe('buildStatusTransitionEvent', () => {
     });
   });
 });
+
+// ── Build-segment progress on publish (intake-linked apps) ──
+
+describe('publishApp intake progress-on-publish', () => {
+  const mockPolicyManager = {
+    getAccountContext: jest.fn().mockResolvedValue({ accountId: '123456789012', region: 'us-east-1' }),
+    ensureRole: jest.fn().mockResolvedValue(undefined),
+    deleteRole: jest.fn().mockResolvedValue(undefined),
+  } as unknown as PolicyManager;
+
+  let defaultDeps: Parameters<typeof publishApp>[2];
+
+  beforeEach(() => {
+    setupDefaultMocks();
+    defaultDeps = {
+      docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
+      apiGwClient: new ApiGatewayV2Client({}),
+      eventBridgeClient: new EventBridgeClient({}),
+      policyManager: mockPolicyManager,
+      appsTable: 'citadel-apps-test',
+      eventBusName: 'citadel-agents-test',
+      environment: 'dev',
+      authorizerFnArn: 'arn:aws:lambda:us-east-1:123:function:auth',
+      region: 'us-east-1',
+    };
+  });
+
+  function seedPublishableApp(metadataOverrides: Partial<AppMetadata> = {}) {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        makeMetadata({ status: 'ACTIVE', workflowIds: ['wf-1'], ...metadataOverrides }),
+        { sortId: 'AGENT#agent-1', agentId: 'agent-1', status: 'READY' },
+      ],
+    });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
+  }
+
+  function findIntakeProgressEntries() {
+    return ebMock
+      .commandCalls(PutEventsCommand)
+      .flatMap((c) => c.args[0].input.Entries ?? [])
+      .filter(
+        (e) =>
+          e.Source === 'agent_intake.implementation' &&
+          e.DetailType === 'intake.progress.updated',
+      );
+  }
+
+  test('emits implementation=100 intake progress event when the app carries a sourceProjectId', async () => {
+    seedPublishableApp({ sourceProjectId: 'proj-42' });
+
+    await publishApp('app-1', 'user-1', defaultDeps);
+
+    const entries = findIntakeProgressEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0].EventBusName).toBe('citadel-agents-test');
+    const detail = JSON.parse(entries[0].Detail as string);
+    expect(detail).toMatchObject({
+      sessionId: 'proj-42',
+      phase: 'implementation',
+      completionPercentage: 100,
+    });
+  });
+
+  test('emits NO intake progress event when the app has no sourceProjectId linkage (backward compatible)', async () => {
+    seedPublishableApp();
+
+    await publishApp('app-1', 'user-1', defaultDeps);
+
+    expect(findIntakeProgressEntries()).toHaveLength(0);
+    // The status-transition event still goes out.
+    expect(ebMock.commandCalls(PutEventsCommand).length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('publish still succeeds when the progress emission fails (best-effort)', async () => {
+    seedPublishableApp({ sourceProjectId: 'proj-42' });
+    ebMock.on(PutEventsCommand).callsFake((input: { Entries?: Array<{ Source?: string }> }) => {
+      if (input.Entries?.some((e) => e.Source === 'agent_intake.implementation')) {
+        throw new Error('EventBridge unavailable');
+      }
+      return Promise.resolve({});
+    });
+
+    const result = await publishApp('app-1', 'user-1', defaultDeps);
+
+    expect(result.app.status).toBe('PUBLISHED');
+    expect(result.endpointUrl).toBeTruthy();
+  });
+
+  test('already-published idempotent path emits no progress event', async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        makeMetadata({ status: 'PUBLISHED', endpointUrl: 'https://x', apiId: 'api-x', sourceProjectId: 'proj-42' }),
+        { sortId: 'APIKEY#key-1', keyId: 'key-1', groupId: 'APP#app-1' },
+      ],
+    });
+
+    await publishApp('app-1', 'user-1', defaultDeps);
+
+    expect(findIntakeProgressEntries()).toHaveLength(0);
+  });
+});

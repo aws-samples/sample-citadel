@@ -43,6 +43,18 @@ const servicesStack = new ServicesStack(app, `citadel-services-${environment}`, 
   // the AgentCore Registry (conditionally wired in the stack).
   registryArn: backendStack.registryArn,
   registryId: backendStack.registryId,
+  // AppSync handles so the intake runtime can call the 4 IAM-only intake
+  // post-fabrication mutations over SigV4, and so ServicesStack can host the
+  // backing intake-orchestration resolver via L1 cross-stack attachment
+  // (conditionally wired in the stack).
+  appSyncApiArn: backendStack.appSyncApi.arn,
+  appSyncApiId: backendStack.appSyncApi.apiId,
+  appSyncGraphqlUrl: backendStack.appSyncApi.graphqlUrl,
+  // Cognito handles so the intake-orchestration resolver can resolve an
+  // org-less project's organization from the project owner's
+  // custom:organization attribute (AdminGetUser, scoped to this pool).
+  userPoolId: backendStack.userPool.userPoolId,
+  userPoolArn: backendStack.userPool.userPoolArn,
 });
 
 // Governance stack — AI-Accelerated Modernization Governance.
@@ -380,6 +392,10 @@ if (app.node.tryGetContext('nag')!== 'false') {
                 // registry ARN + its records (<AgentCoreRegistry.RegistryArn>/*).
                 [backendStack, 'AgentImportManifestResultHandler/ServiceRole/DefaultPolicy/Resource'],
                 [servicesStack, 'AgentIntakeSingleRuntime/ExecutionRole/DefaultPolicy/Resource'],
+                // Intake post-fabrication orchestration resolver: registry record
+                // CRUD-without-delete (activation status transitions + app record
+                // creation), scoped to the registry ARN + its records.
+                [servicesStack, 'IntakeOrchestrationResolverFunction/ServiceRole/DefaultPolicy/Resource'],
               ];
               for (const [stack, path] of registryArnPaths) {
                 NagSuppressions.addResourceSuppressionsByPath(stack, `/${stack.stackName}/${path}`, registryArnSuppression);

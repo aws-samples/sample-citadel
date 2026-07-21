@@ -14,7 +14,7 @@ const WORKFLOWS_TABLE = process.env.WORKFLOWS_TABLE!;
 const APPS_TABLE = process.env.APPS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
 
-interface CreateWorkflowInput {
+export interface CreateWorkflowInput {
   orgId: string;
   name: string;
   description?: string;
@@ -145,7 +145,7 @@ export const handler: AppSyncResolverHandler<WorkflowResolverArguments, unknown>
   }
 };
 
-async function getWorkflow(workflowId: string, userId: string, event: WorkflowResolverEvent): Promise<WorkflowRecord | null> {
+async function getWorkflow(workflowId: string, userId: string, event: unknown): Promise<WorkflowRecord | null> {
   const result = await docClient.send(new GetCommand({
     TableName: WORKFLOWS_TABLE,
     Key: { workflowId },
@@ -227,7 +227,10 @@ async function listBlueprints(
   };
 }
 
-async function createWorkflow(input: CreateWorkflowInput, userId: string): Promise<unknown> {
+// Exported for reuse by intake-orchestration-resolver (the IAM-only intake
+// blueprint mutation delegates here so definition-structure validation and
+// the workflow.created event stay in exactly one place).
+export async function createWorkflow(input: CreateWorkflowInput, userId: string): Promise<unknown> {
   const now = new Date().toISOString();
   const workflowId = uuidv4();
 
@@ -412,8 +415,9 @@ function toJsonString(value: unknown): string | null {
  * Validates workflow definition structure before persistence (WF-01 AC 12).
  * Lightweight check: valid JSON, has nodes array and edges array.
  * Accepts either a JSON string or an already-parsed object (AppSync AWSJSON).
+ * Exported for the intake Python-client contract test (envelope round-trip).
  */
-function validateDefinitionStructure(definitionValue: unknown): { valid: boolean; errors: string[] } {
+export function validateDefinitionStructure(definitionValue: unknown): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
   let definition: unknown;
   if (typeof definitionValue === 'string') {
@@ -588,7 +592,11 @@ async function verifyAgentsExist(
   return { ok: missing.length === 0, missing };
 }
 
-async function publishWorkflow(workflowId: string, userId: string, event: WorkflowResolverEvent): Promise<unknown> {
+// Exported for reuse by intake-orchestration-resolver (the IAM-only intake
+// blueprint mutation delegates here so the definition validator and the
+// agent-existence gate stay in exactly one place). The event parameter only
+// feeds extractOrgFromEvent(unknown), hence the wide type.
+export async function publishWorkflow(workflowId: string, userId: string, event: unknown): Promise<unknown> {
   const workflow = await getWorkflow(workflowId, userId, event);
   if (!workflow) {
     throw new Error('Workflow not found');
@@ -696,13 +704,18 @@ async function updateWorkflowConfiguration(
   }
 }
 
-async function importBlueprint(
+// Exported for reuse by intake-orchestration-resolver (the IAM-only intake
+// import mutation delegates here so the published-only gate, agentMapping
+// rewrite, app.workflowIds append and workflow.imported event stay in
+// exactly one place). The event parameter only feeds
+// extractOrgFromEvent(unknown), hence the wide type.
+export async function importBlueprint(
   blueprintId: string,
   appId: string,
   name: string | undefined,
   agentMapping: string | Record<string, string> | undefined,
   userId: string,
-  event: WorkflowResolverEvent,
+  event: unknown,
 ): Promise<unknown> {
   // Get the blueprint
   const blueprintResult = await docClient.send(new GetCommand({

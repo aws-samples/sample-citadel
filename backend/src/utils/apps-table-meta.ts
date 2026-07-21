@@ -57,6 +57,10 @@ export interface AppMetaRow {
   createdAt: string;
   updatedAt: string;
   version: number;
+  /** Intake linkage: originating intake session/project id. Optional and
+   * only written when present — apps created through the UI have none, and
+   * an absent value must never clobber an existing linkage. */
+  sourceProjectId?: string;
 }
 
 /**
@@ -89,6 +93,11 @@ export async function upsertAppMeta(
     ['sortId', APP_META_SORT_VALUE],
     ['groupId', `APP#${meta.appId}`],
   ];
+  // Optional intake linkage: written only when supplied so a linkage-less
+  // upsert (UI-created apps, reconciler runs) never removes or blanks it.
+  if (meta.sourceProjectId !== undefined) {
+    fields.push(['sourceProjectId', meta.sourceProjectId]);
+  }
   const sets: string[] = [];
   const names: Record<string, string> = {};
   const values: Record<string, unknown> = {};

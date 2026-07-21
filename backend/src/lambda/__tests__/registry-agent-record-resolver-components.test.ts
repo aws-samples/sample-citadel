@@ -129,12 +129,14 @@ function seedAppWithBinding(opts: { bindingStatus?: string; agentId?: string } =
   });
 }
 
-function seedTargetAgent(opts: { agentId?: string; state?: string } = {}) {
+function seedTargetAgent(opts: { agentId?: string; state?: string; status?: string } = {}) {
   const agentId = opts.agentId ?? 'agent-1';
   seedMockRegistry('agent', agentId, {
     name: 'Target Agent',
     description: 'A registered agent',
-    status: 'ACTIVE',
+    // APPROVED maps to internal state 'active' — the READY gate derives the
+    // agent's state from record.status (authoritative), not the descriptor.
+    status: opts.status ?? 'APPROVED',
     customDescriptorContent: JSON.stringify({ state: opts.state ?? 'active' }),
   });
 }
@@ -602,7 +604,7 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
     expect(detail.agentId).toBe('agent-1');
   });
 
-  test('status change to READY succeeds when target agent descriptor.state === "active"', async () => {
+  test('status change to READY succeeds when the target agent record status maps to active', async () => {
     seedAppWithBinding();
     seedTargetAgent({ agentId: 'agent-1', state: 'active' });
 
@@ -635,9 +637,9 @@ describe('registry-agent-record-resolver — updateAgentBinding', () => {
     ).rejects.toThrow('Agent must be active before it can be marked as ready');
   });
 
-  test('throws when target agent descriptor.state is not "active"', async () => {
+  test('throws when target agent record status is not active-mapping', async () => {
     seedAppWithBinding();
-    seedTargetAgent({ agentId: 'agent-1', state: 'inactive' });
+    seedTargetAgent({ agentId: 'agent-1', state: 'inactive', status: 'DRAFT' });
 
     await expect(
       invokeHandler(

@@ -212,7 +212,11 @@ export async function deserializeWorkflow(
         data: {
           agentId: nodeDef.agentId,
           agentConfig: agentConfig,
-          label: (agentConfig as any).name || agentConfig.config?.name || nodeDef.agentId,
+          // Definition name first: intake-generated envelopes carry the
+          // human-readable step name, while catalog configs for fabricated
+          // agents hold snake_case fabricator ids (and a catalog miss would
+          // otherwise surface the raw registry recordId).
+          label: nodeDef.name || (agentConfig as any).name || agentConfig.config?.name || nodeDef.agentId,
           icon: agentConfig.config?.icon,
           configuration: nodeDef.configuration,
           inputCount: 1,

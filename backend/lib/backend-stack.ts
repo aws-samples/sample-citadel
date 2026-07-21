@@ -2253,6 +2253,14 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    // NOTE: the intake-orchestration resolver Lambda (the 4 IAM-only intake
+    // post-fabrication mutations) deliberately lives in ServicesStack, next
+    // to the intake runtime it serves, attached to this stack's API via the
+    // L1 CfnDataSource/CfnResolver cross-stack pattern (see arbiter-stack's
+    // governance-ui resolver). BackendStack sits at CloudFormation's
+    // 500-resource ceiling — adding the Lambda + data source + 4 resolvers
+    // here would push it over.
+
     // App Component Registration Handler — subscribes to fabrication events (Req 6.3)
     const appComponentRegistrationHandler = new lambda.Function(
       this,

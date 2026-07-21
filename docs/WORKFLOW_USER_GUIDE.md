@@ -50,6 +50,36 @@ To import a blueprint into an app:
 
 Publish validation later rejects any node whose `agentId` does not exist — including leftover `placeholder-` references — so remap before you attempt to publish.
 
+### Arriving from the intake conversation
+
+The intake conversation is a second way a workflow lands on an app's
+Workflows tab — no catalog browsing or import dialog involved. After a
+fabrication completes, the intake agent (with your consent at each step)
+activates the fabricated agents, creates the Agent App, generates a process
+blueprint from your technical design, and imports it into the app. Because
+the blueprint's steps reference the real fabricated agents, there are no
+placeholder slots to remap.
+
+The workflow's nodes are named after the step names in your design
+documents — human-readable labels such as "Invoice Intake Classifier
+Agent", not internal agent identifiers — so the canvas reads like the
+process you designed.
+
+The imported workflow arrives as a `DRAFT` named `<app name> Process` on the
+app's Workflows tab, exactly like a catalog import. From there the standard
+flow in the rest of this guide applies: publish the workflow to enable Run,
+then publish the app itself when you want the endpoint. The conversation
+walks you through those same steps — including that the app's Publish button
+appears only after you Activate the app, and that the API key is shown only
+once — but the agent never publishes on your behalf; you publish from the
+app's pages.
+
+If you later ask the intake conversation for the blueprint again, it offers
+a "Regenerate the blueprint" action rather than silently rebuilding: a
+fresh blueprint is published, and importing it adds a fresh workflow
+alongside the existing one — the earlier workflow stays on the app's
+Workflows tab until you remove it there.
+
 ### Worked example: Echo Demo Workflow
 
 The Echo Demo Workflow is the fastest way to see a run end to end, because it references a real seeded agent and needs no remapping:

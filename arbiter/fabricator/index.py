@@ -901,7 +901,11 @@ def publish_intake_progress(session_id: str, agent_index: int, total_agents: int
     bus = os.environ.get('COMPLETION_BUS_NAME')
     if not bus or not session_id or session_id == '0':
         return
-    pct = min(int(((agent_index + 1) / total_agents) * 100), 100) if not failed else -1
+    # Build-segment window: fabrication owns 10-60 of the project header's
+    # implementation progress (confirm = 10; post-fabrication milestones own
+    # 70-100), so per-agent completion scales within it. A failed agent emits
+    # -1 — a failure SIGNAL the backend updater ignores (never regresses).
+    pct = (10 + min(int(((agent_index + 1) / total_agents) * 50), 50)) if not failed else -1
     summary = f"{'Failed' if failed else 'Built'}: {agent_name} ({agent_index + 1}/{total_agents})"
     client.put_events(Entries=[{
         'Source': 'agent_intake.implementation',

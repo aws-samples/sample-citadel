@@ -13,6 +13,21 @@ interface ProgressUpdateEvent {
   detail: { sessionId: string; phase: string; completionPercentage: number };
 }
 
+type NestedUpdateOutcome = 'ok' | 'stale' | 'no_map';
+
+/**
+ * Freshly initialized progress map, mirroring project-resolver createProject.
+ * Used only when a legacy project row is missing the map entirely.
+ */
+const INITIAL_PROGRESS = {
+  overall: 0,
+  assessment: 0,
+  design: 0,
+  planning: 0,
+  implementation: 0,
+  currentPhase: 'CREATED',
+};
+
 export const handler = async (event: ProgressUpdateEvent) => {
   console.log('Progress event:', JSON.stringify(event));
 
@@ -25,35 +40,99 @@ export const handler = async (event: ProgressUpdateEvent) => {
       return;
     }
 
-    // Atomic monotonic update: only advance progress, never regress.
-    // This prevents concurrent fabrication events from overwriting each other.
-    const phaseKey = `progress.${phase}`;
+    // Fabricator failure convention: a failed agent build emits
+    // completionPercentage = -1 (arbiter/fabricator/index.py
+    // publish_intake_progress). Negative values are failure SIGNALS, not
+    // progress — skip them entirely so a failure can neither regress the
+    // segment nor write a bogus negative value. The last real progress
+    // value simply stands.
+    if (completionPercentage < 0) {
+      console.log(`Ignoring negative progress signal: ${phase}=${completionPercentage}%`);
+      return;
+    }
+    const pct = Math.min(100, completionPercentage);
 
     let currentPhase = 'CREATED';
-    if (phase === 'implementation') currentPhase = completionPercentage === 100 ? 'IMPLEMENTATION_COMPLETE' : 'IMPLEMENTATION_IN_PROGRESS';
-    else if (phase === 'planning')  currentPhase = completionPercentage === 100 ? 'PLANNING_COMPLETE' : 'PLANNING_IN_PROGRESS';
-    else if (phase === 'design')    currentPhase = completionPercentage === 100 ? 'DESIGN_COMPLETE' : 'DESIGN_IN_PROGRESS';
-    else if (phase === 'assessment') currentPhase = completionPercentage === 100 ? 'ASSESSMENT_COMPLETE' : 'ASSESSMENT_IN_PROGRESS';
+    if (phase === 'implementation') currentPhase = pct === 100 ? 'IMPLEMENTATION_COMPLETE' : 'IMPLEMENTATION_IN_PROGRESS';
+    else if (phase === 'planning')  currentPhase = pct === 100 ? 'PLANNING_COMPLETE' : 'PLANNING_IN_PROGRESS';
+    else if (phase === 'design')    currentPhase = pct === 100 ? 'DESIGN_COMPLETE' : 'DESIGN_IN_PROGRESS';
+    else if (phase === 'assessment') currentPhase = pct === 100 ? 'ASSESSMENT_COMPLETE' : 'ASSESSMENT_IN_PROGRESS';
 
-    try {
-      await client.send(new UpdateCommand({
-        TableName: projectsTable,
-        Key: { id: sessionId },
-        UpdateExpression: 'SET #phase = :pct, progress.currentPhase = :cp, updatedAt = :now',
-        ConditionExpression: 'attribute_not_exists(#phase) OR #phase < :pct',
-        ExpressionAttributeNames: { '#phase': phaseKey },
-        ExpressionAttributeValues: {
-          ':pct': completionPercentage,
-          ':cp': currentPhase,
-          ':now': new Date().toISOString(),
-        },
-      }));
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
-        console.log(`Skipping stale progress: ${phase}=${completionPercentage}% (already higher)`);
-        return;
+    // Atomic monotonic update of the NESTED progress.<phase> attribute.
+    //
+    // ExpressionAttributeNames placeholders are atomic attribute names — a
+    // dot inside a placeholder VALUE is literal, so a single placeholder
+    // valued 'progress.<phase>' would write a junk TOP-LEVEL attribute named
+    // "progress.implementation" instead of the nested field. The nested path
+    // therefore needs TWO placeholders: #progress.#field.
+    const attemptNestedUpdate = async (): Promise<NestedUpdateOutcome> => {
+      try {
+        await client.send(new UpdateCommand({
+          TableName: projectsTable,
+          Key: { id: sessionId },
+          UpdateExpression: 'SET #progress.#field = :pct, #progress.#cpn = :cp, updatedAt = :now',
+          // Monotonic: only advance progress, never regress. Prevents
+          // concurrent/stale fabrication events from overwriting each other.
+          ConditionExpression: 'attribute_not_exists(#progress.#field) OR #progress.#field < :pct',
+          ExpressionAttributeNames: {
+            '#progress': 'progress',
+            '#field': phase,
+            '#cpn': 'currentPhase',
+          },
+          ExpressionAttributeValues: {
+            ':pct': pct,
+            ':cp': currentPhase,
+            ':now': new Date().toISOString(),
+          },
+        }));
+        return 'ok';
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+          return 'stale';
+        }
+        if (err instanceof Error && err.name === 'ValidationException') {
+          // SET of a nested field under a missing `progress` map (or a
+          // missing row) fails with "document path ... invalid".
+          return 'no_map';
+        }
+        throw err;
       }
-      throw err;
+    };
+
+    let outcome = await attemptNestedUpdate();
+
+    if (outcome === 'no_map') {
+      // Initialize the progress map — but ONLY on an existing project row;
+      // never create skeleton rows for sessions with no project record.
+      try {
+        await client.send(new UpdateCommand({
+          TableName: projectsTable,
+          Key: { id: sessionId },
+          UpdateExpression: 'SET #progress = :init, updatedAt = :now',
+          ConditionExpression: 'attribute_exists(id) AND attribute_not_exists(#progress)',
+          ExpressionAttributeNames: { '#progress': 'progress' },
+          ExpressionAttributeValues: {
+            ':init': INITIAL_PROGRESS,
+            ':now': new Date().toISOString(),
+          },
+        }));
+      } catch (err: unknown) {
+        if (!(err instanceof Error && err.name === 'ConditionalCheckFailedException')) {
+          throw err;
+        }
+        // Row missing (the retry below settles it) or the map appeared
+        // concurrently — either way, retry decides.
+      }
+      outcome = await attemptNestedUpdate();
+    }
+
+    if (outcome === 'stale') {
+      console.log(`Skipping stale progress: ${phase}=${pct}% (already higher)`);
+      return;
+    }
+    if (outcome === 'no_map') {
+      console.log(`No project row for ${sessionId}, skipping progress update`);
+      return;
     }
 
     // Recompute overall from the now-updated record
@@ -66,11 +145,12 @@ export const handler = async (event: ProgressUpdateEvent) => {
     await client.send(new UpdateCommand({
       TableName: projectsTable,
       Key: { id: sessionId },
-      UpdateExpression: 'SET progress.overall = :o',
+      UpdateExpression: 'SET #progress.#overall = :o',
+      ExpressionAttributeNames: { '#progress': 'progress', '#overall': 'overall' },
       ExpressionAttributeValues: { ':o': overall },
     }));
 
-    console.log(`Updated ${sessionId}: ${phase}=${completionPercentage}%, overall=${overall}%, currentPhase=${currentPhase}`);
+    console.log(`Updated ${sessionId}: ${phase}=${pct}%, overall=${overall}%, currentPhase=${currentPhase}`);
   });
 
   if (!executed) {

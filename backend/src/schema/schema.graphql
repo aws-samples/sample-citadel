@@ -296,6 +296,20 @@ type Mutation {
   cancelExecution(executionId: ID!): Execution
   publishWorkflowProgress(input: WorkflowProgressInput!): WorkflowProgressEvent @aws_iam
 
+  # ── Intake post-fabrication orchestration (IAM-only) ──────────────────
+  # Called exclusively by the intake AgentCore runtime over SigV4 after a
+  # fabrication completes. Declared @aws_iam ONLY (no Cognito directive) so
+  # user-pool clients never reach them; the resolver adds a defence-in-depth
+  # IAM-identity check. Each resolver derives projectId/orgId SERVER-SIDE
+  # from the sessionId via the conversations→project linkage — scoping fields
+  # (orgId, sourceProjectId) are never client-supplied. Declared inside the
+  # primary Mutation block on purpose: AppSync silently drops fields added
+  # via `extend type` blocks.
+  intakeActivateProjectAgents(sessionId: ID!): ActivateAgentsResult @aws_iam
+  intakeCreateApp(sessionId: ID!, name: String!, description: String): RegistryAgentRecord @aws_iam
+  intakeCreateBlueprint(sessionId: ID!, name: String!, definition: AWSJSON!): IntakeBlueprintResult @aws_iam
+  intakeImportBlueprintToApp(sessionId: ID!, blueprintId: ID!, appId: ID!, name: String): Workflow @aws_iam
+
   # AgentDesignAssessment (Requirement 7)
   startAgentDesignAssessment(projectId: ID!): AgentDesignAssessment!
   submitAgentDesignAssessment(
@@ -842,10 +856,19 @@ type DeleteAgentConfigResult {
   message: String
 }
 
-type ActivateAgentsResult {
+# Adding @aws_iam @aws_cognito_user_pools is non-breaking for the existing
+# Cognito activateProjectAgents surface and required for the IAM-only
+# intakeActivateProjectAgents mutation to return this type.
+type ActivateAgentsResult @aws_iam @aws_cognito_user_pools {
   activated: [String!]!
   failed: [String!]!
   alreadyActive: [String!]!
+  # Which key matched the fabricated agents' sourceProjectId: "sessionId"
+  # (the fabrication orchestration id), "projectId" (the conversations-linked
+  # project fallback), or null when zero records matched either key — the
+  # explicit zero-activated signal for the intake flow. Null on the legacy
+  # activateProjectAgents path.
+  matchedBy: String
 }
 
 type AgentCode {
@@ -1612,7 +1635,10 @@ enum WorkflowStatus {
   PUBLISHED
 }
 
-type Workflow {
+# Adding @aws_iam @aws_cognito_user_pools is non-breaking for the existing
+# Cognito workflow surface and required for the IAM-only
+# intakeImportBlueprintToApp mutation to return this type.
+type Workflow @aws_iam @aws_cognito_user_pools {
   workflowId: ID!
   orgId: String!
   name: String!
@@ -1668,7 +1694,7 @@ enum ComponentStatus {
   READY
 }
 
-type RegistryAgentBinding {
+type RegistryAgentBinding @aws_iam @aws_cognito_user_pools {
   agentId: String!
   status: ComponentStatus!
   systemPromptAddition: String
@@ -1677,11 +1703,25 @@ type RegistryAgentBinding {
   addedAt: AWSDateTime!
 }
 
-type RegistryAgentRecordPermission {
+type RegistryAgentRecordPermission @aws_iam @aws_cognito_user_pools {
   permissionId: String!
   actions: [String!]!
   resources: [String!]!
   description: String
+}
+
+# Structured outcome of intakeCreateBlueprint (create + publish in one call).
+# status: PUBLISHED | AGENTS_SYNCING | VALIDATION_FAILED. AGENTS_SYNCING is
+# the retryable registry-sync race (fabricated recordIds not yet mirrored to
+# the agent-config table); `missing` carries the unresolved agentIds. On
+# VALIDATION_FAILED before persistence, blueprintId is null.
+type IntakeBlueprintResult @aws_iam @aws_cognito_user_pools {
+  ok: Boolean!
+  blueprintId: ID
+  status: String!
+  nodeCount: Int
+  missing: [String!]
+  errors: [String!]
 }
 
 type AppStatusEvent {
@@ -1701,7 +1741,10 @@ type AgentManifest {
   resourceRequirements: AWSJSON
 }
 
-type RegistryAgentRecord {
+# Adding @aws_iam @aws_cognito_user_pools is non-breaking for the existing
+# Cognito app surface and required for the IAM-only intakeCreateApp mutation
+# to return this type (and its nested binding/permission types below).
+type RegistryAgentRecord @aws_iam @aws_cognito_user_pools {
   appId: ID!
   orgId: String!
   name: String!

@@ -313,6 +313,49 @@ Persist the normalized strings, and write validators that accept both shapes (st
 
 Testing rule: every resolver that takes an `AWSJSON` argument needs an object-shaped input test AND a string-shaped input test, plus a no-double-encoding assertion (a string input must persist unchanged, not as `"\"{...}\""`).
 
+### 8. IAM-Only Orchestration Resolvers (the intake-orchestration pattern)
+
+Some mutations are called by backend runtimes over SigV4, never by user-pool clients. `backend/src/lambda/intake-orchestration-resolver.ts` — which backs the four intake post-fabrication mutations (`intakeActivateProjectAgents`, `intakeCreateApp`, `intakeCreateBlueprint`, `intakeImportBlueprintToApp`) — is the reference implementation. It combines seven conventions:
+
+**`@aws_iam`-only field scoping.** The schema declares the fields `@aws_iam` only (no Cognito directive), so user-pool clients never reach them. Two supporting rules:
+
+- Declare the fields inside the primary `type Mutation` block — AppSync silently drops fields added via `extend type` blocks.
+- Return types shared with the Cognito surface (e.g. `Workflow`, `RegistryAgentRecord`, `ActivateAgentsResult`) must carry `@aws_iam @aws_cognito_user_pools` — widening auth modes on a type is non-breaking for existing Cognito callers.
+
+The handler adds a defence-in-depth identity check (mirroring the `publishGovernanceFinding` guard) so even a misconfigured directive change cannot leak the fields to user-pool callers: an IAM identity surfaces `accountId` and lacks the Cognito/OIDC `sub`/`claims` shape; anything else is rejected.
+
+```typescript
+function isIamIdentity(identity: unknown): boolean {
+  if (!identity || typeof identity !== 'object') return false;
+  const id = identity as Record<string, unknown>;
+  if (id.claims !== undefined) return false;
+  if (typeof id.sub === 'string') return false;
+  return typeof id.accountId === 'string' && id.accountId.length > 0;
+}
+```
+
+**Server-side scoping instead of the Cognito org guard.** `extractOrgFromEvent` returns null for IAM identities, which makes the delegated cores' own org guards no-ops. The orchestration resolver therefore enforces scoping itself: `orgId` and `sourceProjectId` are derived server-side from the session's conversations→project linkage and never read from client arguments, and cross-org access to the referenced app and blueprint rows is rejected before delegation.
+
+**Export-only delegation to existing resolver cores.** The handler is a thin boundary — identity guard, input validation, and org/project derivation only. All substantive logic runs in the existing resolver cores, exported from their home modules and imported directly, so no invariant is re-implemented or duplicated:
+
+```typescript
+import { activateProjectAgents } from './agent-config-resolver';
+import { createApp } from './registry-agent-record-resolver';
+import { createWorkflow, publishWorkflow, importBlueprint } from './workflow-resolver';
+```
+
+When you need a core another resolver owns, export the core function from its module — do not copy its logic.
+
+**`sourceProjectId` matching with a fallback.** Fabricated agents carry `sourceProjectId = session_id` (the fabricator threads the SQS `orchestration_id`, which intake sets to the session id, into the registry record). Activation therefore tries the sessionId first; when it matches zero records, the conversations-linked projectId is tried as the fallback. The result's `matchedBy` field surfaces which key matched (`'sessionId'`, `'projectId'`, or `null` for the explicit zero-activated signal).
+
+**Idempotency by `sourceProjectId` lookup before create.** Creation mutations on this path must be retry-safe: a timed-out invocation may already have persisted its resource, and each consented retry would then mint another (live incident: one consent produced three apps). `intakeCreateApp` therefore stamps the app with a server-derived `sourceProjectId` (the session id) and, before creating anything, looks the app up by that same key (`findAppBySourceProjectId`) — a retry returns the existing app instead of a duplicate. The import step applies the same pattern keyed on the blueprint definition id preserved into the imported workflow: an already-imported blueprint returns the existing workflow (and still re-ensures its agent bindings).
+
+**Point-of-need healing before delegation.** The fabricator persists agents to the AgentCore Registry only, while the workflow publish/import gates BatchGet the DynamoDB agents cache table — so registry-only agents would fail every publish and import with a permanent missing-agents error. Before delegating to `publishWorkflow`/`importBlueprint`, the resolver materializes any missing agents-table rows from the live registry records (`ensureAgentConfigRows` in `backend/src/lambda/ensure-agent-config-rows.ts`): a creation-only conditional Put using the same row mapping registry-sync applies, so existing richer rows are never touched. The heal is best-effort and never throws — a row that cannot be healed simply leaves the delegated gate's own failure mode in place.
+
+**ServicesStack placement via L1 cross-stack wiring.** The Lambda, its data-source role, and the four resolvers live in `ServicesStack` (next to the intake runtime they serve), not `BackendStack` — BackendStack sits at CloudFormation's 500-resource ceiling. They attach to the BackendStack-owned API with the same L1 `CfnDataSource`/`CfnResolver` cross-stack pattern as arbiter-stack's governance-ui resolver, using a dedicated `iam.Role` assumed by `appsync.amazonaws.com` with `grantInvoke` on the Lambda. The caller side is least-privilege too: the intake runtime's `appsync:GraphQL` grant lists exactly the four field ARNs, never `Mutation/*` or the whole API. The Lambda's own IAM is the union of the delegated cores' least-privilege sets, plus the projects/conversations reads the derivation step needs.
+
+Logging in this pattern is restricted to identifiers (field, correlationId, ids) — argument payloads are never logged, so credential sanitization holds by construction.
+
 ## Wiring a New Resolver in CDK
 
 ### 1. Create the Lambda Function

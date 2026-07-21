@@ -16,6 +16,36 @@ function readClaim(event: unknown, name: string): string | undefined {
 }
 
 /**
+ * Looks up a user's `custom:organization` attribute via Cognito
+ * AdminGetUser. `username` accepts the Cognito sub or username (both are
+ * valid AdminGetUser lookups). Returns null when USER_POOL_ID is not
+ * configured, the user cannot be found, or the attribute is absent —
+ * callers decide what null means.
+ *
+ * Shared by {@link extractOrgFromEvent} (caller-identity fallback) and the
+ * intake-orchestration resolver (project-owner fallback for org-less
+ * project rows created before the pre-token-generation trigger existed).
+ */
+export async function lookupUserOrganization(username: string): Promise<string | null> {
+  const userPoolId = process.env.USER_POOL_ID;
+  if (!userPoolId) return null;
+
+  try {
+    const response = await cognitoClient.send(
+      new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }),
+    );
+    const attr = response.UserAttributes?.find((a) => a.Name === 'custom:organization');
+    return attr?.Value || null;
+  } catch (err) {
+    console.warn('lookupUserOrganization: Cognito lookup failed', {
+      userId: username,
+      err: String(err),
+    });
+    return null;
+  }
+}
+
+/**
  * Extracts the caller's organization.
  *
  * Preferred path: JWT claim `custom:organization` (populated by the pre-token
@@ -35,19 +65,7 @@ export async function extractOrgFromEvent(event: unknown): Promise<string | null
   const userId = (identity.sub || identity.username) as string | undefined;
   if (!userId) return null;
 
-  const userPoolId = process.env.USER_POOL_ID;
-  if (!userPoolId) return null;
-
-  try {
-    const response = await cognitoClient.send(
-      new AdminGetUserCommand({ UserPoolId: userPoolId, Username: userId }),
-    );
-    const attr = response.UserAttributes?.find((a) => a.Name === 'custom:organization');
-    return attr?.Value || null;
-  } catch (err) {
-    console.warn('extractOrgFromEvent: Cognito fallback failed', { userId, err: String(err) });
-    return null;
-  }
+  return lookupUserOrganization(userId);
 }
 
 /**
