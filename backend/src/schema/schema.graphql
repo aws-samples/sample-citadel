@@ -1804,6 +1804,9 @@ type AppMetrics {
   p50Latency: Float!
   p95Latency: Float!
   p99Latency: Float!
+  totalInputTokens: Int!
+  totalOutputTokens: Int!
+  totalCostUsd: Float!
   timeSeries: [AppMetricsBucket!]!
 }
 
@@ -1812,6 +1815,9 @@ type AppMetricsBucket {
   requestCount: Int!
   errorCount: Int!
   avgLatency: Float!
+  inputTokens: Int!
+  outputTokens: Int!
+  costUsd: Float!
 }
 
 type AppAccessEntry {
