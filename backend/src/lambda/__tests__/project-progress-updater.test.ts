@@ -184,7 +184,7 @@ describe('out-of-range clamp', () => {
 describe('missing progress map initialization', () => {
   test('initializes the map on an existing row, then retries the nested write once', async () => {
     let call = 0;
-    ddbMock.on(UpdateCommand).callsFake((input: { UpdateExpression?: string }) => {
+    ddbMock.on(UpdateCommand).callsFake((_input: { UpdateExpression?: string }) => {
       call += 1;
       if (call === 1) {
         // Nested SET under a missing map fails with ValidationException.
