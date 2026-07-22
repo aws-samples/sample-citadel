@@ -33,8 +33,8 @@
   },
   "lint-staged": {
     "backend/**/*.{ts,js}": [
-      "cd backend && npm run lint:fix",
-      "cd backend && npm run format"
+      "eslint --fix",
+      "prettier --write"
     ]
   },
   "engines": {
