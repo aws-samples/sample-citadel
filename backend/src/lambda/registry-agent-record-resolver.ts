@@ -57,10 +57,12 @@ import { publishAppStatusEvent as publishAppStatusSubscription } from '../utils/
 import {
   RegistryService,
   TypeMismatchError,
+  RegistryLifecycleError,
   type RegistryRecord,
   type RegistryRecordStatusValue,
   type AgentCustomMetadata,
 } from '../services/registry-service';
+import { LifecycleManager, REGISTRY_TRANSITIONS } from '../adapters/lifecycle';
 import {
   grantFabricatorAuthority,
   revokeFabricatorAuthority,
@@ -264,6 +266,23 @@ const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
 const DEFAULT_REGION = process.env.AWS_REGION || 'us-east-1';
 
 /**
+ * Agent-record approval lifecycle gate. Every status change dispatched
+ * through this resolver (updateApp) MUST route through
+ * registryLifecycle.validateTransition before the Registry write —
+ * illegal transitions throw RegistryLifecycleError rather than being
+ * silently coerced. See backend/src/adapters/lifecycle.ts REGISTRY_TRANSITIONS:
+ *   DRAFT             -> PENDING_APPROVAL | DEPRECATED
+ *   PENDING_APPROVAL  -> APPROVED | REJECTED
+ *   REJECTED          -> DRAFT | DEPRECATED
+ *   APPROVED          -> DEPRECATED
+ *   DEPRECATED        -> (terminal)
+ */
+const registryLifecycle = new LifecycleManager(REGISTRY_TRANSITIONS);
+
+/** Statuses that represent an authorized approve/reject decision, not a submit/resubmit/deprecate action. */
+const DECISION_STATUSES = new Set(['APPROVED', 'REJECTED']);
+
+/**
  * Lazy DynamoDBDocumentClient singleton. Constructed on first call — keeps the
  * module free of top-level SDK construction so tests can install mocks before
  * any handler fires. The AppApiKey / AccessControl / Metrics helpers still
@@ -390,6 +409,19 @@ interface AgentAppManifest {
   access?: Record<string, { role: string; grantedAt: string; grantedBy: string }>;
   routingConfig?: unknown;
   sourceProjectId?: string;
+  /**
+   * Human-readable reason for the current status. Required by the resolver
+   * when transitioning PENDING_APPROVAL -> REJECTED; optional otherwise.
+   * Persisted so a later getApp/listApps read can surface why a record was
+   * rejected.
+   */
+  statusReason?: string | null;
+  /**
+   * Identity of the caller who made the last APPROVED/REJECTED decision.
+   * ALWAYS derived server-side from the auth context (Cognito claims) —
+   * never accepted from client input.
+   */
+  decidedBy?: string | null;
 }
 
 interface CustomDescriptor extends AgentAppManifest {
@@ -475,6 +507,8 @@ interface ProjectedAgentApp {
   sourceProjectId: string | null;
   endpointUrl?: string;
   apiId?: string;
+  statusReason?: string | null;
+  decidedBy?: string | null;
 }
 
 function projectAgentApp(record: RegistryRecord): ProjectedAgentApp {
@@ -506,6 +540,8 @@ function projectAgentApp(record: RegistryRecord): ProjectedAgentApp {
     routingConfig: manifest.routingConfig ?? null,
     sourceProjectId:
       manifest.sourceProjectId ?? base.sourceProjectId ?? descriptor.sourceProjectId ?? null,
+    statusReason: manifest.statusReason ?? null,
+    decidedBy: manifest.decidedBy ?? null,
   };
 }
 
@@ -580,6 +616,12 @@ interface UpdateAppInput {
   version?: number;
   routingConfig?: string;
   sourceProjectId?: string;
+  /**
+   * Required when transitioning PENDING_APPROVAL -> REJECTED. Ignored for
+   * every other transition. `decidedBy` is intentionally NOT an input field
+   * here — it is always derived server-side from the auth context.
+   */
+  statusReason?: string;
 }
 
 /**
@@ -602,6 +644,7 @@ interface RegistryAppInputArgument {
   previousStatus: string;
   newStatus: string;
   timestamp: string;
+  statusReason?: string;
 }
 
 /**
@@ -648,7 +691,7 @@ export const handler: AppSyncResolverHandler<RegistryResolverArguments, unknown>
       case 'createApp':
         return await createApp(args.input, userId);
       case 'updateApp':
-        return await updateApp(args.input, userId);
+        return await updateApp(args.input, userId, event);
       case 'deleteApp':
         return await deleteApp(args.appId, userId);
       case 'bindWorkflowToApp':
@@ -1025,7 +1068,11 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
   return projectAgentAppNormalized(record);
 }
 
-async function updateApp(input: UpdateAppInput, userId: string): Promise<unknown> {
+async function updateApp(
+  input: UpdateAppInput,
+  userId: string,
+  event: Parameters<typeof handler>[0],
+): Promise<unknown> {
   const existing = await getRegistryService().getResource('agent', input.appId);
   if (!existing) {
     throw new Error('App not found');
@@ -1036,6 +1083,64 @@ async function updateApp(input: UpdateAppInput, userId: string): Promise<unknown
   if (input.version !== undefined && input.version !== existingVersion) {
     throw new Error('Conflict: app was modified concurrently. Please retry.');
   }
+
+  const currentStatus = existing.status ?? 'DRAFT';
+  const isStatusChange = input.status !== undefined && input.status !== currentStatus;
+
+  // Pending-immutability: while a record is PENDING_APPROVAL, content
+  // updates (name/description/routingConfig/sourceProjectId) are rejected.
+  // Status-only decisions (approve/reject) are exempt — this is what lets
+  // the approval workflow itself proceed.
+  const isContentChange =
+    input.name !== undefined ||
+    input.description !== undefined ||
+    input.routingConfig !== undefined ||
+    input.sourceProjectId !== undefined;
+  if (currentStatus === 'PENDING_APPROVAL' && isContentChange) {
+    throw new RegistryLifecycleError(
+      `App ${input.appId} is PENDING_APPROVAL and cannot be modified until an authorized decision is recorded`,
+      'RECORD_IMMUTABLE',
+    );
+  }
+
+  // Validated-transition gate. Every status change on this path MUST pass
+  // through registryLifecycle before any write — illegal transitions throw
+  // a structured error rather than being silently coerced.
+  if (isStatusChange && input.status !== 'PUBLISHED') {
+    if (!registryLifecycle.isValidTransition(currentStatus, input.status!)) {
+      const valid = REGISTRY_TRANSITIONS.transitions[currentStatus] || [];
+      throw new RegistryLifecycleError(
+        `Invalid status transition: ${currentStatus} → ${input.status}. ` +
+          `Valid transitions from ${currentStatus}: ${valid.join(', ') || 'none'}`,
+        'INVALID_TRANSITION',
+      );
+    }
+
+    // Approve/reject is an authorized DECISION, not a plain status edit:
+    //   - admin-only (server-side role check via Cognito claims, never
+    //     trusted from client input)
+    //   - reject requires a non-empty statusReason
+    //   - decidedBy is ALWAYS derived from the auth context
+    if (DECISION_STATUSES.has(input.status!)) {
+      if (!isAdminFromEvent(event)) {
+        throw new Error(
+          `UnauthorizedError: admin role required to ${input.status === 'APPROVED' ? 'approve' : 'reject'} app ${input.appId}`,
+        );
+      }
+      if (input.status === 'REJECTED' && !(input.statusReason ?? '').trim()) {
+        throw new Error('ValidationError: statusReason is required to reject an app');
+      }
+    }
+  }
+
+  // decidedBy/decidedAt/statusReason bookkeeping for the manifest. Only
+  // stamped on an actual approve/reject decision — resubmit (REJECTED ->
+  // DRAFT), submit (DRAFT -> PENDING_APPROVAL), and deprecate leave the
+  // prior decision fields untouched (or clear statusReason on resubmit,
+  // handled below via the isStatusChange branch order).
+  const isDecision = isStatusChange && DECISION_STATUSES.has(input.status!);
+  const decidedBy = isDecision ? getUserId(event.identity) : undefined;
+  const decidedStatusReason = isDecision ? (input.statusReason ?? '').trim() : undefined;
 
   // Merge the input fields over the existing AgentApp projection, then run
   // through the factory so the Registry write goes through the canonical
@@ -1072,6 +1177,15 @@ async function updateApp(input: UpdateAppInput, userId: string): Promise<unknown
     }
     manifest.orgId = mergedAgentApp.orgId;
     manifest.version = mergedAgentApp.version;
+    if (isDecision) {
+      manifest.decidedBy = decidedBy;
+      manifest.statusReason = decidedStatusReason || null;
+    } else if (input.status === 'DRAFT') {
+      // Resubmit (REJECTED -> DRAFT): clear the prior decision so a stale
+      // rejection reason/decider does not linger on the fresh draft.
+      manifest.decidedBy = null;
+      manifest.statusReason = null;
+    }
   });
 
   const record = await getRegistryService().updateResource('agent', input.appId, {
@@ -1093,17 +1207,26 @@ async function updateApp(input: UpdateAppInput, userId: string): Promise<unknown
   if (input.routingConfig !== undefined) metaPartial.routingConfig = input.routingConfig;
   await updateAppMetaFields(APPS_TABLE, input.appId, metaPartial);
 
-  if (input.status) {
+  let finalRecord = record;
+  if (isStatusChange) {
     // Propagate to Registry record status so the lifecycle state is authoritative
     // there, not just in the local manifest. Accepts Registry-native status values
     // (DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, DEPRECATED) plus the
     // app-specific PUBLISHED which is stored in manifest only.
     if (input.status !== 'PUBLISHED') {
-      await getRegistryService().updateResourceStatus(
+      finalRecord = await getRegistryService().updateResourceStatus(
         'agent',
         input.appId,
         input.status as RegistryRecordStatusValue,
+        decidedStatusReason || 'Status update via registry service',
+        currentStatus,
       );
+      // The mock/real updateResourceStatus response often omits fields
+      // (name, customDescriptorContent) that updateResource already wrote —
+      // re-fetch so the returned projection reflects both the content edit
+      // AND the post-transition status rather than a partial merge of either.
+      const refreshed = await getRegistryService().getResource('agent', input.appId);
+      if (refreshed) finalRecord = refreshed;
     }
   }
 
@@ -1114,7 +1237,7 @@ async function updateApp(input: UpdateAppInput, userId: string): Promise<unknown
   });
 
   // Emit status-transition events (matches legacy resolver semantics).
-  if (input.status !== undefined && input.status !== existingProjection.status) {
+  if (isStatusChange) {
     const previousStatus = String(existingProjection.status || '').toLowerCase();
     const newStatus = String(input.status).toLowerCase();
     const timestamp = new Date().toISOString();
@@ -1135,7 +1258,7 @@ async function updateApp(input: UpdateAppInput, userId: string): Promise<unknown
       await publishAppStatusSubscription({
         appId: input.appId,
         previousStatus: existingProjection.status,
-        newStatus: input.status,
+        newStatus: input.status!,
         timestamp,
       });
     } catch (err) {
@@ -1143,7 +1266,7 @@ async function updateApp(input: UpdateAppInput, userId: string): Promise<unknown
     }
   }
 
-  return projectAgentAppNormalized(record);
+  return projectAgentAppNormalized(finalRecord);
 }
 
 async function deleteApp(appId: string, userId: string): Promise<unknown> {

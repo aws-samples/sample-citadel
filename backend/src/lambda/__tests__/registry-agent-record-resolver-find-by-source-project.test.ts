@@ -33,11 +33,14 @@ import { seedMockRegistry, resetMockRegistry } from './fixtures/registry-service
 
 jest.mock('../../services/registry-service', () => {
   const { getMockRegistryService } = jest.requireActual('./fixtures/registry-service-mock');
+  const actual = jest.requireActual('../../services/registry-service');
   return {
     RegistryService: jest.fn().mockImplementation(() => getMockRegistryService()),
     getRegistryService: jest.fn(() => getMockRegistryService()),
     _resetRegistryService: jest.fn(),
     isRegistryEnabled: jest.fn(() => true),
+    TypeMismatchError: actual.TypeMismatchError,
+    RegistryLifecycleError: actual.RegistryLifecycleError,
   };
 });
 

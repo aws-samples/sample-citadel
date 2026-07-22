@@ -30,11 +30,14 @@ import {
 
 jest.mock('../../services/registry-service', () => {
   const { getMockRegistryService } = jest.requireActual('./fixtures/registry-service-mock');
+  const actual = jest.requireActual('../../services/registry-service');
   return {
     RegistryService: jest.fn().mockImplementation(() => getMockRegistryService()),
     getRegistryService: jest.fn(() => getMockRegistryService()),
     _resetRegistryService: jest.fn(),
     isRegistryEnabled: jest.fn(() => true),
+    TypeMismatchError: actual.TypeMismatchError,
+    RegistryLifecycleError: actual.RegistryLifecycleError,
   };
 });
 
@@ -66,6 +69,19 @@ function makeEvent(fieldName: string, args: Record<string, unknown>) {
     info: { fieldName },
     arguments: args,
     identity: { sub: 'user-123', claims: { sub: 'user-123' } },
+  } as unknown as HandlerEvent;
+}
+
+/** Admin-identity variant — approve/reject decisions are admin-only. */
+function makeAdminEvent(fieldName: string, args: Record<string, unknown>) {
+  return {
+    info: { fieldName },
+    arguments: args,
+    identity: {
+      sub: 'admin-1',
+      claims: { sub: 'admin-1', 'custom:role': 'admin' },
+      'custom:role': 'admin',
+    },
   } as unknown as HandlerEvent;
 }
 
@@ -113,11 +129,11 @@ describe('registry-agent-record-resolver — status transition events', () => {
     delete process.env.AUTHORITY_UNITS_TABLE;
   });
 
-  test('emits app.status.draft_to_approved on DRAFT→APPROVED transition', async () => {
-    seedApp('DRAFT', 1);
+  test('emits app.status.pending_approval_to_approved on PENDING_APPROVAL→APPROVED transition (admin decision)', async () => {
+    seedApp('PENDING_APPROVAL', 1);
 
     await invokeHandler(
-      makeEvent('updateApp', {
+      makeAdminEvent('updateApp', {
         input: { appId: 'app-1', status: 'APPROVED', version: 1 },
       }),
     );
@@ -125,7 +141,7 @@ describe('registry-agent-record-resolver — status transition events', () => {
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvent = allEntries.find(
-      (e) => e?.DetailType === 'app.status.draft_to_approved',
+      (e) => e?.DetailType === 'app.status.pending_approval_to_approved',
     );
 
     expect(statusEvent).toBeDefined();
@@ -135,9 +151,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
     const detail = JSON.parse(statusEvent!.Detail!);
     expect(detail.appId).toBe('app-1');
     expect(detail.orgId).toBe('org-1');
-    expect(detail.previousStatus).toBe('DRAFT');
+    expect(detail.previousStatus).toBe('PENDING_APPROVAL');
     expect(detail.newStatus).toBe('APPROVED');
-    expect(detail.userId).toBe('user-123');
     expect(detail.timestamp).toBeDefined();
     expect(detail.correlationId).toBe('test-correlation-id');
   });
@@ -163,8 +178,8 @@ describe('registry-agent-record-resolver — status transition events', () => {
     expect(detail.newStatus).toBe('DEPRECATED');
   });
 
-  test('emits app.status.deprecated_to_draft on DEPRECATED→DRAFT transition', async () => {
-    seedApp('DEPRECATED', 3);
+  test('emits app.status.rejected_to_draft on REJECTED→DRAFT (resubmit) transition', async () => {
+    seedApp('REJECTED', 3);
 
     await invokeHandler(
       makeEvent('updateApp', {
@@ -175,17 +190,17 @@ describe('registry-agent-record-resolver — status transition events', () => {
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvent = allEntries.find(
-      (e) => e?.DetailType === 'app.status.deprecated_to_draft',
+      (e) => e?.DetailType === 'app.status.rejected_to_draft',
     );
 
     expect(statusEvent).toBeDefined();
     const detail = JSON.parse(statusEvent!.Detail!);
-    expect(detail.previousStatus).toBe('DEPRECATED');
+    expect(detail.previousStatus).toBe('REJECTED');
     expect(detail.newStatus).toBe('DRAFT');
   });
 
   test('status event timestamp is valid ISO 8601', async () => {
-    seedApp('DEPRECATED', 3);
+    seedApp('REJECTED', 3);
 
     await invokeHandler(
       makeEvent('updateApp', {
@@ -196,7 +211,7 @@ describe('registry-agent-record-resolver — status transition events', () => {
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvent = allEntries.find(
-      (e) => e?.DetailType === 'app.status.deprecated_to_draft',
+      (e) => e?.DetailType === 'app.status.rejected_to_draft',
     );
     const detail = JSON.parse(statusEvent!.Detail!);
 
@@ -238,11 +253,11 @@ describe('registry-agent-record-resolver — status transition events', () => {
     expect(statusEvents.length).toBe(0);
   });
 
-  test('calls publishAppStatusEvent for DRAFT→APPROVED transition', async () => {
-    seedApp('DRAFT', 1);
+  test('calls publishAppStatusEvent for PENDING_APPROVAL→APPROVED transition (admin decision)', async () => {
+    seedApp('PENDING_APPROVAL', 1);
 
     await invokeHandler(
-      makeEvent('updateApp', {
+      makeAdminEvent('updateApp', {
         input: { appId: 'app-1', status: 'APPROVED', version: 1 },
       }),
     );
@@ -251,7 +266,7 @@ describe('registry-agent-record-resolver — status transition events', () => {
     expect(mockPublishAppStatusEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         appId: 'app-1',
-        previousStatus: 'DRAFT',
+        previousStatus: 'PENDING_APPROVAL',
         newStatus: 'APPROVED',
         timestamp: expect.any(String),
       }),
@@ -273,13 +288,13 @@ describe('registry-agent-record-resolver — status transition events', () => {
   test('does not fail updateApp if publishAppStatusEvent throws', async () => {
     mockPublishAppStatusEvent.mockRejectedValueOnce(new Error('AppSync unreachable'));
 
-    seedApp('DEPRECATED', 3);
+    seedApp('REJECTED', 3);
 
-    const result = await invokeHandler(
+    const result = (await invokeHandler(
       makeEvent('updateApp', {
         input: { appId: 'app-1', status: 'DRAFT', version: 3 },
       }),
-    );
+    )) as Record<string, unknown>;
 
     expect(result).toBeDefined();
     expect(result.appId).toBe('app-1');

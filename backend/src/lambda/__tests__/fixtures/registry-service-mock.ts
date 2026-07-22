@@ -73,7 +73,16 @@ export function getMockRegistryService() {
     ): Promise<RegistryRecord> {
       const existing = records.get(`${type}:${id}`);
       if (!existing) throw new Error(`Record not found: ${type}:${id}`);
-      const updated = { ...existing, ...input, recordId: id, updatedAt: new Date() };
+      const updated: MockRegistryRecord = {
+        ...existing,
+        ...(input.name !== undefined && { name: input.name }),
+        ...(input.description !== undefined && { description: input.description }),
+        ...(input.customMetadata !== undefined && {
+          customDescriptorContent: input.customMetadata,
+        }),
+        recordId: id,
+        updatedAt: new Date(),
+      };
       records.set(`${type}:${id}`, updated);
       return updated as RegistryRecord;
     },

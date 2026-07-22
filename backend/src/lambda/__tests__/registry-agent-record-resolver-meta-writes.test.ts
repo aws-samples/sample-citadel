@@ -38,11 +38,14 @@ import {
 
 jest.mock('../../services/registry-service', () => {
   const { getMockRegistryService } = jest.requireActual('./fixtures/registry-service-mock');
+  const actual = jest.requireActual('../../services/registry-service');
   return {
     RegistryService: jest.fn().mockImplementation(() => getMockRegistryService()),
     getRegistryService: jest.fn(() => getMockRegistryService()),
     _resetRegistryService: jest.fn(),
     isRegistryEnabled: jest.fn(() => true),
+    TypeMismatchError: actual.TypeMismatchError,
+    RegistryLifecycleError: actual.RegistryLifecycleError,
   };
 });
 
@@ -65,25 +68,27 @@ type HandlerEvent = Parameters<typeof handler>[0];
 // (single cast here) so calls don't pass superfluous arguments.
 const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
-function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123') {
+function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123', admin = false) {
   return {
     info: { fieldName },
     arguments: args,
-    identity: { sub, claims: { sub } },
+    identity: admin
+      ? { sub, claims: { sub, 'custom:role': 'admin' }, 'custom:role': 'admin' }
+      : { sub, claims: { sub } },
   } as unknown as HandlerEvent;
 }
 
-function seedApp(opts: { version?: number; orgId?: string } = {}): void {
+function seedApp(opts: { version?: number; orgId?: string; status?: string } = {}): void {
   seedMockRegistry('agent', 'app-1', {
     name: 'Test App',
     description: 'Test',
-    status: 'DRAFT',
+    status: opts.status ?? 'DRAFT',
     customDescriptorContent: JSON.stringify({
       appId: 'app-1',
       manifest: {
         orgId: opts.orgId ?? 'org-1',
         version: opts.version ?? 1,
-        status: 'DRAFT',
+        status: opts.status ?? 'DRAFT',
         workflowIds: [],
         agentBindings: [],
         permissions: [],
@@ -230,12 +235,15 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
     });
 
     test('mirrors a status change', async () => {
-      seedApp({ version: 1 });
+      seedApp({ version: 1, status: 'PENDING_APPROVAL' });
 
       await invokeHandler(
-        makeEvent('updateApp', {
-          input: { appId: 'app-1', version: 1, status: 'APPROVED' },
-        }),
+        makeEvent(
+          'updateApp',
+          { input: { appId: 'app-1', version: 1, status: 'APPROVED' } },
+          'admin-1',
+          true,
+        ),
       );
 
       const updateCalls = ddbMock.commandCalls(UpdateCommand);

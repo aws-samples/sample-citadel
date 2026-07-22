@@ -129,11 +129,19 @@ jest.mock('../../services/registry-service', () => {
     },
   };
   class TypeMismatchError extends Error {}
+  class RegistryLifecycleError extends Error {
+    code: string;
+    constructor(message: string, code: string) {
+      super(message);
+      this.code = code;
+    }
+  }
   return {
     RegistryService: jest.fn().mockImplementation(() => svc),
     getRegistryService: jest.fn(() => svc),
     isRegistryEnabled: jest.fn(() => true),
     TypeMismatchError,
+    RegistryLifecycleError,
     __get: (type: string, id: string) => records.get(`${type}:${id}`),
     __createInputs: createInputs,
     __reset: () => {

@@ -1769,6 +1769,12 @@ type RegistryAgentRecord @aws_iam @aws_cognito_user_pools {
   # fabricator-request-resolver propagates it into agent_input so the
   # fabricator's design_assessment_gate can enforce preconditions.
   sourceProjectId: ID
+  # Set on REJECTED (required by the resolver) and cleared on resubmit
+  # (REJECTED -> DRAFT). Null otherwise.
+  statusReason: String
+  # Identity of the caller who recorded the last APPROVED/REJECTED decision,
+  # derived server-side from the auth context. Null until a decision is made.
+  decidedBy: String
 }
 
 type AppApiKey {
@@ -1918,6 +1924,9 @@ input UpdateAppInput {
   routingConfig: AWSJSON
   version: Int!
   sourceProjectId: ID
+  # Required when transitioning PENDING_APPROVAL -> REJECTED. Ignored for
+  # every other transition.
+  statusReason: String
 }
 
 input RegistryAgentComponentInput {

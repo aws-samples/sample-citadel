@@ -12,7 +12,6 @@ import {
   UpdateRegistryRecordStatusCommand,
   DeleteRegistryRecordCommand,
   ListRegistryRecordsCommand,
-  SubmitRegistryRecordForApprovalCommand,
   RegistryRecordStatus,
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import type {
@@ -21,6 +20,8 @@ import type {
   RegistryRecordSummary,
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import { sanitizeRegistryName } from '../utils/registry-name';
+import { LifecycleManager, REGISTRY_TRANSITIONS } from '../adapters/lifecycle';
+import { ConnectorError } from '../adapters/errors';
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -37,6 +38,19 @@ export class TypeMismatchError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'TypeMismatchError';
+  }
+}
+
+/**
+ * Structured error for the agent-record approval lifecycle gate: illegal
+ * status transitions and pending-immutability violations. Carries a `code`
+ * so callers/UIs can branch on failure kind rather than string-matching the
+ * human message.
+ */
+export class RegistryLifecycleError extends ConnectorError {
+  constructor(message: string, code: 'INVALID_TRANSITION' | 'RECORD_IMMUTABLE') {
+    super(message, code, false);
+    this.name = 'RegistryLifecycleError';
   }
 }
 
@@ -483,6 +497,12 @@ export interface UpdateResourceInput {
 
 export class RegistryService {
   private readonly client: BedrockAgentCoreControlClient;
+  /**
+   * Shared LifecycleManager for REGISTRY_TRANSITIONS (agent-record approval
+   * lifecycle). Stateless — safe as a single static instance across all
+   * RegistryService instances.
+   */
+  private static readonly lifecycleManager = new LifecycleManager(REGISTRY_TRANSITIONS);
   private readonly registryId: string;
 
   // ---------------------------------------------------------------------
@@ -851,29 +871,35 @@ export class RegistryService {
     id: string,
     status: RegistryRecordStatusValue,
     statusReason: string = 'Status update via registry service',
+    currentStatus?: string,
   ): Promise<RegistryRecord> {
     const recordId = id;
+
+    // Validated-transition gate (agent-record approval lifecycle). Only
+    // enforced when the caller supplies the record's current status — the
+    // legacy tri-state (active/inactive/maintenance) callers in
+    // agent-config-resolver.ts / tool-config-resolver.ts do not pass this
+    // and are unaffected. Callers that DO know the current status (the
+    // RegistryAgentRecord governance resolver) must pass it so every
+    // transition is validated, never silently coerced.
+    if (currentStatus !== undefined) {
+      if (!RegistryService.lifecycleManager.isValidTransition(currentStatus, status)) {
+        const valid = REGISTRY_TRANSITIONS.transitions[currentStatus] || [];
+        throw new RegistryLifecycleError(
+          `Invalid status transition: ${currentStatus} → ${status}. ` +
+            `Valid transitions from ${currentStatus}: ${valid.join(', ') || 'none'}`,
+          'INVALID_TRANSITION',
+        );
+      }
+    }
+
     // Wait for any in-progress state transition to complete
     await this.waitForStableState(recordId);
 
-    // APPROVED requires SubmitRegistryRecordForApproval (auto-approval handles the rest)
-    if (status === RegistryRecordStatusValues.APPROVED) {
-      const result = await this.withRetry(() =>
-        this.client.send(
-          new SubmitRegistryRecordForApprovalCommand({
-            registryId: this.registryId,
-            recordId,
-          }),
-        ),
-      );
-      return {
-        recordId: result.recordId ?? recordId,
-        name: '',
-        status: result.status ?? status,
-        updatedAt: result.updatedAt,
-      };
-    }
-
+    // Every status change — including APPROVED — goes through
+    // UpdateRegistryRecordStatusCommand directly. SubmitRegistryRecordForApproval
+    // must NEVER be used here: it auto-approves the record on the AgentCore
+    // side, bypassing the human decision this gate exists to enforce.
     const result = await this.withRetry(() =>
       this.client.send(
         new UpdateRegistryRecordStatusCommand({
