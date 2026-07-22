@@ -72,6 +72,35 @@ describe('summarizeFabricationQueue', () => {
   });
 });
 
+describe('summarizeFabricationQueue — terminal statuses are never in-progress (badge-stuck-at-37 incident)', () => {
+  it('reports zero active for the live incident shape: 37 all-COMPLETED rows', () => {
+    const items = Array.from({ length: 37 }, (_, i) =>
+      makeItem({ requestId: `job-${i}`, status: 'COMPLETED' }),
+    );
+
+    expect(summarizeFabricationQueue(items)).toEqual({ active: 0, completed: 37, failed: 0 });
+  });
+
+  it('does not count COMPLETED as active', () => {
+    expect(summarizeFabricationQueue([makeItem({ status: 'COMPLETED' })]).active).toBe(0);
+  });
+
+  it('does not count FAILED as active', () => {
+    expect(summarizeFabricationQueue([makeItem({ status: 'FAILED' })]).active).toBe(0);
+  });
+
+  it('counts only PENDING and PROCESSING as active', () => {
+    const items = [
+      makeItem({ status: 'PENDING' }),
+      makeItem({ status: 'PROCESSING' }),
+      makeItem({ status: 'COMPLETED' }),
+      makeItem({ status: 'FAILED' }),
+    ];
+
+    expect(summarizeFabricationQueue(items).active).toBe(2);
+  });
+});
+
 describe('FabricationButton — active count shown prominently', () => {
   it('shows the ACTIVE count in the badge, not the cumulative total', () => {
     render(<FabricationButton activeCount={0} completedCount={37} onClick={jest.fn()} />);

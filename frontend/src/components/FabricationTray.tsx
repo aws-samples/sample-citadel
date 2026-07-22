@@ -53,7 +53,10 @@ export const FabricationTray: React.FC<FabricationTrayProps> = ({
             {formatFabricationQueueSummary(summary)}
           </SheetDescription>
         </SheetHeader>
-        <div className="flex flex-col mt-6 gap-4">
+        {/* Bounded scrollable flex child: SheetContent is a fixed h-full flex
+            column and Radix locks body scroll, so without flex-1 + min-h-0 +
+            overflow-y-auto content below the fold is unreachable. */}
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col mt-6 gap-4">
           {queueItems.length === 0 ? (
             <EmptyState />
           ) : (
