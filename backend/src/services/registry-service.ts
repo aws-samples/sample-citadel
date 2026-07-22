@@ -1340,6 +1340,38 @@ export class RegistryService {
   }
 
   /**
+   * Resolves the value projected into a GraphQL AWSJSON `config` field.
+   *
+   * Data-contract invariant (Agent Tools error-boundary incident): every
+   * value projected into AWSJSON `config` MUST be valid JSON representing an
+   * object. AWSJSON double-encodes bare strings, so plain-text descriptions
+   * (e.g. 'Fetches weather data' on summary-fallback rows where the detail
+   * GET failed and customDescriptorContent is undefined) or '' poison
+   * consumers that parse twice.
+   *
+   * Resolution order: the first candidate that parses as JSON to a plain
+   * (non-null, non-array) object is returned BYTE-IDENTICAL; otherwise '{}'.
+   * Plain-text descriptions are never projected here — they keep flowing
+   * through the record's description/name fields.
+   */
+  private static toValidConfigJson(
+    ...candidates: Array<string | undefined>
+  ): string {
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string' || candidate === '') continue;
+      try {
+        const parsed: unknown = JSON.parse(candidate);
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+          return candidate;
+        }
+      } catch {
+        // Not JSON (plain-text description) — try the next candidate.
+      }
+    }
+    return '{}';
+  }
+
+  /**
    * Maps a Registry record to the AgentConfig GraphQL response shape.
    */
   mapToAgentConfig(record: RegistryRecord): AgentConfig {
@@ -1352,7 +1384,9 @@ export class RegistryService {
       agentId: record.recordId,
       name: record.name ?? '',
       orgId: meta.orgId ?? '',
-      config: record.description ?? '',
+      // AWSJSON contract: config must be a JSON object — a plain-text
+      // description falls back to '{}' (see toValidConfigJson).
+      config: RegistryService.toValidConfigJson(record.description),
       state: this.toInternalState(record.status),
       categories: meta.categories,
       createdAt: record.createdAt?.toISOString(),
@@ -1386,7 +1420,9 @@ export class RegistryService {
       orgId: meta.orgId ?? '',
       // New records: config comes from custom_metadata.config (see tool-config-resolver createToolConfigRegistry).
       // Legacy records: fall back to record.description which previously carried the full JSON blob.
-      config: meta.config ?? record.description ?? '',
+      // AWSJSON contract: whichever candidate wins must be a JSON object —
+      // plain text or '' falls back to '{}' (see toValidConfigJson).
+      config: RegistryService.toValidConfigJson(meta.config, record.description),
       state: this.toInternalState(record.status),
       categories: meta.categories,
       integrationBindings: RegistryService.sanitizeIntegrationBindings(meta.integrationBindings),
