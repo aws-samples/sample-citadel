@@ -20,6 +20,26 @@ const SCAN_LIMIT = 100;
 
 type FabricationStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
 
+const VALID_FABRICATION_STATUSES: readonly FabricationStatus[] = [
+  'PENDING',
+  'PROCESSING',
+  'COMPLETED',
+  'FAILED',
+];
+
+/**
+ * Validate a raw row status against the GraphQL enum. Rows the resolver
+ * cannot attribute to a real lifecycle state (missing or unrecognized
+ * status) normalize to terminal FAILED — never PENDING — so anomalous
+ * all-time rows can't read as in-flight work and wedge the queue badge,
+ * and unknown values never pass through verbatim as an invalid enum member.
+ */
+function normalizeStatus(status: string | undefined): FabricationStatus {
+  return (VALID_FABRICATION_STATUSES as readonly string[]).includes(status ?? '')
+    ? (status as FabricationStatus)
+    : 'FAILED';
+}
+
 interface FabricationQueueItem {
   requestId: string;
   agentName: string;
@@ -54,7 +74,7 @@ function mapRow(item: FabricationJobRow): FabricationQueueItem {
     requestId: item.agentUseId,
     agentName: item.agentName || item.agentId || item.agentUseId || 'Unknown Agent',
     taskDescription: item.taskDescription || 'No description',
-    status: (item.status as FabricationStatus) || 'PENDING',
+    status: normalizeStatus(item.status),
     submittedAt: item.submittedAt || item.updatedAt || new Date(0).toISOString(),
     errorMessage: item.errorMessage,
     metadata: {

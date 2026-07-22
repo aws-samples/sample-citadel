@@ -171,4 +171,51 @@ describe('fabricator-queue-resolver', () => {
     expect(result).toEqual([]);
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
   });
+
+  describe('status normalization (badge-stuck incident hardening)', () => {
+    // The durable table holds all-time rows; anything the resolver cannot
+    // attribute to a real lifecycle state must NOT read as in-flight work,
+    // or the queue badge wedges on phantom "active" rows. Unknown values
+    // must also never pass through verbatim (invalid GraphQL enum member).
+
+    test('a row with a missing status is not surfaced as active work (normalized to FAILED, not PENDING)', async () => {
+      ddbMock.on(ScanCommand).resolves({
+        Items: [
+          {
+            orchestrationId: '0',
+            agentUseId: 'req-no-status',
+            agentName: 'AgentNoStatus',
+            submittedAt: '2026-06-01T00:00:00.000Z',
+          },
+        ],
+      });
+
+      const result = await handler(makeEvent());
+
+      expect(result[0].status).toBe('FAILED');
+    });
+
+    test('a row with an unrecognized status is normalized to a valid enum member instead of passing through verbatim', async () => {
+      ddbMock.on(ScanCommand).resolves({
+        Items: [row({ agentUseId: 'req-bad-status', status: 'DONE' })],
+      });
+
+      const result = await handler(makeEvent());
+
+      expect(result[0].status).toBe('FAILED');
+    });
+
+    test.each(['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'] as const)(
+      'a valid %s status passes through unchanged',
+      async (status) => {
+        ddbMock.on(ScanCommand).resolves({
+          Items: [row({ agentUseId: `req-${status}`, status })],
+        });
+
+        const result = await handler(makeEvent());
+
+        expect(result[0].status).toBe(status);
+      },
+    );
+  });
 });
