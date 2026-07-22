@@ -154,10 +154,38 @@ export class ArbiterStack extends cdk.Stack {
 
     const supervisorLambda = new PythonFunction(this, 'SupervisorAgent', {
       runtime: lambda.Runtime.PYTHON_3_14,
-      entry: path.join(ARBITER_ROOT, 'supervisor'),
+      // Widened to the arbiter/ root (rather than arbiter/supervisor/) so
+      // the governance package and the common package — both siblings of
+      // supervisor/ that `_load_governance_package()` and the
+      // `from common.region import ...` line in arbiter/supervisor/index.py
+      // resolve at runtime — are inside the bundling container's mounted
+      // input dir and can be included in the asset directly. A prior
+      // commandHooks.afterBundling approach tried to `cp -r
+      // ${inputDir}/../governance` post-bundling, but only `entry` itself is
+      // mounted into the Docker/Finch bundling container, so `../governance`
+      // never existed there and every synth failed with
+      // FailedToBundleAsset. assetExcludes below strips everything under
+      // arbiter/ that the supervisor does not need at runtime, while
+      // keeping supervisor/, governance/, and common/.
+      entry: ARBITER_ROOT,
+      index: 'supervisor/index.py',
       handler: 'handler',
       layers: [catalogLayer],
-      bundling: { assetHashType: cdk.AssetHashType.SOURCE },
+      bundling: {
+        assetHashType: cdk.AssetHashType.SOURCE,
+        assetExcludes: [
+          'fabricator',
+          'stepRunner',
+          'workerWrapper',
+          'activator',
+          'seedConfig',
+          'catalog',
+          '__tests__',
+          '__pycache__',
+          'conftest.py',
+          '*.md',
+        ],
+      },
       timeout: cdk.Duration.seconds(30),
       memorySize: 1024,
       environment: {

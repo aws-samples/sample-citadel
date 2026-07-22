@@ -324,6 +324,87 @@ class TestAgentRunnerGovernanceInjection:
         parsed = json.loads(captured[0])
         assert parsed["response"] == "ran-without-strands"
 
+    def test_denylisted_tool_never_executes_end_to_end(self, monkeypatch):
+        """US-ARB-012a wiring contract: a denylisted tool call must never
+        reach the underlying tool implementation.
+
+        This exercises the full chain the real subprocess uses: agent_runner
+        installs the patch, the injected GovernedToolHandler's preprocess()
+        DENYs the call, and Strands (simulated here) must short-circuit
+        before invoking the tool function — never call it "just to log",
+        never call it at all.
+        """
+        monkeypatch.setenv("CITADEL_AGENT_ID", "agent-xyz")
+        monkeypatch.setenv("DENIED_TOOLS", "dangerous_tool")
+        fake_mod = _install_fake_strands(monkeypatch)
+
+        # Extend the fake Agent so it actually drives tool_handler.preprocess()
+        # before "calling" a tool, mirroring the real Strands dispatch loop
+        # closely enough to prove the short-circuit contract.
+        class _DrivingAgent(fake_mod.Agent):
+            def dispatch_tool(self, tool_use, executed_log):
+                pre = None
+                if self.tool_handler is not None:
+                    pre = self.tool_handler.preprocess(tool_use)
+                if pre is not None:
+                    return pre  # DENY short-circuit — tool must NOT run.
+                executed_log.append(tool_use["name"])
+                return {"status": "success", "content": [{"text": "ran"}]}
+
+        fake_mod.Agent = _DrivingAgent
+
+        module_src = (
+            "from strands import Agent\n"
+            "def handler(**kwargs):\n"
+            "    executed = []\n"
+            "    a = Agent(tools=[])\n"
+            "    result = a.dispatch_tool({'name': 'dangerous_tool', 'toolUseId': 'tu-1'}, executed)\n"
+            "    return f'executed={executed};status={result.get(\"status\")}'\n"
+        )
+        captured = []
+        _run_runner_with_module(module_src, {}, captured)
+
+        assert len(captured) == 1
+        parsed = json.loads(captured[0])
+        resp = parsed["response"]
+        assert "executed=[]" in resp, resp  # tool function never ran
+        assert "status=error" in resp, resp
+
+    def test_permitted_tool_executes_end_to_end(self, monkeypatch):
+        """Symmetric control: a non-denied tool DOES reach execution."""
+        monkeypatch.setenv("CITADEL_AGENT_ID", "agent-xyz")
+        monkeypatch.setenv("DENIED_TOOLS", "dangerous_tool")
+        fake_mod = _install_fake_strands(monkeypatch)
+
+        class _DrivingAgent(fake_mod.Agent):
+            def dispatch_tool(self, tool_use, executed_log):
+                pre = None
+                if self.tool_handler is not None:
+                    pre = self.tool_handler.preprocess(tool_use)
+                if pre is not None:
+                    return pre
+                executed_log.append(tool_use["name"])
+                return {"status": "success", "content": [{"text": "ran"}]}
+
+        fake_mod.Agent = _DrivingAgent
+
+        module_src = (
+            "from strands import Agent\n"
+            "def handler(**kwargs):\n"
+            "    executed = []\n"
+            "    a = Agent(tools=[])\n"
+            "    result = a.dispatch_tool({'name': 'safe_tool', 'toolUseId': 'tu-2'}, executed)\n"
+            "    return f'executed={executed};status={result.get(\"status\")}'\n"
+        )
+        captured = []
+        _run_runner_with_module(module_src, {}, captured)
+
+        assert len(captured) == 1
+        parsed = json.loads(captured[0])
+        resp = parsed["response"]
+        assert "executed=['safe_tool']" in resp, resp
+        assert "status=success" in resp, resp
+
 
 # ---------------------------------------------------------------------------
 # Per-agent model override — agent_runner._install_model_override.

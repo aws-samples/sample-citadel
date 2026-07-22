@@ -48,6 +48,16 @@ CACHE_TTL_SECONDS = 300
 _GLOBAL_REGISTRY_ID = "*GLOBAL*"
 _CACHE_KEY_ALL = "__ALL__"
 
+# Enforcement-mode cache is independent of the four-table state cache above
+# (different TTL, different backing store — SSM vs DynamoDB) but is exposed
+# through the same ``GovernanceState`` snapshot for a single call site.
+_MODE_CACHE_TTL_SECONDS = 300
+_VALID_ENFORCEMENT_MODES = ("permissive", "shadow", "strict")
+_DEFAULT_ENFORCEMENT_MODE = "shadow"
+
+# Maps env name to (mode, loaded_at).
+_mode_cache: dict[str, tuple[str, float]] = {}
+
 
 # ---------------------------------------------------------------------------
 # Public dataclass
@@ -64,6 +74,12 @@ class GovernanceState:
     * any string — only ``authority_units`` with ``registryId`` equal to this
       value or to ``'*GLOBAL*'`` are present. The other three collections are
       always unfiltered.
+
+    ``enforcement_mode`` is the persisted governance enforcement mode
+    (``'permissive'`` | ``'shadow'`` | ``'strict'``) resolved from the same
+    SSM-backed control surface the platform's other governance-aware
+    components read (``/citadel/governance/enforce/{env}``). Defaults to
+    ``'shadow'`` when unset or unresolvable — see ``_resolve_enforcement_mode``.
     """
 
     authority_units: list[AuthorityUnit] = field(default_factory=list)
@@ -72,6 +88,7 @@ class GovernanceState:
     constitutional_layers: list[ConstitutionalLayer] = field(default_factory=list)
     loaded_at: float = 0.0
     registry_id: str | None = None
+    enforcement_mode: str = _DEFAULT_ENFORCEMENT_MODE
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +395,88 @@ def _apply_registry_filter(
 
 
 # ---------------------------------------------------------------------------
+# Enforcement-mode resolution (SSM-backed, mirrors backend/src/utils/governance-flag.ts)
+# ---------------------------------------------------------------------------
+
+
+def _get_ssm_client() -> Any:
+    """Return a boto3 SSM client, constructed on demand (see QB-013-1)."""
+    return boto3.client("ssm")
+
+
+def _resolve_enforcement_mode(force_reload: bool = False) -> str:
+    """Resolve the persisted governance enforcement mode.
+
+    Reads the SSM parameter ``/citadel/governance/enforce/{ENVIRONMENT}`` —
+    the same control-surface parameter the TypeScript governance-flag reader
+    (``backend/src/utils/governance-flag.ts``) consults — so Python and
+    TypeScript components observe a single source of truth for rollout
+    state. ``ENVIRONMENT`` is read from the Lambda environment; if it is
+    unset the parameter path collapses to a plainly-invalid name, which is
+    handled the same as any other resolution failure below.
+
+    Falls back to ``_DEFAULT_ENFORCEMENT_MODE`` ('shadow') whenever the
+    parameter is missing, the value is outside the allowed literal set, or
+    the SSM call raises for any reason (permissions, throttling, network).
+    Shadow is the safe middle ground: findings are still evaluated and
+    recorded, but nothing is blocked, so an unresolvable mode never
+    silently degrades into either an accidental hard-block or an
+    accidental bypass.
+
+    When ``ENVIRONMENT`` is unset (local dev, unit tests, or any process
+    not running as a deployed Lambda) the SSM lookup is skipped entirely —
+    there is no well-formed parameter path to query — and the default is
+    returned immediately without an AWS call.
+
+    Cached in-process for ``_MODE_CACHE_TTL_SECONDS`` per environment name.
+    """
+    env_name = os.environ.get("ENVIRONMENT")
+    if not env_name:
+        return _DEFAULT_ENFORCEMENT_MODE
+
+    now = time.time()
+
+    if not force_reload:
+        cached = _mode_cache.get(env_name)
+        if cached is not None:
+            mode, loaded_at = cached
+            if now - loaded_at < _MODE_CACHE_TTL_SECONDS:
+                return mode
+
+    resolved = _DEFAULT_ENFORCEMENT_MODE
+    try:
+        response = _get_ssm_client().get_parameter(
+            Name=f"/citadel/governance/enforce/{env_name}"
+        )
+        raw_value = response.get("Parameter", {}).get("Value")
+        if raw_value in _VALID_ENFORCEMENT_MODES:
+            resolved = raw_value
+        else:
+            logger.warning(
+                "Governance enforcement mode parameter has unresolvable "
+                "value %r for env=%s; defaulting to %r.",
+                raw_value, env_name, _DEFAULT_ENFORCEMENT_MODE,
+            )
+    except Exception as e:
+        # Any SSM failure (missing param, permissions, throttling, network)
+        # is a resolution failure, not a fatal error — default to shadow
+        # and log so operators can see the degraded state.
+        logger.warning(
+            "Failed to resolve governance enforcement mode from SSM for "
+            "env=%s; defaulting to %r. Error: %s",
+            env_name, _DEFAULT_ENFORCEMENT_MODE, e,
+        )
+
+    _mode_cache[env_name] = (resolved, now)
+    return resolved
+
+
+def __reset_mode_cache_for_test() -> None:
+    """Clear the process-local enforcement-mode cache. Test-only helper."""
+    _mode_cache.clear()
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 
@@ -393,10 +492,12 @@ def load_governance_state(
             ``registryId`` matches ``registry_id`` or the ``'*GLOBAL*'`` sentinel.
             The other three collections are always unfiltered.
         force_reload: When ``True``, bypasses the cache entry for this
-            ``registry_id`` key and re-scans every table.
+            ``registry_id`` key and re-scans every table. Also forces a fresh
+            resolution of ``enforcement_mode``.
 
     Returns:
-        A ``GovernanceState`` snapshot.
+        A ``GovernanceState`` snapshot, including the resolved
+        ``enforcement_mode`` (see ``_resolve_enforcement_mode``).
     """
     cache_key = registry_id if registry_id is not None else _CACHE_KEY_ALL
     now = time.time()
@@ -415,6 +516,7 @@ def load_governance_state(
     composition_contracts = _load_composition_contracts()
     case_law = _load_case_law()
     constitutional_layers = _load_constitutional_layers()
+    enforcement_mode = _resolve_enforcement_mode(force_reload=force_reload)
 
     loaded_at = time.time()
     state = GovernanceState(
@@ -424,13 +526,15 @@ def load_governance_state(
         constitutional_layers=constitutional_layers,
         loaded_at=loaded_at,
         registry_id=registry_id,
+        enforcement_mode=enforcement_mode,
     )
     _cache[cache_key] = (state, loaded_at)
 
     logger.info(
-        "Governance state loaded (registry_id=%s): %d units, %d contracts, "
-        "%d case-law entries, %d layers.",
+        "Governance state loaded (registry_id=%s, enforcement_mode=%s): "
+        "%d units, %d contracts, %d case-law entries, %d layers.",
         registry_id,
+        enforcement_mode,
         len(authority_units),
         len(composition_contracts),
         len(case_law),
@@ -446,3 +550,4 @@ def __reset_hierarchy_cache_for_test() -> None:
     will simply re-scan the tables.
     """
     _cache.clear()
+    _mode_cache.clear()
