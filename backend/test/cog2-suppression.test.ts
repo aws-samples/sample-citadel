@@ -19,39 +19,28 @@
  *      annotation remains on the UserPool/Resource path for either pool.
  */
 
-import * as cdk from 'aws-cdk-lib';
-import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as s3 from 'aws-cdk-lib/aws-s3';
-import * as path from 'path';
-import * as fs from 'fs';
-import { AwsSolutionsChecks } from 'cdk-nag';
+import * as cdk from "aws-cdk-lib";
+import { Annotations, Match, Template } from "aws-cdk-lib/assertions";
+import * as events from "aws-cdk-lib/aws-events";
+import * as s3 from "aws-cdk-lib/aws-s3";
+import { AwsSolutionsChecks } from "cdk-nag";
+import {
+  scaffoldBackendAssetDirs,
+  scaffoldServiceDockerfiles,
+} from "./helpers/scaffold-stub-assets";
 
 // Ensure asset directories exist for CDK synthesis (mirror existing test setup).
-const assetDirs = [
-  path.resolve(__dirname, '../src/schema'),
-  path.resolve(__dirname, '../dist/lambda'),
-  path.resolve(__dirname, '../src/lambda/seed-admin-user'),
-  path.resolve(__dirname, '../src/lambda/seed-organizations'),
-  path.resolve(__dirname, '../../src/schema'),
-  path.resolve(__dirname, '../../src/lambda/cognito-secret-handler'),
-  path.resolve(__dirname, '../../../service/hld_pdf_generator'),
-  path.resolve(__dirname, '../../../service/agent_intake_single'),
-];
-for (const dir of assetDirs) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-const dockerStub = 'FROM public.ecr.aws/lambda/python:3.12\nCMD ["handler.handler"]\n';
-for (const dockerDir of [
-  path.resolve(__dirname, '../../../service/hld_pdf_generator'),
-  path.resolve(__dirname, '../../../service/agent_intake_single'),
-]) {
-  const df = path.join(dockerDir, 'Dockerfile');
-  if (!fs.existsSync(df)) fs.writeFileSync(df, dockerStub);
-}
+scaffoldBackendAssetDirs([
+  "src/schema",
+  "dist/lambda",
+  "src/lambda/seed-admin-user",
+  "src/lambda/seed-organizations",
+  "src/lambda/cognito-secret-handler",
+]);
+scaffoldServiceDockerfiles();
 
-import { BackendStack } from '../lib/backend-stack';
-import { ServicesStack } from '../lib/services-stack';
+import { BackendStack } from "../lib/backend-stack";
+import { ServicesStack } from "../lib/services-stack";
 
 interface SuppressionEntry {
   id: string;
@@ -62,7 +51,7 @@ function findCog2Suppression(
   template: Template,
   userPoolName: string,
 ): SuppressionEntry | undefined {
-  const pools = template.findResources('AWS::Cognito::UserPool', {
+  const pools = template.findResources("AWS::Cognito::UserPool", {
     Properties: { UserPoolName: userPoolName },
   });
   const ids = Object.keys(pools);
@@ -73,23 +62,23 @@ function findCog2Suppression(
   }
   const rules: SuppressionEntry[] =
     pools[ids[0]].Metadata?.cdk_nag?.rules_to_suppress ?? [];
-  return rules.find((r) => r.id === 'AwsSolutions-COG2');
+  return rules.find((r) => r.id === "AwsSolutions-COG2");
 }
 
-describe('cdk-nag — AwsSolutions-COG2 documented suppressions', () => {
+describe("cdk-nag — AwsSolutions-COG2 documented suppressions", () => {
   // ---------------------------------------------------------------------------
   // backend UserPool (citadel-backend-${env}/UserPool/Resource)
   // ---------------------------------------------------------------------------
 
-  describe('backend UserPool', () => {
+  describe("backend UserPool", () => {
     let backendStack: BackendStack;
     let backendTemplate: Template;
 
     beforeAll(() => {
       const app = new cdk.App();
-      backendStack = new BackendStack(app, 'citadel-backend-test', {
-        environment: 'test',
-        env: { account: '123456789012', region: 'us-east-1' },
+      backendStack = new BackendStack(app, "citadel-backend-test", {
+        environment: "test",
+        env: { account: "123456789012", region: "us-east-1" },
       });
       // Apply the AwsSolutions pack so any un-suppressed COG2 finding would
       // surface as an error annotation on the UserPool/Resource path.
@@ -97,20 +86,20 @@ describe('cdk-nag — AwsSolutions-COG2 documented suppressions', () => {
       backendTemplate = Template.fromStack(backendStack);
     });
 
-    it('carries an AwsSolutions-COG2 suppression with a customer-deployment rationale', () => {
-      const cog2 = findCog2Suppression(backendTemplate, 'citadel-users-test');
+    it("carries an AwsSolutions-COG2 suppression with a customer-deployment rationale", () => {
+      const cog2 = findCog2Suppression(backendTemplate, "citadel-users-test");
       expect(cog2).toBeDefined();
       expect(cog2!.reason).toMatch(/customer.*deployment|MFA.*OPTIONAL/i);
       // Reason must be substantive, not a one-liner placeholder.
       expect(cog2!.reason.length).toBeGreaterThanOrEqual(80);
     });
 
-    it('suppresses AwsSolutions-COG2 on UserPool with documented rationale', () => {
+    it("suppresses AwsSolutions-COG2 on UserPool with documented rationale", () => {
       const annotations = Annotations.fromStack(backendStack);
       // Confirm no AwsSolutions-COG2 errors remain on the UserPool path.
       annotations.hasNoError(
-        'citadel-backend-test/UserPool/Resource',
-        Match.stringLikeRegexp('AwsSolutions-COG2'),
+        "citadel-backend-test/UserPool/Resource",
+        Match.stringLikeRegexp("AwsSolutions-COG2"),
       );
     });
   });
@@ -119,42 +108,47 @@ describe('cdk-nag — AwsSolutions-COG2 documented suppressions', () => {
   // GatewayUserPool (citadel-services-${env}/GatewayUserPool/Resource)
   // ---------------------------------------------------------------------------
 
-  describe('GatewayUserPool (M2M)', () => {
+  describe("GatewayUserPool (M2M)", () => {
     let servicesStack: ServicesStack;
     let servicesTemplate: Template;
 
     beforeAll(() => {
       const app = new cdk.App();
-      const prereq = new cdk.Stack(app, 'PrereqStack', {
-        env: { account: '123456789012', region: 'us-east-1' },
+      const prereq = new cdk.Stack(app, "PrereqStack", {
+        env: { account: "123456789012", region: "us-east-1" },
       });
-      const agentEventBus = new events.EventBus(prereq, 'TestEventBus', {
-        eventBusName: 'test-bus',
+      const agentEventBus = new events.EventBus(prereq, "TestEventBus", {
+        eventBusName: "test-bus",
       });
-      const documentBucket = new s3.Bucket(prereq, 'TestDocBucket');
+      const documentBucket = new s3.Bucket(prereq, "TestDocBucket");
 
-      servicesStack = new ServicesStack(app, 'citadel-services-test', {
-        environment: 'test',
+      servicesStack = new ServicesStack(app, "citadel-services-test", {
+        environment: "test",
         agentEventBus,
         documentBucket,
-        env: { account: '123456789012', region: 'us-east-1' },
+        env: { account: "123456789012", region: "us-east-1" },
       });
       cdk.Aspects.of(app).add(new AwsSolutionsChecks({ verbose: false }));
       servicesTemplate = Template.fromStack(servicesStack);
     });
 
-    it('carries an AwsSolutions-COG2 suppression with an M2M rationale', () => {
-      const cog2 = findCog2Suppression(servicesTemplate, 'citadel-gateway-test');
+    it("carries an AwsSolutions-COG2 suppression with an M2M rationale", () => {
+      const cog2 = findCog2Suppression(
+        servicesTemplate,
+        "citadel-gateway-test",
+      );
       expect(cog2).toBeDefined();
-      expect(cog2!.reason).toMatch(/machine-to-machine|client_credentials|M2M/i);
+      expect(cog2!.reason).toMatch(
+        /machine-to-machine|client_credentials|M2M/i,
+      );
       expect(cog2!.reason.length).toBeGreaterThanOrEqual(80);
     });
 
-    it('suppresses AwsSolutions-COG2 on GatewayUserPool with documented rationale', () => {
+    it("suppresses AwsSolutions-COG2 on GatewayUserPool with documented rationale", () => {
       const annotations = Annotations.fromStack(servicesStack);
       annotations.hasNoError(
-        'citadel-services-test/GatewayUserPool/Resource',
-        Match.stringLikeRegexp('AwsSolutions-COG2'),
+        "citadel-services-test/GatewayUserPool/Resource",
+        Match.stringLikeRegexp("AwsSolutions-COG2"),
       );
     });
   });
