@@ -4,66 +4,37 @@
   "description": "Scalable 3-layer application architecture",
   "private": true,
   "workspaces": [
-    "service",
-    "backend",
-    "frontend"
+    "backend"
   ],
   "scripts": {
     "install:all": "npm install && npm run install:service && npm run install:backend && npm run install:frontend",
-    "install:service": "cd service && npm install",
+    "install:service": "python3 -m pip install -r service/agent_intake_single/requirements.txt",
     "install:backend": "cd backend && npm install",
     "install:frontend": "cd frontend && npm install",
-    "dev": "concurrently \"npm run dev:service\" \"npm run dev:backend\" \"npm run dev:frontend\"",
-    "dev:service": "cd service && npm run dev",
     "dev:backend": "cd backend && npm run dev",
     "dev:frontend": "cd frontend && npm start",
-    "build": "npm run build:service && npm run build:backend && npm run build:frontend",
-    "build:service": "cd service && npm run build",
     "build:backend": "cd backend && npm run build",
-    "build:frontend": "cd frontend && npm run build",
-    "test": "npm run test:service && npm run test:backend && npm run test:frontend",
-    "test:service": "cd service && npm test",
+    "build:frontend": "npm run build --prefix frontend",
+    "test:service": "python3 -m pytest service/ -q",
     "test:backend": "cd backend && npm test",
-    "test:frontend": "cd frontend && npm test -- --watchAll=false",
-    "test:integration": "npm run test:integration:service && npm run test:integration:backend",
-    "test:integration:service": "cd service && npm run test:integration",
+    "test:frontend": "npm test --prefix frontend -- --watchAll=false",
     "test:integration:backend": "cd backend && npm run test:integration",
-    "test:e2e": "cd frontend && npm run test:e2e",
-    "lint": "npm run lint:service && npm run lint:backend && npm run lint:frontend",
-    "lint:service": "cd service && npm run lint",
+    "test:integration:frontend": "npm run test:integration --prefix frontend",
     "lint:backend": "cd backend && npm run lint",
-    "lint:frontend": "cd frontend && npm run lint",
-    "lint:fix": "npm run lint:fix:service && npm run lint:fix:backend && npm run lint:fix:frontend",
-    "lint:fix:service": "cd service && npm run lint:fix",
     "lint:fix:backend": "cd backend && npm run lint:fix",
-    "lint:fix:frontend": "cd frontend && npm run lint:fix",
-    "format": "npm run format:service && npm run format:backend && npm run format:frontend",
-    "format:service": "cd service && npm run format",
     "format:backend": "cd backend && npm run format",
-    "format:frontend": "cd frontend && npm run format"
+    "verify:doc-claims": "node scripts/verify-doc-claims.js",
+    "prepare": "husky"
   },
   "devDependencies": {
-    "concurrently": "^10.0.3",
+    "audit-ci": "^7.1.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.6"
   },
-  "husky": {
-    "hooks": {
-      "pre-commit": "lint-staged"
-    }
-  },
   "lint-staged": {
-    "service/**/*.{ts,js}": [
-      "cd service && npm run lint:fix",
-      "cd service && npm run format"
-    ],
     "backend/**/*.{ts,js}": [
       "cd backend && npm run lint:fix",
       "cd backend && npm run format"
-    ],
-    "frontend/**/*.{ts,tsx,js,jsx}": [
-      "cd frontend && npm run lint:fix",
-      "cd frontend && npm run format"
     ]
   },
   "engines": {
@@ -74,7 +45,8 @@
   },
   "overrides": {
     "dompurify": "^3.4.9",
-    "js-yaml": "4.2.0",
+    "js-yaml": "4.3.0",
+    "fast-uri": "4.1.1",
     "@typescript-eslint/typescript-estree": {
       "minimatch": "9.0.9"
     }

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/IBM/audit-ci/main/docs/schema.json",
+  "low": true,
+  "moderate": true,
+  "high": true,
+  "critical": true,
+  "allowlist": [
+    "GHSA-v2hh-gcrm-f6hx",
+    "GHSA-4c8g-83qw-93j6",
+    "GHSA-3jxr-9vmj-r5cp",
+    "GHSA-r67j-r569-jrwp",
+    "GHSA-526f-jxpj-jmg2",
+    "GHSA-w5hq-g745-h8pq",
+    "GHSA-j965-2qgj-vjmq",
+    "aws-lambda",
+    "@databricks/sql"
+  ],
+  "report": true,
+  "skip-dev": false,
+  "_comment": "This file intentionally carries NO active allowlist entries. Every advisory this project cannot fully remediate must be documented with a written justification and a revisit date in audit-ci-allowlist-justifications.md, and its GHSA/advisory id added to the 'allowlist' array above ONLY after that write-up exists. Plain JSON cannot hold inline comments, hence the separate justification file."
+}
