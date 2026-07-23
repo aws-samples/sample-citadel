@@ -51,6 +51,7 @@ export type EventType = 'CREATED' | 'UPDATED' | 'DELETED' | 'STATUS_CHANGED';
  */
 export interface RegistryResourcePayload {
   [key: string]: unknown;
+  name?: string;
   description?: string;
   customDescriptorContent?: string | null;
   createdAt?: string | number;
@@ -188,6 +189,12 @@ const AGENT_METADATA_DEFAULTS = {
   state: 'active' as string,
   appId: undefined as string | undefined,
   manifest: undefined as Record<string, unknown> | undefined,
+  // Deliberately `undefined`, NOT `''` — the cache-record builder below must
+  // distinguish "no orgId in the manifest at all" (undefined, e.g. a
+  // malformed/legacy record) from "explicitly system-shared" (''), mirroring
+  // RegistryService.AGENT_METADATA_DEFAULTS. Collapsing the two would let a
+  // record that merely omits orgId fail OPEN as globally visible.
+  orgId: undefined as string | undefined,
 };
 
 const TOOL_METADATA_DEFAULTS = {
@@ -253,6 +260,20 @@ export type AgentCacheRecord = {
   manifest: Record<string, unknown> | undefined;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Registry record `name` (from the event's `resource.name`), denormalized
+   * here so registry-agent-record-resolver's agentBindings[].name enrichment
+   * can resolve names via a single BatchGetItem against this table instead
+   * of one Registry GetRegistryRecord per binding (the N+1 fix).
+   */
+  name: string;
+  /**
+   * The agent's own manifest orgId, denormalized for the same reason. Kept
+   * as `undefined` (NOT coerced to `''`) when the source manifest omits
+   * orgId entirely — the resolver's tenant check must treat "no orgId"
+   * as NOT system-shared, only an explicit `''` counts as shared.
+   */
+  orgId: string | undefined;
 };
 
 /**
@@ -292,6 +313,8 @@ export function buildAgentCacheRecord(
     icon: meta.icon,
     appId: meta.appId,
     manifest: meta.manifest,
+    name: typeof resource.name === 'string' ? resource.name : '',
+    orgId: meta.orgId,
     createdAt: resource.createdAt
       ? new Date(resource.createdAt).toISOString()
       : new Date().toISOString(),

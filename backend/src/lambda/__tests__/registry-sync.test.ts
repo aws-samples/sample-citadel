@@ -294,6 +294,49 @@ describe('buildAgentCacheRecord', () => {
     expect(record.createdAt).toBeDefined();
     expect(record.updatedAt).toBeDefined();
   });
+
+  test('denormalizes the event resource.name onto the cache record', () => {
+    const resource = makeAgentResource({ name: 'Support Agent' } as unknown as RegistryResourcePayload);
+    const record = buildAgentCacheRecord('agent-1', resource);
+    expect(record.name).toBe('Support Agent');
+  });
+
+  test('defaults name to empty string when resource.name is absent', () => {
+    const record = buildAgentCacheRecord('agent-2', { description: 'desc' });
+    expect(record.name).toBe('');
+  });
+
+  test('denormalizes an explicit empty-string manifest orgId (system-shared) as ""', () => {
+    const resource = makeAgentResource({
+      customDescriptorContent: JSON.stringify({ orgId: '', categories: [], icon: '', state: 'active' }),
+    });
+    const record = buildAgentCacheRecord('agent-1', resource);
+    expect(record.orgId).toBe('');
+  });
+
+  test('denormalizes a specific manifest orgId', () => {
+    const resource = makeAgentResource({
+      customDescriptorContent: JSON.stringify({ orgId: 'org-1', categories: [], icon: '', state: 'active' }),
+    });
+    const record = buildAgentCacheRecord('agent-1', resource);
+    expect(record.orgId).toBe('org-1');
+  });
+
+  test('leaves orgId undefined (NOT coerced to "") when the manifest omits it entirely', () => {
+    // Fail-closed requirement: a record that merely omits orgId must not be
+    // treated as system-shared by downstream tenant checks, which only
+    // special-case an EXPLICIT empty string.
+    const resource = makeAgentResource({
+      customDescriptorContent: JSON.stringify({ categories: [], icon: '', state: 'active' }),
+    });
+    const record = buildAgentCacheRecord('agent-1', resource);
+    expect(record.orgId).toBeUndefined();
+  });
+
+  test('leaves orgId undefined when customDescriptorContent is entirely absent', () => {
+    const record = buildAgentCacheRecord('agent-1', { description: 'desc' });
+    expect(record.orgId).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

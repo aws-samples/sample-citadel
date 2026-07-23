@@ -71,6 +71,7 @@ describe('BackendStack — Workflow/App/Execution Lambda functions and AppSync w
           Variables: Match.objectLike({
             APPS_TABLE: Match.anyValue(),
             WORKFLOWS_TABLE: Match.anyValue(),
+            AGENT_CONFIG_TABLE: Match.anyValue(),
             EVENT_BUS_NAME: Match.anyValue(),
             USER_POOL_ID: Match.anyValue(),
           }),
@@ -248,6 +249,63 @@ describe('BackendStack — Workflow/App/Execution Lambda functions and AppSync w
           ]),
         },
       });
+    });
+
+    test('RegistryAgentRecordResolver is granted EXACTLY cognito-idp:AdminGetUser, scoped to the concrete UserPool ARN (not a broader/wildcard grant)', () => {
+      // Locate the resolver's own IAM role via its Lambda function properties.
+      const functions = template.findResources('AWS::Lambda::Function', {
+        Properties: { Handler: 'registry-agent-record-resolver.handler' },
+      });
+      const fnLogicalId = Object.keys(functions)[0];
+      expect(fnLogicalId).toBeDefined();
+      const roleRef = functions[fnLogicalId].Properties.Role;
+      // Role is always `{ 'Fn::GetAtt': [ '<RoleLogicalId>', 'Arn' ] }`.
+      const roleLogicalId = roleRef?.['Fn::GetAtt']?.[0];
+      expect(roleLogicalId).toBeDefined();
+
+      // Find the IAM::Policy attached to that exact role that grants
+      // cognito-idp:AdminGetUser, and assert the statement is scoped to a
+      // single resource referencing the UserPool construct's Arn — never a
+      // wildcard ('*') and never bundled with a broader/unscoped action
+      // (e.g. ListUsers) in the same statement.
+      const policies = template.findResources('AWS::IAM::Policy');
+      const matchingStatements = Object.values(policies).flatMap((p: any) => {
+        const roles = p.Properties?.Roles || [];
+        const attachedToResolver = roles.some((r: any) => r?.Ref === roleLogicalId);
+        if (!attachedToResolver) return [];
+        const statements = p.Properties?.PolicyDocument?.Statement || [];
+        return statements.filter((s: any) => {
+          const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+          return actions.includes('cognito-idp:AdminGetUser');
+        });
+      });
+
+      expect(matchingStatements.length).toBeGreaterThan(0);
+      for (const statement of matchingStatements) {
+        // Exactly this one action in the statement — not broadened to
+        // ListUsers or any other cognito-idp action.
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        expect(actions).toEqual(['cognito-idp:AdminGetUser']);
+
+        const resources = Array.isArray(statement.Resource)
+          ? statement.Resource
+          : [statement.Resource];
+        // Never a bare wildcard.
+        expect(resources).not.toContain('*');
+        // Scoped to a concrete resource reference (GetAtt/Ref/Fn::Join off
+        // the UserPool construct), not a hand-written ARN string that could
+        // silently drift from the real pool.
+        const isConcreteUserPoolRef = resources.some((r: any) => {
+          if (typeof r === 'string') return false; // no literal ARN strings
+          const getAttTarget = r?.['Fn::GetAtt']?.[0];
+          const joinParts = r?.['Fn::Join']?.[1];
+          const joinReferencesUserPool =
+            Array.isArray(joinParts) &&
+            joinParts.some((part: any) => part?.Ref?.includes('UserPool') || part?.['Fn::GetAtt']?.[0]?.includes('UserPool'));
+          return (typeof getAttTarget === 'string' && getAttTarget.includes('UserPool')) || joinReferencesUserPool;
+        });
+        expect(isConcreteUserPoolRef).toBe(true);
+      }
     });
 
     test('WorkflowProgressFanout has appsync:GraphQL permission for publishWorkflowProgress', () => {
