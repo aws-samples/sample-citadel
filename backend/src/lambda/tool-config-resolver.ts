@@ -1,7 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
 import { getOperations } from '../utils/operations-registry';
-import { RegistryService, type ToolCustomMetadata } from '../services/registry-service';
+import { RegistryService, type ToolCustomMetadata, type ListResourcesOptions } from '../services/registry-service';
 import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
 
 const client = new DynamoDBClient({});
@@ -54,6 +54,27 @@ export function getRegistryService(): RegistryService {
  */
 export function _resetRegistryService(): void {
   registryServiceInstance = null;
+}
+
+/**
+ * Minimal slice of the Lambda Context this resolver consumes. The runtime
+ * always invokes `handler(event, context)`; declaring the parameter keeps
+ * unit-test invocations (which omit it) compiling while letting the list
+ * path thread the remaining-time budget into the Registry N+1 fetch.
+ */
+export interface LambdaContextLike {
+  getRemainingTimeInMillis?: () => number;
+}
+
+/**
+ * Builds listResources options carrying the Lambda remaining-time budget so
+ * a large registry returns a partial list instead of timing out (live
+ * incident: 340 records × sequential GETs > 30s).
+ */
+function budgetOptionsFrom(context?: LambdaContextLike): ListResourcesOptions | undefined {
+  const getRemainingTimeInMillis = context?.getRemainingTimeInMillis;
+  if (typeof getRemainingTimeInMillis !== 'function') return undefined;
+  return { getRemainingTimeMs: () => getRemainingTimeInMillis.call(context) };
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +228,7 @@ export function sanitizeDataStoreBindings(bindings: unknown): DataStoreBinding[]
 // Handler (task 7.5)
 // ---------------------------------------------------------------------------
 
-export const handler = async (event: ToolConfigResolverEvent) => {
+export const handler = async (event: ToolConfigResolverEvent, context?: LambdaContextLike) => {
   console.log('Event:', JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
@@ -227,7 +248,7 @@ export const handler = async (event: ToolConfigResolverEvent) => {
     switch (fieldName) {
       case 'listToolConfigs':
         return registryEnabled
-          ? await listToolConfigsRegistry(event)
+          ? await listToolConfigsRegistry(event, context)
           : await listToolConfigs();
 
       case 'getToolConfig':
@@ -278,7 +299,10 @@ export const handler = async (event: ToolConfigResolverEvent) => {
  * returned. A non-admin caller without an orgId receives an empty list
  * with a warning.
  */
-export async function listToolConfigsRegistry(event?: OrgScopedEvent): Promise<ToolConfig[]> {
+export async function listToolConfigsRegistry(
+  event?: OrgScopedEvent,
+  context?: LambdaContextLike,
+): Promise<ToolConfig[]> {
   const callerOrgId = event !== undefined ? await extractOrgFromEvent(event) : null;
   const admin = event !== undefined ? isAdminFromEvent(event) : false;
 
@@ -288,7 +312,10 @@ export async function listToolConfigsRegistry(event?: OrgScopedEvent): Promise<T
   }
 
   const registryService = getRegistryService();
-  const registryRecords = await registryService.listResources('tool');
+  const budgetOptions = budgetOptionsFrom(context);
+  const registryRecords = budgetOptions
+    ? await registryService.listResources('tool', budgetOptions)
+    : await registryService.listResources('tool');
   const allRegistryConfigs = registryRecords.map((record) =>
     registryService.mapToToolConfig(record),
   );

@@ -133,7 +133,7 @@ export async function executeTool(
     let code: string;
     try {
       code = await deps.loadToolCode(toolId);
-    } catch (err: unknown) {
+    } catch {
       return {
         success: false,
         error: 'Tool code not found',

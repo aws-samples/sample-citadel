@@ -71,3 +71,48 @@ def test_no_publish_without_session_or_bus():
         index.publish_intake_progress("", 0, 1, "AgentA")
         index.publish_intake_progress("0", 0, 1, "AgentA")
     events_client.put_events.assert_not_called()
+
+
+def test_process_event_emits_failure_signal_once_only_after_final_attempt():
+    # An always-transient fabricator must NOT emit -1 per attempt: the retry
+    # wrapper swallows intermediate faults, so exactly ONE failed=True
+    # progress publish happens, after the retry budget exhausts.
+    import functools
+    from botocore.exceptions import ClientError
+    import pytest
+    import transient_retry
+
+    boom = ClientError(
+        {"Error": {"Code": "internalServerException", "Message": "boom"}},
+        "ConverseStream",
+    )
+    agent = MagicMock(side_effect=boom)
+    progress_calls = []
+
+    def record_progress(orchestration_id, agent_index, total_agents,
+                        agent_use_id, failed=False):
+        progress_calls.append(failed)
+
+    no_sleep_retry = functools.partial(
+        transient_retry.call_with_transient_retry, sleep=lambda _d: None
+    )
+    event = {
+        "orchestration_id": "sess-1",
+        "agent_use_id": "AgentA",
+        "node": "fabricator",
+        "agent_input": {"taskDetails": "Create an agent"},
+        "agent_index": 0,
+        "total_agents": 1,
+    }
+    with patch.object(index, "_write_fabrication_status"), \
+            patch.object(index, "check_design_assessment"), \
+            patch.object(index, "create_agent_fabricator") as mk, \
+            patch.object(index, "publish_intake_progress", side_effect=record_progress), \
+            patch.object(index, "publish_fabrication_event"), \
+            patch.object(index, "call_with_transient_retry", no_sleep_retry):
+        mk.return_value = agent
+        with pytest.raises(ClientError):
+            index.process_event(event, {}, request_type="agent-creation")
+
+    assert agent.call_count == transient_retry.MAX_ATTEMPTS
+    assert progress_calls == [True]

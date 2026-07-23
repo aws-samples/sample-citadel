@@ -1,13 +1,17 @@
 """extract_information tool — KB retrieval + LLM extraction with running scorecard."""
 import json
+import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from strands.tools import tool
-from tools.kb import kb_query, load_json_from_s3, save_json_to_s3
+from tools.kb import kb_retrieve, load_json_from_s3, save_json_to_s3
 from tools.converse_utils import extract_text
 from config import bedrock, AWS_REGION
 from region import cross_region_prefix
 from model_config_loader import load_extraction_model_id
+
+logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), '..', 'templates')
 # fourth assessment pillar 'dimensions' appended per QT2B-3.
@@ -24,6 +28,37 @@ EXTRACTION_SYSTEM_PROMPT = """You are extracting specific information from busin
 For each field, extract a concise, specific value from the document context provided.
 If the information is not present in the context, respond with null for that field.
 Respond only with a JSON object — no explanation."""
+
+# Readiness probe backoff. A just-uploaded document can report INDEXED while
+# the vector index is not yet queryable — retrieval returns empty for a short
+# window and a later retry succeeds. Total sleep budget ≈ 45s across 7
+# attempts (one immediate + these delays).
+READINESS_PROBE_DELAYS = (2, 3, 5, 8, 12, 15)
+
+# Seam for tests; production sleeps for real.
+_probe_sleep = time.sleep
+
+
+def _probe_document_searchable(session_id: str, probe_query: str) -> bool:
+    """Bounded probe that the session's documents are actually retrievable.
+
+    Retrieval is scoped to the session, so ANY returned chunk proves the
+    uploaded content has become searchable. Backs off up to ~45s total;
+    returns False when the KB is still returning nothing (or erroring).
+    """
+    for attempt, delay in enumerate((0,) + READINESS_PROBE_DELAYS):
+        if delay:
+            _probe_sleep(delay)
+        result = kb_retrieve(probe_query, session_id)
+        if result.status == 'content':
+            return True
+        if result.status == 'error':
+            logger.warning(
+                "readiness probe attempt %d failed session=%s: %s",
+                attempt + 1, session_id, result.detail,
+            )
+    return False
+
 
 def _assessment_key(session_id: str, pillar: str) -> str:
     return f"{session_id}/assessment/{pillar}.json"
@@ -168,19 +203,56 @@ def extract_information(session_id: str) -> str:
 
     completed, pending = _all_fields_scorecard_from_data(pillar_data)
 
+    # Honest emptiness: before the field-extraction pass, verify the
+    # just-uploaded document is actually retrievable. A document can report
+    # INDEXED while the index is not yet queryable — the old code then
+    # silently reported 0/N fields extracted.
+    if pending:
+        probe_hint = pending[0].get('kb_hint', pending[0]['label'])
+        if not _probe_document_searchable(session_id, probe_hint):
+            # Copy rules: what changed (nothing), ONE plain reason, ONE next
+            # action — never raw error text.
+            return json.dumps({
+                'status': 'document_not_searchable',
+                'what_changed': 'Nothing was extracted — the assessment is unchanged.',
+                'reason': 'The uploaded document is still being made searchable.',
+                'next_action': 'Wait a short moment, then run the extraction again.',
+                'retryable': True,
+            })
+
     # Group pending fields by section for batched KB queries
     sections: dict[tuple, list[dict]] = {}
     for field in pending:
         key = (field['pillar'], field['section'])
         sections.setdefault(key, []).append(field)
 
-    # One KB query per section
+    # One KB query per section, with one bounded retry on a FAILED lookup.
+    # A failed section is marked skipped in the result — never silently
+    # treated as empty.
     section_contexts: dict[tuple, str] = {}
+    skipped_sections: list[dict] = []
     for key, fields in sections.items():
         hint = fields[0].get('kb_hint', fields[0]['label'])
-        ctx = kb_query(hint, session_id)
-        if ctx and 'error' not in ctx.lower() and 'No relevant' not in ctx:
-            section_contexts[key] = ctx
+        result = kb_retrieve(hint, session_id)
+        if result.status == 'error':
+            logger.warning(
+                "KB lookup failed for section %s/%s (retrying once): %s",
+                key[0], key[1], result.detail,
+            )
+            result = kb_retrieve(hint, session_id)
+        if result.status == 'error':
+            logger.warning(
+                "KB lookup failed twice for section %s/%s — marking skipped: %s",
+                key[0], key[1], result.detail,
+            )
+            skipped_sections.append({
+                'pillar': key[0],
+                'section': key[1],
+                'reason': 'The document lookup for this section failed — it will be retried on the next extraction run.',
+            })
+            continue
+        if result.status == 'content':
+            section_contexts[key] = result.content
 
     # Parallel extraction
     filled_this_run = 0
@@ -230,12 +302,8 @@ def extract_information(session_id: str) -> str:
         'total_required': total_required,
         'completion_pct': round(total_filled / total_required * 100, 1) if total_required else 0,
         'still_missing': still_missing,
+        'skipped_sections': skipped_sections,
     })
-
-    # Auto-update project progress
-    from tools.state import _internal_update_progress as update_intake_progress
-    pct = round(total_filled / total_required * 100) if total_required else 0
-    update_intake_progress(session_id=session_id, phase='assessment', progress=min(pct, 90), change_summary=f'Extracted {total_filled}/{total_required} fields')
 
 @tool
 def get_assessment_summary(session_id: str) -> str:

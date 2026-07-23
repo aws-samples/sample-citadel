@@ -6,6 +6,47 @@ export interface FabricationGroup {
   items: FabricationQueueItem[];
 }
 
+export interface FabricationQueueSummary {
+  /** PENDING + PROCESSING — the work actually in flight. */
+  active: number;
+  completed: number;
+  failed: number;
+}
+
+/**
+ * Summarizes queue items by lifecycle state. The queue endpoint returns
+ * ALL-TIME rows, so a single cumulative count reads as a stalled backlog
+ * once history accumulates (live: 37 rows, all COMPLETED). The UI shows the
+ * active count prominently and completed/failed separately.
+ */
+export function summarizeFabricationQueue(
+  items: FabricationQueueItem[],
+): FabricationQueueSummary {
+  const summary: FabricationQueueSummary = { active: 0, completed: 0, failed: 0 };
+  for (const item of items) {
+    if (item.status === 'PENDING' || item.status === 'PROCESSING') {
+      summary.active += 1;
+    } else if (item.status === 'COMPLETED') {
+      summary.completed += 1;
+    } else if (item.status === 'FAILED') {
+      summary.failed += 1;
+    }
+  }
+  return summary;
+}
+
+/**
+ * Renders a queue summary as the human breakdown line, e.g.
+ * '0 in progress · 37 completed' (+ ' · 2 failed' only when present).
+ */
+export function formatFabricationQueueSummary(summary: FabricationQueueSummary): string {
+  const parts = [`${summary.active} in progress`, `${summary.completed} completed`];
+  if (summary.failed > 0) {
+    parts.push(`${summary.failed} failed`);
+  }
+  return parts.join(' · ');
+}
+
 /**
  * Groups fabrication queue items by appId.
  * Items without appId go to an "Unassigned" group.

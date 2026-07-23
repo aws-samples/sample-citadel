@@ -158,13 +158,13 @@ describe('RegistryService record mapping', () => {
       expect(service.mapToAgentConfig(record).manifest).toBeUndefined();
     });
 
-    it('returns empty string for config when description is undefined', () => {
+    it("returns '{}' for config when description is undefined (AWSJSON contract)", () => {
       const record: RegistryRecord = {
         recordId: 'a1',
         name: 'A',
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToAgentConfig(record).config).toBe('');
+      expect(service.mapToAgentConfig(record).config).toBe('{}');
     });
 
     it('returns undefined timestamps when dates are missing', () => {
@@ -335,13 +335,13 @@ describe('RegistryService record mapping', () => {
       expect(service.mapToToolConfig(record).categories).toEqual([]);
     });
 
-    it('returns empty string for config when description is undefined', () => {
+    it("returns '{}' for config when description is undefined (AWSJSON contract)", () => {
       const record: RegistryRecord = {
         recordId: 't1',
         name: 'T',
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToToolConfig(record).config).toBe('');
+      expect(service.mapToToolConfig(record).config).toBe('{}');
     });
 
     it('returns undefined timestamps when dates are missing', () => {

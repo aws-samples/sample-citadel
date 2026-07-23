@@ -1,5 +1,6 @@
 """Tests for parallel field extraction optimizations."""
 import json
+from tools.kb import KBResult
 import time
 from unittest.mock import patch, MagicMock
 import pytest
@@ -41,7 +42,7 @@ class TestScorecardFromData:
         assert 'Field 4' not in labels
 
 class TestSectionGroupedKBBatching:
-    @patch('tools.extract.kb_query')
+    @patch('tools.extract.kb_retrieve')
     @patch('tools.extract._extract_field_with_llm', return_value='extracted')
     @patch('tools.extract.save_json_to_s3')
     @patch('tools.extract.load_json_from_s3')
@@ -50,7 +51,7 @@ class TestSectionGroupedKBBatching:
         from tools.extract import extract_information, PILLARS
         pillar = _sample_pillar_data()
         mock_load.return_value = pillar
-        mock_kb.return_value = 'some context'
+        mock_kb.return_value = KBResult(status='content', content='some context')
 
         extract_information(session_id='test-session')
 
@@ -58,10 +59,12 @@ class TestSectionGroupedKBBatching:
         # added a 4th pillar 'dimensions' with 1 section, so the expected
         # count is len(PILLARS) * sections_per_pillar = 4 * 2 = 8).
         # Fixture uses 2 sections per pillar; the multiplicand stays 2.
-        assert mock_kb.call_count == len(PILLARS) * 2
+        # +1: the readiness probe issues one retrieval before extraction
+        # (it succeeds immediately here because the mock returns content).
+        assert mock_kb.call_count == len(PILLARS) * 2 + 1
 
 class TestParallelExecution:
-    @patch('tools.extract.kb_query', return_value='context')
+    @patch('tools.extract.kb_retrieve', return_value=KBResult(status='content', content='context'))
     @patch('tools.extract.save_json_to_s3')
     @patch('tools.extract.load_json_from_s3')
     @patch('tools.extract._init_if_needed')
@@ -85,7 +88,7 @@ class TestParallelExecution:
         assert elapsed < 0.5, f"Parallel extraction took {elapsed:.2f}s, expected < 0.5s"
 
 class TestBulkS3Write:
-    @patch('tools.extract.kb_query', return_value='context')
+    @patch('tools.extract.kb_retrieve', return_value=KBResult(status='content', content='context'))
     @patch('tools.extract._extract_field_with_llm', return_value='val')
     @patch('tools.extract.save_json_to_s3')
     @patch('tools.extract.load_json_from_s3')
@@ -100,7 +103,7 @@ class TestBulkS3Write:
         assert mock_save.call_count == len(PILLARS)
 
 class TestOutputFormat:
-    @patch('tools.extract.kb_query', return_value='context')
+    @patch('tools.extract.kb_retrieve', return_value=KBResult(status='content', content='context'))
     @patch('tools.extract._extract_field_with_llm', return_value='val')
     @patch('tools.extract.save_json_to_s3')
     @patch('tools.extract.load_json_from_s3')

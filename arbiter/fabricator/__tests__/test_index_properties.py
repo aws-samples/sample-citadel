@@ -220,3 +220,35 @@ class TestLambdaHandlerRecordProcessing:
         with patch("index.process_event") as mock_process:
             lambda_handler({"Records": records}, {})
             assert mock_process.call_count == num_records
+
+
+# ---------------------------------------------------------------------------
+# Fabricator BedrockModel construction — non-streaming + retry config
+# ---------------------------------------------------------------------------
+
+class TestFabricatorModelTransientFaultConfig:
+    """Both fabricator models must be built with streaming=False (faults then
+    surface PRE-response, inside botocore's retry scope — mid-stream
+    EventStreamErrors are retried by no layer) and with BEDROCK_RETRY_CONFIG
+    (adaptive retries, read_timeout=3600 for the long non-streaming call)."""
+
+    def _bedrock_model_kwargs(self, factory, *args, **kwargs):
+        import index as index_module
+        with patch.object(index_module.models, "BedrockModel") as bedrock_model, \
+                patch.object(index_module, "Agent"):
+            factory(*args, **kwargs)
+        return bedrock_model.call_args.kwargs
+
+    def test_agent_fabricator_model_disables_streaming(self):
+        import index as index_module
+        kwargs = self._bedrock_model_kwargs(
+            index_module.create_agent_fabricator, MagicMock(name="complete_task")
+        )
+        assert kwargs.get("streaming") is False
+        assert kwargs.get("boto_client_config") is index_module.BEDROCK_RETRY_CONFIG
+
+    def test_tool_fabricator_model_disables_streaming(self):
+        import index as index_module
+        kwargs = self._bedrock_model_kwargs(index_module.create_tool_fabricator)
+        assert kwargs.get("streaming") is False
+        assert kwargs.get("boto_client_config") is index_module.BEDROCK_RETRY_CONFIG

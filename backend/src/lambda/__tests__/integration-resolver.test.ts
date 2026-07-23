@@ -615,7 +615,7 @@ describe('Integration Resolver - Unit Tests', () => {
       // This will fail at connection test but we can verify SSM retrieval
       try {
         await invoke(event);
-      } catch (error) {
+      } catch {
         // Expected to fail at connection test
       }
       

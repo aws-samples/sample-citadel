@@ -11,6 +11,7 @@ import { IntegrationToolWizard } from '../components/IntegrationToolWizard';
 import { DataPipelineWizard } from '../components/DataPipelineWizard';
 import { ToolCard } from '../components/ToolCard';
 import { FabricationButton } from '../components/FabricationButton';
+import { summarizeFabricationQueue } from '../components/fabricationGrouping';
 import { FabricationTray } from '../components/FabricationTray';
 import { useFabricatorQueue } from '../hooks/useFabricatorQueue';
 import { useOrganization } from '../contexts/OrganizationContext';
@@ -91,6 +92,7 @@ export function Tools() {
   const { queueItems, reload: reloadQueue, addPendingItem } = useFabricatorQueue({
     onFabricationComplete: () => { loadTools(); },
   });
+  const queueSummary = summarizeFabricationQueue(queueItems);
 
   useEffect(() => { loadTools(); }, []);
 
@@ -222,7 +224,7 @@ export function Tools() {
             </Button>
           );
         })}
-        <FabricationButton queueCount={queueItems.length} onClick={() => setIsFabricationTrayOpen(true)} />
+        <FabricationButton activeCount={queueSummary.active} completedCount={queueSummary.completed} onClick={() => setIsFabricationTrayOpen(true)} />
       </div>
 
       {error && (

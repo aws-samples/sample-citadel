@@ -87,8 +87,20 @@ describe('DatabricksAdapter', () => {
       expect(mockConnect).toHaveBeenCalledWith({
         host: 'myworkspace.cloud.databricks.com',
         path: '/sql/1.0/warehouses/abc123',
+        authType: 'access-token',
         token: 'dapi-token-123',
+        telemetryEnabled: false,
       });
+    });
+
+    it('disables v2 driver telemetry to avoid out-of-band HTTP from Lambda', async () => {
+      mockConnect.mockResolvedValueOnce(undefined);
+      mockClose.mockResolvedValueOnce(undefined);
+
+      await adapter.testConnection(validConfig);
+      expect(mockConnect).toHaveBeenCalledWith(
+        expect.objectContaining({ telemetryEnabled: false })
+      );
     });
 
     it('wraps authentication errors in PermissionError with cause', async () => {

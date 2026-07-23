@@ -56,6 +56,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { v4 as uuidv4 } from 'uuid';
 import Ajv from 'ajv';
+import addFormats from 'ajv-formats';
 import { getUserId } from '../utils/appsync';
 import { isAdminFromEvent, extractOrgFromEvent } from '../utils/auth-event';
 import { publishAppStatusEvent as publishAppStatusSubscription } from '../utils/appsync-publish';
@@ -1981,7 +1982,12 @@ async function setAppConfigSchema(
   if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
     throw new Error('Invalid JSON Schema: schema must be a JSON object');
   }
-  const ajv = new Ajv();
+  // ajv 8 compat for user-supplied schemas: strictSchema is relaxed because
+  // config schemas are authored by API callers and may carry benign unknown
+  // keywords (silently ignored by ajv 6, which this endpoint accepted and
+  // stored). addFormats restores the `format` validation built into ajv 6.
+  const ajv = new Ajv({ strictSchema: false });
+  addFormats(ajv);
   const isValid = ajv.validateSchema(schema);
   if (!isValid) {
     const errors =
@@ -2022,23 +2028,21 @@ async function setAppConfigValues(
     typeof valuesInput === 'string' ? JSON.parse(valuesInput) : valuesInput;
 
   if (manifest.configSchema) {
-    const ajv = new Ajv({ allErrors: true });
+    // ajv 8 compat: stored schemas were accepted under ajv 6, which ignored
+    // unknown keywords and validated `format` built-in. strictSchema: false +
+    // addFormats preserves that behavior so previously stored schemas keep
+    // compiling instead of throwing at this call site.
+    const ajv = new Ajv({ allErrors: true, strictSchema: false });
+    addFormats(ajv);
     const validate = ajv.compile(manifest.configSchema);
     const valid = validate(values);
     if (!valid) {
       const errors = (validate.errors || [])
         .map((e) => {
-          // ajv v6 ErrorObject has dataPath/params unions; access the fields
-          // this message builder needs through a structural view.
-          const err = e as {
-            instancePath?: string;
-            params?: { missingProperty?: string };
-            message?: string;
-          };
           const path =
-            err.instancePath ||
-            (err.params?.missingProperty ? err.params.missingProperty : '');
-          return `${path ? path + ': ' : ''}${err.message}`;
+            e.instancePath ||
+            ((e.params as { missingProperty?: string }).missingProperty ?? '');
+          return `${path ? path + ': ' : ''}${e.message}`;
         })
         .join('; ');
       throw new Error(`Config validation failed: ${errors}`);
