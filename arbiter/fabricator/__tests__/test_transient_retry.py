@@ -21,7 +21,7 @@ Contract under test:
 
 import sys
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError, EventStreamError
@@ -238,3 +238,117 @@ class TestBackoffProperties:
         retryable = sorted(TRANSIENT_BEDROCK_ERROR_CODES)
         if code not in retryable:
             assert should_retry(code, retryable, 0, 3) is False
+
+
+# ---------------------------------------------------------------------------
+# ConflictException is NON-RETRYABLE (kill→poison→kill loop pin)
+# ---------------------------------------------------------------------------
+
+class TestConflictExceptionIsNotTransient:
+    """Live evidence 2026-07-23: an orphaned Registry record stuck in
+    CREATING raised ConflictException on every UpdateRegistryRecordStatus;
+    retrying it 92-110× consumed ~825-834s of the 900s Lambda budget. The
+    condition never resolves within a run — it must NEVER be classified
+    transient here."""
+
+    def test_conflict_exception_not_in_transient_frozenset(self):
+        assert "conflictexception" not in TRANSIENT_BEDROCK_ERROR_CODES
+
+    def test_conflict_exception_not_classified_transient(self):
+        err = _client_error(
+            "ConflictException",
+            "Registry record cannot be modified while in CREATING state.",
+        )
+        assert is_transient_bedrock_error(err) is False
+
+    def test_conflict_exception_fails_fast_single_attempt_no_sleep(self):
+        calls = []
+        sleeps = []
+
+        def op():
+            calls.append(1)
+            raise _client_error(
+                "ConflictException",
+                "Registry record cannot be modified while in CREATING state.",
+            )
+
+        with pytest.raises(ClientError):
+            call_with_transient_retry(op, sleep=sleeps.append)
+
+        assert len(calls) == 1
+        assert sleeps == []
+
+
+# ---------------------------------------------------------------------------
+# Deadline-aware retry gating
+# ---------------------------------------------------------------------------
+
+from deadline import FabricationDeadline, FabricationDeadlineExceeded  # noqa: E402
+
+
+class TestDeadlineAwareRetry:
+    """Rule: never start an attempt or backoff that cannot fit before
+    (deadline - safety_margin) — the terminal status write must win over
+    more retry work."""
+
+    def test_retries_normally_when_deadline_has_room(self):
+        calls = []
+        deadline = FabricationDeadline(lambda: 900_000, safety_margin_seconds=60)
+
+        def op():
+            calls.append(1)
+            if len(calls) < 3:
+                raise _client_error("internalServerException")
+            return "ok"
+
+        result = call_with_transient_retry(
+            op, sleep=lambda s: None, deadline=deadline
+        )
+        assert result == "ok"
+        assert len(calls) == 3
+
+    def test_declines_backoff_that_cannot_fit_and_reraises_original(self):
+        # 61s remaining, 60s margin, pinned 2s backoff: sleeping would eat
+        # into the margin — decline the retry, re-raise the ORIGINAL
+        # transient error. (Backoff is pinned because full jitter's lower
+        # bound is 0, which could legitimately fit.)
+        calls = []
+        sleeps = []
+        deadline = FabricationDeadline(lambda: 61_000, safety_margin_seconds=60)
+
+        def op():
+            calls.append(1)
+            raise _client_error("internalServerException", "bedrock hiccup")
+
+        import transient_retry as tr
+        with pytest.raises(ClientError) as exc_info, \
+                patch.object(tr, "calculate_backoff", lambda *a: 2.0):
+            call_with_transient_retry(op, sleep=sleeps.append, deadline=deadline)
+
+        assert "bedrock hiccup" in str(exc_info.value)
+        assert len(calls) == 1
+        assert sleeps == []
+
+    def test_never_starts_attempt_inside_margin(self):
+        calls = []
+        deadline = FabricationDeadline(lambda: 30_000, safety_margin_seconds=60)
+
+        with pytest.raises(FabricationDeadlineExceeded):
+            call_with_transient_retry(
+                lambda: calls.append(1), sleep=lambda s: None, deadline=deadline
+            )
+
+        assert calls == []
+        assert deadline.tripped is True
+
+    def test_no_deadline_keeps_legacy_behavior(self):
+        calls = []
+
+        def op():
+            calls.append(1)
+            if len(calls) < 2:
+                raise _client_error("ThrottlingException")
+            return "ok"
+
+        assert call_with_transient_retry(op, sleep=lambda s: None) == "ok"
+        assert len(calls) == 2

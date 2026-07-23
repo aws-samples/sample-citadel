@@ -471,6 +471,13 @@ export class ArbiterStack extends cdk.Stack {
       handler: 'lambda_handler',
       layers: [catalogLayer],
       bundling: { assetHashType: cdk.AssetHashType.SOURCE },
+      // Platform max reached — Lambda's hard cap is 900s (15 min): verified
+      // against the installed generated service models (aws-cdk-lib 2.261.0
+      // lambda.generated.d.ts and @aws-sdk/client-lambda 3.1071.0
+      // models_0.d.ts: "The maximum allowed value is 900 seconds"). Do not
+      // raise. Headroom is owned by the runtime deadline guard
+      // (arbiter/fabricator/deadline.py, 60s safety margin); worst observed
+      // successful build is 748s.
       timeout: cdk.Duration.minutes(15),
       memorySize: 1024,
       environment: {

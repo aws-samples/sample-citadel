@@ -113,6 +113,7 @@ def call_with_transient_retry(
     base_delay: float = BASE_DELAY_SECONDS,
     max_delay: float = MAX_DELAY_SECONDS,
     sleep=None,
+    deadline=None,
 ):
     """Invoke ``operation()``, retrying ONLY transient Bedrock faults.
 
@@ -121,15 +122,33 @@ def call_with_transient_retry(
     so callers' except blocks see the original Bedrock message. Non-transient
     errors propagate immediately (fail fast).
 
+    Deadline rule (kill→poison→kill fix, live evidence 2026-07-23): never
+    START an attempt or a backoff that cannot fit before
+    (deadline - safety_margin) — the terminal status write must win over
+    more retry work. Starting inside the margin raises
+    FabricationDeadlineExceeded (via ``deadline.check``); a backoff that
+    would eat into the margin declines the retry and re-raises the ORIGINAL
+    transient error instead.
+
     Args:
         operation: Zero-arg callable to invoke (e.g. ``lambda: agent(task)``).
         max_attempts: Total attempts including the first (default 3).
         base_delay: Backoff base in seconds (default 1.0 → ~1s/~2s ceilings).
         max_delay: Backoff cap in seconds.
         sleep: Injectable sleep function for tests; defaults to time.sleep.
+        deadline: Optional FabricationDeadline; None keeps legacy behavior.
     """
     sleep_fn = time.sleep if sleep is None else sleep
     for attempt in range(max_attempts):
+        if deadline is not None:
+            # Raises FabricationDeadlineExceeded (a BaseException — it must
+            # bypass the ``except Exception`` below) when already inside the
+            # safety margin, so process_event writes the terminal 'timed
+            # out' FAILED status instead of the Lambda burning its last
+            # seconds on an attempt that cannot finish.
+            deadline.check(
+                f"transient-retry attempt {attempt + 1}/{max_attempts}"
+            )
         try:
             return operation()
         except Exception as exc:  # noqa: BLE001 — classified below; re-raised unless transient
@@ -137,6 +156,15 @@ def call_with_transient_retry(
             if not should_retry(code, TRANSIENT_BEDROCK_ERROR_CODES, attempt, max_attempts - 1):
                 raise
             delay = calculate_backoff(attempt, base_delay, max_delay)
+            if deadline is not None and not deadline.can_fit(delay):
+                logger.warning(
+                    "Declining transient retry (attempt %d/%d): %.2fs backoff "
+                    "cannot fit before the deadline safety margin "
+                    "(%.1fs remaining); re-raising the original error",
+                    attempt + 1, max_attempts, delay,
+                    deadline.remaining_seconds(),
+                )
+                raise
             logger.warning(
                 "Transient Bedrock fault (%s) on attempt %d/%d; retrying in %.2fs",
                 code, attempt + 1, max_attempts, delay,
