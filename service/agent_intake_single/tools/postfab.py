@@ -28,7 +28,7 @@ from strands.tools import tool
 
 from tools import appsync_client
 from tools.appsync_client import AppSyncError
-from tools.fabricate import PLAN_KEY, SECTION_KEY, _get_existing_agents, _llm
+from tools.fabricate import PLAN_KEY, SECTION_KEY, _get_existing_agents, _is_stale_active, _llm
 from tools.kb import s3_get
 from tools.plan_doc import refresh_plan_document
 from tools.state import get_postfab_marker, set_postfab_marker, _internal_update_progress
@@ -157,6 +157,23 @@ def _join_names(names: list[str]) -> str:
     if len(quoted) <= 1:
         return quoted[0] if quoted else ""
     return ", ".join(quoted[:-1]) + " and " + quoted[-1]
+
+
+def _stalled_sentence(stale: list[str]) -> str:
+    """Distinct plain-language copy for orphaned (stalled) builds — never the
+    'being built' phrasing, so a dead job is never presented as live."""
+    verb = "has" if len(stale) == 1 else "have"
+    return (f"{_join_names(stale)} {verb} stalled — no progress for a while — "
+            "and can be retried.")
+
+
+def _retry_gate_action(retryable: list[str]) -> dict:
+    """Verb-first retry action for failed/stalled agents (visible labels
+    only, never raw statuses)."""
+    if len(retryable) == 1:
+        return _action(f"Retry '{retryable[0]}'", f"Retry the agent {retryable[0]}")
+    return _action("Retry the agents that didn't finish",
+                   "Retry the agents that didn't finish")
 
 
 def _error_return(session_id: str, err: AppSyncError, step: str) -> str:
@@ -376,24 +393,44 @@ def check_fabrication_status(session_id: str) -> str:
              _action("Stop here", "Stop here")],
         )
 
+    now = datetime.now(timezone.utc)
     total = len(items)
-    succeeded = [i.get("agentName") or i.get("agentUseId") for i in items if i.get("status") == "COMPLETED"]
-    failed = [i.get("agentName") or i.get("agentUseId") for i in items if i.get("status") == "FAILED"]
-    building = [i.get("agentName") or i.get("agentUseId") for i in items if i.get("status") not in _TERMINAL]
+
+    def _name(i: dict) -> str:
+        return i.get("agentName") or i.get("agentUseId")
+
+    succeeded = [_name(i) for i in items if i.get("status") == "COMPLETED"]
+    failed = [_name(i) for i in items if i.get("status") == "FAILED"]
+    # Non-terminal rows split by updatedAt age: a stale row is orphaned — its
+    # writer can never re-stamp it (see STALE_ACTIVE_SECONDS in
+    # tools/fabricate.py for the derivation) — so it gates like a failure
+    # instead of holding the whole session "in progress" until the row's TTL.
+    stale: list[str] = []
+    building: list[str] = []
+    for i in items:
+        if i.get("status") in _TERMINAL:
+            continue
+        (stale if _is_stale_active(i, now) else building).append(_name(i))
+    stale_set = set(stale)
     agents = [
-        {"name": i.get("agentName") or i.get("agentUseId"),
-         "state": _STATUS_PLAIN.get(i.get("status"), "in an unknown state")}
+        {"name": _name(i),
+         "state": "stalled"
+         if i.get("status") not in _TERMINAL and _name(i) in stale_set
+         else _STATUS_PLAIN.get(i.get("status"), "in an unknown state")}
         for i in items
     ]
     counts = {
         "built": len(succeeded),
         "failed": len(failed),
-        "being_built": sum(1 for i in items if i.get("status") == "PROCESSING"),
-        "waiting_to_start": sum(1 for i in items if i.get("status") == "PENDING"),
+        "stalled": len(stale),
+        "being_built": sum(1 for i in items
+                           if i.get("status") == "PROCESSING" and _name(i) not in stale_set),
+        "waiting_to_start": sum(1 for i in items
+                                if i.get("status") == "PENDING" and _name(i) not in stale_set),
     }
     all_terminal = total > 0 and not building
-    all_succeeded = all_terminal and not failed
-    any_failed = bool(failed)
+    all_succeeded = all_terminal and not failed and not stale
+    any_failed = bool(failed) or bool(stale)
 
     if total == 0:
         status = "none"
@@ -409,7 +446,7 @@ def check_fabrication_status(session_id: str) -> str:
     extra = {
         "session_id": session_id, "total": total, "counts": counts,
         "agents": agents, "succeeded": succeeded, "failed": failed,
-        "building": building, "all_terminal": all_terminal,
+        "building": building, "stalled": stale, "all_terminal": all_terminal,
         "all_succeeded": all_succeeded, "any_failed": any_failed,
     }
 
@@ -428,15 +465,25 @@ def check_fabrication_status(session_id: str) -> str:
         if _stage_rank(current_stage) < _stage_rank("fabrication_pending"):
             set_postfab_marker(session_id, stage="fabrication_pending")
         detail = f", and {_join_names(building)} " + ("is" if len(building) == 1 else "are") + " in progress" if building else ""
-        summary = (
-            f"Still building — {len(succeeded)} of {total} agents are done{detail}. "
-            "Check back with me any time and I'll give you the latest."
-        )
+        summary = f"Still building — {len(succeeded)} of {total} agents are done{detail}. "
+        # Jobs are independent: failed or stalled agents are retryable right
+        # now — never held hostage by a sibling that is still building.
+        if failed:
+            pronoun = "it" if len(failed) == 1 else "they"
+            summary += (f"{_join_names(failed)} didn't finish — {pronoun} can "
+                        "be retried while the rest keep building. ")
+        if stale:
+            summary += _stalled_sentence(stale) + " "
+        summary += "Check back with me any time and I'll give you the latest."
+        actions = [_action("Check again", "Check the build status again")]
+        retryable = failed + stale
+        if retryable:
+            actions.append(_retry_gate_action(retryable))
+        actions.append(_action("Not now", "Not now"))
         return _result(
             True, "in_progress", summary,
             "Want me to check again, or is there anything else while we wait?",
-            [_action("Check again", "Check the build status again"),
-             _action("Not now", "Not now")],
+            actions,
             **extra,
         )
 
@@ -465,25 +512,43 @@ def check_fabrication_status(session_id: str) -> str:
         )
 
     if status == "partial":
-        summary = (
-            f"{len(succeeded)} of {total} agents built successfully. "
-            f"{_join_names(failed)} didn't finish — I'll keep the details so we can come back to it."
-        )
+        bits = [f"{len(succeeded)} of {total} agents built successfully."]
+        if failed:
+            bits.append(
+                f"{_join_names(failed)} didn't finish — I'll keep the details "
+                "so we can come back to it."
+            )
+        if stale:
+            bits.append(_stalled_sentence(stale))
+        actions = [_action(f"Activate {len(succeeded)} agents",
+                           "Yes, activate the agents that are ready")]
+        retryable = failed + stale
+        if retryable:
+            actions.append(_retry_gate_action(retryable))
+        if failed:
+            actions.append(_action(f"Look at {_join_names(failed[:1])} first",
+                                   "Let's look at the failed agent first"))
+        actions.append(_action("Not now", "Not now"))
         return _result(
-            True, "partial", summary,
+            True, "partial", " ".join(bits),
             f"Want me to activate the {len(succeeded)} that are ready?",
-            [_action(f"Activate {len(succeeded)} agents", "Yes, activate the agents that are ready"),
-             _action(f"Look at {_join_names(failed[:1])} first", "Let's look at the failed agent first"),
-             _action("Not now", "Not now")],
+            actions,
             **extra,
         )
 
+    bits = ["None of the agents finished building this time. "
+            "Nothing has been activated."]
+    if stale:
+        bits.append(_stalled_sentence(stale))
+    actions = [_action("Review the plan", "Let's review the fabrication plan")]
+    retryable = failed + stale
+    if retryable:
+        actions.append(_retry_gate_action(retryable))
+    actions.append(_action("Stop here", "Stop here"))
     return _result(
-        True, "all_failed",
-        "None of the agents finished building this time. Nothing has been activated.",
+        True, "all_failed", " ".join(bits),
         "Want to take another look at the fabrication plan together?",
-        [_action("Review the plan", "Let's review the fabrication plan"),
-         _action("Stop here", "Stop here")],
+        actions,
         **extra,
     )
 

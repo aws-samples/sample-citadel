@@ -15,9 +15,13 @@
  *
  * Requirements: 3.2, 3.3, 3.4, 3.8, 3.9
  */
-import { createHash } from 'crypto';
-import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { createHash } from "crypto";
+import {
+  DynamoDBDocumentClient,
+  QueryCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -41,17 +45,18 @@ export interface AuditLogEntry {
   apiKeyId: string;
   sourceIp: string;
   timestamp: string;
-  result: 'allow' | 'deny';
+  result: "allow" | "deny";
 }
 
 // ── SDK Client (lazy-initialized) ───────────────────────────
 
-const APPS_TABLE = process.env.APPS_TABLE || 'citadel-apps-dev';
+const APPS_TABLE = process.env.APPS_TABLE || "citadel-apps-dev";
 
 let _docClient: DynamoDBDocumentClient | undefined;
 
 function getDocClient(): DynamoDBDocumentClient {
-  if (!_docClient) _docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+  if (!_docClient)
+    _docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
   return _docClient;
 }
 
@@ -69,12 +74,15 @@ function logAudit(entry: AuditLogEntry): void {
  * This function has no side effects and depends only on key state.
  */
 export function evaluateKeyAuthorization(
-  matchedKey: { status: string; expiresAt?: string; keyId?: string } | undefined,
-): 'allow' | 'deny' {
-  if (!matchedKey) return 'deny';
-  if (matchedKey.status !== 'ACTIVE') return 'deny';
-  if (matchedKey.expiresAt && new Date(matchedKey.expiresAt) <= new Date()) return 'deny';
-  return 'allow';
+  matchedKey:
+    | { status: string; expiresAt?: string; keyId?: string }
+    | undefined,
+): "allow" | "deny" {
+  if (!matchedKey) return "deny";
+  if (matchedKey.status !== "ACTIVE") return "deny";
+  if (matchedKey.expiresAt && new Date(matchedKey.expiresAt) <= new Date())
+    return "deny";
+  return "allow";
 }
 
 // ── Handler ─────────────────────────────────────────────────
@@ -93,36 +101,38 @@ export const handler = async (
 ): Promise<SimpleAuthorizerResult> => {
   const docClient = deps.docClient || getDocClient();
   const appsTable = deps.appsTable || APPS_TABLE;
-  const appId = event.stageVariables?.appId || '';
-  const sourceIp = event.requestContext?.http?.sourceIp || 'unknown';
-  const apiKey = event.headers?.['x-api-key'];
+  const appId = event.stageVariables?.appId || "";
+  const sourceIp = event.requestContext?.http?.sourceIp || "unknown";
+  const apiKey = event.headers?.["x-api-key"];
 
   // Missing or empty x-api-key → 401 Unauthorized
   if (!apiKey) {
     logAudit({
       appId,
-      apiKeyId: 'unknown',
+      apiKeyId: "unknown",
       sourceIp,
       timestamp: new Date().toISOString(),
-      result: 'deny',
+      result: "deny",
     });
-    throw new Error('Unauthorized');
+    throw new Error("Unauthorized");
   }
 
   // Hash the provided key
-  const hashedKey = createHash('sha256').update(apiKey).digest('hex');
+  const hashedKey = createHash("sha256").update(apiKey).digest("hex");
 
   try {
     // Query GroupIndex for APIKEY# items under APP#{appId}
-    const result = await docClient.send(new QueryCommand({
-      TableName: appsTable,
-      IndexName: 'GroupIndex',
-      KeyConditionExpression: 'groupId = :gid AND begins_with(sortId, :sk)',
-      ExpressionAttributeValues: {
-        ':gid': `APP#${appId}`,
-        ':sk': 'APIKEY#',
-      },
-    }));
+    const result = await docClient.send(
+      new QueryCommand({
+        TableName: appsTable,
+        IndexName: "GroupIndex",
+        KeyConditionExpression: "groupId = :gid AND begins_with(sortId, :sk)",
+        ExpressionAttributeValues: {
+          ":gid": `APP#${appId}`,
+          ":sk": "APIKEY#",
+        },
+      }),
+    );
 
     const items = result.Items || [];
 
@@ -136,27 +146,31 @@ export const handler = async (
 
     logAudit({
       appId,
-      apiKeyId: matchedKey?.keyId || 'unknown',
+      apiKeyId: matchedKey?.keyId || "unknown",
       sourceIp,
       timestamp: new Date().toISOString(),
       result: decision,
     });
 
-    if (decision === 'deny') {
+    if (decision === "deny") {
       return { isAuthorized: false };
     }
 
     // Best-effort async update of lastUsedAt
-    docClient.send(new UpdateCommand({
-      TableName: appsTable,
-      Key: { appId: matchedKey!.appId },
-      UpdateExpression: 'SET lastUsedAt = :now',
-      ExpressionAttributeValues: {
-        ':now': new Date().toISOString(),
-      },
-    })).catch(() => {
-      // Best-effort — swallow errors silently
-    });
+    docClient
+      .send(
+        new UpdateCommand({
+          TableName: appsTable,
+          Key: { appId: matchedKey!.appId },
+          UpdateExpression: "SET lastUsedAt = :now",
+          ExpressionAttributeValues: {
+            ":now": new Date().toISOString(),
+          },
+        }),
+      )
+      .catch(() => {
+        // Best-effort — swallow errors silently
+      });
 
     return {
       isAuthorized: true,
@@ -165,14 +179,14 @@ export const handler = async (
         apiKeyId: matchedKey!.keyId as string,
       },
     };
-  } catch (error) {
+  } catch {
     // DynamoDB failure → fail closed (deny)
     logAudit({
       appId,
-      apiKeyId: 'unknown',
+      apiKeyId: "unknown",
       sourceIp,
       timestamp: new Date().toISOString(),
-      result: 'deny',
+      result: "deny",
     });
     return { isAuthorized: false };
   }

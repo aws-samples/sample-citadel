@@ -259,6 +259,11 @@ def _invoke_model(prompt: str) -> str:
         max_tokens=8192,
         region_name="us-west-2",
         boto_client_config=BEDROCK_RETRY_CONFIG,
+        # Headless (no per-token consumer): streaming=False makes transient
+        # model faults surface pre-response, inside BEDROCK_RETRY_CONFIG's
+        # adaptive retry scope — mid-stream stream faults are retried by no
+        # layer. Mirrors the fabricator model construction in index.py.
+        streaming=False,
     )
     agent = Agent(bedrock_model, system_prompt=_MANIFEST_PROPOSER_SYSTEM_PROMPT)
     result = agent(prompt)

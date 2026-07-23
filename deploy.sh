@@ -501,8 +501,8 @@ if [ "$DOCKER_CMD" = "finch" ]; then
     ok "Finch VM running"
   fi
 else
-  if ! $DOCKER_CMD info &>/dev/null; then
-    err "'$DOCKER_CMD' is not responding. Ensure the Docker daemon is running."
+  if ! perl -e 'alarm 15; exec @ARGV' $DOCKER_CMD info &>/dev/null; then
+    err "Docker daemon is not responding — restart Docker Desktop and retry"
     exit 1
   fi
   ok "Container runtime: $DOCKER_CMD"

@@ -37,23 +37,32 @@
  * The full JSON blob is opaque to the Registry SDK; this resolver is the
  * sole reader/writer of the manifest surface.
  */
-import type { AppSyncResolverHandler } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import type { AppSyncResolverHandler } from "aws-lambda";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
+  BatchGetCommand,
   QueryCommand,
   ScanCommand,
   type NativeAttributeValue,
   type QueryCommandOutput,
   type ScanCommandOutput,
-} from '@aws-sdk/lib-dynamodb';
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { v4 as uuidv4 } from 'uuid';
-import Ajv from 'ajv';
-import { getUserId } from '../utils/appsync';
-import { isAdminFromEvent } from '../utils/auth-event';
-import { publishAppStatusEvent as publishAppStatusSubscription } from '../utils/appsync-publish';
+} from "@aws-sdk/lib-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import {
+  CognitoIdentityProviderClient,
+  AdminGetUserCommand,
+} from "@aws-sdk/client-cognito-identity-provider";
+import { v4 as uuidv4 } from "uuid";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+import { getUserId } from "../utils/appsync";
+import { isAdminFromEvent, extractOrgFromEvent } from "../utils/auth-event";
+import { publishAppStatusEvent as publishAppStatusSubscription } from "../utils/appsync-publish";
 import {
   RegistryService,
   TypeMismatchError,
@@ -61,31 +70,31 @@ import {
   type RegistryRecord,
   type RegistryRecordStatusValue,
   type AgentCustomMetadata,
-} from '../services/registry-service';
-import { LifecycleManager, REGISTRY_TRANSITIONS } from '../adapters/lifecycle';
+} from "../services/registry-service";
+import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import {
   grantFabricatorAuthority,
   revokeFabricatorAuthority,
-} from './registry-agent-authority-lifecycle';
+} from "./registry-agent-authority-lifecycle";
 import {
   createAppApiKey as createAppApiKeyImpl,
   revokeAppApiKey as revokeAppApiKeyImpl,
   rotateAppApiKey as rotateAppApiKeyImpl,
   listAppApiKeys as listAppApiKeysImpl,
   type ApiKeyDeps,
-} from './app-api-key-management';
+} from "./app-api-key-management";
 import {
   listAppAccessEntries as listAppAccessEntriesImpl,
   type AccessControlDeps,
-} from './app-access-control';
-import { getAppMetrics as getAppMetricsImpl } from './app-metrics-handler';
+} from "./app-access-control";
+import { getAppMetrics as getAppMetricsImpl } from "./app-metrics-handler";
 import {
   upsertAppMeta,
   updateAppMetaFields,
   deleteAppMeta,
   APP_META_SORT_VALUE,
   type AppMetaRow,
-} from '../utils/apps-table-meta';
+} from "../utils/apps-table-meta";
 
 // ---------------------------------------------------------------------------
 // AgentApp-shape projection helpers (inlined from the deleted
@@ -125,16 +134,21 @@ interface DeprecatedAgentAppShape {
  * TODO (follow-up): refactor the Fabricator to store the manifest in customDescriptorContent
  * and only a plain string in `description`; then this helper becomes unnecessary.
  */
-export function extractHumanDescription(raw: string | null | undefined): string {
-  if (!raw) return '';
+export function extractHumanDescription(
+  raw: string | null | undefined,
+): string {
+  if (!raw) return "";
   const trimmed = raw.trim();
-  if (!trimmed.startsWith('{')) return raw;
+  if (!trimmed.startsWith("{")) return raw;
   try {
     const parsed = JSON.parse(trimmed);
-    if (typeof parsed?.description === 'string' && parsed.description.trim()) {
+    if (typeof parsed?.description === "string" && parsed.description.trim()) {
       return parsed.description;
     }
-    if (typeof parsed?.info?.description === 'string' && parsed.info.description.trim()) {
+    if (
+      typeof parsed?.info?.description === "string" &&
+      parsed.info.description.trim()
+    ) {
       return parsed.info.description;
     }
   } catch {
@@ -149,10 +163,10 @@ export function extractHumanDescription(raw: string | null | undefined): string 
  * GraphQL contract. Parses safely and falls back to 1.
  */
 export function toIntVersion(raw: unknown): number {
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
+  if (typeof raw === "number" && Number.isFinite(raw)) {
     return Math.max(1, Math.trunc(raw));
   }
-  if (typeof raw === 'string' && raw.trim()) {
+  if (typeof raw === "string" && raw.trim()) {
     const parsed = parseInt(raw, 10);
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
   }
@@ -196,11 +210,11 @@ function projectAgentAppShape(
   if (record.customDescriptorContent) {
     try {
       const parsed = JSON.parse(record.customDescriptorContent);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        if (typeof parsed.appId === 'string') {
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        if (typeof parsed.appId === "string") {
           out.appId = parsed.appId;
         }
-        if (typeof parsed.sourceProjectId === 'string') {
+        if (typeof parsed.sourceProjectId === "string") {
           out.sourceProjectId = parsed.sourceProjectId;
         }
       }
@@ -223,8 +237,8 @@ function recordFromInput(
 ): Partial<RegistryRecord> {
   const metadata: AgentCustomMetadata & { sourceProjectId?: string | null } = {
     categories: [],
-    icon: '',
-    state: 'active',
+    icon: "",
+    state: "active",
     appId: app.appId,
     sourceProjectId: app.sourceProjectId,
   };
@@ -262,8 +276,16 @@ function recordFromInput(
 // ---------------------------------------------------------------------------
 
 const APPS_TABLE = process.env.APPS_TABLE!;
+// Denormalized Registry -> DynamoDB projection (kept in sync by
+// registry-sync.ts off `citadel.agentcore.*` EventBridge events). Used ONLY
+// for the agentBindings[].name enrichment's fast path: a single
+// BatchGetItem for every 12-char Registry recordId binding, instead of one
+// GetRegistryRecord Registry call per binding (the N+1 fix — see
+// resolveAgentBindingNames). Read-only; this resolver never writes here.
+const AGENT_CONFIG_TABLE = process.env.AGENT_CONFIG_TABLE || "";
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
-const DEFAULT_REGION = process.env.AWS_REGION || 'us-east-1';
+const DEFAULT_REGION = process.env.AWS_REGION || "us-east-1";
+const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
 /**
  * Agent-record approval lifecycle gate. Every status change dispatched
@@ -280,7 +302,7 @@ const DEFAULT_REGION = process.env.AWS_REGION || 'us-east-1';
 const registryLifecycle = new LifecycleManager(REGISTRY_TRANSITIONS);
 
 /** Statuses that represent an authorized approve/reject decision, not a submit/resubmit/deprecate action. */
-const DECISION_STATUSES = new Set(['APPROVED', 'REJECTED']);
+const DECISION_STATUSES = new Set(["APPROVED", "REJECTED"]);
 
 /**
  * Lazy DynamoDBDocumentClient singleton. Constructed on first call — keeps the
@@ -312,7 +334,7 @@ function getRegistryService(): RegistryService {
     const registryId = process.env.REGISTRY_ID;
     if (!registryId) {
       throw new Error(
-        'REGISTRY_ID environment variable is required by registry-agent-record-resolver',
+        "REGISTRY_ID environment variable is required by registry-agent-record-resolver",
       );
     }
     _registryService = new RegistryService({
@@ -321,6 +343,89 @@ function getRegistryService(): RegistryService {
     });
   }
   return _registryService;
+}
+
+/** Lazy CognitoIdentityProviderClient singleton for createdBy name resolution. */
+let _cognitoClient: CognitoIdentityProviderClient | undefined;
+function getCognitoClient(): CognitoIdentityProviderClient {
+  if (!_cognitoClient) {
+    _cognitoClient = new CognitoIdentityProviderClient({});
+  }
+  return _cognitoClient;
+}
+
+/**
+ * Per-invocation cache for userId -> display name lookups. Declared at
+ * module scope (so it's reachable from both getApp and metaRowToAppShape)
+ * but explicitly cleared at the top of `handler` on every invocation — a
+ * warm Lambda container must never serve a stale name from a prior request.
+ *
+ * Caches the in-flight `Promise<string>`, not just the resolved value: both
+ * `listApps` list projections (`metaRowToAppShape`) run concurrently via
+ * `Promise.all`, so multiple rows created by the SAME user all observe a
+ * cache miss before any single one resolves if only settled values were
+ * cached. Storing the promise itself means the second-and-later concurrent
+ * callers for a given userId await the SAME in-flight `AdminGetUser` call
+ * instead of issuing their own — exactly one Cognito call per unique
+ * creator per invocation, however many rows/bindings reference them.
+ */
+const createdByNameCache = new Map<string, Promise<string>>();
+
+/**
+ * Resolves a Cognito user ID to a human-readable display name via
+ * AdminGetUser. Falls back to the raw userId on any failure (missing
+ * USER_POOL_ID, user not found, Cognito error) — this must never throw,
+ * since it is a display-only enrichment and must not block getApp/listApps.
+ *
+ * Deliberately scoped to a single admin-privileged call per userId
+ * (AdminGetUser, not the unscoped ListUsers) and never exposes any Cognito
+ * attribute beyond the display name itself.
+ *
+ * Concurrency-safe: the in-flight promise is memoized (see
+ * `createdByNameCache`), so N concurrent callers for the same userId within
+ * one invocation share a single AdminGetUser call.
+ */
+async function resolveCreatedByName(
+  userId: string | undefined | null,
+): Promise<string> {
+  if (!userId) return "unknown";
+  const cached = createdByNameCache.get(userId);
+  if (cached !== undefined) return cached;
+
+  const lookup = (async (): Promise<string> => {
+    if (!USER_POOL_ID) {
+      return userId;
+    }
+    try {
+      const response = await getCognitoClient().send(
+        new AdminGetUserCommand({
+          UserPoolId: USER_POOL_ID,
+          Username: userId,
+        }),
+      );
+      const attributes = response.UserAttributes || [];
+      const givenName = attributes.find((a) => a.Name === "given_name")?.Value;
+      const familyName = attributes.find(
+        (a) => a.Name === "family_name",
+      )?.Value;
+      const email = attributes.find((a) => a.Name === "email")?.Value;
+      return givenName && familyName
+        ? `${givenName} ${familyName}`
+        : email || userId;
+    } catch (err) {
+      console.warn(
+        "resolveCreatedByName: AdminGetUser failed, falling back to userId",
+        {
+          userId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+      return userId;
+    }
+  })();
+
+  createdByNameCache.set(userId, lookup);
+  return lookup;
 }
 
 /**
@@ -355,7 +460,7 @@ async function assertEnabledCatalogModel(modelKey: string): Promise<void> {
   const table = process.env.MODEL_CATALOG_TABLE;
   if (!table) {
     console.warn(
-      'MODEL_CATALOG_TABLE is not configured; skipping modelOverride catalog validation',
+      "MODEL_CATALOG_TABLE is not configured; skipping modelOverride catalog validation",
     );
     return;
   }
@@ -367,8 +472,10 @@ async function assertEnabledCatalogModel(modelKey: string): Promise<void> {
       `Invalid modelOverride '${modelKey}': not found in the model catalog`,
     );
   }
-  if (res.Item.status !== 'enabled') {
-    throw new Error(`Invalid modelOverride '${modelKey}': model is not enabled`);
+  if (res.Item.status !== "enabled") {
+    throw new Error(
+      `Invalid modelOverride '${modelKey}': model is not enabled`,
+    );
   }
 }
 
@@ -385,6 +492,14 @@ interface AgentBinding {
   systemPromptAddition?: string;
   toolRestrictions?: string[];
   modelOverride?: string;
+  /**
+   * Server-resolved display name of the bound agent (Registry record's
+   * `name` field). NOT persisted in the manifest — populated at read time
+   * by `resolveAgentBindingNames` so the frontend never has to make N+1
+   * per-binding lookups. Optional because it is absent until resolution
+   * runs (e.g. write-path projections that don't call resolveAgentBindingNames).
+   */
+  name?: string;
 }
 
 /** A single permission entry stored in the manifest. */
@@ -406,7 +521,10 @@ interface AgentAppManifest {
   configSchema?: Record<string, unknown> | null;
   configValues?: unknown;
   authConfig?: unknown;
-  access?: Record<string, { role: string; grantedAt: string; grantedBy: string }>;
+  access?: Record<
+    string,
+    { role: string; grantedAt: string; grantedBy: string }
+  >;
   routingConfig?: unknown;
   sourceProjectId?: string;
   /**
@@ -432,13 +550,15 @@ interface CustomDescriptor extends AgentAppManifest {
   state?: string;
 }
 
-function parseDescriptor(record: RegistryRecord | null | undefined): CustomDescriptor {
+function parseDescriptor(
+  record: RegistryRecord | null | undefined,
+): CustomDescriptor {
   if (!record?.customDescriptorContent) {
     return {};
   }
   try {
     const parsed = JSON.parse(record.customDescriptorContent);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as CustomDescriptor;
     }
   } catch {
@@ -447,10 +567,12 @@ function parseDescriptor(record: RegistryRecord | null | undefined): CustomDescr
   return {};
 }
 
-function readManifest(record: RegistryRecord | null | undefined): AgentAppManifest {
+function readManifest(
+  record: RegistryRecord | null | undefined,
+): AgentAppManifest {
   const descriptor = parseDescriptor(record);
   const manifest = descriptor.manifest;
-  if (manifest && typeof manifest === 'object' && !Array.isArray(manifest)) {
+  if (manifest && typeof manifest === "object" && !Array.isArray(manifest)) {
     return manifest;
   }
   return {};
@@ -495,6 +617,15 @@ interface ProjectedAgentApp {
   status: string;
   orgId: string;
   createdBy: string;
+  /**
+   * Server-resolved display name for `createdBy` (Cognito AdminGetUser
+   * given_name + family_name, or email, falling back to the raw userId on
+   * any lookup failure). Populated by `getApp` and `metaRowToAppShape` at
+   * read time — NEVER persisted, so it always reflects the current Cognito
+   * profile. Optional because write-path projections (createApp, updateApp,
+   * etc.) do not resolve it.
+   */
+  createdByName?: string;
   version: number;
   workflowIds: string[];
   agentBindings: AgentBinding[];
@@ -502,7 +633,12 @@ interface ProjectedAgentApp {
   configSchema: Record<string, unknown> | null;
   configValues: unknown;
   authConfig: unknown;
-  access: { userId: string; role: string; grantedAt: string; grantedBy: string }[];
+  access: {
+    userId: string;
+    role: string;
+    grantedAt: string;
+    grantedBy: string;
+  }[];
   routingConfig: unknown;
   sourceProjectId: string | null;
   endpointUrl?: string;
@@ -526,9 +662,9 @@ function projectAgentApp(record: RegistryRecord): ProjectedAgentApp {
 
   return {
     ...base,
-    status: record.status ?? 'DRAFT',
-    orgId: manifest.orgId ?? descriptor.orgId ?? '',
-    createdBy: manifest.createdBy ?? descriptor.createdBy ?? '',
+    status: record.status ?? "DRAFT",
+    orgId: manifest.orgId ?? descriptor.orgId ?? "",
+    createdBy: manifest.createdBy ?? descriptor.createdBy ?? "",
     version: toIntVersion(manifest.version ?? descriptor.version),
     workflowIds: manifest.workflowIds ?? [],
     agentBindings: manifest.agentBindings ?? [],
@@ -539,7 +675,10 @@ function projectAgentApp(record: RegistryRecord): ProjectedAgentApp {
     access: accessEntries,
     routingConfig: manifest.routingConfig ?? null,
     sourceProjectId:
-      manifest.sourceProjectId ?? base.sourceProjectId ?? descriptor.sourceProjectId ?? null,
+      manifest.sourceProjectId ??
+      base.sourceProjectId ??
+      descriptor.sourceProjectId ??
+      null,
     statusReason: manifest.statusReason ?? null,
     decidedBy: manifest.decidedBy ?? null,
   };
@@ -563,18 +702,226 @@ function projectAgentAppNormalized(record: RegistryRecord): ProjectedAgentApp {
   return projected;
 }
 
+/**
+ * Enriches each agent binding with the bound agent's `name` field so the
+ * frontend never has to resolve raw agentIds itself (eliminates the N+1
+ * per-page-load agent lookups the client used to perform).
+ *
+ * Resolution runs within THIS Lambda invocation only (no cross-Lambda
+ * calls) and is genuinely bounded independent of binding count:
+ *
+ *   - Fast path (the common case — bindings carry the Registry's own
+ *     12-char recordId): a SINGLE `BatchGetItem` against `AGENT_CONFIG_TABLE`,
+ *     the denormalized Registry->DynamoDB projection that registry-sync.ts
+ *     keeps current off EventBridge resource-change events. One DynamoDB
+ *     round trip for the whole batch of unique agent ids (DynamoDB's
+ *     100-item BatchGetItem limit is chunked, so even that stays O(ceil(n/100))
+ *     round trips rather than O(n) Registry GETs).
+ *   - Slow path (legacy human-readable agentId, not a 12-char recordId —
+ *     rare, pre-Registry-native bindings only): falls back to
+ *     `RegistryService.getResourcesByRefs`, a single shared name->recordId
+ *     summary-list pass plus one detail GET per unique legacy agent. This
+ *     path still costs real Registry reads because the installed AgentCore
+ *     Control SDK has no batch-get operation — but it is only reached for
+ *     the small, shrinking set of legacy non-recordId bindings, never for
+ *     ordinary pages of recordId-shaped bindings.
+ *
+ * Tenant validation: a binding's `name` is populated ONLY when the bound
+ * agent's own manifest orgId EXPLICITLY matches `appOrgId`, or is an
+ * EXPLICIT empty string (`orgId === ''`, the established "system-shared"
+ * convention `agent-config-resolver` also uses). An agent record whose
+ * orgId is missing/undefined (malformed or legacy metadata) is treated as
+ * belonging to neither org and FAILS CLOSED — it must never be treated as
+ * system-shared merely because the field is absent. An agent belonging to a
+ * different (non-empty) org is likewise left unresolved (name unset,
+ * callers fall back to displaying the raw agentId) rather than leaking its
+ * name across tenants.
+ *
+ * Failures (unresolvable legacy name, missing record, transient DynamoDB/
+ * Registry error, cross-org or org-less agent) are isolated per-binding and
+ * non-fatal — matching the "always fall back gracefully" constraint.
+ *
+ * Mutates and returns the same array reference for convenience.
+ */
+async function resolveAgentBindingNames(
+  bindings: AgentBinding[],
+  appOrgId: string,
+): Promise<AgentBinding[]> {
+  if (!bindings || bindings.length === 0) {
+    return bindings;
+  }
+
+  const isRecordId = (r: string) => /^[a-zA-Z0-9]{12}$/.test(r);
+  const uniqueRefs = Array.from(
+    new Set(bindings.map((b) => b.agentId).filter((r) => !!r)),
+  );
+  const recordIdRefs = uniqueRefs.filter(isRecordId);
+  const legacyRefs = uniqueRefs.filter((r) => !isRecordId(r));
+
+  // ref -> { name, orgId } for every ref we manage to resolve, from EITHER
+  // path. `orgId` is `undefined` when the source record omitted it — kept
+  // distinct from `''` so the tenant check below fails closed correctly.
+  const resolved = new Map<
+    string,
+    { name: string; orgId: string | undefined }
+  >();
+
+  await Promise.all([
+    resolveRecordIdRefsViaCache(recordIdRefs, resolved),
+    resolveLegacyRefsViaRegistry(legacyRefs, resolved),
+  ]);
+
+  // Fallback: any recordId refs not resolved from DDB cache → try the Registry directly
+  const unresolvedRecordIds = recordIdRefs.filter((r) => !resolved.has(r));
+  if (unresolvedRecordIds.length > 0) {
+    try {
+      const registry = getRegistryService();
+      const results = await Promise.allSettled(
+        unresolvedRecordIds.map((id) => registry.getResource("agent", id)),
+      );
+      for (let i = 0; i < unresolvedRecordIds.length; i++) {
+        const result = results[i];
+        if (result.status === "fulfilled" && result.value) {
+          const record = result.value;
+          const orgId = readRawManifestOrgId(record);
+          resolved.set(unresolvedRecordIds[i], {
+            name: record.name ?? "",
+            orgId,
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(
+        "resolveAgentBindingNames: Registry fallback for unresolved recordIds failed",
+        {
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
+  }
+
+  for (const binding of bindings) {
+    const entry = resolved.get(binding.agentId);
+    if (!entry) continue;
+    const sameOrg = entry.orgId === appOrgId || entry.orgId === "";
+    if (sameOrg && entry.name) {
+      binding.name = entry.name;
+    }
+  }
+  return bindings;
+}
+
+/** DynamoDB BatchGetItem hard limit — chunk any larger ref set. */
+const BATCH_GET_CHUNK_SIZE = 100;
+
+/**
+ * Fast path for `resolveAgentBindingNames`: resolves 12-char Registry
+ * recordId refs via BatchGetItem against the AGENT_CONFIG_TABLE projection —
+ * O(ceil(n/100)) DynamoDB round trips for the WHOLE batch, never one Registry
+ * call per binding. Populates `out` in place; never throws (falls back to
+ * leaving those refs unresolved on any table/config failure).
+ */
+async function resolveRecordIdRefsViaCache(
+  refs: string[],
+  out: Map<string, { name: string; orgId: string | undefined }>,
+): Promise<void> {
+  if (refs.length === 0 || !AGENT_CONFIG_TABLE) {
+    return;
+  }
+  try {
+    for (let i = 0; i < refs.length; i += BATCH_GET_CHUNK_SIZE) {
+      const chunk = refs.slice(i, i + BATCH_GET_CHUNK_SIZE);
+      const result = await getDocClient().send(
+        new BatchGetCommand({
+          RequestItems: {
+            [AGENT_CONFIG_TABLE]: {
+              Keys: chunk.map((agentId) => ({ agentId })),
+            },
+          },
+        }),
+      );
+      const items = result.Responses?.[AGENT_CONFIG_TABLE] ?? [];
+      for (const item of items) {
+        const agentId = item.agentId as string;
+        const name = typeof item.name === "string" ? item.name : "";
+        const orgId = typeof item.orgId === "string" ? item.orgId : undefined;
+        if (agentId) out.set(agentId, { name, orgId });
+      }
+    }
+  } catch (err) {
+    console.warn(
+      "resolveAgentBindingNames: BatchGetItem against AGENT_CONFIG_TABLE failed, leaving recordId bindings unset",
+      { error: err instanceof Error ? err.message : String(err) },
+    );
+  }
+}
+
+/**
+ * Slow path for `resolveAgentBindingNames`: resolves legacy human-readable
+ * agentId refs (pre-Registry-native bindings, not a 12-char recordId) via
+ * RegistryService.getResourcesByRefs — a single shared summary-list pass
+ * for the whole batch plus one detail GET per unique resolved record.
+ * Populates `out` in place; never throws.
+ */
+async function resolveLegacyRefsViaRegistry(
+  refs: string[],
+  out: Map<string, { name: string; orgId: string | undefined }>,
+): Promise<void> {
+  if (refs.length === 0) {
+    return;
+  }
+  const registry = getRegistryService();
+  try {
+    const recordsByRef = await registry.getResourcesByRefs("agent", refs);
+    for (const [ref, record] of recordsByRef.entries()) {
+      const orgId = readRawManifestOrgId(record);
+      out.set(ref, { name: record.name ?? "", orgId });
+    }
+  } catch (err) {
+    console.warn(
+      "resolveAgentBindingNames: legacy-ref batch resolution failed, leaving names unset",
+      {
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+  }
+}
+
+/**
+ * Reads the RAW `orgId` from a Registry record's custom metadata, preserving
+ * the "absent" (undefined) vs "explicit empty string" distinction that
+ * `RegistryService.mapToAgentConfig` deliberately collapses (its
+ * `meta.orgId ?? ''` is correct for ITS callers, which treat every org-less
+ * agent as visible — but would make this enrichment fail OPEN for any
+ * legacy/malformed record that merely omits orgId). Never throws.
+ */
+function readRawManifestOrgId(record: RegistryRecord): string | undefined {
+  try {
+    const meta = record.customDescriptorContent
+      ? JSON.parse(record.customDescriptorContent)
+      : undefined;
+    if (meta && typeof meta === "object" && typeof meta.orgId === "string") {
+      return meta.orgId;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // IAM action validation (preserved from app-resolver.ts)
 // ---------------------------------------------------------------------------
 
-export function validatePermissionActions(
-  actions: string[],
-): { valid: boolean; errors: string[] } {
+export function validatePermissionActions(actions: string[]): {
+  valid: boolean;
+  errors: string[];
+} {
   const errors: string[] = [];
   for (const action of actions) {
-    if (action === '*') {
+    if (action === "*") {
       errors.push(
-        'Bare wildcard (*) not allowed — must specify service prefix (e.g., s3:*)',
+        "Bare wildcard (*) not allowed — must specify service prefix (e.g., s3:*)",
       );
     } else if (!/^[a-zA-Z0-9-]+:[a-zA-Z0-9*]+$/.test(action)) {
       errors.push(`Invalid IAM action format: ${action}`);
@@ -584,16 +931,18 @@ export function validatePermissionActions(
 }
 
 async function emitEvent(eventType: string, detail: unknown): Promise<void> {
-  await getEventBridgeClient().send(new PutEventsCommand({
-    Entries: [
-      {
-        Source: 'citadel.apps',
-        DetailType: eventType,
-        Detail: JSON.stringify(detail),
-        EventBusName: EVENT_BUS_NAME,
-      },
-    ],
-  }));
+  await getEventBridgeClient().send(
+    new PutEventsCommand({
+      Entries: [
+        {
+          Source: "citadel.apps",
+          DetailType: eventType,
+          Detail: JSON.stringify(detail),
+          EventBusName: EVENT_BUS_NAME,
+        },
+      ],
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -672,8 +1021,21 @@ interface RegistryResolverArguments {
   expiresIn?: number;
 }
 
-export const handler: AppSyncResolverHandler<RegistryResolverArguments, unknown> = async (event) => {
-  console.log('Registry agent record resolver event:', JSON.stringify(event, null, 2));
+export const handler: AppSyncResolverHandler<
+  RegistryResolverArguments,
+  unknown
+> = async (event) => {
+  console.log(
+    "Registry agent record resolver event:",
+    JSON.stringify(event, null, 2),
+  );
+
+  // Clear the invocation-scoped createdByName cache. It exists to dedupe
+  // repeated AdminGetUser calls for the SAME userId across many rows WITHIN
+  // one getApp/listApps call (e.g. many apps created by the same user) —
+  // not to persist stale names across separate invocations on a warm
+  // container, which would let a Cognito profile update go unreflected.
+  createdByNameCache.clear();
 
   const { info, arguments: args, identity } = event;
   const fieldName = info.fieldName;
@@ -682,67 +1044,82 @@ export const handler: AppSyncResolverHandler<RegistryResolverArguments, unknown>
   try {
     switch (fieldName) {
       // AgentApp-shape queries (registry-backed)
-      case 'getApp':
-        return await getApp(args.appId, userId);
-      case 'listApps':
+      case "getApp":
+        return await getApp(args.appId, userId, event);
+      case "listApps":
         return await listApps(args.orgId, userId, event);
 
       // AgentApp-shape mutations (registry-backed, factory-projected)
-      case 'createApp':
+      case "createApp":
         return await createApp(args.input, userId);
-      case 'updateApp':
+      case "updateApp":
         return await updateApp(args.input, userId, event);
-      case 'deleteApp':
+      case "deleteApp":
         return await deleteApp(args.appId, userId);
-      case 'bindWorkflowToApp':
+      case "bindWorkflowToApp":
         return await bindWorkflowToApp(args.appId, args.workflowId, userId);
-      case 'unbindWorkflowFromApp':
+      case "unbindWorkflowFromApp":
         return await unbindWorkflowFromApp(args.appId, args.workflowId, userId);
-      case 'updateAgentBinding':
+      case "updateAgentBinding":
         return await updateAgentBinding(args.input, userId);
-      case 'addAppComponent':
+      case "addAppComponent":
         return await addAppComponent(args.appId, args.component, userId);
-      case 'removeAppComponent':
+      case "removeAppComponent":
         return await removeAppComponent(
           args.appId,
           args.componentType,
           args.componentId,
           userId,
         );
-      case 'setAppConfigSchema':
-        return await setAppConfigSchema(args.appId, args.schema, args.version, userId);
-      case 'setAppConfigValues':
-        return await setAppConfigValues(args.appId, args.values, args.version, userId);
-      case 'setAppAuthConfig':
+      case "setAppConfigSchema":
+        return await setAppConfigSchema(
+          args.appId,
+          args.schema,
+          args.version,
+          userId,
+        );
+      case "setAppConfigValues":
+        return await setAppConfigValues(
+          args.appId,
+          args.values,
+          args.version,
+          userId,
+        );
+      case "setAppAuthConfig":
         return await setAppAuthConfig(args.appId, args.authConfig, userId);
-      case 'grantAppAccess':
+      case "grantAppAccess":
         return await grantAppAccess(args.appId, args.userId, args.role, userId);
-      case 'revokeAppAccess':
+      case "revokeAppAccess":
         return await revokeAppAccess(args.appId, args.userId, userId);
 
       // Non-AgentApp queries (preserved DDB / subscription paths)
-      case 'listAppApiKeys':
+      case "listAppApiKeys":
         return await listAppApiKeys(args.appId);
-      case 'listAppAccessEntries':
+      case "listAppAccessEntries":
         return await listAppAccessEntries(args.appId);
-      case 'getAppMetrics':
+      case "getAppMetrics":
         return await getAppMetrics(args.appId, args.startTime, args.endTime);
 
       // Non-AgentApp mutations (EventBridge / DDB-backed API keys)
-      case 'publishAppStatusEvent':
+      case "publishAppStatusEvent":
         return await publishAppStatusEvent(args.input);
-      case 'createAppApiKey':
-        return await createAppApiKey(args.appId, args.name, args.expiresIn, userId);
-      case 'revokeAppApiKey':
+      case "createAppApiKey":
+        return await createAppApiKey(
+          args.appId,
+          args.name,
+          args.expiresIn,
+          userId,
+        );
+      case "revokeAppApiKey":
         return await revokeAppApiKey(args.appId, args.keyId, userId);
-      case 'rotateAppApiKey':
+      case "rotateAppApiKey":
         return await rotateAppApiKey(args.appId, args.keyId, userId);
 
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
   } catch (error) {
-    console.error('Registry agent record resolver error:', error);
+    console.error("Registry agent record resolver error:", error);
     throw error;
   }
 };
@@ -751,10 +1128,14 @@ export const handler: AppSyncResolverHandler<RegistryResolverArguments, unknown>
 // Registry-backed (AgentApp-shape) handlers
 // ===========================================================================
 
-async function getApp(appId: string, _userId: string): Promise<unknown> {
+async function getApp(
+  appId: string,
+  _userId: string,
+  event: unknown,
+): Promise<unknown> {
   let record;
   try {
-    record = await getRegistryService().getResource('agent', appId);
+    record = await getRegistryService().getResource("agent", appId);
   } catch (err) {
     if (err instanceof TypeMismatchError) {
       throw new Error(`App ${appId} not found`);
@@ -766,13 +1147,30 @@ async function getApp(appId: string, _userId: string): Promise<unknown> {
   }
   const projected = projectAgentApp(record);
 
+  // Tenant gate — MUST run before any Cognito/agent-name enrichment (both of
+  // which are privileged, PII-bearing lookups) and before returning the
+  // record at all. The AppSync mapping for getApp is a direct Lambda
+  // pass-through with no upstream authorization, so this resolver is the
+  // only place that can enforce it. Admins bypass; everyone else must
+  // belong to the app's own org. A denied caller sees the same "not found"
+  // shape as a missing app — this must not distinguish "exists in another
+  // org" from "doesn't exist" (that distinction is itself a disclosure).
+  if (!isAdminFromEvent(event)) {
+    const callerOrgId = await extractOrgFromEvent(event);
+    if (!callerOrgId || callerOrgId !== projected.orgId) {
+      return null;
+    }
+  }
+
   // Merge publish-time fields from the AppsTable (DDB is authoritative for
   // status, endpointUrl, apiId after publishApp runs).
   try {
-    const ddbResult = await getDocClient().send(new GetCommand({
-      TableName: APPS_TABLE,
-      Key: { appId },
-    }));
+    const ddbResult = await getDocClient().send(
+      new GetCommand({
+        TableName: APPS_TABLE,
+        Key: { appId },
+      }),
+    );
     const meta = ddbResult.Item;
     if (meta) {
       if (meta.status) projected.status = meta.status;
@@ -783,6 +1181,20 @@ async function getApp(appId: string, _userId: string): Promise<unknown> {
   } catch {
     // DDB read failure is non-fatal — return Registry-only projection.
   }
+
+  // Server-side resolution of createdBy -> display name and per-binding
+  // agent names — runs in parallel since they hit independent backends
+  // (Cognito vs Registry) and neither result depends on the other. Both
+  // helpers are individually fail-safe (fall back to the raw id), so no
+  // try/catch is needed here. Only reached once the tenant gate above has
+  // authorized this caller for this app's org, so it's safe to call
+  // AdminGetUser and resolve bound-agent names here.
+  await Promise.all([
+    resolveCreatedByName(projected.createdBy).then((name) => {
+      projected.createdByName = name;
+    }),
+    resolveAgentBindingNames(projected.agentBindings, projected.orgId),
+  ]);
 
   // Always return the 12-char recordId as appId (not the UUID from customDescriptorContent).
   projected.appId = appId;
@@ -795,9 +1207,26 @@ async function listApps(
   _userId: string,
   event: unknown,
 ): Promise<{ items: unknown[]; nextToken: string | null }> {
-  const isAllOrgsRequest = !orgId || orgId === 'All Organizations';
-  if (isAllOrgsRequest && !isAdminFromEvent(event)) {
-    throw new Error('Only admins may list apps across all organizations');
+  const isAllOrgsRequest = !orgId || orgId === "All Organizations";
+  const admin = isAdminFromEvent(event);
+  if (isAllOrgsRequest && !admin) {
+    throw new Error("Only admins may list apps across all organizations");
+  }
+
+  // Tenant gate for a specific-org request: a non-admin caller may only
+  // list their OWN org's apps. Silently coerce a mismatched requested orgId
+  // to the caller's actual org rather than trusting the argument outright —
+  // AppSync has no upstream authorization for this field (direct Lambda
+  // pass-through), so a non-admin could otherwise pass an arbitrary orgId
+  // and enumerate another tenant's apps (plus trigger AdminGetUser /
+  // agent-name enrichment for each one).
+  let effectiveOrgId = orgId;
+  if (!isAllOrgsRequest && !admin) {
+    const callerOrgId = await extractOrgFromEvent(event);
+    if (!callerOrgId) {
+      return { items: [], nextToken: null };
+    }
+    effectiveOrgId = callerOrgId;
   }
 
   // Phase 3: read from the AppsTable.OrgIndex GSI rather than scanning the
@@ -807,7 +1236,7 @@ async function listApps(
   if (isAllOrgsRequest) {
     return await scanAllAppsViaMeta();
   }
-  return await queryAppsViaOrgIndex(orgId);
+  return await queryAppsViaOrgIndex(effectiveOrgId);
 }
 
 /**
@@ -828,15 +1257,16 @@ async function queryAppsViaOrgIndex(
     const result: QueryCommandOutput = await getDocClient().send(
       new QueryCommand({
         TableName: APPS_TABLE,
-        IndexName: 'OrgIndex',
-        KeyConditionExpression: 'orgId = :org',
+        IndexName: "OrgIndex",
+        KeyConditionExpression: "orgId = :org",
         ExpressionAttributeValues: {
-          ':org': orgId,
+          ":org": orgId,
         },
         ExclusiveStartKey: nextToken,
       }),
     );
-    if (result.Items) items.push(...result.Items.map(metaRowToAppShape));
+    if (result.Items)
+      items.push(...(await Promise.all(result.Items.map(metaRowToAppShape))));
     nextToken = result.LastEvaluatedKey;
   } while (nextToken);
   return { items, nextToken: null };
@@ -859,12 +1289,13 @@ async function scanAllAppsViaMeta(): Promise<{
     const result: ScanCommandOutput = await getDocClient().send(
       new ScanCommand({
         TableName: APPS_TABLE,
-        FilterExpression: 'sortId = :meta',
-        ExpressionAttributeValues: { ':meta': APP_META_SORT_VALUE },
+        FilterExpression: "sortId = :meta",
+        ExpressionAttributeValues: { ":meta": APP_META_SORT_VALUE },
         ExclusiveStartKey: nextToken,
       }),
     );
-    if (result.Items) items.push(...result.Items.map(metaRowToAppShape));
+    if (result.Items)
+      items.push(...(await Promise.all(result.Items.map(metaRowToAppShape))));
     nextToken = result.LastEvaluatedKey;
   } while (nextToken);
   return { items, nextToken: null };
@@ -874,20 +1305,29 @@ async function scanAllAppsViaMeta(): Promise<{
  * Projects a single AppsTable `#META` row onto the AgentApp-shape response
  * used by listApps. Field defaults match the Registry-backed projection so
  * callers see no behavioural difference between the two read paths.
+ *
+ * Resolves `createdByName` via Cognito AdminGetUser (same helper getApp
+ * uses), sharing the invocation-scoped `createdByNameCache` — rows created
+ * by the same user across a page of listApps results incur only one
+ * AdminGetUser call, not one per row.
  */
-function metaRowToAppShape(row: Record<string, unknown>): Record<string, unknown> {
+async function metaRowToAppShape(
+  row: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const createdBy = (row.createdBy as string) ?? "";
   return {
     appId: row.appId,
-    orgId: row.orgId ?? '',
-    name: row.name ?? '',
-    description: row.description ?? '',
-    status: row.status ?? 'DRAFT',
+    orgId: row.orgId ?? "",
+    name: row.name ?? "",
+    description: row.description ?? "",
+    status: row.status ?? "DRAFT",
     workflowIds: row.workflowIds ?? [],
-    routingConfig: row.routingConfig ?? '',
-    createdBy: row.createdBy ?? '',
-    createdAt: row.createdAt ?? '',
-    updatedAt: row.updatedAt ?? '',
-    version: typeof row.version === 'number' ? row.version : 1,
+    routingConfig: row.routingConfig ?? "",
+    createdBy,
+    createdByName: await resolveCreatedByName(createdBy),
+    createdAt: row.createdAt ?? "",
+    updatedAt: row.updatedAt ?? "",
+    version: typeof row.version === "number" ? row.version : 1,
   };
 }
 
@@ -920,22 +1360,23 @@ export async function findAppBySourceProjectId(
     const result: ScanCommandOutput = await getDocClient().send(
       new ScanCommand({
         TableName: APPS_TABLE,
-        FilterExpression: 'sortId = :meta AND sourceProjectId = :spid AND orgId = :org',
+        FilterExpression:
+          "sortId = :meta AND sourceProjectId = :spid AND orgId = :org",
         ExpressionAttributeValues: {
-          ':meta': APP_META_SORT_VALUE,
-          ':spid': sourceProjectId,
-          ':org': orgId,
+          ":meta": APP_META_SORT_VALUE,
+          ":spid": sourceProjectId,
+          ":org": orgId,
         },
         ExclusiveStartKey: nextToken,
       }),
     );
     for (const row of result.Items ?? []) {
-      if (typeof row.appId !== 'string' || row.appId.length === 0) {
+      if (typeof row.appId !== "string" || row.appId.length === 0) {
         continue;
       }
       let record: RegistryRecord | null = null;
       try {
-        record = await getRegistryService().getResource('agent', row.appId);
+        record = await getRegistryService().getResource("agent", row.appId);
       } catch (err) {
         if (!(err instanceof TypeMismatchError)) {
           throw err;
@@ -948,9 +1389,12 @@ export async function findAppBySourceProjectId(
       // deleteApp removes the registry record first and the mirror row
       // best-effort; a surviving mirror row must not resurrect a deleted
       // app. Log and keep scanning.
-      console.warn('findAppBySourceProjectId: stale AppsTable mirror row (registry record gone)', {
-        appId: row.appId,
-      });
+      console.warn(
+        "findAppBySourceProjectId: stale AppsTable mirror row (registry record gone)",
+        {
+          appId: row.appId,
+        },
+      );
     }
     nextToken = result.LastEvaluatedKey;
   } while (nextToken);
@@ -961,7 +1405,10 @@ export async function findAppBySourceProjectId(
 // mutations delegate to this core so app-creation governance — registry
 // record, #META mirror, fabricator authority grant, app.created event —
 // stays in exactly one place).
-export async function createApp(input: CreateAppInput, userId: string): Promise<unknown> {
+export async function createApp(
+  input: CreateAppInput,
+  userId: string,
+): Promise<unknown> {
   const now = new Date().toISOString();
   const appId = uuidv4();
 
@@ -969,7 +1416,7 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
   // Blueprint dialog's New App mode sends only { name, orgId }, so an
   // absent/blank description defaults to the app name. Resolved once here so
   // the registry record and the AppsTable #META mirror stay consistent.
-  const description = (input.description ?? '').trim() || input.name;
+  const description = (input.description ?? "").trim() || input.name;
 
   // Build the AgentApp-shaped input, then project to a RegistryRecord skeleton
   // via the factory. The manifest sub-object carries the fields the legacy
@@ -979,7 +1426,7 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
     orgId: input.orgId,
     name: input.name,
     description,
-    status: 'DRAFT',
+    status: "DRAFT",
     version: 1,
     createdAt: now,
     updatedAt: now,
@@ -990,7 +1437,7 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
   const initialManifest: AgentAppManifest = {
     orgId: input.orgId,
     version: 1,
-    status: 'DRAFT',
+    status: "DRAFT",
     createdBy: userId,
     workflowIds: [],
     agentBindings: [],
@@ -1011,7 +1458,7 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
     manifest: initialManifest,
   };
 
-  const record = await getRegistryService().createResource('agent', appId, {
+  const record = await getRegistryService().createResource("agent", appId, {
     name: skeleton.name || agentAppInput.name,
     description: skeleton.description,
     customMetadata: JSON.stringify(descriptor),
@@ -1029,7 +1476,7 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
     // listApps (mirror) and getApp (registry) render the same name.
     name: record.name || agentAppInput.name,
     description: agentAppInput.description,
-    status: 'DRAFT',
+    status: "DRAFT",
     workflowIds: [],
     routingConfig: undefined,
     createdBy: userId,
@@ -1039,12 +1486,13 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
     // Intake linkage mirrored onto the AppsTable METADATA row so the publish
     // handler (which reads AppsTable, not the Registry) can finish the
     // project's Build segment on publish. Optional — absent for UI-created apps.
-    ...(typeof input.sourceProjectId === 'string' && input.sourceProjectId.length > 0
+    ...(typeof input.sourceProjectId === "string" &&
+    input.sourceProjectId.length > 0
       ? { sourceProjectId: input.sourceProjectId }
       : {}),
   });
   if (!metaMirrored) {
-    console.error('createApp: AppsTable #META mirror write failed', {
+    console.error("createApp: AppsTable #META mirror write failed", {
       appId: record.recordId,
       tableName: APPS_TABLE,
     });
@@ -1056,7 +1504,7 @@ export async function createApp(input: CreateAppInput, userId: string): Promise<
   // attempt to roll back the registry create (matches legacy behaviour).
   await grantFabricatorAuthority(record.recordId);
 
-  await emitEvent('app.created', {
+  await emitEvent("app.created", {
     appId: record.recordId,
     orgId: input.orgId,
     userId,
@@ -1073,19 +1521,20 @@ async function updateApp(
   userId: string,
   event: Parameters<typeof handler>[0],
 ): Promise<unknown> {
-  const existing = await getRegistryService().getResource('agent', input.appId);
+  const existing = await getRegistryService().getResource("agent", input.appId);
   if (!existing) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
 
   const existingManifest = readManifest(existing);
   const existingVersion = existingManifest.version ?? 1;
   if (input.version !== undefined && input.version !== existingVersion) {
-    throw new Error('Conflict: app was modified concurrently. Please retry.');
+    throw new Error("Conflict: app was modified concurrently. Please retry.");
   }
 
-  const currentStatus = existing.status ?? 'DRAFT';
-  const isStatusChange = input.status !== undefined && input.status !== currentStatus;
+  const currentStatus = existing.status ?? "DRAFT";
+  const isStatusChange =
+    input.status !== undefined && input.status !== currentStatus;
 
   // Pending-immutability: while a record is PENDING_APPROVAL, content
   // updates (name/description/routingConfig/sourceProjectId) are rejected.
@@ -1096,23 +1545,23 @@ async function updateApp(
     input.description !== undefined ||
     input.routingConfig !== undefined ||
     input.sourceProjectId !== undefined;
-  if (currentStatus === 'PENDING_APPROVAL' && isContentChange) {
+  if (currentStatus === "PENDING_APPROVAL" && isContentChange) {
     throw new RegistryLifecycleError(
       `App ${input.appId} is PENDING_APPROVAL and cannot be modified until an authorized decision is recorded`,
-      'RECORD_IMMUTABLE',
+      "RECORD_IMMUTABLE",
     );
   }
 
   // Validated-transition gate. Every status change on this path MUST pass
   // through registryLifecycle before any write — illegal transitions throw
   // a structured error rather than being silently coerced.
-  if (isStatusChange && input.status !== 'PUBLISHED') {
+  if (isStatusChange && input.status !== "PUBLISHED") {
     if (!registryLifecycle.isValidTransition(currentStatus, input.status!)) {
       const valid = REGISTRY_TRANSITIONS.transitions[currentStatus] || [];
       throw new RegistryLifecycleError(
         `Invalid status transition: ${currentStatus} → ${input.status}. ` +
-          `Valid transitions from ${currentStatus}: ${valid.join(', ') || 'none'}`,
-        'INVALID_TRANSITION',
+          `Valid transitions from ${currentStatus}: ${valid.join(", ") || "none"}`,
+        "INVALID_TRANSITION",
       );
     }
 
@@ -1124,11 +1573,13 @@ async function updateApp(
     if (DECISION_STATUSES.has(input.status!)) {
       if (!isAdminFromEvent(event)) {
         throw new Error(
-          `UnauthorizedError: admin role required to ${input.status === 'APPROVED' ? 'approve' : 'reject'} app ${input.appId}`,
+          `UnauthorizedError: admin role required to ${input.status === "APPROVED" ? "approve" : "reject"} app ${input.appId}`,
         );
       }
-      if (input.status === 'REJECTED' && !(input.statusReason ?? '').trim()) {
-        throw new Error('ValidationError: statusReason is required to reject an app');
+      if (input.status === "REJECTED" && !(input.statusReason ?? "").trim()) {
+        throw new Error(
+          "ValidationError: statusReason is required to reject an app",
+        );
       }
     }
   }
@@ -1140,7 +1591,9 @@ async function updateApp(
   // handled below via the isStatusChange branch order).
   const isDecision = isStatusChange && DECISION_STATUSES.has(input.status!);
   const decidedBy = isDecision ? getUserId(event.identity) : undefined;
-  const decidedStatusReason = isDecision ? (input.statusReason ?? '').trim() : undefined;
+  const decidedStatusReason = isDecision
+    ? (input.statusReason ?? "").trim()
+    : undefined;
 
   // Merge the input fields over the existing AgentApp projection, then run
   // through the factory so the Registry write goes through the canonical
@@ -1151,8 +1604,9 @@ async function updateApp(
   // record whose stored description is blank) falls back to the app name.
   const resolvedName = input.name ?? existingProjection.name;
   const resolvedDescription =
-    ((input.description ?? existingProjection.description ?? '') as string).trim() ||
-    resolvedName;
+    (
+      (input.description ?? existingProjection.description ?? "") as string
+    ).trim() || resolvedName;
   const mergedAgentApp = {
     appId: input.appId,
     orgId: input.orgId ?? existingProjection.orgId,
@@ -1171,7 +1625,8 @@ async function updateApp(
 
   const updatedContent = writeManifestMutation(existing, (manifest) => {
     if (input.status !== undefined) manifest.status = input.status;
-    if (input.routingConfig !== undefined) manifest.routingConfig = input.routingConfig;
+    if (input.routingConfig !== undefined)
+      manifest.routingConfig = input.routingConfig;
     if (input.sourceProjectId !== undefined) {
       manifest.sourceProjectId = input.sourceProjectId;
     }
@@ -1180,7 +1635,7 @@ async function updateApp(
     if (isDecision) {
       manifest.decidedBy = decidedBy;
       manifest.statusReason = decidedStatusReason || null;
-    } else if (input.status === 'DRAFT') {
+    } else if (input.status === "DRAFT") {
       // Resubmit (REJECTED -> DRAFT): clear the prior decision so a stale
       // rejection reason/decider does not linger on the fresh draft.
       manifest.decidedBy = null;
@@ -1188,23 +1643,31 @@ async function updateApp(
     }
   });
 
-  const record = await getRegistryService().updateResource('agent', input.appId, {
-    name: skeleton.name,
-    description: skeleton.description,
-    customMetadata: updatedContent,
-  });
+  const record = await getRegistryService().updateResource(
+    "agent",
+    input.appId,
+    {
+      name: skeleton.name,
+      description: skeleton.description,
+      customMetadata: updatedContent,
+    },
+  );
 
   // Eventually-consistent mirror to AppsTable.#META — only the fields the
   // caller actually changed, plus the always-bumped updatedAt + version so
   // OrgIndex projections (Step 3) stay correct. Helper never throws.
-  const metaPartial: Partial<Omit<AppMetaRow, 'appId' | 'createdAt' | 'createdBy'>> = {
+  const metaPartial: Partial<
+    Omit<AppMetaRow, "appId" | "createdAt" | "createdBy">
+  > = {
     updatedAt: mergedAgentApp.updatedAt,
     version: mergedAgentApp.version,
   };
   if (input.name !== undefined) metaPartial.name = input.name;
-  if (input.description !== undefined) metaPartial.description = resolvedDescription;
+  if (input.description !== undefined)
+    metaPartial.description = resolvedDescription;
   if (input.status !== undefined) metaPartial.status = input.status;
-  if (input.routingConfig !== undefined) metaPartial.routingConfig = input.routingConfig;
+  if (input.routingConfig !== undefined)
+    metaPartial.routingConfig = input.routingConfig;
   await updateAppMetaFields(APPS_TABLE, input.appId, metaPartial);
 
   let finalRecord = record;
@@ -1213,24 +1676,27 @@ async function updateApp(
     // there, not just in the local manifest. Accepts Registry-native status values
     // (DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, DEPRECATED) plus the
     // app-specific PUBLISHED which is stored in manifest only.
-    if (input.status !== 'PUBLISHED') {
+    if (input.status !== "PUBLISHED") {
       finalRecord = await getRegistryService().updateResourceStatus(
-        'agent',
+        "agent",
         input.appId,
         input.status as RegistryRecordStatusValue,
-        decidedStatusReason || 'Status update via registry service',
+        decidedStatusReason || "Status update via registry service",
         currentStatus,
       );
       // The mock/real updateResourceStatus response often omits fields
       // (name, customDescriptorContent) that updateResource already wrote —
       // re-fetch so the returned projection reflects both the content edit
       // AND the post-transition status rather than a partial merge of either.
-      const refreshed = await getRegistryService().getResource('agent', input.appId);
+      const refreshed = await getRegistryService().getResource(
+        "agent",
+        input.appId,
+      );
       if (refreshed) finalRecord = refreshed;
     }
   }
 
-  await emitEvent('app.updated', {
+  await emitEvent("app.updated", {
     appId: input.appId,
     userId,
     changes: input,
@@ -1238,7 +1704,9 @@ async function updateApp(
 
   // Emit status-transition events (matches legacy resolver semantics).
   if (isStatusChange) {
-    const previousStatus = String(existingProjection.status || '').toLowerCase();
+    const previousStatus = String(
+      existingProjection.status || "",
+    ).toLowerCase();
     const newStatus = String(input.status).toLowerCase();
     const timestamp = new Date().toISOString();
     const correlationId = uuidv4();
@@ -1262,7 +1730,7 @@ async function updateApp(
         timestamp,
       });
     } catch (err) {
-      console.error('Failed to publish AppSync status event (non-fatal):', err);
+      console.error("Failed to publish AppSync status event (non-fatal):", err);
     }
   }
 
@@ -1270,9 +1738,9 @@ async function updateApp(
 }
 
 async function deleteApp(appId: string, userId: string): Promise<unknown> {
-  const existing = await getRegistryService().getResource('agent', appId);
+  const existing = await getRegistryService().getResource("agent", appId);
   if (!existing) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
   const projection = projectAgentApp(existing);
 
@@ -1283,13 +1751,13 @@ async function deleteApp(appId: string, userId: string): Promise<unknown> {
   // (already revoked / missing) is swallowed inside revokeFabricatorAuthority.
   await revokeFabricatorAuthority(appId);
 
-  await getRegistryService().deleteResource('agent', appId);
+  await getRegistryService().deleteResource("agent", appId);
 
   // Eventually-consistent mirror: drop the AppsTable #META row so OrgIndex
   // (Step 3) stops surfacing the deleted app. Helper never throws.
   await deleteAppMeta(APPS_TABLE, appId);
 
-  await emitEvent('app.deleted', {
+  await emitEvent("app.deleted", {
     appId,
     orgId: projection.orgId,
     userId,
@@ -1303,9 +1771,9 @@ async function bindWorkflowToApp(
   workflowId: string,
   userId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
   const manifest = readManifest(record);
   const existingIds = manifest.workflowIds || [];
@@ -1319,11 +1787,11 @@ async function bindWorkflowToApp(
     m.version = (m.version ?? 1) + 1;
   });
 
-  const updated = await getRegistryService().updateResource('agent', appId, {
+  const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: updatedContent,
   });
 
-  await emitEvent('app.workflow.bound', { appId, workflowId, userId });
+  await emitEvent("app.workflow.bound", { appId, workflowId, userId });
 
   return projectAgentAppNormalized(updated);
 }
@@ -1333,23 +1801,25 @@ async function unbindWorkflowFromApp(
   workflowId: string,
   userId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
   const manifest = readManifest(record);
-  const remaining = (manifest.workflowIds || []).filter((id) => id !== workflowId);
+  const remaining = (manifest.workflowIds || []).filter(
+    (id) => id !== workflowId,
+  );
 
   const updatedContent = writeManifestMutation(record, (m) => {
     m.workflowIds = remaining;
     m.version = (m.version ?? 1) + 1;
   });
 
-  const updated = await getRegistryService().updateResource('agent', appId, {
+  const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: updatedContent,
   });
 
-  await emitEvent('app.workflow.unbound', { appId, workflowId, userId });
+  await emitEvent("app.workflow.unbound", { appId, workflowId, userId });
 
   return projectAgentAppNormalized(updated);
 }
@@ -1368,21 +1838,21 @@ export async function updateAgentBinding(
   },
   userId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', input.appId);
+  const record = await getRegistryService().getResource("agent", input.appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
   const manifest = readManifest(record);
   const bindings = manifest.agentBindings || [];
   const idx = bindings.findIndex((b) => b.agentId === input.agentId);
   if (idx === -1) {
-    throw new Error('Agent is not a component of this app');
+    throw new Error("Agent is not a component of this app");
   }
 
   // Transition to READY requires the underlying agent record to itself be
   // active (matches legacy validation — keeps a half-wired agent from being
   // flipped live). Consult the registry for the target agent's state.
-  if (input.status === 'READY') {
+  if (input.status === "READY") {
     // Bindings may carry a human-readable agentId (legacy DynamoDB agents) OR a
     // 12-char Registry recordId. The Registry SDK's GetRegistryRecord rejects
     // anything that isn't a recordId. Resolve first; treat a resolution failure
@@ -1390,11 +1860,19 @@ export async function updateAgentBinding(
     // rather than a raw regex violation.
     let targetAgent;
     try {
-      const targetRecordId = await getRegistryService().resolveRecordId('agent', input.agentId);
-      targetAgent = await getRegistryService().getResource('agent', targetRecordId);
+      const targetRecordId = await getRegistryService().resolveRecordId(
+        "agent",
+        input.agentId,
+      );
+      targetAgent = await getRegistryService().getResource(
+        "agent",
+        targetRecordId,
+      );
     } catch (err) {
       if (err instanceof TypeMismatchError) {
-        throw new Error('Agent must be active before it can be marked as ready');
+        throw new Error(
+          "Agent must be active before it can be marked as ready",
+        );
       }
       // Distinguish 'not found' (resolveRecordId failure) from 'not active'
       // so the user sees a useful message rather than a misleading
@@ -1415,9 +1893,9 @@ export async function updateAgentBinding(
     // updateAgentConfig.
     if (
       !targetAgent ||
-      getRegistryService().toInternalState(targetAgent.status) !== 'active'
+      getRegistryService().toInternalState(targetAgent.status) !== "active"
     ) {
-      throw new Error('Agent must be active before it can be marked as ready');
+      throw new Error("Agent must be active before it can be marked as ready");
     }
   }
 
@@ -1434,7 +1912,7 @@ export async function updateAgentBinding(
     // enabled catalog model. Unchanged/legacy values and the empty string
     // (which clears the override) are grandfathered — never re-validated.
     if (
-      input.modelOverride !== '' &&
+      input.modelOverride !== "" &&
       input.modelOverride !== bindings[idx].modelOverride
     ) {
       await assertEnabledCatalogModel(input.modelOverride);
@@ -1452,11 +1930,15 @@ export async function updateAgentBinding(
     m.version = (m.version ?? 1) + 1;
   });
 
-  const updated = await getRegistryService().updateResource('agent', input.appId, {
-    customMetadata: updatedContent,
-  });
+  const updated = await getRegistryService().updateResource(
+    "agent",
+    input.appId,
+    {
+      customMetadata: updatedContent,
+    },
+  );
 
-  await emitEvent('app.agent.binding.updated', {
+  await emitEvent("app.agent.binding.updated", {
     appId: input.appId,
     agentId: input.agentId,
     userId,
@@ -1473,13 +1955,15 @@ export async function addAppComponent(
   component: { type: string; data: string },
   userId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
 
   const data =
-    typeof component.data === 'string' ? JSON.parse(component.data) : component.data;
+    typeof component.data === "string"
+      ? JSON.parse(component.data)
+      : component.data;
   const now = new Date().toISOString();
 
   const manifest = readManifest(record);
@@ -1487,12 +1971,12 @@ export async function addAppComponent(
   let mutatedContent: string;
 
   switch (component.type.toLowerCase()) {
-    case 'agent': {
+    case "agent": {
       // Creation-path catalog validation: a non-empty modelOverride supplied
       // at bind time must reference an enabled catalog model before we
       // persist. Absent/empty override → no validation (grandfathered; mirrors
       // updateAgentBinding).
-      if (typeof data.modelOverride === 'string' && data.modelOverride !== '') {
+      if (typeof data.modelOverride === "string" && data.modelOverride !== "") {
         await assertEnabledCatalogModel(data.modelOverride);
       }
       componentId = data.agentId;
@@ -1500,7 +1984,7 @@ export async function addAppComponent(
       const filtered = existing.filter((b) => b.agentId !== data.agentId);
       const binding = {
         agentId: data.agentId,
-        status: 'DESIGN',
+        status: "DESIGN",
         addedAt: now,
         ...(data.systemPromptAddition !== undefined && {
           systemPromptAddition: data.systemPromptAddition,
@@ -1508,7 +1992,9 @@ export async function addAppComponent(
         ...(data.toolRestrictions !== undefined && {
           toolRestrictions: data.toolRestrictions,
         }),
-        ...(data.modelOverride !== undefined && { modelOverride: data.modelOverride }),
+        ...(data.modelOverride !== undefined && {
+          modelOverride: data.modelOverride,
+        }),
       };
       mutatedContent = writeManifestMutation(record, (m) => {
         m.agentBindings = [...filtered, binding];
@@ -1516,11 +2002,11 @@ export async function addAppComponent(
       });
       break;
     }
-    case 'permission': {
+    case "permission": {
       const validation = validatePermissionActions(data.actions || []);
       if (!validation.valid) {
         throw new Error(
-          `Permission validation failed: ${validation.errors.join('; ')}`,
+          `Permission validation failed: ${validation.errors.join("; ")}`,
         );
       }
       componentId = data.permissionId;
@@ -1532,7 +2018,9 @@ export async function addAppComponent(
         permissionId: data.permissionId,
         actions: data.actions,
         resources: data.resources,
-        ...(data.description !== undefined && { description: data.description }),
+        ...(data.description !== undefined && {
+          description: data.description,
+        }),
       };
       mutatedContent = writeManifestMutation(record, (m) => {
         m.permissions = [...filtered, permission];
@@ -1544,11 +2032,11 @@ export async function addAppComponent(
       throw new Error(`Unsupported component type: ${component.type}`);
   }
 
-  const updated = await getRegistryService().updateResource('agent', appId, {
+  const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: mutatedContent,
   });
 
-  await emitEvent('app.component.added', {
+  await emitEvent("app.component.added", {
     appId,
     componentType: component.type,
     componentId,
@@ -1579,9 +2067,9 @@ const BINDING_CONFLICT_MAX_ATTEMPTS = 3;
 const BINDING_CONFLICT_RETRY_DELAY_MS = 250;
 
 function isRegistryConflict(err: unknown): boolean {
-  const name = err instanceof Error ? err.name : '';
+  const name = err instanceof Error ? err.name : "";
   const message = err instanceof Error ? err.message : String(err);
-  return name === 'ConflictException' || /conflict|updating/i.test(message);
+  return name === "ConflictException" || /conflict|updating/i.test(message);
 }
 
 async function withConflictRetry<T>(fn: () => Promise<T>): Promise<T> {
@@ -1591,7 +2079,10 @@ async function withConflictRetry<T>(fn: () => Promise<T>): Promise<T> {
       return await fn();
     } catch (err) {
       lastError = err;
-      if (!isRegistryConflict(err) || attempt === BINDING_CONFLICT_MAX_ATTEMPTS) {
+      if (
+        !isRegistryConflict(err) ||
+        attempt === BINDING_CONFLICT_MAX_ATTEMPTS
+      ) {
         throw err;
       }
       await new Promise((resolve) =>
@@ -1641,9 +2132,9 @@ export async function ensureAppAgentBindings(
     return result;
   }
 
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
   const existingBindings = readManifest(record).agentBindings || [];
   const statusByAgentId = new Map(
@@ -1652,7 +2143,7 @@ export async function ensureAppAgentBindings(
 
   for (const agentId of uniqueIds) {
     const existingStatus = statusByAgentId.get(agentId);
-    if (existingStatus === 'READY') {
+    if (existingStatus === "READY") {
       result.alreadyBound.push(agentId);
       continue;
     }
@@ -1662,7 +2153,7 @@ export async function ensureAppAgentBindings(
         result.finalApp = await withConflictRetry(() =>
           addAppComponent(
             appId,
-            { type: 'agent', data: JSON.stringify({ agentId }) },
+            { type: "agent", data: JSON.stringify({ agentId }) },
             userId,
           ),
         );
@@ -1670,12 +2161,16 @@ export async function ensureAppAgentBindings(
       // …then canonical promotion to READY (activation-gated). An existing
       // DESIGN binding takes only this step, preserving its fields.
       result.finalApp = await withConflictRetry(() =>
-        updateAgentBinding({ appId, agentId, status: 'READY' }, userId),
+        updateAgentBinding({ appId, agentId, status: "READY" }, userId),
       );
       result.bound.push(agentId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error('ensureAppAgentBindings: bind failed', { appId, agentId, error: message });
+      console.error("ensureAppAgentBindings: bind failed", {
+        appId,
+        agentId,
+        error: message,
+      });
       result.failed.push({ agentId, error: message });
     }
   }
@@ -1689,19 +2184,19 @@ async function removeAppComponent(
   componentId: string,
   userId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
 
   const mutatedContent = writeManifestMutation(record, (m) => {
     switch (componentType) {
-      case 'agent':
+      case "agent":
         m.agentBindings = (m.agentBindings || []).filter(
           (b) => b.agentId !== componentId,
         );
         break;
-      case 'permission':
+      case "permission":
         m.permissions = (m.permissions || []).filter(
           (p) => p.permissionId !== componentId,
         );
@@ -1712,11 +2207,11 @@ async function removeAppComponent(
     m.version = (m.version ?? 1) + 1;
   });
 
-  const updated = await getRegistryService().updateResource('agent', appId, {
+  const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: mutatedContent,
   });
 
-  await emitEvent('app.component.removed', {
+  await emitEvent("app.component.removed", {
     appId,
     componentType,
     componentId,
@@ -1732,25 +2227,31 @@ async function setAppConfigSchema(
   version: number,
   userId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
   const manifest = readManifest(record);
   if ((manifest.version ?? 1) !== version) {
-    throw new Error('Conflict: app was modified concurrently. Please retry.');
+    throw new Error("Conflict: app was modified concurrently. Please retry.");
   }
 
   const schema =
-    typeof schemaInput === 'string' ? JSON.parse(schemaInput) : schemaInput;
-  if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
-    throw new Error('Invalid JSON Schema: schema must be a JSON object');
+    typeof schemaInput === "string" ? JSON.parse(schemaInput) : schemaInput;
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
+    throw new Error("Invalid JSON Schema: schema must be a JSON object");
   }
-  const ajv = new Ajv();
+  // ajv 8 compat for user-supplied schemas: strictSchema is relaxed because
+  // config schemas are authored by API callers and may carry benign unknown
+  // keywords (silently ignored by ajv 6, which this endpoint accepted and
+  // stored). addFormats restores the `format` validation built into ajv 6.
+  const ajv = new Ajv({ strictSchema: false });
+  addFormats(ajv);
   const isValid = ajv.validateSchema(schema);
   if (!isValid) {
     const errors =
-      ajv.errors?.map((e) => e.message).join('; ') || 'unknown validation error';
+      ajv.errors?.map((e) => e.message).join("; ") ||
+      "unknown validation error";
     throw new Error(`Invalid JSON Schema: ${errors}`);
   }
 
@@ -1759,11 +2260,11 @@ async function setAppConfigSchema(
     m.version = version + 1;
   });
 
-  const updated = await getRegistryService().updateResource('agent', appId, {
+  const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: mutatedContent,
   });
 
-  await emitEvent('app.config.schema.set', { appId, userId });
+  await emitEvent("app.config.schema.set", { appId, userId });
 
   return projectAgentAppNormalized(updated);
 }
@@ -1774,38 +2275,36 @@ async function setAppConfigValues(
   version: number,
   userId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
   const manifest = readManifest(record);
   if ((manifest.version ?? 1) !== version) {
-    throw new Error('Conflict: app was modified concurrently. Please retry.');
+    throw new Error("Conflict: app was modified concurrently. Please retry.");
   }
 
   const values =
-    typeof valuesInput === 'string' ? JSON.parse(valuesInput) : valuesInput;
+    typeof valuesInput === "string" ? JSON.parse(valuesInput) : valuesInput;
 
   if (manifest.configSchema) {
-    const ajv = new Ajv({ allErrors: true });
+    // ajv 8 compat: stored schemas were accepted under ajv 6, which ignored
+    // unknown keywords and validated `format` built-in. strictSchema: false +
+    // addFormats preserves that behavior so previously stored schemas keep
+    // compiling instead of throwing at this call site.
+    const ajv = new Ajv({ allErrors: true, strictSchema: false });
+    addFormats(ajv);
     const validate = ajv.compile(manifest.configSchema);
     const valid = validate(values);
     if (!valid) {
       const errors = (validate.errors || [])
         .map((e) => {
-          // ajv v6 ErrorObject has dataPath/params unions; access the fields
-          // this message builder needs through a structural view.
-          const err = e as {
-            instancePath?: string;
-            params?: { missingProperty?: string };
-            message?: string;
-          };
           const path =
-            err.instancePath ||
-            (err.params?.missingProperty ? err.params.missingProperty : '');
-          return `${path ? path + ': ' : ''}${err.message}`;
+            e.instancePath ||
+            ((e.params as { missingProperty?: string }).missingProperty ?? "");
+          return `${path ? path + ": " : ""}${e.message}`;
         })
-        .join('; ');
+        .join("; ");
       throw new Error(`Config validation failed: ${errors}`);
     }
   }
@@ -1815,11 +2314,11 @@ async function setAppConfigValues(
     m.version = version + 1;
   });
 
-  const updated = await getRegistryService().updateResource('agent', appId, {
+  const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: mutatedContent,
   });
 
-  await emitEvent('app.config.values.set', { appId, userId });
+  await emitEvent("app.config.values.set", { appId, userId });
 
   return projectAgentAppNormalized(updated);
 }
@@ -1829,13 +2328,13 @@ async function setAppAuthConfig(
   authConfigInput: string | object,
   userId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
 
   const authConfig =
-    typeof authConfigInput === 'string'
+    typeof authConfigInput === "string"
       ? JSON.parse(authConfigInput)
       : authConfigInput;
 
@@ -1844,11 +2343,11 @@ async function setAppAuthConfig(
     m.version = (m.version ?? 1) + 1;
   });
 
-  const updated = await getRegistryService().updateResource('agent', appId, {
+  const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: mutatedContent,
   });
 
-  await emitEvent('app.auth.config.set', { appId, userId });
+  await emitEvent("app.auth.config.set", { appId, userId });
 
   return projectAgentAppNormalized(updated);
 }
@@ -1859,9 +2358,9 @@ async function grantAppAccess(
   role: string,
   grantingUserId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
 
   const now = new Date().toISOString();
@@ -1876,11 +2375,11 @@ async function grantAppAccess(
     m.version = (m.version ?? 1) + 1;
   });
 
-  const updated = await getRegistryService().updateResource('agent', appId, {
+  const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: mutatedContent,
   });
 
-  await emitEvent('app.access.granted', {
+  await emitEvent("app.access.granted", {
     appId,
     userId: targetUserId,
     role,
@@ -1895,9 +2394,9 @@ async function revokeAppAccess(
   targetUserId: string,
   revokingUserId: string,
 ): Promise<unknown> {
-  const record = await getRegistryService().getResource('agent', appId);
+  const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
 
   const mutatedContent = writeManifestMutation(record, (m) => {
@@ -1907,11 +2406,11 @@ async function revokeAppAccess(
     m.version = (m.version ?? 1) + 1;
   });
 
-  const updated = await getRegistryService().updateResource('agent', appId, {
+  const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: mutatedContent,
   });
 
-  await emitEvent('app.access.revoked', {
+  await emitEvent("app.access.revoked", {
     appId,
     userId: targetUserId,
     revokedBy: revokingUserId,
@@ -1950,7 +2449,7 @@ async function publishAppStatusEvent(input: {
   // echo the payload so AppSync subscriptions receive a deterministic shape.
   // No registry interaction — matches the "existing EventBridge put preserved"
   // rule in the PR 3 contract.
-  await emitEvent('app.status.published', input);
+  await emitEvent("app.status.published", input);
   return {
     appId: input.appId,
     previousStatus: input.previousStatus,
@@ -1965,7 +2464,13 @@ async function createAppApiKey(
   expiresIn: number | undefined,
   userId: string,
 ): Promise<unknown> {
-  const result = await createAppApiKeyImpl(appId, name, userId, getSharedDeps(), expiresIn);
+  const result = await createAppApiKeyImpl(
+    appId,
+    name,
+    userId,
+    getSharedDeps(),
+    expiresIn,
+  );
   // Shape to the AppApiKeyWithPlaintext GraphQL type — plaintext is returned
   // exactly once here at creation and is never persisted in retrievable form.
   return {
@@ -1993,7 +2498,12 @@ async function rotateAppApiKey(
   keyId: string,
   userId: string,
 ): Promise<unknown> {
-  const result = await rotateAppApiKeyImpl(appId, keyId, userId, getSharedDeps());
+  const result = await rotateAppApiKeyImpl(
+    appId,
+    keyId,
+    userId,
+    getSharedDeps(),
+  );
   // Shape to AppApiKeyWithPlaintext — flatten result.newKey to the top level
   // and drop revokedKeyId. Plaintext is returned exactly once on rotation.
   return {

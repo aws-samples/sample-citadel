@@ -29,14 +29,41 @@ interface ToolCardProps {
   configureDisabled?: boolean;
 }
 
+/** Minimal shape ToolCard reads off a tool's parsed config. */
+interface RenderableToolConfig {
+  name?: string;
+  description?: string;
+  version?: string;
+  parameters?: Record<string, unknown>;
+}
+
+/**
+ * Normalize a tool's `config` payload for render.
+ *
+ * Summary-fallback registry rows project a bare string (plain description
+ * or '') through AWSJSON, so after the service's first decode the payload
+ * may not be JSON at all — or may be a double-encoded scalar. Never throw
+ * during render: parse guarded, and normalize any non-object result to {}.
+ */
+function toRenderableConfig(raw: unknown): RenderableToolConfig {
+  let value: unknown = raw;
+  if (typeof value === 'string') {
+    try {
+      value = value.trim() ? JSON.parse(value) : {};
+    } catch {
+      value = {};
+    }
+  }
+  return typeof value === 'object' && value !== null
+    ? (value as RenderableToolConfig)
+    : {};
+}
+
 export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, configureDisabled = true }: ToolCardProps) {
   const { selectedOrganization } = useOrganization();
   const resolvedOrgId = orgId || selectedOrganization || 'default';
   const [showSandbox, setShowSandbox] = useState(false);
-  // Parse config if it's a string
-  const config = typeof tool.config === 'string' 
-    ? (() => { try { return tool.config.trim() ? JSON.parse(tool.config) : {}; } catch { return {}; } })()
-    : tool.config;
+  const config = toRenderableConfig(tool.config);
 
   // Only show config button for admin and developer roles
   const canConfigure = userRole === 'admin' || userRole === 'developer';

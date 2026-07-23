@@ -299,6 +299,28 @@ describe("validatePublishPreconditions (extended)", () => {
     expect(errors).toEqual([]);
   });
 
+  // ajv 6 → 8 compat: user-authored config schemas may carry `format`
+  // (built-in in v6) or benign unknown keywords (ignored in v6). The
+  // precondition check must validate, not crash at schema compile.
+  test("validates values against a schema using format and unknown keywords", () => {
+    const metadata = makeMetadata();
+    const components: ComponentItem[] = [
+      makeAgentBinding("agent-1", "READY"),
+      makeConfigSchema({
+        type: "object",
+        properties: {
+          contact: { type: "string", format: "email", uiHint: "email-input" },
+        },
+        required: ["contact"],
+      }),
+      makeConfigValues({ contact: "not-an-email" }),
+    ];
+    const errors = validatePublishPreconditions(metadata, components);
+    expect(errors).toContainEqual(
+      expect.stringContaining("Config validation failed"),
+    );
+  });
+
   test("returns all failing preconditions in a single call", () => {
     // Two agents trigger the workflow precondition (multi-agent); both
     // are non-READY; configSchema present but no values provided.

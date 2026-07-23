@@ -4,7 +4,7 @@ Property-based tests for store_tool_config_registry.
 Covers task 9.2 of the agentcore-registry-migration spec:
   - Calls CreateRegistryRecord with tool metadata and custom metadata
     (including integrationBindings and dataStoreBindings)
-  - Sets initial status to PUBLISHED (maps to active state)
+  - Sets initial status to APPROVED (maps to active state)
   - On failure: logs error and publishes tool.fabrication.failed event
     to EventBridge
 
@@ -108,11 +108,11 @@ def _make_registry_mock(record_id: str = "gen-record-id"):
     client.create_registry_record.return_value = {
         "recordArn": f"arn:aws:bedrock-agentcore:us-west-2:123456789012:registry/reg/record/{record_id}",
         "recordId": record_id,
-        "status": "PUBLISHED",
+        "status": "CREATING",
     }
     client.update_registry_record_status.return_value = {
         "recordId": record_id,
-        "status": "PUBLISHED",
+        "status": "APPROVED",
     }
     return client
 
@@ -418,18 +418,32 @@ class TestCreateResourceCall:
 
 
 # ---------------------------------------------------------------------------
-# Requirement 8.4: initial status is PUBLISHED (maps to active)
+# Requirement 8.4: initial status is APPROVED (maps to active).
+#
+# UpdateRegistryRecordStatus accepts ONLY this enum (live-verified — a
+# "PUBLISHED" value raised a ValidationException at index.py:1580):
+#   CREATE_FAILED, DRAFT, UPDATING, PENDING_APPROVAL, UPDATE_FAILED,
+#   DEPRECATED, APPROVED, CREATING, REJECTED
+# APPROVED is the correct "immediately usable" terminal status: both the
+# intake catalog (_registry_state_from_status) and the backend
+# (registry-service.ts toInternalState) map the APPROVED family -> "active".
 # ---------------------------------------------------------------------------
 
-class TestInitialStatusPublished:
-    """Verify records are created with PUBLISHED status / state active.
+VALID_REGISTRY_STATUSES = {
+    "CREATE_FAILED", "DRAFT", "UPDATING", "PENDING_APPROVAL", "UPDATE_FAILED",
+    "DEPRECATED", "APPROVED", "CREATING", "REJECTED",
+}
+
+
+class TestInitialStatusApproved:
+    """Verify records are moved to APPROVED status (internal state active).
 
     **Validates: Requirements 8.4**
     """
 
     @given(tool_id=tool_ids, schema=tool_schemas)
     @settings(max_examples=20)
-    def test_status_update_called_with_published(self, tool_id, schema):
+    def test_status_update_called_with_approved(self, tool_id, schema):
         client = _make_registry_mock(record_id="rec-789")
         with patch("index._get_registry_client", return_value=client):
             store_tool_config_registry(
@@ -441,10 +455,27 @@ class TestInitialStatusPublished:
 
         assert client.update_registry_record_status.called
         kwargs = client.update_registry_record_status.call_args.kwargs
-        assert kwargs["status"] == "PUBLISHED"
+        assert kwargs["status"] == "APPROVED"
         assert kwargs["registryId"] == os.environ["REGISTRY_ID"]
         # recordId is extracted from the create response ARN
         assert kwargs["recordId"] == "rec-789"
+
+    @given(tool_id=tool_ids, schema=tool_schemas)
+    @settings(max_examples=20)
+    def test_status_is_in_valid_registry_enum(self, tool_id, schema):
+        """Pin the status to the UpdateRegistryRecordStatus enum so an
+        invalid value (e.g. the old "PUBLISHED") can never ship again."""
+        client = _make_registry_mock()
+        with patch("index._get_registry_client", return_value=client):
+            store_tool_config_registry(
+                file_name=f"/tmp/{tool_id}.py",
+                tool_id=tool_id,
+                tool_schema=schema,
+                tool_description="desc",
+            )
+
+        kwargs = client.update_registry_record_status.call_args.kwargs
+        assert kwargs["status"] in VALID_REGISTRY_STATUSES
 
     @given(tool_id=tool_ids, schema=tool_schemas)
     @settings(max_examples=20)

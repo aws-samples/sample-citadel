@@ -17,6 +17,7 @@ from the service/agent_intake_single directory.
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from unittest import mock
 
 import pytest
@@ -31,10 +32,18 @@ import tools.state as state
 
 RAW_ENUMS = ("PENDING", "PROCESSING", "COMPLETED", "FAILED")
 
+# Days older than the stale-active threshold; real byte shape (microseconds,
+# Z-suffixed) mirrors what the fabricator's status writer produces.
+STALE_TS = "2026-07-19T04:31:03.885692Z"
 
-def _job(name, status):
+
+def _fresh_ts():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _job(name, status, updated_at=None):
     return {"orchestrationId": "sess-1", "agentUseId": name, "agentName": name,
-            "status": status, "updatedAt": "2026-07-19T00:00:00Z"}
+            "status": status, "updatedAt": updated_at or _fresh_ts()}
 
 
 @pytest.fixture
@@ -180,6 +189,118 @@ def test_marker_not_regressed_from_later_stage(jobs_table, marker_store):
     _run(jobs_table, [_job("A", "COMPLETED")], marker_store)
 
     assert marker_store["sess-1"]["stage"] == "app_created"
+
+
+# --- stale-PROCESSING classification -----------------------------------------
+#
+# Live-evidence shape (orchestration 6a5e4870…): a fabricator Lambda timeout
+# kill never writes a terminal status, so a PROCESSING row's updatedAt stops
+# moving. Such an orphaned row must gate like a failure (never deadlock the
+# flow) and be surfaced distinctly as stalled.
+
+
+def _live_like_items():
+    return [
+        _job("IngestionAgent", "COMPLETED"),
+        _job("NodeReconAgent", "COMPLETED"),
+        _job("RegistryReconAgent", "COMPLETED"),
+        _job("ArbiterAgent", "PROCESSING", updated_at=STALE_TS),
+        _job("SettlementMatchAgent", "FAILED"),
+        _job("VarianceTriageAgent", "FAILED"),
+    ]
+
+
+def test_stale_sibling_does_not_block_gating_and_reports_stalled(jobs_table, marker_store):
+    result = _run(jobs_table, _live_like_items(), marker_store)
+
+    assert result["status"] == "partial"
+    assert result["all_terminal"] is True
+    assert result["stalled"] == ["ArbiterAgent"]
+    assert "stalled" in result["summary"]
+    assert "SettlementMatchAgent" in result["failed"]
+    _assert_no_raw_enums(result)
+    _assert_conversational_contract(result)
+
+
+def test_stale_row_state_reads_stalled_not_being_built(jobs_table, marker_store):
+    result = _run(jobs_table, _live_like_items(), marker_store)
+
+    states = {a["name"]: a["state"] for a in result["agents"]}
+    assert states["ArbiterAgent"] == "stalled"
+
+
+def test_partial_with_failed_or_stalled_offers_retry_action(jobs_table, marker_store):
+    result = _run(jobs_table, _live_like_items(), marker_store)
+
+    labels = " | ".join(a["label"] for a in result["actions"])
+    assert "Retry" in labels
+
+
+def test_fresh_processing_sibling_still_gates_in_progress(jobs_table, marker_store):
+    items = [_job("A", "COMPLETED"), _job("B", "PROCESSING"),
+             _job("C", "FAILED")]
+    result = _run(jobs_table, items, marker_store)
+
+    assert result["status"] == "in_progress"
+    assert result["stalled"] == []
+    assert result["all_terminal"] is False
+
+
+def test_in_progress_with_failed_offers_retry_while_sibling_builds(jobs_table, marker_store):
+    items = [_job("A", "COMPLETED"), _job("B", "PROCESSING"),
+             _job("C", "FAILED")]
+    result = _run(jobs_table, items, marker_store)
+
+    labels = " | ".join(a["label"] for a in result["actions"])
+    assert "Retry" in labels
+    _assert_no_raw_enums(result)
+    _assert_conversational_contract(result)
+
+
+def test_in_progress_without_failures_has_no_retry_action(jobs_table, marker_store):
+    items = [_job("A", "COMPLETED"), _job("B", "PROCESSING")]
+    result = _run(jobs_table, items, marker_store)
+
+    labels = " | ".join(a["label"] for a in result["actions"])
+    assert "Retry" not in labels
+
+
+def test_missing_updated_at_is_treated_as_fresh(jobs_table, marker_store):
+    items = [{"orchestrationId": "sess-1", "agentUseId": "A",
+              "agentName": "A", "status": "PROCESSING"}]
+    result = _run(jobs_table, items, marker_store)
+
+    assert result["status"] == "in_progress"
+    assert result["stalled"] == []
+
+
+def test_unparseable_updated_at_is_treated_as_fresh(jobs_table, marker_store):
+    items = [_job("A", "PROCESSING", updated_at="not-a-timestamp")]
+    result = _run(jobs_table, items, marker_store)
+
+    assert result["status"] == "in_progress"
+    assert result["stalled"] == []
+
+
+def test_stale_only_reports_stalled_and_offers_retry(jobs_table, marker_store):
+    items = [_job("ArbiterAgent", "PROCESSING", updated_at=STALE_TS)]
+    result = _run(jobs_table, items, marker_store)
+
+    assert result["status"] == "all_failed"
+    assert result["stalled"] == ["ArbiterAgent"]
+    assert "stalled" in result["summary"]
+    labels = " | ".join(a["label"] for a in result["actions"])
+    assert "Retry" in labels
+    _assert_no_raw_enums(result)
+
+
+def test_stale_never_counts_as_all_succeeded(jobs_table, marker_store):
+    items = [_job("A", "COMPLETED"),
+             _job("ArbiterAgent", "PROCESSING", updated_at=STALE_TS)]
+    result = _run(jobs_table, items, marker_store)
+
+    assert result["status"] == "partial"
+    assert result["all_succeeded"] is False
 
 
 # --- marker helpers (tools/state.py) -----------------------------------------

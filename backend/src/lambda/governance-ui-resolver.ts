@@ -17,8 +17,8 @@
  * remaining four (rb-2, own-1, own-2, own-3) stay as STUB and require a
  * human "mark verified" action that ships in Wave 2.B.2.
  */
-import { AppSyncResolverEvent } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { AppSyncResolverEvent } from "aws-lambda";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
@@ -26,49 +26,41 @@ import {
   QueryCommand,
   ScanCommand,
   UpdateCommand,
-} from '@aws-sdk/lib-dynamodb';
+} from "@aws-sdk/lib-dynamodb";
 import {
   SSMClient,
   GetParameterCommand,
   GetParameterHistoryCommand,
   PutParameterCommand,
-} from '@aws-sdk/client-ssm';
+} from "@aws-sdk/client-ssm";
 import {
   CloudWatchClient,
   GetMetricStatisticsCommand,
-} from '@aws-sdk/client-cloudwatch';
-import {
-  IAMClient,
-  GetRolePolicyCommand,
-} from '@aws-sdk/client-iam';
-import {
-  STSClient,
-  GetCallerIdentityCommand,
-} from '@aws-sdk/client-sts';
+} from "@aws-sdk/client-cloudwatch";
+import { IAMClient, GetRolePolicyCommand } from "@aws-sdk/client-iam";
+import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 
 import {
   getGovernanceEnforce,
   getGovernanceEffectiveAt,
-} from '../utils/governance-flag';
-import { isAdminFromEvent } from '../utils/auth-event';
-import {
-  emitGovernanceEvent,
-} from '../utils/notifier-base';
+} from "../utils/governance-flag";
+import { isAdminFromEvent } from "../utils/auth-event";
+import { emitGovernanceEvent } from "../utils/notifier-base";
 import {
   RegistryService,
   TypeMismatchError,
   type AgentCustomMetadata,
   type ToolCustomMetadata,
   type RegistryRecord,
-} from '../services/registry-service';
-import { PolicyManager, type PolicyScope } from '../utils/policy-manager';
-import { getUnifiedRegistry } from '../adapters/registry';
+} from "../services/registry-service";
+import { PolicyManager, type PolicyScope } from "../utils/policy-manager";
+import { getUnifiedRegistry } from "../adapters/registry";
 import {
   fetchTrustPathHop,
   parseTrustPolicyPrincipals,
   projectInlinePolicyDocument,
   extractCrossAccountRoleArn,
-} from '../utils/trust-path';
+} from "../utils/trust-path";
 // Re-export the pure trust-path helpers from their original module path so
 // existing importers (governance-ui-resolver.test.ts) keep working unchanged.
 // The IAM-fetch + hop projection now lives in ../utils/trust-path; getTrustPath
@@ -100,9 +92,9 @@ const DATA_TWO_SAMPLE_SIZE = 50;
 
 // Allowlist for rb-1 — mirrors backend/src/utils/governance-flag.ts.
 const VALID_ENFORCE_VALUES: ReadonlySet<string> = new Set([
-  'permissive',
-  'shadow',
-  'strict',
+  "permissive",
+  "shadow",
+  "strict",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -121,61 +113,61 @@ const PIPELINE_STEPS: ReadonlyArray<{
 }> = [
   {
     stepNumber: 1,
-    name: 'Case-law lookup',
+    name: "Case-law lookup",
     defaultDetail:
-      'First match in precedence-sorted case law; on PERMIT, step 8 may still override.',
+      "First match in precedence-sorted case law; on PERMIT, step 8 may still override.",
   },
   {
     stepNumber: 2,
-    name: 'Composition arbitration scaffold',
-    defaultDetail: 'Scaffolded; replaced by step 6 in US-ARB-006',
+    name: "Composition arbitration scaffold",
+    defaultDetail: "Scaffolded; replaced by step 6 in US-ARB-006",
   },
   {
     stepNumber: 3,
-    name: 'Covering-unit discovery',
+    name: "Covering-unit discovery",
     defaultDetail:
-      'Discover authority units bound to the requesting agent (or platform-wide) that cover the request.',
+      "Discover authority units bound to the requesting agent (or platform-wide) that cover the request.",
   },
   {
     stepNumber: 4,
-    name: 'Residual-authority denial check',
+    name: "Residual-authority denial check",
     defaultDetail:
-      'No covering unit means no residual authority — deny by default.',
+      "No covering unit means no residual authority — deny by default.",
   },
   {
     stepNumber: 5,
-    name: 'Tightest-scope selection',
+    name: "Tightest-scope selection",
     defaultDetail:
-      'Pick the highest-specificity covering unit, breaking ties by lexicographic unit_id.',
+      "Pick the highest-specificity covering unit, breaking ties by lexicographic unit_id.",
   },
   {
     stepNumber: 6,
-    name: 'Composition evaluation',
+    name: "Composition evaluation",
     defaultDetail:
-      'Apply the four arbitration patterns (deferred/unilateral/rivalrous/collaborative).',
+      "Apply the four arbitration patterns (deferred/unilateral/rivalrous/collaborative).",
   },
   {
     stepNumber: 7,
-    name: 'Single-domain permit',
+    name: "Single-domain permit",
     defaultDetail:
-      'No contract governs the request — permit on the tightest matching scope.',
+      "No contract governs the request — permit on the tightest matching scope.",
   },
   {
     stepNumber: 8,
-    name: 'Constitutional review',
+    name: "Constitutional review",
     defaultDetail:
-      'Override a permit to deny when any constitutional invariant is violated.',
+      "Override a permit to deny when any constitutional invariant is violated.",
   },
 ] as const;
 
 type DecisionTraceStepStatus =
-  | 'matched'
-  | 'skipped'
-  | 'pass-through'
-  | 'denied'
-  | 'permitted'
-  | 'escalated'
-  | 'overridden';
+  | "matched"
+  | "skipped"
+  | "pass-through"
+  | "denied"
+  | "permitted"
+  | "escalated"
+  | "overridden";
 
 interface DecisionTraceStepProjected {
   stepNumber: number;
@@ -199,10 +191,10 @@ interface DecisionTraceProjected {
 }
 
 const ARBITRATION_PATTERN_PREFIXES: ReadonlySet<string> = new Set([
-  'deferred_authority',
-  'unilateral_sovereignty',
-  'rivalrous_claim',
-  'collaborative_composition',
+  "deferred_authority",
+  "unilateral_sovereignty",
+  "rivalrous_claim",
+  "collaborative_composition",
 ]);
 
 // --- Types ---
@@ -249,7 +241,7 @@ interface ReconcilerStatus {
 
 // --- Wave 2.A: rollout readiness types ---
 
-type ReadinessCheckStatus = 'PASS' | 'FAIL' | 'WARN' | 'UNKNOWN' | 'STUB';
+type ReadinessCheckStatus = "PASS" | "FAIL" | "WARN" | "UNKNOWN" | "STUB";
 
 interface ReadinessCheck {
   id: string;
@@ -290,25 +282,25 @@ function zeroReconcilerStatus(): ReconcilerStatus {
 }
 
 function isReconcilerStatusShape(value: unknown): value is ReconcilerStatus {
-  if (!value || typeof value !== 'object') return false;
+  if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
   const c = v.classifications as Record<string, unknown> | undefined;
-  if (!c || typeof c !== 'object') return false;
+  if (!c || typeof c !== "object") return false;
   return (
-    typeof c.inSync === 'number' &&
-    typeof c.missing === 'number' &&
-    typeof c.stale === 'number' &&
-    typeof c.orphan === 'number' &&
-    typeof v.totalRecords === 'number'
+    typeof c.inSync === "number" &&
+    typeof c.missing === "number" &&
+    typeof c.stale === "number" &&
+    typeof c.orphan === "number" &&
+    typeof v.totalRecords === "number"
   );
 }
 
 function asStringOrNull(v: unknown): string | null {
-  return typeof v === 'string' && v.length > 0 ? v : null;
+  return typeof v === "string" && v.length > 0 ? v : null;
 }
 
 function asBoolOrNull(v: unknown): boolean | null {
-  return typeof v === 'boolean' ? v : null;
+  return typeof v === "boolean" ? v : null;
 }
 
 /**
@@ -320,21 +312,20 @@ function asBoolOrNull(v: unknown): boolean | null {
 export function projectFinding(row: DdbRow): GovernanceFindingProjected {
   const tsRaw = row.timestamp;
   const timestamp =
-    typeof tsRaw === 'number'
+    typeof tsRaw === "number"
       ? tsRaw
-      : typeof tsRaw === 'string'
+      : typeof tsRaw === "string"
         ? Number(tsRaw)
         : 0;
 
   return {
-    findingId: typeof row.findingId === 'string' ? row.findingId : '',
-    workflowId: typeof row.workflowId === 'string' ? row.workflowId : '',
-    decision: typeof row.decision === 'string' ? row.decision : '',
-    reason: typeof row.reason === 'string' ? row.reason : '',
+    findingId: typeof row.findingId === "string" ? row.findingId : "",
+    workflowId: typeof row.workflowId === "string" ? row.workflowId : "",
+    decision: typeof row.decision === "string" ? row.decision : "",
+    reason: typeof row.reason === "string" ? row.reason : "",
     requestingAgent:
-      typeof row.requesting_agent === 'string' ? row.requesting_agent : '',
-    targetAgent:
-      typeof row.target_agent === 'string' ? row.target_agent : '',
+      typeof row.requesting_agent === "string" ? row.requesting_agent : "",
+    targetAgent: typeof row.target_agent === "string" ? row.target_agent : "",
     scopeEvaluated: asStringOrNull(row.scope_evaluated),
     contractEvaluated: asStringOrNull(row.contract_evaluated),
     escalationTarget: asStringOrNull(row.escalation_target),
@@ -343,10 +334,12 @@ export function projectFinding(row: DdbRow): GovernanceFindingProjected {
   };
 }
 
-function decodeCursor(cursor: string | null | undefined): Record<string, unknown> | undefined {
+function decodeCursor(
+  cursor: string | null | undefined,
+): Record<string, unknown> | undefined {
   if (!cursor) return undefined;
   try {
-    const decoded = Buffer.from(cursor, 'base64').toString('utf8');
+    const decoded = Buffer.from(cursor, "base64").toString("utf8");
     const parsed = JSON.parse(decoded);
     // Validate shape: must be a non-null object with a string `findingId`
     // (the ledger table's primary key, used as DDB ExclusiveStartKey).
@@ -354,11 +347,11 @@ function decodeCursor(cursor: string | null | undefined): Record<string, unknown
     // throwing an opaque DDB error downstream.
     if (
       parsed === null ||
-      typeof parsed !== 'object' ||
+      typeof parsed !== "object" ||
       Array.isArray(parsed) ||
-      typeof (parsed as Record<string, unknown>).findingId !== 'string'
+      typeof (parsed as Record<string, unknown>).findingId !== "string"
     ) {
-      console.warn('decodeCursor: malformed cursor, ignoring');
+      console.warn("decodeCursor: malformed cursor, ignoring");
       return undefined;
     }
     return parsed as Record<string, unknown>;
@@ -369,11 +362,11 @@ function decodeCursor(cursor: string | null | undefined): Record<string, unknown
 
 function encodeCursor(key: Record<string, unknown> | undefined): string | null {
   if (!key) return null;
-  return Buffer.from(JSON.stringify(key), 'utf8').toString('base64');
+  return Buffer.from(JSON.stringify(key), "utf8").toString("base64");
 }
 
 function clampLimit(raw: number | null | undefined): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
     return DEFAULT_LIMIT;
   }
   return Math.min(Math.floor(raw), MAX_LIMIT);
@@ -386,7 +379,7 @@ async function getGovernanceMode(): Promise<{
   effectiveAt: string | null;
   env: string;
 }> {
-  const env = process.env.ENVIRONMENT || 'unknown';
+  const env = process.env.ENVIRONMENT || "unknown";
   try {
     const [enforce, effectiveAt] = await Promise.all([
       getGovernanceEnforce(env),
@@ -394,8 +387,8 @@ async function getGovernanceMode(): Promise<{
     ]);
     return { enforce, effectiveAt, env };
   } catch (err) {
-    console.error('getGovernanceMode: fail-open', err);
-    return { enforce: 'permissive', effectiveAt: null, env };
+    console.error("getGovernanceMode: fail-open", err);
+    return { enforce: "permissive", effectiveAt: null, env };
   }
 }
 
@@ -405,7 +398,7 @@ async function listGovernanceFindings(args: ListFindingsArgs): Promise<{
 }> {
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
   if (!tableName) {
-    throw new Error('GOVERNANCE_LEDGER_TABLE env var is not set');
+    throw new Error("GOVERNANCE_LEDGER_TABLE env var is not set");
   }
 
   const limit = clampLimit(args.limit);
@@ -416,27 +409,27 @@ async function listGovernanceFindings(args: ListFindingsArgs): Promise<{
   if (args.workflowId) {
     // GSI Query path — significantly cheaper than a Scan.
     const expressionAttributeValues: Record<string, unknown> = {
-      ':wid': args.workflowId,
+      ":wid": args.workflowId,
     };
-    let keyConditionExpression = 'workflowId = :wid';
+    let keyConditionExpression = "workflowId = :wid";
     const expressionAttributeNames: Record<string, string> = {};
 
-    if (typeof args.sinceTs === 'number') {
-      keyConditionExpression += ' AND #ts >= :since';
-      expressionAttributeNames['#ts'] = 'timestamp';
-      expressionAttributeValues[':since'] = args.sinceTs;
+    if (typeof args.sinceTs === "number") {
+      keyConditionExpression += " AND #ts >= :since";
+      expressionAttributeNames["#ts"] = "timestamp";
+      expressionAttributeValues[":since"] = args.sinceTs;
     }
 
     let filterExpression: string | undefined;
     if (args.decision) {
-      filterExpression = '#decision = :decision';
-      expressionAttributeNames['#decision'] = 'decision';
-      expressionAttributeValues[':decision'] = args.decision;
+      filterExpression = "#decision = :decision";
+      expressionAttributeNames["#decision"] = "decision";
+      expressionAttributeValues[":decision"] = args.decision;
     }
 
     const cmd = new QueryCommand({
       TableName: tableName,
-      IndexName: 'workflow-index',
+      IndexName: "workflow-index",
       KeyConditionExpression: keyConditionExpression,
       ExpressionAttributeValues: expressionAttributeValues,
       ...(Object.keys(expressionAttributeNames).length > 0
@@ -455,14 +448,14 @@ async function listGovernanceFindings(args: ListFindingsArgs): Promise<{
     const expressionAttributeValues: Record<string, unknown> = {};
 
     if (args.decision) {
-      filterClauses.push('#decision = :decision');
-      expressionAttributeNames['#decision'] = 'decision';
-      expressionAttributeValues[':decision'] = args.decision;
+      filterClauses.push("#decision = :decision");
+      expressionAttributeNames["#decision"] = "decision";
+      expressionAttributeValues[":decision"] = args.decision;
     }
-    if (typeof args.sinceTs === 'number') {
-      filterClauses.push('#ts >= :since');
-      expressionAttributeNames['#ts'] = 'timestamp';
-      expressionAttributeValues[':since'] = args.sinceTs;
+    if (typeof args.sinceTs === "number") {
+      filterClauses.push("#ts >= :since");
+      expressionAttributeNames["#ts"] = "timestamp";
+      expressionAttributeValues[":since"] = args.sinceTs;
     }
 
     const cmd = new ScanCommand({
@@ -470,7 +463,7 @@ async function listGovernanceFindings(args: ListFindingsArgs): Promise<{
       Limit: limit,
       ...(filterClauses.length > 0
         ? {
-            FilterExpression: filterClauses.join(' AND '),
+            FilterExpression: filterClauses.join(" AND "),
             ExpressionAttributeNames: expressionAttributeNames,
             ExpressionAttributeValues: expressionAttributeValues,
           }
@@ -502,7 +495,7 @@ async function loadFinding(
 ): Promise<GovernanceFindingProjected | null> {
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
   if (!tableName) {
-    throw new Error('GOVERNANCE_LEDGER_TABLE env var is not set');
+    throw new Error("GOVERNANCE_LEDGER_TABLE env var is not set");
   }
 
   const cmd = new GetCommand({
@@ -537,7 +530,7 @@ interface GetDecisionTraceArgs {
 
 export function parseReasonTokens(reason: string): string[] {
   if (!reason) return [];
-  return reason.split(':');
+  return reason.split(":");
 }
 
 export function detectScopeReduction(tokens: string[]): string | null {
@@ -547,9 +540,9 @@ export function detectScopeReduction(tokens: string[]): string | null {
   // `domain_boundary` is reserved in models.ScopeReductionReason for
   // future use and recognised here so the frontend can render it.
   for (const token of tokens) {
-    if (token === 'unconfirmed_state') return 'unconfirmed_state';
-    if (token === 'attenuation') return 'attenuation';
-    if (token === 'domain_boundary') return 'domain_boundary';
+    if (token === "unconfirmed_state") return "unconfirmed_state";
+    if (token === "attenuation") return "attenuation";
+    if (token === "domain_boundary") return "domain_boundary";
   }
   return null;
 }
@@ -594,43 +587,48 @@ export function buildSteps(
   tokens: string[],
   arbitrationPattern: string | null,
   scopeReduction: string | null,
-): { steps: DecisionTraceStepProjected[]; terminalStepNumber: number; constitutionalOverride: boolean } {
+): {
+  steps: DecisionTraceStepProjected[];
+  terminalStepNumber: number;
+  constitutionalOverride: boolean;
+} {
   const baseInputs = buildBaseInputs(finding);
   const decision = finding.decision;
-  const head = tokens[0] ?? '';
+  const head = tokens[0] ?? "";
 
   // Constitutional review (step 8 override) is detected by the literal
   // `constitutional_review` reason head OR by the explicit
   // `constitutional_review:<layerId>:invariant_violated:<field>` shape.
-  const constitutionalOverride = head === 'constitutional_review';
-  const overrideLayerId = constitutionalOverride ? tokens[1] ?? null : null;
-  const overrideField = constitutionalOverride ? tokens[3] ?? null : null;
+  const constitutionalOverride = head === "constitutional_review";
+  const overrideLayerId = constitutionalOverride ? (tokens[1] ?? null) : null;
+  const overrideField = constitutionalOverride ? (tokens[3] ?? null) : null;
 
   // ----- Step 1: Case-law lookup -----
-  const caseLawHit = head === 'case_law';
-  const caseLawId = caseLawHit ? tokens[1] ?? null : null;
+  const caseLawHit = head === "case_law";
+  const caseLawId = caseLawHit ? (tokens[1] ?? null) : null;
 
   // ----- Step 4: Residual-authority denial -----
   const residualDenial =
-    head === 'residual_authority_denial' || finding.residualAuthorityDenial === true;
+    head === "residual_authority_denial" ||
+    finding.residualAuthorityDenial === true;
 
   // ----- Step 5/6/7: scope match vs composition vs single-domain permit -----
-  const scopeMatch = head === 'scope_match';
-  const scopeMatchUnitId = scopeMatch ? tokens[1] ?? null : null;
+  const scopeMatch = head === "scope_match";
+  const scopeMatchUnitId = scopeMatch ? (tokens[1] ?? null) : null;
   const composition = arbitrationPattern !== null;
 
   // ----- Step 6 outputs (composition) -----
   const compositionContractId = composition ? finding.contractEvaluated : null;
 
   // Default: all steps skipped.
-  let s1: DecisionTraceStepStatus = 'skipped';
-  const s2: DecisionTraceStepStatus = 'pass-through';
-  let s3: DecisionTraceStepStatus = 'skipped';
-  let s4: DecisionTraceStepStatus = 'skipped';
-  let s5: DecisionTraceStepStatus = 'skipped';
-  let s6: DecisionTraceStepStatus = 'skipped';
-  let s7: DecisionTraceStepStatus = 'skipped';
-  let s8: DecisionTraceStepStatus = 'skipped';
+  let s1: DecisionTraceStepStatus = "skipped";
+  const s2: DecisionTraceStepStatus = "pass-through";
+  let s3: DecisionTraceStepStatus = "skipped";
+  let s4: DecisionTraceStepStatus = "skipped";
+  let s5: DecisionTraceStepStatus = "skipped";
+  let s6: DecisionTraceStepStatus = "skipped";
+  let s7: DecisionTraceStepStatus = "skipped";
+  let s8: DecisionTraceStepStatus = "skipped";
   let terminalStepNumber = 8;
 
   if (constitutionalOverride) {
@@ -639,43 +637,43 @@ export function buildSteps(
     // the reason on override). We light up steps 1/3/4/5 as pass-through
     // so the operator sees the override clearly without false claims
     // about the upstream path.
-    s1 = 'pass-through';
-    s3 = 'pass-through';
-    s4 = 'pass-through';
-    s5 = 'pass-through';
-    s6 = 'pass-through';
-    s7 = 'pass-through';
-    s8 = 'overridden';
+    s1 = "pass-through";
+    s3 = "pass-through";
+    s4 = "pass-through";
+    s5 = "pass-through";
+    s6 = "pass-through";
+    s7 = "pass-through";
+    s8 = "overridden";
     terminalStepNumber = 8;
   } else if (caseLawHit) {
     // Case-law match short-circuits steps 3..7. Step 8 may still fire on
     // PERMITs, but if the reason head is case_law (not
     // constitutional_review) the constitutional override did not trigger.
-    s1 = 'matched';
+    s1 = "matched";
     terminalStepNumber = 1;
   } else if (residualDenial) {
     // Steps 1/3/4 with denial at step 4 (no covering units).
-    s1 = 'pass-through';
-    s3 = 'matched';
-    s4 = 'denied';
+    s1 = "pass-through";
+    s3 = "matched";
+    s4 = "denied";
     terminalStepNumber = 4;
   } else if (scopeMatch) {
     // Single-domain permit — steps 1..7, decision lit at step 7.
-    s1 = 'pass-through';
-    s3 = 'matched';
-    s4 = 'pass-through';
-    s5 = 'matched';
-    s6 = 'pass-through';
-    s7 = mapDecisionToStatus(decision, 'permitted');
+    s1 = "pass-through";
+    s3 = "matched";
+    s4 = "pass-through";
+    s5 = "matched";
+    s6 = "pass-through";
+    s7 = mapDecisionToStatus(decision, "permitted");
     terminalStepNumber = 7;
   } else if (composition) {
     // Composition decision lit at step 6 with the arbitration pattern.
-    s1 = 'pass-through';
-    s3 = 'matched';
-    s4 = 'pass-through';
-    s5 = 'matched';
-    s6 = mapDecisionToStatus(decision, 'matched');
-    s7 = 'skipped';
+    s1 = "pass-through";
+    s3 = "matched";
+    s4 = "pass-through";
+    s5 = "matched";
+    s6 = mapDecisionToStatus(decision, "matched");
+    s7 = "skipped";
     terminalStepNumber = 6;
   } else {
     // Unrecognised reason — degrade to pass-through. Log to CloudWatch
@@ -685,15 +683,15 @@ export function buildSteps(
       `getDecisionTrace: unrecognised reason format ${JSON.stringify(reasonForLog(tokens))} ` +
         `on finding ${finding.findingId}; degrading to pass-through.`,
     );
-    s1 = 'pass-through';
-    s3 = 'pass-through';
-    s4 = 'pass-through';
-    s5 = 'pass-through';
-    s6 = 'pass-through';
-    s7 = 'pass-through';
+    s1 = "pass-through";
+    s3 = "pass-through";
+    s4 = "pass-through";
+    s5 = "pass-through";
+    s6 = "pass-through";
+    s7 = "pass-through";
     // Final decision still anchors the terminal step; default to 8 so
     // operators see the override slot when present, else 7.
-    terminalStepNumber = decision === 'halt' ? 8 : 7;
+    terminalStepNumber = decision === "halt" ? 8 : 7;
   }
 
   const steps: DecisionTraceStepProjected[] = [
@@ -708,14 +706,19 @@ export function buildSteps(
     makeStep(
       4,
       s4,
-      { ...baseInputs, residualAuthorityDenial: finding.residualAuthorityDenial ?? false },
-      residualDenial ? { decision: 'deny' } : null,
+      {
+        ...baseInputs,
+        residualAuthorityDenial: finding.residualAuthorityDenial ?? false,
+      },
+      residualDenial ? { decision: "deny" } : null,
     ),
     makeStep(
       5,
       s5,
       { ...baseInputs },
-      finding.scopeEvaluated ? { scope_evaluated: finding.scopeEvaluated } : null,
+      finding.scopeEvaluated
+        ? { scope_evaluated: finding.scopeEvaluated }
+        : null,
     ),
     makeStep(
       6,
@@ -738,7 +741,10 @@ export function buildSteps(
       s7,
       { ...baseInputs },
       scopeMatch
-        ? { decision, scope_evaluated: scopeMatchUnitId ?? finding.scopeEvaluated ?? null }
+        ? {
+            decision,
+            scope_evaluated: scopeMatchUnitId ?? finding.scopeEvaluated ?? null,
+          }
         : null,
     ),
     makeStep(
@@ -749,7 +755,7 @@ export function buildSteps(
         ? {
             override_layer: overrideLayerId,
             override_field: overrideField,
-            decision: 'deny',
+            decision: "deny",
           }
         : null,
     ),
@@ -759,7 +765,7 @@ export function buildSteps(
 }
 
 function reasonForLog(tokens: string[]): string {
-  return tokens.join(':');
+  return tokens.join(":");
 }
 
 export function mapDecisionToStatus(
@@ -767,16 +773,16 @@ export function mapDecisionToStatus(
   permitStatus: DecisionTraceStepStatus,
 ): DecisionTraceStepStatus {
   switch (decision) {
-    case 'permit':
+    case "permit":
       return permitStatus;
-    case 'deny':
-      return 'denied';
-    case 'escalate':
-      return 'escalated';
-    case 'halt':
-      return 'denied';
+    case "deny":
+      return "denied";
+    case "escalate":
+      return "escalated";
+    case "halt":
+      return "denied";
     default:
-      return 'pass-through';
+      return "pass-through";
   }
 }
 
@@ -813,22 +819,27 @@ async function getReconcilerStatus(
   event: AppSyncResolverEvent<unknown>,
 ): Promise<ReconcilerStatus> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
-  const env = process.env.ENVIRONMENT || 'unknown';
+  const env = process.env.ENVIRONMENT || "unknown";
   const parameterName = `/citadel/governance/reconciler/last_status/${env}`;
 
   let raw: string | undefined;
   try {
-    const resp = await ssm.send(new GetParameterCommand({ Name: parameterName }));
+    const resp = await ssm.send(
+      new GetParameterCommand({ Name: parameterName }),
+    );
     raw = resp.Parameter?.Value;
   } catch (err) {
     // ParameterNotFound is the expected steady-state when the scheduled
     // reconciler has not yet written its first status blob (Wave 1 follow-up).
     // Any other error also falls through to the zero-defaults response so the
     // page never breaks on transient SSM issues.
-    console.warn('getReconcilerStatus: SSM read failed, returning zero defaults', err);
+    console.warn(
+      "getReconcilerStatus: SSM read failed, returning zero defaults",
+      err,
+    );
     return zeroReconcilerStatus();
   }
 
@@ -837,12 +848,17 @@ async function getReconcilerStatus(
   try {
     const parsed = JSON.parse(raw);
     if (!isReconcilerStatusShape(parsed)) {
-      console.warn('getReconcilerStatus: shape mismatch, returning zero defaults');
+      console.warn(
+        "getReconcilerStatus: shape mismatch, returning zero defaults",
+      );
       return zeroReconcilerStatus();
     }
     return parsed;
   } catch (err) {
-    console.warn('getReconcilerStatus: JSON parse failed, returning zero defaults', err);
+    console.warn(
+      "getReconcilerStatus: JSON parse failed, returning zero defaults",
+      err,
+    );
     return zeroReconcilerStatus();
   }
 }
@@ -866,81 +882,81 @@ const READINESS_CHECK_DEFINITIONS: Array<{
   stubInstruction?: string;
 }> = [
   {
-    id: 'data-1',
-    label: 'Every active AuthorityUnit has a non-null registryId',
-    category: 'data-integrity',
+    id: "data-1",
+    label: "Every active AuthorityUnit has a non-null registryId",
+    category: "data-integrity",
   },
   {
-    id: 'data-2',
-    label: 'Every registryId points to a live registry record',
-    category: 'data-integrity',
+    id: "data-2",
+    label: "Every registryId points to a live registry record",
+    category: "data-integrity",
   },
   {
-    id: 'data-3',
+    id: "data-3",
     label:
-      'Every governance-aware agent and tool has a workload-identity attribute',
-    category: 'data-integrity',
+      "Every governance-aware agent and tool has a workload-identity attribute",
+    category: "data-integrity",
   },
   {
-    id: 'tel-1',
+    id: "tel-1",
     label:
-      'governance-gate-decisions dashboard shows ≥7 days of shadow traffic',
-    category: 'telemetry',
+      "governance-gate-decisions dashboard shows ≥7 days of shadow traffic",
+    category: "telemetry",
     stubInstruction:
-      'Confirm the governance-gate-decisions CloudWatch dashboard shows at least 7 days of decision data from shadow mode. Open CloudWatch Console → Dashboards → governance-gate-decisions, then click Mark verified.',
+      "Confirm the governance-gate-decisions CloudWatch dashboard shows at least 7 days of decision data from shadow mode. Open CloudWatch Console → Dashboards → governance-gate-decisions, then click Mark verified.",
   },
   {
-    id: 'tel-2',
-    label: 'workload-identity-mismatch-rate < 0.5% over 24h',
-    category: 'telemetry',
+    id: "tel-2",
+    label: "workload-identity-mismatch-rate < 0.5% over 24h",
+    category: "telemetry",
     stubInstruction:
-      'Confirm the rolling 24-hour workload-identity-mismatch rate is below 0.5%. Check the Mismatch heatmap (/governance/mismatches) or the CloudWatch metric, then click Mark verified.',
+      "Confirm the rolling 24-hour workload-identity-mismatch rate is below 0.5%. Check the Mismatch heatmap (/governance/mismatches) or the CloudWatch metric, then click Mark verified.",
   },
   {
-    id: 'tel-3',
-    label: 'registry-sync-failures DLQ empty for ≥48h',
-    category: 'telemetry',
+    id: "tel-3",
+    label: "registry-sync-failures DLQ empty for ≥48h",
+    category: "telemetry",
   },
   {
-    id: 'rb-1',
-    label: 'GOVERNANCE_MODE controllable via CFN parameter',
-    category: 'rollback',
+    id: "rb-1",
+    label: "GOVERNANCE_MODE controllable via CFN parameter",
+    category: "rollback",
   },
   {
-    id: 'rb-2',
-    label: 'Permissive fallback exercised in non-prod within 7 days',
-    category: 'rollback',
+    id: "rb-2",
+    label: "Permissive fallback exercised in non-prod within 7 days",
+    category: "rollback",
     stubInstruction:
-      'Confirm a flip back to permissive mode was exercised in a non-prod environment within the last 7 days. Review the deployment audit log or CloudTrail SSM parameter-history events for /citadel/governance/enforce/<env>, then click Mark verified.',
+      "Confirm a flip back to permissive mode was exercised in a non-prod environment within the last 7 days. Review the deployment audit log or CloudTrail SSM parameter-history events for /citadel/governance/enforce/<env>, then click Mark verified.",
   },
   {
-    id: 'own-1',
-    label: 'On-call runbook entry updated and PagerDuty escalation verified',
-    category: 'ownership',
+    id: "own-1",
+    label: "On-call runbook entry updated and PagerDuty escalation verified",
+    category: "ownership",
     stubInstruction:
-      'Confirm the on-call runbook entry for governance is current and the PagerDuty service has an active escalation policy that pages someone on call. Verify in your PagerDuty console, then click Mark verified.',
+      "Confirm the on-call runbook entry for governance is current and the PagerDuty service has an active escalation policy that pages someone on call. Verify in your PagerDuty console, then click Mark verified.",
   },
   {
-    id: 'own-2',
-    label: 'Flip announced to stakeholders ≥48h in advance',
-    category: 'ownership',
+    id: "own-2",
+    label: "Flip announced to stakeholders ≥48h in advance",
+    category: "ownership",
     stubInstruction:
-      'Confirm an announcement of the planned governance mode flip has been sent to stakeholders at least 48 hours in advance, per docs/GOVERNANCE_ROLLOUT_RUNBOOK.md. Then click Mark verified.',
+      "Confirm an announcement of the planned governance mode flip has been sent to stakeholders at least 48 hours in advance, per docs/GOVERNANCE_ROLLOUT_RUNBOOK.md. Then click Mark verified.",
   },
   {
-    id: 'own-3',
-    label: 'Change ticket lists rollback criteria',
-    category: 'ownership',
+    id: "own-3",
+    label: "Change ticket lists rollback criteria",
+    category: "ownership",
     stubInstruction:
-      'Confirm the change ticket explicitly documents (1) trigger conditions for rollback to permissive, (2) the on-call owner during the soak window, and (3) the communication plan for stakeholders. Then click Mark verified.',
+      "Confirm the change ticket explicitly documents (1) trigger conditions for rollback to permissive, (2) the on-call owner during the soak window, and (3) the communication plan for stakeholders. Then click Mark verified.",
   },
 ];
 
 // IDs of checks that remain stubs in Wave 2.B (ship in Wave 2.B.2).
 const STUB_CHECK_IDS: ReadonlySet<string> = new Set([
-  'own-1',
-  'own-2',
-  'own-3',
+  "own-1",
+  "own-2",
+  "own-3",
 ]);
 
 // --- Wave 2.B.2: manual-check verification (mark-verified UI) ---
@@ -984,16 +1000,16 @@ function parseManualVerification(raw: string): ManualVerificationRecord | null {
     const parsed = JSON.parse(raw);
     if (
       parsed === null ||
-      typeof parsed !== 'object' ||
+      typeof parsed !== "object" ||
       Array.isArray(parsed)
     ) {
       return null;
     }
     const obj = parsed as Record<string, unknown>;
     if (
-      typeof obj.verifiedAt !== 'string' ||
-      typeof obj.verifiedBy !== 'string' ||
-      typeof obj.expiresAt !== 'string'
+      typeof obj.verifiedAt !== "string" ||
+      typeof obj.verifiedBy !== "string" ||
+      typeof obj.expiresAt !== "string"
     ) {
       return null;
     }
@@ -1001,7 +1017,7 @@ function parseManualVerification(raw: string): ManualVerificationRecord | null {
       verifiedAt: obj.verifiedAt,
       verifiedBy: obj.verifiedBy,
       expiresAt: obj.expiresAt,
-      note: typeof obj.note === 'string' ? obj.note : null,
+      note: typeof obj.note === "string" ? obj.note : null,
     };
   } catch {
     return null;
@@ -1081,7 +1097,7 @@ function applyVerificationToStub(
     return {
       id: def.id,
       label: def.label,
-      status: 'PASS',
+      status: "PASS",
       detail: `Verified by ${verification.verifiedBy} at ${verification.verifiedAt}, expires ${verification.expiresAt}`,
       evidence: null,
       category: def.category,
@@ -1090,7 +1106,7 @@ function applyVerificationToStub(
   return {
     id: def.id,
     label: def.label,
-    status: 'STUB',
+    status: "STUB",
     detail: `Verification expired ${verification.expiresAt} — re-mark required`,
     evidence: null,
     category: def.category,
@@ -1108,7 +1124,7 @@ function applyVerificationToStub(
  */
 function friendlyEvidence(
   err: unknown,
-  context: 'registry' | 'ssm' | 'cloudwatch' | 'dynamodb' = 'registry',
+  context: "registry" | "ssm" | "cloudwatch" | "dynamodb" = "registry",
 ): string {
   const msg = err instanceof Error ? err.message : String(err);
   // Detect JS runtime errors that indicate a coding/bundling issue.
@@ -1120,13 +1136,12 @@ function friendlyEvidence(
   if (isRuntimeError) {
     const contextHint: Record<typeof context, string> = {
       registry:
-        'The AgentCore Registry SDK could not be initialised in this environment. Check that the resolver Lambda has REGISTRY_ID set and that the registry is reachable.',
-      ssm:
-        'The SSM Parameter Store SDK could not be initialised. Check the resolver Lambda IAM role and SSM service availability.',
+        "The AgentCore Registry SDK could not be initialised in this environment. Check that the resolver Lambda has REGISTRY_ID set and that the registry is reachable.",
+      ssm: "The SSM Parameter Store SDK could not be initialised. Check the resolver Lambda IAM role and SSM service availability.",
       cloudwatch:
-        'The CloudWatch SDK could not be initialised. Check the resolver Lambda IAM role and CloudWatch service availability.',
+        "The CloudWatch SDK could not be initialised. Check the resolver Lambda IAM role and CloudWatch service availability.",
       dynamodb:
-        'The DynamoDB SDK could not be initialised. Check the resolver Lambda IAM role and table existence.',
+        "The DynamoDB SDK could not be initialised. Check the resolver Lambda IAM role and table existence.",
     };
     return contextHint[context];
   }
@@ -1138,7 +1153,7 @@ function defForId(id: string): { id: string; label: string; category: string } {
   if (!def) {
     // Defensive — should not happen because all IDs come from the
     // definition list above.
-    return { id, label: id, category: 'unknown' };
+    return { id, label: id, category: "unknown" };
   }
   return def;
 }
@@ -1152,8 +1167,8 @@ function makeStubCheck(def: {
   return {
     id: def.id,
     label: def.label,
-    status: 'STUB',
-    detail: def.stubInstruction ?? 'Manual operator verification required.',
+    status: "STUB",
+    detail: def.stubInstruction ?? "Manual operator verification required.",
     evidence: null,
     category: def.category,
   };
@@ -1184,25 +1199,25 @@ async function runDataIntegrityChecks(
   registryService: RegistryService | null,
 ): Promise<{ dataOne: ReadinessCheck; dataTwo: ReadinessCheck }> {
   const tableName = process.env.AUTHORITY_UNITS_TABLE;
-  const dataOneDef = defForId('data-1');
-  const dataTwoDef = defForId('data-2');
+  const dataOneDef = defForId("data-1");
+  const dataTwoDef = defForId("data-2");
 
   if (!tableName) {
     return {
       dataOne: {
         id: dataOneDef.id,
         label: dataOneDef.label,
-        status: 'UNKNOWN',
-        detail: 'Authority units table unreachable',
-        evidence: 'AUTHORITY_UNITS_TABLE env var is not set',
+        status: "UNKNOWN",
+        detail: "Authority units table unreachable",
+        evidence: "AUTHORITY_UNITS_TABLE env var is not set",
         category: dataOneDef.category,
       },
       dataTwo: {
         id: dataTwoDef.id,
         label: dataTwoDef.label,
-        status: 'UNKNOWN',
-        detail: 'Authority units table unreachable',
-        evidence: 'AUTHORITY_UNITS_TABLE env var is not set',
+        status: "UNKNOWN",
+        detail: "Authority units table unreachable",
+        evidence: "AUTHORITY_UNITS_TABLE env var is not set",
         category: dataTwoDef.category,
       },
     };
@@ -1214,17 +1229,17 @@ async function runDataIntegrityChecks(
     const scan = await dynamodb.send(
       new ScanCommand({
         TableName: tableName,
-        ProjectionExpression: '#uid, #rid',
+        ProjectionExpression: "#uid, #rid",
         ExpressionAttributeNames: {
-          '#uid': 'unitId',
-          '#rid': 'registryId',
+          "#uid": "unitId",
+          "#rid": "registryId",
         },
       }),
     );
     items = (scan.Items ?? []).map((it) => ({
-      unitId: typeof it.unitId === 'string' ? it.unitId : '',
+      unitId: typeof it.unitId === "string" ? it.unitId : "",
       registryId:
-        typeof it.registryId === 'string' && it.registryId.length > 0
+        typeof it.registryId === "string" && it.registryId.length > 0
           ? it.registryId
           : null,
     }));
@@ -1235,16 +1250,16 @@ async function runDataIntegrityChecks(
       dataOne: {
         id: dataOneDef.id,
         label: dataOneDef.label,
-        status: 'UNKNOWN',
-        detail: 'Authority units table unreachable',
+        status: "UNKNOWN",
+        detail: "Authority units table unreachable",
         evidence: msg,
         category: dataOneDef.category,
       },
       dataTwo: {
         id: dataTwoDef.id,
         label: dataTwoDef.label,
-        status: 'UNKNOWN',
-        detail: 'Authority units table unreachable',
+        status: "UNKNOWN",
+        detail: "Authority units table unreachable",
         evidence: msg,
         category: dataTwoDef.category,
       },
@@ -1259,7 +1274,7 @@ async function runDataIntegrityChecks(
       ? {
           id: dataOneDef.id,
           label: dataOneDef.label,
-          status: 'PASS',
+          status: "PASS",
           detail: `All ${scannedCount} authority units have registryId`,
           evidence: null,
           category: dataOneDef.category,
@@ -1267,7 +1282,7 @@ async function runDataIntegrityChecks(
       : {
           id: dataOneDef.id,
           label: dataOneDef.label,
-          status: 'FAIL',
+          status: "FAIL",
           detail: `${missing} of ${scannedCount} units missing registryId`,
           evidence: null,
           category: dataOneDef.category,
@@ -1288,9 +1303,9 @@ async function runDataTwoCheck(
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'Registry unreachable',
-      evidence: 'REGISTRY_ID env var is not set',
+      status: "UNKNOWN",
+      detail: "Registry unreachable",
+      evidence: "REGISTRY_ID env var is not set",
       category: def.category,
     };
   }
@@ -1309,8 +1324,8 @@ async function runDataTwoCheck(
     return {
       id: def.id,
       label: def.label,
-      status: 'WARN',
-      detail: 'No units to sample (see data-1)',
+      status: "WARN",
+      detail: "No units to sample (see data-1)",
       evidence: null,
       category: def.category,
     };
@@ -1323,13 +1338,13 @@ async function runDataTwoCheck(
         const recordId = unit.registryId;
         let record: RegistryRecord | null;
         try {
-          record = await registryService.getResource('agent', recordId);
+          record = await registryService.getResource("agent", recordId);
         } catch (err) {
           if (err instanceof TypeMismatchError) {
             // Authority units may bind to either agents or tools; if the
             // record exists but isn't an agent, fall back to the tool path
             // before declaring it missing.
-            record = await registryService.getResource('tool', recordId);
+            record = await registryService.getResource("tool", recordId);
           } else {
             throw err;
           }
@@ -1338,7 +1353,7 @@ async function runDataTwoCheck(
           failed.push(recordId);
           return;
         }
-        if (record.status === 'DEPRECATED') {
+        if (record.status === "DEPRECATED") {
           failed.push(recordId);
         }
       }),
@@ -1347,9 +1362,9 @@ async function runDataTwoCheck(
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'Registry unreachable',
-      evidence: friendlyEvidence(err, 'registry'),
+      status: "UNKNOWN",
+      detail: "Registry unreachable",
+      evidence: friendlyEvidence(err, "registry"),
       category: def.category,
     };
   }
@@ -1358,7 +1373,7 @@ async function runDataTwoCheck(
     return {
       id: def.id,
       label: def.label,
-      status: 'PASS',
+      status: "PASS",
       detail: `Sampled ${sample.length} units, all live and non-deprecated`,
       evidence: null,
       category: def.category,
@@ -1368,9 +1383,9 @@ async function runDataTwoCheck(
   return {
     id: def.id,
     label: def.label,
-    status: 'FAIL',
+    status: "FAIL",
     detail: `${failed.length} of ${sample.length} sampled units missing or deprecated`,
-    evidence: failed.slice(0, 5).join(', '),
+    evidence: failed.slice(0, 5).join(", "),
     category: def.category,
   };
 }
@@ -1384,15 +1399,15 @@ const AGENT_META_DEFAULTS_FOR_CHECK: AgentCustomMetadata & {
   registryId?: string;
 } = {
   categories: [],
-  icon: '',
-  state: 'active',
+  icon: "",
+  state: "active",
 };
 const TOOL_META_DEFAULTS_FOR_CHECK: ToolCustomMetadata & {
   registryId?: string;
 } = {
   categories: [],
-  icon: '',
-  state: 'active',
+  icon: "",
+  state: "active",
 };
 
 function recordHasWorkloadIdentity(
@@ -1410,21 +1425,21 @@ function recordHasWorkloadIdentity(
     ...defaults,
   } as unknown as Record<string, unknown>);
   const v = meta.registryId;
-  return typeof v === 'string' && v.length > 0;
+  return typeof v === "string" && v.length > 0;
 }
 
 async function runDataThreeCheck(
   registryService: RegistryService | null,
 ): Promise<ReadinessCheck> {
-  const def = defForId('data-3');
+  const def = defForId("data-3");
 
   if (!registryService) {
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'Registry unreachable',
-      evidence: 'REGISTRY_ID env var is not set',
+      status: "UNKNOWN",
+      detail: "Registry unreachable",
+      evidence: "REGISTRY_ID env var is not set",
       category: def.category,
     };
   }
@@ -1433,16 +1448,16 @@ async function runDataThreeCheck(
   let tools: RegistryRecord[];
   try {
     [agents, tools] = await Promise.all([
-      registryService.listResources('agent'),
-      registryService.listResources('tool'),
+      registryService.listResources("agent"),
+      registryService.listResources("tool"),
     ]);
   } catch (err) {
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'Registry unreachable',
-      evidence: friendlyEvidence(err, 'registry'),
+      status: "UNKNOWN",
+      detail: "Registry unreachable",
+      evidence: friendlyEvidence(err, "registry"),
       category: def.category,
     };
   }
@@ -1468,7 +1483,7 @@ async function runDataThreeCheck(
     return {
       id: def.id,
       label: def.label,
-      status: 'PASS',
+      status: "PASS",
       detail: `All ${agents.length} agents and ${tools.length} tools have workload-identity attribute`,
       evidence: null,
       category: def.category,
@@ -1478,12 +1493,12 @@ async function runDataThreeCheck(
   const evidenceIds = [...missingAgents, ...missingTools]
     .map((r) => r.recordId)
     .slice(0, 5)
-    .join(', ');
+    .join(", ");
 
   return {
     id: def.id,
     label: def.label,
-    status: 'FAIL',
+    status: "FAIL",
     detail: `${missingAgents.length} of ${agents.length} agents and ${missingTools.length} of ${tools.length} tools missing workload-identity`,
     evidence: evidenceIds,
     category: def.category,
@@ -1504,15 +1519,15 @@ const TEL_ONE_LOOKBACK_SECONDS = 30 * 86400;
 const TEL_ONE_THRESHOLD_DAYS = 7;
 
 async function runTelOneCheck(): Promise<ReadinessCheck> {
-  const def = defForId('tel-1');
+  const def = defForId("tel-1");
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
   if (!tableName) {
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'Governance ledger table unreachable',
-      evidence: 'GOVERNANCE_LEDGER_TABLE env var is not set',
+      status: "UNKNOWN",
+      detail: "Governance ledger table unreachable",
+      evidence: "GOVERNANCE_LEDGER_TABLE env var is not set",
       category: def.category,
     };
   }
@@ -1528,9 +1543,9 @@ async function runTelOneCheck(): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'Governance ledger unreachable',
-      evidence: friendlyEvidence(err, 'dynamodb'),
+      status: "UNKNOWN",
+      detail: "Governance ledger unreachable",
+      evidence: friendlyEvidence(err, "dynamodb"),
       category: def.category,
     };
   }
@@ -1539,9 +1554,9 @@ async function runTelOneCheck(): Promise<ReadinessCheck> {
   for (const row of items) {
     const tsRaw = row.timestamp;
     const ts =
-      typeof tsRaw === 'number'
+      typeof tsRaw === "number"
         ? tsRaw
-        : typeof tsRaw === 'string'
+        : typeof tsRaw === "string"
           ? Number(tsRaw)
           : NaN;
     if (!Number.isFinite(ts)) continue;
@@ -1552,9 +1567,9 @@ async function runTelOneCheck(): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'FAIL',
+      status: "FAIL",
       detail:
-        'No shadow traffic recorded yet. Switch to shadow mode (/governance/rollout) and let it run for ≥7 days.',
+        "No shadow traffic recorded yet. Switch to shadow mode (/governance/rollout) and let it run for ≥7 days.",
       evidence: null,
       category: def.category,
     };
@@ -1567,7 +1582,7 @@ async function runTelOneCheck(): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'PASS',
+      status: "PASS",
       detail: `Shadow traffic spans ${ageDays} days (oldest: ${oldestIso})`,
       evidence: null,
       category: def.category,
@@ -1578,7 +1593,7 @@ async function runTelOneCheck(): Promise<ReadinessCheck> {
   return {
     id: def.id,
     label: def.label,
-    status: 'FAIL',
+    status: "FAIL",
     detail: `Shadow traffic spans only ${ageDays} days; need ≥7 days. Continue running shadow mode for another ${remainingDays} days.`,
     evidence: null,
     category: def.category,
@@ -1602,31 +1617,31 @@ async function countLedgerRows(
   tableName: string,
   sinceTs: number,
   untilTs: number,
-  decisionFilter: 'all' | 'mismatch',
+  decisionFilter: "all" | "mismatch",
 ): Promise<number> {
   let count = 0;
   let lastEvaluatedKey: Record<string, unknown> | undefined;
 
   const filterExpression =
-    decisionFilter === 'mismatch'
-      ? 'decision IN (:deny, :escalate) AND #ts BETWEEN :since AND :until'
-      : '#ts BETWEEN :since AND :until';
+    decisionFilter === "mismatch"
+      ? "decision IN (:deny, :escalate) AND #ts BETWEEN :since AND :until"
+      : "#ts BETWEEN :since AND :until";
   const expressionAttributeValues: Record<string, unknown> =
-    decisionFilter === 'mismatch'
+    decisionFilter === "mismatch"
       ? {
-          ':deny': 'deny',
-          ':escalate': 'escalate',
-          ':since': sinceTs,
-          ':until': untilTs,
+          ":deny": "deny",
+          ":escalate": "escalate",
+          ":since": sinceTs,
+          ":until": untilTs,
         }
-      : { ':since': sinceTs, ':until': untilTs };
+      : { ":since": sinceTs, ":until": untilTs };
 
   do {
     const cmd = new ScanCommand({
       TableName: tableName,
-      Select: 'COUNT',
+      Select: "COUNT",
       FilterExpression: filterExpression,
-      ExpressionAttributeNames: { '#ts': 'timestamp' },
+      ExpressionAttributeNames: { "#ts": "timestamp" },
       ExpressionAttributeValues: expressionAttributeValues,
       ...(lastEvaluatedKey ? { ExclusiveStartKey: lastEvaluatedKey } : {}),
     });
@@ -1641,15 +1656,15 @@ async function countLedgerRows(
 }
 
 async function runTelTwoCheck(): Promise<ReadinessCheck> {
-  const def = defForId('tel-2');
+  const def = defForId("tel-2");
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
   if (!tableName) {
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'Governance ledger table unreachable',
-      evidence: 'GOVERNANCE_LEDGER_TABLE env var is not set',
+      status: "UNKNOWN",
+      detail: "Governance ledger table unreachable",
+      evidence: "GOVERNANCE_LEDGER_TABLE env var is not set",
       category: def.category,
     };
   }
@@ -1661,16 +1676,16 @@ async function runTelTwoCheck(): Promise<ReadinessCheck> {
   let mismatches: number;
   try {
     [total, mismatches] = await Promise.all([
-      countLedgerRows(tableName, sinceTs, nowSec, 'all'),
-      countLedgerRows(tableName, sinceTs, nowSec, 'mismatch'),
+      countLedgerRows(tableName, sinceTs, nowSec, "all"),
+      countLedgerRows(tableName, sinceTs, nowSec, "mismatch"),
     ]);
   } catch (err) {
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'Governance ledger unreachable',
-      evidence: friendlyEvidence(err, 'dynamodb'),
+      status: "UNKNOWN",
+      detail: "Governance ledger unreachable",
+      evidence: friendlyEvidence(err, "dynamodb"),
       category: def.category,
     };
   }
@@ -1679,7 +1694,7 @@ async function runTelTwoCheck(): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'WARN',
+      status: "WARN",
       detail: `Insufficient data: only ${total} findings in last 24h. Need >=100 for confident rate calculation.`,
       evidence: null,
       category: def.category,
@@ -1693,7 +1708,7 @@ async function runTelTwoCheck(): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'PASS',
+      status: "PASS",
       detail: `Mismatch rate ${ratePct}% over 24h (${mismatches} mismatches in ${total} total findings)`,
       evidence: null,
       category: def.category,
@@ -1703,7 +1718,7 @@ async function runTelTwoCheck(): Promise<ReadinessCheck> {
   return {
     id: def.id,
     label: def.label,
-    status: 'FAIL',
+    status: "FAIL",
     detail: `Mismatch rate ${ratePct}% over 24h exceeds 0.5% threshold (${mismatches} mismatches in ${total} total findings). Investigate the Mismatch heatmap (/governance/mismatches) before flipping to strict.`,
     evidence: null,
     category: def.category,
@@ -1713,19 +1728,19 @@ async function runTelTwoCheck(): Promise<ReadinessCheck> {
 // --- tel-3 ---
 
 async function runTelThreeCheck(): Promise<ReadinessCheck> {
-  const def = defForId('tel-3');
+  const def = defForId("tel-3");
   const now = new Date();
   const start = new Date(now.getTime() - 48 * 60 * 60 * 1000);
 
   try {
     const resp = await cloudwatch.send(
       new GetMetricStatisticsCommand({
-        Namespace: 'RegistrySync',
-        MetricName: 'SyncFailure',
+        Namespace: "RegistrySync",
+        MetricName: "SyncFailure",
         StartTime: start,
         EndTime: now,
         Period: 3600,
-        Statistics: ['Sum'],
+        Statistics: ["Sum"],
       }),
     );
     const points = resp.Datapoints ?? [];
@@ -1733,7 +1748,7 @@ async function runTelThreeCheck(): Promise<ReadinessCheck> {
     let peak = 0;
     let peakAt: Date | null = null;
     for (const p of points) {
-      const v = typeof p.Sum === 'number' ? p.Sum : 0;
+      const v = typeof p.Sum === "number" ? p.Sum : 0;
       total += v;
       if (v > peak) {
         peak = v;
@@ -1745,18 +1760,18 @@ async function runTelThreeCheck(): Promise<ReadinessCheck> {
       return {
         id: def.id,
         label: def.label,
-        status: 'PASS',
-        detail: 'Zero sync failures in last 48h',
+        status: "PASS",
+        detail: "Zero sync failures in last 48h",
         evidence: null,
         category: def.category,
       };
     }
 
-    const peakIso = peakAt ? peakAt.toISOString() : 'unknown';
+    const peakIso = peakAt ? peakAt.toISOString() : "unknown";
     return {
       id: def.id,
       label: def.label,
-      status: 'FAIL',
+      status: "FAIL",
       detail: `${total} sync failures in last 48h (peak ${peak}/h at ${peakIso})`,
       evidence: null,
       category: def.category,
@@ -1765,9 +1780,9 @@ async function runTelThreeCheck(): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'CloudWatch unreachable',
-      evidence: friendlyEvidence(err, 'cloudwatch'),
+      status: "UNKNOWN",
+      detail: "CloudWatch unreachable",
+      evidence: friendlyEvidence(err, "cloudwatch"),
       category: def.category,
     };
   }
@@ -1776,7 +1791,7 @@ async function runTelThreeCheck(): Promise<ReadinessCheck> {
 // --- rb-1 ---
 
 async function runRbOneCheck(env: string): Promise<ReadinessCheck> {
-  const def = defForId('rb-1');
+  const def = defForId("rb-1");
   const parameterName = `/citadel/governance/enforce/${env}`;
 
   // Direct GetParameter — bypass the cached helper so the readiness page
@@ -1785,12 +1800,12 @@ async function runRbOneCheck(env: string): Promise<ReadinessCheck> {
     const resp = await ssm.send(
       new GetParameterCommand({ Name: parameterName }),
     );
-    const value = resp.Parameter?.Value ?? '';
+    const value = resp.Parameter?.Value ?? "";
     if (VALID_ENFORCE_VALUES.has(value)) {
       return {
         id: def.id,
         label: def.label,
-        status: 'PASS',
+        status: "PASS",
         detail: `Mode parameter present, value: ${value}`,
         evidence: null,
         category: def.category,
@@ -1799,7 +1814,7 @@ async function runRbOneCheck(env: string): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'FAIL',
+      status: "FAIL",
       detail: `Mode parameter has invalid value: ${value}`,
       evidence: null,
       category: def.category,
@@ -1808,16 +1823,16 @@ async function runRbOneCheck(env: string): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'Mode parameter unreachable',
-      evidence: friendlyEvidence(err, 'ssm'),
+      status: "UNKNOWN",
+      detail: "Mode parameter unreachable",
+      evidence: friendlyEvidence(err, "ssm"),
       category: def.category,
     };
   }
 }
 
 async function runRb2Check(env: string): Promise<ReadinessCheck> {
-  const def = defForId('rb-2');
+  const def = defForId("rb-2");
   const paramName = `/citadel/governance/enforce/${env}`;
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
@@ -1839,9 +1854,9 @@ async function runRb2Check(env: string): Promise<ReadinessCheck> {
       return {
         id: def.id,
         label: def.label,
-        status: 'FAIL',
+        status: "FAIL",
         detail:
-          'No SSM parameter history for the governance enforce mode. The rollback path has never been exercised. Flip to shadow then back to permissive in this environment, then re-check.',
+          "No SSM parameter history for the governance enforce mode. The rollback path has never been exercised. Flip to shadow then back to permissive in this environment, then re-check.",
         evidence: null,
         category: def.category,
       };
@@ -1849,11 +1864,11 @@ async function runRb2Check(env: string): Promise<ReadinessCheck> {
 
     if (history.length === 1) {
       const only = history[0];
-      const value = String(only.Value ?? 'unknown');
+      const value = String(only.Value ?? "unknown");
       return {
         id: def.id,
         label: def.label,
-        status: 'FAIL',
+        status: "FAIL",
         detail: `The governance enforce parameter has only ever held one value (${value}). Exercise the rollback by flipping to shadow then back to permissive in this environment, then re-check.`,
         evidence: null,
         category: def.category,
@@ -1870,19 +1885,22 @@ async function runRb2Check(env: string): Promise<ReadinessCheck> {
     for (let i = 1; i < history.length; i++) {
       const prev = history[i - 1];
       const curr = history[i];
-      const prevValue = String(prev.Value ?? '');
-      const currValue = String(curr.Value ?? '');
+      const prevValue = String(prev.Value ?? "");
+      const currValue = String(curr.Value ?? "");
       const currDate = curr.LastModifiedDate;
       if (
-        currValue === 'permissive' &&
-        prevValue !== 'permissive' &&
+        currValue === "permissive" &&
+        prevValue !== "permissive" &&
         currDate &&
         currDate.getTime() >= sevenDaysAgo
       ) {
-        if (!lastTransition || currDate.getTime() > lastTransition.at.getTime()) {
+        if (
+          !lastTransition ||
+          currDate.getTime() > lastTransition.at.getTime()
+        ) {
           lastTransition = {
-            from: prevValue || 'unknown',
-            to: 'permissive',
+            from: prevValue || "unknown",
+            to: "permissive",
             at: currDate,
           };
         }
@@ -1893,7 +1911,7 @@ async function runRb2Check(env: string): Promise<ReadinessCheck> {
       return {
         id: def.id,
         label: def.label,
-        status: 'PASS',
+        status: "PASS",
         detail: `Permissive fallback exercised on ${lastTransition.at.toISOString()} (transition: ${lastTransition.from} → permissive)`,
         evidence: null,
         category: def.category,
@@ -1903,9 +1921,9 @@ async function runRb2Check(env: string): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'FAIL',
+      status: "FAIL",
       detail:
-        'No transition to permissive in the last 7 days. Exercise the rollback path by flipping to shadow then back to permissive in this environment, then re-check.',
+        "No transition to permissive in the last 7 days. Exercise the rollback path by flipping to shadow then back to permissive in this environment, then re-check.",
       evidence: null,
       category: def.category,
     };
@@ -1913,9 +1931,9 @@ async function runRb2Check(env: string): Promise<ReadinessCheck> {
     return {
       id: def.id,
       label: def.label,
-      status: 'UNKNOWN',
-      detail: 'SSM parameter history unreachable',
-      evidence: friendlyEvidence(err, 'ssm'),
+      status: "UNKNOWN",
+      detail: "SSM parameter history unreachable",
+      evidence: friendlyEvidence(err, "ssm"),
       category: def.category,
     };
   }
@@ -1953,7 +1971,7 @@ function getRegistryServiceForChecks(): RegistryService | null {
   if (!_registryService || _registryService.getRegistryId() !== id) {
     _registryService = new RegistryService({
       registryId: id,
-      region: process.env.AWS_REGION ?? 'us-east-1',
+      region: process.env.AWS_REGION ?? "us-east-1",
     });
   }
   return _registryService;
@@ -1976,7 +1994,7 @@ async function runReadinessChecks(env: string): Promise<{
   // On read failure, fall back to permissive / null so the page still
   // renders rather than throwing — admins still need to see the
   // checklist even when SSM is briefly unreachable.
-  let currentMode = 'permissive';
+  let currentMode = "permissive";
   let effectiveAt: string | null = null;
   try {
     const [mode, eff] = await Promise.all([
@@ -1986,11 +2004,11 @@ async function runReadinessChecks(env: string): Promise<{
     currentMode = mode;
     effectiveAt = eff;
   } catch (err) {
-    console.error('runReadinessChecks: governance-flag read failed', err);
+    console.error("runReadinessChecks: governance-flag read failed", err);
   }
 
   const registryService = getRegistryServiceForChecks();
-  const cacheKey = registryService?.getRegistryId() ?? '<no-registry>';
+  const cacheKey = registryService?.getRegistryId() ?? "<no-registry>";
   const cached = registryCheckCache.get(cacheKey);
   const cacheValid = cached && Date.now() < cached.expiresAt;
 
@@ -2025,38 +2043,38 @@ async function runReadinessChecks(env: string): Promise<{
   ]);
 
   const dataOne =
-    integrityResult.status === 'fulfilled'
+    integrityResult.status === "fulfilled"
       ? integrityResult.value.dataOne
-      : unknownCheck('data-1', integrityResult.reason);
+      : unknownCheck("data-1", integrityResult.reason);
   const dataTwoFresh =
-    integrityResult.status === 'fulfilled'
+    integrityResult.status === "fulfilled"
       ? integrityResult.value.dataTwo
-      : unknownCheck('data-2', integrityResult.reason);
+      : unknownCheck("data-2", integrityResult.reason);
   const dataTwo = cacheValid ? cached!.dataTwo : dataTwoFresh;
   const dataThree =
-    dataThreeResult.status === 'fulfilled'
+    dataThreeResult.status === "fulfilled"
       ? dataThreeResult.value
-      : unknownCheck('data-3', dataThreeResult.reason);
+      : unknownCheck("data-3", dataThreeResult.reason);
   const telOne =
-    telOneResult.status === 'fulfilled'
+    telOneResult.status === "fulfilled"
       ? telOneResult.value
-      : unknownCheck('tel-1', telOneResult.reason);
+      : unknownCheck("tel-1", telOneResult.reason);
   const telTwo =
-    telTwoResult.status === 'fulfilled'
+    telTwoResult.status === "fulfilled"
       ? telTwoResult.value
-      : unknownCheck('tel-2', telTwoResult.reason);
+      : unknownCheck("tel-2", telTwoResult.reason);
   const telThree =
-    telThreeResult.status === 'fulfilled'
+    telThreeResult.status === "fulfilled"
       ? telThreeResult.value
-      : unknownCheck('tel-3', telThreeResult.reason);
+      : unknownCheck("tel-3", telThreeResult.reason);
   const rbOne =
-    rbOneResult.status === 'fulfilled'
+    rbOneResult.status === "fulfilled"
       ? rbOneResult.value
-      : unknownCheck('rb-1', rbOneResult.reason);
+      : unknownCheck("rb-1", rbOneResult.reason);
   const rbTwo =
-    rbTwoResult.status === 'fulfilled'
+    rbTwoResult.status === "fulfilled"
       ? rbTwoResult.value
-      : unknownCheck('rb-2', rbTwoResult.reason);
+      : unknownCheck("rb-2", rbTwoResult.reason);
 
   // Refresh the cache when we computed a fresh data-2/data-3 pair.
   if (!cacheValid) {
@@ -2069,14 +2087,14 @@ async function runReadinessChecks(env: string): Promise<{
 
   // Assemble in canonical order — match READINESS_CHECK_DEFINITIONS.
   const realById: Record<string, ReadinessCheck> = {
-    'data-1': dataOne,
-    'data-2': dataTwo,
-    'data-3': dataThree,
-    'tel-1': telOne,
-    'tel-2': telTwo,
-    'tel-3': telThree,
-    'rb-1': rbOne,
-    'rb-2': rbTwo,
+    "data-1": dataOne,
+    "data-2": dataTwo,
+    "data-3": dataThree,
+    "tel-1": telOne,
+    "tel-2": telTwo,
+    "tel-3": telThree,
+    "rb-1": rbOne,
+    "rb-2": rbTwo,
   };
 
   // Wave 2.B.2: each manual stub may now be promoted to PASS when an
@@ -2100,9 +2118,9 @@ function unknownCheck(id: string, reason: unknown): ReadinessCheck {
   return {
     id: def.id,
     label: def.label,
-    status: 'UNKNOWN',
-    detail: 'Check failed unexpectedly',
-    evidence: friendlyEvidence(reason, 'registry'),
+    status: "UNKNOWN",
+    detail: "Check failed unexpectedly",
+    evidence: friendlyEvidence(reason, "registry"),
     category: def.category,
   };
 }
@@ -2111,24 +2129,24 @@ async function getRolloutReadiness(
   event: AppSyncResolverEvent<unknown>,
 ): Promise<RolloutReadinessReport> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
-  const env = process.env.ENVIRONMENT || 'unknown';
+  const env = process.env.ENVIRONMENT || "unknown";
   const { checks, currentMode, effectiveAt } = await runReadinessChecks(env);
 
   const shadowSoakStartedAt =
-    currentMode === 'shadow' && effectiveAt ? effectiveAt : null;
+    currentMode === "shadow" && effectiveAt ? effectiveAt : null;
 
   let passCount = 0;
   let failCount = 0;
   let warnCount = 0;
   let stubCount = 0;
   for (const c of checks) {
-    if (c.status === 'PASS') passCount++;
-    else if (c.status === 'FAIL') failCount++;
-    else if (c.status === 'WARN') warnCount++;
-    else if (c.status === 'STUB') stubCount++;
+    if (c.status === "PASS") passCount++;
+    else if (c.status === "FAIL") failCount++;
+    else if (c.status === "WARN") warnCount++;
+    else if (c.status === "STUB") stubCount++;
   }
 
   return {
@@ -2211,7 +2229,7 @@ function extractTopReason(reasons: string[]): string | null {
   if (reasons.length === 0) return null;
   const counts = new Map<string, number>();
   for (const r of reasons) {
-    const idx = r.indexOf(':');
+    const idx = r.indexOf(":");
     const prefix = idx >= 0 ? r.slice(0, idx) : r;
     counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
   }
@@ -2239,13 +2257,13 @@ async function scanMismatchItems(
     const cmd = new ScanCommand({
       TableName: tableName,
       FilterExpression:
-        'decision IN (:deny, :escalate) AND #ts BETWEEN :since AND :until',
-      ExpressionAttributeNames: { '#ts': 'timestamp' },
+        "decision IN (:deny, :escalate) AND #ts BETWEEN :since AND :until",
+      ExpressionAttributeNames: { "#ts": "timestamp" },
       ExpressionAttributeValues: {
-        ':deny': 'deny',
-        ':escalate': 'escalate',
-        ':since': sinceTs,
-        ':until': untilTs,
+        ":deny": "deny",
+        ":escalate": "escalate",
+        ":since": sinceTs,
+        ":until": untilTs,
       },
       ...(lastEvaluatedKey ? { ExclusiveStartKey: lastEvaluatedKey } : {}),
     });
@@ -2271,19 +2289,19 @@ async function getMismatchHeatmap(
   event: AppSyncResolverEvent<MismatchHeatmapArgs>,
 ): Promise<MismatchHeatmapReport> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
   if (!tableName) {
-    throw new Error('GOVERNANCE_LEDGER_TABLE env var is not set');
+    throw new Error("GOVERNANCE_LEDGER_TABLE env var is not set");
   }
 
   const args = (event.arguments ?? {}) as MismatchHeatmapArgs;
 
   // bucketSeconds: default 3600, allowlist enforced.
   const requestedBucket =
-    typeof args.bucketSeconds === 'number'
+    typeof args.bucketSeconds === "number"
       ? args.bucketSeconds
       : DEFAULT_BUCKET_SECONDS;
   if (!ALLOWED_BUCKET_SECONDS.has(requestedBucket)) {
@@ -2297,9 +2315,11 @@ async function getMismatchHeatmap(
   // GraphQL, number here). Defaults: now − 7d to now. Window cap: 30d.
   const nowSec = Math.floor(Date.now() / 1000);
   const untilTs =
-    typeof args.untilTs === 'number' && args.untilTs > 0 ? args.untilTs : nowSec;
+    typeof args.untilTs === "number" && args.untilTs > 0
+      ? args.untilTs
+      : nowSec;
   let sinceTs =
-    typeof args.sinceTs === 'number' && args.sinceTs > 0
+    typeof args.sinceTs === "number" && args.sinceTs > 0
       ? args.sinceTs
       : untilTs - MISMATCH_WINDOW_DEFAULT_SECONDS;
   if (sinceTs > untilTs) {
@@ -2317,12 +2337,12 @@ async function getMismatchHeatmap(
 
   // Mode window — Wave 2.C uses a single window covering the entire query
   // range with the CURRENT mode (historical mode transitions ship later).
-  const env = process.env.ENVIRONMENT || 'unknown';
-  let currentMode = 'permissive';
+  const env = process.env.ENVIRONMENT || "unknown";
+  let currentMode = "permissive";
   try {
     currentMode = await getGovernanceEnforce(env);
   } catch (err) {
-    console.warn('getMismatchHeatmap: governance-flag read failed', err);
+    console.warn("getMismatchHeatmap: governance-flag read failed", err);
   }
 
   let items: DdbRow[];
@@ -2332,7 +2352,7 @@ async function getMismatchHeatmap(
     items = scan.items;
     truncated = scan.truncated;
   } catch (err) {
-    console.error('getMismatchHeatmap: ledger scan failed', err);
+    console.error("getMismatchHeatmap: ledger scan failed", err);
     throw err;
   }
 
@@ -2357,16 +2377,15 @@ async function getMismatchHeatmap(
   for (const row of items) {
     const tsRaw = row.timestamp;
     const ts =
-      typeof tsRaw === 'number'
+      typeof tsRaw === "number"
         ? tsRaw
-        : typeof tsRaw === 'string'
+        : typeof tsRaw === "string"
           ? Number(tsRaw)
           : NaN;
     if (!Number.isFinite(ts)) continue;
-    const decision =
-      typeof row.decision === 'string' ? row.decision : '';
-    if (decision !== 'deny' && decision !== 'escalate') continue;
-    if (decision === 'deny') totalDenials++;
+    const decision = typeof row.decision === "string" ? row.decision : "";
+    if (decision !== "deny" && decision !== "escalate") continue;
+    if (decision === "deny") totalDenials++;
     else totalEscalations++;
     const bucketStart = Math.floor(ts / bucketSeconds) * bucketSeconds;
     const key = `${bucketStart}|${decision}`;
@@ -2376,7 +2395,7 @@ async function getMismatchHeatmap(
       acc.set(key, entry);
     }
     entry.count++;
-    const reason = typeof row.reason === 'string' ? row.reason : '';
+    const reason = typeof row.reason === "string" ? row.reason : "";
     if (reason.length > 0) entry.reasons.push(reason);
   }
 
@@ -2452,9 +2471,9 @@ const ALLOWED_ESCALATION_PERIODS: ReadonlySet<number> = new Set([
 const DEFAULT_ESCALATION_PERIOD_SECONDS = 3600;
 const ESCALATION_WINDOW_DEFAULT_SECONDS = 7 * 86400;
 const ESCALATION_WINDOW_MAX_SECONDS = 30 * 86400;
-const ESCALATION_NAMESPACE = 'CitadelGovernance';
-const ESCALATION_METRIC = 'OffFrontierEscalations';
-const ESCALATION_STATISTIC = 'Sum';
+const ESCALATION_NAMESPACE = "CitadelGovernance";
+const ESCALATION_METRIC = "OffFrontierEscalations";
+const ESCALATION_STATISTIC = "Sum";
 // 60s in-memory cache to absorb repeat page loads. CloudWatch GetMetricStatistics
 // cost is per-call; an admin spamming F5 on the page should not amplify into
 // rate-limiting on the operator dashboards.
@@ -2475,13 +2494,13 @@ async function getEscalationMetricSeries(
   event: AppSyncResolverEvent<EscalationMetricArgs>,
 ): Promise<MetricSeries> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const args = (event.arguments ?? {}) as EscalationMetricArgs;
 
   const requestedPeriod =
-    typeof args.periodSeconds === 'number'
+    typeof args.periodSeconds === "number"
       ? args.periodSeconds
       : DEFAULT_ESCALATION_PERIOD_SECONDS;
   if (!ALLOWED_ESCALATION_PERIODS.has(requestedPeriod)) {
@@ -2493,11 +2512,11 @@ async function getEscalationMetricSeries(
 
   const nowSec = Math.floor(Date.now() / 1000);
   const untilTs =
-    typeof args.untilTs === 'number' && args.untilTs > 0
+    typeof args.untilTs === "number" && args.untilTs > 0
       ? args.untilTs
       : nowSec;
   let sinceTs =
-    typeof args.sinceTs === 'number' && args.sinceTs > 0
+    typeof args.sinceTs === "number" && args.sinceTs > 0
       ? args.sinceTs
       : untilTs - ESCALATION_WINDOW_DEFAULT_SECONDS;
   if (sinceTs > untilTs) {
@@ -2529,7 +2548,7 @@ async function getEscalationMetricSeries(
   const datapoints: MetricDatapoint[] = (resp.Datapoints ?? [])
     .map((p) => ({
       timestamp: p.Timestamp ? Math.floor(p.Timestamp.getTime() / 1000) : 0,
-      value: typeof p.Sum === 'number' ? p.Sum : 0,
+      value: typeof p.Sum === "number" ? p.Sum : 0,
     }))
     .sort((a, b) => a.timestamp - b.timestamp);
 
@@ -2596,9 +2615,9 @@ interface SetGovernanceModeResult {
 // MUST match the frontend constant in governanceService.ts. Any drift is a
 // contract bug — the modal also enforces this string client-side.
 const MODE_FLIP_ACKNOWLEDGEMENT_TEXT =
-  'I understand this affects production governance enforcement';
+  "I understand this affects production governance enforcement";
 
-type GovernanceMode = 'permissive' | 'shadow' | 'strict';
+type GovernanceMode = "permissive" | "shadow" | "strict";
 
 /**
  * Direct SSM read for the current mode. Bypasses the 60-min cached
@@ -2612,14 +2631,16 @@ type GovernanceMode = 'permissive' | 'shadow' | 'strict';
 async function readCurrentModeFromSsm(env: string): Promise<GovernanceMode> {
   const parameterName = `/citadel/governance/enforce/${env}`;
   try {
-    const resp = await ssm.send(new GetParameterCommand({ Name: parameterName }));
-    const value = resp.Parameter?.Value ?? '';
-    if (value === 'permissive' || value === 'shadow' || value === 'strict') {
+    const resp = await ssm.send(
+      new GetParameterCommand({ Name: parameterName }),
+    );
+    const value = resp.Parameter?.Value ?? "";
+    if (value === "permissive" || value === "shadow" || value === "strict") {
       return value;
     }
-    return 'permissive';
+    return "permissive";
   } catch {
-    return 'permissive';
+    return "permissive";
   }
 }
 
@@ -2645,18 +2666,18 @@ function validateTransition(
   targetMode: GovernanceMode,
   env: string,
 ): string | null {
-  if (currentMode === 'permissive' && targetMode === 'shadow') return null;
-  if (currentMode === 'permissive' && targetMode === 'strict') {
-    if (env.startsWith('prod')) {
-      return 'Decision #8: production must flip via shadow first; permissive→strict not permitted';
+  if (currentMode === "permissive" && targetMode === "shadow") return null;
+  if (currentMode === "permissive" && targetMode === "strict") {
+    if (env.startsWith("prod")) {
+      return "Decision #8: production must flip via shadow first; permissive→strict not permitted";
     }
     return null;
   }
-  if (currentMode === 'shadow' && targetMode === 'strict') return null;
-  if (currentMode === 'shadow' && targetMode === 'permissive') return null;
-  if (currentMode === 'strict' && targetMode === 'permissive') return null;
-  if (currentMode === 'strict' && targetMode === 'shadow') {
-    return 'Strict can only roll back to permissive; rollback to shadow not permitted';
+  if (currentMode === "shadow" && targetMode === "strict") return null;
+  if (currentMode === "shadow" && targetMode === "permissive") return null;
+  if (currentMode === "strict" && targetMode === "permissive") return null;
+  if (currentMode === "strict" && targetMode === "shadow") {
+    return "Strict can only roll back to permissive; rollback to shadow not permitted";
   }
   // Defensive — every (currentMode, targetMode) pair where currentMode !==
   // targetMode is covered above; reject anything else explicitly.
@@ -2679,29 +2700,30 @@ async function setGovernanceMode(
 
   // 1. Admin gate — defense in depth (AppSync auth already runs upstream).
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
-  const args = (event.arguments ?? ({} as SetGovernanceModeArgs)) as SetGovernanceModeArgs;
+  const args = (event.arguments ??
+    ({} as SetGovernanceModeArgs)) as SetGovernanceModeArgs;
   const input = args.input ?? ({} as SetGovernanceModeInput);
 
   // 2. Acknowledgement — exact-string check; matches the frontend modal's
   //    Gate 3 checkbox label so callers cannot bypass via direct API misuse.
   if (input.acknowledgement !== MODE_FLIP_ACKNOWLEDGEMENT_TEXT) {
-    throw new Error('Acknowledgement string mismatch');
+    throw new Error("Acknowledgement string mismatch");
   }
 
   // 3. Target mode allowlist.
   if (
-    input.targetMode !== 'permissive' &&
-    input.targetMode !== 'shadow' &&
-    input.targetMode !== 'strict'
+    input.targetMode !== "permissive" &&
+    input.targetMode !== "shadow" &&
+    input.targetMode !== "strict"
   ) {
     throw new Error(`Invalid target mode: ${input.targetMode}`);
   }
   const targetMode = input.targetMode as GovernanceMode;
 
-  const env = process.env.ENVIRONMENT || 'unknown';
+  const env = process.env.ENVIRONMENT || "unknown";
 
   // 4. Read current mode directly from SSM (bypass 60-min cache).
   const previousMode = await readCurrentModeFromSsm(env);
@@ -2714,7 +2736,7 @@ async function setGovernanceMode(
       previousMode,
       newMode: targetMode,
       effectiveAt:
-        existingEffectiveAt && existingEffectiveAt !== '__EMPTY__'
+        existingEffectiveAt && existingEffectiveAt !== "__EMPTY__"
           ? existingEffectiveAt
           : null,
       noop: true,
@@ -2735,7 +2757,7 @@ async function setGovernanceMode(
     new PutParameterCommand({
       Name: enforceParameterName,
       Value: targetMode,
-      Type: 'String',
+      Type: "String",
       Overwrite: true,
     }),
   );
@@ -2747,8 +2769,8 @@ async function setGovernanceMode(
   try {
     const existingEffectiveAt = await getEffectiveAtRaw(env);
     if (
-      existingEffectiveAt === '__EMPTY__' &&
-      (targetMode === 'shadow' || targetMode === 'strict')
+      existingEffectiveAt === "__EMPTY__" &&
+      (targetMode === "shadow" || targetMode === "strict")
     ) {
       const nowIso = new Date().toISOString();
       const effectiveAtParameterName = `/citadel/governance/effective_at/${env}`;
@@ -2756,19 +2778,19 @@ async function setGovernanceMode(
         new PutParameterCommand({
           Name: effectiveAtParameterName,
           Value: nowIso,
-          Type: 'String',
+          Type: "String",
           Overwrite: true,
         }),
       );
       effectiveAtUpdated = true;
       effectiveAtValue = nowIso;
-    } else if (existingEffectiveAt && existingEffectiveAt !== '__EMPTY__') {
+    } else if (existingEffectiveAt && existingEffectiveAt !== "__EMPTY__") {
       // Existing audit-trail value is preserved; rollback flips to
       // permissive leave the original flip timestamp in place.
       effectiveAtValue = existingEffectiveAt;
     }
   } catch (err) {
-    console.error('setGovernanceMode: effective_at write/read failed', err);
+    console.error("setGovernanceMode: effective_at write/read failed", err);
   }
 
   // 8. Audit event — best-effort. Logged on failure but does NOT roll back
@@ -2776,7 +2798,7 @@ async function setGovernanceMode(
   let emittedEventDetailType: string | null = null;
   try {
     const actorSub = readActorSub(event);
-    await emitGovernanceEvent('governance.mode.transition', {
+    await emitGovernanceEvent("governance.mode.transition", {
       previousMode,
       newMode: targetMode,
       env,
@@ -2785,9 +2807,9 @@ async function setGovernanceMode(
       timestamp: new Date().toISOString(),
       effectiveAtUpdated,
     });
-    emittedEventDetailType = 'governance.mode.transition';
+    emittedEventDetailType = "governance.mode.transition";
   } catch (err) {
-    console.error('setGovernanceMode: audit event emit failed', err);
+    console.error("setGovernanceMode: audit event emit failed", err);
   }
 
   return {
@@ -2809,7 +2831,9 @@ async function setGovernanceMode(
 async function getEffectiveAtRaw(env: string): Promise<string | null> {
   const parameterName = `/citadel/governance/effective_at/${env}`;
   try {
-    const resp = await ssm.send(new GetParameterCommand({ Name: parameterName }));
+    const resp = await ssm.send(
+      new GetParameterCommand({ Name: parameterName }),
+    );
     return resp.Parameter?.Value ?? null;
   } catch {
     return null;
@@ -2825,10 +2849,10 @@ async function getEffectiveAtRaw(env: string): Promise<string | null> {
 function readActorSub(event: AppSyncResolverEvent<unknown>): string {
   const identity = (event.identity ?? {}) as Record<string, unknown>;
   const sub = identity.sub;
-  if (typeof sub === 'string' && sub.length > 0) return sub;
+  if (typeof sub === "string" && sub.length > 0) return sub;
   const username = identity.username;
-  if (typeof username === 'string' && username.length > 0) return username;
-  return '<unknown>';
+  if (typeof username === "string" && username.length > 0) return username;
+  return "<unknown>";
 }
 
 // ---------------------------------------------------------------------------
@@ -2863,9 +2887,9 @@ interface MarkReadinessCheckVerifiedResult {
 }
 
 const MANUAL_VERIFICATION_ALLOWLIST: ReadonlySet<string> = new Set([
-  'own-1',
-  'own-2',
-  'own-3',
+  "own-1",
+  "own-2",
+  "own-3",
 ]);
 
 const VALID_EXPIRES_IN_DAYS: ReadonlySet<number> = new Set([1, 3, 7, 30]);
@@ -2880,10 +2904,10 @@ const DEFAULT_EXPIRES_IN_DAYS = 7;
 function readVerifierFromEvent(event: AppSyncResolverEvent<unknown>): string {
   const identity = (event.identity ?? {}) as Record<string, unknown>;
   const sub = identity.sub;
-  if (typeof sub === 'string' && sub.length > 0) return sub;
+  if (typeof sub === "string" && sub.length > 0) return sub;
   const username = identity.username;
-  if (typeof username === 'string' && username.length > 0) return username;
-  return 'unknown';
+  if (typeof username === "string" && username.length > 0) return username;
+  return "unknown";
 }
 
 async function markReadinessCheckVerified(
@@ -2891,12 +2915,13 @@ async function markReadinessCheckVerified(
 ): Promise<MarkReadinessCheckVerifiedResult> {
   // 1. Admin gate — defense in depth (AppSync auth runs upstream).
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
-  const args = (event.arguments ?? ({} as MarkReadinessCheckVerifiedArgs)) as MarkReadinessCheckVerifiedArgs;
+  const args = (event.arguments ??
+    ({} as MarkReadinessCheckVerifiedArgs)) as MarkReadinessCheckVerifiedArgs;
   const input = args.input ?? ({} as MarkReadinessCheckVerifiedInput);
-  const checkId = typeof input.checkId === 'string' ? input.checkId : '';
+  const checkId = typeof input.checkId === "string" ? input.checkId : "";
 
   // 2. checkId must be one of the 4 manual-only stub IDs. The 7 real
   //    checks (data-1, data-2, data-3, tel-1, tel-2, tel-3, rb-1) are
@@ -2912,7 +2937,8 @@ async function markReadinessCheckVerified(
   //    (the longest is 30d, matching the runbook's "short-term
   //    verification" guidance).
   const requestedDays =
-    typeof input.expiresInDays === 'number' && Number.isFinite(input.expiresInDays)
+    typeof input.expiresInDays === "number" &&
+    Number.isFinite(input.expiresInDays)
       ? input.expiresInDays
       : DEFAULT_EXPIRES_IN_DAYS;
   if (!VALID_EXPIRES_IN_DAYS.has(requestedDays)) {
@@ -2928,10 +2954,10 @@ async function markReadinessCheckVerified(
     verifiedAtMs + requestedDays * 86_400_000,
   ).toISOString();
 
-  const env = process.env.ENVIRONMENT || 'unknown';
+  const env = process.env.ENVIRONMENT || "unknown";
   const paramName = manualVerificationParamName(env, checkId);
   const noteValue =
-    typeof input.note === 'string' && input.note.length > 0 ? input.note : null;
+    typeof input.note === "string" && input.note.length > 0 ? input.note : null;
   const payload = JSON.stringify({
     verifiedAt,
     verifiedBy,
@@ -2945,7 +2971,7 @@ async function markReadinessCheckVerified(
     new PutParameterCommand({
       Name: paramName,
       Value: payload,
-      Type: 'String',
+      Type: "String",
       Overwrite: true,
     }),
   );
@@ -3008,16 +3034,16 @@ interface PublishGovernanceFindingArgs {
  * anonymous callers also `null`.
  */
 export function isIamIdentity(identity: unknown): boolean {
-  if (!identity || typeof identity !== 'object') return false;
+  if (!identity || typeof identity !== "object") return false;
   const id = identity as Record<string, unknown>;
   // Reject anything that smells like a user-pool / OIDC token. Both
   // `claims` (Cognito) and `sub` (Cognito + OIDC) are absent for IAM
   // calls.
   if (id.claims !== undefined) return false;
-  if (typeof id.sub === 'string') return false;
+  if (typeof id.sub === "string") return false;
   // Require the IAM-distinct field. AppSync surfaces `accountId` for
   // every IAM-authed invocation.
-  if (typeof id.accountId !== 'string' || id.accountId.length === 0) {
+  if (typeof id.accountId !== "string" || id.accountId.length === 0) {
     return false;
   }
   return true;
@@ -3025,13 +3051,13 @@ export function isIamIdentity(identity: unknown): boolean {
 
 export function publishGovernanceFinding(
   event: AppSyncResolverEvent<PublishGovernanceFindingArgs>,
-): PublishGovernanceFindingArgs['input'] {
+): PublishGovernanceFindingArgs["input"] {
   if (!isIamIdentity(event.identity)) {
-    throw new Error('Forbidden: publishGovernanceFinding is IAM-only');
+    throw new Error("Forbidden: publishGovernanceFinding is IAM-only");
   }
   const input = event.arguments?.input;
   if (!input) {
-    throw new Error('publishGovernanceFinding: missing input');
+    throw new Error("publishGovernanceFinding: missing input");
   }
   // Pass-through. The fanout Lambda already projected snake_case ledger
   // fields into the camelCase mutation input; the AppSync subscription
@@ -3053,7 +3079,7 @@ export function publishGovernanceFinding(
 // CloudWatch warning so operators see when the live topology has outgrown
 // the cap.
 
-const WAVE4_GLOBAL_REGISTRY_ID = '*GLOBAL*';
+const WAVE4_GLOBAL_REGISTRY_ID = "*GLOBAL*";
 const WAVE4_SCAN_CAP = 5000;
 const WAVE4_CACHE_TTL_MS = 60_000;
 
@@ -3127,7 +3153,7 @@ export function __resetCompositionContractsCacheForTest(): void {
  */
 function maybeJson<T>(value: unknown, defaultValue: T): T {
   if (value === undefined || value === null) return defaultValue;
-  if (typeof value === 'string') {
+  if (typeof value === "string") {
     if (value.length === 0) return defaultValue;
     try {
       const parsed = JSON.parse(value);
@@ -3151,18 +3177,22 @@ function maybeJson<T>(value: unknown, defaultValue: T): T {
 function projectAuthorityScope(rawScope: unknown): AuthorityScopeProjected {
   const scope = maybeJson<Record<string, unknown>>(rawScope, {});
   const decisionType =
-    typeof scope.decision_type === 'string'
+    typeof scope.decision_type === "string"
       ? scope.decision_type
-      : typeof scope.decisionType === 'string'
+      : typeof scope.decisionType === "string"
         ? scope.decisionType
-        : '*';
-  const domain = typeof scope.domain === 'string' ? scope.domain : '*';
+        : "*";
+  const domain = typeof scope.domain === "string" ? scope.domain : "*";
   const conditionsObj =
-    scope.conditions && typeof scope.conditions === 'object' && !Array.isArray(scope.conditions)
+    scope.conditions &&
+    typeof scope.conditions === "object" &&
+    !Array.isArray(scope.conditions)
       ? (scope.conditions as Record<string, unknown>)
       : {};
   const limitsObj =
-    scope.limits && typeof scope.limits === 'object' && !Array.isArray(scope.limits)
+    scope.limits &&
+    typeof scope.limits === "object" &&
+    !Array.isArray(scope.limits)
       ? (scope.limits as Record<string, unknown>)
       : {};
   const specificity =
@@ -3177,22 +3207,22 @@ function projectAuthorityScope(rawScope: unknown): AuthorityScopeProjected {
 }
 
 function projectAuthorityUnit(row: DdbRow): AuthorityUnitProjected | null {
-  const unitId = typeof row.unitId === 'string' ? row.unitId : '';
-  const agentId = typeof row.agentId === 'string' ? row.agentId : '';
+  const unitId = typeof row.unitId === "string" ? row.unitId : "";
+  const agentId = typeof row.agentId === "string" ? row.agentId : "";
   if (unitId.length === 0 || agentId.length === 0) {
     // Skip malformed rows rather than returning a partial — mirrors the
     // hierarchy.py loader which logs and drops these.
     console.warn(
-      'projectAuthorityUnit: skipping malformed row',
+      "projectAuthorityUnit: skipping malformed row",
       JSON.stringify({ keys: Object.keys(row) }),
     );
     return null;
   }
   const expiryRaw = row.expiryTimestamp;
   const expiryTimestamp =
-    typeof expiryRaw === 'number'
+    typeof expiryRaw === "number"
       ? expiryRaw
-      : typeof expiryRaw === 'string' && expiryRaw.length > 0
+      : typeof expiryRaw === "string" && expiryRaw.length > 0
         ? Number(expiryRaw)
         : null;
   const revoked = row.revoked === true;
@@ -3206,7 +3236,7 @@ function projectAuthorityUnit(row: DdbRow): AuthorityUnitProjected | null {
     agentId,
     scope: projectAuthorityScope(row.scope),
     delegationSource:
-      typeof row.delegationSource === 'string' ? row.delegationSource : null,
+      typeof row.delegationSource === "string" ? row.delegationSource : null,
     canRedelegate: row.canRedelegate === true,
     expiryTimestamp:
       expiryTimestamp !== null && !Number.isNaN(expiryTimestamp)
@@ -3214,11 +3244,11 @@ function projectAuthorityUnit(row: DdbRow): AuthorityUnitProjected | null {
         : null,
     revoked,
     riskRating:
-      typeof row.riskRating === 'string' && row.riskRating.length > 0
+      typeof row.riskRating === "string" && row.riskRating.length > 0
         ? row.riskRating
-        : 'low',
+        : "low",
     registryId:
-      typeof row.registryId === 'string' && row.registryId.length > 0
+      typeof row.registryId === "string" && row.registryId.length > 0
         ? row.registryId
         : null,
     isValid,
@@ -3235,16 +3265,17 @@ function projectAuthorityUnit(row: DdbRow): AuthorityUnitProjected | null {
  */
 function coerceStringList(value: unknown): string[] {
   if (Array.isArray(value)) {
-    return value
-      .filter((v): v is string => typeof v === 'string' && v.length > 0);
+    return value.filter(
+      (v): v is string => typeof v === "string" && v.length > 0,
+    );
   }
-  if (typeof value === 'string') {
+  if (typeof value === "string") {
     if (value.length === 0) return [];
     try {
       const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) {
         return parsed.filter(
-          (v): v is string => typeof v === 'string' && v.length > 0,
+          (v): v is string => typeof v === "string" && v.length > 0,
         );
       }
       return [value];
@@ -3258,12 +3289,12 @@ function coerceStringList(value: unknown): string[] {
 function projectCompositionContract(
   row: DdbRow,
 ): CompositionContractProjected | null {
-  const contractId = typeof row.contractId === 'string' ? row.contractId : '';
-  const partyA = typeof row.partyA === 'string' ? row.partyA : '';
-  const partyB = typeof row.partyB === 'string' ? row.partyB : '';
+  const contractId = typeof row.contractId === "string" ? row.contractId : "";
+  const partyA = typeof row.partyA === "string" ? row.partyA : "";
+  const partyB = typeof row.partyB === "string" ? row.partyB : "";
   if (contractId.length === 0 || partyA.length === 0 || partyB.length === 0) {
     console.warn(
-      'projectCompositionContract: skipping malformed row',
+      "projectCompositionContract: skipping malformed row",
       JSON.stringify({ keys: Object.keys(row) }),
     );
     return null;
@@ -3273,18 +3304,18 @@ function projectCompositionContract(
     partyA,
     partyB,
     authorityPrecedence:
-      typeof row.authorityPrecedence === 'string'
+      typeof row.authorityPrecedence === "string"
         ? row.authorityPrecedence
-        : 'none',
+        : "none",
     conflictResolution:
-      typeof row.conflictResolution === 'string'
+      typeof row.conflictResolution === "string"
         ? row.conflictResolution
-        : 'default_deny',
+        : "default_deny",
     invariants: coerceStringList(row.invariants),
     stopRights: coerceStringList(row.stopRights),
     scope: projectAuthorityScope(row.scope),
     escalationPath:
-      typeof row.escalationPath === 'string' ? row.escalationPath : null,
+      typeof row.escalationPath === "string" ? row.escalationPath : null,
   };
 }
 
@@ -3292,22 +3323,22 @@ async function listAuthorityUnits(
   event: AppSyncResolverEvent<ListAuthorityUnitsArgs>,
 ): Promise<AuthorityUnitProjected[]> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.AUTHORITY_UNITS_TABLE;
   if (!tableName) {
-    throw new Error('AUTHORITY_UNITS_TABLE env var is not set');
+    throw new Error("AUTHORITY_UNITS_TABLE env var is not set");
   }
 
   const args = (event.arguments ?? {}) as ListAuthorityUnitsArgs;
   const registryId =
-    typeof args.registryId === 'string' && args.registryId.length > 0
+    typeof args.registryId === "string" && args.registryId.length > 0
       ? args.registryId
       : null;
   const includeRevoked = args.includeRevoked === true;
 
-  const cacheKey = `${registryId ?? '__ALL__'}|${includeRevoked}`;
+  const cacheKey = `${registryId ?? "__ALL__"}|${includeRevoked}`;
   const cached = authorityUnitsCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) {
     return cached.units;
@@ -3322,15 +3353,15 @@ async function listAuthorityUnits(
   const expressionAttributeValues: Record<string, unknown> = {};
 
   if (registryId !== null) {
-    filterClauses.push('#rid IN (:rid, :global)');
-    expressionAttributeNames['#rid'] = 'registryId';
-    expressionAttributeValues[':rid'] = registryId;
-    expressionAttributeValues[':global'] = WAVE4_GLOBAL_REGISTRY_ID;
+    filterClauses.push("#rid IN (:rid, :global)");
+    expressionAttributeNames["#rid"] = "registryId";
+    expressionAttributeValues[":rid"] = registryId;
+    expressionAttributeValues[":global"] = WAVE4_GLOBAL_REGISTRY_ID;
   }
   if (!includeRevoked) {
-    filterClauses.push('attribute_not_exists(#revoked) OR #revoked = :false');
-    expressionAttributeNames['#revoked'] = 'revoked';
-    expressionAttributeValues[':false'] = false;
+    filterClauses.push("attribute_not_exists(#revoked) OR #revoked = :false");
+    expressionAttributeNames["#revoked"] = "revoked";
+    expressionAttributeValues[":false"] = false;
   }
 
   const items: DdbRow[] = [];
@@ -3342,7 +3373,7 @@ async function listAuthorityUnits(
       TableName: tableName,
       ...(filterClauses.length > 0
         ? {
-            FilterExpression: filterClauses.join(' AND '),
+            FilterExpression: filterClauses.join(" AND "),
             ExpressionAttributeNames: expressionAttributeNames,
             ExpressionAttributeValues: expressionAttributeValues,
           }
@@ -3367,8 +3398,8 @@ async function listAuthorityUnits(
   if (truncated) {
     console.warn(
       `listAuthorityUnits: truncated at ${WAVE4_SCAN_CAP} rows ` +
-        `(registryId=${registryId ?? '__ALL__'}, includeRevoked=${includeRevoked}). ` +
-        'Tighten filters or extend the scan cap.',
+        `(registryId=${registryId ?? "__ALL__"}, includeRevoked=${includeRevoked}). ` +
+        "Tighten filters or extend the scan cap.",
     );
   }
 
@@ -3389,12 +3420,12 @@ async function listCompositionContracts(
   event: AppSyncResolverEvent<unknown>,
 ): Promise<CompositionContractProjected[]> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.COMPOSITION_CONTRACTS_TABLE;
   if (!tableName) {
-    throw new Error('COMPOSITION_CONTRACTS_TABLE env var is not set');
+    throw new Error("COMPOSITION_CONTRACTS_TABLE env var is not set");
   }
 
   if (
@@ -3431,7 +3462,7 @@ async function listCompositionContracts(
   if (truncated) {
     console.warn(
       `listCompositionContracts: truncated at ${WAVE4_SCAN_CAP} rows. ` +
-        'Tighten filters or extend the scan cap.',
+        "Tighten filters or extend the scan cap.",
     );
   }
 
@@ -3525,13 +3556,13 @@ async function scanRevokeImpactItems(
     const cmd = new ScanCommand({
       TableName: tableName,
       FilterExpression:
-        'scope_evaluated = :uid AND decision = :permit AND #ts BETWEEN :since AND :until',
-      ExpressionAttributeNames: { '#ts': 'timestamp' },
+        "scope_evaluated = :uid AND decision = :permit AND #ts BETWEEN :since AND :until",
+      ExpressionAttributeNames: { "#ts": "timestamp" },
       ExpressionAttributeValues: {
-        ':uid': unitId,
-        ':permit': 'permit',
-        ':since': sinceTs,
-        ':until': untilTs,
+        ":uid": unitId,
+        ":permit": "permit",
+        ":since": sinceTs,
+        ":until": untilTs,
       },
       ...(lastEvaluatedKey ? { ExclusiveStartKey: lastEvaluatedKey } : {}),
     });
@@ -3557,26 +3588,28 @@ async function getRevokeImpact(
   event: AppSyncResolverEvent<GetRevokeImpactArgs>,
 ): Promise<RevokeImpactReportProjected> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
   if (!tableName) {
-    throw new Error('GOVERNANCE_LEDGER_TABLE env var is not set');
+    throw new Error("GOVERNANCE_LEDGER_TABLE env var is not set");
   }
 
   const args = (event.arguments ?? {}) as GetRevokeImpactArgs;
-  const unitId = typeof args.unitId === 'string' ? args.unitId : '';
+  const unitId = typeof args.unitId === "string" ? args.unitId : "";
   if (unitId.length === 0) {
-    throw new Error('unitId is required');
+    throw new Error("unitId is required");
   }
 
   // Resolve time window. Defaults: now − 1h to now. Window cap: 24h.
   const nowSec = Math.floor(Date.now() / 1000);
   const untilTs =
-    typeof args.untilTs === 'number' && args.untilTs > 0 ? args.untilTs : nowSec;
+    typeof args.untilTs === "number" && args.untilTs > 0
+      ? args.untilTs
+      : nowSec;
   let sinceTs =
-    typeof args.sinceTs === 'number' && args.sinceTs > 0
+    typeof args.sinceTs === "number" && args.sinceTs > 0
       ? args.sinceTs
       : untilTs - REVOKE_IMPACT_WINDOW_DEFAULT_SECONDS;
   if (sinceTs > untilTs) {
@@ -3625,22 +3658,20 @@ async function getRevokeImpact(
   let totalPermits = 0;
 
   for (const row of items) {
-    const decision =
-      typeof row.decision === 'string' ? row.decision : '';
+    const decision = typeof row.decision === "string" ? row.decision : "";
     const scopeEvaluated =
-      typeof row.scope_evaluated === 'string' ? row.scope_evaluated : '';
+      typeof row.scope_evaluated === "string" ? row.scope_evaluated : "";
     // Defence in depth: even though the FilterExpression already filters
     // these, an out-of-band write could slip through, so re-validate.
-    if (decision !== 'permit' || scopeEvaluated !== unitId) continue;
+    if (decision !== "permit" || scopeEvaluated !== unitId) continue;
     totalPermits++;
 
-    const workflowId =
-      typeof row.workflowId === 'string' ? row.workflowId : '';
+    const workflowId = typeof row.workflowId === "string" ? row.workflowId : "";
     const tsRaw = row.timestamp;
     const ts =
-      typeof tsRaw === 'number'
+      typeof tsRaw === "number"
         ? tsRaw
-        : typeof tsRaw === 'string'
+        : typeof tsRaw === "string"
           ? Number(tsRaw)
           : 0;
     if (workflowId.length > 0) {
@@ -3660,9 +3691,9 @@ async function getRevokeImpact(
     }
 
     const requestingAgent =
-      typeof row.requesting_agent === 'string' ? row.requesting_agent : '';
+      typeof row.requesting_agent === "string" ? row.requesting_agent : "";
     const targetAgent =
-      typeof row.target_agent === 'string' ? row.target_agent : '';
+      typeof row.target_agent === "string" ? row.target_agent : "";
     if (requestingAgent.length > 0 && targetAgent.length > 0) {
       const pairKey = `${requestingAgent}|${targetAgent}`;
       const existing = pairAcc.get(pairKey);
@@ -3822,17 +3853,17 @@ function projectAppliesTo(value: unknown): string[] {
 function projectRule(raw: unknown): ConstitutionalRuleProjected | null {
   if (raw === null || raw === undefined) return null;
   const rule =
-    typeof raw === 'string'
+    typeof raw === "string"
       ? maybeJson<Record<string, unknown>>(raw, {})
       : (raw as Record<string, unknown>);
-  if (!rule || typeof rule !== 'object' || Array.isArray(rule)) return null;
-  const field = typeof rule.field === 'string' ? rule.field : '';
-  const operator = typeof rule.operator === 'string' ? rule.operator : 'eq';
+  if (!rule || typeof rule !== "object" || Array.isArray(rule)) return null;
+  const field = typeof rule.field === "string" ? rule.field : "";
+  const operator = typeof rule.operator === "string" ? rule.operator : "eq";
   if (field.length === 0) return null;
   // exists / not_exists carry no value payload — surface null so the
   // frontend can render the rule without an empty `=== null` chip.
   let value: string | null;
-  if (operator === 'exists' || operator === 'not_exists') {
+  if (operator === "exists" || operator === "not_exists") {
     value = null;
   } else if (rule.value === undefined) {
     value = null;
@@ -3849,18 +3880,18 @@ function projectRule(raw: unknown): ConstitutionalRuleProjected | null {
 function projectConstitutionalLayer(
   row: DdbRow,
 ): ConstitutionalLayerProjected | null {
-  const layerId = typeof row.layerId === 'string' ? row.layerId : '';
+  const layerId = typeof row.layerId === "string" ? row.layerId : "";
   if (layerId.length === 0) {
     console.warn(
-      'projectConstitutionalLayer: skipping malformed row',
+      "projectConstitutionalLayer: skipping malformed row",
       JSON.stringify({ keys: Object.keys(row) }),
     );
     return null;
   }
   const layerType =
-    typeof row.layerType === 'string' && row.layerType.length > 0
+    typeof row.layerType === "string" && row.layerType.length > 0
       ? row.layerType
-      : 'global';
+      : "global";
   const appliesTo = projectAppliesTo(row.appliesTo);
   const rawRules = maybeJson<unknown[]>(row.rules, []);
   const rules: ConstitutionalRuleProjected[] = [];
@@ -3876,7 +3907,7 @@ function projectConstitutionalLayer(
     appliesTo,
     rules,
     parentLayerId:
-      typeof row.parentLayerId === 'string' ? row.parentLayerId : null,
+      typeof row.parentLayerId === "string" ? row.parentLayerId : null,
   };
 }
 
@@ -3894,12 +3925,12 @@ async function listConstitutionalLayers(
   event: AppSyncResolverEvent<unknown>,
 ): Promise<ConstitutionalLayerProjected[]> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.CONSTITUTIONAL_LAYERS_TABLE;
   if (!tableName) {
-    throw new Error('CONSTITUTIONAL_LAYERS_TABLE env var is not set');
+    throw new Error("CONSTITUTIONAL_LAYERS_TABLE env var is not set");
   }
 
   if (
@@ -3936,7 +3967,7 @@ async function listConstitutionalLayers(
   if (truncated) {
     console.warn(
       `listConstitutionalLayers: truncated at ${WAVE4C_LAYERS_SCAN_CAP} rows. ` +
-        'Tighten filters or extend the scan cap.',
+        "Tighten filters or extend the scan cap.",
     );
   }
 
@@ -3969,15 +4000,15 @@ interface GetConstitutionalRuleStatsArgs {
 function parseConstitutionalReviewReason(
   reason: string,
 ): { layerId: string; field: string } | null {
-  if (!reason.startsWith('constitutional_review:')) return null;
-  const tokens = reason.split(':');
+  if (!reason.startsWith("constitutional_review:")) return null;
+  const tokens = reason.split(":");
   // Expected: ['constitutional_review', layerId, 'invariant_violated', field]
   if (tokens.length < 4) return null;
   const layerId = tokens[1];
-  if (tokens[2] !== 'invariant_violated') return null;
+  if (tokens[2] !== "invariant_violated") return null;
   // The field may itself contain ':' separators in pathological cases —
   // re-join the tail so a `field=foo:bar` style lands as one logical key.
-  const field = tokens.slice(3).join(':');
+  const field = tokens.slice(3).join(":");
   if (!layerId || !field) return null;
   return { layerId, field };
 }
@@ -3995,13 +4026,13 @@ async function scanConstitutionalReviewItems(
     const cmd = new ScanCommand({
       TableName: tableName,
       FilterExpression:
-        'decision = :deny AND begins_with(reason, :prefix) AND #ts BETWEEN :since AND :until',
-      ExpressionAttributeNames: { '#ts': 'timestamp' },
+        "decision = :deny AND begins_with(reason, :prefix) AND #ts BETWEEN :since AND :until",
+      ExpressionAttributeNames: { "#ts": "timestamp" },
       ExpressionAttributeValues: {
-        ':deny': 'deny',
-        ':prefix': 'constitutional_review:',
-        ':since': sinceTs,
-        ':until': untilTs,
+        ":deny": "deny",
+        ":prefix": "constitutional_review:",
+        ":since": sinceTs,
+        ":until": untilTs,
       },
       ...(lastEvaluatedKey ? { ExclusiveStartKey: lastEvaluatedKey } : {}),
     });
@@ -4027,22 +4058,22 @@ async function getConstitutionalRuleStats(
   event: AppSyncResolverEvent<GetConstitutionalRuleStatsArgs>,
 ): Promise<ConstitutionRuleStatsReportProjected> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
   if (!tableName) {
-    throw new Error('GOVERNANCE_LEDGER_TABLE env var is not set');
+    throw new Error("GOVERNANCE_LEDGER_TABLE env var is not set");
   }
 
   const args = (event.arguments ?? {}) as GetConstitutionalRuleStatsArgs;
   const nowSec = Math.floor(Date.now() / 1000);
   const untilTs =
-    typeof args.untilTs === 'number' && args.untilTs > 0
+    typeof args.untilTs === "number" && args.untilTs > 0
       ? args.untilTs
       : nowSec;
   let sinceTs =
-    typeof args.sinceTs === 'number' && args.sinceTs > 0
+    typeof args.sinceTs === "number" && args.sinceTs > 0
       ? args.sinceTs
       : untilTs - WAVE4C_STATS_WINDOW_DEFAULT_SECONDS;
   if (sinceTs > untilTs) {
@@ -4086,19 +4117,19 @@ async function getConstitutionalRuleStats(
   let totalOverrides = 0;
 
   for (const row of items) {
-    const reason = typeof row.reason === 'string' ? row.reason : '';
+    const reason = typeof row.reason === "string" ? row.reason : "";
     const parsed = parseConstitutionalReviewReason(reason);
     if (!parsed) continue;
     totalOverrides++;
     const tsRaw = row.timestamp;
     const ts =
-      typeof tsRaw === 'number'
+      typeof tsRaw === "number"
         ? tsRaw
-        : typeof tsRaw === 'string'
+        : typeof tsRaw === "string"
           ? Number(tsRaw)
           : NaN;
     const requestingAgent =
-      typeof row.requesting_agent === 'string' ? row.requesting_agent : '';
+      typeof row.requesting_agent === "string" ? row.requesting_agent : "";
     const key = `${parsed.layerId}|${parsed.field}`;
     let entry = acc.get(key);
     if (!entry) {
@@ -4232,10 +4263,10 @@ interface CaseLawCacheEntry {
 const caseLawCache = new Map<string, CaseLawCacheEntry>();
 
 const VALID_CASE_LAW_RESOLUTIONS: ReadonlySet<string> = new Set([
-  'permit',
-  'deny',
-  'escalate',
-  'halt',
+  "permit",
+  "deny",
+  "escalate",
+  "halt",
 ]);
 
 /** Test-only helper: clear the Wave 4.D case-law cache. */
@@ -4258,16 +4289,16 @@ export function __resetCaseLawCacheForTest(): void {
  *     remains a non-null string.
  */
 function normaliseEncodedAt(value: unknown): string {
-  if (typeof value === 'number' && Number.isFinite(value)) {
+  if (typeof value === "number" && Number.isFinite(value)) {
     return new Date(value * 1000).toISOString();
   }
-  if (typeof value === 'string' && value.length > 0) {
+  if (typeof value === "string" && value.length > 0) {
     // Defensive: a writer may have stored the legacy float as a string.
     // ISO strings start with a digit too (year), so disambiguate by
     // checking parseFloat of the entire string and the absence of a
     // calendar separator. ISO 8601 always contains '-' (date separator)
     // or 'T'; bare numeric strings do not.
-    const looksLikeIso = value.includes('-') || value.includes('T');
+    const looksLikeIso = value.includes("-") || value.includes("T");
     if (!looksLikeIso) {
       const asNum = Number(value);
       if (Number.isFinite(asNum)) {
@@ -4276,18 +4307,18 @@ function normaliseEncodedAt(value: unknown): string {
     }
     return value;
   }
-  if (value === null || value === undefined) return '';
+  if (value === null || value === undefined) return "";
   return String(value);
 }
 
 function projectCaseLawEntry(row: DdbRow): CaseLawEntryProjected | null {
   const caseId =
-    typeof row.entryId === 'string' && row.entryId.length > 0
+    typeof row.entryId === "string" && row.entryId.length > 0
       ? row.entryId
-      : '';
+      : "";
   if (caseId.length === 0) {
     console.warn(
-      'projectCaseLawEntry: skipping malformed row',
+      "projectCaseLawEntry: skipping malformed row",
       JSON.stringify({ keys: Object.keys(row) }),
     );
     return null;
@@ -4296,7 +4327,7 @@ function projectCaseLawEntry(row: DdbRow): CaseLawEntryProjected | null {
   // Allowlist guard on resolution. Unknown values coerce to 'unknown'
   // with a warning so operators can spot writer drift in CloudWatch.
   const rawResolution =
-    typeof row.resolution === 'string' ? row.resolution : '';
+    typeof row.resolution === "string" ? row.resolution : "";
   let resolution: string;
   if (VALID_CASE_LAW_RESOLUTIONS.has(rawResolution)) {
     resolution = rawResolution;
@@ -4305,7 +4336,7 @@ function projectCaseLawEntry(row: DdbRow): CaseLawEntryProjected | null {
       `projectCaseLawEntry: unknown resolution ${JSON.stringify(rawResolution)} ` +
         `on case ${caseId}; coercing to 'unknown'.`,
     );
-    resolution = 'unknown';
+    resolution = "unknown";
   }
 
   // pattern + scopeOfApplicability — parse on the row, then
@@ -4321,9 +4352,9 @@ function projectCaseLawEntry(row: DdbRow): CaseLawEntryProjected | null {
   const encodedAt = normaliseEncodedAt(row.createdAt);
   const encodedByRaw = row.createdBy;
   const encodedBy =
-    typeof encodedByRaw === 'string' && encodedByRaw.length > 0
+    typeof encodedByRaw === "string" && encodedByRaw.length > 0
       ? encodedByRaw
-      : 'unknown';
+      : "unknown";
 
   // precedence: coerce via Number() per spec; default 0 on missing /
   // non-finite. Using Number() rather than parseInt preserves the
@@ -4353,17 +4384,17 @@ async function listCaseLaw(
   event: AppSyncResolverEvent<ListCaseLawArgs>,
 ): Promise<CaseLawEntryProjected[]> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.CASE_LAW_TABLE;
   if (!tableName) {
-    throw new Error('CASE_LAW_TABLE env var is not set');
+    throw new Error("CASE_LAW_TABLE env var is not set");
   }
 
   const args = (event.arguments ?? {}) as ListCaseLawArgs;
   const includeRevoked = args.includeRevoked === true;
-  const cacheKey = includeRevoked ? 'with' : 'without';
+  const cacheKey = includeRevoked ? "with" : "without";
   const cached = caseLawCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) {
     return cached.entries;
@@ -4396,7 +4427,7 @@ async function listCaseLaw(
   if (truncated) {
     console.warn(
       `listCaseLaw: truncated at ${WAVE4D_CASE_LAW_SCAN_CAP} rows. ` +
-        'Tighten filters or extend the scan cap.',
+        "Tighten filters or extend the scan cap.",
     );
   }
 
@@ -4453,15 +4484,15 @@ async function listCaseLaw(
 // a `version` attribute incremented per write.
 
 export const CONSTITUTIONAL_RULE_ACKNOWLEDGEMENT_TEXT =
-  'I understand this changes the constitutional layer used at engine step 8';
+  "I understand this changes the constitutional layer used at engine step 8";
 
 const CONSTITUTIONAL_OPERATOR_ALLOWLIST: ReadonlySet<string> = new Set([
-  'eq',
-  'neq',
-  'exists',
-  'not_exists',
-  'gt',
-  'lt',
+  "eq",
+  "neq",
+  "exists",
+  "not_exists",
+  "gt",
+  "lt",
 ]);
 
 const CONSTITUTIONAL_FIELD_MAX_LENGTH = 256;
@@ -4494,7 +4525,7 @@ interface DeleteConstitutionalRuleInput {
 interface ConstitutionalRuleMutationResult {
   ok: boolean;
   layerId: string;
-  action: 'add' | 'update' | 'delete';
+  action: "add" | "update" | "delete";
   layer: ConstitutionalLayerProjected;
   emittedEventDetailType: string | null;
 }
@@ -4523,25 +4554,25 @@ interface StoredConstitutionalRule {
 function validateAndDecodeRule(
   rule: ConstitutionalRuleInputShape | null | undefined,
 ): StoredConstitutionalRule {
-  if (!rule || typeof rule !== 'object') {
-    throw new Error('Rule input is required');
+  if (!rule || typeof rule !== "object") {
+    throw new Error("Rule input is required");
   }
-  const field = typeof rule.field === 'string' ? rule.field : '';
+  const field = typeof rule.field === "string" ? rule.field : "";
   if (field.length === 0) {
-    throw new Error('Rule field must be non-empty');
+    throw new Error("Rule field must be non-empty");
   }
   if (field.length > CONSTITUTIONAL_FIELD_MAX_LENGTH) {
     throw new Error(
       `Rule field exceeds ${CONSTITUTIONAL_FIELD_MAX_LENGTH} characters`,
     );
   }
-  const operator = typeof rule.operator === 'string' ? rule.operator : '';
+  const operator = typeof rule.operator === "string" ? rule.operator : "";
   if (!CONSTITUTIONAL_OPERATOR_ALLOWLIST.has(operator)) {
     throw new Error(
       `Invalid operator: ${operator}. Allowed: eq, neq, exists, not_exists, gt, lt`,
     );
   }
-  const valueIsExistsOp = operator === 'exists' || operator === 'not_exists';
+  const valueIsExistsOp = operator === "exists" || operator === "not_exists";
   const rawValue = rule.value;
   if (valueIsExistsOp) {
     if (rawValue !== null && rawValue !== undefined) {
@@ -4554,8 +4585,10 @@ function validateAndDecodeRule(
   if (rawValue === null || rawValue === undefined) {
     throw new Error(`Operator ${operator} requires a non-null value`);
   }
-  if (typeof rawValue !== 'string') {
-    throw new Error(`Operator ${operator} requires a JSON-encoded string value`);
+  if (typeof rawValue !== "string") {
+    throw new Error(
+      `Operator ${operator} requires a JSON-encoded string value`,
+    );
   }
   let parsed: unknown;
   try {
@@ -4570,13 +4603,13 @@ function validateAndDecodeRule(
 
 function assertAcknowledgement(value: unknown): void {
   if (value !== CONSTITUTIONAL_RULE_ACKNOWLEDGEMENT_TEXT) {
-    throw new Error('Acknowledgement string mismatch');
+    throw new Error("Acknowledgement string mismatch");
   }
 }
 
 function assertAdmin(event: AppSyncResolverEvent<unknown>): void {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 }
 
@@ -4599,15 +4632,15 @@ function parseStoredRules(row: DdbRow): StoredConstitutionalRule[] {
   if (!Array.isArray(raw)) return [];
   const out: StoredConstitutionalRule[] = [];
   for (const r of raw) {
-    if (r === null || typeof r !== 'object' || Array.isArray(r)) continue;
+    if (r === null || typeof r !== "object" || Array.isArray(r)) continue;
     const item = r as Record<string, unknown>;
-    const field = typeof item.field === 'string' ? item.field : '';
-    const operator = typeof item.operator === 'string' ? item.operator : '';
+    const field = typeof item.field === "string" ? item.field : "";
+    const operator = typeof item.operator === "string" ? item.operator : "";
     if (!field || !operator) continue;
     const stored: StoredConstitutionalRule = { field, operator };
     if (
-      operator !== 'exists' &&
-      operator !== 'not_exists' &&
+      operator !== "exists" &&
+      operator !== "not_exists" &&
       item.value !== undefined
     ) {
       stored.value = item.value;
@@ -4626,13 +4659,12 @@ function parseStoredRules(row: DdbRow): StoredConstitutionalRule[] {
 function projectStoredRule(
   rule: StoredConstitutionalRule,
 ): ConstitutionalRuleProjected {
-  if (rule.operator === 'exists' || rule.operator === 'not_exists') {
+  if (rule.operator === "exists" || rule.operator === "not_exists") {
     return { field: rule.field, operator: rule.operator, value: null };
   }
   let valueStr: string | null;
   try {
-    valueStr =
-      rule.value === undefined ? null : JSON.stringify(rule.value);
+    valueStr = rule.value === undefined ? null : JSON.stringify(rule.value);
     if (valueStr === undefined) valueStr = null;
   } catch {
     valueStr = null;
@@ -4650,9 +4682,7 @@ async function writeLayerRules(
   // forward-compatibility (any new attribute introduced by the engine
   // survives a Wave 4.C.2 edit).
   const updated: DdbRow = { ...row, rules: JSON.stringify(rules) };
-  await dynamodb.send(
-    new PutCommand({ TableName: tableName, Item: updated }),
-  );
+  await dynamodb.send(new PutCommand({ TableName: tableName, Item: updated }));
   return updated;
 }
 
@@ -4660,11 +4690,11 @@ function buildLayerProjection(
   row: DdbRow,
   rules: StoredConstitutionalRule[],
 ): ConstitutionalLayerProjected {
-  const layerId = typeof row.layerId === 'string' ? row.layerId : '';
+  const layerId = typeof row.layerId === "string" ? row.layerId : "";
   const layerType =
-    typeof row.layerType === 'string' && row.layerType.length > 0
+    typeof row.layerType === "string" && row.layerType.length > 0
       ? row.layerType
-      : 'global';
+      : "global";
   const appliesTo = projectAppliesTo(row.appliesTo);
   return {
     layerId,
@@ -4672,13 +4702,13 @@ function buildLayerProjection(
     appliesTo,
     rules: rules.map(projectStoredRule),
     parentLayerId:
-      typeof row.parentLayerId === 'string' ? row.parentLayerId : null,
+      typeof row.parentLayerId === "string" ? row.parentLayerId : null,
   };
 }
 
 async function emitConstitutionalRuleAuditEvent(
   layerId: string,
-  action: 'add' | 'update' | 'delete',
+  action: "add" | "update" | "delete",
   ruleIndex: number,
   oldRule: StoredConstitutionalRule | null,
   newRule: StoredConstitutionalRule | null,
@@ -4686,7 +4716,7 @@ async function emitConstitutionalRuleAuditEvent(
 ): Promise<string | null> {
   try {
     const actorSub = readActorSub(event);
-    await emitGovernanceEvent('governance.constitutional.rule.changed', {
+    await emitGovernanceEvent("governance.constitutional.rule.changed", {
       layerId,
       action,
       ruleIndex,
@@ -4695,12 +4725,9 @@ async function emitConstitutionalRuleAuditEvent(
       actorSub,
       timestamp: new Date().toISOString(),
     });
-    return 'governance.constitutional.rule.changed';
+    return "governance.constitutional.rule.changed";
   } catch (err) {
-    console.error(
-      'constitutionalRule mutation: audit event emit failed',
-      err,
-    );
+    console.error("constitutionalRule mutation: audit event emit failed", err);
     return null;
   }
 }
@@ -4711,14 +4738,13 @@ async function addConstitutionalRule(
   assertAdmin(event);
   const tableName = process.env.CONSTITUTIONAL_LAYERS_TABLE;
   if (!tableName) {
-    throw new Error('CONSTITUTIONAL_LAYERS_TABLE env var is not set');
+    throw new Error("CONSTITUTIONAL_LAYERS_TABLE env var is not set");
   }
   const input = (event.arguments?.input ?? {}) as AddConstitutionalRuleInput;
   assertAcknowledgement(input.acknowledgement);
-  const layerId =
-    typeof input.layerId === 'string' ? input.layerId : '';
+  const layerId = typeof input.layerId === "string" ? input.layerId : "";
   if (layerId.length === 0) {
-    throw new Error('layerId must be non-empty');
+    throw new Error("layerId must be non-empty");
   }
   const newRule = validateAndDecodeRule(input.rule);
 
@@ -4733,7 +4759,7 @@ async function addConstitutionalRule(
 
   const emittedEventDetailType = await emitConstitutionalRuleAuditEvent(
     layerId,
-    'add',
+    "add",
     insertIndex,
     null,
     newRule,
@@ -4743,7 +4769,7 @@ async function addConstitutionalRule(
   return {
     ok: true,
     layerId,
-    action: 'add',
+    action: "add",
     layer: buildLayerProjection(updatedRow, updatedRules),
     emittedEventDetailType,
   };
@@ -4755,18 +4781,17 @@ async function updateConstitutionalRule(
   assertAdmin(event);
   const tableName = process.env.CONSTITUTIONAL_LAYERS_TABLE;
   if (!tableName) {
-    throw new Error('CONSTITUTIONAL_LAYERS_TABLE env var is not set');
+    throw new Error("CONSTITUTIONAL_LAYERS_TABLE env var is not set");
   }
   const input = (event.arguments?.input ?? {}) as UpdateConstitutionalRuleInput;
   assertAcknowledgement(input.acknowledgement);
-  const layerId =
-    typeof input.layerId === 'string' ? input.layerId : '';
+  const layerId = typeof input.layerId === "string" ? input.layerId : "";
   if (layerId.length === 0) {
-    throw new Error('layerId must be non-empty');
+    throw new Error("layerId must be non-empty");
   }
   const ruleIndex = input.ruleIndex;
-  if (typeof ruleIndex !== 'number' || !Number.isInteger(ruleIndex)) {
-    throw new Error('ruleIndex must be an integer');
+  if (typeof ruleIndex !== "number" || !Number.isInteger(ruleIndex)) {
+    throw new Error("ruleIndex must be an integer");
   }
   const newRule = validateAndDecodeRule(input.newRule);
 
@@ -4785,7 +4810,7 @@ async function updateConstitutionalRule(
 
   const emittedEventDetailType = await emitConstitutionalRuleAuditEvent(
     layerId,
-    'update',
+    "update",
     ruleIndex,
     oldRule,
     newRule,
@@ -4795,7 +4820,7 @@ async function updateConstitutionalRule(
   return {
     ok: true,
     layerId,
-    action: 'update',
+    action: "update",
     layer: buildLayerProjection(updatedRow, updatedRules),
     emittedEventDetailType,
   };
@@ -4807,18 +4832,17 @@ async function deleteConstitutionalRule(
   assertAdmin(event);
   const tableName = process.env.CONSTITUTIONAL_LAYERS_TABLE;
   if (!tableName) {
-    throw new Error('CONSTITUTIONAL_LAYERS_TABLE env var is not set');
+    throw new Error("CONSTITUTIONAL_LAYERS_TABLE env var is not set");
   }
   const input = (event.arguments?.input ?? {}) as DeleteConstitutionalRuleInput;
   assertAcknowledgement(input.acknowledgement);
-  const layerId =
-    typeof input.layerId === 'string' ? input.layerId : '';
+  const layerId = typeof input.layerId === "string" ? input.layerId : "";
   if (layerId.length === 0) {
-    throw new Error('layerId must be non-empty');
+    throw new Error("layerId must be non-empty");
   }
   const ruleIndex = input.ruleIndex;
-  if (typeof ruleIndex !== 'number' || !Number.isInteger(ruleIndex)) {
-    throw new Error('ruleIndex must be an integer');
+  if (typeof ruleIndex !== "number" || !Number.isInteger(ruleIndex)) {
+    throw new Error("ruleIndex must be an integer");
   }
 
   const row = await getConstitutionalLayerRow(tableName, layerId);
@@ -4836,7 +4860,7 @@ async function deleteConstitutionalRule(
 
   const emittedEventDetailType = await emitConstitutionalRuleAuditEvent(
     layerId,
-    'delete',
+    "delete",
     ruleIndex,
     oldRule,
     null,
@@ -4846,7 +4870,7 @@ async function deleteConstitutionalRule(
   return {
     ok: true,
     layerId,
-    action: 'delete',
+    action: "delete",
     layer: buildLayerProjection(updatedRow, updatedRules),
     emittedEventDetailType,
   };
@@ -4877,7 +4901,7 @@ async function deleteConstitutionalRule(
 // freshly-written row immediately.
 
 export const CASELAW_ACKNOWLEDGEMENT_TEXT =
-  'I understand this changes the case-law precedent used at engine step 1';
+  "I understand this changes the case-law precedent used at engine step 1";
 
 const CASELAW_CASE_ID_MAX_LENGTH = 256;
 const CASELAW_PRECEDENCE_MIN = -1000;
@@ -4906,36 +4930,34 @@ interface UpdateCaseLawPrecedenceInput {
 interface CaseLawMutationResult {
   ok: boolean;
   caseId: string;
-  action: 'revoke' | 'unrevoke' | 'update-precedence';
+  action: "revoke" | "unrevoke" | "update-precedence";
   entry: CaseLawEntryProjected;
   emittedEventDetailType: string | null;
 }
 
 function assertCaselawAcknowledgement(value: unknown): void {
   if (value !== CASELAW_ACKNOWLEDGEMENT_TEXT) {
-    throw new Error('Acknowledgement string mismatch');
+    throw new Error("Acknowledgement string mismatch");
   }
 }
 
 function assertCaseId(value: unknown): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error('caseId must be non-empty');
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("caseId must be non-empty");
   }
   if (value.length > CASELAW_CASE_ID_MAX_LENGTH) {
-    throw new Error(
-      `caseId exceeds ${CASELAW_CASE_ID_MAX_LENGTH} characters`,
-    );
+    throw new Error(`caseId exceeds ${CASELAW_CASE_ID_MAX_LENGTH} characters`);
   }
   return value;
 }
 
 function assertNewPrecedence(value: unknown): number {
   if (
-    typeof value !== 'number' ||
+    typeof value !== "number" ||
     !Number.isFinite(value) ||
     !Number.isInteger(value)
   ) {
-    throw new Error('newPrecedence must be a finite integer');
+    throw new Error("newPrecedence must be a finite integer");
   }
   if (value < CASELAW_PRECEDENCE_MIN || value > CASELAW_PRECEDENCE_MAX) {
     throw new Error(
@@ -4946,7 +4968,7 @@ function assertNewPrecedence(value: unknown): number {
 }
 
 function normaliseReason(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length === 0) return null;
+  if (typeof value !== "string" || value.length === 0) return null;
   // Defensive cap to keep audit payloads bounded; the dialog already
   // applies a 200-char ceiling but a server-side guard means a rogue
   // direct caller can't grow the audit event arbitrarily.
@@ -4972,7 +4994,7 @@ async function getCaseLawRow(
 
 async function emitCaseLawAuditEvent(
   caseId: string,
-  action: 'revoke' | 'unrevoke' | 'update-precedence',
+  action: "revoke" | "unrevoke" | "update-precedence",
   previousValue: Record<string, unknown>,
   newValue: Record<string, unknown>,
   reason: string | null,
@@ -4980,7 +5002,7 @@ async function emitCaseLawAuditEvent(
 ): Promise<string | null> {
   try {
     const actorSub = readActorSub(event);
-    await emitGovernanceEvent('governance.caselaw.changed', {
+    await emitGovernanceEvent("governance.caselaw.changed", {
       caseId,
       action,
       previousValue,
@@ -4989,9 +5011,9 @@ async function emitCaseLawAuditEvent(
       actorSub,
       timestamp: new Date().toISOString(),
     });
-    return 'governance.caselaw.changed';
+    return "governance.caselaw.changed";
   } catch (err) {
-    console.error('caseLaw mutation: audit event emit failed', err);
+    console.error("caseLaw mutation: audit event emit failed", err);
     return null;
   }
 }
@@ -5010,9 +5032,7 @@ async function reprojectCaseLawRow(
   const row = await getCaseLawRow(tableName, caseId);
   const projected = projectCaseLawEntry(row);
   if (projected === null) {
-    throw new Error(
-      `Case-law entry malformed after write: ${caseId}`,
-    );
+    throw new Error(`Case-law entry malformed after write: ${caseId}`);
   }
   return projected;
 }
@@ -5023,7 +5043,7 @@ async function revokeCaseLaw(
   assertAdmin(event);
   const tableName = process.env.CASE_LAW_TABLE;
   if (!tableName) {
-    throw new Error('CASE_LAW_TABLE env var is not set');
+    throw new Error("CASE_LAW_TABLE env var is not set");
   }
   const input = (event.arguments?.input ?? {}) as RevokeCaseLawInput;
   assertCaselawAcknowledgement(input.acknowledgement);
@@ -5042,7 +5062,7 @@ async function revokeCaseLaw(
     return {
       ok: true,
       caseId,
-      action: 'revoke',
+      action: "revoke",
       entry: projected,
       emittedEventDetailType: null,
     };
@@ -5052,9 +5072,9 @@ async function revokeCaseLaw(
     new UpdateCommand({
       TableName: tableName,
       Key: { entryId: caseId },
-      UpdateExpression: 'SET #revoked = :true',
-      ExpressionAttributeNames: { '#revoked': 'revoked' },
-      ExpressionAttributeValues: { ':true': true },
+      UpdateExpression: "SET #revoked = :true",
+      ExpressionAttributeNames: { "#revoked": "revoked" },
+      ExpressionAttributeValues: { ":true": true },
     }),
   );
   caseLawCache.clear();
@@ -5062,7 +5082,7 @@ async function revokeCaseLaw(
   const entry = await reprojectCaseLawRow(tableName, caseId);
   const emittedEventDetailType = await emitCaseLawAuditEvent(
     caseId,
-    'revoke',
+    "revoke",
     { revoked: false },
     { revoked: true },
     reason,
@@ -5072,7 +5092,7 @@ async function revokeCaseLaw(
   return {
     ok: true,
     caseId,
-    action: 'revoke',
+    action: "revoke",
     entry,
     emittedEventDetailType,
   };
@@ -5084,7 +5104,7 @@ async function unrevokeCaseLaw(
   assertAdmin(event);
   const tableName = process.env.CASE_LAW_TABLE;
   if (!tableName) {
-    throw new Error('CASE_LAW_TABLE env var is not set');
+    throw new Error("CASE_LAW_TABLE env var is not set");
   }
   const input = (event.arguments?.input ?? {}) as UnrevokeCaseLawInput;
   assertCaselawAcknowledgement(input.acknowledgement);
@@ -5103,7 +5123,7 @@ async function unrevokeCaseLaw(
     return {
       ok: true,
       caseId,
-      action: 'unrevoke',
+      action: "unrevoke",
       entry: projected,
       emittedEventDetailType: null,
     };
@@ -5113,9 +5133,9 @@ async function unrevokeCaseLaw(
     new UpdateCommand({
       TableName: tableName,
       Key: { entryId: caseId },
-      UpdateExpression: 'SET #revoked = :false',
-      ExpressionAttributeNames: { '#revoked': 'revoked' },
-      ExpressionAttributeValues: { ':false': false },
+      UpdateExpression: "SET #revoked = :false",
+      ExpressionAttributeNames: { "#revoked": "revoked" },
+      ExpressionAttributeValues: { ":false": false },
     }),
   );
   caseLawCache.clear();
@@ -5123,7 +5143,7 @@ async function unrevokeCaseLaw(
   const entry = await reprojectCaseLawRow(tableName, caseId);
   const emittedEventDetailType = await emitCaseLawAuditEvent(
     caseId,
-    'unrevoke',
+    "unrevoke",
     { revoked: true },
     { revoked: false },
     reason,
@@ -5133,7 +5153,7 @@ async function unrevokeCaseLaw(
   return {
     ok: true,
     caseId,
-    action: 'unrevoke',
+    action: "unrevoke",
     entry,
     emittedEventDetailType,
   };
@@ -5145,7 +5165,7 @@ async function updateCaseLawPrecedence(
   assertAdmin(event);
   const tableName = process.env.CASE_LAW_TABLE;
   if (!tableName) {
-    throw new Error('CASE_LAW_TABLE env var is not set');
+    throw new Error("CASE_LAW_TABLE env var is not set");
   }
   const input = (event.arguments?.input ?? {}) as UpdateCaseLawPrecedenceInput;
   assertCaselawAcknowledgement(input.acknowledgement);
@@ -5170,7 +5190,7 @@ async function updateCaseLawPrecedence(
     return {
       ok: true,
       caseId,
-      action: 'update-precedence',
+      action: "update-precedence",
       entry: projected,
       emittedEventDetailType: null,
     };
@@ -5180,9 +5200,9 @@ async function updateCaseLawPrecedence(
     new UpdateCommand({
       TableName: tableName,
       Key: { entryId: caseId },
-      UpdateExpression: 'SET #precedence = :p',
-      ExpressionAttributeNames: { '#precedence': 'precedence' },
-      ExpressionAttributeValues: { ':p': newPrecedence },
+      UpdateExpression: "SET #precedence = :p",
+      ExpressionAttributeNames: { "#precedence": "precedence" },
+      ExpressionAttributeValues: { ":p": newPrecedence },
     }),
   );
   caseLawCache.clear();
@@ -5190,7 +5210,7 @@ async function updateCaseLawPrecedence(
   const entry = await reprojectCaseLawRow(tableName, caseId);
   const emittedEventDetailType = await emitCaseLawAuditEvent(
     caseId,
-    'update-precedence',
+    "update-precedence",
     { precedence: existingPrecedence },
     { precedence: newPrecedence },
     reason,
@@ -5200,7 +5220,7 @@ async function updateCaseLawPrecedence(
   return {
     ok: true,
     caseId,
-    action: 'update-precedence',
+    action: "update-precedence",
     entry,
     emittedEventDetailType,
   };
@@ -5239,8 +5259,7 @@ interface AuthorityGraphHistorySettingsRaw {
   captureMode: string;
 }
 
-interface AuthorityGraphHistorySettingsProjected
-  extends AuthorityGraphHistorySettingsRaw {
+interface AuthorityGraphHistorySettingsProjected extends AuthorityGraphHistorySettingsRaw {
   lastSnapshotAt: string | null;
   snapshotCountInWindow: number;
   storageEstimate: string;
@@ -5264,12 +5283,12 @@ interface UpdateAuthorityGraphHistorySettingsResult {
 // drift test (`backend/test/contract-graph-history-ack-text.test.ts`)
 // enforces verbatim equality on every CI run.
 export const AUTHORITY_GRAPH_HISTORY_ACKNOWLEDGEMENT_TEXT =
-  'I understand this changes governance history retention and storage costs';
+  "I understand this changes governance history retention and storage costs";
 
 const AUTHORITY_GRAPH_HISTORY_DEFAULTS: AuthorityGraphHistorySettingsRaw = {
   enabled: false,
   retentionDays: 30,
-  captureMode: 'daily',
+  captureMode: "daily",
 };
 
 const AUTHORITY_GRAPH_HISTORY_RETENTION_ALLOWLIST: ReadonlySet<number> =
@@ -5280,7 +5299,7 @@ const AUTHORITY_GRAPH_HISTORY_RETENTION_ALLOWLIST: ReadonlySet<number> =
 // themselves on the value: scheduled runs on {daily, both}, stream-
 // driven runs on {on-change, both}.
 const AUTHORITY_GRAPH_HISTORY_CAPTURE_MODE_ALLOWLIST: ReadonlySet<string> =
-  new Set(['daily', 'on-change', 'both']);
+  new Set(["daily", "on-change", "both"]);
 
 // Soft cap on the snapshot count scan — matches the scheduled Lambda's
 // per-table cap. Beyond 5000 snapshots in the retention window the
@@ -5311,15 +5330,18 @@ function authorityGraphHistoryParameterName(env: string): string {
 function isValidRawShape(
   candidate: unknown,
 ): candidate is AuthorityGraphHistorySettingsRaw {
-  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
     return false;
   }
   const c = candidate as Record<string, unknown>;
-  if (typeof c.enabled !== 'boolean') return false;
-  if (typeof c.retentionDays !== 'number' || !Number.isFinite(c.retentionDays)) {
+  if (typeof c.enabled !== "boolean") return false;
+  if (
+    typeof c.retentionDays !== "number" ||
+    !Number.isFinite(c.retentionDays)
+  ) {
     return false;
   }
-  if (typeof c.captureMode !== 'string' || c.captureMode.length === 0) {
+  if (typeof c.captureMode !== "string" || c.captureMode.length === 0) {
     return false;
   }
   return true;
@@ -5333,7 +5355,7 @@ async function readAuthorityGraphHistorySettingsRaw(
     const resp = await ssm.send(
       new GetParameterCommand({ Name: parameterName }),
     );
-    const value = resp.Parameter?.Value ?? '';
+    const value = resp.Parameter?.Value ?? "";
     if (value.length === 0) {
       return { ...AUTHORITY_GRAPH_HISTORY_DEFAULTS };
     }
@@ -5374,17 +5396,18 @@ async function countSnapshotsInWindow(
     const resp = await dynamodb.send(
       new ScanCommand({
         TableName: tableName,
-        FilterExpression: '#ts >= :since',
-        ExpressionAttributeNames: { '#ts': 'timestamp' },
-        ExpressionAttributeValues: { ':since': sinceSec },
+        FilterExpression: "#ts >= :since",
+        ExpressionAttributeNames: { "#ts": "timestamp" },
+        ExpressionAttributeValues: { ":since": sinceSec },
         Limit: AUTHORITY_GRAPH_HISTORY_SCAN_CAP,
       }),
     );
-    const items = (resp.Items as Array<Record<string, unknown>> | undefined) ?? [];
+    const items =
+      (resp.Items as Array<Record<string, unknown>> | undefined) ?? [];
     let maxTs = -Infinity;
     for (const item of items) {
       const raw = item.timestamp;
-      const n = typeof raw === 'number' ? raw : Number(raw);
+      const n = typeof raw === "number" ? raw : Number(raw);
       if (Number.isFinite(n) && n > maxTs) {
         maxTs = n;
       }
@@ -5393,13 +5416,13 @@ async function countSnapshotsInWindow(
       maxTs === -Infinity ? null : new Date(maxTs * 1000).toISOString();
     return { count: items.length, lastSnapshotAt };
   } catch (err) {
-    console.error('countSnapshotsInWindow: scan failed', err);
+    console.error("countSnapshotsInWindow: scan failed", err);
     return { count: 0, lastSnapshotAt: null };
   }
 }
 
 function formatStorageEstimate(count: number): string {
-  if (count <= 0) return '—';
+  if (count <= 0) return "—";
   return `~${count * AUTHORITY_GRAPH_HISTORY_AVG_KB}KB`;
 }
 
@@ -5431,7 +5454,7 @@ async function getAuthorityGraphHistorySettings(
   ) {
     return cached.projected;
   }
-  const env = process.env.ENVIRONMENT || 'unknown';
+  const env = process.env.ENVIRONMENT || "unknown";
   const projected = await projectAuthorityGraphHistorySettings(env);
   authorityGraphHistoryCache = { loadedAt: Date.now(), projected };
   return projected;
@@ -5439,25 +5462,23 @@ async function getAuthorityGraphHistorySettings(
 
 function assertAuthorityGraphHistoryAcknowledgement(value: unknown): void {
   if (value !== AUTHORITY_GRAPH_HISTORY_ACKNOWLEDGEMENT_TEXT) {
-    throw new Error('Acknowledgement string mismatch');
+    throw new Error("Acknowledgement string mismatch");
   }
 }
 
 function assertAuthorityGraphHistoryRetention(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new Error('retentionDays must be a finite number');
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error("retentionDays must be a finite number");
   }
   if (!AUTHORITY_GRAPH_HISTORY_RETENTION_ALLOWLIST.has(value)) {
-    throw new Error(
-      `retentionDays ${value} not in allowlist [7, 30, 90, 365]`,
-    );
+    throw new Error(`retentionDays ${value} not in allowlist [7, 30, 90, 365]`);
   }
   return value;
 }
 
 function assertAuthorityGraphHistoryCaptureMode(value: unknown): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new Error('captureMode must be a non-empty string');
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("captureMode must be a non-empty string");
   }
   if (!AUTHORITY_GRAPH_HISTORY_CAPTURE_MODE_ALLOWLIST.has(value)) {
     throw new Error(
@@ -5468,14 +5489,14 @@ function assertAuthorityGraphHistoryCaptureMode(value: unknown): string {
 }
 
 function assertAuthorityGraphHistoryEnabled(value: unknown): boolean {
-  if (typeof value !== 'boolean') {
-    throw new Error('enabled must be a boolean');
+  if (typeof value !== "boolean") {
+    throw new Error("enabled must be a boolean");
   }
   return value;
 }
 
 function normaliseAuthorityGraphHistoryReason(value: unknown): string | null {
-  if (typeof value !== 'string' || value.length === 0) return null;
+  if (typeof value !== "string" || value.length === 0) return null;
   // Defensive cap to bound audit payload size.
   if (value.length > 500) return value.slice(0, 500);
   return value;
@@ -5493,7 +5514,7 @@ async function emitAuthorityGraphHistoryAuditEvent(
     // include this detail-type at compile time. The contract for the
     // payload is documented above; the bus still accepts the shape.
     await emitGovernanceEvent(
-      'governance.authority-graph-history.config.changed' as never,
+      "governance.authority-graph-history.config.changed" as never,
       {
         previousValue,
         newValue,
@@ -5502,10 +5523,10 @@ async function emitAuthorityGraphHistoryAuditEvent(
         timestamp: new Date().toISOString(),
       } as never,
     );
-    return 'governance.authority-graph-history.config.changed';
+    return "governance.authority-graph-history.config.changed";
   } catch (err) {
     console.error(
-      'updateAuthorityGraphHistorySettings: audit event emit failed',
+      "updateAuthorityGraphHistorySettings: audit event emit failed",
       err,
     );
     return null;
@@ -5527,11 +5548,13 @@ async function updateAuthorityGraphHistorySettings(
   // surface clearly even when retention is also out of allowlist.
   assertAuthorityGraphHistoryAcknowledgement(input.acknowledgement);
   const captureMode = assertAuthorityGraphHistoryCaptureMode(input.captureMode);
-  const retentionDays = assertAuthorityGraphHistoryRetention(input.retentionDays);
+  const retentionDays = assertAuthorityGraphHistoryRetention(
+    input.retentionDays,
+  );
   const enabled = assertAuthorityGraphHistoryEnabled(input.enabled);
   const reason = normaliseAuthorityGraphHistoryReason(input.reason);
 
-  const env = process.env.ENVIRONMENT || 'unknown';
+  const env = process.env.ENVIRONMENT || "unknown";
   const previousValue = await readAuthorityGraphHistorySettingsRaw(env);
   const newValue: AuthorityGraphHistorySettingsRaw = {
     enabled,
@@ -5564,7 +5587,7 @@ async function updateAuthorityGraphHistorySettings(
     new PutParameterCommand({
       Name: parameterName,
       Value: JSON.stringify(newValue),
-      Type: 'String',
+      Type: "String",
       Overwrite: true,
     }),
   );
@@ -5693,16 +5716,16 @@ function coerceSnapshotArray(value: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(value)) {
     return value.filter(
       (v): v is Record<string, unknown> =>
-        v !== null && typeof v === 'object' && !Array.isArray(v),
+        v !== null && typeof v === "object" && !Array.isArray(v),
     );
   }
-  if (typeof value === 'string' && value.length > 0) {
+  if (typeof value === "string" && value.length > 0) {
     try {
       const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) {
         return parsed.filter(
           (v): v is Record<string, unknown> =>
-            v !== null && typeof v === 'object' && !Array.isArray(v),
+            v !== null && typeof v === "object" && !Array.isArray(v),
         );
       }
     } catch {
@@ -5722,20 +5745,20 @@ function projectAuthorityUnitForSnapshot(
   row: Record<string, unknown>,
   snapshotTimestampSec: number,
 ): AuthorityUnitProjected | null {
-  const unitId = typeof row.unitId === 'string' ? row.unitId : '';
-  const agentId = typeof row.agentId === 'string' ? row.agentId : '';
+  const unitId = typeof row.unitId === "string" ? row.unitId : "";
+  const agentId = typeof row.agentId === "string" ? row.agentId : "";
   if (unitId.length === 0 || agentId.length === 0) {
     console.warn(
-      'projectAuthorityUnitForSnapshot: skipping malformed row',
+      "projectAuthorityUnitForSnapshot: skipping malformed row",
       JSON.stringify({ keys: Object.keys(row) }),
     );
     return null;
   }
   const expiryRaw = row.expiryTimestamp;
   const expiryTimestamp =
-    typeof expiryRaw === 'number'
+    typeof expiryRaw === "number"
       ? expiryRaw
-      : typeof expiryRaw === 'string' && expiryRaw.length > 0
+      : typeof expiryRaw === "string" && expiryRaw.length > 0
         ? Number(expiryRaw)
         : null;
   const revoked = row.revoked === true;
@@ -5752,7 +5775,7 @@ function projectAuthorityUnitForSnapshot(
     agentId,
     scope: projectAuthorityScope(row.scope),
     delegationSource:
-      typeof row.delegationSource === 'string' ? row.delegationSource : null,
+      typeof row.delegationSource === "string" ? row.delegationSource : null,
     canRedelegate: row.canRedelegate === true,
     expiryTimestamp:
       expiryTimestamp !== null && !Number.isNaN(expiryTimestamp)
@@ -5760,11 +5783,11 @@ function projectAuthorityUnitForSnapshot(
         : null,
     revoked,
     riskRating:
-      typeof row.riskRating === 'string' && row.riskRating.length > 0
+      typeof row.riskRating === "string" && row.riskRating.length > 0
         ? row.riskRating
-        : 'low',
+        : "low",
     registryId:
-      typeof row.registryId === 'string' && row.registryId.length > 0
+      typeof row.registryId === "string" && row.registryId.length > 0
         ? row.registryId
         : null,
     isValid,
@@ -5775,20 +5798,22 @@ async function listAuthorityGraphSnapshots(
   event: AppSyncResolverEvent<ListAuthorityGraphSnapshotsArgs>,
 ): Promise<AuthorityGraphSnapshotSummaryProjected[]> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.GRAPH_SNAPSHOTS_TABLE;
   if (!tableName) {
-    throw new Error('GRAPH_SNAPSHOTS_TABLE env var is not set');
+    throw new Error("GRAPH_SNAPSHOTS_TABLE env var is not set");
   }
 
   const args = (event.arguments ?? {}) as ListAuthorityGraphSnapshotsArgs;
   const nowSec = Math.floor(Date.now() / 1000);
   const untilTs =
-    typeof args.untilTs === 'number' && args.untilTs > 0 ? args.untilTs : nowSec;
+    typeof args.untilTs === "number" && args.untilTs > 0
+      ? args.untilTs
+      : nowSec;
   let sinceTs =
-    typeof args.sinceTs === 'number' && args.sinceTs > 0
+    typeof args.sinceTs === "number" && args.sinceTs > 0
       ? args.sinceTs
       : untilTs - WAVE4EB_LIST_DEFAULT_WINDOW_SECONDS;
   if (sinceTs > untilTs) {
@@ -5818,13 +5843,13 @@ async function listAuthorityGraphSnapshots(
   do {
     const cmd = new QueryCommand({
       TableName: tableName,
-      IndexName: 'kind-timestamp-index',
-      KeyConditionExpression: 'kind = :full AND #ts BETWEEN :since AND :until',
-      ExpressionAttributeNames: { '#ts': 'timestamp' },
+      IndexName: "kind-timestamp-index",
+      KeyConditionExpression: "kind = :full AND #ts BETWEEN :since AND :until",
+      ExpressionAttributeNames: { "#ts": "timestamp" },
       ExpressionAttributeValues: {
-        ':full': 'full',
-        ':since': sinceTs,
-        ':until': untilTs,
+        ":full": "full",
+        ":since": sinceTs,
+        ":until": untilTs,
       },
       ...(lastEvaluatedKey ? { ExclusiveStartKey: lastEvaluatedKey } : {}),
     });
@@ -5852,24 +5877,23 @@ async function listAuthorityGraphSnapshots(
 
   const summaries: AuthorityGraphSnapshotSummaryProjected[] = [];
   for (const row of items) {
-    const snapshotId =
-      typeof row.snapshotId === 'string' ? row.snapshotId : '';
+    const snapshotId = typeof row.snapshotId === "string" ? row.snapshotId : "";
     if (snapshotId.length === 0) continue;
     const tsRaw = row.timestamp;
     const timestamp =
-      typeof tsRaw === 'number'
+      typeof tsRaw === "number"
         ? tsRaw
-        : typeof tsRaw === 'string'
+        : typeof tsRaw === "string"
           ? Number(tsRaw)
           : 0;
     const expRaw = row.expiresAt;
     const expiresAt =
-      typeof expRaw === 'number'
+      typeof expRaw === "number"
         ? expRaw
-        : typeof expRaw === 'string'
+        : typeof expRaw === "string"
           ? Number(expRaw)
           : 0;
-    const kind = typeof row.kind === 'string' ? row.kind : 'full';
+    const kind = typeof row.kind === "string" ? row.kind : "full";
     const partial = row.partial === true;
     summaries.push({
       snapshotId,
@@ -5901,19 +5925,18 @@ async function getAuthorityGraphSnapshot(
   event: AppSyncResolverEvent<GetAuthorityGraphSnapshotArgs>,
 ): Promise<AuthorityGraphSnapshotProjected | null> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.GRAPH_SNAPSHOTS_TABLE;
   if (!tableName) {
-    throw new Error('GRAPH_SNAPSHOTS_TABLE env var is not set');
+    throw new Error("GRAPH_SNAPSHOTS_TABLE env var is not set");
   }
 
   const args = (event.arguments ?? {}) as GetAuthorityGraphSnapshotArgs;
-  const snapshotId =
-    typeof args.snapshotId === 'string' ? args.snapshotId : '';
+  const snapshotId = typeof args.snapshotId === "string" ? args.snapshotId : "";
   if (snapshotId.length === 0) {
-    throw new Error('snapshotId is required');
+    throw new Error("snapshotId is required");
   }
 
   const cached = getAuthorityGraphSnapshotCache.get(snapshotId);
@@ -5929,8 +5952,8 @@ async function getAuthorityGraphSnapshot(
   const result = await dynamodb.send(
     new QueryCommand({
       TableName: tableName,
-      KeyConditionExpression: 'snapshotId = :id',
-      ExpressionAttributeValues: { ':id': snapshotId },
+      KeyConditionExpression: "snapshotId = :id",
+      ExpressionAttributeValues: { ":id": snapshotId },
       Limit: 1,
     }),
   );
@@ -5945,19 +5968,19 @@ async function getAuthorityGraphSnapshot(
 
   const tsRaw = item.timestamp;
   const timestamp =
-    typeof tsRaw === 'number'
+    typeof tsRaw === "number"
       ? tsRaw
-      : typeof tsRaw === 'string'
+      : typeof tsRaw === "string"
         ? Number(tsRaw)
         : 0;
   const expRaw = item.expiresAt;
   const expiresAt =
-    typeof expRaw === 'number'
+    typeof expRaw === "number"
       ? expRaw
-      : typeof expRaw === 'string'
+      : typeof expRaw === "string"
         ? Number(expRaw)
         : 0;
-  const kind = typeof item.kind === 'string' ? item.kind : 'full';
+  const kind = typeof item.kind === "string" ? item.kind : "full";
   const partial = item.partial === true;
 
   const unitsRaw = coerceSnapshotArray(item.authorityUnits);
@@ -6017,12 +6040,14 @@ async function getAuthorityGraphSnapshot(
 // the ledger. Page result is hard-capped at 5000 items; truncated:true
 // signals the operator to tighten the window.
 
-const WAVE5A_WINDOW_ALLOWLIST: ReadonlySet<number> = new Set([7, 14, 30, 60, 90]);
+const WAVE5A_WINDOW_ALLOWLIST: ReadonlySet<number> = new Set([
+  7, 14, 30, 60, 90,
+]);
 const WAVE5A_DEFAULT_WINDOW_DAYS = 30;
 const WAVE5A_SCAN_HARD_CAP = 5000;
 const WAVE5A_CACHE_TTL_MS = 5 * 60_000;
-const WAVE5A_SCOPE_PRE_FILTER = 'worker-pre-filter';
-const WAVE5A_SCOPE_TOOL_HANDLER = 'worker-tool-handler';
+const WAVE5A_SCOPE_PRE_FILTER = "worker-pre-filter";
+const WAVE5A_SCOPE_TOOL_HANDLER = "worker-tool-handler";
 const WAVE5A_RECOMMENDATION_THRESHOLD_HIGH = 0.9;
 const WAVE5A_RECOMMENDATION_THRESHOLD_LOW = 0.2;
 
@@ -6078,35 +6103,35 @@ export function computeD4Recommendation(
   counts: D4RetrospectiveCounts,
   insufficientEvidence: boolean,
 ): string {
-  if (insufficientEvidence) return 'deferred-90d';
+  if (insufficientEvidence) return "deferred-90d";
   const denom = Math.max(
     counts.distinctPreFilter,
     counts.distinctToolHandler,
     1,
   );
   const overlapRatio = counts.overlap / denom;
-  if (overlapRatio > WAVE5A_RECOMMENDATION_THRESHOLD_HIGH) return 're-debate';
+  if (overlapRatio > WAVE5A_RECOMMENDATION_THRESHOLD_HIGH) return "re-debate";
   if (overlapRatio < WAVE5A_RECOMMENDATION_THRESHOLD_LOW) {
-    return 'keep-both-strong-evidence';
+    return "keep-both-strong-evidence";
   }
-  return 'keep-both';
+  return "keep-both";
 }
 
 async function getD4RetrospectiveReport(
   event: AppSyncResolverEvent<D4RetrospectiveArgs>,
 ): Promise<D4RetrospectiveReport> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
   if (!tableName) {
-    throw new Error('GOVERNANCE_LEDGER_TABLE env var is not set');
+    throw new Error("GOVERNANCE_LEDGER_TABLE env var is not set");
   }
 
   const args = (event.arguments ?? {}) as D4RetrospectiveArgs;
   const requestedWindow =
-    typeof args.windowDays === 'number' && Number.isFinite(args.windowDays)
+    typeof args.windowDays === "number" && Number.isFinite(args.windowDays)
       ? args.windowDays
       : WAVE5A_DEFAULT_WINDOW_DAYS;
   if (!WAVE5A_WINDOW_ALLOWLIST.has(requestedWindow)) {
@@ -6141,15 +6166,15 @@ async function getD4RetrospectiveReport(
     const cmd = new ScanCommand({
       TableName: tableName,
       FilterExpression:
-        'decision = :deny AND scope_evaluated IN (:preFilter, :toolHandler) ' +
-        'AND #ts BETWEEN :since AND :until',
-      ExpressionAttributeNames: { '#ts': 'timestamp' },
+        "decision = :deny AND scope_evaluated IN (:preFilter, :toolHandler) " +
+        "AND #ts BETWEEN :since AND :until",
+      ExpressionAttributeNames: { "#ts": "timestamp" },
       ExpressionAttributeValues: {
-        ':deny': 'deny',
-        ':preFilter': WAVE5A_SCOPE_PRE_FILTER,
-        ':toolHandler': WAVE5A_SCOPE_TOOL_HANDLER,
-        ':since': sinceTs,
-        ':until': untilTs,
+        ":deny": "deny",
+        ":preFilter": WAVE5A_SCOPE_PRE_FILTER,
+        ":toolHandler": WAVE5A_SCOPE_TOOL_HANDLER,
+        ":since": sinceTs,
+        ":until": untilTs,
       },
       ...(lastEvaluatedKey ? { ExclusiveStartKey: lastEvaluatedKey } : {}),
     });
@@ -6162,11 +6187,11 @@ async function getD4RetrospectiveReport(
       }
       scanned++;
       const workflowId =
-        typeof row.workflow_id === 'string' ? row.workflow_id : '';
-      const reason = typeof row.reason === 'string' ? row.reason : '';
+        typeof row.workflow_id === "string" ? row.workflow_id : "";
+      const reason = typeof row.reason === "string" ? row.reason : "";
       const key = `${workflowId}|${reason}`;
       const scope =
-        typeof row.scope_evaluated === 'string' ? row.scope_evaluated : '';
+        typeof row.scope_evaluated === "string" ? row.scope_evaluated : "";
       if (scope === WAVE5A_SCOPE_PRE_FILTER) {
         preFilter.add(key);
         preFilterTotal++;
@@ -6184,9 +6209,9 @@ async function getD4RetrospectiveReport(
   if (truncated) {
     console.warn(
       `getD4RetrospectiveReport: truncated at ${WAVE5A_SCAN_HARD_CAP} rows ` +
-        'for windowDays=' +
+        "for windowDays=" +
         windowDays +
-        '. Tighten the window for a complete view.',
+        ". Tighten the window for a complete view.",
     );
   }
 
@@ -6253,9 +6278,9 @@ async function getD4RetrospectiveReport(
 // empty fields + a contextual note rather than crashing the report.
 
 const WAVE5C1_RESOURCE_TYPE_ALLOWLIST: ReadonlySet<string> = new Set([
-  'agent',
-  'datastore',
-  'integration',
+  "agent",
+  "datastore",
+  "integration",
 ]);
 const WAVE5C1_RESOURCE_ID_MAX_LENGTH = 256;
 const WAVE5C1_CACHE_TTL_MS = 5 * 60_000;
@@ -6304,9 +6329,9 @@ export function __resetTrustPathCacheForTest(): void {
 }
 
 const SCOPE_ROLE_PREFIX: Record<string, string> = {
-  datastore: 'citadel-ds-',
-  integration: 'citadel-int-',
-  agent: 'citadel-agent-',
+  datastore: "citadel-ds-",
+  integration: "citadel-int-",
+  agent: "citadel-agent-",
 };
 
 /**
@@ -6318,15 +6343,18 @@ const SCOPE_ROLE_PREFIX: Record<string, string> = {
  * in any env var natively. When both fail, the caller gets a single
  * UNKNOWN hop with the documented note string.
  */
-function resolveLambdaExecRoleArn(): { arn: string | null; note: string | null } {
+function resolveLambdaExecRoleArn(): {
+  arn: string | null;
+  note: string | null;
+} {
   const direct = process.env.LAMBDA_EXEC_ROLE_ARN;
-  if (typeof direct === 'string' && direct.length > 0) {
+  if (typeof direct === "string" && direct.length > 0) {
     return { arn: direct, note: null };
   }
   // No reliable env-var fallback in vanilla Lambda; return UNKNOWN.
   return {
     arn: null,
-    note: 'Lambda execution role unresolvable in this environment',
+    note: "Lambda execution role unresolvable in this environment",
   };
 }
 
@@ -6357,7 +6385,7 @@ async function loadTrustPathResource(
   resourceType: string,
   resourceId: string,
 ): Promise<Record<string, unknown> | null> {
-  if (resourceType === 'datastore') {
+  if (resourceType === "datastore") {
     const tableName = process.env.DATASTORES_TABLE;
     if (!tableName) return null;
     try {
@@ -6369,38 +6397,39 @@ async function loadTrustPathResource(
       );
       return (result.Item as Record<string, unknown> | undefined) ?? null;
     } catch (err) {
-      console.warn('getTrustPath: datastore lookup failed', err);
+      console.warn("getTrustPath: datastore lookup failed", err);
       return null;
     }
   }
-  if (resourceType === 'integration') {
+  if (resourceType === "integration") {
     const tableName = process.env.INTEGRATIONS_TABLE;
     if (!tableName) return null;
     try {
       const result = await dynamodb.send(
         new QueryCommand({
           TableName: tableName,
-          IndexName: 'IntegrationIdIndex',
-          KeyConditionExpression: 'integrationId = :id',
-          ExpressionAttributeValues: { ':id': resourceId },
+          IndexName: "IntegrationIdIndex",
+          KeyConditionExpression: "integrationId = :id",
+          ExpressionAttributeValues: { ":id": resourceId },
         }),
       );
-      const items = (result.Items as Array<Record<string, unknown>> | undefined) ?? [];
+      const items =
+        (result.Items as Array<Record<string, unknown>> | undefined) ?? [];
       return items.length > 0 ? items[0] : null;
     } catch (err) {
-      console.warn('getTrustPath: integration lookup failed', err);
+      console.warn("getTrustPath: integration lookup failed", err);
       return null;
     }
   }
-  if (resourceType === 'agent') {
+  if (resourceType === "agent") {
     const registryService = getRegistryServiceForChecks();
     if (!registryService) return null;
     try {
-      const record = await registryService.getResource('agent', resourceId);
+      const record = await registryService.getResource("agent", resourceId);
       if (!record) return null;
       return record as unknown as Record<string, unknown>;
     } catch (err) {
-      console.warn('getTrustPath: agent lookup failed', err);
+      console.warn("getTrustPath: agent lookup failed", err);
       return null;
     }
   }
@@ -6411,14 +6440,13 @@ async function getTrustPath(
   event: AppSyncResolverEvent<GetTrustPathArgs>,
 ): Promise<TrustPathReportProjected> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Forbidden: admin required');
+    throw new Error("Forbidden: admin required");
   }
 
   const args = (event.arguments ?? {}) as GetTrustPathArgs;
   const resourceType =
-    typeof args.resourceType === 'string' ? args.resourceType : '';
-  const resourceId =
-    typeof args.resourceId === 'string' ? args.resourceId : '';
+    typeof args.resourceType === "string" ? args.resourceType : "";
+  const resourceId = typeof args.resourceId === "string" ? args.resourceId : "";
 
   if (!WAVE5C1_RESOURCE_TYPE_ALLOWLIST.has(resourceType)) {
     throw new Error(
@@ -6426,7 +6454,7 @@ async function getTrustPath(
     );
   }
   if (resourceId.length === 0) {
-    throw new Error('Invalid resourceId: must be a non-empty string');
+    throw new Error("Invalid resourceId: must be a non-empty string");
   }
   if (resourceId.length > WAVE5C1_RESOURCE_ID_MAX_LENGTH) {
     throw new Error(
@@ -6437,13 +6465,13 @@ async function getTrustPath(
   // Resolve the account id once (used both in the cache key and in the
   // scoped role ARN construction). A failure here is fatal — without
   // an account id we can't produce a meaningful chain.
-  let accountId = '';
+  let accountId = "";
   try {
     const ident = await sts.send(new GetCallerIdentityCommand({}));
-    accountId = typeof ident.Account === 'string' ? ident.Account : '';
+    accountId = typeof ident.Account === "string" ? ident.Account : "";
   } catch (err) {
-    console.error('getTrustPath: GetCallerIdentity failed', err);
-    throw new Error('Unable to resolve account identity for trust path');
+    console.error("getTrustPath: GetCallerIdentity failed", err);
+    throw new Error("Unable to resolve account identity for trust path");
   }
 
   const cacheKey = `${resourceType}|${resourceId}|${accountId}`;
@@ -6459,15 +6487,15 @@ async function getTrustPath(
   const { arn: lambdaArn, note: lambdaNote } = resolveLambdaExecRoleArn();
   if (lambdaNote) notes.push(lambdaNote);
   if (lambdaArn) {
-    const hop = await buildHop(lambdaArn, 'lambda', notes);
+    const hop = await buildHop(lambdaArn, "lambda", notes);
     hops.push(hop);
   } else {
     // Emit a synthetic UNKNOWN hop so the chain has at least one
     // entry — the frontend renders a hop card with the note text.
     hops.push({
-      arn: 'unknown',
-      name: 'unknown',
-      scope: 'lambda',
+      arn: "unknown",
+      name: "unknown",
+      scope: "lambda",
       trustPolicyPrincipals: [],
       inlinePolicy: [],
       inlinePolicyName: null,
@@ -6497,7 +6525,7 @@ async function getTrustPath(
   // --- Optional Hop 2: cross-account role -----------------------------
   const crossAccountRoleArn = extractCrossAccountRoleArn(record);
   if (crossAccountRoleArn) {
-    const hop = await buildHop(crossAccountRoleArn, 'cross-account', notes);
+    const hop = await buildHop(crossAccountRoleArn, "cross-account", notes);
     hops.push(hop);
   }
 
@@ -6575,22 +6603,21 @@ async function getResourceIamDrift(
   // resolver uses; PolicyScope is a strict subset so the cast below is
   // safe.
   const resourceType =
-    typeof args.resourceType === 'string' ? args.resourceType : '';
+    typeof args.resourceType === "string" ? args.resourceType : "";
   if (
-    resourceType !== 'agent' &&
-    resourceType !== 'datastore' &&
-    resourceType !== 'integration'
+    resourceType !== "agent" &&
+    resourceType !== "datastore" &&
+    resourceType !== "integration"
   ) {
     throw new Error(`Invalid resourceType: ${resourceType}`);
   }
 
-  const resourceId =
-    typeof args.resourceId === 'string' ? args.resourceId : '';
+  const resourceId = typeof args.resourceId === "string" ? args.resourceId : "";
   if (resourceId.length === 0) {
-    throw new Error('Invalid resourceId: must be a non-empty string');
+    throw new Error("Invalid resourceId: must be a non-empty string");
   }
   if (resourceId.length > 256) {
-    throw new Error('Invalid resourceId: length must be <= 256');
+    throw new Error("Invalid resourceId: length must be <= 256");
   }
 
   const notes: string[] = [];
@@ -6603,7 +6630,7 @@ async function getResourceIamDrift(
     return {
       resourceType,
       resourceId,
-      scopedRoleArn: '',
+      scopedRoleArn: "",
       generatedAt: Math.floor(Date.now() / 1000),
       hasDrift: false,
       totalExcess: 0,
@@ -6616,22 +6643,22 @@ async function getResourceIamDrift(
   // Account context (mirrors getTrustPath). A failure here is fatal
   // because we cannot construct a meaningful scoped role ARN without
   // the account id.
-  let accountId = '';
+  let accountId = "";
   try {
     const ident = await sts.send(new GetCallerIdentityCommand({}));
-    accountId = typeof ident.Account === 'string' ? ident.Account : '';
+    accountId = typeof ident.Account === "string" ? ident.Account : "";
   } catch (err) {
-    console.error('getResourceIamDrift: GetCallerIdentity failed', err);
-    throw new Error('Unable to resolve account identity for IAM drift report');
+    console.error("getResourceIamDrift: GetCallerIdentity failed", err);
+    throw new Error("Unable to resolve account identity for IAM drift report");
   }
-  const region = process.env.AWS_REGION ?? 'us-east-1';
+  const region = process.env.AWS_REGION ?? "us-east-1";
 
   const scope: PolicyScope =
-    resourceType === 'agent'
-      ? 'agent'
-      : resourceType === 'datastore'
-        ? 'datastore'
-        : 'integration';
+    resourceType === "agent"
+      ? "agent"
+      : resourceType === "datastore"
+        ? "datastore"
+        : "integration";
   const roleName = PolicyManager.getRoleName(resourceId, scope);
   const scopedRoleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
 
@@ -6642,14 +6669,14 @@ async function getResourceIamDrift(
     const policyOut = await iam.send(
       new GetRolePolicyCommand({
         RoleName: roleName,
-        PolicyName: 'DataStoreAccess',
+        PolicyName: "DataStoreAccess",
       }),
     );
     const documentEncoded = policyOut.PolicyDocument;
-    if (typeof documentEncoded === 'string' && documentEncoded.length > 0) {
+    if (typeof documentEncoded === "string" && documentEncoded.length > 0) {
       // IAM may URL-encode the document — decode unless it already
       // looks like raw JSON.
-      const documentJson = documentEncoded.trim().startsWith('{')
+      const documentJson = documentEncoded.trim().startsWith("{")
         ? documentEncoded
         : decodeURIComponent(documentEncoded);
       try {
@@ -6663,19 +6690,19 @@ async function getResourceIamDrift(
           const actionsRaw = stmt?.Action;
           const resourcesRaw = stmt?.Resource;
           const actions =
-            typeof actionsRaw === 'string'
+            typeof actionsRaw === "string"
               ? [actionsRaw]
               : Array.isArray(actionsRaw)
                 ? actionsRaw.filter(
-                    (a: unknown): a is string => typeof a === 'string',
+                    (a: unknown): a is string => typeof a === "string",
                   )
                 : [];
           const resources =
-            typeof resourcesRaw === 'string'
+            typeof resourcesRaw === "string"
               ? [resourcesRaw]
               : Array.isArray(resourcesRaw)
                 ? resourcesRaw.filter(
-                    (r: unknown): r is string => typeof r === 'string',
+                    (r: unknown): r is string => typeof r === "string",
                   )
                 : [];
           for (const r of resources) {
@@ -6690,7 +6717,7 @@ async function getResourceIamDrift(
           }
         }
         effectiveAvailable = true;
-      } catch (err) {
+      } catch {
         notes.push(
           `Inline policy DataStoreAccess on ${scopedRoleArn} did not parse as JSON`,
         );
@@ -6703,13 +6730,11 @@ async function getResourceIamDrift(
   } catch (err) {
     // NoSuchEntity, AccessDenied, etc. all collapse to the same
     // operator-facing note. The detail is logged for postmortem.
-    console.warn('getResourceIamDrift: GetRolePolicy failed', {
+    console.warn("getResourceIamDrift: GetRolePolicy failed", {
       roleName,
       error: (err as Error)?.message,
     });
-    notes.push(
-      `Inline policy DataStoreAccess not present on ${scopedRoleArn}`,
-    );
+    notes.push(`Inline policy DataStoreAccess not present on ${scopedRoleArn}`);
   }
 
   if (!effectiveAvailable) {
@@ -6730,7 +6755,7 @@ async function getResourceIamDrift(
   const declaredByResource = new Map<string, Set<string>>();
   const recordRecord = resource as Record<string, unknown>;
   const resourceTypeKey =
-    typeof recordRecord.type === 'string' ? recordRecord.type : '';
+    typeof recordRecord.type === "string" ? recordRecord.type : "";
   const resourceConfig =
     (recordRecord.config as Record<string, unknown> | undefined) ?? {};
   try {
@@ -6833,125 +6858,125 @@ export async function handler(
   const fieldName = event.info?.fieldName;
 
   switch (fieldName) {
-    case 'getGovernanceMode':
+    case "getGovernanceMode":
       return getGovernanceMode();
-    case 'listGovernanceFindings':
+    case "listGovernanceFindings":
       return listGovernanceFindings(
         (event.arguments as ListFindingsArgs | undefined) ?? {},
       );
-    case 'getGovernanceFinding':
+    case "getGovernanceFinding":
       return getGovernanceFinding(event.arguments as unknown as GetFindingArgs);
-    case 'getDecisionTrace':
+    case "getDecisionTrace":
       return getDecisionTrace(
         event.arguments as unknown as GetDecisionTraceArgs,
       );
-    case 'getReconcilerStatus':
+    case "getReconcilerStatus":
       return getReconcilerStatus(event);
-    case 'getRolloutReadiness': {
+    case "getRolloutReadiness": {
       const report = await getRolloutReadiness(event);
       return { ...report, generatedAt: Number(report.generatedAt) };
     }
-    case 'getMismatchHeatmap':
+    case "getMismatchHeatmap":
       return getMismatchHeatmap(
         event as unknown as AppSyncResolverEvent<MismatchHeatmapArgs>,
       );
-    case 'getEscalationMetricSeries':
+    case "getEscalationMetricSeries":
       return getEscalationMetricSeries(
         event as unknown as AppSyncResolverEvent<EscalationMetricArgs>,
       );
-    case 'setGovernanceMode':
+    case "setGovernanceMode":
       return setGovernanceMode(
         event as unknown as AppSyncResolverEvent<SetGovernanceModeArgs>,
       );
-    case 'markReadinessCheckVerified':
+    case "markReadinessCheckVerified":
       return markReadinessCheckVerified(
         event as unknown as AppSyncResolverEvent<MarkReadinessCheckVerifiedArgs>,
       );
-    case 'publishGovernanceFinding':
+    case "publishGovernanceFinding":
       return publishGovernanceFinding(
         event as unknown as AppSyncResolverEvent<PublishGovernanceFindingArgs>,
       );
-    case 'listAuthorityUnits':
+    case "listAuthorityUnits":
       return listAuthorityUnits(
         event as unknown as AppSyncResolverEvent<ListAuthorityUnitsArgs>,
       );
-    case 'listCompositionContracts':
+    case "listCompositionContracts":
       return listCompositionContracts(event);
-    case 'getRevokeImpact':
+    case "getRevokeImpact":
       return getRevokeImpact(
         event as unknown as AppSyncResolverEvent<GetRevokeImpactArgs>,
       );
-    case 'listConstitutionalLayers':
+    case "listConstitutionalLayers":
       return listConstitutionalLayers(event);
-    case 'getConstitutionalRuleStats':
+    case "getConstitutionalRuleStats":
       return getConstitutionalRuleStats(
         event as unknown as AppSyncResolverEvent<GetConstitutionalRuleStatsArgs>,
       );
-    case 'listCaseLaw':
+    case "listCaseLaw":
       return listCaseLaw(
         event as unknown as AppSyncResolverEvent<ListCaseLawArgs>,
       );
-    case 'addConstitutionalRule':
+    case "addConstitutionalRule":
       return addConstitutionalRule(
         event as unknown as AppSyncResolverEvent<{
           input: AddConstitutionalRuleInput;
         }>,
       );
-    case 'updateConstitutionalRule':
+    case "updateConstitutionalRule":
       return updateConstitutionalRule(
         event as unknown as AppSyncResolverEvent<{
           input: UpdateConstitutionalRuleInput;
         }>,
       );
-    case 'deleteConstitutionalRule':
+    case "deleteConstitutionalRule":
       return deleteConstitutionalRule(
         event as unknown as AppSyncResolverEvent<{
           input: DeleteConstitutionalRuleInput;
         }>,
       );
-    case 'revokeCaseLaw':
+    case "revokeCaseLaw":
       return revokeCaseLaw(
         event as unknown as AppSyncResolverEvent<{
           input: RevokeCaseLawInput;
         }>,
       );
-    case 'unrevokeCaseLaw':
+    case "unrevokeCaseLaw":
       return unrevokeCaseLaw(
         event as unknown as AppSyncResolverEvent<{
           input: UnrevokeCaseLawInput;
         }>,
       );
-    case 'updateCaseLawPrecedence':
+    case "updateCaseLawPrecedence":
       return updateCaseLawPrecedence(
         event as unknown as AppSyncResolverEvent<{
           input: UpdateCaseLawPrecedenceInput;
         }>,
       );
-    case 'getAuthorityGraphHistorySettings':
+    case "getAuthorityGraphHistorySettings":
       return getAuthorityGraphHistorySettings(event);
-    case 'updateAuthorityGraphHistorySettings':
+    case "updateAuthorityGraphHistorySettings":
       return updateAuthorityGraphHistorySettings(
         event as unknown as AppSyncResolverEvent<{
           input: UpdateAuthorityGraphHistorySettingsInput;
         }>,
       );
-    case 'listAuthorityGraphSnapshots':
+    case "listAuthorityGraphSnapshots":
       return listAuthorityGraphSnapshots(
         event as unknown as AppSyncResolverEvent<ListAuthorityGraphSnapshotsArgs>,
       );
-    case 'getAuthorityGraphSnapshot':
+    case "getAuthorityGraphSnapshot":
       return getAuthorityGraphSnapshot(
         event as unknown as AppSyncResolverEvent<GetAuthorityGraphSnapshotArgs>,
       );
-    case 'getD4RetrospectiveReport':
+    case "getD4RetrospectiveReport":
       return getD4RetrospectiveReport(
         event as unknown as AppSyncResolverEvent<D4RetrospectiveArgs>,
       );
-    case 'getTrustPath':
+    case "getTrustPath":
       return getTrustPath(
         event as unknown as AppSyncResolverEvent<GetTrustPathArgs>,
       );
-    case 'getResourceIamDrift':
+    case "getResourceIamDrift":
       return getResourceIamDrift(
         event,
         event.arguments as unknown as GetResourceIamDriftArgs,

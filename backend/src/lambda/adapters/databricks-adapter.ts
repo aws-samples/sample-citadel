@@ -1,53 +1,81 @@
 import {
-  ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod,
-  RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult,
-} from '../../adapters/base';
-import { ProvisioningError, ConnectionError, PermissionError, ValidationError } from './errors';
-import { SdkError } from './sdk-types';
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import {
+  ProvisioningError,
+  ConnectionError,
+  PermissionError,
+  ValidationError,
+} from "./errors";
+import { SdkError } from "./sdk-types";
 
 /** Constructor type of DBSQLClient, resolved from the module's type surface. */
-type DBSQLClientCtor = (typeof import('@databricks/sql'))['DBSQLClient'];
+type DBSQLClientCtor = (typeof import("@databricks/sql"))["DBSQLClient"];
 
 async function getDatabricksSQL(): Promise<DBSQLClientCtor> {
   try {
-    const mod = await import('@databricks/sql');
+    const mod = await import("@databricks/sql");
     return (mod.DBSQLClient ??
-      (mod as unknown as { default?: { DBSQLClient?: DBSQLClientCtor } }).default?.DBSQLClient) as DBSQLClientCtor;
+      (mod as unknown as { default?: { DBSQLClient?: DBSQLClientCtor } })
+        .default?.DBSQLClient) as DBSQLClientCtor;
   } catch {
-    throw new ConnectionError('@databricks/sql is not installed. Install it to use the Databricks adapter.');
+    throw new ConnectionError(
+      "@databricks/sql is not installed. Install it to use the Databricks adapter.",
+    );
   }
 }
 
 export class DatabricksAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
-  readonly spec: ConnectorSpec = { type: 'DATABRICKS', provider: 'Databricks', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['serverHostname'], optional: [], ssmParameters: [] } };
-  private readonly kind = 'databricks';
+  readonly category: ConnectorCategory = "datastore";
+  readonly spec: ConnectorSpec = {
+    type: "DATABRICKS",
+    provider: "Databricks",
+    category: "datastore",
+    authentication: {
+      method: AuthenticationMethod.IAM_ROLE,
+      fields: [],
+      secretStructure: {},
+    },
+    configuration: {
+      required: ["serverHostname"],
+      optional: [],
+      ssmParameters: [],
+    },
+  };
+  private readonly kind = "databricks";
 
   requiredPolicies(
     _config: Record<string, unknown>,
     _accountId: string,
-    _region: string
+    _region: string,
   ): RequiredPolicies {
     return { provision: [], connect: [] };
   }
 
   async provision(
     _config: Record<string, unknown>,
-    _credentials?: Record<string, unknown>
+    _credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
     throw new ProvisioningError(
-      `Provisioning is not supported for external ${this.kind} data stores`
+      `Provisioning is not supported for external ${this.kind} data stores`,
     );
   }
 
   async connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
     const result = await this.testConnection(config, credentials);
     if (!result.success) {
       throw new ConnectionError(
-        `Failed to connect to Databricks: ${result.message}`
+        `Failed to connect to Databricks: ${result.message}`,
       );
     }
   }
@@ -58,19 +86,23 @@ export class DatabricksAdapter implements ConnectorAdapter {
 
   async testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     if (!config.host) {
-      throw new ValidationError('Missing required Databricks config field: host');
+      throw new ValidationError(
+        "Missing required Databricks config field: host",
+      );
     }
     if (!config.httpPath) {
-      throw new ValidationError('Missing required Databricks config field: httpPath');
+      throw new ValidationError(
+        "Missing required Databricks config field: httpPath",
+      );
     }
 
     const token = (credentials?.token ?? config.token) as string | undefined;
     if (!token) {
       throw new ValidationError(
-        'Missing required Databricks credential: token'
+        "Missing required Databricks credential: token",
       );
     }
 
@@ -81,7 +113,13 @@ export class DatabricksAdapter implements ConnectorAdapter {
       await client.connect({
         host: config.host as string,
         path: config.httpPath as string,
+        // v2: personal-access-token auth is now one of several authType variants;
+        // state it explicitly rather than relying on the default.
+        authType: "access-token",
         token,
+        // v2 ships driver telemetry enabled by default (out-of-band HTTP POSTs).
+        // Disable it to preserve v1 behavior and avoid extra egress from Lambda.
+        telemetryEnabled: false,
       });
 
       await client.close();
@@ -97,31 +135,35 @@ export class DatabricksAdapter implements ConnectorAdapter {
     } catch (error) {
       const err = error as SdkError;
       if (client) {
-        try { await client.close(); } catch { /* ignore cleanup errors */ }
+        try {
+          await client.close();
+        } catch {
+          /* ignore cleanup errors */
+        }
       }
 
       if (
-        err.message?.includes('401') ||
-        err.message?.includes('Unauthorized') ||
-        err.message?.includes('authentication')
+        err.message?.includes("401") ||
+        err.message?.includes("Unauthorized") ||
+        err.message?.includes("authentication")
       ) {
         throw new PermissionError(
           `Authentication failed for Databricks workspace at ${config.host}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to connect to Databricks workspace at ${config.host}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }
 
   async getMetrics(
     _config: Record<string, unknown>,
-    _resourceArn?: string
+    _resourceArn?: string,
   ): Promise<MetricsResult> {
-    return { size: '0 MB', records: 0 };
+    return { size: "0 MB", records: 0 };
   }
 }

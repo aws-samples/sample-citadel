@@ -143,3 +143,24 @@ def test_phase8_no_self_retry_rule_covers_any_failure_not_just_sync():
     the retry'."""
     prompt = agent.SYSTEM_PROMPT
     assert "ANY post-fabrication tool result that is not a success" in prompt
+
+
+def test_phase8_offers_per_job_retry_while_siblings_build():
+    """Live defect (orchestration 6a5e4870…): the agent refused to retry two
+    FAILED agents because a stalled sibling kept the session 'in progress'.
+    PHASE 8 must state that agents build independently and that failed or
+    stalled agents can be rebuilt individually while siblings build."""
+    prompt = agent.SYSTEM_PROMPT
+    assert "retry_failed_fabrication" in prompt
+    assert "builds independently" in prompt
+    assert "stalled" in prompt
+    assert "Never refuse" in prompt
+
+
+def test_retry_tool_imported_and_registered():
+    src = inspect.getsource(agent)
+    assert hasattr(agent, "retry_failed_fabrication"), \
+        "retry_failed_fabrication not imported into agent.py"
+    # once in the import, once in the Agent tools list (plus prompt mentions)
+    assert src.count("retry_failed_fabrication") >= 2, \
+        "retry_failed_fabrication not registered in the tools list"

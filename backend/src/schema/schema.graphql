@@ -1,6 +1,6 @@
 type Query {
   getProject(id: ID!): Project
-  listProjects(filter: ProjectFilter): ProjectConnection
+  listProjects(filter: ProjectFilter, nextToken: String): ProjectConnection
   # ADR governance queries.
   getADR(adrId: ID!): ADR
   listADRsForProject(projectId: ID!): [ADR!]!
@@ -1701,6 +1701,12 @@ type RegistryAgentBinding @aws_iam @aws_cognito_user_pools {
   toolRestrictions: [String]
   modelOverride: String
   addedAt: AWSDateTime!
+  # Server-resolved display name of the bound agent (Registry record's
+  # `name` field), populated at read time by registry-agent-record-resolver
+  # so the frontend never has to resolve raw agentIds via N+1 lookups.
+  # Nullable — absent when the underlying agent lookup fails (e.g. deleted
+  # agent); callers fall back to `agentId` for display.
+  name: String
 }
 
 type RegistryAgentRecordPermission @aws_iam @aws_cognito_user_pools {
@@ -1753,6 +1759,13 @@ type RegistryAgentRecord @aws_iam @aws_cognito_user_pools {
   workflowIds: [String!]
   routingConfig: AWSJSON
   createdBy: String!
+  # Server-resolved display name for `createdBy` (Cognito given_name +
+  # family_name, or email, falling back to the raw userId on lookup
+  # failure). Resolved at read time by registry-agent-record-resolver via
+  # AdminGetUser — NEVER persisted, so it always reflects the current
+  # Cognito profile. Nullable for the same reason: a lookup failure leaves
+  # this unset and callers fall back to `createdBy`.
+  createdByName: String
   createdAt: AWSDateTime!
   updatedAt: AWSDateTime!
   version: Int!

@@ -5,7 +5,7 @@ from strands.tools import tool
 from tools.kb import s3_get, s3_put, load_json_from_s3, save_json_to_s3
 from tools.converse_utils import extract_text
 from tools.design import SECTION_KEY, RESOURCING_KEY, RESOURCING_INPUTS_KEY, SYSTEM_PROMPT, _assessment_summary, _rolling_summary
-from config import bedrock, AGENT_MODEL_ID
+from config import bedrock, get_agent_model_id
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), '..', 'templates')
 
@@ -48,7 +48,7 @@ Required content:
 Write in markdown. Start with ## {section['title']}. Be specific and concise — no filler."""
 
         response = bedrock.converse(
-            modelId=AGENT_MODEL_ID,
+            modelId=get_agent_model_id(),
             system=[{'text': SYSTEM_PROMPT}],
             messages=[{'role': 'user', 'content': [{'text': prompt}]}],
             inferenceConfig={'maxTokens': 4096},
@@ -202,7 +202,7 @@ Current config:
 {json.dumps(config)}"""
 
         response = bedrock.converse(
-            modelId=AGENT_MODEL_ID,
+            modelId=get_agent_model_id(),
             messages=[{'role': 'user', 'content': [{'text': patch_prompt}]}],
             inferenceConfig={'maxTokens': 256},
         )

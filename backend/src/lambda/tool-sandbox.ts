@@ -9,10 +9,10 @@
  * Requirement references: 7.3, 7.4, 7.5, 7.8, 10.9
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
-import * as vm from 'vm';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import * as vm from "vm";
 
 // --- Clients ---
 
@@ -57,7 +57,7 @@ export interface SandboxToolConfig {
  */
 type SandboxToolFn = (
   inputs: unknown,
-  credentials: Record<string, unknown>
+  credentials: Record<string, unknown>,
 ) => unknown;
 type SandboxToolExports = SandboxToolFn | { handler?: SandboxToolFn };
 
@@ -71,7 +71,7 @@ export interface ExecuteToolDeps {
   executeCode: (
     code: string,
     inputs: unknown,
-    credentials: Record<string, unknown>
+    credentials: Record<string, unknown>,
   ) => Promise<{ output: unknown }>;
 }
 
@@ -86,7 +86,7 @@ export interface ExecuteToolDeps {
 export function addToHistory<T>(
   history: T[],
   newEntry: T,
-  maxSize: number
+  maxSize: number,
 ): T[] {
   const updated = [...history, newEntry];
   if (updated.length > maxSize) {
@@ -114,7 +114,7 @@ export async function executeTool(
   inputs: unknown,
   orgId: string,
   deps: ExecuteToolDeps,
-  timeoutMs: number = 30000
+  timeoutMs: number = 30000,
 ): Promise<ToolTestResult> {
   const startTime = Date.now();
 
@@ -124,7 +124,7 @@ export async function executeTool(
     if (!toolConfig) {
       return {
         success: false,
-        error: 'Tool not found',
+        error: "Tool not found",
         executionTimeMs: Date.now() - startTime,
       };
     }
@@ -133,10 +133,10 @@ export async function executeTool(
     let code: string;
     try {
       code = await deps.loadToolCode(toolId);
-    } catch (err: unknown) {
+    } catch {
       return {
         success: false,
-        error: 'Tool code not found',
+        error: "Tool code not found",
         executionTimeMs: Date.now() - startTime,
       };
     }
@@ -160,9 +160,9 @@ export async function executeTool(
     const executionPromise = deps.executeCode(code, inputs, credentials);
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(
-        () => reject(new Error('Execution timed out after 30 seconds')),
-        timeoutMs
-      )
+        () => reject(new Error("Execution timed out after 30 seconds")),
+        timeoutMs,
+      ),
     );
 
     const result = await Promise.race([executionPromise, timeoutPromise]);
@@ -176,10 +176,10 @@ export async function executeTool(
     const elapsed = Date.now() - startTime;
 
     // Timeout error (Req 7.8)
-    if (err instanceof Error && err.message.includes('timed out')) {
+    if (err instanceof Error && err.message.includes("timed out")) {
       return {
         success: false,
-        error: 'Execution timed out after 30 seconds',
+        error: "Execution timed out after 30 seconds",
         executionTimeMs: Math.min(elapsed, timeoutMs + 500),
       };
     }
@@ -187,7 +187,8 @@ export async function executeTool(
     // Runtime error in tool code
     return {
       success: false,
-      error: (err instanceof Error ? err.message : '') || 'Unknown runtime error',
+      error:
+        (err instanceof Error ? err.message : "") || "Unknown runtime error",
       executionTimeMs: elapsed,
     };
   }
@@ -202,7 +203,7 @@ function defaultDeps(): ExecuteToolDeps {
         new GetCommand({
           TableName: TOOLS_CONFIG_TABLE,
           Key: { toolId },
-        })
+        }),
       );
       return result.Item || null;
     },
@@ -212,9 +213,9 @@ function defaultDeps(): ExecuteToolDeps {
         new GetObjectCommand({
           Bucket: TOOLS_BUCKET,
           Key: `tools/${toolId}/index.js`,
-        })
+        }),
       );
-      return (await result.Body?.transformToString()) || '';
+      return (await result.Body?.transformToString()) || "";
     },
 
     resolveCredentials: async (bindings) => {
@@ -232,13 +233,17 @@ function defaultDeps(): ExecuteToolDeps {
       return creds;
     },
 
-    executeCode: async (code: string, inputs: unknown, credentials: Record<string, unknown>) => {
+    executeCode: async (
+      code: string,
+      inputs: unknown,
+      credentials: Record<string, unknown>,
+    ) => {
       // Execute tool code in an isolated VM context
       const sandbox = {
         module: { exports: {} as SandboxToolExports },
         exports: {} as SandboxToolExports,
         require: () => {
-          throw new Error('require is not allowed in sandbox');
+          throw new Error("require is not allowed in sandbox");
         },
         console: { log: () => {}, error: () => {}, warn: () => {} },
       };
@@ -248,15 +253,15 @@ function defaultDeps(): ExecuteToolDeps {
       script.runInContext(context);
 
       const handler = sandbox.module.exports;
-      if (typeof handler === 'function') {
+      if (typeof handler === "function") {
         const output = await handler(inputs, credentials);
         return { output };
-      } else if (typeof handler.handler === 'function') {
+      } else if (typeof handler.handler === "function") {
         const output = await handler.handler(inputs, credentials);
         return { output };
       }
 
-      throw new Error('Tool code does not export a valid handler function');
+      throw new Error("Tool code does not export a valid handler function");
     },
   };
 }
@@ -266,19 +271,19 @@ function defaultDeps(): ExecuteToolDeps {
 function logToolExecution(
   toolId: string,
   orgId: string,
-  result: ToolTestResult
+  result: ToolTestResult,
 ): void {
   console.log(
     JSON.stringify({
-      level: result.success ? 'INFO' : 'WARN',
-      component: 'ToolSandbox',
+      level: result.success ? "INFO" : "WARN",
+      component: "ToolSandbox",
       toolId,
       orgId,
       success: result.success,
       executionTimeMs: result.executionTimeMs,
       error: result.error || null,
       timestamp: new Date().toISOString(),
-    })
+    }),
   );
 }
 
@@ -300,7 +305,7 @@ export async function handler(event: {
   } catch {
     return {
       success: false,
-      error: 'Invalid inputs: must be valid JSON',
+      error: "Invalid inputs: must be valid JSON",
       executionTimeMs: 0,
     };
   }

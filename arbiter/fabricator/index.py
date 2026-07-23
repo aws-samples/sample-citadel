@@ -15,6 +15,23 @@ from manifest_proposal import (
     propose_agent_manifest,
     sanitize_text,
 )
+from transient_retry import (
+    call_with_transient_retry,
+    user_actionable_failure_message,
+)
+from deadline import (
+    FabricationDeadline,
+    FabricationDeadlineExceeded,
+    clear_fabrication_deadline,
+    registration_checkpoint,
+    set_fabrication_deadline,
+    timed_out_failure_message,
+)
+from registry_recovery import (
+    OrphanedRegistryRecordError,
+    is_creating_conflict,
+    recover_creating_record,
+)
 import boto3
 from botocore.config import Config
 from common.region import cross_region_prefix
@@ -53,6 +70,48 @@ def _reset_registry_client_for_test() -> None:
     """Test-only hook — forces the next call to rebuild the cached client."""
     global _registry_client
     _registry_client = None
+
+
+class _RegistrationRunState:
+    """Per-SQS-record registration bookkeeping (kill→poison→kill fix).
+
+    Live evidence 2026-07-23: the fabricator LLM retried a terminally
+    failing store_tool_config_registry 92-110× per run (~825-834s of the
+    900s budget) and tool.fabrication.failed was published 45-53× per run
+    for the SAME failing condition.
+
+    - ``latched`` maps tool_id → terminal message: once a registration
+      fails NON-RETRYABLY (orphaned CREATING record), repeat calls for that
+      tool_id fail INSTANTLY — no registry API traffic, no fresh events —
+      so an uncooperative LLM retry costs microseconds, not minutes.
+    - ``published`` dedupes tool.fabrication.failed to ONE event per
+      (tool_id, error type) per run — once per tool failure, never once per
+      retry iteration.
+
+    Scoped to a run on purpose: process_event begins/ends it around each
+    SQS record (Lambda containers are REUSED, so module state must never
+    leak between runs), and DIRECT calls outside a run keep the legacy
+    publish-every-time behavior.
+    """
+
+    def __init__(self):
+        self.latched = {}
+        self.published = set()
+
+
+_registration_run_state = None
+
+
+def _begin_registration_run() -> None:
+    """Start fresh per-run registration bookkeeping (one SQS record)."""
+    global _registration_run_state
+    _registration_run_state = _RegistrationRunState()
+
+
+def _end_registration_run() -> None:
+    """Drop the per-run registration bookkeeping."""
+    global _registration_run_state
+    _registration_run_state = None
 
 
 def _find_existing_record_id(registry_id: str, agent_id: str) -> str | None:
@@ -396,6 +455,14 @@ def get_tool_fabricator_prompt():
         
         CRITICAL: You must call ALL THREE tools (file_write, upload_tool_to_s3, store_tool_config_registry) for every tool creation request.
         If you skip store_tool_config_registry, the tool will be created but NOT registered, making it invisible to the system.
+
+        FAILURE HANDLING (NON-NEGOTIABLE): if store_tool_config_registry fails
+        with a NON-RETRYABLE error (OrphanedRegistryRecordError, or any error
+        message containing "NON-RETRYABLE" or "DO NOT retry"), you MUST NOT
+        call store_tool_config_registry again for that tool_id — retrying
+        cannot succeed and wastes the execution budget. Do not sleep, poll,
+        or use http_request delays as backoff. Report the failure text for
+        that tool and continue with your remaining work.
         </example_execution>
 
         <tool_code_example>
@@ -1227,6 +1294,17 @@ def store_agent_config_registry(
             publishing an agent.fabrication.failed event to EventBridge.
     """
     try:
+        # Watchdog checkpoint (deadline-aware execution): refuse to START the
+        # agent registration inside the Lambda's safety margin so
+        # process_event can write the terminal 'timed out' status instead of
+        # the run being SIGKILLed midway. Entry-only on this path: once the
+        # agent record is written, the remaining work (complete_task event
+        # publishes) is cheap, so a post-registration trip would fail an
+        # essentially finished job for no protective benefit — unlike the
+        # tool path, where the next step can be another multi-minute
+        # generation.
+        registration_checkpoint(f"before agent registration '{agent_id}'")
+
         print(
             f"[store_agent_config_registry] Starting - agent_id: {agent_id}, "
             f"file_name: {file_name}"
@@ -1444,9 +1522,13 @@ def store_tool_config_registry(
     Phase 2b) are serialized as JSON and stored in the CUSTOM descriptor's
     inlineContent. Tool records deliberately do NOT carry a ``manifest`` key —
     that is the agent/tool type discriminator (commit 0a42938) and must be
-    preserved. After creation the record status is moved to PUBLISHED so the
-    tool is immediately usable (PUBLISHED maps to internal state "active" for
-    fabricator-created tools, per Requirement 8.4).
+    preserved. After creation the record status is moved to APPROVED so the
+    tool is immediately usable (APPROVED maps to internal state "active" for
+    fabricator-created tools, per Requirement 8.4). APPROVED is the only
+    "usable" terminal value UpdateRegistryRecordStatus accepts — the service
+    enum is CREATE_FAILED, DRAFT, UPDATING, PENDING_APPROVAL, UPDATE_FAILED,
+    DEPRECATED, APPROVED, CREATING, REJECTED (a former "PUBLISHED" value
+    raised a live ValidationException here).
 
     Requirements:
     - REGISTRY_ID environment variable must be set with the Registry ID.
@@ -1479,10 +1561,31 @@ def store_tool_config_registry(
 
     Raises:
         ValueError: If REGISTRY_ID environment variable is not set.
+        OrphanedRegistryRecordError: NON-RETRYABLE — the registry record is
+            orphaned in CREATING state and the automatic recovery failed.
+            DO NOT call this tool again for the same tool_id: it cannot
+            succeed until an operator removes the orphaned record. Report
+            the failure and move on.
         Exception: Re-raises any error from the Registry API after logging and
             publishing a tool.fabrication.failed event to EventBridge.
     """
     try:
+        # Watchdog checkpoint (deadline-aware execution): refuse to START a
+        # registration inside the Lambda's safety margin — the terminal
+        # status write must win over more work. Raises a BaseException that
+        # bypasses the Strands tool executor's except-Exception handler and
+        # reaches process_event as a hard stop.
+        registration_checkpoint(f"before tool registration '{tool_id}'")
+
+        run_state = _registration_run_state
+        if run_state is not None and tool_id in run_state.latched:
+            # This registration already failed NON-RETRYABLY this run
+            # (orphaned CREATING record). The fabricator LLM has been
+            # observed retrying such a failure 92-110× (~825-834s of the
+            # 900s Lambda budget, live 2026-07-23): fail INSTANTLY with the
+            # same terminal message — zero registry API traffic.
+            raise OrphanedRegistryRecordError(run_state.latched[tool_id])
+
         print(
             f"[store_tool_config_registry] Starting - tool_id: {tool_id}, "
             f"file_name: {file_name}"
@@ -1522,7 +1625,7 @@ def store_tool_config_registry(
 
         # Custom metadata — serialized into the CUSTOM descriptor inlineContent.
         # state is recorded as "active" to match Requirement 8.4; status is
-        # set to PUBLISHED below via UpdateRegistryRecordStatus. The full
+        # set to APPROVED below via UpdateRegistryRecordStatus. The full
         # ``config`` dict and requester ``createdBy`` are preserved here so
         # that moving the executable config out of the top-level description
         # doesn't lose information (QB-013-2 post-boto3-1.42 refactor). Note
@@ -1552,37 +1655,92 @@ def store_tool_config_registry(
 
         # CreateRegistryRecord does NOT accept a recordId — the service generates
         # one. We use the toolId as the record name so records can be located
-        # by name in subsequent operations.
-        response = _get_registry_client().create_registry_record(
-            registryId=registry_id,
-            name=tool_id,
-            description=tool_description or "",
-            descriptorType="CUSTOM",
-            descriptors={
+        # by name in subsequent operations. The kwargs are shared with the
+        # CREATING-conflict recovery below, which may need to recreate the
+        # record with exactly the same shape.
+        create_kwargs = {
+            "registryId": registry_id,
+            "name": tool_id,
+            "description": tool_description or "",
+            "descriptorType": "CUSTOM",
+            "descriptors": {
                 "custom": {
                     "inlineContent": json.dumps(custom_metadata, default=str),
                 },
             },
-        )
+        }
 
-        # Extract recordId from the ARN returned by CreateRegistryRecord.
-        record_arn = response.get("recordArn", "")
-        record_id = record_arn.rsplit("/", 1)[-1] if "/" in record_arn else tool_id
+        def _record_id_from(create_response) -> str:
+            # Extract recordId from the ARN returned by CreateRegistryRecord.
+            record_arn = create_response.get("recordArn", "")
+            return record_arn.rsplit("/", 1)[-1] if "/" in record_arn else tool_id
+
+        response = _get_registry_client().create_registry_record(**create_kwargs)
+        record_id = _record_id_from(response)
 
         print(
             f"[store_tool_config_registry] Record created (recordId={record_id}), "
-            f"setting status to PUBLISHED"
+            f"setting status to APPROVED"
         )
 
-        # Published status => internal state "active" for fabricator-created tools
-        # (Requirement 8.4). Unlike agents, tools are immediately usable after
-        # fabrication.
-        _get_registry_client().update_registry_record_status(
-            registryId=registry_id,
-            recordId=record_id,
-            status="PUBLISHED",
-            statusReason="Initial status set by Fabricator",
-        )
+        # APPROVED status => internal state "active" for fabricator-created
+        # tools (Requirement 8.4). Unlike agents, tools are immediately usable
+        # after fabrication. NOTE: UpdateRegistryRecordStatus validates status
+        # against the enum {CREATE_FAILED, DRAFT, UPDATING, PENDING_APPROVAL,
+        # UPDATE_FAILED, DEPRECATED, APPROVED, CREATING, REJECTED} — the old
+        # "PUBLISHED" value raised a live ValidationException. APPROVED is the
+        # value both the intake catalog (_registry_state_from_status) and the
+        # backend (toInternalState) map to "active".
+        def _approve(rid: str) -> None:
+            _get_registry_client().update_registry_record_status(
+                registryId=registry_id,
+                recordId=rid,
+                status="APPROVED",
+                statusReason="Initial status set by Fabricator",
+            )
+
+        def _recreate() -> str:
+            return _record_id_from(
+                _get_registry_client().create_registry_record(**create_kwargs)
+            )
+
+        try:
+            _approve(record_id)
+        except Exception as approve_err:  # noqa: BLE001 — classified below
+            if not is_creating_conflict(approve_err):
+                raise
+            # Kill→poison→kill fix (live evidence 2026-07-23): a record stuck
+            # in CREATING (orphaned by a prior SIGKILLed run, or an unusually
+            # slow asynchronous creation) makes UpdateRegistryRecordStatus
+            # raise ConflictException 'Registry record cannot be modified
+            # while in CREATING state'. The condition is NOT transient from
+            # within this run — the record never leaves CREATING on its own —
+            # so it must never be blindly retried (the LLM previously retried
+            # it 92-110×, burning ~92% of the 900s Lambda budget). Run the
+            # bounded, SDK-documented recovery instead: poll briefly in case
+            # CREATING is genuinely in-flight, then delete-and-recreate the
+            # orphan (DeleteRegistryRecord is supported; deletion is async),
+            # else fail FAST with a terminal, user-actionable error. See
+            # registry_recovery.py for the full justification.
+            print(
+                f"[store_tool_config_registry] ConflictException on CREATING "
+                f"for '{tool_id}' (recordId {record_id}) — entering bounded "
+                f"recovery (poll -> delete-and-recreate -> fail fast)"
+            )
+            record_id = recover_creating_record(
+                _get_registry_client(),
+                registry_id,
+                record_id,
+                tool_id,
+                recreate=_recreate,
+                approve=_approve,
+            )
+
+        # Watchdog checkpoint after the registration: if the margin is gone,
+        # stop BEFORE the agent loop starts another multi-minute generation —
+        # process_event turns this into a terminal 'timed out' FAILED write
+        # instead of the run being SIGKILLed later.
+        registration_checkpoint(f"after tool registration '{tool_id}'")
 
         print(f"[store_tool_config_registry] SUCCESS - Registry response: {response}")
         return True
@@ -1595,20 +1753,39 @@ def store_tool_config_registry(
         import traceback
         print(f"[store_tool_config_registry] TRACEBACK: {traceback.format_exc()}")
         # Publish fabrication failure event to EventBridge. Failures here are
-        # non-fatal — we still re-raise the original error.
-        try:
-            publish_fabrication_event(
-                orchestration_id="0",
-                event_type="tool.fabrication.failed",
-                agent_id=tool_id,
-                error=str(e),
-                app_id=app_id,
-            )
-        except Exception as pub_err:
+        # non-fatal — we still re-raise the original error. Within a
+        # registration run the event is deduped to ONE per (tool_id, error
+        # type): live evidence (2026-07-23) showed tool.fabrication.failed
+        # published 45-53× per run because the LLM re-called the failing tool
+        # on every retry iteration. A terminal orphaned-record failure also
+        # LATCHES the tool_id so repeat calls fail instantly (see the latch
+        # check at the top). Direct calls outside a run keep the legacy
+        # one-event-per-call behavior.
+        run_state = _registration_run_state
+        if run_state is not None and isinstance(e, OrphanedRegistryRecordError):
+            run_state.latched.setdefault(tool_id, str(e))
+        publish_key = (tool_id, type(e).__name__)
+        if run_state is not None and publish_key in run_state.published:
             print(
-                f"[store_tool_config_registry] Failed to publish failure event: "
-                f"{pub_err}"
+                f"[store_tool_config_registry] Failure event for {publish_key} "
+                f"already published this run; skipping duplicate"
             )
+        else:
+            if run_state is not None:
+                run_state.published.add(publish_key)
+            try:
+                publish_fabrication_event(
+                    orchestration_id="0",
+                    event_type="tool.fabrication.failed",
+                    agent_id=tool_id,
+                    error=str(e),
+                    app_id=app_id,
+                )
+            except Exception as pub_err:
+                print(
+                    f"[store_tool_config_registry] Failed to publish failure event: "
+                    f"{pub_err}"
+                )
         raise
 
 
@@ -1630,6 +1807,16 @@ def create_tool_fabricator(store_tool_tool=None):
         max_tokens=32768,
         region_name="us-west-2",
         boto_client_config=BEDROCK_RETRY_CONFIG,
+        # The fabricator is headless: per-token chunks are consumed only
+        # internally by the Strands loop (user-visible progress is per-agent
+        # EventBridge, not per-token). streaming=False routes through the
+        # Converse API instead of ConverseStream, so transient model faults
+        # (internalServerException, ...) surface PRE-response — inside
+        # botocore's retry scope (BEDROCK_RETRY_CONFIG, adaptive) — instead
+        # of as mid-stream EventStreamErrors that NO layer retries.
+        # BEDROCK_RETRY_CONFIG's read_timeout=3600 accommodates the long
+        # non-streaming call at max_tokens=32768.
+        streaming=False,
     )
     
     tool_fabricator = Agent(
@@ -1657,6 +1844,13 @@ def create_custom_tool(
     Returns:
         The generated tool code as a string
     """
+    # Watchdog checkpoint: a nested tool fabrication is a multi-minute
+    # operation (a whole inner Strands agent run). Refuse to START one
+    # inside the Lambda's safety margin so process_event can write the
+    # terminal 'timed out' status instead of the run being SIGKILLed midway.
+    registration_checkpoint(
+        f"before custom tool fabrication: {tool_description[:80]!r}"
+    )
     print(f"Agent Fabricator requesting custom tool: {tool_description}")
     
     # Create the Tool Fabricator agent
@@ -1716,6 +1910,10 @@ def create_agent_fabricator(complete_task, store_agent_tool=None):
             max_tokens=32768,
             region_name="us-west-2",
             boto_client_config=BEDROCK_RETRY_CONFIG,
+            # Headless fabricator — see create_tool_fabricator: streaming=False
+            # converts unretryable mid-stream faults into pre-response faults
+            # covered by BEDROCK_RETRY_CONFIG's adaptive retry.
+            streaming=False,
     )
     
     agent_fabricator = Agent(
@@ -1833,6 +2031,19 @@ def process_event(event, context, request_type=None):
         print(f"fabrication refused: {exc}")
         raise
 
+    # Deadline-aware execution (kill→poison→kill fix, live 2026-07-23): wrap
+    # the REAL Lambda remaining-time clock so the registration checkpoints
+    # and the transient-retry helper can stop work inside the safety margin
+    # and this handler can write the terminal status INSTEAD of being
+    # SIGKILLed at the 900s timeout (which skips every except/finally and
+    # leaves the row PROCESSING + the SQS message redelivering). Local runs
+    # and tests passing {} degrade to an unlimited deadline.
+    deadline = FabricationDeadline.from_lambda_context(context)
+    set_fabrication_deadline(deadline)
+    # Fresh per-run registration bookkeeping (failure-event dedupe + the
+    # non-retryable latch) — Lambda containers are reused, so this must be
+    # reset for every SQS record.
+    _begin_registration_run()
     try:
         # Durable status: mark this agent PROCESSING at the start. Best-effort
         # — a status-write failure never changes fabrication behavior.
@@ -1952,7 +2163,17 @@ def process_event(event, context, request_type=None):
                     f"integration_bindings={json.dumps(integration_bindings) if integration_bindings else 'None'}\n"
                     f"datastore_bindings={json.dumps(datastore_bindings) if datastore_bindings else 'None'}"
                 )
-            tool_fabricator(enriched_task)
+            # Bounded transient retry (defence in depth on top of
+            # streaming=False + botocore adaptive retries): re-invoke the
+            # fabricator ONLY on transient Bedrock faults (internal server /
+            # service unavailable / throttling / model stream errors), with
+            # exponential backoff + full jitter. Non-transient faults
+            # (ValidationException, AccessDenied, ...) fail fast to the
+            # except below unchanged. The deadline stops attempts/backoffs
+            # that cannot fit before (deadline - safety margin).
+            call_with_transient_retry(
+                lambda: tool_fabricator(enriched_task), deadline=deadline
+            )
         else:
             # Bind requested_by into a closure-wrapped @tool so the LLM
             # invocation path records the event's requester in custom
@@ -1983,7 +2204,25 @@ def process_event(event, context, request_type=None):
                 complete_task,
                 store_agent_tool=store_agent_config_registry_bound,
             )
-            agent_fabricator(TASK)
+            # Bounded transient retry — same contract as the tool-creation
+            # path above: transient Bedrock faults only, ≤3 total attempts,
+            # exponential backoff + full jitter; everything else fails fast.
+            # The deadline stops attempts/backoffs that cannot fit before
+            # (deadline - safety margin).
+            call_with_transient_retry(
+                lambda: agent_fabricator(TASK), deadline=deadline
+            )
+
+        # Belt-and-braces: if a checkpoint tripped but the BaseException was
+        # converted into an LLM-visible tool error somewhere inside the agent
+        # loop (instead of propagating), the run is NOT complete — surface it
+        # as the timeout it is rather than writing COMPLETED for a job whose
+        # registrations were refused.
+        if deadline.tripped:
+            raise FabricationDeadlineExceeded(
+                f"deadline tripped at {deadline.tripped_where!r} during the "
+                f"fabrication run"
+            )
 
         # Durable status: fabrication dispatch completed without raising — mark
         # COMPLETED and stamp the agent name/recordId. Best-effort.
@@ -1992,13 +2231,56 @@ def process_event(event, context, request_type=None):
             agent_id=agent_use_id, agent_name=agent_use_id
         )
 
+    except FabricationDeadlineExceeded as deadline_exc:
+        # Time exhaustion (kill→poison→kill fix): the watchdog stopped work
+        # inside the safety margin. Write the job's terminal FAILED status
+        # with a 'timed out' actionable message and RETURN CLEANLY — this is
+        # the whole point of the guard: the terminal write happens INSTEAD
+        # of the SIGKILL. Deliberately no re-raise: re-raising would nack
+        # the SQS message and redeliver it into another 900s run that hits
+        # the same wall (the observed kill→redeliver→kill ×3 → DLQ loop,
+        # rows stuck PROCESSING). Returning deletes the message; the durable
+        # outcome is the FAILED row, and the user re-queues via the
+        # conversational retry tool.
+        print(f"Fabrication stopped by deadline guard: {deadline_exc}")
+        timeout_message = timed_out_failure_message(agent_use_id, deadline)
+        _write_fabrication_status(
+            orchestration_id, agent_use_id, "FAILED",
+            error_message=timeout_message,
+            agent_name=agent_use_id
+        )
+        # Best-effort failure signals: the CLEAN RETURN is the loop-breaker,
+        # so a failing EventBridge publish must never turn this path back
+        # into a raise (which would nack + redeliver the message).
+        try:
+            # Publish intake progress failure
+            publish_intake_progress(orchestration_id, agent_index, total_agents, agent_use_id, failed=True)
+            # Publish fabrication failure event
+            publish_fabrication_event(
+                orchestration_id=orchestration_id,
+                event_type='agent.fabrication.failed',
+                error=timeout_message
+            )
+        except Exception as pub_err:  # noqa: BLE001 — best-effort by design
+            print(
+                f"Failed to publish deadline-failure signals (non-fatal): "
+                f"{pub_err}"
+            )
+        return
+
     except Exception as e:
         print(f"Fabrication failed: {str(e)}")
         # Durable status: mark FAILED + errorMessage before re-raising. The
-        # status write is best-effort and must not mask the original error.
+        # retry wrapper above guarantees transient Bedrock faults reach here
+        # only AFTER the retry budget is exhausted, so FAILED is written once,
+        # at the end — never mid-retry. The status write is best-effort and
+        # must not mask the original error. user_actionable_failure_message
+        # keeps the raw Bedrock detail while telling the operator what to do
+        # next (non-transient errors pass through unchanged).
         _write_fabrication_status(
             orchestration_id, agent_use_id, "FAILED",
-            error_message=str(e), agent_name=agent_use_id
+            error_message=user_actionable_failure_message(e),
+            agent_name=agent_use_id
         )
         # Publish intake progress failure
         publish_intake_progress(orchestration_id, agent_index, total_agents, agent_use_id, failed=True)
@@ -2009,6 +2291,12 @@ def process_event(event, context, request_type=None):
             error=str(e)
         )
         raise
+    finally:
+        # Lambda containers are reused: never leak this run's deadline or
+        # registration bookkeeping into the next invocation. Runs on the
+        # success path, the clean deadline return, and every re-raise.
+        clear_fabrication_deadline()
+        _end_registration_run()
 
     # Fallback: ensure progress is published even if the LLM didn't call complete_task
     publish_intake_progress(orchestration_id, agent_index, total_agents, agent_use_id)

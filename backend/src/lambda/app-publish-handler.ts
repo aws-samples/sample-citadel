@@ -7,6 +7,7 @@
  * Requirements: 1.1-1.11, 2.1-2.10
  */
 import Ajv from "ajv";
+import addFormats from "ajv-formats";
 import { randomBytes, createHash } from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import {
@@ -179,23 +180,20 @@ export function validatePublishPreconditions(
         "Configuration values are required when a config schema is defined",
       );
     } else {
-      const ajv = new Ajv({ allErrors: true });
+      // ajv 8 compat: config schemas are user-authored and were stored under
+      // ajv 6, which ignored unknown keywords and validated `format` built-in.
+      // strictSchema: false + addFormats keeps those stored schemas compiling.
+      const ajv = new Ajv({ allErrors: true, strictSchema: false });
+      addFormats(ajv);
       const validate = ajv.compile(configSchema.schema);
       const valid = validate(configValues.values);
       if (!valid) {
-        // ErrorObject's compiled type defs lag the runtime shape here
-        // (instancePath); view the errors structurally without changing
-        // the runtime mapping.
-        const ajvErrors = (validate.errors || []) as Array<{
-          instancePath?: string;
-          message?: string;
-          params?: { missingProperty?: string };
-        }>;
-        const validationErrors = ajvErrors
+        const validationErrors = (validate.errors || [])
           .map((e) => {
             const path =
               e.instancePath ||
-              (e.params?.missingProperty ? e.params.missingProperty : "");
+              ((e.params as { missingProperty?: string }).missingProperty ??
+                "");
             return `${path ? path + ": " : ""}${e.message}`;
           })
           .join("; ");

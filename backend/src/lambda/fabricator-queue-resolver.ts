@@ -1,10 +1,10 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   QueryCommand,
   ScanCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { AppSyncResolverEvent } from 'aws-lambda';
+} from "@aws-sdk/lib-dynamodb";
+import { AppSyncResolverEvent } from "aws-lambda";
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -18,7 +18,29 @@ function getFabricationJobsTable(): string | undefined {
 // view stays cheap regardless of table size.
 const SCAN_LIMIT = 100;
 
-type FabricationStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+type FabricationStatus = "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
+
+const VALID_FABRICATION_STATUSES: readonly FabricationStatus[] = [
+  "PENDING",
+  "PROCESSING",
+  "COMPLETED",
+  "FAILED",
+];
+
+/**
+ * Validate a raw row status against the GraphQL enum. Rows the resolver
+ * cannot attribute to a real lifecycle state (missing or unrecognized
+ * status) normalize to terminal FAILED — never PENDING — so anomalous
+ * all-time rows can't read as in-flight work and wedge the queue badge,
+ * and unknown values never pass through verbatim as an invalid enum member.
+ */
+function normalizeStatus(status: string | undefined): FabricationStatus {
+  return (VALID_FABRICATION_STATUSES as readonly string[]).includes(
+    status ?? "",
+  )
+    ? (status as FabricationStatus)
+    : "FAILED";
+}
 
 interface FabricationQueueItem {
   requestId: string;
@@ -52,10 +74,12 @@ interface FabricationJobRow {
 function mapRow(item: FabricationJobRow): FabricationQueueItem {
   return {
     requestId: item.agentUseId,
-    agentName: item.agentName || item.agentId || item.agentUseId || 'Unknown Agent',
-    taskDescription: item.taskDescription || 'No description',
-    status: (item.status as FabricationStatus) || 'PENDING',
-    submittedAt: item.submittedAt || item.updatedAt || new Date(0).toISOString(),
+    agentName:
+      item.agentName || item.agentId || item.agentUseId || "Unknown Agent",
+    taskDescription: item.taskDescription || "No description",
+    status: normalizeStatus(item.status),
+    submittedAt:
+      item.submittedAt || item.updatedAt || new Date(0).toISOString(),
     errorMessage: item.errorMessage,
     metadata: {
       orchestrationId: item.orchestrationId,
@@ -79,7 +103,9 @@ export const handler = async (
 ): Promise<FabricationQueueItem[]> => {
   const table = getFabricationJobsTable();
   if (!table) {
-    console.warn('FABRICATION_JOBS_TABLE unset; returning empty fabricator queue');
+    console.warn(
+      "FABRICATION_JOBS_TABLE unset; returning empty fabricator queue",
+    );
     return [];
   }
 
@@ -91,8 +117,8 @@ export const handler = async (
       const response = await docClient.send(
         new QueryCommand({
           TableName: table,
-          KeyConditionExpression: 'orchestrationId = :pk',
-          ExpressionAttributeValues: { ':pk': projectId },
+          KeyConditionExpression: "orchestrationId = :pk",
+          ExpressionAttributeValues: { ":pk": projectId },
         }),
       );
       items = (response.Items || []) as FabricationJobRow[];
@@ -111,7 +137,7 @@ export const handler = async (
     console.log(`Returning ${queueItems.length} fabrication queue items`);
     return queueItems;
   } catch (error) {
-    console.error('Error reading fabrication-jobs table:', error);
+    console.error("Error reading fabrication-jobs table:", error);
     // Preserve the existing contract: empty array on failure.
     return [];
   }

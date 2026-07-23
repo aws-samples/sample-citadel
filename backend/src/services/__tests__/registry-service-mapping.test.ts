@@ -12,9 +12,9 @@ import {
   RegistryRecordStatusValues,
   AgentConfig,
   ToolConfig,
-} from '../registry-service';
+} from "../registry-service";
 
-jest.mock('@aws-sdk/client-bedrock-agentcore-control', () => ({
+jest.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
   BedrockAgentCoreControlClient: jest.fn().mockImplementation(() => ({})),
   CreateRegistryRecordCommand: jest.fn(),
   GetRegistryRecordCommand: jest.fn(),
@@ -24,15 +24,15 @@ jest.mock('@aws-sdk/client-bedrock-agentcore-control', () => ({
   ListRegistryRecordsCommand: jest.fn(),
 }));
 
-describe('RegistryService record mapping', () => {
+describe("RegistryService record mapping", () => {
   let service: RegistryService;
 
   beforeEach(() => {
     service = new RegistryService({
-      registryId: 'test-registry',
-      region: 'us-east-1',
+      registryId: "test-registry",
+      region: "us-east-1",
     });
-    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    jest.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -41,21 +41,21 @@ describe('RegistryService record mapping', () => {
 
   // -- mapToAgentConfig ----------------------------------------------------
 
-  describe('mapToAgentConfig', () => {
-    it('maps a full Registry record to AgentConfig', () => {
-      const now = new Date('2024-06-15T10:00:00Z');
-      const later = new Date('2024-06-16T12:00:00Z');
+  describe("mapToAgentConfig", () => {
+    it("maps a full Registry record to AgentConfig", () => {
+      const now = new Date("2024-06-15T10:00:00Z");
+      const later = new Date("2024-06-16T12:00:00Z");
       const customMeta = JSON.stringify({
-        categories: ['nlp', 'chat'],
-        icon: 'bot',
-        state: 'active',
-        appId: 'app-1',
-        manifest: { name: 'TestAgent', version: '1.0' },
+        categories: ["nlp", "chat"],
+        icon: "bot",
+        state: "active",
+        appId: "app-1",
+        manifest: { name: "TestAgent", version: "1.0" },
       });
 
       const record: RegistryRecord = {
-        recordId: 'agent-123',
-        name: 'TestAgent',
+        recordId: "agent-123",
+        name: "TestAgent",
         description: '{"name":"TestAgent","filename":"test.py","schema":"{}"}',
         status: RegistryRecordStatusValues.APPROVED,
         customDescriptorContent: customMeta,
@@ -65,112 +65,114 @@ describe('RegistryService record mapping', () => {
 
       const result: AgentConfig = service.mapToAgentConfig(record);
 
-      expect(result.agentId).toBe('agent-123');
-      expect(result.config).toBe('{"name":"TestAgent","filename":"test.py","schema":"{}"}');
-      expect(result.state).toBe('active');
-      expect(result.categories).toEqual(['nlp', 'chat']);
-      expect(result.createdAt).toBe('2024-06-15T10:00:00.000Z');
-      expect(result.updatedAt).toBe('2024-06-16T12:00:00.000Z');
-      expect(result.manifest).toEqual({ name: 'TestAgent', version: '1.0' });
+      expect(result.agentId).toBe("agent-123");
+      expect(result.config).toBe(
+        '{"name":"TestAgent","filename":"test.py","schema":"{}"}',
+      );
+      expect(result.state).toBe("active");
+      expect(result.categories).toEqual(["nlp", "chat"]);
+      expect(result.createdAt).toBe("2024-06-15T10:00:00.000Z");
+      expect(result.updatedAt).toBe("2024-06-16T12:00:00.000Z");
+      expect(result.manifest).toEqual({ name: "TestAgent", version: "1.0" });
     });
 
-    it('maps recordId to agentId', () => {
+    it("maps recordId to agentId", () => {
       const record: RegistryRecord = {
-        recordId: 'my-agent-id',
-        name: 'Agent',
+        recordId: "my-agent-id",
+        name: "Agent",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToAgentConfig(record).agentId).toBe('my-agent-id');
+      expect(service.mapToAgentConfig(record).agentId).toBe("my-agent-id");
     });
 
-    it('maps description to config', () => {
+    it("maps description to config", () => {
       const desc = '{"name":"A","filename":"a.py"}';
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         description: desc,
         status: RegistryRecordStatusValues.DRAFT,
       };
       expect(service.mapToAgentConfig(record).config).toBe(desc);
     });
 
-    it('maps APPROVED status to active state', () => {
+    it("maps APPROVED status to active state", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToAgentConfig(record).state).toBe('active');
+      expect(service.mapToAgentConfig(record).state).toBe("active");
     });
 
-    it('maps DEPRECATED status to inactive state', () => {
+    it("maps DEPRECATED status to inactive state", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.DEPRECATED,
       };
-      expect(service.mapToAgentConfig(record).state).toBe('inactive');
+      expect(service.mapToAgentConfig(record).state).toBe("inactive");
     });
 
-    it('maps DRAFT status to maintenance state', () => {
+    it("maps DRAFT status to maintenance state", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.DRAFT,
       };
-      expect(service.mapToAgentConfig(record).state).toBe('maintenance');
+      expect(service.mapToAgentConfig(record).state).toBe("maintenance");
     });
 
-    it('maps PENDING_APPROVAL status to active state', () => {
+    it("maps PENDING_APPROVAL status to active state", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.PENDING_APPROVAL,
       };
-      expect(service.mapToAgentConfig(record).state).toBe('active');
+      expect(service.mapToAgentConfig(record).state).toBe("active");
     });
 
-    it('maps unknown status to inactive with warning', () => {
+    it("maps unknown status to inactive with warning", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
-        status: 'SOME_UNKNOWN_STATUS',
+        recordId: "a1",
+        name: "A",
+        status: "SOME_UNKNOWN_STATUS",
       };
-      expect(service.mapToAgentConfig(record).state).toBe('inactive');
+      expect(service.mapToAgentConfig(record).state).toBe("inactive");
       expect(console.warn).toHaveBeenCalled();
     });
 
-    it('uses default categories when custom metadata is missing', () => {
+    it("uses default categories when custom metadata is missing", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.APPROVED,
       };
       expect(service.mapToAgentConfig(record).categories).toEqual([]);
     });
 
-    it('uses default manifest (undefined) when custom metadata is missing', () => {
+    it("uses default manifest (undefined) when custom metadata is missing", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.APPROVED,
       };
       expect(service.mapToAgentConfig(record).manifest).toBeUndefined();
     });
 
-    it('returns empty string for config when description is undefined', () => {
+    it("returns '{}' for config when description is undefined (AWSJSON contract)", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToAgentConfig(record).config).toBe('');
+      expect(service.mapToAgentConfig(record).config).toBe("{}");
     });
 
-    it('returns undefined timestamps when dates are missing', () => {
+    it("returns undefined timestamps when dates are missing", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.APPROVED,
       };
       const result = service.mapToAgentConfig(record);
@@ -178,12 +180,12 @@ describe('RegistryService record mapping', () => {
       expect(result.updatedAt).toBeUndefined();
     });
 
-    it('handles malformed custom metadata gracefully', () => {
+    it("handles malformed custom metadata gracefully", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.APPROVED,
-        customDescriptorContent: '{invalid json',
+        customDescriptorContent: "{invalid json",
       };
       const result = service.mapToAgentConfig(record);
       expect(result.categories).toEqual([]);
@@ -192,63 +194,77 @@ describe('RegistryService record mapping', () => {
     });
 
     // ── Phase-2a: orgId round-trips through the metadata layer ──
-    it('round-trips orgId from customDescriptorContent onto the mapped AgentConfig', () => {
+    it("round-trips orgId from customDescriptorContent onto the mapped AgentConfig", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.APPROVED,
         customDescriptorContent: JSON.stringify({
           categories: [],
-          icon: '',
-          state: 'active',
-          orgId: 'team-rocket',
+          icon: "",
+          state: "active",
+          orgId: "team-rocket",
         }),
       };
-      expect(service.mapToAgentConfig(record).orgId).toBe('team-rocket');
+      expect(service.mapToAgentConfig(record).orgId).toBe("team-rocket");
     });
 
     it("defaults orgId to '' when customDescriptorContent is absent (legacy records)", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToAgentConfig(record).orgId).toBe('');
+      expect(service.mapToAgentConfig(record).orgId).toBe("");
     });
 
     it("defaults orgId to '' when customDescriptorContent has no orgId field", () => {
       const record: RegistryRecord = {
-        recordId: 'a1',
-        name: 'A',
+        recordId: "a1",
+        name: "A",
         status: RegistryRecordStatusValues.APPROVED,
-        customDescriptorContent: JSON.stringify({ categories: [], icon: '', state: 'active' }),
+        customDescriptorContent: JSON.stringify({
+          categories: [],
+          icon: "",
+          state: "active",
+        }),
       };
-      expect(service.mapToAgentConfig(record).orgId).toBe('');
+      expect(service.mapToAgentConfig(record).orgId).toBe("");
     });
   });
 
   // -- mapToToolConfig -----------------------------------------------------
 
-  describe('mapToToolConfig', () => {
-    it('maps a full Registry record to ToolConfig', () => {
-      const now = new Date('2024-07-01T08:00:00Z');
-      const later = new Date('2024-07-02T09:30:00Z');
+  describe("mapToToolConfig", () => {
+    it("maps a full Registry record to ToolConfig", () => {
+      const now = new Date("2024-07-01T08:00:00Z");
+      const later = new Date("2024-07-02T09:30:00Z");
       const customMeta = JSON.stringify({
-        categories: ['data', 'api'],
-        icon: 'wrench',
-        state: 'active',
+        categories: ["data", "api"],
+        icon: "wrench",
+        state: "active",
         integrationBindings: [
-          { integrationId: 'int-1', integrationType: 'REST', operations: ['read'], direction: 'INPUT' },
+          {
+            integrationId: "int-1",
+            integrationType: "REST",
+            operations: ["read"],
+            direction: "INPUT",
+          },
         ],
         dataStoreBindings: [
-          { dataStoreId: 'ds-1', dataStoreType: 'S3', operations: ['write'], direction: 'OUTPUT' },
+          {
+            dataStoreId: "ds-1",
+            dataStoreType: "S3",
+            operations: ["write"],
+            direction: "OUTPUT",
+          },
         ],
-        appId: 'app-2',
+        appId: "app-2",
       });
 
       const record: RegistryRecord = {
-        recordId: 'tool-456',
-        name: 'DataTool',
+        recordId: "tool-456",
+        name: "DataTool",
         description: '{"name":"DataTool","filename":"data.py","schema":"{}"}',
         status: RegistryRecordStatusValues.APPROVED,
         customDescriptorContent: customMeta,
@@ -258,67 +274,79 @@ describe('RegistryService record mapping', () => {
 
       const result: ToolConfig = service.mapToToolConfig(record);
 
-      expect(result.toolId).toBe('tool-456');
-      expect(result.config).toBe('{"name":"DataTool","filename":"data.py","schema":"{}"}');
-      expect(result.state).toBe('active');
-      expect(result.categories).toEqual(['data', 'api']);
+      expect(result.toolId).toBe("tool-456");
+      expect(result.config).toBe(
+        '{"name":"DataTool","filename":"data.py","schema":"{}"}',
+      );
+      expect(result.state).toBe("active");
+      expect(result.categories).toEqual(["data", "api"]);
       expect(result.integrationBindings).toEqual([
-        { integrationId: 'int-1', integrationType: 'REST', operations: ['read'], direction: 'INPUT' },
+        {
+          integrationId: "int-1",
+          integrationType: "REST",
+          operations: ["read"],
+          direction: "INPUT",
+        },
       ]);
       expect(result.dataStoreBindings).toEqual([
-        { dataStoreId: 'ds-1', dataStoreType: 'S3', operations: ['write'], direction: 'OUTPUT' },
+        {
+          dataStoreId: "ds-1",
+          dataStoreType: "S3",
+          operations: ["write"],
+          direction: "OUTPUT",
+        },
       ]);
-      expect(result.createdAt).toBe('2024-07-01T08:00:00.000Z');
-      expect(result.updatedAt).toBe('2024-07-02T09:30:00.000Z');
+      expect(result.createdAt).toBe("2024-07-01T08:00:00.000Z");
+      expect(result.updatedAt).toBe("2024-07-02T09:30:00.000Z");
     });
 
-    it('maps recordId to toolId', () => {
+    it("maps recordId to toolId", () => {
       const record: RegistryRecord = {
-        recordId: 'my-tool-id',
-        name: 'Tool',
+        recordId: "my-tool-id",
+        name: "Tool",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToToolConfig(record).toolId).toBe('my-tool-id');
+      expect(service.mapToToolConfig(record).toolId).toBe("my-tool-id");
     });
 
-    it('maps description to config', () => {
+    it("maps description to config", () => {
       const desc = '{"name":"T","filename":"t.py"}';
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         description: desc,
         status: RegistryRecordStatusValues.APPROVED,
       };
       expect(service.mapToToolConfig(record).config).toBe(desc);
     });
 
-    it('maps status to state correctly', () => {
+    it("maps status to state correctly", () => {
       const cases: Array<[string, string]> = [
-        [RegistryRecordStatusValues.APPROVED, 'active'],
-        [RegistryRecordStatusValues.DEPRECATED, 'inactive'],
-        [RegistryRecordStatusValues.DRAFT, 'maintenance'],
-        [RegistryRecordStatusValues.PENDING_APPROVAL, 'active'],
+        [RegistryRecordStatusValues.APPROVED, "active"],
+        [RegistryRecordStatusValues.DEPRECATED, "inactive"],
+        [RegistryRecordStatusValues.DRAFT, "maintenance"],
+        [RegistryRecordStatusValues.PENDING_APPROVAL, "active"],
       ];
 
       for (const [status, expectedState] of cases) {
         const record: RegistryRecord = {
-          recordId: 't1',
-          name: 'T',
+          recordId: "t1",
+          name: "T",
           status,
         };
         expect(service.mapToToolConfig(record).state).toBe(expectedState);
       }
     });
 
-    it('returns null for bindings when custom metadata has no bindings', () => {
+    it("returns null for bindings when custom metadata has no bindings", () => {
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         status: RegistryRecordStatusValues.APPROVED,
         customDescriptorContent: JSON.stringify({
-          categories: ['test'],
-          icon: '',
-          state: 'active',
+          categories: ["test"],
+          icon: "",
+          state: "active",
         }),
       };
       const result = service.mapToToolConfig(record);
@@ -326,28 +354,28 @@ describe('RegistryService record mapping', () => {
       expect(result.dataStoreBindings).toBeNull();
     });
 
-    it('uses default categories when custom metadata is missing', () => {
+    it("uses default categories when custom metadata is missing", () => {
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         status: RegistryRecordStatusValues.APPROVED,
       };
       expect(service.mapToToolConfig(record).categories).toEqual([]);
     });
 
-    it('returns empty string for config when description is undefined', () => {
+    it("returns '{}' for config when description is undefined (AWSJSON contract)", () => {
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToToolConfig(record).config).toBe('');
+      expect(service.mapToToolConfig(record).config).toBe("{}");
     });
 
-    it('returns undefined timestamps when dates are missing', () => {
+    it("returns undefined timestamps when dates are missing", () => {
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         status: RegistryRecordStatusValues.APPROVED,
       };
       const result = service.mapToToolConfig(record);
@@ -355,12 +383,12 @@ describe('RegistryService record mapping', () => {
       expect(result.updatedAt).toBeUndefined();
     });
 
-    it('handles malformed custom metadata gracefully', () => {
+    it("handles malformed custom metadata gracefully", () => {
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         status: RegistryRecordStatusValues.APPROVED,
-        customDescriptorContent: 'not-json',
+        customDescriptorContent: "not-json",
       };
       const result = service.mapToToolConfig(record);
       expect(result.categories).toEqual([]);
@@ -369,22 +397,31 @@ describe('RegistryService record mapping', () => {
       expect(console.warn).toHaveBeenCalled();
     });
 
-    it('preserves binding arrays from custom metadata', () => {
+    it("preserves binding arrays from custom metadata", () => {
       const bindings = {
         categories: [],
-        icon: '',
-        state: 'active',
+        icon: "",
+        state: "active",
         integrationBindings: [
-          { integrationId: 'i1', integrationType: 'GraphQL' },
-          { integrationId: 'i2', integrationType: 'REST', operations: ['create', 'read'], direction: 'BIDIRECTIONAL' },
+          { integrationId: "i1", integrationType: "GraphQL" },
+          {
+            integrationId: "i2",
+            integrationType: "REST",
+            operations: ["create", "read"],
+            direction: "BIDIRECTIONAL",
+          },
         ],
         dataStoreBindings: [
-          { dataStoreId: 'd1', dataStoreType: 'DynamoDB', operations: ['scan'] },
+          {
+            dataStoreId: "d1",
+            dataStoreType: "DynamoDB",
+            operations: ["scan"],
+          },
         ],
       };
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         status: RegistryRecordStatusValues.APPROVED,
         customDescriptorContent: JSON.stringify(bindings),
       };
@@ -394,38 +431,42 @@ describe('RegistryService record mapping', () => {
     });
 
     // ── Phase-2a: orgId round-trips through the metadata layer ──
-    it('round-trips orgId from customDescriptorContent onto the mapped ToolConfig', () => {
+    it("round-trips orgId from customDescriptorContent onto the mapped ToolConfig", () => {
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         status: RegistryRecordStatusValues.APPROVED,
         customDescriptorContent: JSON.stringify({
           categories: [],
-          icon: '',
-          state: 'active',
-          orgId: 'team-rocket',
+          icon: "",
+          state: "active",
+          orgId: "team-rocket",
         }),
       };
-      expect(service.mapToToolConfig(record).orgId).toBe('team-rocket');
+      expect(service.mapToToolConfig(record).orgId).toBe("team-rocket");
     });
 
     it("defaults orgId to '' when customDescriptorContent is absent (legacy records)", () => {
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToToolConfig(record).orgId).toBe('');
+      expect(service.mapToToolConfig(record).orgId).toBe("");
     });
 
     it("defaults orgId to '' when customDescriptorContent has no orgId field", () => {
       const record: RegistryRecord = {
-        recordId: 't1',
-        name: 'T',
+        recordId: "t1",
+        name: "T",
         status: RegistryRecordStatusValues.APPROVED,
-        customDescriptorContent: JSON.stringify({ categories: [], icon: '', state: 'active' }),
+        customDescriptorContent: JSON.stringify({
+          categories: [],
+          icon: "",
+          state: "active",
+        }),
       };
-      expect(service.mapToToolConfig(record).orgId).toBe('');
+      expect(service.mapToToolConfig(record).orgId).toBe("");
     });
   });
 });

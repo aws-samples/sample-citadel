@@ -13,15 +13,15 @@ import {
   DeleteRegistryRecordCommand,
   ListRegistryRecordsCommand,
   RegistryRecordStatus,
-} from '@aws-sdk/client-bedrock-agentcore-control';
+} from "@aws-sdk/client-bedrock-agentcore-control";
 import type {
   GetRegistryRecordCommandOutput,
   ListRegistryRecordsCommandOutput,
   RegistryRecordSummary,
-} from '@aws-sdk/client-bedrock-agentcore-control';
-import { sanitizeRegistryName } from '../utils/registry-name';
-import { LifecycleManager, REGISTRY_TRANSITIONS } from '../adapters/lifecycle';
-import { ConnectorError } from '../adapters/errors';
+} from "@aws-sdk/client-bedrock-agentcore-control";
+import { sanitizeRegistryName } from "../utils/registry-name";
+import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
+import { ConnectorError } from "../adapters/errors";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -37,7 +37,7 @@ import { ConnectorError } from '../adapters/errors';
 export class TypeMismatchError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'TypeMismatchError';
+    this.name = "TypeMismatchError";
   }
 }
 
@@ -48,9 +48,12 @@ export class TypeMismatchError extends Error {
  * human message.
  */
 export class RegistryLifecycleError extends ConnectorError {
-  constructor(message: string, code: 'INVALID_TRANSITION' | 'RECORD_IMMUTABLE') {
+  constructor(
+    message: string,
+    code: "INVALID_TRANSITION" | "RECORD_IMMUTABLE",
+  ) {
     super(message, code, false);
-    this.name = 'RegistryLifecycleError';
+    this.name = "RegistryLifecycleError";
   }
 }
 
@@ -63,7 +66,7 @@ export interface RegistryServiceConfig {
   region: string;
 }
 
-export type BindingDirection = 'INPUT' | 'OUTPUT' | 'BIDIRECTIONAL';
+export type BindingDirection = "INPUT" | "OUTPUT" | "BIDIRECTIONAL";
 
 /**
  * Structural view of an AWS SDK error for transient/not-found checks.
@@ -104,27 +107,27 @@ export interface DataStoreBinding {
  * for records with no invocation block.
  */
 export type AgentInvocationProtocol =
-  | 'AGENTCORE_RUNTIME'
-  | 'BEDROCK_AGENT'
-  | 'LAMBDA_INVOKE'
-  | 'HTTP_ENDPOINT'
-  | 'MCP'
-  | 'A2A'
-  | 'STEP_FUNCTIONS'
-  | 'SAGEMAKER_ENDPOINT'
-  | 'SQS_ASYNC';
+  | "AGENTCORE_RUNTIME"
+  | "BEDROCK_AGENT"
+  | "LAMBDA_INVOKE"
+  | "HTTP_ENDPOINT"
+  | "MCP"
+  | "A2A"
+  | "STEP_FUNCTIONS"
+  | "SAGEMAKER_ENDPOINT"
+  | "SQS_ASYNC";
 
 /** Authentication mode used when reaching an invocation target. */
 export type AgentInvocationAuthMode =
-  | 'SIGV4'
-  | 'API_KEY'
-  | 'OAUTH2'
-  | 'COGNITO'
-  | 'NONE'
-  | 'BEARER';
+  | "SIGV4"
+  | "API_KEY"
+  | "OAUTH2"
+  | "COGNITO"
+  | "NONE"
+  | "BEARER";
 
 /** Synchronous request/response vs. asynchronous callback delivery. */
-export type AgentInvocationMode = 'sync' | 'async_callback';
+export type AgentInvocationMode = "sync" | "async_callback";
 
 /**
  * How to reach and invoke an agent. `target` is protocol-specific (an ARN, an
@@ -173,7 +176,7 @@ export interface AgentOrigin {
   region?: string;
   substrate: string;
   discoveredAt: string;
-  ownership: 'external';
+  ownership: "external";
 }
 
 /**
@@ -183,7 +186,7 @@ export interface AgentOrigin {
  * invocation/origin types FROM this file — keeping the alias here avoids a
  * circular module dependency. LLM-proposed manifests are always 'low'.
  */
-export type ProposedManifestConfidence = 'high' | 'medium' | 'low';
+export type ProposedManifestConfidence = "high" | "medium" | "low";
 
 /**
  * UNTRUSTED, LLM-proposed agent manifest stored on a DRAFT import record
@@ -210,9 +213,9 @@ export interface ProposedManifestMetadata {
    * proposed manifest into the trusted manifest. Acceptance NEVER activates the
    * agent — the record still STAYS DRAFT.
    */
-  reviewState: 'pending_review' | 'failed' | 'accepted';
+  reviewState: "pending_review" | "failed" | "accepted";
   /** Provenance — fixed for the Tier-3 LLM path. */
-  source: 'llm_tier3';
+  source: "llm_tier3";
   /** Per-field confidence for the proposed manifest; all 'low' for an LLM proposal. */
   fieldConfidence?: Record<string, ProposedManifestConfidence>;
   /** ISO 8601 timestamp the proposal/marker was stored. */
@@ -246,10 +249,10 @@ export interface ProposedManifestMetadata {
  * {@link ProposedManifestConfidence}.
  */
 export type AgentReachabilityClassification =
-  | 'reachable'
-  | 'unreachable'
-  | 'unverifiable_private'
-  | 'no_endpoint';
+  | "reachable"
+  | "unreachable"
+  | "unverifiable_private"
+  | "no_endpoint";
 
 /**
  * Result of a BACKEND-ONLY best-effort reachability probe of an imported
@@ -288,8 +291,8 @@ export interface AgentReachabilityMetadata {
  * fields are retained across an unpublish.
  */
 export interface GatewayPublicationMetadata {
-  status: 'published' | 'unpublished';
-  targetType: 'mcpServer';
+  status: "published" | "unpublished";
+  targetType: "mcpServer";
   gatewayId: string;
   gatewayTargetId: string;
   /** Present only when auth was offloaded (API_KEY/BEARER); absent for NONE. */
@@ -303,7 +306,7 @@ export interface GatewayPublicationMetadata {
 export interface AgentCustomMetadata {
   categories: string[];
   icon: string;
-  state: 'active' | 'inactive' | 'maintenance';
+  state: "active" | "inactive" | "maintenance";
   appId?: string;
   manifest?: Record<string, unknown>;
   orgId?: string;
@@ -318,7 +321,7 @@ export interface AgentCustomMetadata {
    * once governance has acknowledged the requested authority grant.
    */
   governanceAttestation?: {
-    status: 'pending' | 'attested';
+    status: "pending" | "attested";
     enforcementMode: string;
     authorityRequested: boolean;
     requestedAt: string;
@@ -376,22 +379,22 @@ export interface AgentCustomMetadata {
 export function getInvocationProtocol(meta: {
   invocation?: AgentInvocationBlock;
 }): AgentInvocationProtocol {
-  return meta.invocation?.protocol ?? 'AGENTCORE_RUNTIME';
+  return meta.invocation?.protocol ?? "AGENTCORE_RUNTIME";
 }
 
 export interface ToolCustomMetadata {
   categories: string[];
   icon: string;
-  state: 'active' | 'inactive' | 'maintenance';
+  state: "active" | "inactive" | "maintenance";
   integrationBindings?: IntegrationBinding[];
   dataStoreBindings?: DataStoreBinding[];
   appId?: string;
-  config?: string;      // full tool config JSON (was previously dumped in `description`)
-  createdBy?: string;   // AppSync caller identity or 'unknown'
+  config?: string; // full tool config JSON (was previously dumped in `description`)
+  createdBy?: string; // AppSync caller identity or 'unknown'
   orgId?: string;
 }
 
-export type ResourceType = 'agent' | 'tool';
+export type ResourceType = "agent" | "tool";
 
 /**
  * Registry record status values from the SDK.
@@ -400,15 +403,15 @@ export type ResourceType = 'agent' | 'tool';
  * "APPROVED". We use the SDK constants directly.
  */
 export const RegistryRecordStatusValues = {
-  DRAFT: 'DRAFT',
-  PENDING_APPROVAL: 'PENDING_APPROVAL',
-  APPROVED: 'APPROVED',
-  REJECTED: 'REJECTED',
-  DEPRECATED: 'DEPRECATED',
-  CREATING: 'CREATING',
-  UPDATING: 'UPDATING',
-  CREATE_FAILED: 'CREATE_FAILED',
-  UPDATE_FAILED: 'UPDATE_FAILED',
+  DRAFT: "DRAFT",
+  PENDING_APPROVAL: "PENDING_APPROVAL",
+  APPROVED: "APPROVED",
+  REJECTED: "REJECTED",
+  DEPRECATED: "DEPRECATED",
+  CREATING: "CREATING",
+  UPDATING: "UPDATING",
+  CREATE_FAILED: "CREATE_FAILED",
+  UPDATE_FAILED: "UPDATE_FAILED",
 } as const;
 
 export type RegistryRecordStatusValue =
@@ -495,6 +498,25 @@ export interface UpdateResourceInput {
 // Service class
 // ---------------------------------------------------------------------------
 
+/**
+ * Options for {@link RegistryService.listResources}.
+ */
+export interface ListResourcesOptions {
+  /**
+   * Remaining-time budget supplier — wire it to the Lambda
+   * `context.getRemainingTimeInMillis`. When the returned value drops below
+   * {@link minRemainingTimeMs}, listResources stops issuing Registry calls
+   * and returns the records completed so far (a partial list) instead of
+   * timing out the caller.
+   */
+  getRemainingTimeMs?: () => number;
+  /**
+   * Floor (ms) below which no further Registry calls are issued.
+   * Defaults to 5000.
+   */
+  minRemainingTimeMs?: number;
+}
+
 export class RegistryService {
   private readonly client: BedrockAgentCoreControlClient;
   /**
@@ -502,8 +524,16 @@ export class RegistryService {
    * lifecycle). Stateless — safe as a single static instance across all
    * RegistryService instances.
    */
-  private static readonly lifecycleManager = new LifecycleManager(REGISTRY_TRANSITIONS);
+  private static readonly lifecycleManager = new LifecycleManager(
+    REGISTRY_TRANSITIONS,
+  );
   private readonly registryId: string;
+
+  /**
+   * Upper bound on concurrent GetRegistryRecord calls issued while
+   * hydrating list summaries (the N+1 fix — see listResources).
+   */
+  private static readonly LIST_DETAIL_CONCURRENCY = 10;
 
   // ---------------------------------------------------------------------
   // resolveRecordId LRU cache
@@ -621,15 +651,15 @@ export class RegistryService {
     const statusCode = (err as AwsErrorLike)?.$metadata?.httpStatusCode;
     if (statusCode && statusCode >= 500) return true;
 
-    const name = (err as AwsErrorLike)?.name ?? '';
+    const name = (err as AwsErrorLike)?.name ?? "";
     if (
-      name === 'TimeoutError' ||
-      name === 'NetworkingError' ||
-      name === 'ECONNRESET' ||
-      name === 'ThrottlingException' ||
-      name === 'TooManyRequestsException' ||
-      name === 'ServiceUnavailableException' ||
-      name === 'InternalServerException'
+      name === "TimeoutError" ||
+      name === "NetworkingError" ||
+      name === "ECONNRESET" ||
+      name === "ThrottlingException" ||
+      name === "TooManyRequestsException" ||
+      name === "ServiceUnavailableException" ||
+      name === "InternalServerException"
     ) {
       return true;
     }
@@ -676,7 +706,7 @@ export class RegistryService {
           // The string literal is part of the field's TS union type ('MCP' | 'A2A'
           // | 'CUSTOM' | 'AGENT_SKILLS'), so this type-checks cleanly without the
           // runtime import dependency.
-          descriptorType: 'CUSTOM',
+          descriptorType: "CUSTOM",
           descriptors: {
             custom: {
               inlineContent: input.customMetadata,
@@ -687,9 +717,9 @@ export class RegistryService {
     );
 
     // Extract recordId from the ARN (last segment after '/')
-    const recordArn = createResult.recordArn ?? '';
-    const recordId = recordArn.includes('/')
-      ? recordArn.substring(recordArn.lastIndexOf('/') + 1)
+    const recordArn = createResult.recordArn ?? "";
+    const recordId = recordArn.includes("/")
+      ? recordArn.substring(recordArn.lastIndexOf("/") + 1)
       : id;
 
     // Fetch the full record to populate all fields
@@ -742,12 +772,12 @@ export class RegistryService {
         ? JSON.parse(customDescriptorContent)
         : {};
       const hasManifest = meta.manifest !== undefined;
-      if (type === 'agent' && !hasManifest) {
+      if (type === "agent" && !hasManifest) {
         throw new TypeMismatchError(
           `Record ${recordId} exists but is not an agent (no manifest)`,
         );
       }
-      if (type === 'tool' && hasManifest) {
+      if (type === "tool" && hasManifest) {
         throw new TypeMismatchError(
           `Record ${recordId} exists but is not a tool (has manifest)`,
         );
@@ -755,16 +785,16 @@ export class RegistryService {
 
       return {
         recordId: result.recordId ?? id,
-        name: result.name ?? '',
+        name: result.name ?? "",
         description: result.description,
-        status: result.status ?? '',
+        status: result.status ?? "",
         customDescriptorContent,
         createdAt: result.createdAt,
         updatedAt: result.updatedAt,
       };
     } catch (err: unknown) {
       if (
-        (err as AwsErrorLike).name === 'ResourceNotFoundException' ||
+        (err as AwsErrorLike).name === "ResourceNotFoundException" ||
         (err as AwsErrorLike)?.$metadata?.httpStatusCode === 404
       ) {
         return null;
@@ -818,30 +848,33 @@ export class RegistryService {
           recordId,
           // Renames hit the same name constraint as creates — sanitize with
           // the shared rule (legal names pass through unchanged).
-          name: input.name != null ? sanitizeRegistryName(input.name) : input.name,
-          description: input.description != null
-            ? { optionalValue: input.description }
-            : undefined,
-          descriptors: input.customMetadata != null
-            ? {
-                optionalValue: {
-                  custom: {
-                    optionalValue: {
-                      inlineContent: input.customMetadata,
+          name:
+            input.name != null ? sanitizeRegistryName(input.name) : input.name,
+          description:
+            input.description != null
+              ? { optionalValue: input.description }
+              : undefined,
+          descriptors:
+            input.customMetadata != null
+              ? {
+                  optionalValue: {
+                    custom: {
+                      optionalValue: {
+                        inlineContent: input.customMetadata,
+                      },
                     },
                   },
-                },
-              }
-            : undefined,
+                }
+              : undefined,
         }),
       ),
     );
 
     return {
       recordId: result.recordId ?? id,
-      name: result.name ?? '',
+      name: result.name ?? "",
       description: result.description,
-      status: result.status ?? '',
+      status: result.status ?? "",
       customDescriptorContent: result.descriptors?.custom?.inlineContent,
       createdAt: result.createdAt,
       updatedAt: result.updatedAt,
@@ -854,15 +887,18 @@ export class RegistryService {
   /**
    * Waits for a registry record to leave transitional states (CREATING, UPDATING).
    */
-  private async waitForStableState(recordId: string, maxWaitMs = 10000): Promise<void> {
+  private async waitForStableState(
+    recordId: string,
+    maxWaitMs = 10000,
+  ): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < maxWaitMs) {
       const result = await this.client.send(
         new GetRegistryRecordCommand({ registryId: this.registryId, recordId }),
       );
       const s = result.status as string;
-      if (s !== 'CREATING' && s !== 'UPDATING') return;
-      await new Promise(r => setTimeout(r, 1000));
+      if (s !== "CREATING" && s !== "UPDATING") return;
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 
@@ -870,7 +906,7 @@ export class RegistryService {
     type: ResourceType,
     id: string,
     status: RegistryRecordStatusValue,
-    statusReason: string = 'Status update via registry service',
+    statusReason: string = "Status update via registry service",
     currentStatus?: string,
   ): Promise<RegistryRecord> {
     const recordId = id;
@@ -883,12 +919,17 @@ export class RegistryService {
     // RegistryAgentRecord governance resolver) must pass it so every
     // transition is validated, never silently coerced.
     if (currentStatus !== undefined) {
-      if (!RegistryService.lifecycleManager.isValidTransition(currentStatus, status)) {
+      if (
+        !RegistryService.lifecycleManager.isValidTransition(
+          currentStatus,
+          status,
+        )
+      ) {
         const valid = REGISTRY_TRANSITIONS.transitions[currentStatus] || [];
         throw new RegistryLifecycleError(
           `Invalid status transition: ${currentStatus} → ${status}. ` +
-            `Valid transitions from ${currentStatus}: ${valid.join(', ') || 'none'}`,
-          'INVALID_TRANSITION',
+            `Valid transitions from ${currentStatus}: ${valid.join(", ") || "none"}`,
+          "INVALID_TRANSITION",
         );
       }
     }
@@ -913,7 +954,7 @@ export class RegistryService {
 
     return {
       recordId: result.recordId ?? recordId,
-      name: '',
+      name: "",
       status: result.status ?? status,
       updatedAt: result.updatedAt,
     };
@@ -935,16 +976,134 @@ export class RegistryService {
   }
 
   /**
+   * Lists CUSTOM-descriptor registry record summaries in a SINGLE pass of
+   * `ListRegistryRecords` pagination — deliberately does NOT follow up with
+   * a `GetRegistryRecord` per record (unlike `listResources`, which issues
+   * one detail GET per summary just to apply its type filter).
+   *
+   * Summaries carry `recordId`/`name`/`status` but never
+   * `customDescriptorContent` (org/manifest data), so this is only suitable
+   * for cheap id<->name lookups (e.g. batch display-name resolution). Callers
+   * needing manifest content (org validation, bindings, etc.) must follow up
+   * with `getResource` for the specific records they actually need — but
+   * critically, only for the deduped subset they care about, not the full
+   * registry.
+   */
+  async listResourceSummaries(): Promise<RegistryRecordSummary[]> {
+    const summaries: RegistryRecordSummary[] = [];
+    let nextToken: string | undefined;
+    do {
+      const result: ListRegistryRecordsCommandOutput = await this.withRetry(
+        () =>
+          this.client.send(
+            new ListRegistryRecordsCommand({
+              registryId: this.registryId,
+              descriptorType: "CUSTOM",
+              nextToken,
+            }),
+          ),
+      );
+      if (result.registryRecords) {
+        summaries.push(...result.registryRecords);
+      }
+      nextToken = result.nextToken;
+    } while (nextToken);
+    return summaries;
+  }
+
+  /**
+   * Batch-resolves a set of agent references — each may be a 12-char
+   * Registry recordId OR a legacy human-readable name — to their full
+   * `RegistryRecord`s, keyed by the ORIGINAL reference string passed in.
+   *
+   * Cost profile (the N+1 fix): at most ONE `listResourceSummaries` call
+   * total (shared across every legacy-name reference in the batch, and only
+   * issued at all if at least one reference isn't already a 12-char id),
+   * plus exactly one `getResource` detail GET per UNIQUE resolved recordId
+   * (deduplicated — repeated bindings to the same agent cost one GET, not
+   * one per binding).
+   *
+   * Per-reference failures (unresolvable name, missing record, transient
+   * Registry error) are isolated: the failing key is simply absent from the
+   * returned map so callers can fall back gracefully, matching this
+   * codebase's "never throw on a display-only lookup" convention.
+   */
+  async getResourcesByRefs(
+    type: ResourceType,
+    refs: string[],
+  ): Promise<Map<string, RegistryRecord>> {
+    const uniqueRefs = Array.from(new Set(refs.filter((r) => !!r)));
+    const result = new Map<string, RegistryRecord>();
+    if (uniqueRefs.length === 0) return result;
+
+    const isRecordId = (r: string) => /^[a-zA-Z0-9]{12}$/.test(r);
+    const needsNameResolution = uniqueRefs.some((r) => !isRecordId(r));
+
+    // Single shared summary list for every legacy-name reference in the
+    // batch — NOT one list call per reference.
+    let nameToRecordId: Map<string, string> | undefined;
+    if (needsNameResolution) {
+      const summaries = await this.listResourceSummaries();
+      nameToRecordId = new Map(
+        summaries
+          .filter((s) => s.recordId && s.name)
+          .map((s) => [s.name as string, s.recordId as string]),
+      );
+    }
+
+    // ref -> resolved recordId (or undefined if unresolvable).
+    const refToRecordId = new Map<string, string | undefined>();
+    for (const ref of uniqueRefs) {
+      if (isRecordId(ref)) {
+        refToRecordId.set(ref, ref);
+      } else {
+        refToRecordId.set(ref, nameToRecordId?.get(ref));
+      }
+    }
+
+    // Dedupe by resolved recordId so an agent bound under multiple refs (or
+    // a batch with duplicate bindings) is fetched exactly once.
+    const uniqueRecordIds = Array.from(
+      new Set(
+        Array.from(refToRecordId.values()).filter((id): id is string => !!id),
+      ),
+    );
+    const recordIdToRecord = new Map<string, RegistryRecord>();
+    await Promise.all(
+      uniqueRecordIds.map(async (recordId) => {
+        try {
+          const record = await this.getResource(type, recordId);
+          if (record) recordIdToRecord.set(recordId, record);
+        } catch (err) {
+          console.warn("getResourcesByRefs: getResource failed, dropping ref", {
+            type,
+            recordId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }),
+    );
+
+    for (const [ref, recordId] of refToRecordId.entries()) {
+      if (!recordId) continue;
+      const record = recordIdToRecord.get(recordId);
+      if (record) result.set(ref, record);
+    }
+
+    return result;
+  }
+
+  /**
    * Helper to map a RegistryRecordSummary to our RegistryRecord shape.
    * Note: summaries from ListRegistryRecords do not include custom
    * descriptor content — callers needing that must follow up with getResource.
    */
   private summaryToRecord(rec: RegistryRecordSummary): RegistryRecord {
     return {
-      recordId: rec.recordId ?? '',
-      name: rec.name ?? '',
+      recordId: rec.recordId ?? "",
+      name: rec.name ?? "",
       description: rec.description,
-      status: rec.status ?? '',
+      status: rec.status ?? "",
       // Summaries don't include descriptor content
       customDescriptorContent: undefined,
       createdAt: rec.createdAt,
@@ -959,33 +1118,93 @@ export class RegistryService {
    * Uses CUSTOM descriptorType filter since all our resources use CUSTOM
    * descriptors. The `type` parameter is reserved for future use when the
    * Registry supports finer-grained filtering.
+   *
+   * N+1 fix (live incident: 340 records × sequential GetRegistryRecord —
+   * each carrying SDK retries — blew the 30s resolver budget): detail
+   * fetches now run in PARALLEL with bounded concurrency
+   * ({@link RegistryService.LIST_DETAIL_CONCURRENCY}). A summary-only fast
+   * path is NOT possible for the current callers — the projection evidence:
+   *  - mapToAgentConfig/mapToToolConfig read `orgId` (the tenant filter in
+   *    listAgentConfigsRegistry / listToolConfigsRegistry) from
+   *    customDescriptorContent, which list summaries do not carry;
+   *  - the agent-vs-tool classification below is the inlineContent
+   *    `manifest` discriminator;
+   *  - findProjectAgentRecords / agent-import dedupe / governance workload
+   *    checks all read customDescriptorContent.
+   * So every record still needs its detail — fetched concurrently.
+   *
+   * When {@link ListResourcesOptions.getRemainingTimeMs} is supplied (wire
+   * it to the Lambda context.getRemainingTimeInMillis), the fetch
+   * short-circuits once the remaining budget drops below
+   * {@link ListResourcesOptions.minRemainingTimeMs}: no further Registry
+   * calls are issued and the records completed so far are returned as a
+   * PARTIAL list (with a warning) instead of timing out the resolver.
+   * Budget-skipped records are dropped entirely — NOT pushed as summaries —
+   * because a summary maps to orgId '' (system-shared), which would surface
+   * another tenant's records to every caller.
    */
-  async listResources(type: ResourceType): Promise<RegistryRecord[]> {
+  async listResources(
+    type: ResourceType,
+    options?: ListResourcesOptions,
+  ): Promise<RegistryRecord[]> {
+    const minRemainingTimeMs = options?.minRemainingTimeMs ?? 5000;
+    const budgetLow = (): boolean =>
+      options?.getRemainingTimeMs !== undefined &&
+      options.getRemainingTimeMs() < minRemainingTimeMs;
+
     const records: RegistryRecord[] = [];
     let nextToken: string | undefined;
+    let truncated = false;
 
     do {
+      if (budgetLow()) {
+        truncated = true;
+        break;
+      }
+
       const result: ListRegistryRecordsCommandOutput = await this.withRetry(
         () =>
           this.client.send(
             new ListRegistryRecordsCommand({
               registryId: this.registryId,
-              descriptorType: 'CUSTOM',
+              descriptorType: "CUSTOM",
               nextToken,
             }),
           ),
       );
 
-      if (result.registryRecords) {
-        for (const rec of result.registryRecords) {
-          const recId = rec.recordId ?? '';
+      const summaries = result.registryRecords ?? [];
+
+      // Per-summary outcome, index-aligned so output order matches summary
+      // order regardless of GET completion order.
+      type DetailOutcome =
+        | { kind: "full"; record: RegistryRecord }
+        | { kind: "summary" } // GET failed — fall back to the summary shape
+        | { kind: "filtered" } // wrong type for this listing — drop
+        | { kind: "skipped" }; // time budget exhausted — drop (see note above)
+      const outcomes: DetailOutcome[] = new Array(summaries.length);
+
+      let cursor = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const i = cursor;
+          cursor += 1;
+          if (i >= summaries.length) return;
+          const rec = summaries[i];
+          const recId = rec.recordId ?? "";
           if (!recId) {
-            records.push(this.summaryToRecord(rec));
+            outcomes[i] = { kind: "summary" };
+            continue;
+          }
+          if (budgetLow()) {
+            truncated = true;
+            outcomes[i] = { kind: "skipped" };
             continue;
           }
           try {
-            // Call SDK directly — do NOT call getResource/resolveRecordId here,
-            // which would recurse back into listResources for short ids.
+            // Call SDK directly — do NOT call getResource/resolveRecordId
+            // here, which would recurse back into listResources for short
+            // ids.
             const detail: GetRegistryRecordCommandOutput = await this.withRetry(
               () =>
                 this.client.send(
@@ -997,9 +1216,9 @@ export class RegistryService {
             );
             const full: RegistryRecord = {
               recordId: detail.recordId ?? recId,
-              name: detail.name ?? rec.name ?? '',
+              name: detail.name ?? rec.name ?? "",
               description: detail.description,
-              status: detail.status ?? rec.status ?? '',
+              status: detail.status ?? rec.status ?? "",
               customDescriptorContent:
                 detail.descriptors?.custom?.inlineContent,
               createdAt: detail.createdAt,
@@ -1008,34 +1227,52 @@ export class RegistryService {
             // Filter by type using authoritative manifest-presence check:
             // agents always carry a `manifest` in customDescriptorContent;
             // tools store their config in the `description` field and have
-            // no manifest.
+            // no manifest. (A malformed inlineContent throws here and falls
+            // back to the summary shape — the pre-parallel behavior.)
             const meta = full.customDescriptorContent
               ? JSON.parse(full.customDescriptorContent)
               : {};
             const hasManifest = meta.manifest !== undefined;
-
-            if (type === 'agent' && !hasManifest) {
-              // Not an agent — agents always carry a manifest in
-              // customDescriptorContent. Skip tool records (which store
-              // their config in the `description` field instead).
-              continue;
-            }
-            if (type === 'tool' && hasManifest) {
-              // Not a tool — the presence of a manifest indicates this is
-              // an agent record.
-              continue;
-            }
-            records.push(full);
-            continue;
+            const typeMatches = type === "agent" ? hasManifest : !hasManifest;
+            outcomes[i] = typeMatches
+              ? { kind: "full", record: full }
+              : { kind: "filtered" };
           } catch {
-            /* fall through */
+            outcomes[i] = { kind: "summary" };
           }
-          records.push(this.summaryToRecord(rec));
+        }
+      };
+
+      const workerCount = Math.min(
+        RegistryService.LIST_DETAIL_CONCURRENCY,
+        Math.max(summaries.length, 1),
+      );
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+      for (let i = 0; i < summaries.length; i++) {
+        const outcome = outcomes[i];
+        if (outcome === undefined) continue;
+        switch (outcome.kind) {
+          case "full":
+            records.push(outcome.record);
+            break;
+          case "summary":
+            records.push(this.summaryToRecord(summaries[i]));
+            break;
+          case "filtered":
+          case "skipped":
+            break;
         }
       }
 
       nextToken = result.nextToken;
-    } while (nextToken);
+    } while (nextToken && !truncated);
+
+    if (truncated) {
+      console.warn(
+        `listResources(${type}): remaining time budget below ${minRemainingTimeMs}ms — returning partial list of ${records.length} records`,
+      );
+    }
 
     return records;
   }
@@ -1059,7 +1296,7 @@ export class RegistryService {
           this.client.send(
             new ListRegistryRecordsCommand({
               registryId: this.registryId,
-              descriptorType: 'CUSTOM',
+              descriptorType: "CUSTOM",
               name: query,
               nextToken,
             }),
@@ -1094,11 +1331,11 @@ export class RegistryService {
    */
   toRegistryStatus(internalState: string): RegistryRecordStatusValue {
     switch (internalState) {
-      case 'active':
+      case "active":
         return RegistryRecordStatusValues.APPROVED;
-      case 'inactive':
+      case "inactive":
         return RegistryRecordStatusValues.DEPRECATED;
-      case 'maintenance':
+      case "maintenance":
         return RegistryRecordStatusValues.DRAFT;
       default:
         console.warn(
@@ -1131,7 +1368,9 @@ export class RegistryService {
    *
    * Unknown Registry statuses default to 'inactive' with a warning log.
    */
-  toInternalState(registryStatus: RegistryRecordStatusValue | string | undefined): string {
+  toInternalState(
+    registryStatus: RegistryRecordStatusValue | string | undefined,
+  ): string {
     // Map every RegistryRecordStatus value to the 3-value AgentState enum
     // (active | inactive | maintenance). PENDING_APPROVAL surfaces as 'active'
     // because SubmitRegistryRecordForApproval is async and reflecting user
@@ -1140,18 +1379,20 @@ export class RegistryService {
       case RegistryRecordStatusValues.APPROVED:
       case RegistryRecordStatusValues.UPDATING:
       case RegistryRecordStatusValues.PENDING_APPROVAL:
-        return 'active';
+        return "active";
       case RegistryRecordStatusValues.DRAFT:
       case RegistryRecordStatusValues.CREATING:
-        return 'maintenance';
+        return "maintenance";
       case RegistryRecordStatusValues.DEPRECATED:
       case RegistryRecordStatusValues.REJECTED:
       case RegistryRecordStatusValues.CREATE_FAILED:
       case RegistryRecordStatusValues.UPDATE_FAILED:
-        return 'inactive';
+        return "inactive";
       default:
-        console.warn(`Unknown registry status "${registryStatus}", mapping to 'inactive'`);
-        return 'inactive';
+        console.warn(
+          `Unknown registry status "${registryStatus}", mapping to 'inactive'`,
+        );
+        return "inactive";
     }
   }
 
@@ -1178,14 +1419,20 @@ export class RegistryService {
     json: string | null | undefined,
     defaults: T,
   ): T {
-    if (json == null || json === '') {
+    if (json == null || json === "") {
       return defaults;
     }
 
     try {
       const parsed = JSON.parse(json);
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        console.warn('Custom metadata JSON is not a plain object, returning defaults');
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        console.warn(
+          "Custom metadata JSON is not a plain object, returning defaults",
+        );
         return defaults;
       }
       return { ...defaults, ...parsed };
@@ -1203,8 +1450,8 @@ export class RegistryService {
 
   private static readonly AGENT_METADATA_DEFAULTS: AgentCustomMetadata = {
     categories: [],
-    icon: '',
-    state: 'active',
+    icon: "",
+    state: "active",
     appId: undefined,
     manifest: undefined,
     orgId: undefined,
@@ -1218,8 +1465,8 @@ export class RegistryService {
 
   private static readonly TOOL_METADATA_DEFAULTS: ToolCustomMetadata = {
     categories: [],
-    icon: '',
-    state: 'active',
+    icon: "",
+    state: "active",
     integrationBindings: undefined,
     dataStoreBindings: undefined,
     appId: undefined,
@@ -1241,10 +1488,17 @@ export class RegistryService {
   ): IntegrationBinding[] | null {
     if (!Array.isArray(bindings) || bindings.length === 0) return null;
     const cleaned = bindings.filter(
-      (b: { integrationId?: unknown; integrationType?: unknown } | null | undefined) =>
+      (
+        b:
+          | { integrationId?: unknown; integrationType?: unknown }
+          | null
+          | undefined,
+      ) =>
         b &&
-        typeof b.integrationId === 'string' && b.integrationId.length > 0 &&
-        typeof b.integrationType === 'string' && b.integrationType.length > 0,
+        typeof b.integrationId === "string" &&
+        b.integrationId.length > 0 &&
+        typeof b.integrationType === "string" &&
+        b.integrationType.length > 0,
     );
     return cleaned.length > 0 ? (cleaned as IntegrationBinding[]) : null;
   }
@@ -1254,12 +1508,55 @@ export class RegistryService {
   ): DataStoreBinding[] | null {
     if (!Array.isArray(bindings) || bindings.length === 0) return null;
     const cleaned = bindings.filter(
-      (b: { dataStoreId?: unknown; dataStoreType?: unknown } | null | undefined) =>
+      (
+        b:
+          | { dataStoreId?: unknown; dataStoreType?: unknown }
+          | null
+          | undefined,
+      ) =>
         b &&
-        typeof b.dataStoreId === 'string' && b.dataStoreId.length > 0 &&
-        typeof b.dataStoreType === 'string' && b.dataStoreType.length > 0,
+        typeof b.dataStoreId === "string" &&
+        b.dataStoreId.length > 0 &&
+        typeof b.dataStoreType === "string" &&
+        b.dataStoreType.length > 0,
     );
     return cleaned.length > 0 ? (cleaned as DataStoreBinding[]) : null;
+  }
+
+  /**
+   * Resolves the value projected into a GraphQL AWSJSON `config` field.
+   *
+   * Data-contract invariant (Agent Tools error-boundary incident): every
+   * value projected into AWSJSON `config` MUST be valid JSON representing an
+   * object. AWSJSON double-encodes bare strings, so plain-text descriptions
+   * (e.g. 'Fetches weather data' on summary-fallback rows where the detail
+   * GET failed and customDescriptorContent is undefined) or '' poison
+   * consumers that parse twice.
+   *
+   * Resolution order: the first candidate that parses as JSON to a plain
+   * (non-null, non-array) object is returned BYTE-IDENTICAL; otherwise '{}'.
+   * Plain-text descriptions are never projected here — they keep flowing
+   * through the record's description/name fields.
+   */
+  private static toValidConfigJson(
+    ...candidates: Array<string | undefined>
+  ): string {
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string" || candidate === "") continue;
+      try {
+        const parsed: unknown = JSON.parse(candidate);
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray(parsed)
+        ) {
+          return candidate;
+        }
+      } catch {
+        // Not JSON (plain-text description) — try the next candidate.
+      }
+    }
+    return "{}";
   }
 
   /**
@@ -1273,9 +1570,11 @@ export class RegistryService {
 
     return {
       agentId: record.recordId,
-      name: record.name ?? '',
-      orgId: meta.orgId ?? '',
-      config: record.description ?? '',
+      name: record.name ?? "",
+      orgId: meta.orgId ?? "",
+      // AWSJSON contract: config must be a JSON object — a plain-text
+      // description falls back to '{}' (see toValidConfigJson).
+      config: RegistryService.toValidConfigJson(record.description),
       state: this.toInternalState(record.status),
       categories: meta.categories,
       createdAt: record.createdAt?.toISOString(),
@@ -1291,7 +1590,9 @@ export class RegistryService {
       ...(meta.reachability ? { reachability: meta.reachability } : {}),
       // Surface the gateway publication record READ-ONLY when present
       // (US-IMP-031). Never an active/trusted field; never changes DRAFT state.
-      ...(meta.gatewayPublication ? { gatewayPublication: meta.gatewayPublication } : {}),
+      ...(meta.gatewayPublication
+        ? { gatewayPublication: meta.gatewayPublication }
+        : {}),
     };
   }
 
@@ -1306,14 +1607,23 @@ export class RegistryService {
 
     return {
       toolId: record.recordId,
-      orgId: meta.orgId ?? '',
+      orgId: meta.orgId ?? "",
       // New records: config comes from custom_metadata.config (see tool-config-resolver createToolConfigRegistry).
       // Legacy records: fall back to record.description which previously carried the full JSON blob.
-      config: meta.config ?? record.description ?? '',
+      // AWSJSON contract: whichever candidate wins must be a JSON object —
+      // plain text or '' falls back to '{}' (see toValidConfigJson).
+      config: RegistryService.toValidConfigJson(
+        meta.config,
+        record.description,
+      ),
       state: this.toInternalState(record.status),
       categories: meta.categories,
-      integrationBindings: RegistryService.sanitizeIntegrationBindings(meta.integrationBindings),
-      dataStoreBindings: RegistryService.sanitizeDataStoreBindings(meta.dataStoreBindings),
+      integrationBindings: RegistryService.sanitizeIntegrationBindings(
+        meta.integrationBindings,
+      ),
+      dataStoreBindings: RegistryService.sanitizeDataStoreBindings(
+        meta.dataStoreBindings,
+      ),
       createdAt: record.createdAt?.toISOString(),
       updatedAt: record.updatedAt?.toISOString(),
     };

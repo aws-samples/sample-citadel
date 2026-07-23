@@ -1,12 +1,34 @@
 """Internal KB and S3 helpers — no @tool decorator, used by extract.py and design.py."""
 import json
+from dataclasses import dataclass
 from config import bedrock_agent, s3, KNOWLEDGE_BASE_ID, SESSION_BUCKET
 
 
-def kb_query(query: str, session_id: str, n: int = 3) -> str:
-    """Run a single KB query scoped to session_id. Returns concatenated text chunks."""
+@dataclass(frozen=True)
+class KBResult:
+    """Outcome of a KB retrieval — distinguishes error/empty/content.
+
+    status:  'content' — chunks were retrieved (in ``content``)
+             'empty'   — the query ran but returned no chunks (also used when
+                         no knowledge base is configured)
+             'error'   — the retrieval FAILED; ``detail`` carries the
+                         diagnostic for logs only and must NEVER be surfaced
+                         as document content.
+    """
+    status: str
+    content: str = ""
+    detail: str = ""
+
+
+def kb_retrieve(query: str, session_id: str, n: int = 3) -> KBResult:
+    """Run a single KB query scoped to session_id with an honest outcome.
+
+    Never raises and never smuggles error text into ``content`` — the old
+    contract returned "KB error: {e}" strings as if they were document
+    content, which downstream extraction then treated as context.
+    """
     if not KNOWLEDGE_BASE_ID:
-        return ""
+        return KBResult(status="empty", detail="knowledge base not configured")
     try:
         resp = bedrock_agent.retrieve(
             knowledgeBaseId=KNOWLEDGE_BASE_ID,
@@ -20,9 +42,19 @@ def kb_query(query: str, session_id: str, n: int = 3) -> str:
             },
         )
         chunks = [r['content']['text'] for r in resp.get('retrievalResults', []) if r.get('content', {}).get('text')]
-        return "\n\n---\n\n".join(chunks)
+        if not chunks:
+            return KBResult(status="empty")
+        return KBResult(status="content", content="\n\n---\n\n".join(chunks))
     except Exception as e:
-        return f"KB error: {e}"
+        return KBResult(status="error", detail=str(e))
+
+
+def kb_query(query: str, session_id: str, n: int = 3) -> str:
+    """Back-compat wrapper: returns retrieved content, or '' on empty/error.
+
+    Never returns error text as content (see kb_retrieve).
+    """
+    return kb_retrieve(query, session_id, n).content
 
 
 def s3_get(key: str) -> str | None:
