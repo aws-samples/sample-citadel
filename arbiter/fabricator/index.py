@@ -15,6 +15,10 @@ from manifest_proposal import (
     propose_agent_manifest,
     sanitize_text,
 )
+from transient_retry import (
+    call_with_transient_retry,
+    user_actionable_failure_message,
+)
 import boto3
 from botocore.config import Config
 from common.region import cross_region_prefix
@@ -1639,6 +1643,16 @@ def create_tool_fabricator(store_tool_tool=None):
         max_tokens=32768,
         region_name="us-west-2",
         boto_client_config=BEDROCK_RETRY_CONFIG,
+        # The fabricator is headless: per-token chunks are consumed only
+        # internally by the Strands loop (user-visible progress is per-agent
+        # EventBridge, not per-token). streaming=False routes through the
+        # Converse API instead of ConverseStream, so transient model faults
+        # (internalServerException, ...) surface PRE-response — inside
+        # botocore's retry scope (BEDROCK_RETRY_CONFIG, adaptive) — instead
+        # of as mid-stream EventStreamErrors that NO layer retries.
+        # BEDROCK_RETRY_CONFIG's read_timeout=3600 accommodates the long
+        # non-streaming call at max_tokens=32768.
+        streaming=False,
     )
     
     tool_fabricator = Agent(
@@ -1725,6 +1739,10 @@ def create_agent_fabricator(complete_task, store_agent_tool=None):
             max_tokens=32768,
             region_name="us-west-2",
             boto_client_config=BEDROCK_RETRY_CONFIG,
+            # Headless fabricator — see create_tool_fabricator: streaming=False
+            # converts unretryable mid-stream faults into pre-response faults
+            # covered by BEDROCK_RETRY_CONFIG's adaptive retry.
+            streaming=False,
     )
     
     agent_fabricator = Agent(
@@ -1961,7 +1979,14 @@ def process_event(event, context, request_type=None):
                     f"integration_bindings={json.dumps(integration_bindings) if integration_bindings else 'None'}\n"
                     f"datastore_bindings={json.dumps(datastore_bindings) if datastore_bindings else 'None'}"
                 )
-            tool_fabricator(enriched_task)
+            # Bounded transient retry (defence in depth on top of
+            # streaming=False + botocore adaptive retries): re-invoke the
+            # fabricator ONLY on transient Bedrock faults (internal server /
+            # service unavailable / throttling / model stream errors), with
+            # exponential backoff + full jitter. Non-transient faults
+            # (ValidationException, AccessDenied, ...) fail fast to the
+            # except below unchanged.
+            call_with_transient_retry(lambda: tool_fabricator(enriched_task))
         else:
             # Bind requested_by into a closure-wrapped @tool so the LLM
             # invocation path records the event's requester in custom
@@ -1992,7 +2017,10 @@ def process_event(event, context, request_type=None):
                 complete_task,
                 store_agent_tool=store_agent_config_registry_bound,
             )
-            agent_fabricator(TASK)
+            # Bounded transient retry — same contract as the tool-creation
+            # path above: transient Bedrock faults only, ≤3 total attempts,
+            # exponential backoff + full jitter; everything else fails fast.
+            call_with_transient_retry(lambda: agent_fabricator(TASK))
 
         # Durable status: fabrication dispatch completed without raising — mark
         # COMPLETED and stamp the agent name/recordId. Best-effort.
@@ -2004,10 +2032,16 @@ def process_event(event, context, request_type=None):
     except Exception as e:
         print(f"Fabrication failed: {str(e)}")
         # Durable status: mark FAILED + errorMessage before re-raising. The
-        # status write is best-effort and must not mask the original error.
+        # retry wrapper above guarantees transient Bedrock faults reach here
+        # only AFTER the retry budget is exhausted, so FAILED is written once,
+        # at the end — never mid-retry. The status write is best-effort and
+        # must not mask the original error. user_actionable_failure_message
+        # keeps the raw Bedrock detail while telling the operator what to do
+        # next (non-transient errors pass through unchanged).
         _write_fabrication_status(
             orchestration_id, agent_use_id, "FAILED",
-            error_message=str(e), agent_name=agent_use_id
+            error_message=user_actionable_failure_message(e),
+            agent_name=agent_use_id
         )
         # Publish intake progress failure
         publish_intake_progress(orchestration_id, agent_index, total_agents, agent_use_id, failed=True)

@@ -384,3 +384,21 @@ class TestUnknownRequestType:
         fab_pub.assert_not_called()
         gate.assert_not_called()
         mk_agent.assert_not_called()
+
+
+class TestInvokeModelTransientFaultConfig:
+    """_invoke_model reuses the Fabricator's retry config and, like the other
+    headless fabricator sites, must disable streaming so transient model
+    faults surface pre-response where botocore's adaptive retry covers them
+    (mid-stream stream faults are retried by no layer)."""
+
+    def test_invoke_model_constructs_non_streaming_model(self):
+        agent_instance = MagicMock(return_value="raw model output")
+        with patch("strands.models.BedrockModel") as bedrock_model, \
+                patch("strands.Agent", return_value=agent_instance):
+            out = manifest_proposal._invoke_model("propose")
+
+        assert out == "raw model output"
+        kwargs = bedrock_model.call_args.kwargs
+        assert kwargs.get("streaming") is False
+        assert kwargs.get("boto_client_config") is index.BEDROCK_RETRY_CONFIG

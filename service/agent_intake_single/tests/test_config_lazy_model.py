@@ -134,3 +134,29 @@ def test_unknown_attribute_still_raises(monkeypatch):
     cfg = _fresh_config(monkeypatch)
     with pytest.raises(AttributeError):
         _ = cfg.NOT_A_REAL_CONFIG_ATTRIBUTE
+
+
+def test_bedrock_client_config_carries_adaptive_retries(monkeypatch):
+    """The shared bedrock-runtime client drives every non-streaming
+    converse() tool site (fabricate/design/plan/extract). Transient Bedrock
+    faults (internalServerException, ServiceUnavailable, Throttling) surface
+    at request level there, so botocore adaptive retry (exponential backoff
+    + jitter, 3 attempts) must be enabled — and the existing timeouts must
+    be preserved."""
+    import boto3
+    captured = {}
+
+    def client_spy(service_name, *args, **kwargs):
+        if service_name == "bedrock-runtime":
+            captured["config"] = kwargs.get("config")
+        return mock.MagicMock(name=f"client:{service_name}")
+
+    monkeypatch.setattr(boto3, "client", client_spy)
+    sys.modules.pop("config", None)
+    importlib.import_module("config")
+
+    cfg = captured["config"]
+    assert cfg is not None
+    assert cfg.retries == {"max_attempts": 3, "mode": "adaptive"}
+    assert cfg.read_timeout == 300
+    assert cfg.connect_timeout == 60

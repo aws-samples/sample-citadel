@@ -58,10 +58,23 @@ def __getattr__(name):
 
 
 # Raw boto3 client for converse() calls inside tools
+#
+# retries: every tool call site off this client (fabricate/design/plan/
+# extract) uses the NON-streaming Converse API, so transient Bedrock faults
+# (internalServerException, ServiceUnavailableException, ThrottlingException)
+# surface at request level — fully inside botocore's retry scope. Client-side
+# adaptive retry (exponential backoff + jitter, 3 attempts) is therefore the
+# cleanest single lever: it hardens all seven call sites uniformly with no
+# per-call wrappers. Streaming paths (which botocore cannot retry mid-stream)
+# do not use this client — see arbiter/fabricator/transient_retry.py.
 bedrock = boto3.client(
     'bedrock-runtime',
     region_name=AWS_REGION,
-    config=Config(read_timeout=300, connect_timeout=60),
+    config=Config(
+        read_timeout=300,
+        connect_timeout=60,
+        retries={'max_attempts': 3, 'mode': 'adaptive'},
+    ),
 )
 
 s3 = boto3.client('s3', region_name=AWS_REGION)
