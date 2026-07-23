@@ -11,10 +11,10 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as sns from "aws-cdk-lib/aws-sns";
-import { BlockPublicAccess, Bucket } from 'aws-cdk-lib/aws-s3';
+import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3";
 import { Asset } from "aws-cdk-lib/aws-s3-assets";
 import { CfnGraphQLSchema } from "aws-cdk-lib/aws-appsync";
-import * as path from 'path';
+import * as path from "path";
 import { Construct } from "constructs";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import { CustomResource, Duration } from "aws-cdk-lib";
@@ -60,13 +60,13 @@ export class BackendStack extends cdk.Stack {
 
     // Idempotency table for EventBridge event deduplication (RE-05)
     this.idempotencyTable = new dynamodb.Table(this, "IdempotencyTable", {
-          tableName: `citadel-idempotency-${props.environment}`,
-          partitionKey: { name: "eventId", type: dynamodb.AttributeType.STRING },
-          billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-          timeToLiveAttribute: "ttl",
-          pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-        });
+      tableName: `citadel-idempotency-${props.environment}`,
+      partitionKey: { name: "eventId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      timeToLiveAttribute: "ttl",
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
 
     // Projects Table
     this.projectsTable = new dynamodb.Table(this, "ProjectsTable", {
@@ -79,65 +79,74 @@ export class BackendStack extends cdk.Stack {
     });
 
     this.projectsTable.addGlobalSecondaryIndex({
-      indexName: 'OrganizationIndex',
-      partitionKey: { name: 'organization', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      indexName: "OrganizationIndex",
+      partitionKey: {
+        name: "organization",
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    this.conversationsTable = new dynamodb.Table(this, 'ConversationsTable', {
+    this.conversationsTable = new dynamodb.Table(this, "ConversationsTable", {
       tableName: `citadel-conversations-${props.environment}`,
-      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'timestamp', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "projectId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
-    this.accessLogsBucket = new Bucket(this, 'AccessLogsBucket', {
-          bucketName: `citadel-s3-logs-${props.environment}-${this.account}-${this.region}`,
-          encryption: cdk.aws_s3.BucketEncryption.S3_MANAGED,
-          blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
-          enforceSSL: true,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-          autoDeleteObjects: true,
-          lifecycleRules: [{ expiration: cdk.Duration.days(90) }],
-        });
+    this.accessLogsBucket = new Bucket(this, "AccessLogsBucket", {
+      bucketName: `citadel-s3-logs-${props.environment}-${this.account}-${this.region}`,
+      encryption: cdk.aws_s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      lifecycleRules: [{ expiration: cdk.Duration.days(90) }],
+    });
     const accessLogsBucket = this.accessLogsBucket;
 
-        this.documentBucket = new Bucket(this, 'DocumentBucket', {
-              bucketName: `citadel-documents-${props.environment}-${this.account}-${this.region}`,
-              versioned: true,
-              encryption: cdk.aws_s3.BucketEncryption.S3_MANAGED,
-              blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
-              enforceSSL: true,
-              serverAccessLogsBucket: accessLogsBucket,
-              serverAccessLogsPrefix: 'documents/',
-              removalPolicy: cdk.RemovalPolicy.DESTROY,
-              autoDeleteObjects: true,
-              cors: [
-                {
-                  allowedHeaders: ['*'],
-                  allowedMethods: [cdk.aws_s3.HttpMethods.GET, cdk.aws_s3.HttpMethods.PUT, cdk.aws_s3.HttpMethods.POST],
-                  allowedOrigins: [process.env.ALLOWED_ORIGIN || `https://*.cloudfront.net`],
-                  maxAge: 3000,
-                },
-              ],
-            });
+    this.documentBucket = new Bucket(this, "DocumentBucket", {
+      bucketName: `citadel-documents-${props.environment}-${this.account}-${this.region}`,
+      versioned: true,
+      encryption: cdk.aws_s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      serverAccessLogsBucket: accessLogsBucket,
+      serverAccessLogsPrefix: "documents/",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      cors: [
+        {
+          allowedHeaders: ["*"],
+          allowedMethods: [
+            cdk.aws_s3.HttpMethods.GET,
+            cdk.aws_s3.HttpMethods.PUT,
+            cdk.aws_s3.HttpMethods.POST,
+          ],
+          allowedOrigins: [
+            process.env.ALLOWED_ORIGIN || `https://*.cloudfront.net`,
+          ],
+          maxAge: 3000,
+        },
+      ],
+    });
 
-    this.codeBucket = new Bucket(this, 'CodeBucket', {
-              bucketName: `citadel-code-${props.environment}-${this.account}-${this.region}`,
-              removalPolicy: cdk.RemovalPolicy.DESTROY,
-              autoDeleteObjects: true,
-              blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
-              enforceSSL: true,
-              serverAccessLogsBucket: accessLogsBucket,
-              serverAccessLogsPrefix: 'code/',
-              versioned: true, // Enable versioning for code files
-            });
+    this.codeBucket = new Bucket(this, "CodeBucket", {
+      bucketName: `citadel-code-${props.environment}-${this.account}-${this.region}`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      serverAccessLogsBucket: accessLogsBucket,
+      serverAccessLogsPrefix: "code/",
+      versioned: true, // Enable versioning for code files
+    });
 
     // DynamoDB Tables
-     const organisationTable = new dynamodb.Table(this, "OrganisationTable", {
+    const organisationTable = new dynamodb.Table(this, "OrganisationTable", {
       tableName: `citadel-organisations-${props.environment}`,
       partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -154,9 +163,9 @@ export class BackendStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
-    this.agentConfigTable = new dynamodb.Table(this, 'AgentConfigTable', {
+    this.agentConfigTable = new dynamodb.Table(this, "AgentConfigTable", {
       tableName: `citadel-agents-${props.environment}`,
-      partitionKey: { name: 'agentId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "agentId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
@@ -164,9 +173,9 @@ export class BackendStack extends cdk.Stack {
 
     // Model Catalog Table — inventory of invokable foundation models. Additive and
     // not yet wired into any runtime/Lambda env; operators curate rows over time.
-    const modelCatalogTable = new dynamodb.Table(this, 'ModelCatalogTable', {
+    const modelCatalogTable = new dynamodb.Table(this, "ModelCatalogTable", {
       tableName: `citadel-model-catalog-${props.environment}`,
-      partitionKey: { name: 'modelKey', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "modelKey", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
@@ -174,165 +183,188 @@ export class BackendStack extends cdk.Stack {
 
     // Model Config Table — resolved model-selection defaults/overrides. Additive and
     // not yet wired into any runtime/Lambda env.
-    const modelConfigTable = new dynamodb.Table(this, 'ModelConfigTable', {
+    const modelConfigTable = new dynamodb.Table(this, "ModelConfigTable", {
       tableName: `citadel-model-config-${props.environment}`,
-      partitionKey: { name: 'scope', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "scope", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
     // Integrations Table
-    const integrationsTable = new dynamodb.Table(this, 'IntegrationsTable', {
+    const integrationsTable = new dynamodb.Table(this, "IntegrationsTable", {
       tableName: `citadel-integrations-${props.environment}`,
-      partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "SK", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
     integrationsTable.addGlobalSecondaryIndex({
-      indexName: 'IntegrationIdIndex',
-      partitionKey: { name: 'integrationId', type: dynamodb.AttributeType.STRING },
+      indexName: "IntegrationIdIndex",
+      partitionKey: {
+        name: "integrationId",
+        type: dynamodb.AttributeType.STRING,
+      },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // Workflows Table
-    this.workflowsTable = new dynamodb.Table(this, 'WorkflowsTable', {
+    this.workflowsTable = new dynamodb.Table(this, "WorkflowsTable", {
       tableName: `citadel-workflows-${props.environment}`,
-      partitionKey: { name: 'workflowId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
     this.workflowsTable.addGlobalSecondaryIndex({
-      indexName: 'OrgStatusIndex',
-      partitionKey: { name: 'orgId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'status', type: dynamodb.AttributeType.STRING },
+      indexName: "OrgStatusIndex",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "status", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     this.workflowsTable.addGlobalSecondaryIndex({
-      indexName: 'BlueprintIndex',
-      partitionKey: { name: 'isBlueprint', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'updatedAt', type: dynamodb.AttributeType.STRING },
+      indexName: "BlueprintIndex",
+      partitionKey: {
+        name: "isBlueprint",
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: { name: "updatedAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // Apps Table
-    this.appsTable = new dynamodb.Table(this, 'AppsTable', {
+    this.appsTable = new dynamodb.Table(this, "AppsTable", {
       tableName: `citadel-apps-${props.environment}`,
-      partitionKey: { name: 'appId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "appId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
     this.appsTable.addGlobalSecondaryIndex({
-      indexName: 'OrgIndex',
-      partitionKey: { name: 'orgId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      indexName: "OrgIndex",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     this.appsTable.addGlobalSecondaryIndex({
-      indexName: 'GroupIndex',
-      partitionKey: { name: 'groupId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'sortId', type: dynamodb.AttributeType.STRING },
+      indexName: "GroupIndex",
+      partitionKey: { name: "groupId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "sortId", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // Executions Table
-    this.executionsTable = new dynamodb.Table(this, 'ExecutionsTable', {
+    this.executionsTable = new dynamodb.Table(this, "ExecutionsTable", {
       tableName: `citadel-executions-${props.environment}`,
-      partitionKey: { name: 'executionId', type: dynamodb.AttributeType.STRING },
+      partitionKey: {
+        name: "executionId",
+        type: dynamodb.AttributeType.STRING,
+      },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
     this.executionsTable.addGlobalSecondaryIndex({
-      indexName: 'WorkflowIndex',
-      partitionKey: { name: 'workflowId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'startedAt', type: dynamodb.AttributeType.STRING },
+      indexName: "WorkflowIndex",
+      partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "startedAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // --- AgentCore Registry (Custom Resource — no CloudFormation type yet) ---
-    const registryAutoApproval = this.node.tryGetContext('registryAutoApproval') ?? 'true';
+    const registryAutoApproval =
+      this.node.tryGetContext("registryAutoApproval") ?? "true";
 
-    const registryProvisionerFunction = new lambda.Function(this, 'RegistryProvisionerFunction', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'registry-provisioner.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      timeout: cdk.Duration.minutes(5),
-      logGroup: new logs.LogGroup(this, 'RegistryProvisionerFunctionLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    const registryProvisionerFunction = new lambda.Function(
+      this,
+      "RegistryProvisionerFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "registry-provisioner.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.minutes(5),
+        logGroup: new logs.LogGroup(this, "RegistryProvisionerFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
 
     registryProvisionerFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateRegistry',
-          'bedrock-agentcore:DeleteRegistry',
-          'bedrock-agentcore:GetRegistry',
-          'bedrock-agentcore:ListRegistries',
-          'bedrock-agentcore:CreateWorkloadIdentity',
-          'bedrock-agentcore:DeleteWorkloadIdentity',
-          'bedrock-agentcore:GetWorkloadIdentity',
+          "bedrock-agentcore:CreateRegistry",
+          "bedrock-agentcore:DeleteRegistry",
+          "bedrock-agentcore:GetRegistry",
+          "bedrock-agentcore:ListRegistries",
+          "bedrock-agentcore:CreateWorkloadIdentity",
+          "bedrock-agentcore:DeleteWorkloadIdentity",
+          "bedrock-agentcore:GetWorkloadIdentity",
         ],
-        resources: ['*'],
+        resources: ["*"],
       }),
     );
     registryProvisionerFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['iam:CreateServiceLinkedRole'],
-        resources: ['arn:aws:iam::*:role/aws-service-role/bedrock-agentcore.amazonaws.com/*'],
+        actions: ["iam:CreateServiceLinkedRole"],
+        resources: [
+          "arn:aws:iam::*:role/aws-service-role/bedrock-agentcore.amazonaws.com/*",
+        ],
         conditions: {
-          StringEquals: { 'iam:AWSServiceName': 'bedrock-agentcore.amazonaws.com' },
+          StringEquals: {
+            "iam:AWSServiceName": "bedrock-agentcore.amazonaws.com",
+          },
         },
       }),
     );
 
-    const agentCoreRegistry = new cdk.CustomResource(this, 'AgentCoreRegistry', {
-      serviceToken: registryProvisionerFunction.functionArn,
-      properties: {
-        RegistryName: `citadel-registry-${props.environment}`,
-        AutoApproval: String(registryAutoApproval),
-        Description: `Citadel agent and tool registry for ${props.environment}`,
-        ForceRecreate: '2026-05-03b',
+    const agentCoreRegistry = new cdk.CustomResource(
+      this,
+      "AgentCoreRegistry",
+      {
+        serviceToken: registryProvisionerFunction.functionArn,
+        properties: {
+          RegistryName: `citadel-registry-${props.environment}`,
+          AutoApproval: String(registryAutoApproval),
+          Description: `Citadel agent and tool registry for ${props.environment}`,
+          ForceRecreate: "2026-05-03b",
+        },
       },
-    });
+    );
 
-    const registryArn = agentCoreRegistry.getAttString('RegistryArn');
-    const registryId = agentCoreRegistry.getAttString('RegistryId');
+    const registryArn = agentCoreRegistry.getAttString("RegistryArn");
+    const registryId = agentCoreRegistry.getAttString("RegistryId");
     this.registryArn = registryArn;
     this.registryId = registryId;
 
-    new cdk.CfnOutput(this, 'AgentCoreRegistryArn', {
+    new cdk.CfnOutput(this, "AgentCoreRegistryArn", {
       value: registryArn,
-      description: 'AgentCore Registry ARN',
+      description: "AgentCore Registry ARN",
       exportName: `${this.stackName}-RegistryArn`,
     });
 
-    new cdk.CfnOutput(this, 'AgentCoreRegistryId', {
+    new cdk.CfnOutput(this, "AgentCoreRegistryId", {
       value: registryId,
-      description: 'AgentCore Registry ID',
+      description: "AgentCore Registry ID",
       exportName: `${this.stackName}-RegistryId`,
     });
 
     // EventBridge rule for Registry change events (sync to DynamoDB cache)
-    const registrySyncRule = new events.Rule(this, 'RegistrySyncRule', {
-      description: 'Captures AgentCore Registry resource changes for DynamoDB cache sync',
+    const registrySyncRule = new events.Rule(this, "RegistrySyncRule", {
+      description:
+        "Captures AgentCore Registry resource changes for DynamoDB cache sync",
       eventPattern: {
-        source: ['aws.bedrock-agentcore'],
-        detailType: ['AgentCore Registry Resource Change'],
+        source: ["aws.bedrock-agentcore"],
+        detailType: ["AgentCore Registry Resource Change"],
         detail: {
           registryId: [registryId],
         },
@@ -340,24 +372,24 @@ export class BackendStack extends cdk.Stack {
     });
 
     // Dead-letter queue for failed sync events
-    const registrySyncDlq = new sqs.Queue(this, 'RegistrySyncDLQ', {
+    const registrySyncDlq = new sqs.Queue(this, "RegistrySyncDLQ", {
       queueName: `citadel-registry-sync-dlq-${props.environment}`,
       retentionPeriod: cdk.Duration.days(14),
       enforceSSL: true,
     });
 
     // Sync Lambda — processes Registry change events into DynamoDB cache
-    const registrySyncLambda = new lambda.Function(this, 'RegistrySyncLambda', {
+    const registrySyncLambda = new lambda.Function(this, "RegistrySyncLambda", {
       runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'registry-sync.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
+      handler: "registry-sync.handler",
+      code: lambda.Code.fromAsset("dist/lambda"),
       environment: {
         AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
         TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
         REGISTRY_ID: registryId,
       },
       timeout: cdk.Duration.seconds(30),
-      logGroup: new logs.LogGroup(this, 'RegistrySyncLambdaLogs', {
+      logGroup: new logs.LogGroup(this, "RegistrySyncLambdaLogs", {
         retention: logs.RetentionDays.ONE_WEEK,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
@@ -369,9 +401,9 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'dynamodb:GetItem',
-          'dynamodb:PutItem',
-          'dynamodb:DeleteItem',
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem",
         ],
         resources: [
           `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-tools-${props.environment}`,
@@ -384,12 +416,12 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecordStatus',
-          'bedrock-agentcore:DeleteRegistryRecord',
-          'bedrock-agentcore:GetRegistryRecord',
-          'bedrock-agentcore:ListRegistryRecords',
+          "bedrock-agentcore:CreateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecordStatus",
+          "bedrock-agentcore:DeleteRegistryRecord",
+          "bedrock-agentcore:GetRegistryRecord",
+          "bedrock-agentcore:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
       }),
@@ -417,11 +449,11 @@ export class BackendStack extends cdk.Stack {
     // for inspection runs.
     const reconcileAppsMetaScheduledFunction = new lambda.Function(
       this,
-      'ReconcileAppsMetaScheduledFunction',
+      "ReconcileAppsMetaScheduledFunction",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'reconcile-apps-meta-scheduled-handler.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "reconcile-apps-meta-scheduled-handler.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           REGISTRY_ID: registryId,
           APPS_TABLE: this.appsTable.tableName,
@@ -429,7 +461,7 @@ export class BackendStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(5),
         logGroup: new logs.LogGroup(
           this,
-          'ReconcileAppsMetaScheduledFunctionLogs',
+          "ReconcileAppsMetaScheduledFunctionLogs",
           {
             retention: logs.RetentionDays.ONE_WEEK,
             removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -444,8 +476,8 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:GetRegistryRecord',
-          'bedrock-agentcore:ListRegistryRecords',
+          "bedrock-agentcore:GetRegistryRecord",
+          "bedrock-agentcore:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
       }),
@@ -460,10 +492,10 @@ export class BackendStack extends cdk.Stack {
     // with retryAttempts:1, maxEventAge:30m).
     const reconcileAppsMetaSchedule = new events.Rule(
       this,
-      'ReconcileAppsMetaSchedule',
+      "ReconcileAppsMetaSchedule",
       {
         description:
-          'Reconciles AppsTable #META rows against Registry every 6 hours',
+          "Reconciles AppsTable #META rows against Registry every 6 hours",
         schedule: events.Schedule.rate(cdk.Duration.hours(6)),
       },
     );
@@ -483,18 +515,18 @@ export class BackendStack extends cdk.Stack {
     // reconcile-apps-meta scheduled-function wiring above.
     const modelCatalogSyncFunction = new lambda.Function(
       this,
-      'ModelCatalogSyncFunction',
+      "ModelCatalogSyncFunction",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'model-catalog-sync.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "model-catalog-sync.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
           ENVIRONMENT: props.environment,
         },
         timeout: cdk.Duration.minutes(5),
-        logGroup: new logs.LogGroup(this, 'ModelCatalogSyncFunctionLogs', {
+        logGroup: new logs.LogGroup(this, "ModelCatalogSyncFunctionLogs", {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
@@ -506,12 +538,12 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock:ListFoundationModels',
-          'bedrock:ListInferenceProfiles',
-          'bedrock:GetFoundationModel',
-          'bedrock:GetInferenceProfile',
+          "bedrock:ListFoundationModels",
+          "bedrock:ListInferenceProfiles",
+          "bedrock:GetFoundationModel",
+          "bedrock:GetInferenceProfile",
         ],
-        resources: ['*'],
+        resources: ["*"],
       }),
     );
 
@@ -528,13 +560,13 @@ export class BackendStack extends cdk.Stack {
       modelCatalogSyncFunction.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'Bedrock discovery actions (ListFoundationModels/ListInferenceProfiles/' +
-            'GetFoundationModel/GetInferenceProfile) are read-only and have no ' +
-            'resource-level scoping; the model set is discovered dynamically each ' +
-            'run, so target ARNs are not known ahead of time.',
-          appliesTo: ['Resource::*'],
+            "Bedrock discovery actions (ListFoundationModels/ListInferenceProfiles/" +
+            "GetFoundationModel/GetInferenceProfile) are read-only and have no " +
+            "resource-level scoping; the model set is discovered dynamically each " +
+            "run, so target ARNs are not known ahead of time.",
+          appliesTo: ["Resource::*"],
         },
       ],
       true,
@@ -545,8 +577,8 @@ export class BackendStack extends cdk.Stack {
     this.agentEventBus.grantPutEventsTo(modelCatalogSyncFunction);
 
     // Daily EventBridge schedule.
-    const modelCatalogSyncRule = new events.Rule(this, 'ModelCatalogSyncRule', {
-      description: 'Daily sync of the Bedrock model catalog',
+    const modelCatalogSyncRule = new events.Rule(this, "ModelCatalogSyncRule", {
+      description: "Daily sync of the Bedrock model catalog",
       schedule: events.Schedule.rate(cdk.Duration.hours(24)),
     });
 
@@ -561,14 +593,18 @@ export class BackendStack extends cdk.Stack {
     // model.catalog.sync_requested event (emitted by the syncModelCatalog
     // mutation) to the SAME discovery Lambda. EventBridge invokes the target
     // via the rule's managed permission — no lambda:InvokeFunction IAM grant.
-    const modelCatalogSyncRequestRule = new events.Rule(this, 'ModelCatalogSyncRequestRule', {
-      eventBus: this.agentEventBus,
-      description: 'On-demand model catalog sync (operator-triggered)',
-      eventPattern: {
-        source: ['citadel.backend'],
-        detailType: ['model.catalog.sync_requested'],
+    const modelCatalogSyncRequestRule = new events.Rule(
+      this,
+      "ModelCatalogSyncRequestRule",
+      {
+        eventBus: this.agentEventBus,
+        description: "On-demand model catalog sync (operator-triggered)",
+        eventPattern: {
+          source: ["citadel.backend"],
+          detailType: ["model.catalog.sync_requested"],
+        },
       },
-    });
+    );
 
     modelCatalogSyncRequestRule.addTarget(
       new targets.LambdaFunction(modelCatalogSyncFunction, {
@@ -581,17 +617,21 @@ export class BackendStack extends cdk.Stack {
     // `custom:role` attributes onto JWT claims so downstream resolvers can
     // read org/role identity without an AdminGetUserCommand per request.
     // Phase 1 org-scoping foundation.
-    const preTokenGenerationLambda = new lambda.Function(this, 'PreTokenGenerationFunction', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'pre-token-generation.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      functionName: `citadel-pre-token-gen-${props.environment}`,
-      timeout: cdk.Duration.seconds(5),
-      logGroup: new logs.LogGroup(this, 'PreTokenGenerationFunctionLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    const preTokenGenerationLambda = new lambda.Function(
+      this,
+      "PreTokenGenerationFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "pre-token-generation.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        functionName: `citadel-pre-token-gen-${props.environment}`,
+        timeout: cdk.Duration.seconds(5),
+        logGroup: new logs.LogGroup(this, "PreTokenGenerationFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
 
     // Cognito User Pool
     this.userPool = new cognito.UserPool(this, "UserPool", {
@@ -637,7 +677,8 @@ export class BackendStack extends cdk.Stack {
       lambdaTriggers: {
         preTokenGeneration: preTokenGenerationLambda,
       },
-      accountRecovery: cognito.AccountRecovery.EMAIL_ONLY, featurePlan: cognito.FeaturePlan.ESSENTIALS,
+      accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
+      featurePlan: cognito.FeaturePlan.ESSENTIALS,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
@@ -666,23 +707,35 @@ export class BackendStack extends cdk.Stack {
       description: "Full system access",
     });
 
-    const projectManagerGroup = new cognito.CfnUserPoolGroup(this, "ProjectManagerGroup", {
+    const projectManagerGroup = new cognito.CfnUserPoolGroup(
+      this,
+      "ProjectManagerGroup",
+      {
         userPoolId: this.userPool.userPoolId,
         groupName: "project_manager",
         description: "Project management access",
-    });
+      },
+    );
 
-    const architectGroup = new cognito.CfnUserPoolGroup(this, "ArchitectGroup", {
+    const architectGroup = new cognito.CfnUserPoolGroup(
+      this,
+      "ArchitectGroup",
+      {
         userPoolId: this.userPool.userPoolId,
         groupName: "architect",
         description: "Architecture and design access",
-    });
+      },
+    );
 
-    const developerGroup = new cognito.CfnUserPoolGroup(this, "DeveloperGroup", {
+    const developerGroup = new cognito.CfnUserPoolGroup(
+      this,
+      "DeveloperGroup",
+      {
         userPoolId: this.userPool.userPoolId,
         groupName: "developer",
         description: "Development access",
-    });
+      },
+    );
 
     // User Pool Client
     this.userPoolClient = new cognito.UserPoolClient(this, "UserPoolClient", {
@@ -730,17 +783,20 @@ export class BackendStack extends cdk.Stack {
           USER_POOL_ID: this.userPool.userPoolId,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'ProjectResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "ProjectResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Grant Cognito permissions to project resolver
     projectResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['cognito-idp:AdminGetUser'],
+        actions: ["cognito-idp:AdminGetUser"],
         resources: [this.userPool.userPoolArn],
-      })
+      }),
     );
 
     const conversationResolverFunction = new lambda.Function(
@@ -757,8 +813,11 @@ export class BackendStack extends cdk.Stack {
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'ConversationResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "ConversationResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     const agentResolverFunction = new lambda.Function(
@@ -775,8 +834,11 @@ export class BackendStack extends cdk.Stack {
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'AgentResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "AgentResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     const documentUploadResolverFunction = new lambda.Function(
@@ -801,25 +863,35 @@ export class BackendStack extends cdk.Stack {
           INGESTION_TABLE: `citadel-document-ingestion-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'DocumentUploadResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "DocumentUploadResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     const documentResolverFunction = new lambda.Function(
-          this,
-          "DocumentResolverFunction",
-          {
-            runtime: lambda.Runtime.NODEJS_24_X,
-            handler: "document-resolver.handler",
-            code: lambda.Code.fromAsset("dist/lambda"),
-            environment: {
-              SESSION_BUCKET: `citadel-sessions-${props.environment}-${this.account}-${this.region}`,
-              PDF_GENERATOR_FUNCTION: `citadel-pdf-generator-${props.environment}`,
-            },
-            timeout: cdk.Duration.minutes(6), // PDF generation can take up to 5 min
-            logGroup: new logs.LogGroup(this, 'DocumentResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-          }
-        );
+      this,
+      "DocumentResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "document-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          SESSION_BUCKET: `citadel-sessions-${props.environment}-${this.account}-${this.region}`,
+          PDF_GENERATOR_FUNCTION: `citadel-pdf-generator-${props.environment}`,
+        },
+        timeout: cdk.Duration.minutes(6), // PDF generation can take up to 5 min
+        logGroup: new logs.LogGroup(this, "DocumentResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
 
     const agentConfigResolverFunction = new lambda.Function(
       this,
@@ -830,7 +902,7 @@ export class BackendStack extends cdk.Stack {
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
-          REGISTRY_ENABLED: 'true',
+          REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
           // Governance activation gate (US-IMP): ENVIRONMENT selects the
           // governance rollout SSM parameter path (getGovernanceEnforce);
@@ -846,8 +918,11 @@ export class BackendStack extends cdk.Stack {
           ACCOUNT_ID: this.account,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'AgentConfigResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "AgentConfigResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Model Config Resolver — operator-facing GraphQL surface over the model
@@ -868,8 +943,11 @@ export class BackendStack extends cdk.Stack {
           ENVIRONMENT: props.environment,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'ModelConfigResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "ModelConfigResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Scoped grants: read/write both model tables + emit MODEL_CONFIG_CHANGED.
@@ -889,7 +967,7 @@ export class BackendStack extends cdk.Stack {
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
-          REGISTRY_ENABLED: 'true',
+          REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
           // Best-effort agent.import.{discovered,registered,failed} emission via
           // backend/src/utils/events.ts (source citadel.backend). Scoped grant below.
@@ -915,8 +993,11 @@ export class BackendStack extends cdk.Stack {
           FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'AgentImportResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "AgentImportResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Least-privilege: events:PutEvents scoped to the shared agent event bus
@@ -931,11 +1012,11 @@ export class BackendStack extends cdk.Stack {
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
         resources: [
           `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-authority-units-${props.environment}`,
         ],
-      })
+      }),
     );
 
     // Import-side auth-secret storage (US-IMP): a caller may submit a RAW
@@ -950,14 +1031,14 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'secretsmanager:CreateSecret',
-          'secretsmanager:PutSecretValue',
-          'secretsmanager:TagResource',
+          "secretsmanager:CreateSecret",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:TagResource",
         ],
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
         ],
-      })
+      }),
     );
 
     // Pre-activation TEST-INVOKE (testImportedAgent): the admin/architect-gated
@@ -971,10 +1052,10 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:InvokeAgentRuntime',
-          'lambda:InvokeFunction',
-          'bedrock:InvokeAgent',
-          'execute-api:Invoke',
+          "bedrock-agentcore:InvokeAgentRuntime",
+          "lambda:InvokeFunction",
+          "bedrock:InvokeAgent",
+          "execute-api:Invoke",
         ],
         resources: [
           `arn:aws:bedrock-agentcore:*:${this.account}:runtime/*`,
@@ -982,7 +1063,7 @@ export class BackendStack extends cdk.Stack {
           `arn:aws:bedrock:*:${this.account}:agent-alias/*`,
           `arn:aws:execute-api:*:${this.account}:*`,
         ],
-      })
+      }),
     );
     // READ a pre-existing invocation secret for the test-invoke. Scoped to the
     // agent secret-path convention /citadel/agents/* (the same scope as the
@@ -990,11 +1071,11 @@ export class BackendStack extends cdk.Stack {
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['secretsmanager:GetSecretValue'],
+        actions: ["secretsmanager:GetSecretValue"],
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
         ],
-      })
+      }),
     );
 
     // Phase-2 cross-account INVOKE (testImportedAgent / probeAgentCandidate):
@@ -1011,9 +1092,9 @@ export class BackendStack extends cdk.Stack {
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['sts:AssumeRole'],
-        resources: ['arn:aws:iam::*:role/*'],
-      })
+        actions: ["sts:AssumeRole"],
+        resources: ["arn:aws:iam::*:role/*"],
+      }),
     );
 
     // Tier-3 agent-import B2 (proposeAgentManifestTier3): enqueue a
@@ -1026,11 +1107,11 @@ export class BackendStack extends cdk.Stack {
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['sqs:SendMessage'],
+        actions: ["sqs:SendMessage"],
         resources: [
           `arn:aws:sqs:${this.region}:${this.account}:citadel-fabricator-queue-${props.environment}`,
         ],
-      })
+      }),
     );
 
     // ── Agent Import — Manifest RESULT handler (Tier-3 agent import, B1) ─────
@@ -1041,19 +1122,26 @@ export class BackendStack extends cdk.Stack {
     // bundle, idempotency table, scoped Registry perms.
     const agentImportManifestResultHandler = new lambda.Function(
       this,
-      'AgentImportManifestResultHandler',
+      "AgentImportManifestResultHandler",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'agent-import-manifest-result-handler.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "agent-import-manifest-result-handler.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
-          REGISTRY_ENABLED: 'true',
+          REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
           IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'AgentImportManifestResultHandlerLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "AgentImportManifestResultHandlerLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     // Idempotency table: dedupe on correlationId||requestId (duplicate emits).
@@ -1069,11 +1157,11 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:GetRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecord',
+          "bedrock-agentcore:GetRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecord",
         ],
         resources: [registryArn, `${registryArn}/*`],
-      })
+      }),
     );
 
     // EventBridge rule on the shared agent bus: route the proposed/failed
@@ -1082,25 +1170,25 @@ export class BackendStack extends cdk.Stack {
     // the arbiter Fabricator branch MUST emit these detail-types on this bus.
     const agentImportManifestResultRule = new events.Rule(
       this,
-      'AgentImportManifestResultRule',
+      "AgentImportManifestResultRule",
       {
         eventBus: this.agentEventBus,
         ruleName: `citadel-agent-import-manifest-result-${props.environment}`,
         description:
-          'Routes async LLM-proposed agent-import manifest results (proposed/failed) to the result handler',
+          "Routes async LLM-proposed agent-import manifest results (proposed/failed) to the result handler",
         eventPattern: {
           detailType: [
-            'agent.import.manifest.proposed',
-            'agent.import.manifest.failed',
+            "agent.import.manifest.proposed",
+            "agent.import.manifest.failed",
           ],
         },
-      }
+      },
     );
     agentImportManifestResultRule.addTarget(
       new targets.LambdaFunction(agentImportManifestResultHandler, {
         retryAttempts: 2,
         maxEventAge: cdk.Duration.hours(2),
-      })
+      }),
     );
 
     // Agent Code Resolver - for reading/writing agent code from S3
@@ -1116,8 +1204,11 @@ export class BackendStack extends cdk.Stack {
           AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'AgentCodeResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "AgentCodeResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     const toolConfigResolverFunction = new lambda.Function(
@@ -1129,12 +1220,15 @@ export class BackendStack extends cdk.Stack {
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
-          REGISTRY_ENABLED: 'true',
+          REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'ToolConfigResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "ToolConfigResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     const fabricatorRequestResolverFunction = new lambda.Function(
@@ -1149,8 +1243,15 @@ export class BackendStack extends cdk.Stack {
           FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'FabricatorRequestResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "FabricatorRequestResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     const fabricatorQueueResolverFunction = new lambda.Function(
@@ -1165,8 +1266,15 @@ export class BackendStack extends cdk.Stack {
           FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'FabricatorQueueResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "FabricatorQueueResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     // Grant permissions to Lambda functions
@@ -1188,17 +1296,24 @@ export class BackendStack extends cdk.Stack {
     this.documentBucket.grantPut(documentUploadResolverFunction);
     this.documentBucket.grantRead(documentUploadResolverFunction);
     this.documentBucket.grantDelete(documentUploadResolverFunction);
-    documentUploadResolverFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['bedrock:GetKnowledgeBaseDocuments', 'bedrock:DeleteKnowledgeBaseDocuments'],
-      resources: ['*'],
-    }));
-    documentUploadResolverFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ssm:GetParameter'],
-      resources: [
-        `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/knowledge-base-id-${props.environment}`,
-        `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/knowledge-base-datasource-id-${props.environment}`,
-      ],
-    }));
+    documentUploadResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "bedrock:GetKnowledgeBaseDocuments",
+          "bedrock:DeleteKnowledgeBaseDocuments",
+        ],
+        resources: ["*"],
+      }),
+    );
+    documentUploadResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/knowledge-base-id-${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/knowledge-base-datasource-id-${props.environment}`,
+        ],
+      }),
+    );
     this.agentEventBus.grantPutEventsTo(documentUploadResolverFunction);
 
     // Read-only access to the authoritative document-ingestion jobs table
@@ -1210,11 +1325,16 @@ export class BackendStack extends cdk.Stack {
     // already depends ON BackendStack).
     const ingestionTableName = `citadel-document-ingestion-${props.environment}`;
     const ingestionTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/${ingestionTableName}`;
-    documentUploadResolverFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:GetItem', 'dynamodb:Query'],
-      resources: [ingestionTableArn, `${ingestionTableArn}/index/status-index`],
-    }));
+    documentUploadResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem", "dynamodb:Query"],
+        resources: [
+          ingestionTableArn,
+          `${ingestionTableArn}/index/status-index`,
+        ],
+      }),
+    );
 
     // ── Durable fabrication-jobs status table ────────────────────────────────
     // Source of truth for per-agent fabrication status, replacing the old
@@ -1228,13 +1348,16 @@ export class BackendStack extends cdk.Stack {
     // PK orchestrationId (intake session id, or '0' for direct UI requests) /
     // SK agentUseId (agent name / requestId). On-demand + PITR per conventions;
     // a `ttl` attribute (epoch seconds, ~7 days) keeps the table self-pruning.
-    new dynamodb.Table(this, 'FabricationJobsTable', {
+    new dynamodb.Table(this, "FabricationJobsTable", {
       tableName: `citadel-fabrication-jobs-${props.environment}`,
-      partitionKey: { name: 'orchestrationId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'agentUseId', type: dynamodb.AttributeType.STRING },
+      partitionKey: {
+        name: "orchestrationId",
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: { name: "agentUseId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      timeToLiveAttribute: 'ttl',
+      timeToLiveAttribute: "ttl",
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
@@ -1244,31 +1367,48 @@ export class BackendStack extends cdk.Stack {
     // privilege: the request resolver only writes PENDING rows; the queue
     // resolver only reads (Query for a given project, Scan otherwise).
     const fabricationJobsTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-fabrication-jobs-${props.environment}`;
-    fabricatorRequestResolverFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:PutItem'],
-      resources: [fabricationJobsTableArn],
-    }));
-    fabricatorQueueResolverFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:Query', 'dynamodb:Scan'],
-      resources: [fabricationJobsTableArn],
-    }));
+    fabricatorRequestResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [fabricationJobsTableArn],
+      }),
+    );
+    fabricatorQueueResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:Query", "dynamodb:Scan"],
+        resources: [fabricationJobsTableArn],
+      }),
+    );
 
     // Grant S3 + Lambda permissions for document resolver
     const sessionBucketArn = `arn:aws:s3:::citadel-sessions-${props.environment}-${this.account}-${this.region}`;
-    documentResolverFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['s3:GetObject', 's3:ListBucket', 's3:ListBucketVersions', 's3:GetObjectVersion'],
-      resources: [sessionBucketArn, `${sessionBucketArn}/*`],
-    }));
-    documentResolverFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['s3:PutObject'],
-      resources: [`${sessionBucketArn}/*`],
-    }));
-    documentResolverFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['lambda:InvokeFunction'],
-      resources: [`arn:aws:lambda:${this.region}:${this.account}:function:citadel-pdf-generator-${props.environment}`],
-    }));
+    documentResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:ListBucketVersions",
+          "s3:GetObjectVersion",
+        ],
+        resources: [sessionBucketArn, `${sessionBucketArn}/*`],
+      }),
+    );
+    documentResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:PutObject"],
+        resources: [`${sessionBucketArn}/*`],
+      }),
+    );
+    documentResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [
+          `arn:aws:lambda:${this.region}:${this.account}:function:citadel-pdf-generator-${props.environment}`,
+        ],
+      }),
+    );
 
     // Grant permissions for agent config
     this.agentConfigTable.grantReadWriteData(agentConfigResolverFunction);
@@ -1278,13 +1418,13 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecordStatus',
-          'bedrock-agentcore:SubmitRegistryRecordForApproval',
-          'bedrock-agentcore:DeleteRegistryRecord',
-          'bedrock-agentcore:GetRegistryRecord',
-          'bedrock-agentcore:ListRegistryRecords',
+          "bedrock-agentcore:CreateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecordStatus",
+          "bedrock-agentcore:SubmitRegistryRecordForApproval",
+          "bedrock-agentcore:DeleteRegistryRecord",
+          "bedrock-agentcore:GetRegistryRecord",
+          "bedrock-agentcore:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
       }),
@@ -1302,7 +1442,7 @@ export class BackendStack extends cdk.Stack {
     agentConfigResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['ssm:GetParameter'],
+        actions: ["ssm:GetParameter"],
         resources: [
           `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
           `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
@@ -1326,10 +1466,10 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'iam:GetRole',
-          'iam:GetRolePolicy',
-          'iam:ListRolePolicies',
-          'iam:ListAttachedRolePolicies',
+          "iam:GetRole",
+          "iam:GetRolePolicy",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
         ],
         resources: [`arn:aws:iam::${this.account}:role/*`],
       }),
@@ -1337,7 +1477,7 @@ export class BackendStack extends cdk.Stack {
     agentConfigResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['iam:GetPolicy', 'iam:GetPolicyVersion'],
+        actions: ["iam:GetPolicy", "iam:GetPolicyVersion"],
         resources: [`arn:aws:iam::${this.account}:policy/*`],
       }),
     );
@@ -1357,8 +1497,8 @@ export class BackendStack extends cdk.Stack {
     agentConfigResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['sts:AssumeRole'],
-        resources: ['arn:aws:iam::*:role/*'],
+        actions: ["sts:AssumeRole"],
+        resources: ["arn:aws:iam::*:role/*"],
       }),
     );
 
@@ -1369,13 +1509,13 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecordStatus',
-          'bedrock-agentcore:SubmitRegistryRecordForApproval',
-          'bedrock-agentcore:DeleteRegistryRecord',
-          'bedrock-agentcore:GetRegistryRecord',
-          'bedrock-agentcore:ListRegistryRecords',
+          "bedrock-agentcore:CreateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecordStatus",
+          "bedrock-agentcore:SubmitRegistryRecordForApproval",
+          "bedrock-agentcore:DeleteRegistryRecord",
+          "bedrock-agentcore:GetRegistryRecord",
+          "bedrock-agentcore:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
       }),
@@ -1422,12 +1562,12 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'elasticloadbalancing:DescribeTargetGroups',
-          'elasticloadbalancing:DescribeTargetHealth',
-          'elasticloadbalancing:DescribeLoadBalancers',
-          'elasticloadbalancing:DescribeTags',
+          "elasticloadbalancing:DescribeTargetGroups",
+          "elasticloadbalancing:DescribeTargetHealth",
+          "elasticloadbalancing:DescribeLoadBalancers",
+          "elasticloadbalancing:DescribeTags",
         ],
-        resources: ['*'],
+        resources: ["*"],
       }),
     );
 
@@ -1436,12 +1576,17 @@ export class BackendStack extends cdk.Stack {
     agentCodeResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['s3:GetObject', 's3:PutObject', 's3:GetObjectVersion', 's3:ListBucket'],
+        actions: [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:GetObjectVersion",
+          "s3:ListBucket",
+        ],
         resources: [
           `arn:aws:s3:::citadel-code-${props.environment}-${this.account}-${this.region}`,
           `arn:aws:s3:::citadel-code-${props.environment}-${this.account}-${this.region}/agents/*`,
         ],
-      })
+      }),
     );
 
     // Grant DynamoDB read permissions to get agent config (for filename)
@@ -1452,15 +1597,15 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'dynamodb:GetItem',
-          'dynamodb:PutItem',
-          'dynamodb:DeleteItem',
-          'dynamodb:Scan',
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Scan",
         ],
         resources: [
           `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-tools-${props.environment}`,
         ],
-      })
+      }),
     );
 
     // Grant tool-config-resolver permission to call Registry APIs
@@ -1468,13 +1613,13 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecordStatus',
-          'bedrock-agentcore:SubmitRegistryRecordForApproval',
-          'bedrock-agentcore:DeleteRegistryRecord',
-          'bedrock-agentcore:GetRegistryRecord',
-          'bedrock-agentcore:ListRegistryRecords',
+          "bedrock-agentcore:CreateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecordStatus",
+          "bedrock-agentcore:SubmitRegistryRecordForApproval",
+          "bedrock-agentcore:DeleteRegistryRecord",
+          "bedrock-agentcore:GetRegistryRecord",
+          "bedrock-agentcore:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
       }),
@@ -1484,22 +1629,22 @@ export class BackendStack extends cdk.Stack {
     fabricatorRequestResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['sqs:SendMessage', 'sqs:GetQueueUrl'],
+        actions: ["sqs:SendMessage", "sqs:GetQueueUrl"],
         resources: [
           `arn:aws:sqs:${this.region}:${this.account}:citadel-fabricator-queue-${props.environment}`,
         ],
-      })
+      }),
     );
 
     // Grant permissions for fabricator queue query
     fabricatorQueueResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['sqs:ReceiveMessage', 'sqs:GetQueueAttributes'],
+        actions: ["sqs:ReceiveMessage", "sqs:GetQueueAttributes"],
         resources: [
           `arn:aws:sqs:${this.region}:${this.account}:citadel-fabricator-queue-${props.environment}`,
         ],
-      })
+      }),
     );
 
     // Task Runner Resolver
@@ -1514,8 +1659,11 @@ export class BackendStack extends cdk.Stack {
           AGENT_EVENT_BUS_NAME: this.agentEventBus.eventBusName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'TaskRunnerResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "TaskRunnerResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // User Management Resolver
@@ -1531,8 +1679,15 @@ export class BackendStack extends cdk.Stack {
           ORGANISATION_TABLE: organisationTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'UserManagementResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "UserManagementResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     // Gateway ID resolved at runtime from SSM (created by ServicesStack)
@@ -1545,16 +1700,20 @@ export class BackendStack extends cdk.Stack {
     // and operators may overwrite the value out-of-band without redeploying
     // (Lambda env var is resolved at deploy time via {{resolve:ssm:...}}).
     const oauthReturnUrlParamName = `/citadel/${props.environment}/oauth-return-url`;
-    const oauthReturnUrlParam = new ssm.StringParameter(this, 'OAuthReturnUrlParam', {
-      parameterName: oauthReturnUrlParamName,
-      stringValue: 'https://app.citadel.example.com/integrations/connected',
-      description:
-        'Default redirect target presented to end-users after the AgentCore-hosted ' +
-        'OAuth2 callback completes for an integration. Consumed by integration-resolver ' +
-        'and gateway-registration-handler Lambdas via the OAUTH_DEFAULT_RETURN_URL env var.',
-      tier: ssm.ParameterTier.STANDARD,
-      dataType: ssm.ParameterDataType.TEXT,
-    });
+    const oauthReturnUrlParam = new ssm.StringParameter(
+      this,
+      "OAuthReturnUrlParam",
+      {
+        parameterName: oauthReturnUrlParamName,
+        stringValue: "https://app.citadel.example.com/integrations/connected",
+        description:
+          "Default redirect target presented to end-users after the AgentCore-hosted " +
+          "OAuth2 callback completes for an integration. Consumed by integration-resolver " +
+          "and gateway-registration-handler Lambdas via the OAUTH_DEFAULT_RETURN_URL env var.",
+        tier: ssm.ParameterTier.STANDARD,
+        dataType: ssm.ParameterDataType.TEXT,
+      },
+    );
     // Use the CREATED parameter's stringValue token (resolves to CFN Ref) to
     // establish a deploy-time dependency: CFN updates the parameter resource
     // before the Lambda env var is rendered. Do NOT use
@@ -1585,8 +1744,11 @@ export class BackendStack extends cdk.Stack {
           OAUTH_RETURN_URL_SSM_PARAM: oauthReturnUrlParamName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'IntegrationResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "IntegrationResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Gateway Registration Handler
@@ -1610,8 +1772,11 @@ export class BackendStack extends cdk.Stack {
           OAUTH_RETURN_URL_SSM_PARAM: oauthReturnUrlParamName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'GatewayRegistrationHandlerLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "GatewayRegistrationHandlerLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     this.idempotencyTable.grantReadWriteData(gatewayRegistrationHandler);
@@ -1622,31 +1787,31 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'secretsmanager:CreateSecret',
-          'secretsmanager:UpdateSecret',
-          'secretsmanager:DeleteSecret',
-          'secretsmanager:GetSecretValue',
-          'secretsmanager:TagResource',
+          "secretsmanager:CreateSecret",
+          "secretsmanager:UpdateSecret",
+          "secretsmanager:DeleteSecret",
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:TagResource",
         ],
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/integrations/*`,
         ],
-      })
+      }),
     );
     integrationResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'ssm:PutParameter',
-          'ssm:GetParameter',
-          'ssm:DeleteParameter',
-          'ssm:AddTagsToResource',
+          "ssm:PutParameter",
+          "ssm:GetParameter",
+          "ssm:DeleteParameter",
+          "ssm:AddTagsToResource",
         ],
         resources: [
           `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/integrations/*`,
           `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/gateway/*`,
         ],
-      })
+      }),
     );
     this.agentEventBus.grantPutEventsTo(integrationResolverFunction);
 
@@ -1655,18 +1820,18 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateGatewayTarget',
-          'bedrock-agentcore:DeleteGatewayTarget',
-          'bedrock-agentcore:GetGatewayTarget',
-          'bedrock-agentcore:UpdateGatewayTarget',
-          'bedrock-agentcore:CreateCredentialProvider',
-          'bedrock-agentcore:DeleteCredentialProvider',
+          "bedrock-agentcore:CreateGatewayTarget",
+          "bedrock-agentcore:DeleteGatewayTarget",
+          "bedrock-agentcore:GetGatewayTarget",
+          "bedrock-agentcore:UpdateGatewayTarget",
+          "bedrock-agentcore:CreateCredentialProvider",
+          "bedrock-agentcore:DeleteCredentialProvider",
         ],
         resources: [
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`,
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/apikeycredentialprovider/*`,
         ],
-      })
+      }),
     );
 
     // Grant AgentCore Identity credential-provider permissions for OAuth2 +
@@ -1677,21 +1842,21 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateOauth2CredentialProvider',
-          'bedrock-agentcore:UpdateOauth2CredentialProvider',
-          'bedrock-agentcore:GetOauth2CredentialProvider',
-          'bedrock-agentcore:DeleteOauth2CredentialProvider',
-          'bedrock-agentcore:CreateApiKeyCredentialProvider',
-          'bedrock-agentcore:UpdateApiKeyCredentialProvider',
-          'bedrock-agentcore:GetApiKeyCredentialProvider',
-          'bedrock-agentcore:DeleteApiKeyCredentialProvider',
-          'bedrock-agentcore:ListOauth2CredentialProviders',
-          'bedrock-agentcore:ListApiKeyCredentialProviders',
+          "bedrock-agentcore:CreateOauth2CredentialProvider",
+          "bedrock-agentcore:UpdateOauth2CredentialProvider",
+          "bedrock-agentcore:GetOauth2CredentialProvider",
+          "bedrock-agentcore:DeleteOauth2CredentialProvider",
+          "bedrock-agentcore:CreateApiKeyCredentialProvider",
+          "bedrock-agentcore:UpdateApiKeyCredentialProvider",
+          "bedrock-agentcore:GetApiKeyCredentialProvider",
+          "bedrock-agentcore:DeleteApiKeyCredentialProvider",
+          "bedrock-agentcore:ListOauth2CredentialProviders",
+          "bedrock-agentcore:ListApiKeyCredentialProviders",
         ],
         resources: [
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:credential-provider/integration-*`,
         ],
-      })
+      }),
     );
 
     // Read access to the OAuth return-URL SSM parameter. CDK has already
@@ -1705,34 +1870,32 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'iam:CreateRole',
-          'iam:DeleteRole',
-          'iam:GetRole',
-          'iam:PutRolePolicy',
-          'iam:DeleteRolePolicy',
-          'iam:TagRole',
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:GetRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:TagRole",
         ],
-        resources: [
-          `arn:aws:iam::${this.account}:role/citadel-int-*`,
-        ],
-      })
+        resources: [`arn:aws:iam::${this.account}:role/citadel-int-*`],
+      }),
     );
 
     // Grant STS permissions for PolicyManager (integration scope)
     integrationResolverFunction.addToRolePolicy(
-          new iam.PolicyStatement({
-            effect: iam.Effect.ALLOW,
-            actions: ['sts:AssumeRole'],
-            resources: [`arn:aws:iam::${this.account}:role/citadel-int-*`],
-          })
-        );
-        integrationResolverFunction.addToRolePolicy(
-          new iam.PolicyStatement({
-            effect: iam.Effect.ALLOW,
-            actions: ['sts:GetCallerIdentity'],
-            resources: ['*'],
-          })
-        );
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sts:AssumeRole"],
+        resources: [`arn:aws:iam::${this.account}:role/citadel-int-*`],
+      }),
+    );
+    integrationResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sts:GetCallerIdentity"],
+        resources: ["*"],
+      }),
+    );
 
     // Gateway registration handler permissions
     integrationsTable.grantReadWriteData(gatewayRegistrationHandler);
@@ -1740,39 +1903,39 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'ssm:GetParameter',
-          'ssm:PutParameter',
-          'ssm:DeleteParameter',
-          'ssm:AddTagsToResource',
+          "ssm:GetParameter",
+          "ssm:PutParameter",
+          "ssm:DeleteParameter",
+          "ssm:AddTagsToResource",
         ],
         resources: [
           `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/gateway/*`,
           `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/gateway-id-*`,
         ],
-      })
+      }),
     );
     gatewayRegistrationHandler.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['secretsmanager:GetSecretValue'],
+        actions: ["secretsmanager:GetSecretValue"],
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/integrations/*`,
         ],
-      })
+      }),
     );
     gatewayRegistrationHandler.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateGatewayTarget',
-          'bedrock-agentcore:DeleteGatewayTarget',
-          'bedrock-agentcore:GetGatewayTarget',
+          "bedrock-agentcore:CreateGatewayTarget",
+          "bedrock-agentcore:DeleteGatewayTarget",
+          "bedrock-agentcore:GetGatewayTarget",
         ],
         resources: [
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`,
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*/target/*`,
         ],
-      })
+      }),
     );
 
     // Credential-provider read + delete for disconnect cleanup. The handler
@@ -1783,15 +1946,15 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:GetOauth2CredentialProvider',
-          'bedrock-agentcore:GetApiKeyCredentialProvider',
-          'bedrock-agentcore:DeleteOauth2CredentialProvider',
-          'bedrock-agentcore:DeleteApiKeyCredentialProvider',
+          "bedrock-agentcore:GetOauth2CredentialProvider",
+          "bedrock-agentcore:GetApiKeyCredentialProvider",
+          "bedrock-agentcore:DeleteOauth2CredentialProvider",
+          "bedrock-agentcore:DeleteApiKeyCredentialProvider",
         ],
         resources: [
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:credential-provider/integration-*`,
         ],
-      })
+      }),
     );
 
     // Read access to the OAuth return-URL SSM parameter (mirrors the grant on
@@ -1801,9 +1964,11 @@ export class BackendStack extends cdk.Stack {
     gatewayRegistrationHandler.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['s3:GetObject'],
-        resources: [`arn:aws:s3:::citadel-schemas-${props.environment}-${this.account}-${this.region}/*`],
-      })
+        actions: ["s3:GetObject"],
+        resources: [
+          `arn:aws:s3:::citadel-schemas-${props.environment}-${this.account}-${this.region}/*`,
+        ],
+      }),
     );
 
     // ── US-IMP-031: MCP Gateway publish/unpublish for the import resolver ────
@@ -1825,63 +1990,70 @@ export class BackendStack extends cdk.Stack {
     // here (bedrock-agentcore gateway/* + credential-provider/integration-*) are
     // covered by the stack-level IAM5 suppression in bin/app.ts; the SSM ARN is
     // exact (no wildcard ⇒ no finding).
-    agentImportResolverFunction.addEnvironment('GATEWAY_ID_PARAM', gatewayIdParamName);
+    agentImportResolverFunction.addEnvironment(
+      "GATEWAY_ID_PARAM",
+      gatewayIdParamName,
+    );
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateGatewayTarget',
-          'bedrock-agentcore:DeleteGatewayTarget',
+          "bedrock-agentcore:CreateGatewayTarget",
+          "bedrock-agentcore:DeleteGatewayTarget",
         ],
         resources: [
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`,
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*/target/*`,
         ],
-      })
+      }),
     );
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateApiKeyCredentialProvider',
-          'bedrock-agentcore:UpdateApiKeyCredentialProvider',
-          'bedrock-agentcore:DeleteApiKeyCredentialProvider',
+          "bedrock-agentcore:CreateApiKeyCredentialProvider",
+          "bedrock-agentcore:UpdateApiKeyCredentialProvider",
+          "bedrock-agentcore:DeleteApiKeyCredentialProvider",
         ],
         resources: [
           `arn:aws:bedrock-agentcore:${this.region}:${this.account}:credential-provider/integration-*`,
         ],
-      })
+      }),
     );
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['ssm:GetParameter'],
+        actions: ["ssm:GetParameter"],
         resources: [
           `arn:aws:ssm:${this.region}:${this.account}:parameter${gatewayIdParamName}`,
         ],
-      })
+      }),
     );
 
     // EventBridge rule for gateway registration
     const gatewayRegistrationRule = new events.Rule(
       this,
-      'GatewayRegistrationRule',
+      "GatewayRegistrationRule",
       {
         eventBus: this.agentEventBus,
         ruleName: `citadel-gateway-registration-${props.environment}`,
-        description: 'Triggers gateway registration when integration connects/disconnects',
+        description:
+          "Triggers gateway registration when integration connects/disconnects",
         eventPattern: {
-          detailType: ['integration.connect.requested', 'integration.disconnect.requested'],
-          source: ['citadel.integrations'],
+          detailType: [
+            "integration.connect.requested",
+            "integration.disconnect.requested",
+          ],
+          source: ["citadel.integrations"],
         },
-      }
+      },
     );
 
     gatewayRegistrationRule.addTarget(
       new targets.LambdaFunction(gatewayRegistrationHandler, {
         retryAttempts: 2,
         maxEventAge: cdk.Duration.hours(2),
-      })
+      }),
     );
 
     // Grant Cognito permissions to user management function
@@ -1889,18 +2061,18 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'cognito-idp:ListUsers',
-          'cognito-idp:AdminGetUser',
-          'cognito-idp:AdminCreateUser',
-          'cognito-idp:AdminAddUserToGroup',
-          'cognito-idp:AdminRemoveUserFromGroup',
-          'cognito-idp:AdminUpdateUserAttributes',
-          'cognito-idp:AdminListGroupsForUser',
-          'cognito-idp:ListGroups',
-          'cognito-idp:AdminSetUserPassword',
+          "cognito-idp:ListUsers",
+          "cognito-idp:AdminGetUser",
+          "cognito-idp:AdminCreateUser",
+          "cognito-idp:AdminAddUserToGroup",
+          "cognito-idp:AdminRemoveUserFromGroup",
+          "cognito-idp:AdminUpdateUserAttributes",
+          "cognito-idp:AdminListGroupsForUser",
+          "cognito-idp:ListGroups",
+          "cognito-idp:AdminSetUserPassword",
         ],
         resources: [this.userPool.userPoolArn],
-      })
+      }),
     );
 
     // Grant DynamoDB permissions to user management function
@@ -1921,8 +2093,11 @@ export class BackendStack extends cdk.Stack {
           USER_POOL_ID: this.userPool.userPoolId,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'OrganizationResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "OrganizationResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Grant DynamoDB permissions to organization management function
@@ -1933,22 +2108,31 @@ export class BackendStack extends cdk.Stack {
     organizationResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['cognito-idp:ListUsers'],
+        actions: ["cognito-idp:ListUsers"],
         resources: [this.userPool.userPoolArn],
-      })
+      }),
     );
 
     // Seed Organizations Custom Resource
-    const seedOrganizationsLambda = new lambda.Function(this, "SeedOrganizationsFunction", {
+    const seedOrganizationsLambda = new lambda.Function(
+      this,
+      "SeedOrganizationsFunction",
+      {
         runtime: lambda.Runtime.PYTHON_3_14,
         handler: "index.handler",
-        code: lambda.Code.fromAsset(path.join(__dirname,"../../src/lambda/seed-organizations")),
+        code: lambda.Code.fromAsset(
+          path.join(__dirname, "../../src/lambda/seed-organizations"),
+        ),
         timeout: cdk.Duration.seconds(30),
         environment: {
           ORGANISATION_TABLE: organisationTable.tableName,
         },
-        logGroup: new logs.LogGroup(this, 'SeedOrganizationsFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      });
+        logGroup: new logs.LogGroup(this, "SeedOrganizationsFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
 
     organisationTable.grantWriteData(seedOrganizationsLambda);
 
@@ -1960,25 +2144,32 @@ export class BackendStack extends cdk.Stack {
         serviceToken: seedOrganizationsLambda.functionArn,
         properties: {
           // O-05: Use content hash instead of Date.now() to avoid unnecessary re-runs
-          Version: 'v1.0.0',
+          Version: "v1.0.0",
         },
-      }
+      },
     );
 
     // Ensure the Custom Resource runs after the table is created
     seedOrganizationsResource.node.addDependency(organisationTable);
 
     // Seed Blueprints Custom Resource
-    const seedBlueprintsLambda = new lambda.Function(this, "SeedBlueprintsFunction", {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: "seed-blueprints/index.handler",
-      code: lambda.Code.fromAsset("dist/lambda"),
-      timeout: cdk.Duration.seconds(30),
-      environment: {
-        WORKFLOWS_TABLE: this.workflowsTable.tableName,
+    const seedBlueprintsLambda = new lambda.Function(
+      this,
+      "SeedBlueprintsFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "seed-blueprints/index.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(30),
+        environment: {
+          WORKFLOWS_TABLE: this.workflowsTable.tableName,
+        },
+        logGroup: new logs.LogGroup(this, "SeedBlueprintsFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
       },
-      logGroup: new logs.LogGroup(this, 'SeedBlueprintsFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-    });
+    );
 
     this.workflowsTable.grantWriteData(seedBlueprintsLambda);
 
@@ -1992,25 +2183,32 @@ export class BackendStack extends cdk.Stack {
       {
         serviceToken: seedBlueprintsLambda.functionArn,
         properties: {
-          Version: 'v1.2.0',
+          Version: "v1.2.0",
         },
-      }
+      },
     );
 
     seedBlueprintsResource.node.addDependency(this.workflowsTable);
 
     // Seed Model Catalog Custom Resource
-    const seedModelCatalogLambda = new lambda.Function(this, "SeedModelCatalogFunction", {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: "seed-model-catalog/index.handler",
-      code: lambda.Code.fromAsset("dist/lambda"),
-      timeout: cdk.Duration.seconds(30),
-      environment: {
-        MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
-        MODEL_CONFIG_TABLE: modelConfigTable.tableName,
+    const seedModelCatalogLambda = new lambda.Function(
+      this,
+      "SeedModelCatalogFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "seed-model-catalog/index.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(30),
+        environment: {
+          MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
+          MODEL_CONFIG_TABLE: modelConfigTable.tableName,
+        },
+        logGroup: new logs.LogGroup(this, "SeedModelCatalogFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
       },
-      logGroup: new logs.LogGroup(this, 'SeedModelCatalogFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-    });
+    );
 
     modelCatalogTable.grantWriteData(seedModelCatalogLambda);
     modelConfigTable.grantWriteData(seedModelCatalogLambda);
@@ -2021,28 +2219,33 @@ export class BackendStack extends cdk.Stack {
       {
         serviceToken: seedModelCatalogLambda.functionArn,
         properties: {
-          Version: 'v1.0.0',
+          Version: "v1.0.0",
         },
-      }
+      },
     );
 
     seedModelCatalogResource.node.addDependency(modelCatalogTable);
     seedModelCatalogResource.node.addDependency(modelConfigTable);
 
     // Admin email: prefer CDK context param, fall back to env var
-    const adminEmail = this.node.tryGetContext('adminEmail') || process.env.ADMIN_EMAIL || '';
+    const adminEmail =
+      this.node.tryGetContext("adminEmail") || process.env.ADMIN_EMAIL || "";
 
     // Auto-generate admin password via Secrets Manager (never stored in code or env vars)
-    const adminPasswordSecret = new cdk.aws_secretsmanager.Secret(this, 'AdminPasswordSecret', {
-      secretName: `citadel/admin-password-${props.environment}`,
-      description: 'Auto-generated admin user password for initial seed',
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({ email: adminEmail }),
-        generateStringKey: 'password',
-        passwordLength: 16,
-        excludePunctuation: false,
+    const adminPasswordSecret = new cdk.aws_secretsmanager.Secret(
+      this,
+      "AdminPasswordSecret",
+      {
+        secretName: `citadel/admin-password-${props.environment}`,
+        description: "Auto-generated admin user password for initial seed",
+        generateSecretString: {
+          secretStringTemplate: JSON.stringify({ email: adminEmail }),
+          generateStringKey: "password",
+          passwordLength: 16,
+          excludePunctuation: false,
+        },
       },
-    });
+    );
 
     // Seed Admin User Custom Resource
     const seedAdminUserLambda = new lambda.Function(
@@ -2056,12 +2259,15 @@ export class BackendStack extends cdk.Stack {
         environment: {
           USER_POOL_ID: this.userPool.userPoolId,
           ADMIN_EMAIL: adminEmail,
-          ADMIN_FIRST_NAME: process.env.ADMIN_FIRST_NAME || 'Admin',
-          ADMIN_LAST_NAME: process.env.ADMIN_LAST_NAME || 'User',
+          ADMIN_FIRST_NAME: process.env.ADMIN_FIRST_NAME || "Admin",
+          ADMIN_LAST_NAME: process.env.ADMIN_LAST_NAME || "User",
           ADMIN_PASSWORD_SECRET_ARN: adminPasswordSecret.secretArn,
         },
-        logGroup: new logs.LogGroup(this, 'SeedAdminUserFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "SeedAdminUserFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Grant read access to the admin password secret
@@ -2072,13 +2278,13 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'cognito-idp:AdminCreateUser',
-          'cognito-idp:AdminGetUser',
-          'cognito-idp:AdminAddUserToGroup',
-          'cognito-idp:AdminUpdateUserAttributes',
+          "cognito-idp:AdminCreateUser",
+          "cognito-idp:AdminGetUser",
+          "cognito-idp:AdminAddUserToGroup",
+          "cognito-idp:AdminUpdateUserAttributes",
         ],
         resources: [this.userPool.userPoolArn],
-      })
+      }),
     );
 
     // Create Custom Resource to seed admin user
@@ -2089,16 +2295,17 @@ export class BackendStack extends cdk.Stack {
         serviceToken: seedAdminUserLambda.functionArn,
         properties: {
           // O-05: Use content hash instead of Date.now() to avoid unnecessary re-runs
-          Version: 'v2.0.0',
+          Version: "v2.0.0",
           AdminEmail: adminEmail,
         },
-      }
+      },
     );
 
     // Output the secret ARN so deployers can retrieve the generated password
-    new cdk.CfnOutput(this, 'AdminPasswordSecretArn', {
+    new cdk.CfnOutput(this, "AdminPasswordSecretArn", {
       value: adminPasswordSecret.secretArn,
-      description: 'Retrieve admin password: aws secretsmanager get-secret-value --secret-id <this-arn> --query SecretString --output text',
+      description:
+        "Retrieve admin password: aws secretsmanager get-secret-value --secret-id <this-arn> --query SecretString --output text",
     });
 
     // Ensure the Custom Resource runs after user pool and admin group are created
@@ -2116,11 +2323,11 @@ export class BackendStack extends cdk.Stack {
     // Workflow Resolver Lambda
     const workflowResolverFunction = new lambda.Function(
       this,
-      'WorkflowResolverFunction',
+      "WorkflowResolverFunction",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'workflow-resolver.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "workflow-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           WORKFLOWS_TABLE: this.workflowsTable.tableName,
           APPS_TABLE: this.appsTable.tableName,
@@ -2129,8 +2336,11 @@ export class BackendStack extends cdk.Stack {
           USER_POOL_ID: this.userPool.userPoolId,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'WorkflowResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "WorkflowResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Workflow Resolver IAM — least-privilege per design 8.2
@@ -2141,20 +2351,20 @@ export class BackendStack extends cdk.Stack {
     workflowResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['cognito-idp:AdminGetUser'],
+        actions: ["cognito-idp:AdminGetUser"],
         resources: [this.userPool.userPoolArn],
-      })
+      }),
     );
 
     // Registry Agent Record Resolver Lambda (registry-native AgentApp-shape
     // resolver — PR 6a rename of the previous `agent-app-shim-resolver.ts`).
     const registryAgentRecordResolverFunction = new lambda.Function(
       this,
-      'RegistryAgentRecordResolverFunction',
+      "RegistryAgentRecordResolverFunction",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'registry-agent-record-resolver.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "registry-agent-record-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         functionName: `citadel-registry-agent-record-resolver-${props.environment}`,
         environment: {
           APPS_TABLE: this.appsTable.tableName,
@@ -2175,8 +2385,15 @@ export class BackendStack extends cdk.Stack {
           MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'RegistryAgentRecordResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "RegistryAgentRecordResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     // Registry Agent Record Resolver IAM — least-privilege per design 8.2
@@ -2192,45 +2409,45 @@ export class BackendStack extends cdk.Stack {
     registryAgentRecordResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
         resources: [
           `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-authority-units-${props.environment}`,
         ],
-      })
+      }),
     );
     registryAgentRecordResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['cognito-idp:AdminGetUser'],
+        actions: ["cognito-idp:AdminGetUser"],
         resources: [this.userPool.userPoolArn],
-      })
+      }),
     );
     // PolicyManager needs IAM permissions to create/delete app-scoped roles (Req 4.3, 4.6)
     registryAgentRecordResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'iam:CreateRole',
-          'iam:DeleteRole',
-          'iam:PutRolePolicy',
-          'iam:DeleteRolePolicy',
-          'iam:GetRole',
-          'iam:PassRole',
-          'iam:TagRole',
-          'iam:UntagRole',
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:GetRole",
+          "iam:PassRole",
+          "iam:TagRole",
+          "iam:UntagRole",
         ],
         resources: [
           `arn:aws:iam::${this.account}:role/citadel-agent-*`,
           `arn:aws:iam::${this.account}:role/citadel-agent-*`,
         ],
-      })
+      }),
     );
     registryAgentRecordResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['sts:GetCallerIdentity'],
-        resources: ['*'],
-      })
+        actions: ["sts:GetCallerIdentity"],
+        resources: ["*"],
+      }),
     );
 
     // Registry API access — registryAgentRecordResolverFunction performs
@@ -2241,13 +2458,13 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:CreateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecord',
-          'bedrock-agentcore:UpdateRegistryRecordStatus',
-          'bedrock-agentcore:SubmitRegistryRecordForApproval',
-          'bedrock-agentcore:DeleteRegistryRecord',
-          'bedrock-agentcore:GetRegistryRecord',
-          'bedrock-agentcore:ListRegistryRecords',
+          "bedrock-agentcore:CreateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecord",
+          "bedrock-agentcore:UpdateRegistryRecordStatus",
+          "bedrock-agentcore:SubmitRegistryRecordForApproval",
+          "bedrock-agentcore:DeleteRegistryRecord",
+          "bedrock-agentcore:GetRegistryRecord",
+          "bedrock-agentcore:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
       }),
@@ -2264,43 +2481,54 @@ export class BackendStack extends cdk.Stack {
     // App Component Registration Handler — subscribes to fabrication events (Req 6.3)
     const appComponentRegistrationHandler = new lambda.Function(
       this,
-      'AppComponentRegistrationHandler',
+      "AppComponentRegistrationHandler",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'app-component-registration-handler.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "app-component-registration-handler.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           APPS_TABLE: this.appsTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'AppComponentRegistrationHandlerLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "AppComponentRegistrationHandlerLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     this.appsTable.grantReadWriteData(appComponentRegistrationHandler);
 
-    const fabricationRegistrationRule = new events.Rule(this, 'FabricationRegistrationRule', {
-      eventBus: this.agentEventBus,
-      eventPattern: {
-        detailType: ['agent.fabricated', 'tool.fabricated'],
+    const fabricationRegistrationRule = new events.Rule(
+      this,
+      "FabricationRegistrationRule",
+      {
+        eventBus: this.agentEventBus,
+        eventPattern: {
+          detailType: ["agent.fabricated", "tool.fabricated"],
+        },
       },
-    });
+    );
 
     fabricationRegistrationRule.addTarget(
       new targets.LambdaFunction(appComponentRegistrationHandler, {
         retryAttempts: 2,
         maxEventAge: cdk.Duration.hours(2),
-      })
+      }),
     );
 
     // Execution Resolver Lambda
     const executionResolverFunction = new lambda.Function(
       this,
-      'ExecutionResolverFunction',
+      "ExecutionResolverFunction",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'execution-resolver.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "execution-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           EXECUTIONS_TABLE: this.executionsTable.tableName,
           WORKFLOWS_TABLE: this.workflowsTable.tableName,
@@ -2308,8 +2536,11 @@ export class BackendStack extends cdk.Stack {
           USER_POOL_ID: this.userPool.userPoolId,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'ExecutionResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "ExecutionResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Execution Resolver IAM — least-privilege per design 8.2
@@ -2319,9 +2550,9 @@ export class BackendStack extends cdk.Stack {
     executionResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['cognito-idp:AdminGetUser'],
+        actions: ["cognito-idp:AdminGetUser"],
         resources: [this.userPool.userPoolArn],
-      })
+      }),
     );
 
     // AppSync GraphQL API — schema deferred to the L1 escape hatch below so
@@ -2361,38 +2592,47 @@ export class BackendStack extends cdk.Stack {
     // deleted from the rendered template and replaced with
     // `DefinitionS3Location`. The Asset content hash forces CFN to diff
     // on any byte-level change, eliminating the silent-no-op footgun.
-    const schemaAsset = new Asset(this, 'AgenticAIApiSchemaAsset', {
-      path: 'src/schema/schema.graphql',
+    const schemaAsset = new Asset(this, "AgenticAIApiSchemaAsset", {
+      path: "src/schema/schema.graphql",
     });
-    const cfnSchema = this.appSyncApi.node.findChild('Schema') as CfnGraphQLSchema;
-    cfnSchema.addPropertyDeletionOverride('Definition');
+    const cfnSchema = this.appSyncApi.node.findChild(
+      "Schema",
+    ) as CfnGraphQLSchema;
+    cfnSchema.addPropertyDeletionOverride("Definition");
     cfnSchema.definitionS3Location = schemaAsset.s3ObjectUrl;
 
     // Workflow Progress Fan-out Lambda (needs AppSync endpoint)
     this.workflowProgressFanoutFunction = new lambda.Function(
       this,
-      'WorkflowProgressFanoutFunction',
+      "WorkflowProgressFanoutFunction",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'workflow-progress-fanout.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "workflow-progress-fanout.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'WorkflowProgressFanoutFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "WorkflowProgressFanoutFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     // Fan-out IAM — least-privilege per design 8.2: appsync:GraphQL on publishWorkflowProgress
     this.workflowProgressFanoutFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['appsync:GraphQL'],
+        actions: ["appsync:GraphQL"],
         resources: [
           `${this.appSyncApi.arn}/types/Mutation/fields/publishWorkflowProgress`,
         ],
-      })
+      }),
     );
 
     // Fan-out failure observability: the fan-out Lambda emits a best-effort
@@ -2403,20 +2643,20 @@ export class BackendStack extends cdk.Stack {
     this.workflowProgressFanoutFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['cloudwatch:PutMetricData'],
-        resources: ['*'],
-      })
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
     );
     NagSuppressions.addResourceSuppressions(
       this.workflowProgressFanoutFunction.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'cloudwatch:PutMetricData has no resource-level scoping; the ' +
-            'workflow-progress-fanout Lambda narrows the call to the ' +
-            'Citadel/Workflows namespace (FanoutPublishFailure metric).',
-          appliesTo: ['Resource::*'],
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "workflow-progress-fanout Lambda narrows the call to the " +
+            "Citadel/Workflows namespace (FanoutPublishFailure metric).",
+          appliesTo: ["Resource::*"],
         },
       ],
       true,
@@ -2424,13 +2664,13 @@ export class BackendStack extends cdk.Stack {
 
     // Alarm on the fan-out publish-failure metric so GraphQL-level publish
     // errors (which return HTTP 200) surface, not just Lambda-level exceptions.
-    new cloudwatch.Alarm(this, 'WorkflowProgressFanoutFailureAlarm', {
+    new cloudwatch.Alarm(this, "WorkflowProgressFanoutFailureAlarm", {
       alarmName: `citadel-workflow-fanout-publish-failure-${props.environment}`,
       metric: new cloudwatch.Metric({
-        namespace: 'Citadel/Workflows',
-        metricName: 'FanoutPublishFailure',
+        namespace: "Citadel/Workflows",
+        metricName: "FanoutPublishFailure",
         period: cdk.Duration.minutes(5),
-        statistic: 'Sum',
+        statistic: "Sum",
       }),
       threshold: 1,
       evaluationPeriods: 1,
@@ -2438,7 +2678,7 @@ export class BackendStack extends cdk.Stack {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       alarmDescription:
-        'Workflow progress fan-out failed to publish to AppSync (transport or GraphQL error).',
+        "Workflow progress fan-out failed to publish to AppSync (transport or GraphQL error).",
     });
 
     // Lambda function for handling agent messages
@@ -2464,8 +2704,11 @@ export class BackendStack extends cdk.Stack {
           ACCOUNT_ID: this.account,
         },
         timeout: cdk.Duration.minutes(15), // Max timeout for agent interactions (extraction can be slow)
-        logGroup: new logs.LogGroup(this, 'AgentMessageHandlerFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "AgentMessageHandlerFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     this.idempotencyTable.grantReadWriteData(agentMessageHandlerFunction);
@@ -2478,7 +2721,7 @@ export class BackendStack extends cdk.Stack {
         resources: [
           `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/agents/*`,
         ],
-      })
+      }),
     );
 
     // Invoke-side auth-secret resolution for IMPORTED agents: the handler
@@ -2495,7 +2738,7 @@ export class BackendStack extends cdk.Stack {
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
         ],
-      })
+      }),
     );
 
     // Cross-account invoke-role assume for IMPORTED agents (Phase 2,
@@ -2514,7 +2757,7 @@ export class BackendStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ["sts:AssumeRole"],
         resources: ["arn:aws:iam::*:role/*"],
-      })
+      }),
     );
 
     // Grant permissions to invoke Bedrock AgentCore Runtime
@@ -2527,7 +2770,7 @@ export class BackendStack extends cdk.Stack {
           "bedrock:InvokeModel",
         ],
         resources: ["*"], // AgentCore agents can be in different regions
-      })
+      }),
     );
 
     // Grant DynamoDB permissions for storing responses
@@ -2542,7 +2785,7 @@ export class BackendStack extends cdk.Stack {
         resources: [
           `${this.appSyncApi.arn}/types/Mutation/fields/publishConversationMessage`,
         ],
-      })
+      }),
     );
 
     // EventBridge rule for message.sent_to_agent events
@@ -2557,7 +2800,7 @@ export class BackendStack extends cdk.Stack {
           detailType: ["message.sent_to_agent"],
           source: ["citadel"],
         },
-      }
+      },
     );
 
     // Add Lambda as target for the rule
@@ -2565,24 +2808,27 @@ export class BackendStack extends cdk.Stack {
       new targets.LambdaFunction(agentMessageHandlerFunction, {
         retryAttempts: 2,
         maxEventAge: cdk.Duration.hours(2),
-      })
+      }),
     );
 
     // Project Progress Updater Lambda
     const projectProgressUpdater = new lambda.Function(
       this,
-      'ProjectProgressUpdater',
+      "ProjectProgressUpdater",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'project-progress-updater.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "project-progress-updater.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           PROJECTS_TABLE: this.projectsTable.tableName,
           IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'ProjectProgressUpdaterLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "ProjectProgressUpdaterLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     this.projectsTable.grantReadWriteData(projectProgressUpdater);
@@ -2591,20 +2837,26 @@ export class BackendStack extends cdk.Stack {
     // Assessment Completion Notifier Lambda
     const assessmentCompletionNotifier = new lambda.Function(
       this,
-      'AssessmentCompletionNotifier',
+      "AssessmentCompletionNotifier",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'assessment-completion-notifier.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "assessment-completion-notifier.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'AssessmentCompletionNotifierLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "AssessmentCompletionNotifierLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
-    this.appSyncApi.grantMutation(assessmentCompletionNotifier, 'publishAssessmentCompletion');
+    this.appSyncApi.grantMutation(
+      assessmentCompletionNotifier,
+      "publishAssessmentCompletion",
+    );
 
     // Fabrication Event Handler Lambda
     const fabricationEventHandlerFunction = new lambda.Function(
@@ -2618,8 +2870,15 @@ export class BackendStack extends cdk.Stack {
           APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'FabricationEventHandlerFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "FabricationEventHandlerFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     // Grant AppSync permissions for fabrication event handler
@@ -2630,75 +2889,78 @@ export class BackendStack extends cdk.Stack {
         resources: [
           `${this.appSyncApi.arn}/types/Mutation/fields/publishFabricationEvent`,
         ],
-      })
+      }),
     );
 
     // Create AppSync data source for fabrication event handler
-    const fabricationEventLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "FabricationEventLambdaDataSource",
-      fabricationEventHandlerFunction
-    );
+    const fabricationEventLambdaDataSource =
+      this.appSyncApi.addLambdaDataSource(
+        "FabricationEventLambdaDataSource",
+        fabricationEventHandlerFunction,
+      );
 
     // EventBridge rule for assessment completion
     const assessmentCompletionRule = new events.Rule(
       this,
-      'AssessmentCompletionRule',
+      "AssessmentCompletionRule",
       {
         eventBus: this.agentEventBus,
         ruleName: `citadel-assessment-completion-${props.environment}`,
-        description: 'Triggers when all assessment dimensions are complete',
+        description: "Triggers when all assessment dimensions are complete",
         eventPattern: {
-          detailType: ['assessment.completed'],
-          source: ['citadel.assessment'],
+          detailType: ["assessment.completed"],
+          source: ["citadel.assessment"],
         },
-      }
+      },
     );
 
     assessmentCompletionRule.addTarget(
       new targets.LambdaFunction(assessmentCompletionNotifier, {
         retryAttempts: 2,
         maxEventAge: cdk.Duration.hours(2),
-      })
+      }),
     );
 
     // Design Progress Notifier Lambda
     const designProgressNotifier = new lambda.Function(
       this,
-      'DesignProgressNotifier',
+      "DesignProgressNotifier",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'design-progress-notifier.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "design-progress-notifier.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'DesignProgressNotifierLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "DesignProgressNotifierLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
-    this.appSyncApi.grantMutation(designProgressNotifier, 'publishDesignProgress');
+    this.appSyncApi.grantMutation(
+      designProgressNotifier,
+      "publishDesignProgress",
+    );
 
     // EventBridge rule for design progress updates
-    const designProgressRule = new events.Rule(
-      this,
-      'DesignProgressRule',
-      {
-        eventBus: this.agentEventBus,
-        ruleName: `citadel-design-progress-${props.environment}`,
-        description: 'Triggers when design section progress is updated',
-        eventPattern: {
-          detailType: ['design.progress.updated'],
-          source: ['agent2.design'],
-        },
-      }
-    );
+    const designProgressRule = new events.Rule(this, "DesignProgressRule", {
+      eventBus: this.agentEventBus,
+      ruleName: `citadel-design-progress-${props.environment}`,
+      description: "Triggers when design section progress is updated",
+      eventPattern: {
+        detailType: ["design.progress.updated"],
+        source: ["agent2.design"],
+      },
+    });
 
     designProgressRule.addTarget(
       new targets.LambdaFunction(designProgressNotifier, {
         retryAttempts: 2,
         maxEventAge: cdk.Duration.hours(2),
-      })
+      }),
     );
 
     // Chatter Publisher Lambda - publishes all EventBridge messages to AppSync
@@ -2713,8 +2975,11 @@ export class BackendStack extends cdk.Stack {
           APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'ChatterPublisherFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "ChatterPublisherFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Grant AppSync permissions to chatter publisher
@@ -2725,7 +2990,7 @@ export class BackendStack extends cdk.Stack {
         resources: [
           `${this.appSyncApi.arn}/types/Mutation/fields/publishChatter`,
         ],
-      })
+      }),
     );
 
     // Chatter Resolver Lambda
@@ -2737,155 +3002,152 @@ export class BackendStack extends cdk.Stack {
         handler: "chatter-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'ChatterResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "ChatterResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // EventBridge rule for ALL agent chatter - captures all messages on the bus
-    const chatterRule = new events.Rule(
-      this,
-      'ChatterRule',
-      {
-        eventBus: this.agentEventBus,
-        ruleName: `citadel-chatter-${props.environment}`,
-        description: 'Captures all agent communication for real-time display',
-        // Match all events on this bus by not specifying a pattern
-        eventPattern: {
-          source: [ { prefix: ''} ] as any[]
-        },
-      }
-    );
+    const chatterRule = new events.Rule(this, "ChatterRule", {
+      eventBus: this.agentEventBus,
+      ruleName: `citadel-chatter-${props.environment}`,
+      description: "Captures all agent communication for real-time display",
+      // Match all events on this bus by not specifying a pattern
+      eventPattern: {
+        source: [{ prefix: "" }] as any[],
+      },
+    });
 
     chatterRule.addTarget(
       new targets.LambdaFunction(chatterPublisherFunction, {
         retryAttempts: 2,
         maxEventAge: cdk.Duration.hours(2),
-      })
+      }),
     );
 
     // EventBridge rule for fabrication events
-    const fabricationEventRule = new events.Rule(
-      this,
-      'FabricationEventRule',
-      {
-        eventBus: this.agentEventBus,
-        ruleName: `citadel-fabrication-${props.environment}`,
-        description: 'Captures agent fabrication completion and error events',
-        eventPattern: {
-          source: ['agent.fabricated', 'agent.fabrication.failed'],
-        },
-      }
-    );
+    const fabricationEventRule = new events.Rule(this, "FabricationEventRule", {
+      eventBus: this.agentEventBus,
+      ruleName: `citadel-fabrication-${props.environment}`,
+      description: "Captures agent fabrication completion and error events",
+      eventPattern: {
+        source: ["agent.fabricated", "agent.fabrication.failed"],
+      },
+    });
 
     fabricationEventRule.addTarget(
       new targets.LambdaFunction(fabricationEventHandlerFunction, {
         retryAttempts: 2,
         maxEventAge: cdk.Duration.hours(2),
-      })
+      }),
     );
 
     // EventBridge rule for progress updates
-    const progressUpdateRule = new events.Rule(
-      this,
-      'ProgressUpdateRule',
-      {
-        eventBus: this.agentEventBus,
-        ruleName: `citadel-progress-update-${props.environment}`,
-        description: 'Updates project progress from agent events',
-        eventPattern: {
-          detailType: ['intake.progress.updated'],
-          source: ['agent_intake.assessment', 'agent_intake.design', 'agent_intake.planning', 'agent_intake.implementation'],
-        },
-      }
-    );
+    const progressUpdateRule = new events.Rule(this, "ProgressUpdateRule", {
+      eventBus: this.agentEventBus,
+      ruleName: `citadel-progress-update-${props.environment}`,
+      description: "Updates project progress from agent events",
+      eventPattern: {
+        detailType: ["intake.progress.updated"],
+        source: [
+          "agent_intake.assessment",
+          "agent_intake.design",
+          "agent_intake.planning",
+          "agent_intake.implementation",
+        ],
+      },
+    });
 
     progressUpdateRule.addTarget(
       new targets.LambdaFunction(projectProgressUpdater, {
         retryAttempts: 2,
         maxEventAge: cdk.Duration.hours(2),
-      })
+      }),
     );
 
     // Data sources
     const projectsDataSource = this.appSyncApi.addDynamoDbDataSource(
       "ProjectsDataSource",
-      this.projectsTable
+      this.projectsTable,
     );
     const conversationsDataSource = this.appSyncApi.addDynamoDbDataSource(
       "ConversationsDataSource",
-      this.conversationsTable
+      this.conversationsTable,
     );
     const agentStatusDataSource = this.appSyncApi.addDynamoDbDataSource(
       "AgentStatusDataSource",
-      agentStatusTable
+      agentStatusTable,
     );
     const projectLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "ProjectLambdaDataSource",
-      projectResolverFunction
+      projectResolverFunction,
     );
     const conversationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "ConversationLambdaDataSource",
-      conversationResolverFunction
+      conversationResolverFunction,
     );
     const agentLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentLambdaDataSource",
-      agentResolverFunction
+      agentResolverFunction,
     );
     const documentUploadLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "DocumentUploadLambdaDataSource",
-      documentUploadResolverFunction
+      documentUploadResolverFunction,
     );
     const documentLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "DocumentLambdaDataSource",
-      documentResolverFunction
+      documentResolverFunction,
     );
     const agentConfigLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentConfigLambdaDataSource",
-      agentConfigResolverFunction
+      agentConfigResolverFunction,
     );
     const modelConfigLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "ModelConfigLambdaDataSource",
-      modelConfigResolverFunction
+      modelConfigResolverFunction,
     );
     const agentImportLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentImportLambdaDataSource",
-      agentImportResolverFunction
+      agentImportResolverFunction,
     );
     const agentCodeLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentCodeLambdaDataSource",
-      agentCodeResolverFunction
+      agentCodeResolverFunction,
     );
     const toolConfigLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "ToolConfigLambdaDataSource",
-      toolConfigResolverFunction
+      toolConfigResolverFunction,
     );
-    const fabricatorRequestLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "FabricatorRequestLambdaDataSource",
-      fabricatorRequestResolverFunction
-    );
+    const fabricatorRequestLambdaDataSource =
+      this.appSyncApi.addLambdaDataSource(
+        "FabricatorRequestLambdaDataSource",
+        fabricatorRequestResolverFunction,
+      );
     const fabricatorQueueLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "FabricatorQueueLambdaDataSource",
-      fabricatorQueueResolverFunction
+      fabricatorQueueResolverFunction,
     );
     const taskRunnerLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "TaskRunnerLambdaDataSource",
-      taskRunnerResolverFunction
+      taskRunnerResolverFunction,
     );
     const userManagementLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "UserManagementLambdaDataSource",
-      userManagementResolverFunction
+      userManagementResolverFunction,
     );
     const organizationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "OrganizationLambdaDataSource",
-      organizationResolverFunction
+      organizationResolverFunction,
     );
     const chatterLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "ChatterLambdaDataSource",
-      chatterResolverFunction
+      chatterResolverFunction,
     );
     const integrationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "IntegrationLambdaDataSource",
-      integrationResolverFunction
+      integrationResolverFunction,
     );
 
     // Query resolvers
@@ -2917,7 +3179,7 @@ export class BackendStack extends cdk.Stack {
         fieldName: "getConversationHistory",
         requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
         responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      }
+      },
     );
 
     agentConfigLambdaDataSource.createResolver("ListAgentConfigsResolver", {
@@ -2955,12 +3217,15 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    modelConfigLambdaDataSource.createResolver("SetModelCatalogEntryStatusResolver", {
-      typeName: "Mutation",
-      fieldName: "setModelCatalogEntryStatus",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    modelConfigLambdaDataSource.createResolver(
+      "SetModelCatalogEntryStatusResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "setModelCatalogEntryStatus",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     modelConfigLambdaDataSource.createResolver("SyncModelCatalogResolver", {
       typeName: "Mutation",
@@ -2990,7 +3255,7 @@ export class BackendStack extends cdk.Stack {
         fieldName: "publishConversationMessage",
         requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
         responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      }
+      },
     );
 
     // Mutation resolvers
@@ -3022,26 +3287,35 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    documentUploadLambdaDataSource.createResolver("GenerateDocumentUploadUrlResolver", {
-      typeName: "Mutation",
-      fieldName: "generateDocumentUploadUrl",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    documentUploadLambdaDataSource.createResolver(
+      "GenerateDocumentUploadUrlResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "generateDocumentUploadUrl",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    documentUploadLambdaDataSource.createResolver("GetDocumentIngestionStatusResolver", {
-      typeName: "Query",
-      fieldName: "getDocumentIngestionStatus",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    documentUploadLambdaDataSource.createResolver(
+      "GetDocumentIngestionStatusResolver",
+      {
+        typeName: "Query",
+        fieldName: "getDocumentIngestionStatus",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    documentUploadLambdaDataSource.createResolver("ListProjectDocumentsResolver", {
-      typeName: "Query",
-      fieldName: "listProjectDocuments",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    documentUploadLambdaDataSource.createResolver(
+      "ListProjectDocumentsResolver",
+      {
+        typeName: "Query",
+        fieldName: "listProjectDocuments",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     documentUploadLambdaDataSource.createResolver("DeleteDocumentResolver", {
       typeName: "Mutation",
@@ -3108,12 +3382,15 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    agentImportLambdaDataSource.createResolver("DescribeAgentCandidateResolver", {
-      typeName: "Query",
-      fieldName: "describeAgentCandidate",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    agentImportLambdaDataSource.createResolver(
+      "DescribeAgentCandidateResolver",
+      {
+        typeName: "Query",
+        fieldName: "describeAgentCandidate",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Pre-activation test-invoke. Reuses the existing AgentImport data source —
     // the import resolver now also carries the account-scoped invoke +
@@ -3141,48 +3418,63 @@ export class BackendStack extends cdk.Stack {
     // Reuses the existing AgentImport data source — the import resolver already
     // implements this field (agent-import-resolver.ts) and carries the Registry
     // CRUD grants it needs, so no new Lambda/data source/perms are required.
-    agentImportLambdaDataSource.createResolver("ProbeImportReachabilityResolver", {
-      typeName: "Mutation",
-      fieldName: "probeImportReachability",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    agentImportLambdaDataSource.createResolver(
+      "ProbeImportReachabilityResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "probeImportReachability",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Tier-3 agent-import B2 — manifest-proposal REQUEST + human-gated ACCEPT.
     // Both reuse the existing AgentImport data source: the import resolver now
     // also carries the scoped sqs:SendMessage grant (propose) and already has
     // Registry CRUD (accept), so no new Lambda/data source/perms are required.
-    agentImportLambdaDataSource.createResolver("ProposeAgentManifestTier3Resolver", {
-      typeName: "Mutation",
-      fieldName: "proposeAgentManifestTier3",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    agentImportLambdaDataSource.createResolver(
+      "ProposeAgentManifestTier3Resolver",
+      {
+        typeName: "Mutation",
+        fieldName: "proposeAgentManifestTier3",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    agentImportLambdaDataSource.createResolver("AcceptProposedManifestTier3Resolver", {
-      typeName: "Mutation",
-      fieldName: "acceptProposedManifestTier3",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    agentImportLambdaDataSource.createResolver(
+      "AcceptProposedManifestTier3Resolver",
+      {
+        typeName: "Mutation",
+        fieldName: "acceptProposedManifestTier3",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // US-IMP-031 MCP Gateway publish/unpublish. Reuse the existing AgentImport
     // data source — the import resolver now also has the gateway-target +
     // credential-provider + gateway-id grants (see the gateway-publish IAM block
     // above), so no new Lambda/data source is required.
-    agentImportLambdaDataSource.createResolver("PublishImportToGatewayResolver", {
-      typeName: "Mutation",
-      fieldName: "publishImportToGateway",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    agentImportLambdaDataSource.createResolver(
+      "PublishImportToGatewayResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "publishImportToGateway",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    agentImportLambdaDataSource.createResolver("UnpublishImportFromGatewayResolver", {
-      typeName: "Mutation",
-      fieldName: "unpublishImportFromGateway",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    agentImportLambdaDataSource.createResolver(
+      "UnpublishImportFromGatewayResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "unpublishImportFromGateway",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     agentConfigLambdaDataSource.createResolver("UpdateAgentConfigResolver", {
       typeName: "Mutation",
@@ -3198,12 +3490,15 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    agentConfigLambdaDataSource.createResolver("ActivateProjectAgentsResolver", {
-      typeName: "Mutation",
-      fieldName: "activateProjectAgents",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    agentConfigLambdaDataSource.createResolver(
+      "ActivateProjectAgentsResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "activateProjectAgents",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     agentConfigLambdaDataSource.createResolver("PublishAgentManifestResolver", {
       typeName: "Mutation",
@@ -3271,35 +3566,47 @@ export class BackendStack extends cdk.Stack {
     });
 
     // Fabricator Request Resolvers
-    fabricatorRequestLambdaDataSource.createResolver("RequestAgentCreationResolver", {
-      typeName: "Mutation",
-      fieldName: "requestAgentCreation",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    fabricatorRequestLambdaDataSource.createResolver(
+      "RequestAgentCreationResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "requestAgentCreation",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    fabricatorRequestLambdaDataSource.createResolver("RequestToolCreationResolver", {
-      typeName: "Mutation",
-      fieldName: "requestToolCreation",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    fabricatorRequestLambdaDataSource.createResolver(
+      "RequestToolCreationResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "requestToolCreation",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Fabricator Queue Resolver
-    fabricatorQueueLambdaDataSource.createResolver("GetFabricatorQueueResolver", {
-      typeName: "Query",
-      fieldName: "getFabricatorQueue",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    fabricatorQueueLambdaDataSource.createResolver(
+      "GetFabricatorQueueResolver",
+      {
+        typeName: "Query",
+        fieldName: "getFabricatorQueue",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Fabrication Event Resolver
-    fabricationEventLambdaDataSource.createResolver("PublishFabricationEventResolver", {
-      typeName: "Mutation",
-      fieldName: "publishFabricationEvent",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    fabricationEventLambdaDataSource.createResolver(
+      "PublishFabricationEventResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "publishFabricationEvent",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Task Runner Resolver
     taskRunnerLambdaDataSource.createResolver("SubmitTaskResolver", {
@@ -3324,12 +3631,15 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    userManagementLambdaDataSource.createResolver("GetCurrentUserProfileResolver", {
-      typeName: "Query",
-      fieldName: "getCurrentUserProfile",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    userManagementLambdaDataSource.createResolver(
+      "GetCurrentUserProfileResolver",
+      {
+        typeName: "Query",
+        fieldName: "getCurrentUserProfile",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     userManagementLambdaDataSource.createResolver("AssignUserRoleResolver", {
       typeName: "Mutation",
@@ -3345,12 +3655,15 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    userManagementLambdaDataSource.createResolver("ListAvailableRolesResolver", {
-      typeName: "Query",
-      fieldName: "listAvailableRoles",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    userManagementLambdaDataSource.createResolver(
+      "ListAvailableRolesResolver",
+      {
+        typeName: "Query",
+        fieldName: "listAvailableRoles",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     userManagementLambdaDataSource.createResolver("ListOrganizationsResolver", {
       typeName: "Query",
@@ -3366,12 +3679,15 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    userManagementLambdaDataSource.createResolver("AdminResetUserPasswordResolver", {
-      typeName: "Mutation",
-      fieldName: "adminResetUserPassword",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    userManagementLambdaDataSource.createResolver(
+      "AdminResetUserPasswordResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "adminResetUserPassword",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     userManagementLambdaDataSource.createResolver("AdminCreateUserResolver", {
       typeName: "Mutation",
@@ -3380,12 +3696,15 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    userManagementLambdaDataSource.createResolver("AdminResendInvitationResolver", {
-      typeName: "Mutation",
-      fieldName: "adminResendInvitation",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    userManagementLambdaDataSource.createResolver(
+      "AdminResendInvitationResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "adminResendInvitation",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Organization Management Resolvers
     organizationLambdaDataSource.createResolver("CreateOrganizationResolver", {
@@ -3460,12 +3779,15 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    integrationLambdaDataSource.createResolver("DisconnectIntegrationResolver", {
-      typeName: "Mutation",
-      fieldName: "disconnectIntegration",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    integrationLambdaDataSource.createResolver(
+      "DisconnectIntegrationResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "disconnectIntegration",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Assessment Completion Resolver
     const assessmentCompletionResolverFunction = new lambda.Function(
@@ -3476,21 +3798,32 @@ export class BackendStack extends cdk.Stack {
         handler: "assessment-completion-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'AssessmentCompletionResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "AssessmentCompletionResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
-    const assessmentCompletionLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "AssessmentCompletionLambdaDataSource",
-      assessmentCompletionResolverFunction
-    );
+    const assessmentCompletionLambdaDataSource =
+      this.appSyncApi.addLambdaDataSource(
+        "AssessmentCompletionLambdaDataSource",
+        assessmentCompletionResolverFunction,
+      );
 
-    assessmentCompletionLambdaDataSource.createResolver("PublishAssessmentCompletionResolver", {
-      typeName: "Mutation",
-      fieldName: "publishAssessmentCompletion",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    assessmentCompletionLambdaDataSource.createResolver(
+      "PublishAssessmentCompletionResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "publishAssessmentCompletion",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Assessment Progress Resolver
     const sessionMemoryTableName = `citadel-session-memory-${props.environment}`;
@@ -3507,29 +3840,40 @@ export class BackendStack extends cdk.Stack {
           SESSION_MEMORY_TABLE: sessionMemoryTableName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'AssessmentProgressResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "AssessmentProgressResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     assessmentProgressResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        actions: ["dynamodb:GetItem", "dynamodb:Query"],
         resources: [sessionMemoryTableArn],
-      })
+      }),
     );
 
-    const assessmentProgressLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "AssessmentProgressLambdaDataSource",
-      assessmentProgressResolverFunction
-    );
+    const assessmentProgressLambdaDataSource =
+      this.appSyncApi.addLambdaDataSource(
+        "AssessmentProgressLambdaDataSource",
+        assessmentProgressResolverFunction,
+      );
 
-    assessmentProgressLambdaDataSource.createResolver("GetAssessmentProgressResolver", {
-      typeName: "Query",
-      fieldName: "getAssessmentProgress",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    assessmentProgressLambdaDataSource.createResolver(
+      "GetAssessmentProgressResolver",
+      {
+        typeName: "Query",
+        fieldName: "getAssessmentProgress",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Design Progress Resolver
     const designProgressResolverFunction = new lambda.Function(
@@ -3540,21 +3884,31 @@ export class BackendStack extends cdk.Stack {
         handler: "design-progress-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'DesignProgressResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(
+          this,
+          "DesignProgressResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
     );
 
     const designProgressLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "DesignProgressLambdaDataSource",
-      designProgressResolverFunction
+      designProgressResolverFunction,
     );
 
-    designProgressLambdaDataSource.createResolver("PublishDesignProgressResolver", {
-      typeName: "Mutation",
-      fieldName: "publishDesignProgress",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    designProgressLambdaDataSource.createResolver(
+      "PublishDesignProgressResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "publishDesignProgress",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Report Download URL Generator
     const sessionBucketName = `citadel-sessions-${props.environment}-${this.account}-${this.region}`;
@@ -3571,58 +3925,67 @@ export class BackendStack extends cdk.Stack {
           PROJECTS_TABLE: this.projectsTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, 'GenerateReportUrlFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "GenerateReportUrlFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     generateReportUrlFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['s3:GetObject', 's3:ListBucket'],
+        actions: ["s3:GetObject", "s3:ListBucket"],
         resources: [
           `arn:aws:s3:::${sessionBucketName}/*`,
-          `arn:aws:s3:::${sessionBucketName}`
+          `arn:aws:s3:::${sessionBucketName}`,
         ],
-      })
+      }),
     );
     this.projectsTable.grantReadData(generateReportUrlFunction);
 
     const generateReportUrlDataSource = this.appSyncApi.addLambdaDataSource(
       "GenerateReportUrlDataSource",
-      generateReportUrlFunction
+      generateReportUrlFunction,
     );
 
-    generateReportUrlDataSource.createResolver("GenerateReportDownloadUrlResolver", {
-      typeName: "Query",
-      fieldName: "generateReportDownloadUrl",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    generateReportUrlDataSource.createResolver(
+      "GenerateReportDownloadUrlResolver",
+      {
+        typeName: "Query",
+        fieldName: "generateReportDownloadUrl",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // DataStores Table
-    const dataStoresTable = new dynamodb.Table(this, 'DataStoresTable', {
+    const dataStoresTable = new dynamodb.Table(this, "DataStoresTable", {
       tableName: `citadel-datastores-${props.environment}`,
-      partitionKey: { name: 'dataStoreId', type: dynamodb.AttributeType.STRING },
+      partitionKey: {
+        name: "dataStoreId",
+        type: dynamodb.AttributeType.STRING,
+      },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
     dataStoresTable.addGlobalSecondaryIndex({
-      indexName: 'OrgIndex',
-      partitionKey: { name: 'orgId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      indexName: "OrgIndex",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // DataStore Resolver Lambda
     const dataStoreResolverFunction = new lambda.Function(
       this,
-      'DataStoreResolverFunction',
+      "DataStoreResolverFunction",
       {
         runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'datastore-resolver.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
+        handler: "datastore-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           DATASTORES_TABLE: dataStoresTable.tableName,
           ENVIRONMENT: props.environment,
@@ -3630,8 +3993,11 @@ export class BackendStack extends cdk.Stack {
         },
         timeout: cdk.Duration.minutes(10),
         memorySize: 256,
-        logGroup: new logs.LogGroup(this, 'DataStoreResolverFunctionLogs', { retention: logs.RetentionDays.ONE_WEEK, removalPolicy: cdk.RemovalPolicy.DESTROY }),
-      }
+        logGroup: new logs.LogGroup(this, "DataStoreResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
     );
 
     // Grant DynamoDB permissions
@@ -3642,15 +4008,15 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'secretsmanager:CreateSecret',
-          'secretsmanager:UpdateSecret',
-          'secretsmanager:DeleteSecret',
-          'secretsmanager:GetSecretValue',
+          "secretsmanager:CreateSecret",
+          "secretsmanager:UpdateSecret",
+          "secretsmanager:DeleteSecret",
+          "secretsmanager:GetSecretValue",
         ],
         resources: [
           `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/datastores/*`,
         ],
-      })
+      }),
     );
 
     // Grant IAM permissions for PolicyManager
@@ -3658,43 +4024,43 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'iam:CreateRole',
-          'iam:DeleteRole',
-          'iam:GetRole',
-          'iam:PutRolePolicy',
-          'iam:DeleteRolePolicy',
-          'iam:TagRole',
-          'iam:PassRole',
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:GetRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:TagRole",
+          "iam:PassRole",
         ],
-        resources: [
-          `arn:aws:iam::${this.account}:role/citadel-ds-*`,
-        ],
-      })
+        resources: [`arn:aws:iam::${this.account}:role/citadel-ds-*`],
+      }),
     );
 
     // Grant STS permissions for PolicyManager
     dataStoreResolverFunction.addToRolePolicy(
-          new iam.PolicyStatement({
-            effect: iam.Effect.ALLOW,
-            actions: ['sts:AssumeRole'],
-            resources: [`arn:aws:iam::${this.account}:role/citadel-ds-*`],
-          })
-        );
-        dataStoreResolverFunction.addToRolePolicy(
-          new iam.PolicyStatement({
-            effect: iam.Effect.ALLOW,
-            actions: ['sts:GetCallerIdentity'],
-            resources: ['*'],
-          })
-        );
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sts:AssumeRole"],
+        resources: [`arn:aws:iam::${this.account}:role/citadel-ds-*`],
+      }),
+    );
+    dataStoreResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sts:GetCallerIdentity"],
+        resources: ["*"],
+      }),
+    );
 
     // Grant SSM read for health monitor role ARN lookup
     dataStoreResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['ssm:GetParameter'],
-        resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/health-monitor-role-${props.environment}`],
-      })
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/health-monitor-role-${props.environment}`,
+        ],
+      }),
     );
 
     // Grant Bedrock permissions for Knowledge Base adapter (uses Lambda creds directly)
@@ -3702,14 +4068,14 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock:CreateKnowledgeBase',
-          'bedrock:DeleteKnowledgeBase',
-          'bedrock:GetKnowledgeBase',
-          'bedrock:Retrieve',
-          'bedrock:AssociateThirdPartyKnowledgeBase',
+          "bedrock:CreateKnowledgeBase",
+          "bedrock:DeleteKnowledgeBase",
+          "bedrock:GetKnowledgeBase",
+          "bedrock:Retrieve",
+          "bedrock:AssociateThirdPartyKnowledgeBase",
         ],
-        resources: ['*'],
-      })
+        resources: ["*"],
+      }),
     );
 
     // Grant OpenSearch Serverless permissions for Knowledge Base vector store provisioning
@@ -3717,399 +4083,460 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          'aoss:CreateCollection',
-          'aoss:DeleteCollection',
-          'aoss:BatchGetCollection',
-          'aoss:CreateSecurityPolicy',
-          'aoss:GetSecurityPolicy',
-          'aoss:CreateAccessPolicy',
-          'aoss:GetAccessPolicy',
-          'aoss:APIAccessAll',
+          "aoss:CreateCollection",
+          "aoss:DeleteCollection",
+          "aoss:BatchGetCollection",
+          "aoss:CreateSecurityPolicy",
+          "aoss:GetSecurityPolicy",
+          "aoss:CreateAccessPolicy",
+          "aoss:GetAccessPolicy",
+          "aoss:APIAccessAll",
         ],
-        resources: ['*'],
-      })
+        resources: ["*"],
+      }),
     );
 
     // DataStore AppSync data source and resolvers
     const dataStoreLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      'DataStoreLambdaDataSource',
-      dataStoreResolverFunction
+      "DataStoreLambdaDataSource",
+      dataStoreResolverFunction,
     );
 
     // Query resolvers (3)
-    dataStoreLambdaDataSource.createResolver('ListDataStoresResolver', {
-      typeName: 'Query',
-      fieldName: 'listDataStores',
+    dataStoreLambdaDataSource.createResolver("ListDataStoresResolver", {
+      typeName: "Query",
+      fieldName: "listDataStores",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    dataStoreLambdaDataSource.createResolver('GetDataStoreResolver', {
-      typeName: 'Query',
-      fieldName: 'getDataStore',
+    dataStoreLambdaDataSource.createResolver("GetDataStoreResolver", {
+      typeName: "Query",
+      fieldName: "getDataStore",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    dataStoreLambdaDataSource.createResolver('GetDataStoreStatsResolver', {
-      typeName: 'Query',
-      fieldName: 'getDataStoreStats',
+    dataStoreLambdaDataSource.createResolver("GetDataStoreStatsResolver", {
+      typeName: "Query",
+      fieldName: "getDataStoreStats",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
     // Mutation resolvers (7)
-    dataStoreLambdaDataSource.createResolver('CreateDataStoreResolver', {
-      typeName: 'Mutation',
-      fieldName: 'createDataStore',
+    dataStoreLambdaDataSource.createResolver("CreateDataStoreResolver", {
+      typeName: "Mutation",
+      fieldName: "createDataStore",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    dataStoreLambdaDataSource.createResolver('UpdateDataStoreResolver', {
-      typeName: 'Mutation',
-      fieldName: 'updateDataStore',
+    dataStoreLambdaDataSource.createResolver("UpdateDataStoreResolver", {
+      typeName: "Mutation",
+      fieldName: "updateDataStore",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    dataStoreLambdaDataSource.createResolver('DeleteDataStoreResolver', {
-      typeName: 'Mutation',
-      fieldName: 'deleteDataStore',
+    dataStoreLambdaDataSource.createResolver("DeleteDataStoreResolver", {
+      typeName: "Mutation",
+      fieldName: "deleteDataStore",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    dataStoreLambdaDataSource.createResolver('ConnectDataStoreResolver', {
-      typeName: 'Mutation',
-      fieldName: 'connectDataStore',
+    dataStoreLambdaDataSource.createResolver("ConnectDataStoreResolver", {
+      typeName: "Mutation",
+      fieldName: "connectDataStore",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    dataStoreLambdaDataSource.createResolver('DisconnectDataStoreResolver', {
-      typeName: 'Mutation',
-      fieldName: 'disconnectDataStore',
+    dataStoreLambdaDataSource.createResolver("DisconnectDataStoreResolver", {
+      typeName: "Mutation",
+      fieldName: "disconnectDataStore",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    dataStoreLambdaDataSource.createResolver('TestDataStoreConnectionResolver', {
-      typeName: 'Mutation',
-      fieldName: 'testDataStoreConnection',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    dataStoreLambdaDataSource.createResolver(
+      "TestDataStoreConnectionResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "testDataStoreConnection",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Subscription resolvers (handled by AppSync automatically with proper schema)
 
     // --- Workflow, App, Execution AppSync Data Sources & Resolvers ---
 
     const workflowLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      'WorkflowLambdaDataSource',
-      workflowResolverFunction
+      "WorkflowLambdaDataSource",
+      workflowResolverFunction,
     );
 
-    const registryAgentRecordLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      'RegistryAgentRecordLambdaDataSource',
-      registryAgentRecordResolverFunction
-    );
+    const registryAgentRecordLambdaDataSource =
+      this.appSyncApi.addLambdaDataSource(
+        "RegistryAgentRecordLambdaDataSource",
+        registryAgentRecordResolverFunction,
+      );
 
     const executionLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      'ExecutionLambdaDataSource',
-      executionResolverFunction
+      "ExecutionLambdaDataSource",
+      executionResolverFunction,
     );
 
     // Workflow Resolver — Query resolvers
-    workflowLambdaDataSource.createResolver('GetWorkflowResolver', {
-      typeName: 'Query',
-      fieldName: 'getWorkflow',
+    workflowLambdaDataSource.createResolver("GetWorkflowResolver", {
+      typeName: "Query",
+      fieldName: "getWorkflow",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('ListWorkflowsResolver', {
-      typeName: 'Query',
-      fieldName: 'listWorkflows',
+    workflowLambdaDataSource.createResolver("ListWorkflowsResolver", {
+      typeName: "Query",
+      fieldName: "listWorkflows",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('ListBlueprintsResolver', {
-      typeName: 'Query',
-      fieldName: 'listBlueprints',
+    workflowLambdaDataSource.createResolver("ListBlueprintsResolver", {
+      typeName: "Query",
+      fieldName: "listBlueprints",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('ExportWorkflowResolver', {
-      typeName: 'Query',
-      fieldName: 'exportWorkflow',
+    workflowLambdaDataSource.createResolver("ExportWorkflowResolver", {
+      typeName: "Query",
+      fieldName: "exportWorkflow",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('GetWorkflowVersionResolver', {
-      typeName: 'Query',
-      fieldName: 'getWorkflowVersion',
+    workflowLambdaDataSource.createResolver("GetWorkflowVersionResolver", {
+      typeName: "Query",
+      fieldName: "getWorkflowVersion",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('ListAppWorkflowsResolver', {
-      typeName: 'Query',
-      fieldName: 'listAppWorkflows',
+    workflowLambdaDataSource.createResolver("ListAppWorkflowsResolver", {
+      typeName: "Query",
+      fieldName: "listAppWorkflows",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
     // Workflow Resolver — Mutation resolvers
-    workflowLambdaDataSource.createResolver('CreateWorkflowResolver', {
-      typeName: 'Mutation',
-      fieldName: 'createWorkflow',
+    workflowLambdaDataSource.createResolver("CreateWorkflowResolver", {
+      typeName: "Mutation",
+      fieldName: "createWorkflow",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('UpdateWorkflowResolver', {
-      typeName: 'Mutation',
-      fieldName: 'updateWorkflow',
+    workflowLambdaDataSource.createResolver("UpdateWorkflowResolver", {
+      typeName: "Mutation",
+      fieldName: "updateWorkflow",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('DeleteWorkflowResolver', {
-      typeName: 'Mutation',
-      fieldName: 'deleteWorkflow',
+    workflowLambdaDataSource.createResolver("DeleteWorkflowResolver", {
+      typeName: "Mutation",
+      fieldName: "deleteWorkflow",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('PublishWorkflowResolver', {
-      typeName: 'Mutation',
-      fieldName: 'publishWorkflow',
+    workflowLambdaDataSource.createResolver("PublishWorkflowResolver", {
+      typeName: "Mutation",
+      fieldName: "publishWorkflow",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('UpdateWorkflowConfigurationResolver', {
-      typeName: 'Mutation',
-      fieldName: 'updateWorkflowConfiguration',
+    workflowLambdaDataSource.createResolver(
+      "UpdateWorkflowConfigurationResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "updateWorkflowConfiguration",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
+
+    workflowLambdaDataSource.createResolver("ImportBlueprintResolver", {
+      typeName: "Mutation",
+      fieldName: "importBlueprint",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    workflowLambdaDataSource.createResolver('ImportBlueprintResolver', {
-      typeName: 'Mutation',
-      fieldName: 'importBlueprint',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    workflowLambdaDataSource.createResolver('ImportWorkflowResolver', {
-      typeName: 'Mutation',
-      fieldName: 'importWorkflow',
+    workflowLambdaDataSource.createResolver("ImportWorkflowResolver", {
+      typeName: "Mutation",
+      fieldName: "importWorkflow",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
     // App Resolver — Query resolvers
-    registryAgentRecordLambdaDataSource.createResolver('GetAppResolver', {
-      typeName: 'Query',
-      fieldName: 'getApp',
+    registryAgentRecordLambdaDataSource.createResolver("GetAppResolver", {
+      typeName: "Query",
+      fieldName: "getApp",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    registryAgentRecordLambdaDataSource.createResolver('ListAppsResolver', {
-      typeName: 'Query',
-      fieldName: 'listApps',
+    registryAgentRecordLambdaDataSource.createResolver("ListAppsResolver", {
+      typeName: "Query",
+      fieldName: "listApps",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
     // App Resolver — Mutation resolvers
-    registryAgentRecordLambdaDataSource.createResolver('CreateAppResolver', {
-      typeName: 'Mutation',
-      fieldName: 'createApp',
+    registryAgentRecordLambdaDataSource.createResolver("CreateAppResolver", {
+      typeName: "Mutation",
+      fieldName: "createApp",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    registryAgentRecordLambdaDataSource.createResolver('UpdateAppResolver', {
-      typeName: 'Mutation',
-      fieldName: 'updateApp',
+    registryAgentRecordLambdaDataSource.createResolver("UpdateAppResolver", {
+      typeName: "Mutation",
+      fieldName: "updateApp",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    registryAgentRecordLambdaDataSource.createResolver('DeleteAppResolver', {
-      typeName: 'Mutation',
-      fieldName: 'deleteApp',
+    registryAgentRecordLambdaDataSource.createResolver("DeleteAppResolver", {
+      typeName: "Mutation",
+      fieldName: "deleteApp",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    registryAgentRecordLambdaDataSource.createResolver('BindWorkflowToAppResolver', {
-      typeName: 'Mutation',
-      fieldName: 'bindWorkflowToApp',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "BindWorkflowToAppResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "bindWorkflowToApp",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('UnbindWorkflowFromAppResolver', {
-      typeName: 'Mutation',
-      fieldName: 'unbindWorkflowFromApp',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "UnbindWorkflowFromAppResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "unbindWorkflowFromApp",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('UpdateAgentBindingResolver', {
-      typeName: 'Mutation',
-      fieldName: 'updateAgentBinding',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "UpdateAgentBindingResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "updateAgentBinding",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('AddAppComponentResolver', {
-      typeName: 'Mutation',
-      fieldName: 'addAppComponent',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "AddAppComponentResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "addAppComponent",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('RemoveAppComponentResolver', {
-      typeName: 'Mutation',
-      fieldName: 'removeAppComponent',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "RemoveAppComponentResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "removeAppComponent",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('SetAppConfigSchemaResolver', {
-      typeName: 'Mutation',
-      fieldName: 'setAppConfigSchema',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "SetAppConfigSchemaResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "setAppConfigSchema",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('SetAppConfigValuesResolver', {
-      typeName: 'Mutation',
-      fieldName: 'setAppConfigValues',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "SetAppConfigValuesResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "setAppConfigValues",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('PublishAppStatusEventResolver', {
-      typeName: 'Mutation',
-      fieldName: 'publishAppStatusEvent',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "PublishAppStatusEventResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "publishAppStatusEvent",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // API Key Management resolvers
-    registryAgentRecordLambdaDataSource.createResolver('CreateAppApiKeyResolver', {
-      typeName: 'Mutation',
-      fieldName: 'createAppApiKey',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "CreateAppApiKeyResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "createAppApiKey",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('RevokeAppApiKeyResolver', {
-      typeName: 'Mutation',
-      fieldName: 'revokeAppApiKey',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "RevokeAppApiKeyResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "revokeAppApiKey",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('RotateAppApiKeyResolver', {
-      typeName: 'Mutation',
-      fieldName: 'rotateAppApiKey',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "RotateAppApiKeyResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "rotateAppApiKey",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('ListAppApiKeysResolver', {
-      typeName: 'Query',
-      fieldName: 'listAppApiKeys',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "ListAppApiKeysResolver",
+      {
+        typeName: "Query",
+        fieldName: "listAppApiKeys",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Auth Config resolver
-    registryAgentRecordLambdaDataSource.createResolver('SetAppAuthConfigResolver', {
-      typeName: 'Mutation',
-      fieldName: 'setAppAuthConfig',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "SetAppAuthConfigResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "setAppAuthConfig",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Access Control resolvers
-    registryAgentRecordLambdaDataSource.createResolver('GrantAppAccessResolver', {
-      typeName: 'Mutation',
-      fieldName: 'grantAppAccess',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "GrantAppAccessResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "grantAppAccess",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('RevokeAppAccessResolver', {
-      typeName: 'Mutation',
-      fieldName: 'revokeAppAccess',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "RevokeAppAccessResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "revokeAppAccess",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
-    registryAgentRecordLambdaDataSource.createResolver('ListAppAccessEntriesResolver', {
-      typeName: 'Query',
-      fieldName: 'listAppAccessEntries',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "ListAppAccessEntriesResolver",
+      {
+        typeName: "Query",
+        fieldName: "listAppAccessEntries",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Metrics resolver
-    registryAgentRecordLambdaDataSource.createResolver('GetAppMetricsResolver', {
-      typeName: 'Query',
-      fieldName: 'getAppMetrics',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    registryAgentRecordLambdaDataSource.createResolver(
+      "GetAppMetricsResolver",
+      {
+        typeName: "Query",
+        fieldName: "getAppMetrics",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Execution Resolver — Query resolvers
-    executionLambdaDataSource.createResolver('GetExecutionResolver', {
-      typeName: 'Query',
-      fieldName: 'getExecution',
+    executionLambdaDataSource.createResolver("GetExecutionResolver", {
+      typeName: "Query",
+      fieldName: "getExecution",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    executionLambdaDataSource.createResolver('ListExecutionsResolver', {
-      typeName: 'Query',
-      fieldName: 'listExecutions',
+    executionLambdaDataSource.createResolver("ListExecutionsResolver", {
+      typeName: "Query",
+      fieldName: "listExecutions",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
     // Execution Resolver — Mutation resolvers
-    executionLambdaDataSource.createResolver('StartExecutionResolver', {
-      typeName: 'Mutation',
-      fieldName: 'startExecution',
+    executionLambdaDataSource.createResolver("StartExecutionResolver", {
+      typeName: "Mutation",
+      fieldName: "startExecution",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    executionLambdaDataSource.createResolver('CancelExecutionResolver', {
-      typeName: 'Mutation',
-      fieldName: 'cancelExecution',
+    executionLambdaDataSource.createResolver("CancelExecutionResolver", {
+      typeName: "Mutation",
+      fieldName: "cancelExecution",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
     // publishWorkflowProgress — IAM-only mutation called by fan-out Lambda
-    executionLambdaDataSource.createResolver('PublishWorkflowProgressResolver', {
-      typeName: 'Mutation',
-      fieldName: 'publishWorkflowProgress',
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    executionLambdaDataSource.createResolver(
+      "PublishWorkflowProgressResolver",
+      {
+        typeName: "Mutation",
+        fieldName: "publishWorkflowProgress",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
 
     // Outputs
     new cdk.CfnOutput(this, "GraphQLApiUrl", {
@@ -4121,29 +4548,32 @@ export class BackendStack extends cdk.Stack {
     // O-02: Add Powertools structured logging env vars to all Lambda functions
     this.node.findAll().forEach((child) => {
       if (child instanceof lambda.Function) {
-        child.addEnvironment('POWERTOOLS_LOG_LEVEL', 'INFO');
-        child.addEnvironment('POWERTOOLS_SERVICE_NAME', 'citadel');
-        (child as lambda.Function).addEnvironment('AWS_LAMBDA_EXEC_WRAPPER', '');
+        child.addEnvironment("POWERTOOLS_LOG_LEVEL", "INFO");
+        child.addEnvironment("POWERTOOLS_SERVICE_NAME", "citadel");
+        (child as lambda.Function).addEnvironment(
+          "AWS_LAMBDA_EXEC_WRAPPER",
+          "",
+        );
         const cfnFunction = child.node.defaultChild as lambda.CfnFunction;
-        if (cfnFunction &&!cfnFunction.tracingConfig) {
-          cfnFunction.addPropertyOverride('TracingConfig', { Mode: 'Active' });
+        if (cfnFunction && !cfnFunction.tracingConfig) {
+          cfnFunction.addPropertyOverride("TracingConfig", { Mode: "Active" });
         }
       }
     });
 
     // O-01: CloudWatch alarms for operational visibility
-    const alarmTopic = new sns.Topic(this, 'AlarmTopic', {
-          topicName: `citadel-alarms-${props.environment}`,
-          displayName: 'Citadel Alarms',
-          enforceSSL: true,
-        });
+    const alarmTopic = new sns.Topic(this, "AlarmTopic", {
+      topicName: `citadel-alarms-${props.environment}`,
+      displayName: "Citadel Alarms",
+      enforceSSL: true,
+    });
 
     // Lambda error alarms for critical functions
     const criticalFunctions = [
-      { fn: projectResolverFunction, name: 'ProjectResolver' },
-      { fn: agentMessageHandlerFunction, name: 'AgentMessageHandler' },
-      { fn: gatewayRegistrationHandler, name: 'GatewayRegistration' },
-      { fn: integrationResolverFunction, name: 'IntegrationResolver' },
+      { fn: projectResolverFunction, name: "ProjectResolver" },
+      { fn: agentMessageHandlerFunction, name: "AgentMessageHandler" },
+      { fn: gatewayRegistrationHandler, name: "GatewayRegistration" },
+      { fn: integrationResolverFunction, name: "IntegrationResolver" },
     ];
 
     for (const { fn, name } of criticalFunctions) {
@@ -4152,7 +4582,8 @@ export class BackendStack extends cdk.Stack {
         metric: fn.metricErrors({ period: cdk.Duration.minutes(5) }),
         threshold: 5,
         evaluationPeriods: 1,
-        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
         alarmDescription: `${name} Lambda error rate exceeded threshold`,
       });
@@ -4162,7 +4593,8 @@ export class BackendStack extends cdk.Stack {
         metric: fn.metricThrottles({ period: cdk.Duration.minutes(5) }),
         threshold: 3,
         evaluationPeriods: 1,
-        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
         alarmDescription: `${name} Lambda throttle rate exceeded threshold`,
       });
@@ -4170,55 +4602,60 @@ export class BackendStack extends cdk.Stack {
 
     // DynamoDB throttle alarms for critical tables
     const criticalTables = [
-      { table: this.projectsTable, name: 'Projects' },
-      { table: this.conversationsTable, name: 'Conversations' },
-      { table: this.agentConfigTable, name: 'AgentConfig' },
-      { table: integrationsTable, name: 'Integrations' },
+      { table: this.projectsTable, name: "Projects" },
+      { table: this.conversationsTable, name: "Conversations" },
+      { table: this.agentConfigTable, name: "AgentConfig" },
+      { table: integrationsTable, name: "Integrations" },
     ];
 
     for (const { table, name } of criticalTables) {
       new cloudwatch.Alarm(this, `${name}ReadThrottleAlarm`, {
         alarmName: `citadel-${name}-read-throttles-${props.environment}`,
-        metric: table.metricThrottledRequestsForOperation('GetItem', { period: cdk.Duration.minutes(5) }),
+        metric: table.metricThrottledRequestsForOperation("GetItem", {
+          period: cdk.Duration.minutes(5),
+        }),
         threshold: 5,
         evaluationPeriods: 2,
-        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
         alarmDescription: `${name} DynamoDB read throttles exceeded threshold`,
       });
     }
 
     // AppSync 4xx/5xx alarms
-    new cloudwatch.Alarm(this, 'AppSync4xxAlarm', {
+    new cloudwatch.Alarm(this, "AppSync4xxAlarm", {
       alarmName: `citadel-appsync-4xx-${props.environment}`,
       metric: new cloudwatch.Metric({
-        namespace: 'AWS/AppSync',
-        metricName: '4XXError',
+        namespace: "AWS/AppSync",
+        metricName: "4XXError",
         dimensionsMap: { GraphQLAPIId: this.appSyncApi.apiId },
         period: cdk.Duration.minutes(5),
-        statistic: 'Sum',
+        statistic: "Sum",
       }),
       threshold: 50,
       evaluationPeriods: 2,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: 'AppSync 4xx error rate exceeded threshold',
+      alarmDescription: "AppSync 4xx error rate exceeded threshold",
     });
 
-    new cloudwatch.Alarm(this, 'AppSync5xxAlarm', {
+    new cloudwatch.Alarm(this, "AppSync5xxAlarm", {
       alarmName: `citadel-appsync-5xx-${props.environment}`,
       metric: new cloudwatch.Metric({
-        namespace: 'AWS/AppSync',
-        metricName: '5XXError',
+        namespace: "AWS/AppSync",
+        metricName: "5XXError",
         dimensionsMap: { GraphQLAPIId: this.appSyncApi.apiId },
         period: cdk.Duration.minutes(5),
-        statistic: 'Sum',
+        statistic: "Sum",
       }),
       threshold: 10,
       evaluationPeriods: 1,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: 'AppSync 5xx error rate exceeded threshold',
+      alarmDescription: "AppSync 5xx error rate exceeded threshold",
     });
 
     new cdk.CfnOutput(this, "GraphQLApiId", {
@@ -4275,88 +4712,113 @@ export class BackendStack extends cdk.Stack {
     // these tables via props, producing auto-generated cross-stack Exports.
 
     // ADRs
-    this.adrsTable = new dynamodb.Table(this, 'ADRsTable', {
+    this.adrsTable = new dynamodb.Table(this, "ADRsTable", {
       tableName: `citadel-adrs-${props.environment}`,
-      partitionKey: { name: 'adrId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "adrId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       deletionProtection: true,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
     this.adrsTable.addGlobalSecondaryIndex({
-      indexName: 'project-index',
-      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      indexName: "project-index",
+      partitionKey: { name: "projectId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // ADR Reopen Attempts (append-only audit log)
-    this.adrReopenAttemptsTable = new dynamodb.Table(this, 'ADRReopenAttemptsTable', {
-      tableName: `citadel-adr-reopen-attempts-${props.environment}`,
-      partitionKey: { name: 'attemptId', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      deletionProtection: true,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    this.adrReopenAttemptsTable = new dynamodb.Table(
+      this,
+      "ADRReopenAttemptsTable",
+      {
+        tableName: `citadel-adr-reopen-attempts-${props.environment}`,
+        partitionKey: {
+          name: "attemptId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
     this.adrReopenAttemptsTable.addGlobalSecondaryIndex({
-      indexName: 'adr-index',
-      partitionKey: { name: 'adrId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'attemptedAt', type: dynamodb.AttributeType.STRING },
+      indexName: "adr-index",
+      partitionKey: { name: "adrId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "attemptedAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // ExecutionSpecifications — also consumed by ArbiterStack
     // (worker + fabricator) for dispatch-time spec-status validation.
-    this.executionSpecificationsTable = new dynamodb.Table(this, 'ExecutionSpecificationsTable', {
-      tableName: `citadel-execution-specifications-${props.environment}`,
-      partitionKey: { name: 'specId', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      deletionProtection: true,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    this.executionSpecificationsTable = new dynamodb.Table(
+      this,
+      "ExecutionSpecificationsTable",
+      {
+        tableName: `citadel-execution-specifications-${props.environment}`,
+        partitionKey: { name: "specId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
     this.executionSpecificationsTable.addGlobalSecondaryIndex({
-      indexName: 'project-index',
-      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      indexName: "project-index",
+      partitionKey: { name: "projectId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // InterrogationRounds
-    this.interrogationRoundsTable = new dynamodb.Table(this, 'InterrogationRoundsTable', {
-      tableName: `citadel-interrogation-rounds-${props.environment}`,
-      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'roundN', type: dynamodb.AttributeType.NUMBER },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      deletionProtection: true,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    this.interrogationRoundsTable = new dynamodb.Table(
+      this,
+      "InterrogationRoundsTable",
+      {
+        tableName: `citadel-interrogation-rounds-${props.environment}`,
+        partitionKey: {
+          name: "projectId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        sortKey: { name: "roundN", type: dynamodb.AttributeType.NUMBER },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
 
     // AgentDesignAssessments
-    this.agentDesignAssessmentsTable = new dynamodb.Table(this, 'AgentDesignAssessmentsTable', {
-      tableName: `citadel-agent-design-assessments-${props.environment}`,
-      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      deletionProtection: true,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    this.agentDesignAssessmentsTable = new dynamodb.Table(
+      this,
+      "AgentDesignAssessmentsTable",
+      {
+        tableName: `citadel-agent-design-assessments-${props.environment}`,
+        partitionKey: {
+          name: "projectId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
 
     // ProgramReviews (Δ12)
-    this.programReviewsTable = new dynamodb.Table(this, 'ProgramReviewsTable', {
+    this.programReviewsTable = new dynamodb.Table(this, "ProgramReviewsTable", {
       tableName: `citadel-program-reviews-${props.environment}`,
-      partitionKey: { name: 'reviewId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "reviewId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       deletionProtection: true,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
     this.programReviewsTable.addGlobalSecondaryIndex({
-      indexName: 'project-index',
-      partitionKey: { name: 'projectId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      indexName: "project-index",
+      partitionKey: { name: "projectId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
@@ -4365,9 +4827,18 @@ export class BackendStack extends cdk.Stack {
     // are instantiated later in the constructor than the function itself.
     // Gates C3 (assessment), C7 (ADR), C10 (ExecutionSpec) read from these
     // tables during updateProject phase transitions.
-    projectResolverFunction.addEnvironment('ADRS_TABLE', this.adrsTable.tableName);
-    projectResolverFunction.addEnvironment('EXECUTION_SPECS_TABLE', this.executionSpecificationsTable.tableName);
-    projectResolverFunction.addEnvironment('AGENT_DESIGN_ASSESSMENTS_TABLE', this.agentDesignAssessmentsTable.tableName);
+    projectResolverFunction.addEnvironment(
+      "ADRS_TABLE",
+      this.adrsTable.tableName,
+    );
+    projectResolverFunction.addEnvironment(
+      "EXECUTION_SPECS_TABLE",
+      this.executionSpecificationsTable.tableName,
+    );
+    projectResolverFunction.addEnvironment(
+      "AGENT_DESIGN_ASSESSMENTS_TABLE",
+      this.agentDesignAssessmentsTable.tableName,
+    );
     this.adrsTable.grantReadData(projectResolverFunction);
     this.executionSpecificationsTable.grantReadData(projectResolverFunction);
     this.agentDesignAssessmentsTable.grantReadData(projectResolverFunction);
@@ -4380,7 +4851,10 @@ export class BackendStack extends cdk.Stack {
     // function. Same-stack reference (ADRsTable lives in this BackendStack); the
     // resulting GSI /index/* wildcard is covered by the stack-level
     // AwsSolutions-IAM5 suppression in bin/app.ts.
-    agentImportResolverFunction.addEnvironment('ADRS_TABLE', this.adrsTable.tableName);
+    agentImportResolverFunction.addEnvironment(
+      "ADRS_TABLE",
+      this.adrsTable.tableName,
+    );
     this.adrsTable.grantWriteData(agentImportResolverFunction);
   }
 
@@ -4393,28 +4867,28 @@ export class BackendStack extends cdk.Stack {
   public addPublishHandlerResolvers(publishHandlerArn: string): void {
     const publishHandlerFn = lambda.Function.fromFunctionAttributes(
       this,
-      'ImportedPublishHandler',
+      "ImportedPublishHandler",
       {
         functionArn: publishHandlerArn,
         sameEnvironment: true,
-      }
+      },
     );
 
     const publishHandlerDataSource = this.appSyncApi.addLambdaDataSource(
-      'PublishHandlerLambdaDataSource',
-      publishHandlerFn
+      "PublishHandlerLambdaDataSource",
+      publishHandlerFn,
     );
 
-    publishHandlerDataSource.createResolver('PublishAppResolver', {
-      typeName: 'Mutation',
-      fieldName: 'publishApp',
+    publishHandlerDataSource.createResolver("PublishAppResolver", {
+      typeName: "Mutation",
+      fieldName: "publishApp",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    publishHandlerDataSource.createResolver('UnpublishAppResolver', {
-      typeName: 'Mutation',
-      fieldName: 'unpublishApp',
+    publishHandlerDataSource.createResolver("UnpublishAppResolver", {
+      typeName: "Mutation",
+      fieldName: "unpublishApp",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
