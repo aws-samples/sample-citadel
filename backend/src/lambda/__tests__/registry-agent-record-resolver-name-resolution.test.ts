@@ -75,7 +75,7 @@ jest.mock('../../utils/appsync-publish', () => ({
 import { handler } from '../registry-agent-record-resolver';
 
 type HandlerEvent = Parameters<typeof handler>[0];
-const invokeHandler = handler as (event: HandlerEvent) => Promise<any>;
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function makeEvent(
   fieldName: string,
@@ -261,7 +261,7 @@ describe('registry-agent-record-resolver — server-side name resolution', () =>
       const result = await invokeHandler(makeEvent('getApp', { appId: 'app-1' }));
 
       expect(result.agentBindings).toHaveLength(2);
-      const byId = new Map(result.agentBindings.map((b: any) => [b.agentId, b]));
+      const byId = new Map(result.agentBindings.map((b: { agentId: string; name?: string }) => [b.agentId, b]));
       expect(byId.get(AGENT_1).name).toBe('Support Agent');
       expect(byId.get(AGENT_2).name).toBe('Billing Agent');
     });
@@ -278,7 +278,7 @@ describe('registry-agent-record-resolver — server-side name resolution', () =>
 
       const result = await invokeHandler(makeEvent('getApp', { appId: 'app-1' }));
 
-      const byId = new Map(result.agentBindings.map((b: any) => [b.agentId, b]));
+      const byId = new Map(result.agentBindings.map((b: { agentId: string; name?: string }) => [b.agentId, b]));
       expect(byId.get(AGENT_MISSING).name).toBeUndefined();
       expect(byId.get(AGENT_2).name).toBe('Billing Agent');
     });
@@ -364,7 +364,7 @@ describe('registry-agent-record-resolver — server-side name resolution', () =>
       const result = await invokeHandler(makeEvent('getApp', { appId: 'app-1' }));
 
       expect(result.agentBindings).toHaveLength(4);
-      const byId = new Map(result.agentBindings.map((b: any) => [b.agentId, b]));
+      const byId = new Map(result.agentBindings.map((b: { agentId: string; name?: string }) => [b.agentId, b]));
       expect(byId.get(AGENT_1).name).toBe('Support Agent');
       expect(byId.get(AGENT_2).name).toBe('Billing Agent');
       // The whole batch — 4 bindings referencing 2 unique agents — costs
@@ -387,7 +387,7 @@ describe('registry-agent-record-resolver — server-side name resolution', () =>
       const result = await invokeHandler(makeEvent('getApp', { appId: 'app-1' }));
 
       expect(result.agentBindings).toHaveLength(25);
-      expect(result.agentBindings.every((b: any) => !!b.name)).toBe(true);
+      expect(result.agentBindings.every((b: { name?: string }) => !!b.name)).toBe(true);
       // Bounded independent of binding count — a single BatchGetItem call.
       expect(batchGetCallCount).toBe(1);
       expect(batchGetKeyCount).toBe(25);
@@ -421,7 +421,7 @@ describe('registry-agent-record-resolver — server-side name resolution', () =>
 
       const result = await invokeHandler(makeEvent('getApp', { appId: 'app-1' }));
 
-      const byId = new Map(result.agentBindings.map((b: any) => [b.agentId, b]));
+      const byId = new Map(result.agentBindings.map((b: { agentId: string; name?: string }) => [b.agentId, b]));
       expect(byId.get('LegacyThrowsAgent').name).toBeUndefined();
       expect(byId.get(AGENT_2).name).toBe('Billing Agent');
     });
@@ -526,7 +526,7 @@ describe('registry-agent-record-resolver — server-side name resolution', () =>
       const result = await invokeHandler(makeEvent('listApps', { orgId: 'org-1' }, { orgId: 'org-1' }));
 
       expect(result.items).toHaveLength(3);
-      expect(result.items.every((i: any) => i.createdByName === 'user1@example.com')).toBe(true);
+      expect(result.items.every((i: { createdByName?: string }) => i.createdByName === 'user1@example.com')).toBe(true);
       expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(1);
     });
 

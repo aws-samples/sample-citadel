@@ -50,7 +50,7 @@ jest.mock('../../utils/appsync-publish', () => ({
 import { handler } from '../registry-agent-record-resolver';
 
 type HandlerEvent = Parameters<typeof handler>[0];
-const invokeHandler = handler as (event: HandlerEvent) => Promise<any>;
+const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
