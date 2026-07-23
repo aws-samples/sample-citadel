@@ -99,6 +99,24 @@ function makeAdminEvent(fieldName: string, args: Record<string, unknown>, sub = 
   } as unknown as HandlerEvent;
 }
 
+/**
+ * Event helper for callers who need a `custom:organization` claim matching
+ * the org being queried, to pass the getApp/listApps tenant-authorization
+ * gate (a non-admin caller may only read their own org's apps).
+ */
+function makeOrgEvent(
+  fieldName: string,
+  args: Record<string, unknown>,
+  orgId: string,
+  sub = 'user-123',
+) {
+  return {
+    info: { fieldName },
+    arguments: args,
+    identity: { sub, claims: { sub, 'custom:organization': orgId } },
+  } as unknown as HandlerEvent;
+}
+
 function seedApp(
   opts: {
     status?: string;
@@ -163,7 +181,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       seedApp({ orgId: 'org-1' });
 
       const result = await invokeHandler(
-        makeEvent('getApp', { appId: 'app-1' }),
+        makeOrgEvent('getApp', { appId: 'app-1' }, 'org-1'),
       );
 
       expect(result.appId).toBe('app-1');
@@ -272,7 +290,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       });
 
       const result = await invokeHandler(
-        makeEvent('listApps', { orgId: 'org-1' }),
+        makeOrgEvent('listApps', { orgId: 'org-1' }, 'org-1'),
       );
 
       expect(result.items).toHaveLength(2);
@@ -301,7 +319,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       ddbMock.on(QueryCommand).resolves({ Items: [], LastEvaluatedKey: undefined });
 
       const result = await invokeHandler(
-        makeEvent('listApps', { orgId: 'org-other' }),
+        makeOrgEvent('listApps', { orgId: 'org-other' }, 'org-other'),
       );
 
       expect(result.items).toEqual([]);
@@ -324,7 +342,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       });
 
       const result = await invokeHandler(
-        makeEvent('listApps', { orgId: 'org-1' }),
+        makeOrgEvent('listApps', { orgId: 'org-1' }, 'org-1'),
       );
 
       expect(result.items).toHaveLength(1);
@@ -346,7 +364,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
       });
 
       const result = await invokeHandler(
-        makeEvent('listApps', { orgId: 'org-1' }),
+        makeOrgEvent('listApps', { orgId: 'org-1' }, 'org-1'),
       );
 
       expect(result.items).toHaveLength(1);
@@ -378,7 +396,7 @@ describe('registry-agent-record-resolver — CRUD', () => {
         });
 
       const result = await invokeHandler(
-        makeEvent('listApps', { orgId: 'org-1' }),
+        makeOrgEvent('listApps', { orgId: 'org-1' }, 'org-1'),
       );
 
       expect(result.items).toHaveLength(2);

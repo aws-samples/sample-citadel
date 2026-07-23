@@ -108,6 +108,7 @@ const mockApp = {
   agentBindings: [
     {
       agentId: 'agent-1',
+      name: 'Agent One',
       status: 'READY' as const,
       systemPromptAddition: 'Extra prompt',
       toolRestrictions: ['tool-x'],
@@ -131,6 +132,7 @@ const mockApp = {
   configSchema: JSON.stringify({ type: 'object', properties: { apiKey: { type: 'string' } } }),
   configValues: JSON.stringify({ apiKey: 'test-key' }),
   createdBy: 'user-1',
+  createdByName: 'Jane Doe',
   createdAt: '2024-01-01T00:00:00Z',
   updatedAt: '2024-01-15T00:00:00Z',
   version: 1,
@@ -158,7 +160,7 @@ describe('AppDetailView', () => {
   });
 
   // Req 11.2: Header displays name, status badge, description, createdBy, createdAt, updatedAt
-  it('renders app header with name, status badge, description, and metadata', async () => {
+  it('renders app header with name, status badge, description, and server-provided createdByName', async () => {
     render(<AppDetailView {...defaultProps} />);
 
     await waitFor(() => {
@@ -167,7 +169,20 @@ describe('AppDetailView', () => {
 
     expect(screen.getByText('DRAFT')).toBeInTheDocument();
     expect(screen.getByText('A test application')).toBeInTheDocument();
-    expect(screen.getByText(/Created by user-1/)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText(/Created by Jane Doe/)).toBeInTheDocument();
+    });
+  });
+
+  // Falls back to the raw createdBy id when the server did not resolve a name
+  it('falls back to createdBy when createdByName is absent', async () => {
+    (appApiService.getApp as jest.Mock).mockResolvedValue({ ...mockApp, createdByName: undefined });
+
+    render(<AppDetailView {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Created by user-1/)).toBeInTheDocument();
+    });
   });
 
   // Req 11.3: Tabbed navigation with all five tabs
@@ -186,14 +201,17 @@ describe('AppDetailView', () => {
   });
 
   // Req 11.4: Agents tab shows binding cards with status badges and override indicators
-  it('renders agent binding cards with status badges on Agents tab', async () => {
+  it('renders agent binding cards with server-provided name (falling back to agentId) on Agents tab', async () => {
     render(<AppDetailView {...defaultProps} />);
 
     await waitFor(() => {
-      expect(screen.getByText('agent-1')).toBeInTheDocument();
+      // agent-1 has a server-provided name and should display it, not the raw id
+      expect(screen.getByText('Agent One')).toBeInTheDocument();
     });
 
+    // agent-2 has no name from the server — falls back to the raw agentId
     expect(screen.getByText('agent-2')).toBeInTheDocument();
+    expect(screen.queryByText('agent-1')).not.toBeInTheDocument();
     // Status badges — DRAFT is the app status, READY and DESIGN are binding statuses
     expect(screen.getByText('READY')).toBeInTheDocument();
     // DESIGN appears both as agent status and in precondition text potentially
@@ -369,7 +387,7 @@ describe('AppDetailView', () => {
     render(<AppDetailView {...defaultProps} />);
 
     await waitFor(() => {
-      expect(screen.getByText('agent-1')).toBeInTheDocument();
+      expect(screen.getByText('Agent One')).toBeInTheDocument();
     });
 
     const removeButtons = screen.getAllByText('Remove');
@@ -385,7 +403,7 @@ describe('AppDetailView', () => {
     render(<AppDetailView {...defaultProps} />);
 
     await waitFor(() => {
-      expect(screen.getByText('agent-1')).toBeInTheDocument();
+      expect(screen.getByText('Agent One')).toBeInTheDocument();
     });
 
     const editButtons = screen.getAllByText('Edit');
@@ -406,7 +424,7 @@ describe('AppDetailView', () => {
     render(<AppDetailView {...defaultProps} />);
 
     await waitFor(() => {
-      expect(screen.getByText('agent-1')).toBeInTheDocument();
+      expect(screen.getByText('Agent One')).toBeInTheDocument();
     });
 
     const editButtons = screen.getAllByText('Edit');

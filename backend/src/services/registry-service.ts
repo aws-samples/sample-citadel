@@ -909,6 +909,121 @@ export class RegistryService {
   }
 
   /**
+   * Lists CUSTOM-descriptor registry record summaries in a SINGLE pass of
+   * `ListRegistryRecords` pagination — deliberately does NOT follow up with
+   * a `GetRegistryRecord` per record (unlike `listResources`, which issues
+   * one detail GET per summary just to apply its type filter).
+   *
+   * Summaries carry `recordId`/`name`/`status` but never
+   * `customDescriptorContent` (org/manifest data), so this is only suitable
+   * for cheap id<->name lookups (e.g. batch display-name resolution). Callers
+   * needing manifest content (org validation, bindings, etc.) must follow up
+   * with `getResource` for the specific records they actually need — but
+   * critically, only for the deduped subset they care about, not the full
+   * registry.
+   */
+  async listResourceSummaries(): Promise<RegistryRecordSummary[]> {
+    const summaries: RegistryRecordSummary[] = [];
+    let nextToken: string | undefined;
+    do {
+      const result: ListRegistryRecordsCommandOutput = await this.withRetry(() =>
+        this.client.send(
+          new ListRegistryRecordsCommand({
+            registryId: this.registryId,
+            descriptorType: 'CUSTOM',
+            nextToken,
+          }),
+        ),
+      );
+      if (result.registryRecords) {
+        summaries.push(...result.registryRecords);
+      }
+      nextToken = result.nextToken;
+    } while (nextToken);
+    return summaries;
+  }
+
+  /**
+   * Batch-resolves a set of agent references — each may be a 12-char
+   * Registry recordId OR a legacy human-readable name — to their full
+   * `RegistryRecord`s, keyed by the ORIGINAL reference string passed in.
+   *
+   * Cost profile (the N+1 fix): at most ONE `listResourceSummaries` call
+   * total (shared across every legacy-name reference in the batch, and only
+   * issued at all if at least one reference isn't already a 12-char id),
+   * plus exactly one `getResource` detail GET per UNIQUE resolved recordId
+   * (deduplicated — repeated bindings to the same agent cost one GET, not
+   * one per binding).
+   *
+   * Per-reference failures (unresolvable name, missing record, transient
+   * Registry error) are isolated: the failing key is simply absent from the
+   * returned map so callers can fall back gracefully, matching this
+   * codebase's "never throw on a display-only lookup" convention.
+   */
+  async getResourcesByRefs(
+    type: ResourceType,
+    refs: string[],
+  ): Promise<Map<string, RegistryRecord>> {
+    const uniqueRefs = Array.from(new Set(refs.filter((r) => !!r)));
+    const result = new Map<string, RegistryRecord>();
+    if (uniqueRefs.length === 0) return result;
+
+    const isRecordId = (r: string) => /^[a-zA-Z0-9]{12}$/.test(r);
+    const needsNameResolution = uniqueRefs.some((r) => !isRecordId(r));
+
+    // Single shared summary list for every legacy-name reference in the
+    // batch — NOT one list call per reference.
+    let nameToRecordId: Map<string, string> | undefined;
+    if (needsNameResolution) {
+      const summaries = await this.listResourceSummaries();
+      nameToRecordId = new Map(
+        summaries
+          .filter((s) => s.recordId && s.name)
+          .map((s) => [s.name as string, s.recordId as string]),
+      );
+    }
+
+    // ref -> resolved recordId (or undefined if unresolvable).
+    const refToRecordId = new Map<string, string | undefined>();
+    for (const ref of uniqueRefs) {
+      if (isRecordId(ref)) {
+        refToRecordId.set(ref, ref);
+      } else {
+        refToRecordId.set(ref, nameToRecordId?.get(ref));
+      }
+    }
+
+    // Dedupe by resolved recordId so an agent bound under multiple refs (or
+    // a batch with duplicate bindings) is fetched exactly once.
+    const uniqueRecordIds = Array.from(
+      new Set(Array.from(refToRecordId.values()).filter((id): id is string => !!id)),
+    );
+    const recordIdToRecord = new Map<string, RegistryRecord>();
+    await Promise.all(
+      uniqueRecordIds.map(async (recordId) => {
+        try {
+          const record = await this.getResource(type, recordId);
+          if (record) recordIdToRecord.set(recordId, record);
+        } catch (err) {
+          console.warn('getResourcesByRefs: getResource failed, dropping ref', {
+            type,
+            recordId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }),
+    );
+
+    for (const [ref, recordId] of refToRecordId.entries()) {
+      if (!recordId) continue;
+      const record = recordIdToRecord.get(recordId);
+      if (record) result.set(ref, record);
+    }
+
+    return result;
+  }
+
+  /**
    * Helper to map a RegistryRecordSummary to our RegistryRecord shape.
    * Note: summaries from ListRegistryRecords do not include custom
    * descriptor content — callers needing that must follow up with getResource.

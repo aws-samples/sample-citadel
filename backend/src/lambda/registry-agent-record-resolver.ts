@@ -42,6 +42,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   GetCommand,
+  BatchGetCommand,
   QueryCommand,
   ScanCommand,
   type NativeAttributeValue,
@@ -49,10 +50,14 @@ import {
   type ScanCommandOutput,
 } from '@aws-sdk/lib-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import {
+  CognitoIdentityProviderClient,
+  AdminGetUserCommand,
+} from '@aws-sdk/client-cognito-identity-provider';
 import { v4 as uuidv4 } from 'uuid';
 import Ajv from 'ajv';
 import { getUserId } from '../utils/appsync';
-import { isAdminFromEvent } from '../utils/auth-event';
+import { isAdminFromEvent, extractOrgFromEvent } from '../utils/auth-event';
 import { publishAppStatusEvent as publishAppStatusSubscription } from '../utils/appsync-publish';
 import {
   RegistryService,
@@ -260,8 +265,16 @@ function recordFromInput(
 // ---------------------------------------------------------------------------
 
 const APPS_TABLE = process.env.APPS_TABLE!;
+// Denormalized Registry -> DynamoDB projection (kept in sync by
+// registry-sync.ts off `citadel.agentcore.*` EventBridge events). Used ONLY
+// for the agentBindings[].name enrichment's fast path: a single
+// BatchGetItem for every 12-char Registry recordId binding, instead of one
+// GetRegistryRecord Registry call per binding (the N+1 fix — see
+// resolveAgentBindingNames). Read-only; this resolver never writes here.
+const AGENT_CONFIG_TABLE = process.env.AGENT_CONFIG_TABLE || '';
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
 const DEFAULT_REGION = process.env.AWS_REGION || 'us-east-1';
+const USER_POOL_ID = process.env.USER_POOL_ID || '';
 
 /**
  * Lazy DynamoDBDocumentClient singleton. Constructed on first call — keeps the
@@ -302,6 +315,80 @@ function getRegistryService(): RegistryService {
     });
   }
   return _registryService;
+}
+
+/** Lazy CognitoIdentityProviderClient singleton for createdBy name resolution. */
+let _cognitoClient: CognitoIdentityProviderClient | undefined;
+function getCognitoClient(): CognitoIdentityProviderClient {
+  if (!_cognitoClient) {
+    _cognitoClient = new CognitoIdentityProviderClient({});
+  }
+  return _cognitoClient;
+}
+
+/**
+ * Per-invocation cache for userId -> display name lookups. Declared at
+ * module scope (so it's reachable from both getApp and metaRowToAppShape)
+ * but explicitly cleared at the top of `handler` on every invocation — a
+ * warm Lambda container must never serve a stale name from a prior request.
+ *
+ * Caches the in-flight `Promise<string>`, not just the resolved value: both
+ * `listApps` list projections (`metaRowToAppShape`) run concurrently via
+ * `Promise.all`, so multiple rows created by the SAME user all observe a
+ * cache miss before any single one resolves if only settled values were
+ * cached. Storing the promise itself means the second-and-later concurrent
+ * callers for a given userId await the SAME in-flight `AdminGetUser` call
+ * instead of issuing their own — exactly one Cognito call per unique
+ * creator per invocation, however many rows/bindings reference them.
+ */
+const createdByNameCache = new Map<string, Promise<string>>();
+
+/**
+ * Resolves a Cognito user ID to a human-readable display name via
+ * AdminGetUser. Falls back to the raw userId on any failure (missing
+ * USER_POOL_ID, user not found, Cognito error) — this must never throw,
+ * since it is a display-only enrichment and must not block getApp/listApps.
+ *
+ * Deliberately scoped to a single admin-privileged call per userId
+ * (AdminGetUser, not the unscoped ListUsers) and never exposes any Cognito
+ * attribute beyond the display name itself.
+ *
+ * Concurrency-safe: the in-flight promise is memoized (see
+ * `createdByNameCache`), so N concurrent callers for the same userId within
+ * one invocation share a single AdminGetUser call.
+ */
+async function resolveCreatedByName(userId: string | undefined | null): Promise<string> {
+  if (!userId) return 'unknown';
+  const cached = createdByNameCache.get(userId);
+  if (cached !== undefined) return cached;
+
+  const lookup = (async (): Promise<string> => {
+    if (!USER_POOL_ID) {
+      return userId;
+    }
+    try {
+      const response = await getCognitoClient().send(
+        new AdminGetUserCommand({
+          UserPoolId: USER_POOL_ID,
+          Username: userId,
+        }),
+      );
+      const attributes = response.UserAttributes || [];
+      const givenName = attributes.find((a) => a.Name === 'given_name')?.Value;
+      const familyName = attributes.find((a) => a.Name === 'family_name')?.Value;
+      const email = attributes.find((a) => a.Name === 'email')?.Value;
+      return givenName && familyName ? `${givenName} ${familyName}` : email || userId;
+    } catch (err) {
+      console.warn('resolveCreatedByName: AdminGetUser failed, falling back to userId', {
+        userId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return userId;
+    }
+  })();
+
+  createdByNameCache.set(userId, lookup);
+  return lookup;
 }
 
 /**
@@ -366,6 +453,14 @@ interface AgentBinding {
   systemPromptAddition?: string;
   toolRestrictions?: string[];
   modelOverride?: string;
+  /**
+   * Server-resolved display name of the bound agent (Registry record's
+   * `name` field). NOT persisted in the manifest — populated at read time
+   * by `resolveAgentBindingNames` so the frontend never has to make N+1
+   * per-binding lookups. Optional because it is absent until resolution
+   * runs (e.g. write-path projections that don't call resolveAgentBindingNames).
+   */
+  name?: string;
 }
 
 /** A single permission entry stored in the manifest. */
@@ -463,6 +558,15 @@ interface ProjectedAgentApp {
   status: string;
   orgId: string;
   createdBy: string;
+  /**
+   * Server-resolved display name for `createdBy` (Cognito AdminGetUser
+   * given_name + family_name, or email, falling back to the raw userId on
+   * any lookup failure). Populated by `getApp` and `metaRowToAppShape` at
+   * read time — NEVER persisted, so it always reflects the current Cognito
+   * profile. Optional because write-path projections (createApp, updateApp,
+   * etc.) do not resolve it.
+   */
+  createdByName?: string;
   version: number;
   workflowIds: string[];
   agentBindings: AgentBinding[];
@@ -526,6 +630,200 @@ function projectAgentAppNormalized(record: RegistryRecord): ProjectedAgentApp {
   projected.appId = record.recordId;
   return projected;
 }
+
+/**
+ * Enriches each agent binding with the bound agent's `name` field so the
+ * frontend never has to resolve raw agentIds itself (eliminates the N+1
+ * per-page-load agent lookups the client used to perform).
+ *
+ * Resolution runs within THIS Lambda invocation only (no cross-Lambda
+ * calls) and is genuinely bounded independent of binding count:
+ *
+ *   - Fast path (the common case — bindings carry the Registry's own
+ *     12-char recordId): a SINGLE `BatchGetItem` against `AGENT_CONFIG_TABLE`,
+ *     the denormalized Registry->DynamoDB projection that registry-sync.ts
+ *     keeps current off EventBridge resource-change events. One DynamoDB
+ *     round trip for the whole batch of unique agent ids (DynamoDB's
+ *     100-item BatchGetItem limit is chunked, so even that stays O(ceil(n/100))
+ *     round trips rather than O(n) Registry GETs).
+ *   - Slow path (legacy human-readable agentId, not a 12-char recordId —
+ *     rare, pre-Registry-native bindings only): falls back to
+ *     `RegistryService.getResourcesByRefs`, a single shared name->recordId
+ *     summary-list pass plus one detail GET per unique legacy agent. This
+ *     path still costs real Registry reads because the installed AgentCore
+ *     Control SDK has no batch-get operation — but it is only reached for
+ *     the small, shrinking set of legacy non-recordId bindings, never for
+ *     ordinary pages of recordId-shaped bindings.
+ *
+ * Tenant validation: a binding's `name` is populated ONLY when the bound
+ * agent's own manifest orgId EXPLICITLY matches `appOrgId`, or is an
+ * EXPLICIT empty string (`orgId === ''`, the established "system-shared"
+ * convention `agent-config-resolver` also uses). An agent record whose
+ * orgId is missing/undefined (malformed or legacy metadata) is treated as
+ * belonging to neither org and FAILS CLOSED — it must never be treated as
+ * system-shared merely because the field is absent. An agent belonging to a
+ * different (non-empty) org is likewise left unresolved (name unset,
+ * callers fall back to displaying the raw agentId) rather than leaking its
+ * name across tenants.
+ *
+ * Failures (unresolvable legacy name, missing record, transient DynamoDB/
+ * Registry error, cross-org or org-less agent) are isolated per-binding and
+ * non-fatal — matching the "always fall back gracefully" constraint.
+ *
+ * Mutates and returns the same array reference for convenience.
+ */
+async function resolveAgentBindingNames(
+  bindings: AgentBinding[],
+  appOrgId: string,
+): Promise<AgentBinding[]> {
+  if (!bindings || bindings.length === 0) {
+    return bindings;
+  }
+
+  const isRecordId = (r: string) => /^[a-zA-Z0-9]{12}$/.test(r);
+  const uniqueRefs = Array.from(new Set(bindings.map((b) => b.agentId).filter((r) => !!r)));
+  const recordIdRefs = uniqueRefs.filter(isRecordId);
+  const legacyRefs = uniqueRefs.filter((r) => !isRecordId(r));
+
+  // ref -> { name, orgId } for every ref we manage to resolve, from EITHER
+  // path. `orgId` is `undefined` when the source record omitted it — kept
+  // distinct from `''` so the tenant check below fails closed correctly.
+  const resolved = new Map<string, { name: string; orgId: string | undefined }>();
+
+  await Promise.all([
+    resolveRecordIdRefsViaCache(recordIdRefs, resolved),
+    resolveLegacyRefsViaRegistry(legacyRefs, resolved),
+  ]);
+
+  // Fallback: any recordId refs not resolved from DDB cache → try the Registry directly
+  const unresolvedRecordIds = recordIdRefs.filter((r) => !resolved.has(r));
+  if (unresolvedRecordIds.length > 0) {
+    try {
+      const registry = getRegistryService();
+      const results = await Promise.allSettled(
+        unresolvedRecordIds.map((id) => registry.getResource('agent', id))
+      );
+      for (let i = 0; i < unresolvedRecordIds.length; i++) {
+        const result = results[i];
+        if (result.status === 'fulfilled' && result.value) {
+          const record = result.value;
+          const orgId = readRawManifestOrgId(record);
+          resolved.set(unresolvedRecordIds[i], { name: record.name ?? '', orgId });
+        }
+      }
+    } catch (err) {
+      console.warn('resolveAgentBindingNames: Registry fallback for unresolved recordIds failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  for (const binding of bindings) {
+    const entry = resolved.get(binding.agentId);
+    if (!entry) continue;
+    const sameOrg = entry.orgId === appOrgId || entry.orgId === '';
+    if (sameOrg && entry.name) {
+      binding.name = entry.name;
+    }
+  }
+  return bindings;
+}
+
+/** DynamoDB BatchGetItem hard limit — chunk any larger ref set. */
+const BATCH_GET_CHUNK_SIZE = 100;
+
+/**
+ * Fast path for `resolveAgentBindingNames`: resolves 12-char Registry
+ * recordId refs via BatchGetItem against the AGENT_CONFIG_TABLE projection —
+ * O(ceil(n/100)) DynamoDB round trips for the WHOLE batch, never one Registry
+ * call per binding. Populates `out` in place; never throws (falls back to
+ * leaving those refs unresolved on any table/config failure).
+ */
+async function resolveRecordIdRefsViaCache(
+  refs: string[],
+  out: Map<string, { name: string; orgId: string | undefined }>,
+): Promise<void> {
+  if (refs.length === 0 || !AGENT_CONFIG_TABLE) {
+    return;
+  }
+  try {
+    for (let i = 0; i < refs.length; i += BATCH_GET_CHUNK_SIZE) {
+      const chunk = refs.slice(i, i + BATCH_GET_CHUNK_SIZE);
+      const result = await getDocClient().send(
+        new BatchGetCommand({
+          RequestItems: {
+            [AGENT_CONFIG_TABLE]: {
+              Keys: chunk.map((agentId) => ({ agentId })),
+            },
+          },
+        }),
+      );
+      const items = result.Responses?.[AGENT_CONFIG_TABLE] ?? [];
+      for (const item of items) {
+        const agentId = item.agentId as string;
+        const name = typeof item.name === 'string' ? item.name : '';
+        const orgId = typeof item.orgId === 'string' ? item.orgId : undefined;
+        if (agentId) out.set(agentId, { name, orgId });
+      }
+    }
+  } catch (err) {
+    console.warn(
+      'resolveAgentBindingNames: BatchGetItem against AGENT_CONFIG_TABLE failed, leaving recordId bindings unset',
+      { error: err instanceof Error ? err.message : String(err) },
+    );
+  }
+}
+
+/**
+ * Slow path for `resolveAgentBindingNames`: resolves legacy human-readable
+ * agentId refs (pre-Registry-native bindings, not a 12-char recordId) via
+ * RegistryService.getResourcesByRefs — a single shared summary-list pass
+ * for the whole batch plus one detail GET per unique resolved record.
+ * Populates `out` in place; never throws.
+ */
+async function resolveLegacyRefsViaRegistry(
+  refs: string[],
+  out: Map<string, { name: string; orgId: string | undefined }>,
+): Promise<void> {
+  if (refs.length === 0) {
+    return;
+  }
+  const registry = getRegistryService();
+  try {
+    const recordsByRef = await registry.getResourcesByRefs('agent', refs);
+    for (const [ref, record] of recordsByRef.entries()) {
+      const orgId = readRawManifestOrgId(record);
+      out.set(ref, { name: record.name ?? '', orgId });
+    }
+  } catch (err) {
+    console.warn('resolveAgentBindingNames: legacy-ref batch resolution failed, leaving names unset', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Reads the RAW `orgId` from a Registry record's custom metadata, preserving
+ * the "absent" (undefined) vs "explicit empty string" distinction that
+ * `RegistryService.mapToAgentConfig` deliberately collapses (its
+ * `meta.orgId ?? ''` is correct for ITS callers, which treat every org-less
+ * agent as visible — but would make this enrichment fail OPEN for any
+ * legacy/malformed record that merely omits orgId). Never throws.
+ */
+function readRawManifestOrgId(record: RegistryRecord): string | undefined {
+  try {
+    const meta = record.customDescriptorContent
+      ? JSON.parse(record.customDescriptorContent)
+      : undefined;
+    if (meta && typeof meta === 'object' && typeof meta.orgId === 'string') {
+      return meta.orgId;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // IAM action validation (preserved from app-resolver.ts)
@@ -632,6 +930,13 @@ interface RegistryResolverArguments {
 export const handler: AppSyncResolverHandler<RegistryResolverArguments, unknown> = async (event) => {
   console.log('Registry agent record resolver event:', JSON.stringify(event, null, 2));
 
+  // Clear the invocation-scoped createdByName cache. It exists to dedupe
+  // repeated AdminGetUser calls for the SAME userId across many rows WITHIN
+  // one getApp/listApps call (e.g. many apps created by the same user) —
+  // not to persist stale names across separate invocations on a warm
+  // container, which would let a Cognito profile update go unreflected.
+  createdByNameCache.clear();
+
   const { info, arguments: args, identity } = event;
   const fieldName = info.fieldName;
   const userId = getUserId(identity);
@@ -640,7 +945,7 @@ export const handler: AppSyncResolverHandler<RegistryResolverArguments, unknown>
     switch (fieldName) {
       // AgentApp-shape queries (registry-backed)
       case 'getApp':
-        return await getApp(args.appId, userId);
+        return await getApp(args.appId, userId, event);
       case 'listApps':
         return await listApps(args.orgId, userId, event);
 
@@ -708,7 +1013,7 @@ export const handler: AppSyncResolverHandler<RegistryResolverArguments, unknown>
 // Registry-backed (AgentApp-shape) handlers
 // ===========================================================================
 
-async function getApp(appId: string, _userId: string): Promise<unknown> {
+async function getApp(appId: string, _userId: string, event: unknown): Promise<unknown> {
   let record;
   try {
     record = await getRegistryService().getResource('agent', appId);
@@ -722,6 +1027,21 @@ async function getApp(appId: string, _userId: string): Promise<unknown> {
     return null;
   }
   const projected = projectAgentApp(record);
+
+  // Tenant gate — MUST run before any Cognito/agent-name enrichment (both of
+  // which are privileged, PII-bearing lookups) and before returning the
+  // record at all. The AppSync mapping for getApp is a direct Lambda
+  // pass-through with no upstream authorization, so this resolver is the
+  // only place that can enforce it. Admins bypass; everyone else must
+  // belong to the app's own org. A denied caller sees the same "not found"
+  // shape as a missing app — this must not distinguish "exists in another
+  // org" from "doesn't exist" (that distinction is itself a disclosure).
+  if (!isAdminFromEvent(event)) {
+    const callerOrgId = await extractOrgFromEvent(event);
+    if (!callerOrgId || callerOrgId !== projected.orgId) {
+      return null;
+    }
+  }
 
   // Merge publish-time fields from the AppsTable (DDB is authoritative for
   // status, endpointUrl, apiId after publishApp runs).
@@ -741,6 +1061,20 @@ async function getApp(appId: string, _userId: string): Promise<unknown> {
     // DDB read failure is non-fatal — return Registry-only projection.
   }
 
+  // Server-side resolution of createdBy -> display name and per-binding
+  // agent names — runs in parallel since they hit independent backends
+  // (Cognito vs Registry) and neither result depends on the other. Both
+  // helpers are individually fail-safe (fall back to the raw id), so no
+  // try/catch is needed here. Only reached once the tenant gate above has
+  // authorized this caller for this app's org, so it's safe to call
+  // AdminGetUser and resolve bound-agent names here.
+  await Promise.all([
+    resolveCreatedByName(projected.createdBy).then((name) => {
+      projected.createdByName = name;
+    }),
+    resolveAgentBindingNames(projected.agentBindings, projected.orgId),
+  ]);
+
   // Always return the 12-char recordId as appId (not the UUID from customDescriptorContent).
   projected.appId = appId;
 
@@ -753,8 +1087,25 @@ async function listApps(
   event: unknown,
 ): Promise<{ items: unknown[]; nextToken: string | null }> {
   const isAllOrgsRequest = !orgId || orgId === 'All Organizations';
-  if (isAllOrgsRequest && !isAdminFromEvent(event)) {
+  const admin = isAdminFromEvent(event);
+  if (isAllOrgsRequest && !admin) {
     throw new Error('Only admins may list apps across all organizations');
+  }
+
+  // Tenant gate for a specific-org request: a non-admin caller may only
+  // list their OWN org's apps. Silently coerce a mismatched requested orgId
+  // to the caller's actual org rather than trusting the argument outright —
+  // AppSync has no upstream authorization for this field (direct Lambda
+  // pass-through), so a non-admin could otherwise pass an arbitrary orgId
+  // and enumerate another tenant's apps (plus trigger AdminGetUser /
+  // agent-name enrichment for each one).
+  let effectiveOrgId = orgId;
+  if (!isAllOrgsRequest && !admin) {
+    const callerOrgId = await extractOrgFromEvent(event);
+    if (!callerOrgId) {
+      return { items: [], nextToken: null };
+    }
+    effectiveOrgId = callerOrgId;
   }
 
   // Phase 3: read from the AppsTable.OrgIndex GSI rather than scanning the
@@ -764,7 +1115,7 @@ async function listApps(
   if (isAllOrgsRequest) {
     return await scanAllAppsViaMeta();
   }
-  return await queryAppsViaOrgIndex(orgId);
+  return await queryAppsViaOrgIndex(effectiveOrgId);
 }
 
 /**
@@ -793,7 +1144,7 @@ async function queryAppsViaOrgIndex(
         ExclusiveStartKey: nextToken,
       }),
     );
-    if (result.Items) items.push(...result.Items.map(metaRowToAppShape));
+    if (result.Items) items.push(...(await Promise.all(result.Items.map(metaRowToAppShape))));
     nextToken = result.LastEvaluatedKey;
   } while (nextToken);
   return { items, nextToken: null };
@@ -821,7 +1172,7 @@ async function scanAllAppsViaMeta(): Promise<{
         ExclusiveStartKey: nextToken,
       }),
     );
-    if (result.Items) items.push(...result.Items.map(metaRowToAppShape));
+    if (result.Items) items.push(...(await Promise.all(result.Items.map(metaRowToAppShape))));
     nextToken = result.LastEvaluatedKey;
   } while (nextToken);
   return { items, nextToken: null };
@@ -831,8 +1182,14 @@ async function scanAllAppsViaMeta(): Promise<{
  * Projects a single AppsTable `#META` row onto the AgentApp-shape response
  * used by listApps. Field defaults match the Registry-backed projection so
  * callers see no behavioural difference between the two read paths.
+ *
+ * Resolves `createdByName` via Cognito AdminGetUser (same helper getApp
+ * uses), sharing the invocation-scoped `createdByNameCache` — rows created
+ * by the same user across a page of listApps results incur only one
+ * AdminGetUser call, not one per row.
  */
-function metaRowToAppShape(row: Record<string, unknown>): Record<string, unknown> {
+async function metaRowToAppShape(row: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const createdBy = (row.createdBy as string) ?? '';
   return {
     appId: row.appId,
     orgId: row.orgId ?? '',
@@ -841,7 +1198,8 @@ function metaRowToAppShape(row: Record<string, unknown>): Record<string, unknown
     status: row.status ?? 'DRAFT',
     workflowIds: row.workflowIds ?? [],
     routingConfig: row.routingConfig ?? '',
-    createdBy: row.createdBy ?? '',
+    createdBy,
+    createdByName: await resolveCreatedByName(createdBy),
     createdAt: row.createdAt ?? '',
     updatedAt: row.updatedAt ?? '',
     version: typeof row.version === 'number' ? row.version : 1,

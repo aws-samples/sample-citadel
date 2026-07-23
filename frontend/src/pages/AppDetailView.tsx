@@ -92,6 +92,7 @@ interface AppDetailViewProps {
 
 interface RegistryAgentBinding {
   agentId: string;
+  name?: string;
   status: 'DESIGN' | 'READY';
   systemPromptAddition?: string;
   toolRestrictions?: string[];
@@ -139,6 +140,7 @@ interface RegistryAgentRecordDetail {
   configSchema: string | null;
   configValues: string | null;
   createdBy: string;
+  createdByName?: string;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -362,6 +364,10 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
     initialTab && VALID_TABS.includes(initialTab) ? initialTab : 'agents',
   );
 
+  // Display server-resolved creator name — app.createdByName is populated
+  // by registry-agent-record-resolver's getApp via Cognito AdminGetUser.
+  // No client-side resolution needed.
+
   // Workflow run state — one live run tracked at a time
   const [activeRun, setActiveRun] = useState<{ executionId: string; workflowId: string } | null>(null);
   const [startingRun, setStartingRun] = useState<string | null>(null);
@@ -385,7 +391,6 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   // Add agent dialog
   const [addAgentDialogOpen, setAddAgentDialogOpen] = useState(false);
   const [availableAgents, setAvailableAgents] = useState<Array<{ agentId: string; name: string; description: string }>>([]);
-  const [agentNameMap, setAgentNameMap] = useState<Record<string, string>>({});
   const [loadingAgents, setLoadingAgents] = useState(false);
   const [addingAgent, setAddingAgent] = useState<string | null>(null);
 
@@ -504,19 +509,6 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   useEffect(() => {
     loadApp();
   }, [loadApp]);
-
-  useEffect(() => {
-    if (app?.agentBindings?.length) {
-      agentConfigService.listAgentConfigs().then((configs: any[]) => {
-        const map: Record<string, string> = {};
-        for (const c of configs) {
-          const cfg = typeof c.config === 'object' && c.config !== null ? c.config : {};
-          map[c.agentId] = c.name || cfg.name || c.agentId;
-        }
-        setAgentNameMap(map);
-      }).catch(() => {});
-    }
-  }, [app?.agentBindings]);
 
   useEffect(() => {
     if (app?.workflowIds) {
@@ -1040,7 +1032,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2 min-w-0">
                   <Bot className="size-4 text-muted-foreground flex-shrink-0" />
-                  <span className="text-sm font-medium text-foreground truncate">{agentNameMap[binding.agentId] || binding.agentId}</span>
+                  <span className="text-sm font-medium text-foreground truncate">{binding.name || binding.agentId}</span>
                 </div>
                 <Badge className={cn(statusColors.bg, statusColors.text, 'text-xs border-0 flex-shrink-0')}>
                   {binding.status}
@@ -1961,7 +1953,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                 <p className="text-sm text-muted-foreground mb-2">{app.description}</p>
               )}
               <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                <span>Created by {app.createdBy || 'unknown'}</span>
+                <span>Created by {app.createdByName || app.createdBy || 'unknown'}</span>
                 <span>Created {formatDate(app.createdAt)}</span>
                 <span>Updated {formatDate(app.updatedAt)}</span>
               </div>

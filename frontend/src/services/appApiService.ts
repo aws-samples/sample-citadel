@@ -45,11 +45,13 @@ const GET_APP = `
       workflowIds
       routingConfig
       createdBy
+      createdByName
       createdAt
       updatedAt
       version
       agentBindings {
         agentId
+        name
         status
         systemPromptAddition
         toolRestrictions
@@ -81,6 +83,7 @@ const LIST_APPS = `
         workflowIds
         routingConfig
         createdBy
+        createdByName
         createdAt
         updatedAt
         version
