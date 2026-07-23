@@ -1,6 +1,6 @@
 type Query {
   getProject(id: ID!): Project
-  listProjects(filter: ProjectFilter): ProjectConnection
+  listProjects(filter: ProjectFilter, nextToken: String): ProjectConnection
   # ADR governance queries.
   getADR(adrId: ID!): ADR
   listADRsForProject(projectId: ID!): [ADR!]!

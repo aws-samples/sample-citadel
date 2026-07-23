@@ -14,6 +14,8 @@ import {
   GetCommand,
   PutCommand,
   UpdateCommand,
+  QueryCommand,
+  ScanCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import {
@@ -209,6 +211,261 @@ describe('project-resolver — archetype attributes', () => {
       expect(result.id).toBe('proj-claim');
       expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
     });
+  });
+});
+
+describe('project-resolver — organization scoping', () => {
+  beforeEach(() => {
+    dynamoMock.reset();
+    eventBridgeMock.reset();
+    cognitoMock.reset();
+    process.env.PROJECTS_TABLE = 'test-projects';
+    process.env.EVENT_BUS_NAME = 'test-bus';
+    process.env.USER_POOL_ID = 'test-pool';
+
+    cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
+    eventBridgeMock.on(PutEventsCommand).resolves({});
+  });
+
+  afterEach(() => {
+    delete process.env.PROJECTS_TABLE;
+    delete process.env.EVENT_BUS_NAME;
+    delete process.env.USER_POOL_ID;
+  });
+
+  const makeEventWithIdentity = (
+    fieldName: string,
+    args: Record<string, unknown>,
+    identity: Record<string, unknown>,
+  ) =>
+    ({
+      info: { fieldName },
+      arguments: args,
+      identity,
+    }) as unknown as HandlerEvent;
+
+  test('admin sees all projects across orgs via a full table scan', async () => {
+    const crossOrgItems = [
+      {
+        id: 'proj-org-a',
+        name: 'Org A project',
+        status: 'CREATED',
+        owner: 'user-a',
+        organization: 'org-a',
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+      {
+        id: 'proj-org-b',
+        name: 'Org B project',
+        status: 'CREATED',
+        owner: 'user-b',
+        organization: 'org-b',
+        createdAt: '2025-01-02T00:00:00Z',
+        updatedAt: '2025-01-02T00:00:00Z',
+      },
+    ];
+    dynamoMock.on(ScanCommand).resolves({ Items: crossOrgItems });
+
+    const result = await invokeHandler(
+      makeEventWithIdentity(
+        'listProjects',
+        {},
+        { sub: 'admin-1', 'custom:role': 'admin' },
+      ),
+    ) as unknown as { items: Array<{ id: string; archetypeStatus: string }> };
+
+    // Admin path must scan, never query the OrganizationIndex.
+    expect(dynamoMock.commandCalls(ScanCommand)).toHaveLength(1);
+    expect(dynamoMock.commandCalls(QueryCommand)).toHaveLength(0);
+
+    const ids = result.items.map((p) => p.id).sort();
+    expect(ids).toEqual(['proj-org-a', 'proj-org-b']);
+    // normaliseArchetype still applied on the admin path.
+    expect(result.items.every((p) => p.archetypeStatus === 'PENDING')).toBe(true);
+  });
+
+  test('user with no org claim gets Default org projects via OrganizationIndex', async () => {
+    const defaultOrgItems = [
+      {
+        id: 'proj-default-1',
+        name: 'Default org project',
+        status: 'CREATED',
+        owner: 'user-123',
+        organization: 'Default',
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ];
+    dynamoMock.on(QueryCommand).resolves({ Items: defaultOrgItems });
+
+    const result = await invokeHandler(
+      makeEventWithIdentity('listProjects', {}, { sub: 'user-123' }),
+    ) as unknown as { items: Array<{ id: string }> };
+
+    expect(dynamoMock.commandCalls(ScanCommand)).toHaveLength(0);
+    const queryCalls = dynamoMock.commandCalls(QueryCommand);
+    expect(queryCalls).toHaveLength(1);
+    const queryInput = queryCalls[0].args[0].input;
+    expect(queryInput.IndexName).toBe('OrganizationIndex');
+    expect((queryInput.ExpressionAttributeValues as Record<string, unknown>)[':org']).toBe(
+      'Default',
+    );
+
+    expect(result.items.map((p) => p.id)).toEqual(['proj-default-1']);
+  });
+
+  test('createProject always stamps organization (never undefined) when org claim is missing', async () => {
+    dynamoMock.on(PutCommand).resolves({});
+
+    const result = await invokeHandler(
+      makeEventWithIdentity(
+        'createProject',
+        { input: { name: 'No-org project' } },
+        { sub: 'user-123' },
+      ),
+    ) as unknown as { organization?: string };
+
+    expect(result.organization).toBe('Default');
+
+    const putCalls = dynamoMock.commandCalls(PutCommand);
+    expect(putCalls).toHaveLength(1);
+    const persisted = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(persisted.organization).toBe('Default');
+    expect(persisted.organization).not.toBeUndefined();
+  });
+
+  test('createProject stamps the claim organization when present (never undefined)', async () => {
+    dynamoMock.on(PutCommand).resolves({});
+
+    const result = await invokeHandler(
+      makeEventWithIdentity(
+        'createProject',
+        { input: { name: 'Org-claim project' } },
+        { sub: 'user-123', 'custom:organization': 'org-claim' },
+      ),
+    ) as unknown as { organization?: string };
+
+    expect(result.organization).toBe('org-claim');
+
+    const putCalls = dynamoMock.commandCalls(PutCommand);
+    const persisted = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(persisted.organization).toBe('org-claim');
+  });
+
+  test('admin can getProject on a project owned by, and scoped to, a different org', async () => {
+    dynamoMock.on(GetCommand).resolves({
+      Item: {
+        id: 'proj-org-b',
+        name: 'Org B project',
+        status: 'CREATED',
+        owner: 'user-b',
+        organization: 'org-b',
+        createdAt: '2025-01-02T00:00:00Z',
+        updatedAt: '2025-01-02T00:00:00Z',
+      },
+    });
+
+    const result = await invokeHandler(
+      makeEventWithIdentity(
+        'getProject',
+        { id: 'proj-org-b' },
+        { sub: 'admin-1', 'custom:role': 'admin' },
+      ),
+    ) as unknown as { id: string };
+
+    expect(result.id).toBe('proj-org-b');
+  });
+
+  test('non-admin still denied access to a project outside their org', async () => {
+    dynamoMock.on(GetCommand).resolves({
+      Item: {
+        id: 'proj-org-b',
+        name: 'Org B project',
+        status: 'CREATED',
+        owner: 'user-b',
+        organization: 'org-b',
+        createdAt: '2025-01-02T00:00:00Z',
+        updatedAt: '2025-01-02T00:00:00Z',
+      },
+    });
+
+    await expect(
+      invokeHandler(
+        makeEventWithIdentity(
+          'getProject',
+          { id: 'proj-org-b' },
+          { sub: 'user-123', 'custom:organization': 'org-a' },
+        ),
+      ),
+    ).rejects.toThrow(/Access denied/);
+  });
+
+  test('admin listProjects passes nextToken through as ExclusiveStartKey and returns LastEvaluatedKey', async () => {
+    const priorKey = { id: 'proj-page-boundary' };
+    dynamoMock.on(ScanCommand).resolves({
+      Items: [
+        {
+          id: 'proj-org-a',
+          name: 'Org A project',
+          status: 'CREATED',
+          owner: 'user-a',
+          organization: 'org-a',
+          createdAt: '2025-01-01T00:00:00Z',
+          updatedAt: '2025-01-01T00:00:00Z',
+        },
+      ],
+      LastEvaluatedKey: { id: 'proj-next-page' },
+    });
+
+    const result = await invokeHandler(
+      makeEventWithIdentity(
+        'listProjects',
+        { nextToken: JSON.stringify(priorKey) },
+        { sub: 'admin-1', 'custom:role': 'admin' },
+      ),
+    ) as unknown as { items: Array<{ id: string }>; nextToken?: string };
+
+    const scanCalls = dynamoMock.commandCalls(ScanCommand);
+    expect(scanCalls).toHaveLength(1);
+    expect(scanCalls[0].args[0].input.ExclusiveStartKey).toEqual(priorKey);
+
+    expect(result.nextToken).toBe(JSON.stringify({ id: 'proj-next-page' }));
+  });
+
+  test('non-admin listProjects passes nextToken through as ExclusiveStartKey on the OrganizationIndex query and returns LastEvaluatedKey', async () => {
+    const priorKey = { organization: 'Default', id: 'proj-page-boundary' };
+    dynamoMock.on(QueryCommand).resolves({
+      Items: [
+        {
+          id: 'proj-default-2',
+          name: 'Default org project 2',
+          status: 'CREATED',
+          owner: 'user-123',
+          organization: 'Default',
+          createdAt: '2025-01-03T00:00:00Z',
+          updatedAt: '2025-01-03T00:00:00Z',
+        },
+      ],
+      LastEvaluatedKey: { organization: 'Default', id: 'proj-next-page' },
+    });
+
+    const result = await invokeHandler(
+      makeEventWithIdentity(
+        'listProjects',
+        { nextToken: JSON.stringify(priorKey) },
+        { sub: 'user-123' },
+      ),
+    ) as unknown as { items: Array<{ id: string }>; nextToken?: string };
+
+    const queryCalls = dynamoMock.commandCalls(QueryCommand);
+    expect(queryCalls).toHaveLength(1);
+    expect(queryCalls[0].args[0].input.ExclusiveStartKey).toEqual(priorKey);
+
+    expect(result.nextToken).toBe(
+      JSON.stringify({ organization: 'Default', id: 'proj-next-page' }),
+    );
+    expect(result.items.map((p) => p.id)).toEqual(['proj-default-2']);
   });
 });
 
