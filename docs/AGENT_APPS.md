@@ -88,6 +88,104 @@ workflows. Clicking a row opens the execution detail sheet:
 
 The sheet refreshes live while the execution is still running.
 
+## Invoking a Published App
+
+> Like [Workflows](#workflows) and [Executions](#executions), this section
+> describes **current** functionality: the HTTP invoke path a `PUBLISHED`
+> app exposes to external callers.
+
+### Prerequisites
+
+- The app is `PUBLISHED`. Publishing provisions a per-app API Gateway
+  HTTP API (`provisionApiGateway` in
+  `backend/src/lambda/app-publish-handler.ts`) and returns the endpoint
+  URL and the default API key.
+- The workflow to run is `PUBLISHED` and bound to the app on its
+  [Workflows](#workflows) tab. Anything else fails closed — see
+  [Denial behaviour](#denial-behaviour).
+
+### Endpoint and authentication
+
+The endpoint is `https://<apiId>.execute-api.<region>.amazonaws.com` with
+a single route, `POST /invoke`, served from the `$default` stage — there
+is no stage segment in the URL. The URL is returned at **Confirm
+Publish** and stored on the app as `endpointUrl`.
+
+Auth is an `x-api-key` header validated by a Lambda authorizer against
+the app's key records (`backend/src/lambda/app-api-authorizer.ts`):
+
+- The default key's plaintext is shown exactly once, at **Confirm
+  Publish**; only its SHA-256 hash is stored, so it can never be
+  retrieved again.
+- Create, rotate, revoke, and list keys via the `createAppApiKey`,
+  `rotateAppApiKey`, `revokeAppApiKey`, and `listAppApiKeys` GraphQL
+  operations (`backend/src/lambda/app-api-key-management.ts`). Rotation
+  atomically creates the replacement and revokes the old key, returning
+  the new plaintext once; up to 10 keys may be `ACTIVE` per app.
+- A missing key is rejected with `401`; an unknown, revoked, or expired
+  key with `403`. Authorizer results are cached for 300 seconds, so a
+  rotated or revoked key may keep authorizing for up to 5 minutes.
+
+### Calling the endpoint
+
+```bash
+curl -X POST "https://<apiId>.execute-api.<region>.amazonaws.com/invoke" \
+  -H "x-api-key: <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"workflowId": "<workflowId>", "input": {"message": "hello"}}'
+```
+
+The JSON body (64 KiB max, sanitized on receipt):
+
+- `workflowId` — optional. Selects among the app's bound workflows:
+  required (and must be one of the bound IDs) when more than one workflow
+  is bound; optional with exactly one bound workflow, but if supplied it
+  must match that workflow.
+- Every other field is recorded as the execution's input — `workflowId`
+  is stripped before storage, and an otherwise-empty body stores a `null`
+  input. There is no fixed input schema; the `input` wrapper above is a
+  convention, not a requirement.
+
+### Async semantics
+
+The route is an API Gateway → EventBridge integration: a `200` means the
+invoke event was accepted onto the bus, NOT that the workflow ran or
+completed — the response carries no execution id. The consumer
+(`backend/src/lambda/app-invoke-handler.ts`) then creates the execution
+(`status: pending`, `triggeredBy: app-invoke:<appId>`, `orgId` taken from
+the app itself) and hands off to the Step Runner exactly as a UI-started
+run. Consumption is idempotent on the EventBridge event id — a
+redelivered event cannot create a duplicate execution.
+
+Results appear in the [Executions](#executions) tab alongside UI-started
+runs, or via `getExecution(executionId)` once the execution id is known.
+
+### Denial behaviour
+
+After the `200`, every consumer-side validation failure fails closed: the
+event is dropped with a CloudWatch warning and no execution is created —
+the caller sees nothing beyond the original `200`. Dropped cases: app not
+found or not `PUBLISHED`; zero bound workflows; more than one bound
+workflow with a missing or non-bound `workflowId`; a `workflowId` that
+does not match the single bound workflow; workflow not `PUBLISHED`, in a
+different org than the app, or bound to a different app; body over
+64 KiB. If invokes silently produce no executions, check the
+app-invoke-handler logs.
+
+### Apps published before stage-variable support
+
+The invoke path reads its trusted appId from a stage variable stamped
+onto the `$default` stage at publish time. Apps published before this
+existed lack the variable, so their invoke events are dropped. Fix with
+the idempotent backfill script —
+`ts-node backend/scripts/backfill-app-stage-vars.ts --apply` (dry-run by
+default without `--apply`; no key rotation, no downtime) — or by
+re-publishing the app, which also works but rotates the default API key
+and changes the endpoint URL.
+
+The event contract behind this path is cataloged under App Invoke Events
+in [EVENTBRIDGE_CATALOG.md](./EVENTBRIDGE_CATALOG.md).
+
 ## Intake Post-Fabrication Path
 
 > Like [Workflows](#workflows) and [Executions](#executions), this section
@@ -206,6 +304,8 @@ guidance:
 4. **Publish**, then **Confirm Publish** — this returns the endpoint URL and
    the API key, which is shown only once.
 5. After publishing, the **API Dashboard** appears in the app.
+6. The app is now callable over HTTP with the endpoint URL and API key
+   from step 4 — see [Invoking a Published App](#invoking-a-published-app).
 
 Note the workflow-publish step gates **Run** only; the app publish dialog
 treats unpublished workflows as a non-blocking warning, as described under

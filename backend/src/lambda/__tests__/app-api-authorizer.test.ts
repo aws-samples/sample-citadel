@@ -165,6 +165,27 @@ describe("valid active key returns Allow", () => {
   });
 });
 
+// ── appId Context Propagation (regression lock — app-invoke contract) ──────
+// The app-invoke EventBridge integration reads the trusted appId from
+// $context.authorizer.appId (see app-publish-handler.ts provisionApiGateway).
+// This locks in that the authorizer already resolves appId from
+// stageVariables and returns it in context, so that integration contract
+// cannot silently regress.
+
+describe("resolves appId from stageVariables and returns it in context", () => {
+  test("returns appId from stageVariables in the authorizer context on allow", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [makeActiveKeyItem()],
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    const result = await handler(makeEvent(), undefined, makeDeps());
+
+    expect(result.isAuthorized).toBe(true);
+    expect(result.context?.appId).toBe(TEST_APP_ID);
+  });
+});
+
 // ── Missing x-api-key Header (Req 3.4) ─────────────────────
 
 describe("missing x-api-key header returns 401", () => {

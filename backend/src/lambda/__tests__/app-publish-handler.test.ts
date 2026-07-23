@@ -437,6 +437,22 @@ describe("provisionApiGateway", () => {
     });
   });
 
+  test("EventBridge integration injects appId via Resources context expression", async () => {
+    await provisionApiGateway(
+      "app-1",
+      "dev",
+      "arn:auth",
+      "citadel-agents-dev",
+      "us-east-1",
+    );
+
+    const integrationCall = apiGwMock.commandCalls(CreateIntegrationCommand)[0];
+    const input = integrationCall.args[0].input;
+    expect(input.RequestParameters).toMatchObject({
+      Resources: "$context.authorizer.appId",
+    });
+  });
+
   test("creates $default stage with auto-deploy and throttle settings", async () => {
     await provisionApiGateway("app-1", "dev", "arn:auth", "bus", "us-east-1");
 
@@ -446,6 +462,20 @@ describe("provisionApiGateway", () => {
     expect(input.AutoDeploy).toBe(true);
     expect(input.DefaultRouteSettings?.ThrottlingRateLimit).toBe(1000);
     expect(input.DefaultRouteSettings?.ThrottlingBurstLimit).toBe(5000);
+  });
+
+  test("creates $default stage with StageVariables.appId", async () => {
+    await provisionApiGateway(
+      "my-app-99",
+      "dev",
+      "arn:auth",
+      "bus",
+      "us-east-1",
+    );
+
+    const stageCall = apiGwMock.commandCalls(CreateStageCommand)[0];
+    const input = stageCall.args[0].input;
+    expect(input.StageVariables).toEqual({ appId: "my-app-99" });
   });
 
   test("creates POST /invoke route with custom authorizer", async () => {

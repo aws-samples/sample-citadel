@@ -2555,6 +2555,64 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    // --- App Invoke Handler (Agent App invoke-path fix) ---------------------
+    // EventBridge consumer for the per-app invoke path. The per-app API
+    // Gateway's EventBridge-PutEvents integration (provisionApiGateway in
+    // app-publish-handler.ts) emits `app.invoke.requested` on source
+    // `citadel.app.invoke` with the AUTHORITATIVE appId carried in
+    // event.resources[0] (set via the Resources RequestParameters context
+    // expression, never the client body). This handler resolves + validates
+    // the bound/PUBLISHED workflow and starts an execution, mirroring
+    // execution-resolver.ts startExecution semantics.
+    const appInvokeHandlerFunction = new lambda.Function(
+      this,
+      "AppInvokeHandler",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "app-invoke-handler.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        functionName: `citadel-app-invoke-handler-${props.environment}`,
+        environment: {
+          APPS_TABLE: this.appsTable.tableName,
+          WORKFLOWS_TABLE: this.workflowsTable.tableName,
+          EXECUTIONS_TABLE: this.executionsTable.tableName,
+          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
+          IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, "AppInvokeHandlerLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    // Least-privilege: read app/workflow metadata (incl. GroupIndex for the
+    // app METADATA lookup), write new executions, read/write the idempotency
+    // table (event.id dedup), and emit execution.start.requested.
+    this.appsTable.grantReadData(appInvokeHandlerFunction);
+    this.workflowsTable.grantReadData(appInvokeHandlerFunction);
+    this.executionsTable.grantWriteData(appInvokeHandlerFunction);
+    this.idempotencyTable.grantReadWriteData(appInvokeHandlerFunction);
+    this.agentEventBus.grantPutEventsTo(appInvokeHandlerFunction);
+
+    const appInvokeRule = new events.Rule(this, "AppInvokeRule", {
+      eventBus: this.agentEventBus,
+      description:
+        "Routes per-app invoke requests from API Gateway to the app-invoke handler",
+      eventPattern: {
+        source: ["citadel.app.invoke"],
+        detailType: ["app.invoke.requested"],
+      },
+    });
+
+    appInvokeRule.addTarget(
+      new targets.LambdaFunction(appInvokeHandlerFunction, {
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+
     // AppSync GraphQL API — schema deferred to the L1 escape hatch below so
     // the schema is uploaded to S3 (definitionS3Location) instead of
     // inlined into the CFN template. Inline Definition has a Unicode

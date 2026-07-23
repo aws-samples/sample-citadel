@@ -12,6 +12,7 @@ For the engine internals (DAG execution, retries, conditional branching, data mo
 - [Save Your Own Blueprint](#save-your-own-blueprint)
 - [Bind Workflows to an App and Publish](#bind-workflows-to-an-app-and-publish)
 - [Run a Workflow and Watch Live Progress](#run-a-workflow-and-watch-live-progress)
+- [Invoke a Workflow via the Published App API](#invoke-a-workflow-via-the-published-app-api)
 - [Inspect Results](#inspect-results)
 - [Operator Notes](#operator-notes)
 - [Troubleshooting](#troubleshooting)
@@ -187,6 +188,65 @@ Delivery chain: the fan-out Lambda (`backend/src/lambda/workflow-progress-fanout
 ### Cancelling a run
 
 `cancelExecution` marks the execution `cancelled` and every `pending` or `running` node `cancelled`. A `workflow.failed` event carrying the cancellation reason notifies subscribers.
+
+## Invoke a Workflow via the Published App API
+
+Publishing an app (Confirm Publish) returns an endpoint URL and an API key, giving external callers an HTTP path to start runs — no console session required. The full contract (request-body rules, denial behaviour, key management, and the note for apps published before stage-variable support) lives in [AGENT_APPS.md — Invoking a Published App](./AGENT_APPS.md#invoking-a-published-app); this section is the task-oriented quick path.
+
+### Call the endpoint
+
+```bash
+curl -X POST "https://<apiId>.execute-api.<region>.amazonaws.com/invoke" \
+  -H "x-api-key: <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"workflowId": "<workflowId>", "input": {"message": "hello"}}'
+```
+
+The call is asynchronous: a `200` means the invoke event was accepted, not that the workflow ran or completed, and the response carries no execution id. Results land in the app's Executions tab like any other run.
+
+### Finding the workflowId
+
+On the app's Workflows tab, each workflow card's Open action deep-links to the canvas at `/agentic-studio/workflows/:id` — the `:id` segment is the workflowId. Programmatically, the `listAppWorkflows(appId)` query returns the app's bound workflows with their `workflowId`s.
+
+### When workflowId is required in the body
+
+- More than one workflow bound to the app — `workflowId` is required and must be one of the bound workflows.
+- Exactly one workflow bound — `workflowId` may be omitted; the bound workflow runs. If supplied anyway, it must match that workflow or the invoke is silently dropped.
+- No workflows bound — every invoke is dropped; bind and publish a workflow first.
+
+### The authenticated GraphQL alternative
+
+From the console or an org-authenticated service, call the `startExecution` mutation directly with a Cognito JWT (the API's default auth mode). Unlike the App API path it returns the execution record — including the `executionId` — immediately, and it requires only a `PUBLISHED` workflow in your organisation; the app itself need not be published.
+
+```graphql
+mutation {
+  startExecution(
+    workflowId: "<workflowId>"
+    input: "{\"message\": \"hello\"}"
+  ) {
+    executionId
+    status
+    startedAt
+  }
+}
+```
+
+`input` is the same optional `AWSJSON` payload described under [Run a Workflow and Watch Live Progress](#run-a-workflow-and-watch-live-progress) — note that as `AWSJSON` it is passed as a JSON-encoded string.
+
+For status, poll `getExecution` with the returned id:
+
+```graphql
+query {
+  getExecution(executionId: "<executionId>") {
+    status
+    output
+    error
+    completedAt
+  }
+}
+```
+
+Or subscribe to `onWorkflowProgress(executionId: "<executionId>")` for the live event stream described under [Live progress](#live-progress).
 
 ## Inspect Results
 

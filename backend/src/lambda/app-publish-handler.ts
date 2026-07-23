@@ -339,12 +339,18 @@ export async function provisionApiGateway(
       cwLogsClient,
     );
 
-    // Step 2: Create $default stage with auto-deploy, throttling, and access logging
+    // Step 2: Create $default stage with auto-deploy, throttling, access
+    // logging, and the trusted appId as a stage variable (consumed by the
+    // Lambda authorizer via $context.authorizer.appId, and — indirectly, via
+    // the RequestParameters.Resources expression below — by the
+    // app-invoke-handler EventBridge consumer as the sole trusted appId
+    // source).
     await client.send(
       new CreateStageCommand({
         ApiId: apiId,
         StageName: "$default",
         AutoDeploy: true,
+        StageVariables: { appId },
         DefaultRouteSettings: {
           ThrottlingBurstLimit: 5000,
           ThrottlingRateLimit: 1000,
@@ -356,7 +362,10 @@ export async function provisionApiGateway(
       }),
     );
 
-    // Step 3: Create EventBridge integration
+    // Step 3: Create EventBridge integration. Resources carries the
+    // AUTHORIZER-RESOLVED appId ($context.authorizer.appId) onto
+    // event.resources[0] — the app-invoke-handler consumer trusts ONLY this
+    // field and never the client-supplied request body.
     const credentialsArn = process.env.APIGW_EVENTBRIDGE_ROLE_ARN || "";
     const integrationResult = await client.send(
       new CreateIntegrationCommand({
@@ -370,6 +379,7 @@ export async function provisionApiGateway(
           DetailType: "app.invoke.requested",
           Detail: "$request.body",
           EventBusName: eventBusName,
+          Resources: "$context.authorizer.appId",
         },
       }),
     );
