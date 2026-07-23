@@ -118,8 +118,28 @@ export class BackendStack extends cdk.Stack {
               cors: [
                 {
                   allowedHeaders: ['*'],
-                  allowedMethods: [cdk.aws_s3.HttpMethods.GET, cdk.aws_s3.HttpMethods.PUT, cdk.aws_s3.HttpMethods.POST],
-                  allowedOrigins: [process.env.ALLOWED_ORIGIN || `https://*.cloudfront.net`],
+                  allowedMethods: [
+                    cdk.aws_s3.HttpMethods.GET,
+                    cdk.aws_s3.HttpMethods.PUT,
+                    cdk.aws_s3.HttpMethods.POST,
+                    cdk.aws_s3.HttpMethods.HEAD,
+                  ],
+                  // The SPA PUTs documents directly to S3 with a presigned URL, so
+                  // every origin serving the app must pass the CORS preflight:
+                  // the deployed CloudFront default domain (wildcard — the
+                  // distribution lives in FrontendStack, which depends on this
+                  // stack, so its domain token cannot be referenced here without
+                  // a circular dependency) and the Vite dev server. An optional
+                  // synth-time ALLOWED_ORIGIN (custom domain) is APPENDED rather
+                  // than replacing the baseline list — the previous single-slot
+                  // design meant localhost never matched, so the preflight
+                  // OPTIONS was rejected and uploads failed with NetworkError.
+                  allowedOrigins: [
+                    'https://*.cloudfront.net',
+                    'http://localhost:3000',
+                    'http://127.0.0.1:3000',
+                    ...(process.env.ALLOWED_ORIGIN ? [process.env.ALLOWED_ORIGIN] : []),
+                  ],
                   maxAge: 3000,
                 },
               ],
