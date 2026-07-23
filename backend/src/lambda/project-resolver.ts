@@ -4,7 +4,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanComm
 import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { v4 as uuidv4 } from 'uuid';
 import { getUserId } from '../utils/appsync';
-import { extractOrgFromEvent } from '../utils/auth-event';
+import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
 import { LifecycleManager, PROJECT_TRANSITIONS } from '../adapters/lifecycle';
 import { isGrandfathered, emitGrandfatheredBypass } from '../utils/is-grandfathered';
 import { listADRsForProject } from './adr-resolver';
@@ -17,6 +17,16 @@ const eventBridgeClient = new EventBridgeClient({});
 
 const PROJECTS_TABLE = process.env.PROJECTS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
+
+/**
+ * Fallback tenant for callers whose JWT is missing the `custom:organization`
+ * claim (and for whom the Cognito AdminGetUser fallback also comes up
+ * empty). Projects created under this org are still visible to every other
+ * caller who also falls back to it — the previous behaviour ("no org" -->
+ * `organization: undefined`) silently orphaned the row from the
+ * OrganizationIndex GSI and made it invisible to everyone but its owner.
+ */
+const DEFAULT_ORGANIZATION = 'Default';
 
 interface Project {
   id: string;
@@ -95,6 +105,7 @@ interface UploadDocumentFile {
 interface HandlerArgs {
   id: string;
   filter?: ProjectFilter;
+  nextToken?: string;
   input: CreateProjectInput & UpdateProjectInput;
   projectId: string;
   file: UploadDocumentFile;
@@ -131,7 +142,7 @@ export const handler: AppSyncResolverHandler<HandlerArgs, unknown> = async (even
       case 'getProject':
         return await getProject(args.id, userId, event);
       case 'listProjects':
-        return await listProjects(args.filter, userId, event);
+        return await listProjects(args.filter, userId, event, args.nextToken);
       case 'createProject':
         return await createProject(args.input, userId, event);
       case 'updateProject':
@@ -161,6 +172,13 @@ async function getProject(id: string, userId: string, event: ResolverEvent): Pro
 
   const project = result.Item as Project;
 
+  // Admins can open any project regardless of org — mirrors the listProjects
+  // admin bypass (full scan, no org filter). Without this, admins could see
+  // cross-org projects in listProjects but not open them individually.
+  if (isAdminFromEvent(event)) {
+    return normaliseArchetype(project) as Project;
+  }
+
   // Check if user has access to this project
   // Allow access if: user is owner OR user is in same organization
   const userOrganization = await extractOrgFromEvent(event);
@@ -176,31 +194,38 @@ async function getProject(id: string, userId: string, event: ResolverEvent): Pro
   return normaliseArchetype(project) as Project;
 }
 
-async function listProjects(filter: ProjectFilter | undefined, userId: string, event: ResolverEvent): Promise<{ items: Project[]; nextToken?: string }> {
-  // Get user's organization
-  const userOrganization = await extractOrgFromEvent(event);
-
-  if (!userOrganization) {
-    // If user has no organization, fall back to owner-based filtering
+async function listProjects(
+  filter: ProjectFilter | undefined,
+  _userId: string,
+  event: ResolverEvent,
+  nextToken?: string,
+): Promise<{ items: Project[]; nextToken?: string }> {
+  // Admins see every project across every org — full table scan, no
+  // organization filter, with the same status/createdAfter/createdBefore
+  // filters applied as the non-admin path and pagination support.
+  if (isAdminFromEvent(event)) {
     const command = new ScanCommand({
       TableName: PROJECTS_TABLE,
-      FilterExpression: '#owner = :userId',
-      ExpressionAttributeNames: {
-        '#owner': 'owner',
-      },
-      ExpressionAttributeValues: {
-        ':userId': userId,
-      },
+      ExclusiveStartKey: nextToken ? (JSON.parse(nextToken) as Record<string, NativeAttributeValue>) : undefined,
     });
 
     const result = await docClient.send(command);
+
+    let items = (result.Items || []) as Project[];
+    items = applyProjectFilters(items, filter);
+
     return {
-      items: ((result.Items || []) as Project[]).map((p) => normaliseArchetype(p)!),
-      nextToken: result.LastEvaluatedKey? JSON.stringify(result.LastEvaluatedKey): undefined,
+      items: items.map((p) => normaliseArchetype(p)!),
+      nextToken: result.LastEvaluatedKey ? JSON.stringify(result.LastEvaluatedKey) : undefined,
     };
   }
 
-  // Query by organization using GSI
+  // Non-admins are scoped to their own organization. Missing/empty org
+  // claims default to DEFAULT_ORGANIZATION so users without a
+  // custom:organization claim still see (and share) a common project pool
+  // instead of being siloed to only the projects they personally created.
+  const userOrganization = (await extractOrgFromEvent(event)) || DEFAULT_ORGANIZATION;
+
   const command = new QueryCommand({
     TableName: PROJECTS_TABLE,
     IndexName: 'OrganizationIndex',
@@ -209,34 +234,45 @@ async function listProjects(filter: ProjectFilter | undefined, userId: string, e
       ':org': userOrganization,
     },
     ScanIndexForward: false, // Sort by createdAt descending (newest first)
+    ExclusiveStartKey: nextToken ? (JSON.parse(nextToken) as Record<string, NativeAttributeValue>) : undefined,
   });
 
   const result = await docClient.send(command);
 
-  let items = result.Items as Project[] || [];
+  const items = applyProjectFilters((result.Items || []) as Project[], filter);
 
-  // Apply additional filters
-  if (filter) {
-    if (filter.status) {
-      items = items.filter(item => item.status === filter.status);
-    }
-    if (filter.createdAfter) {
-      items = items.filter(item => item.createdAt >= filter.createdAfter!);
-    }
-    if (filter.createdBefore) {
-      items = items.filter(item => item.createdAt <= filter.createdBefore!);
-    }
+  return {
+    items: items.map((p) => normaliseArchetype(p)!),
+    nextToken: result.LastEvaluatedKey ? JSON.stringify(result.LastEvaluatedKey) : undefined,
+  };
+}
+
+/** Applies the optional status/createdAfter/createdBefore filters shared by every listProjects path. */
+function applyProjectFilters(items: Project[], filter: ProjectFilter | undefined): Project[] {
+  if (!filter) return items;
+
+  let filtered = items;
+  if (filter.status) {
+    filtered = filtered.filter((item) => item.status === filter.status);
   }
-
-  return { items: items.map((p) => normaliseArchetype(p)!) };
+  if (filter.createdAfter) {
+    filtered = filtered.filter((item) => item.createdAt >= filter.createdAfter!);
+  }
+  if (filter.createdBefore) {
+    filtered = filtered.filter((item) => item.createdAt <= filter.createdBefore!);
+  }
+  return filtered;
 }
 
 async function createProject(input: CreateProjectInput, userId: string, event: ResolverEvent): Promise<Project> {
   const now = new Date().toISOString();
   const projectId = uuidv4();
 
-  // Get user's organization
-  const userOrganization = await extractOrgFromEvent(event);
+  // Get user's organization, defaulting to DEFAULT_ORGANIZATION when the
+  // claim is missing so the project always lands on a real GSI partition
+  // (organization: undefined would silently drop the row out of the
+  // OrganizationIndex and make it invisible to everyone but its owner).
+  const userOrganization = (await extractOrgFromEvent(event)) || DEFAULT_ORGANIZATION;
 
   const project: Project = {
     id: projectId,
@@ -262,7 +298,7 @@ async function createProject(input: CreateProjectInput, userId: string, event: R
     createdAt: now,
     updatedAt: now,
     owner: userId,
-    organization: userOrganization || undefined,
+    organization: userOrganization,
     // new projects start PENDING; archetype/archetypeConfidence
     // stay absent until an archetype classifier populates them.
     archetypeStatus: 'PENDING',
