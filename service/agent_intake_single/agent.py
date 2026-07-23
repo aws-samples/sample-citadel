@@ -39,7 +39,7 @@ from tools.design import (
     infer_resourcing_inputs, generate_resourcing_report, get_resourcing_report, update_resourcing_report,
 )
 from tools.plan import generate_business_plan, generate_commercial_plan, get_planning_doc, update_planning_doc
-from tools.fabricate import plan_fabrication, confirm_fabrication_plan, list_factory_agents
+from tools.fabricate import plan_fabrication, confirm_fabrication_plan, list_factory_agents, retry_failed_fabrication
 from tools.postfab import (
     check_fabrication_status, activate_agents, create_agent_app,
     generate_process_blueprint, import_blueprint_to_app,
@@ -177,7 +177,7 @@ Each post-fabrication tool returns JSON with a 'summary', a 'consent_question', 
 
 Progression (NEVER skip a step, NEVER auto-proceed — always end with the actions block and wait for the user's explicit choice; a decline means stop, and deferring with "Not now" is always allowed):
 
-1) check_fabrication_status: while agents are building, report progress. When it reports all agents terminal, OFFER activation. A partial success is still success — offer to activate the ones that built, and keep the failed ones for review.
+1) check_fabrication_status: while agents are building, report progress. When it reports all agents terminal, OFFER activation. A partial success is still success — offer to activate the ones that built, and keep the failed ones for review. Each agent builds independently: one that didn't finish or has stalled (no progress for a while) can be rebuilt on its own while the others keep building — on the user's explicit choice, call retry_failed_fabrication(session_id="{session_id}", agent_names=<comma-separated names, or leave empty for all that didn't finish or stalled>), then relay its summary and actions. Never refuse to rebuild a failed or stalled agent because another agent is still building. If the status reports an agent as stalled, say plainly that it hasn't reported progress for a while and offer the retry.
 2) On explicit confirm → activate_agents(session_id="{session_id}"). Report per-agent results (activated / already active / failed). If it reports nothing could be matched to this session, relay that explanation and stop — do not invent a workaround.
 3) Once activated → call create_agent_app(session_id="{session_id}") with NO confirmed_name first: it returns a proposed name from the project. Present the proposal and let the user confirm or rename; only then call create_agent_app(session_id="{session_id}", confirmed_name=<their chosen name>).
 4) Once the app exists → on confirm call generate_process_blueprint(session_id="{session_id}"). If it reports the agents are still being set up, relay that and offer "Try again" — the button IS the retry; never claim you will retry on your own. If the blueprint is already published, the result offers a "Regenerate the blueprint" action — ONLY when the user explicitly chooses it, call generate_process_blueprint(session_id="{session_id}", regenerate=True); it publishes a fresh blueprint and re-opens the import step, and any workflow imported from the old blueprint stays in the app until the user removes it there.
@@ -283,6 +283,7 @@ def get_agent(session_id: str) -> Agent:
                 plan_fabrication,
                 confirm_fabrication_plan,
                 list_factory_agents,
+                retry_failed_fabrication,
                 check_fabrication_status,
                 activate_agents,
                 create_agent_app,

@@ -5,6 +5,7 @@ import os
 import time
 from datetime import datetime, timezone
 import boto3
+from boto3.dynamodb.conditions import Key
 from strands.tools import tool
 from tools.kb import s3_get, s3_put
 from tools.converse_utils import extract_text
@@ -46,6 +47,26 @@ AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-2")
 FABRICATION_JOBS_TTL_SECONDS = 7 * 24 * 60 * 60
 # Cap the stored task description so rows stay small.
 TASK_DESCRIPTION_MAX = 500
+
+# Stale-active threshold for fabrication-jobs rows, shared by the status
+# reader (tools/postfab.py) and the retry gate below.
+#
+# Derivation: the fabricator Lambda's hard timeout is 15 minutes
+# (backend/lib/arbiter-stack.ts:474) and its queue's visibilityTimeout is
+# 90 minutes with maxReceiveCount 3 (arbiter-stack.ts:459-464). The consumer
+# re-stamps the row PROCESSING at the start of every delivery
+# (arbiter/fabricator/index.py _write_fabrication_status), so the LONGEST a
+# genuinely-live job can go without touching updatedAt is one visibility
+# window (90 min) between deliveries plus one full run (15 min) ~= 105 min.
+# After the 3rd delivery dies the message parks in the DLQ and the row can
+# NEVER be re-stamped again; a timeout/OOM kill writes no terminal status
+# either (the except handler is never reached). 120 minutes adds slack over
+# the 105-minute bound. A non-terminal row older than this is orphaned: it
+# gates like a failure and is eligible for retry, instead of deadlocking the
+# flow until the 7-day TTL deletes the row.
+STALE_ACTIVE_SECONDS = 2 * 60 * 60
+
+_TERMINAL_STATUSES = ("COMPLETED", "FAILED")
 
 sqs = boto3.client("sqs", region_name=AWS_REGION)
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
@@ -104,6 +125,99 @@ def _write_pending_fabrication_status(session_id: str, agent: dict) -> None:
             "Failed to write PENDING fabrication status for %s/%s: %s",
             session_id, agent.get("name"), e,
         )
+
+
+def _parse_iso_utc(ts) -> datetime | None:
+    """Parse an ISO-8601 timestamp (Z-suffixed or offset) to aware UTC.
+
+    Returns None on anything unparseable so callers can treat unknown ages
+    conservatively.
+    """
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_stale_active(item: dict, now: datetime | None = None) -> bool:
+    """True when a NON-terminal jobs row can no longer be re-stamped.
+
+    See STALE_ACTIVE_SECONDS for the derivation. Missing or unparseable
+    updatedAt is treated as fresh (conservative: never misclassify a live
+    job as orphaned on bad data).
+    """
+    if item.get("status") in _TERMINAL_STATUSES:
+        return False
+    updated = _parse_iso_utc(item.get("updatedAt"))
+    if updated is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return (now - updated).total_seconds() > STALE_ACTIVE_SECONDS
+
+
+def _specs_from_plan(session_id: str) -> dict[str, str]:
+    """Recover per-agent build specs from the saved fabrication plan in S3.
+
+    The jobs row stores only a truncated taskDescription, so a retry must
+    re-read the full spec from the plan's '## Agents to Build' section
+    ('### <name>' sub-sections, written by confirm_fabrication_plan).
+    Returns {} when the plan is missing or has no build section.
+    """
+    plan = s3_get(PLAN_KEY.format(session_id=session_id)) or ""
+    marker = "## Agents to Build"
+    idx = plan.find(marker)
+    if idx == -1:
+        return {}
+    specs: dict[str, str] = {}
+    current = None
+    lines: list[str] = []
+    for line in plan[idx + len(marker):].split("\n"):
+        if line.startswith("### "):
+            if current:
+                specs[current] = "\n".join(lines).strip()
+            current = line[4:].strip()
+            lines = []
+        elif line.startswith("## "):
+            break  # next top-level section ends the build block
+        elif current:
+            lines.append(line)
+    if current:
+        specs[current] = "\n".join(lines).strip()
+    return {name: spec for name, spec in specs.items() if spec}
+
+
+# Conversational payload helpers for retry_failed_fabrication. Mirrors the
+# shape of tools/postfab.py _result/_action — duplicated here (small, stable)
+# because postfab imports from this module, so importing back would be a
+# circular import.
+
+def _retry_result(ok: bool, status: str, summary: str, consent_question: str,
+                  actions: list[dict], **extra) -> str:
+    payload = {
+        "ok": ok,
+        "status": status,
+        "summary": summary,
+        "consent_question": consent_question,
+        "actions": actions,
+    }
+    payload.update(extra)
+    return json.dumps(payload)
+
+
+def _retry_action(label: str, value: str) -> dict:
+    return {"label": label, "value": value}
+
+
+def _plain_join(names: list[str]) -> str:
+    quoted = [f"'{n}'" for n in names]
+    if len(quoted) <= 1:
+        return quoted[0] if quoted else ""
+    return ", ".join(quoted[:-1]) + " and " + quoted[-1]
 
 
 def _llm(system: str, user: str, max_tokens: int = 8192) -> str:
@@ -372,6 +486,175 @@ def confirm_fabrication_plan(session_id: str, plan_json: str) -> str:
     update_intake_progress(session_id=session_id, phase='implementation', progress=10, change_summary=f'Fabrication confirmed: {len(queued)} build, {len(reuse)} reuse, {len(external)} external')
 
     return summary.strip()
+
+
+@tool
+def retry_failed_fabrication(session_id: str, agent_names: str = "") -> str:
+    """Re-queue fabrication for agents whose build failed or stalled.
+
+    Each agent builds independently: this retries ONLY the requested (or all
+    eligible) agents whose OWN job has failed or stalled (no progress for
+    over two hours). Agents that are already built are never rebuilt, and
+    agents actively being built are never interrupted — other agents' builds
+    never block a retry. Safe to repeat: a just-retried agent is back in a
+    fresh waiting state, so an immediate second call skips it.
+
+    Args:
+        session_id: The current session ID
+        agent_names: Optional comma-separated agent names to retry. Leave
+            empty to retry every agent that failed or stalled.
+
+    Returns:
+        JSON with what was re-queued and what was skipped (with plain
+        reasons), a conversational summary, and the consent question for
+        the next step.
+    """
+    if not FABRICATOR_QUEUE_URL or not FABRICATION_JOBS_TABLE:
+        return _retry_result(
+            False, "unavailable",
+            "I can't re-queue builds automatically right now.",
+            "Want me to try again in a moment?",
+            [_retry_action("Try again", "Retry the agents that didn't finish"),
+             _retry_action("Stop here", "Stop here")],
+        )
+
+    items: list[dict] = []
+    try:
+        kwargs = {"KeyConditionExpression": Key("orchestrationId").eq(session_id)}
+        while True:
+            resp = dynamodb.Table(FABRICATION_JOBS_TABLE).query(**kwargs)
+            items.extend(resp.get("Items", []))
+            if not resp.get("LastEvaluatedKey"):
+                break
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    except Exception as e:  # noqa: BLE001 — degrade to a conversational error
+        logger.warning("fabrication-jobs query failed session=%s: %s", session_id, e)
+        return _retry_result(
+            False, "unavailable",
+            "I can't re-queue builds automatically right now.",
+            "Want me to try again in a moment?",
+            [_retry_action("Try again", "Retry the agents that didn't finish"),
+             _retry_action("Stop here", "Stop here")],
+        )
+
+    if not items:
+        return _retry_result(
+            True, "none",
+            "I don't see anything queued to build for this session yet.",
+            "Want me to check the build status, or shall we review the "
+            "fabrication plan together?",
+            [_retry_action("Check build status", "Check the build status"),
+             _retry_action("Stop here", "Stop here")],
+        )
+
+    now = datetime.now(timezone.utc)
+    by_name: dict[str, dict] = {}
+    for item in items:
+        name = item.get("agentName") or item.get("agentUseId")
+        if name:
+            by_name[name] = item
+
+    requested = [n.strip() for n in agent_names.split(",") if n.strip()]
+    eligible: list[str] = []
+    stalled: list[str] = []
+    skipped: list[tuple[str, str]] = []
+
+    def _classify(name: str, item: dict) -> None:
+        # Gate on the TARGET job's own state only — siblings never block.
+        if item.get("status") == "FAILED":
+            eligible.append(name)
+        elif _is_stale_active(item, now):
+            eligible.append(name)
+            stalled.append(name)
+        elif requested:
+            # Per-job refusal copy only for explicitly requested targets;
+            # an implicit "retry everything" simply doesn't select them.
+            if item.get("status") == "COMPLETED":
+                skipped.append((name, f"'{name}' is already built"))
+            else:
+                skipped.append((name, f"'{name}' is still being built"))
+
+    if requested:
+        for name in requested:
+            item = by_name.get(name)
+            if item is None:
+                skipped.append((name, f"'{name}' isn't part of this build"))
+            else:
+                _classify(name, item)
+    else:
+        for name, item in by_name.items():
+            _classify(name, item)
+
+    check_actions = [
+        _retry_action("Check build status", "Check the build status"),
+        _retry_action("Not now", "Not now"),
+    ]
+
+    if not eligible:
+        if skipped:
+            summary = "Nothing was re-queued — " + "; ".join(r for _, r in skipped) + "."
+        else:
+            summary = "Nothing needs a rebuild right now — no agents have failed or stalled."
+        return _retry_result(
+            True, "nothing_to_retry", summary,
+            "Want me to check the build status?",
+            check_actions,
+            retried=[], stalled=[],
+            skipped=[{"name": n, "reason": r} for n, r in skipped],
+        )
+
+    # The jobs row stores only a truncated taskDescription — recover the full
+    # spec from the saved plan so a retry message is shape-identical to the
+    # original enqueue.
+    specs = _specs_from_plan(session_id)
+    targets = [n for n in eligible if specs.get(n)]
+    missing = [n for n in eligible if not specs.get(n)]
+
+    if not targets:
+        return _retry_result(
+            False, "plan_missing",
+            f"I couldn't recover the build details for {_plain_join(missing)} "
+            "from the fabrication plan, so nothing was re-queued.",
+            "Want me to check the build status instead?",
+            [_retry_action("Check build status", "Check the build status"),
+             _retry_action("Stop here", "Stop here")],
+            retried=[], stalled=[], missing=missing,
+        )
+
+    # _send_to_fabricator also resets the row to a fresh waiting state, so a
+    # repeat call sees the target as in-flight and skips it (idempotent per
+    # agentUseId). Coarse per-retry indices (0..n-1 of n) are deliberate —
+    # never reuse the original batch's indices.
+    for i, name in enumerate(targets):
+        _send_to_fabricator(session_id, {"name": name, "spec": specs[name]},
+                            agent_index=i, total_agents=len(targets))
+
+    stale_targets = [n for n in stalled if n in targets]
+    parts = [f"Re-queued {_plain_join(targets)} to be rebuilt — check back "
+             "with me any time for progress."]
+    if stale_targets:
+        pronoun = "it" if len(stale_targets) == 1 else "them"
+        parts.append(
+            f"{_plain_join(stale_targets)} had stalled — no progress for over "
+            f"two hours — so I've restarted {pronoun}."
+        )
+    for _, reason in skipped:
+        parts.append(f"{reason}, so I left it as is.")
+    if missing:
+        tail = "it wasn't" if len(missing) == 1 else "they weren't"
+        parts.append(
+            f"I couldn't recover the build details for {_plain_join(missing)}, "
+            f"so {tail} re-queued."
+        )
+
+    return _retry_result(
+        True, "retried", " ".join(parts),
+        "Want me to check the build status now?",
+        check_actions,
+        retried=targets, stalled=stale_targets,
+        skipped=[{"name": n, "reason": r} for n, r in skipped],
+        missing=missing,
+    )
 
 
 @tool
