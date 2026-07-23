@@ -875,4 +875,51 @@ describe('registry-agent-record-resolver — setAppConfigValues', () => {
       ),
     ).rejects.toThrow('App not found');
   });
+
+  // ajv 6 → 8 compat: stored user schemas may use `format` (built-in in v6)
+  // and benign unknown keywords (silently ignored in v6). Both must keep
+  // compiling and validating rather than crashing at compile time.
+  test('validates values against a stored schema using the email format keyword', async () => {
+    seedApp({
+      version: 3,
+      configSchema: {
+        type: 'object',
+        properties: { contact: { type: 'string', format: 'email' } },
+        required: ['contact'],
+      },
+    });
+
+    await expect(
+      invokeHandler(
+        makeEvent('setAppConfigValues', {
+          appId: 'app-1',
+          values: JSON.stringify({ contact: 'not-an-email' }),
+          version: 3,
+        }),
+      ),
+    ).rejects.toThrow(/validation/i);
+  });
+
+  test('accepts valid values against a stored schema with format and unknown keywords', async () => {
+    seedApp({
+      version: 3,
+      configSchema: {
+        type: 'object',
+        properties: {
+          contact: { type: 'string', format: 'email', uiHint: 'email-input' },
+        },
+        required: ['contact'],
+      },
+    });
+
+    const result = await invokeHandler(
+      makeEvent('setAppConfigValues', {
+        appId: 'app-1',
+        values: JSON.stringify({ contact: 'admin@example.com' }),
+        version: 3,
+      }),
+    );
+
+    expect(result).toBeDefined();
+  });
 });

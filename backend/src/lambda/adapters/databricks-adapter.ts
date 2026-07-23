@@ -81,7 +81,13 @@ export class DatabricksAdapter implements ConnectorAdapter {
       await client.connect({
         host: config.host as string,
         path: config.httpPath as string,
+        // v2: personal-access-token auth is now one of several authType variants;
+        // state it explicitly rather than relying on the default.
+        authType: 'access-token',
         token,
+        // v2 ships driver telemetry enabled by default (out-of-band HTTP POSTs).
+        // Disable it to preserve v1 behavior and avoid extra egress from Lambda.
+        telemetryEnabled: false,
       });
 
       await client.close();

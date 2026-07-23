@@ -21,7 +21,6 @@
       { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }
     ],
     "@typescript-eslint/no-require-imports": "warn",
-    "@typescript-eslint/no-var-requires": "warn",
     "prefer-const": "warn",
     "no-case-declarations": "warn",
     "no-inner-declarations": "warn",

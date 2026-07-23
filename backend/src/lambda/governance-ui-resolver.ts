@@ -6690,7 +6690,7 @@ async function getResourceIamDrift(
           }
         }
         effectiveAvailable = true;
-      } catch (err) {
+      } catch {
         notes.push(
           `Inline policy DataStoreAccess on ${scopedRoleArn} did not parse as JSON`,
         );

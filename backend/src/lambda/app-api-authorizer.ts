@@ -165,7 +165,7 @@ export const handler = async (
         apiKeyId: matchedKey!.keyId as string,
       },
     };
-  } catch (error) {
+  } catch {
     // DynamoDB failure → fail closed (deny)
     logAudit({
       appId,

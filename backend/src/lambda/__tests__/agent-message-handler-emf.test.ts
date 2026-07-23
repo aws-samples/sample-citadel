@@ -127,7 +127,7 @@ describe('agent-message-handler — Wave 0 EMF instrumentation', () => {
 
   beforeAll(() => {
     // Loaded here so module-scope env reads see the values set above.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const sut = require('../agent-message-handler');
     handler = sut.handler;
     resetCaches = sut._resetCaches;

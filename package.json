@@ -75,9 +75,6 @@
   "overrides": {
     "js-yaml": "^4.3.0",
     "shell-quote": "^1.9.0",
-    "@typescript-eslint/typescript-estree": {
-      "minimatch": "9.0.9"
-    },
     "dompurify": "^3.4.12"
   }
 }

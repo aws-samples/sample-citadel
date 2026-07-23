@@ -180,7 +180,7 @@ export function validateToolSchemaJSON(jsonString: string): void {
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonString);
-  } catch (error) {
+  } catch {
     throw new ValidationError('Tool schema must be valid JSON', 'toolSchema');
   }
   const schema = parsed as {
@@ -260,7 +260,7 @@ export function validateHTTPSUrl(url: string): void {
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(url);
-  } catch (error) {
+  } catch {
     throw new ValidationError('MCP Server URL must be a valid HTTPS URL', 'serverUrl');
   }
 
