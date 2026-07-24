@@ -28,28 +28,23 @@ import * as path from "path";
  * module is loaded from source (`backend/lib/`) via ts-jest or from the
  * compiled output (`backend/dist/lib/`) via `node dist/bin/app.js`.
  *
- * Anchored to `startDir` (always `__dirname`), never `process.cwd()`, and
- * guarded so a resolved candidate that is not actually inside the repo
- * (e.g. a stray sibling `service/` one level above the repo) is rejected —
- * this mirrors `resolveArbiterRoot` in arbiter-stack.ts.
+ * Anchored to `startDir` (always `__dirname`), never `process.cwd()`.
+ * Each candidate is checked for existence of a known subdirectory
+ * (`hld_pdf_generator`) rather than the bare directory itself, so a stray
+ * unrelated `service/` directory elsewhere on disk can't be mistaken for
+ * the repo root — this mirrors `resolveArbiterRoot`'s `catalog` subdir
+ * check in arbiter-stack.ts, without the prior single-repoRoot escape
+ * guard that incorrectly anchored both the source and dist candidates to
+ * the same `startDir/../..` root (rejecting the valid dist candidate).
  */
 function resolveServiceRoot(startDir: string): string {
-  const repoRoot = path.resolve(startDir, "..", "..");
   const candidates = [
     path.join(startDir, "..", "..", "service"), // source: backend/lib/ -> repo/service
     path.join(startDir, "..", "..", "..", "service"), // dist:   backend/dist/lib/ -> repo/service
   ];
-  const repoRootWithSep = repoRoot.endsWith(path.sep)
-    ? repoRoot
-    : repoRoot + path.sep;
   for (const candidate of candidates) {
-    const resolved = path.resolve(candidate);
-    if (!resolved.startsWith(repoRootWithSep) && resolved !== repoRoot) {
-      // Would escape the repository — never select this candidate.
-      continue;
-    }
-    if (fs.existsSync(resolved)) {
-      return resolved;
+    if (fs.existsSync(path.join(candidate, "hld_pdf_generator"))) {
+      return candidate;
     }
   }
   throw new Error(
