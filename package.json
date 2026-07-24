@@ -24,7 +24,7 @@
     "lint:fix:backend": "cd backend && npm run lint:fix",
     "format:backend": "cd backend && npm run format",
     "verify:doc-claims": "node scripts/verify-doc-claims.js",
-    "prepare": "husky"
+    "prepare": "node -e \"try{require('husky')}catch(e){process.exit(0)}\" && husky || node -e \"process.exit(0)\""
   },
   "devDependencies": {
     "audit-ci": "^7.1.0",
