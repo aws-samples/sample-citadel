@@ -4,6 +4,9 @@
  * Tests API key validation against DynamoDB, audit logging, and async lastUsedAt updates.
  * Uses API Gateway Lambda authorizer v2 format (simple response: isAuthorized boolean).
  *
+ * Covers HMAC-SHA-256-with-pepper hashing (current) and the plain-SHA-256
+ * dual-read branch (legacy, migration window only).
+ *
  * Validates: Requirements 3.2, 3.3, 3.4, 3.8, 3.9
  */
 import { createHash } from "crypto";
@@ -16,6 +19,8 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
 import { handler, AuthorizerEvent } from "../app-api-authorizer";
+import { hashApiKey, HASH_ALG } from "../../utils/api-key-hash";
+import * as apiKeyHash from "../../utils/api-key-hash";
 
 // ── Mocks ───────────────────────────────────────────────────
 
@@ -28,7 +33,8 @@ let logSpy: jest.SpyInstance;
 
 const TEST_APP_ID = "app-test-123";
 const TEST_API_KEY = "cit_test_api_key_plaintext_value_1234";
-const TEST_HASHED_KEY = createHash("sha256").update(TEST_API_KEY).digest("hex");
+const TEST_PEPPER = "f".repeat(64);
+const TEST_HASHED_KEY = hashApiKey(TEST_API_KEY, TEST_PEPPER);
 const TEST_KEY_ID = "key-abc-789";
 const TEST_SOURCE_IP = "192.168.1.100";
 
@@ -51,6 +57,7 @@ function makeEvent(overrides: Partial<AuthorizerEvent> = {}): AuthorizerEvent {
   };
 }
 
+/** New-generation (HMAC + hashAlg) active key item. */
 function makeActiveKeyItem(overrides: Record<string, unknown> = {}) {
   return {
     appId: `${TEST_APP_ID}#APIKEY#${TEST_KEY_ID}`,
@@ -59,11 +66,32 @@ function makeActiveKeyItem(overrides: Record<string, unknown> = {}) {
     keyId: TEST_KEY_ID,
     name: "default",
     hashedKey: TEST_HASHED_KEY,
+    hashAlg: HASH_ALG,
     prefix: TEST_API_KEY.substring(0, 8),
     status: "ACTIVE",
     createdAt: "2024-01-01T00:00:00.000Z",
     ...overrides,
   };
+}
+
+/** Legacy (pre-migration, plain SHA-256, no hashAlg) active key item. */
+function makeLegacyActiveKeyItem(overrides: Record<string, unknown> = {}) {
+  const item = {
+    appId: `${TEST_APP_ID}#APIKEY#${TEST_KEY_ID}`,
+    groupId: `APP#${TEST_APP_ID}`,
+    sortId: `APIKEY#${TEST_KEY_ID}`,
+    keyId: TEST_KEY_ID,
+    name: "default",
+    hashedKey: createHash("sha256").update(TEST_API_KEY).digest("hex"),
+    prefix: TEST_API_KEY.substring(0, 8),
+    status: "ACTIVE",
+    createdAt: "2024-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+  // hashAlg absent marks a legacy record — must not be set even via overrides
+  // unless a test explicitly wants a hashAlg-tagged record.
+  delete (item as Record<string, unknown>).hashAlg;
+  return item;
 }
 
 function makeDeps() {
@@ -87,6 +115,8 @@ function pastTimestamp(): string {
 
 beforeEach(() => {
   ddbMock.reset();
+  apiKeyHash.__resetApiKeyPepperCacheForTest();
+  jest.spyOn(apiKeyHash, "getApiKeyPepper").mockResolvedValue(TEST_PEPPER);
   // Spy on structured logging — authorizer logs audit entries via console
   logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
   jest.spyOn(console, "info").mockImplementation(() => {});
@@ -147,10 +177,8 @@ describe("valid active key returns Allow", () => {
     ).toBe(true);
   });
 
-  test("matches key by SHA-256 hash of provided x-api-key", async () => {
-    const otherKeyHash = createHash("sha256")
-      .update("some-other-key")
-      .digest("hex");
+  test("matches key by HMAC-SHA-256 hash of provided x-api-key", async () => {
+    const otherKeyHash = hashApiKey("some-other-key", TEST_PEPPER);
     ddbMock.on(QueryCommand).resolves({
       Items: [
         makeActiveKeyItem({ keyId: "key-other", hashedKey: otherKeyHash }),
@@ -160,6 +188,108 @@ describe("valid active key returns Allow", () => {
     ddbMock.on(UpdateCommand).resolves({});
 
     const result = await handler(makeEvent(), undefined, makeDeps());
+
+    expect(result.isAuthorized).toBe(true);
+  });
+});
+
+// ── Dual-Read Migration Window (legacy plain-SHA-256 records) ──────────────
+
+describe("dual-read: legacy plain-SHA-256 record (no hashAlg) still authorizes", () => {
+  test("returns isAuthorized true for a legacy record whose hashedKey is plain SHA-256", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [makeLegacyActiveKeyItem()],
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    const result = await handler(makeEvent(), undefined, makeDeps());
+
+    expect(result.isAuthorized).toBe(true);
+  });
+
+  test("legacy record status/expiry rules still apply (REVOKED denies)", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [makeLegacyActiveKeyItem({ status: "REVOKED" })],
+    });
+
+    const result = await handler(makeEvent(), undefined, makeDeps());
+
+    expect(result.isAuthorized).toBe(false);
+  });
+});
+
+describe("no-cross-match: legacy and HMAC digests must not match each other's records", () => {
+  test("a legacy record's plain-SHA-256 hash does not match against the HMAC digest path (hashAlg present but stale legacy hash)", async () => {
+    // Simulates a corrupted/mis-tagged record: hashAlg present (so the
+    // authorizer computes the HMAC comparison) but hashedKey is the legacy
+    // plain-SHA-256 digest — must NOT match.
+    const legacyDigest = createHash("sha256")
+      .update(TEST_API_KEY)
+      .digest("hex");
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        makeActiveKeyItem({ hashedKey: legacyDigest, hashAlg: HASH_ALG }),
+      ],
+    });
+
+    const result = await handler(makeEvent(), undefined, makeDeps());
+
+    expect(result.isAuthorized).toBe(false);
+  });
+
+  test("an HMAC digest does not match against the legacy comparison path (hashAlg absent but hashedKey is HMAC)", async () => {
+    // hashAlg absent → legacy path is used; hashedKey holds the HMAC digest
+    // instead — must NOT match, since the two digests differ for the same
+    // plaintext+pepper.
+    ddbMock.on(QueryCommand).resolves({
+      Items: [makeLegacyActiveKeyItem({ hashedKey: TEST_HASHED_KEY })],
+    });
+
+    const result = await handler(makeEvent(), undefined, makeDeps());
+
+    expect(result.isAuthorized).toBe(false);
+  });
+});
+
+describe("pepper unavailable — fails closed", () => {
+  test("returns isAuthorized false when getApiKeyPepper rejects", async () => {
+    jest
+      .spyOn(apiKeyHash, "getApiKeyPepper")
+      .mockRejectedValue(new Error("SSM parameter not found"));
+    ddbMock.on(QueryCommand).resolves({
+      Items: [makeActiveKeyItem()],
+    });
+
+    const result = await handler(makeEvent(), undefined, makeDeps());
+
+    expect(result.isAuthorized).toBe(false);
+  });
+
+  test("does not query DynamoDB when the pepper is unavailable (fails closed before lookup)", async () => {
+    jest
+      .spyOn(apiKeyHash, "getApiKeyPepper")
+      .mockRejectedValue(new Error("AccessDenied"));
+
+    await handler(makeEvent(), undefined, makeDeps());
+
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+});
+
+describe("producer round-trip: produced key authorizes", () => {
+  test("a key hashed via hashApiKey(plaintext, pepper) with hashAlg set authorizes end-to-end", async () => {
+    const plaintext = "cit_roundtrip_plaintext_key_9876";
+    const hashed = hashApiKey(plaintext, TEST_PEPPER);
+    ddbMock.on(QueryCommand).resolves({
+      Items: [makeActiveKeyItem({ hashedKey: hashed, hashAlg: HASH_ALG })],
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    const result = await handler(
+      makeEvent({ headers: { "x-api-key": plaintext } }),
+      undefined,
+      makeDeps(),
+    );
 
     expect(result.isAuthorized).toBe(true);
   });
@@ -231,9 +361,7 @@ describe("invalid key (no matching hash) returns 401", () => {
   });
 
   test("returns isAuthorized false when hash does not match any stored key", async () => {
-    const differentHash = createHash("sha256")
-      .update("wrong-key")
-      .digest("hex");
+    const differentHash = hashApiKey("wrong-key", TEST_PEPPER);
     ddbMock.on(QueryCommand).resolves({
       Items: [makeActiveKeyItem({ hashedKey: differentHash })],
     });

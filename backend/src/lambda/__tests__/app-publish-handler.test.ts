@@ -43,11 +43,14 @@ import {
   provisionApiGateway,
   publishApp,
   buildStatusTransitionEvent,
+  generateApiKey,
   AppMetadata,
   ComponentItem,
 } from "../app-publish-handler";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { PolicyManager } from "../../utils/policy-manager";
+import * as apiKeyHash from "../../utils/api-key-hash";
+import { hashApiKey, HASH_ALG } from "../../utils/api-key-hash";
 
 // ── Mocks ───────────────────────────────────────────────────
 
@@ -57,6 +60,17 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 const ebMock = mockClient(EventBridgeClient);
 const stsMock = mockClient(STSClient);
 const iamMock = mockClient(IAMClient);
+
+const TEST_PEPPER = "e".repeat(64);
+
+beforeEach(() => {
+  apiKeyHash.__resetApiKeyPepperCacheForTest();
+  jest.spyOn(apiKeyHash, "getApiKeyPepper").mockResolvedValue(TEST_PEPPER);
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -648,6 +662,32 @@ describe("provisionApiGateway", () => {
 
 // ── Task 4.4: Full publishApp Flow Tests ────────────────────
 
+// ── generateApiKey (HMAC-SHA-256 with server-side pepper) ──────
+
+describe("generateApiKey", () => {
+  test("stores HMAC-SHA-256(plaintext, pepper) as the hashed value with hashAlg tagged", async () => {
+    const result = await generateApiKey();
+
+    expect(result.hashAlg).toBe(HASH_ALG);
+    expect(result.hashed).toBe(hashApiKey(result.plaintext, TEST_PEPPER));
+  });
+
+  test("plaintext decodes to 32 random bytes and prefix is its first 8 chars", async () => {
+    const result = await generateApiKey();
+
+    expect(Buffer.from(result.plaintext, "base64url").length).toBe(32);
+    expect(result.prefix).toBe(result.plaintext.substring(0, 8));
+  });
+
+  test("propagates pepper-lookup failure rather than falling back silently", async () => {
+    jest
+      .spyOn(apiKeyHash, "getApiKeyPepper")
+      .mockRejectedValue(new Error("pepper unavailable"));
+
+    await expect(generateApiKey()).rejects.toThrow("pepper unavailable");
+  });
+});
+
 describe("publishApp", () => {
   // Use a mock PolicyManager to avoid real AWS config resolution
   const mockPolicyManager = {
@@ -777,6 +817,11 @@ describe("publishApp", () => {
     expect(keyPut).toBeDefined();
     expect(keyPut!.args[0].input.Item?.status).toBe("ACTIVE");
     expect(keyPut!.args[0].input.Item?.hashedKey).toBeTruthy();
+    // New keys are written with the current HMAC-SHA-256-with-pepper algorithm
+    expect(keyPut!.args[0].input.Item?.hashAlg).toBe(HASH_ALG);
+    expect(keyPut!.args[0].input.Item?.hashedKey).toBe(
+      hashApiKey(result.apiKey, TEST_PEPPER),
+    );
 
     // Verify app status updated
     const updateCalls = ddbMock.commandCalls(UpdateCommand);

@@ -8,7 +8,7 @@
  */
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
-import { randomBytes, createHash } from "crypto";
+import { randomBytes } from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import {
   ApiGatewayV2Client,
@@ -37,6 +37,7 @@ import {
 } from "@aws-sdk/client-eventbridge";
 import { PolicyManager } from "../utils/policy-manager";
 import { updateAppMetaFields } from "../utils/apps-table-meta";
+import { hashApiKey, getApiKeyPepper, HASH_ALG } from "../utils/api-key-hash";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -77,6 +78,7 @@ export interface PublishResult {
 export interface ApiKeyGenResult {
   plaintext: string;
   hashed: string;
+  hashAlg: string;
   prefix: string;
   keyId: string;
 }
@@ -102,16 +104,17 @@ export function deriveEndpointUrl(apiId: string, region: string): string {
 /**
  * Generates a cryptographically random API key.
  * - 32 random bytes → base64url plaintext
- * - SHA-256 hex hash for storage
+ * - HMAC-SHA-256 (server-side pepper) hex hash for storage
  * - First 8 chars of plaintext as prefix for identification
  */
-export function generateApiKey(): ApiKeyGenResult {
+export async function generateApiKey(): Promise<ApiKeyGenResult> {
   const keyBytes = randomBytes(32);
   const plaintext = keyBytes.toString("base64url");
-  const hashed = createHash("sha256").update(plaintext).digest("hex");
+  const pepper = await getApiKeyPepper();
+  const hashed = hashApiKey(plaintext, pepper);
   const prefix = plaintext.substring(0, 8);
   const keyId = uuidv4();
-  return { plaintext, hashed, prefix, keyId };
+  return { plaintext, hashed, hashAlg: HASH_ALG, prefix, keyId };
 }
 
 /**
@@ -525,7 +528,7 @@ export async function publishApp(
   );
 
   // 6. Generate default API key
-  const apiKey = generateApiKey();
+  const apiKey = await generateApiKey();
   await deps.docClient.send(
     new PutCommand({
       TableName: deps.appsTable,
@@ -536,6 +539,7 @@ export async function publishApp(
         keyId: apiKey.keyId,
         name: "default",
         hashedKey: apiKey.hashed,
+        hashAlg: apiKey.hashAlg,
         prefix: apiKey.prefix,
         status: "ACTIVE",
         createdAt: new Date().toISOString(),

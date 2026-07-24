@@ -2397,6 +2397,10 @@ export class BackendStack extends cdk.Stack {
           // when this env var is unset the resolver treats validation as a
           // no-op, so non-deploy/test paths are never blocked.
           MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
+          // API-key HMAC pepper (createAppApiKey/rotateAppApiKey in
+          // app-api-key-management.ts, wired via this resolver): getApiKeyPepper
+          // reads process.env.ENVIRONMENT to build the SSM parameter path.
+          ENVIRONMENT: props.environment,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(
@@ -2461,6 +2465,29 @@ export class BackendStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ["sts:GetCallerIdentity"],
         resources: ["*"],
+      }),
+    );
+
+    // API key HMAC pepper (getApiKeyPepper/hashApiKey in api-key-hash.ts):
+    // createAppApiKey/rotateAppApiKey hash new/rotated keys with the
+    // server-side pepper. Mirrors the governance-flag ssm:GetParameter grant
+    // pattern above (~lines 1452-1463), plus kms:Decrypt since this
+    // parameter is a SecureString encrypted with the AWS-managed SSM key (no
+    // dedicated CMK exists for this parameter).
+    registryAgentRecordResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/${props.environment}/app-api-key-pepper`,
+        ],
+      }),
+    );
+    registryAgentRecordResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["kms:Decrypt"],
+        resources: [`arn:aws:kms:${this.region}:${this.account}:alias/aws/ssm`],
       }),
     );
 

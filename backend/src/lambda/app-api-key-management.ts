@@ -5,10 +5,20 @@
  *
  * Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9
  */
-import { randomBytes, createHash } from 'crypto';
-import { v4 as uuidv4 } from 'uuid';
-import { DynamoDBDocumentClient, QueryCommand, PutCommand, UpdateCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import { randomBytes } from "crypto";
+import { v4 as uuidv4 } from "uuid";
+import {
+  DynamoDBDocumentClient,
+  QueryCommand,
+  PutCommand,
+  UpdateCommand,
+  TransactWriteCommand,
+} from "@aws-sdk/lib-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { hashApiKey, getApiKeyPepper, HASH_ALG } from "../utils/api-key-hash";
 
 export interface ApiKeyDeps {
   docClient: DynamoDBDocumentClient;
@@ -23,6 +33,7 @@ export interface CreateApiKeyResult {
   plaintext: string;
   prefix: string;
   hashedKey: string;
+  hashAlg: string;
   status: string;
   createdAt: string;
   expiresAt?: string;
@@ -57,13 +68,20 @@ const MAX_ACTIVE_KEYS = 10;
  * Generates a cryptographically random API key.
  * Reuses the same algorithm as generateApiKey in app-publish-handler.ts.
  */
-function generateKey(): { plaintext: string; hashed: string; prefix: string; keyId: string } {
+async function generateKey(): Promise<{
+  plaintext: string;
+  hashed: string;
+  hashAlg: string;
+  prefix: string;
+  keyId: string;
+}> {
   const keyBytes = randomBytes(32);
-  const plaintext = keyBytes.toString('base64url');
-  const hashed = createHash('sha256').update(plaintext).digest('hex');
+  const plaintext = keyBytes.toString("base64url");
+  const pepper = await getApiKeyPepper();
+  const hashed = hashApiKey(plaintext, pepper);
   const prefix = plaintext.substring(0, 8);
   const keyId = uuidv4();
-  return { plaintext, hashed, prefix, keyId };
+  return { plaintext, hashed, hashAlg: HASH_ALG, prefix, keyId };
 }
 
 /**
@@ -86,15 +104,17 @@ async function queryApiKeys(
   appId: string,
   deps: ApiKeyDeps,
 ): Promise<ApiKeyRecord[]> {
-  const result = await deps.docClient.send(new QueryCommand({
-    TableName: deps.appsTable,
-    IndexName: 'GroupIndex',
-    KeyConditionExpression: 'groupId = :gid AND begins_with(sortId, :sk)',
-    ExpressionAttributeValues: {
-      ':gid': `APP#${appId}`,
-      ':sk': 'APIKEY#',
-    },
-  }));
+  const result = await deps.docClient.send(
+    new QueryCommand({
+      TableName: deps.appsTable,
+      IndexName: "GroupIndex",
+      KeyConditionExpression: "groupId = :gid AND begins_with(sortId, :sk)",
+      ExpressionAttributeValues: {
+        ":gid": `APP#${appId}`,
+        ":sk": "APIKEY#",
+      },
+    }),
+  );
   return (result.Items || []) as ApiKeyRecord[];
 }
 
@@ -106,17 +126,21 @@ async function emitApiKeyEvent(
   detail: Record<string, unknown>,
   deps: ApiKeyDeps,
 ): Promise<void> {
-  await deps.eventBridgeClient.send(new PutEventsCommand({
-    Entries: [{
-      Source: 'citadel.apps',
-      DetailType: detailType,
-      Detail: JSON.stringify({
-        ...detail,
-        timestamp: new Date().toISOString(),
-      }),
-      EventBusName: deps.eventBusName,
-    }],
-  }));
+  await deps.eventBridgeClient.send(
+    new PutEventsCommand({
+      Entries: [
+        {
+          Source: "citadel.apps",
+          DetailType: detailType,
+          Detail: JSON.stringify({
+            ...detail,
+            timestamp: new Date().toISOString(),
+          }),
+          EventBusName: deps.eventBusName,
+        },
+      ],
+    }),
+  );
 }
 
 /**
@@ -139,13 +163,15 @@ export async function createAppApiKey(
 ): Promise<CreateApiKeyResult> {
   // Query existing keys to enforce max active limit
   const existingKeys = await queryApiKeys(appId, deps);
-  const activeCount = existingKeys.filter(k => k.status === 'ACTIVE').length;
+  const activeCount = existingKeys.filter((k) => k.status === "ACTIVE").length;
 
   if (activeCount >= MAX_ACTIVE_KEYS) {
-    throw new Error(`Maximum of ${MAX_ACTIVE_KEYS} active API keys reached. Revoke an existing key first.`);
+    throw new Error(
+      `Maximum of ${MAX_ACTIVE_KEYS} active API keys reached. Revoke an existing key first.`,
+    );
   }
 
-  const key = generateKey();
+  const key = await generateKey();
   const now = new Date().toISOString();
 
   const item: {
@@ -155,6 +181,7 @@ export async function createAppApiKey(
     keyId: string;
     name: string;
     hashedKey: string;
+    hashAlg: string;
     prefix: string;
     status: string;
     createdAt: string;
@@ -166,8 +193,9 @@ export async function createAppApiKey(
     keyId: key.keyId,
     name,
     hashedKey: key.hashed,
+    hashAlg: key.hashAlg,
     prefix: key.prefix,
-    status: 'ACTIVE',
+    status: "ACTIVE",
     createdAt: now,
   };
 
@@ -175,18 +203,24 @@ export async function createAppApiKey(
     item.expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
   }
 
-  await deps.docClient.send(new PutCommand({
-    TableName: deps.appsTable,
-    Item: item,
-  }));
+  await deps.docClient.send(
+    new PutCommand({
+      TableName: deps.appsTable,
+      Item: item,
+    }),
+  );
 
   // Emit EventBridge event
-  await emitApiKeyEvent('app.apikey.created', {
-    appId,
-    keyId: key.keyId,
-    keyName: name,
-    userId,
-  }, deps);
+  await emitApiKeyEvent(
+    "app.apikey.created",
+    {
+      appId,
+      keyId: key.keyId,
+      keyName: name,
+      userId,
+    },
+    deps,
+  );
 
   return {
     keyId: key.keyId,
@@ -194,7 +228,8 @@ export async function createAppApiKey(
     plaintext: key.plaintext,
     prefix: key.prefix,
     hashedKey: key.hashed,
-    status: 'ACTIVE',
+    hashAlg: key.hashAlg,
+    status: "ACTIVE",
     createdAt: now,
     expiresAt: item.expiresAt,
   };
@@ -213,47 +248,53 @@ export async function revokeAppApiKey(
   deps: ApiKeyDeps,
 ): Promise<RevokeApiKeyResult> {
   const existingKeys = await queryApiKeys(appId, deps);
-  const keyItem = existingKeys.find(k => k.keyId === keyId);
+  const keyItem = existingKeys.find((k) => k.keyId === keyId);
 
   if (!keyItem) {
     throw new Error(`API key not found: ${keyId}`);
   }
 
   // Idempotent: already revoked → return current state
-  if (keyItem.status === 'REVOKED') {
+  if (keyItem.status === "REVOKED") {
     return {
       keyId: keyItem.keyId,
       name: keyItem.name,
-      prefix: keyItem.prefix || '',
-      status: 'REVOKED',
+      prefix: keyItem.prefix || "",
+      status: "REVOKED",
       createdAt: keyItem.createdAt || new Date().toISOString(),
     };
   }
 
-  await deps.docClient.send(new UpdateCommand({
-    TableName: deps.appsTable,
-    Key: { appId: `${appId}#APIKEY#${keyId}` },
-    UpdateExpression: 'SET #status = :REVOKED, updatedAt = :now',
-    ExpressionAttributeNames: { '#status': 'status' },
-    ExpressionAttributeValues: {
-      ':REVOKED': 'REVOKED',
-      ':now': new Date().toISOString(),
-    },
-  }));
+  await deps.docClient.send(
+    new UpdateCommand({
+      TableName: deps.appsTable,
+      Key: { appId: `${appId}#APIKEY#${keyId}` },
+      UpdateExpression: "SET #status = :REVOKED, updatedAt = :now",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":REVOKED": "REVOKED",
+        ":now": new Date().toISOString(),
+      },
+    }),
+  );
 
   // Emit EventBridge event
-  await emitApiKeyEvent('app.apikey.revoked', {
-    appId,
-    keyId,
-    keyName: keyItem.name,
-    userId,
-  }, deps);
+  await emitApiKeyEvent(
+    "app.apikey.revoked",
+    {
+      appId,
+      keyId,
+      keyName: keyItem.name,
+      userId,
+    },
+    deps,
+  );
 
   return {
     keyId: keyItem.keyId,
     name: keyItem.name,
-    prefix: keyItem.prefix || '',
-    status: 'REVOKED',
+    prefix: keyItem.prefix || "",
+    status: "REVOKED",
     createdAt: keyItem.createdAt || new Date().toISOString(),
   };
 }
@@ -271,17 +312,17 @@ export async function rotateAppApiKey(
   deps: ApiKeyDeps,
 ): Promise<RotateApiKeyResult> {
   const existingKeys = await queryApiKeys(appId, deps);
-  const oldKeyItem = existingKeys.find(k => k.keyId === keyId);
+  const oldKeyItem = existingKeys.find((k) => k.keyId === keyId);
 
   if (!oldKeyItem) {
     throw new Error(`API key not found: ${keyId}`);
   }
 
-  if (oldKeyItem.status === 'REVOKED') {
+  if (oldKeyItem.status === "REVOKED") {
     throw new Error(`Cannot rotate a revoked key: ${keyId}`);
   }
 
-  const newKey = generateKey();
+  const newKey = await generateKey();
   const now = new Date().toISOString();
 
   const newKeyItem: Record<string, string> = {
@@ -291,34 +332,37 @@ export async function rotateAppApiKey(
     keyId: newKey.keyId,
     name: oldKeyItem.name,
     hashedKey: newKey.hashed,
+    hashAlg: newKey.hashAlg,
     prefix: newKey.prefix,
-    status: 'ACTIVE',
+    status: "ACTIVE",
     createdAt: now,
   };
 
   // Atomic transaction: put new key + revoke old key
-  await deps.docClient.send(new TransactWriteCommand({
-    TransactItems: [
-      {
-        Put: {
-          TableName: deps.appsTable,
-          Item: newKeyItem,
-        },
-      },
-      {
-        Update: {
-          TableName: deps.appsTable,
-          Key: { appId: `${appId}#APIKEY#${keyId}` },
-          UpdateExpression: 'SET #status = :REVOKED, updatedAt = :now',
-          ExpressionAttributeNames: { '#status': 'status' },
-          ExpressionAttributeValues: {
-            ':REVOKED': 'REVOKED',
-            ':now': now,
+  await deps.docClient.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: deps.appsTable,
+            Item: newKeyItem,
           },
         },
-      },
-    ],
-  }));
+        {
+          Update: {
+            TableName: deps.appsTable,
+            Key: { appId: `${appId}#APIKEY#${keyId}` },
+            UpdateExpression: "SET #status = :REVOKED, updatedAt = :now",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: {
+              ":REVOKED": "REVOKED",
+              ":now": now,
+            },
+          },
+        },
+      ],
+    }),
+  );
 
   return {
     newKey: {
@@ -327,7 +371,8 @@ export async function rotateAppApiKey(
       plaintext: newKey.plaintext,
       prefix: newKey.prefix,
       hashedKey: newKey.hashed,
-      status: 'ACTIVE',
+      hashAlg: newKey.hashAlg,
+      status: "ACTIVE",
       createdAt: now,
     },
     revokedKeyId: keyId,
@@ -344,7 +389,7 @@ export async function listAppApiKeys(
   deps: ApiKeyDeps,
 ): Promise<ApiKeyListItem[]> {
   const items = await queryApiKeys(appId, deps);
-  return items.map(item => ({
+  return items.map((item) => ({
     keyId: item.keyId,
     name: item.name,
     prefix: item.prefix,

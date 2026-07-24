@@ -6,22 +6,34 @@
  *
  * Authorization flow:
  * 1. Extract appId from stage variables
- * 2. Hash provided x-api-key with SHA-256
+ * 2. Compute HMAC-SHA-256 of the provided x-api-key using the server-side
+ *    pepper (fail closed / deny if the pepper is unavailable)
  * 3. Query GroupIndex for APIKEY# items under APP#{appId}
- * 4. Match by hashedKey, check status === ACTIVE and not expired
- * 5. Return { isAuthorized: true/false }
- * 6. Update lastUsedAt asynchronously (best-effort)
- * 7. Log all attempts for audit
+ * 4. Match by hashedKey: records with `hashAlg` set compare against the
+ *    HMAC digest; records without `hashAlg` (pre-migration legacy records)
+ *    compare against the legacy plain-SHA-256 digest. This dual-read is a
+ *    time-boxed migration bridge (~90 days) — plaintext for legacy keys
+ *    cannot be re-derived, so in-place rehashing is not possible. All
+ *    comparisons use a timing-safe equality check.
+ * 5. Check status === ACTIVE and not expired
+ * 6. Return { isAuthorized: true/false }
+ * 7. Update lastUsedAt asynchronously (best-effort)
+ * 8. Log all attempts for audit
  *
  * Requirements: 3.2, 3.3, 3.4, 3.8, 3.9
  */
-import { createHash } from "crypto";
+import { timingSafeEqual } from "crypto";
 import {
   DynamoDBDocumentClient,
   QueryCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  hashApiKey,
+  legacyHashApiKey,
+  getApiKeyPepper,
+} from "../utils/api-key-hash";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -67,6 +79,35 @@ function logAudit(entry: AuditLogEntry): void {
 }
 
 // ── Authorization Decision (pure logic) ─────────────────────
+
+/**
+ * Constant-time comparison of two hex digest strings. Returns false (not a
+ * throw) on length mismatch — timingSafeEqual requires equal-length buffers,
+ * and a length mismatch is itself not a valid match.
+ */
+function timingSafeHexEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, "hex");
+  const bufB = Buffer.from(b, "hex");
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Matches an API key item against the provided x-api-key using the
+ * appropriate digest for that item's storage generation:
+ * - `hashAlg` present → new HMAC-SHA-256-with-pepper record.
+ * - `hashAlg` absent → legacy plain-SHA-256 record (dual-read window).
+ * Comparisons are timing-safe.
+ */
+function matchesApiKey(
+  item: { hashedKey?: string; hashAlg?: string },
+  hmacDigest: string,
+  legacyDigest: string,
+): boolean {
+  if (!item.hashedKey) return false;
+  const expected = item.hashAlg ? hmacDigest : legacyDigest;
+  return timingSafeHexEqual(item.hashedKey, expected);
+}
 
 /**
  * Pure authorization decision based on key status and expiry.
@@ -117,8 +158,30 @@ export const handler = async (
     throw new Error("Unauthorized");
   }
 
-  // Hash the provided key
-  const hashedKey = createHash("sha256").update(apiKey).digest("hex");
+  // Compute the HMAC digest (requires the server-side pepper) and the
+  // legacy plain-SHA-256 digest (dual-read window only — never used for
+  // new records). Fail closed if the pepper is unavailable: we cannot
+  // safely evaluate HMAC-generation records without it, and proceeding
+  // would silently exclude those records from matching.
+  let hmacDigest: string;
+  const legacyDigest = legacyHashApiKey(apiKey);
+  try {
+    const pepper = await getApiKeyPepper();
+    hmacDigest = hashApiKey(apiKey, pepper);
+  } catch (error) {
+    logAudit({
+      appId,
+      apiKeyId: "unknown",
+      sourceIp,
+      timestamp: new Date().toISOString(),
+      result: "deny",
+    });
+    console.error("app-api-authorizer: pepper unavailable, failing closed", {
+      appId,
+      err: error instanceof Error ? error.message : String(error),
+    });
+    return { isAuthorized: false };
+  }
 
   try {
     // Query GroupIndex for APIKEY# items under APP#{appId}
@@ -136,9 +199,18 @@ export const handler = async (
 
     const items = result.Items || [];
 
-    // Find matching key by hash
-    const matchedKey = items.find((item) => item.hashedKey === hashedKey) as
-      | { status: string; expiresAt?: string; keyId?: string; appId?: string }
+    // Find matching key: HMAC digest for hashAlg-tagged records, legacy
+    // SHA-256 digest for pre-migration records without hashAlg.
+    const matchedKey = items.find((item) =>
+      matchesApiKey(item, hmacDigest, legacyDigest),
+    ) as
+      | {
+          status: string;
+          expiresAt?: string;
+          keyId?: string;
+          appId?: string;
+          hashAlg?: string;
+        }
       | undefined;
 
     // Evaluate authorization using pure decision logic
