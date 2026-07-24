@@ -1,7 +1,7 @@
 /**
  * Tests for useUserDisplayName hook
  */
-import { renderHook, waitFor, act } from '@testing-library/react';
+import { renderHook, waitFor } from '@testing-library/react';
 import { useUserDisplayName, isUserId, formatUserDisplayName, clearUserDisplayNameCache } from '../useUserDisplayName';
 
 // Mock the userManagementService
