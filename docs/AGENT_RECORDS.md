@@ -113,9 +113,11 @@ Decisions cited in this document are listed in [References](#references).
 
 A `RegistryAgentRecord` moves through five states. The state machine is
 defined in `backend/src/adapters/lifecycle.ts` as the `REGISTRY_TRANSITIONS`
-transition map (added in PR 1-T2). Note that `REGISTRY_TRANSITIONS` is
-defined but not yet wired into any resolver in PR 1 — PR 3 will route
-`UpdateRegistryRecordStatus` calls through `LifecycleManager.validateTransition`.
+transition map (added in PR 1-T2) and is enforced today: the `updateApp`
+mutation in `backend/src/lambda/registry-agent-record-resolver.ts` routes
+every status change through `LifecycleManager.isValidTransition` before the
+Registry write. An illegal transition throws a `RegistryLifecycleError` with
+code `INVALID_TRANSITION` rather than being silently coerced.
 
 ### States
 
@@ -140,7 +142,7 @@ defined but not yet wired into any resolver in PR 1 — PR 3 will route
 |--------------------|----------------------|------------|------------------------------------------------------------------|
 | `DRAFT`            | `PENDING_APPROVAL`   | architect  | `SubmitRegistryRecordForApproval` SDK call                       |
 | `DRAFT`            | `DEPRECATED`         | architect  | `UpdateRegistryRecordStatus` with `status=DEPRECATED`            |
-| `PENDING_APPROVAL` | `APPROVED`           | auto / admin | Auto-approval on submit (see `updateResourceStatus` in registry-service.ts) |
+| `PENDING_APPROVAL` | `APPROVED`           | admin      | `UpdateRegistryRecordStatus` with `status=APPROVED`; `decidedBy` stamped server-side |
 | `PENDING_APPROVAL` | `REJECTED`           | admin      | `UpdateRegistryRecordStatus` with `status=REJECTED`, `statusReason` required |
 | `REJECTED`         | `DRAFT`              | architect  | `UpdateRegistryRecordStatus` with `status=DRAFT` (resubmit path) |
 | `REJECTED`         | `DEPRECATED`         | architect  | `UpdateRegistryRecordStatus` with `status=DEPRECATED` (abandon)  |
@@ -149,6 +151,14 @@ defined but not yet wired into any resolver in PR 1 — PR 3 will route
 
 Idempotent same-state transitions are permitted and produce no side effect —
 `LifecycleManager.isValidTransition` returns `true` when `current === next`.
+
+There is no auto-approval: submitting leaves the record `PENDING_APPROVAL`
+until an admin records a decision. Approve/reject is admin-only (server-side
+role check), rejecting requires a non-empty `statusReason`, and `decidedBy`
+is always derived from the caller's auth context — never from client input.
+While `PENDING_APPROVAL`, content edits (name, description, routing config,
+source project) are refused with a `RegistryLifecycleError`
+(`RECORD_IMMUTABLE`); only a status decision may proceed.
 
 ### UpdateRegistryRecordStatus call shape
 
@@ -174,7 +184,7 @@ stateDiagram-v2
     [*] --> DRAFT: CreateRegistryRecord
     DRAFT --> PENDING_APPROVAL: SubmitForApproval
     DRAFT --> DEPRECATED: abandon
-    PENDING_APPROVAL --> APPROVED: auto-approve
+    PENDING_APPROVAL --> APPROVED: admin approve
     PENDING_APPROVAL --> REJECTED: admin reject
     REJECTED --> DRAFT: revise + resubmit
     REJECTED --> DEPRECATED: abandon
