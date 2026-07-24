@@ -462,13 +462,65 @@ They are consumed by `backend/src/lambda/agent-import-manifest-result-handler.ts
 }
 ```
 
+## App Invoke Events (source: `citadel.app.invoke`)
+
+These events carry per-app invoke requests from a published app's API
+Gateway HTTP API to the backend. The API Gateway EventBridge-PutEvents
+integration (`provisionApiGateway` in `app-publish-handler.ts`) is the sole
+producer; `app-invoke-handler` is the sole consumer.
+
+### app.invoke.requested
+
+Emitted by the per-app API Gateway's `POST /invoke` route via its
+`AWS_PROXY` / `EventBridge-PutEvents` integration — never emitted directly
+by a client. The integration's `RequestParameters` set:
+
+- `Source`: `citadel.app.invoke` (fixed)
+- `DetailType`: `app.invoke.requested` (fixed)
+- `Detail`: `$request.body` (the raw, UNTRUSTED client JSON body)
+- `Resources`: `$context.authorizer.appId` — the TRUSTED appId resolved by
+  the Lambda authorizer from the `$default` stage's `StageVariables.appId`
+  (set at publish time; backfilled for pre-existing apps by
+  `backend/scripts/backfill-app-stage-vars.ts`). This lands in
+  `event.resources[0]`.
+
+```json
+{
+  "source": "citadel.app.invoke",
+  "detail-type": "app.invoke.requested",
+  "resources": ["<appId> (TRUSTED — from $context.authorizer.appId)"],
+  "detail": {
+    "workflowId": "string (optional; UNTRUSTED — required only when >1 workflow is bound to the app)",
+    "input": "object (optional; UNTRUSTED client payload, sanitized + size-capped by the consumer)"
+  }
+}
+```
+
+**Consumer: `app-invoke-handler`**
+
+- Reads the authoritative `appId` from `event.resources[0]` ONLY — the
+  request body's `appId` (if any) is ignored.
+- Dedupes on `event.id` via `IdempotencyGuard` (the shared
+  `citadel-idempotency-{env}` table) — a duplicate delivery is a no-op.
+- Rejects (fail-closed, no write) when: `resources` is empty; the app is not
+  found or not `PUBLISHED`; the app has 0 bound workflows; the app has >1
+  bound workflows and no/ambiguous `workflowId` was supplied; the resolved
+  workflow is not `PUBLISHED`, is in a different org than the app, or is
+  bound to a different app; or the body exceeds the 64KiB size cap.
+- On success, writes an execution row to `EXECUTIONS_TABLE` (same shape as
+  `execution-resolver.ts` `startExecution`: `nodeResults` initialized from
+  the workflow definition, `orgId` from the app's own METADATA, `appId`,
+  `status: 'pending'`, `triggeredBy: 'app-invoke:<appId>'`) and emits
+  `execution.start.requested` on source `citadel.workflows` with
+  `correlationId` set to `event.id`.
+
 ## Execution Control Events
 
-These events control workflow execution lifecycle. They are published by the Execution Resolver and consumed by the Step Runner.
+These events control workflow execution lifecycle. They are published by the Execution Resolver and the App Invoke Handler, and consumed by the Step Runner.
 
 | DetailType | Producer | Consumer | Description |
 |------------|----------|----------|-------------|
-| `execution.start.requested` | execution-resolver | Step Runner | Start a new workflow execution |
+| `execution.start.requested` | execution-resolver, app-invoke-handler | Step Runner | Start a new workflow execution |
 | `execution.cancel.requested` | execution-resolver | Step Runner | Cancel a running execution |
 
 ## Task Orchestration Events
@@ -631,6 +683,7 @@ The consumer's write semantics make the family safe under duplicates, retries, a
 | Rule | Event Pattern | Target |
 |------|--------------|--------|
 | `ProgressUpdateRule` | detailType: `intake.progress.updated`; source: `agent_intake.assessment`, `agent_intake.design`, `agent_intake.planning`, `agent_intake.implementation` | Project Progress Updater Lambda |
+| `AppInvokeRule` | source: `citadel.app.invoke`; detailType: `app.invoke.requested` | App Invoke Handler Lambda |
 
 ## Idempotency
 

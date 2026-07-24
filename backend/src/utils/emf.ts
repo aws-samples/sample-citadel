@@ -36,8 +36,8 @@ export interface EmitMetricsOptions {
   dimensions?: Record<string, string>;
 }
 
-const DEFAULT_NAMESPACE = 'Citadel/Intake';
-const DEFAULT_UNIT = 'Milliseconds';
+const DEFAULT_NAMESPACE = "Citadel/Intake";
+const DEFAULT_UNIT = "Milliseconds";
 
 /**
  * Emit one EMF-formatted line to stdout (single console.log call).
@@ -56,10 +56,10 @@ export function emitMetrics(options: EmitMetricsOptions): void {
     const metrics = options.metrics.filter(
       (m): m is EmfMetric =>
         !!m &&
-        typeof m.name === 'string' &&
+        typeof m.name === "string" &&
         m.name.length > 0 &&
-        typeof m.value === 'number' &&
-        Number.isFinite(m.value)
+        typeof m.value === "number" &&
+        Number.isFinite(m.value),
     );
     if (metrics.length === 0) {
       return;
@@ -67,7 +67,7 @@ export function emitMetrics(options: EmitMetricsOptions): void {
 
     const namespace = options.namespace || DEFAULT_NAMESPACE;
     const dimensions = options.dimensions ?? {
-      Environment: process.env.ENVIRONMENT || 'dev',
+      Environment: process.env.ENVIRONMENT || "dev",
     };
 
     const buildBlob = (withProperties: boolean): Record<string, unknown> => {
@@ -106,6 +106,6 @@ export function emitMetrics(options: EmitMetricsOptions): void {
     console.log(line);
   } catch (err) {
     // Metrics must never break the caller — swallow, but keep it observable.
-    console.error('emf: emit failed', err);
+    console.error("emf: emit failed", err);
   }
 }

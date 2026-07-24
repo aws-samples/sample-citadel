@@ -17,7 +17,8 @@ ENV/
 .venv-test/
 
 # E2E test artifacts
-scripts/
+scripts/*
+!scripts/verify-doc-claims.js
 
 # Build outputs
 dist/

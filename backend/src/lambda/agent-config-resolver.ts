@@ -1,6 +1,16 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, DeleteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { RegistryService, RegistryRecordStatusValues } from '../services/registry-service';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  ScanCommand,
+  DeleteCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
+import {
+  RegistryService,
+  RegistryRecordStatusValues,
+} from "../services/registry-service";
 import type {
   AgentInvocationProtocol,
   AgentCustomMetadata,
@@ -8,11 +18,15 @@ import type {
   AgentOrigin,
   RegistryRecord,
   ListResourcesOptions,
-} from '../services/registry-service';
-import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
-import { getGovernanceEnforce } from '../utils/governance-flag';
-import { publishEvent } from '../utils/events';
-import { computeTrustPath, isCrossAccountRoleArn, assumeAnalysisRoleClient } from '../utils/trust-path';
+} from "../services/registry-service";
+import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import { getGovernanceEnforce } from "../utils/governance-flag";
+import { publishEvent } from "../utils/events";
+import {
+  computeTrustPath,
+  isCrossAccountRoleArn,
+  assumeAnalysisRoleClient,
+} from "../utils/trust-path";
 
 /** Trust-path summary persisted into governanceAttestation by the activation path. */
 interface TrustPathAttestationSummary {
@@ -34,10 +48,11 @@ interface TrustPathAttestationSummary {
  * Declared locally (NOT in registry-service) so that module stays unchanged;
  * the extra field is serialized verbatim via serializeCustomMetadata.
  */
-type GovernanceAttestationWithTrustPath =
-  NonNullable<AgentCustomMetadata['governanceAttestation']> & {
-    trustPath?: TrustPathAttestationSummary;
-  };
+type GovernanceAttestationWithTrustPath = NonNullable<
+  AgentCustomMetadata["governanceAttestation"]
+> & {
+  trustPath?: TrustPathAttestationSummary;
+};
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -54,7 +69,7 @@ const AGENT_CONFIG_TABLE = process.env.AGENT_CONFIG_TABLE!;
  */
 export function isRegistryEnabled(): boolean {
   try {
-    return process.env.REGISTRY_ENABLED === 'true';
+    return process.env.REGISTRY_ENABLED === "true";
   } catch {
     return false;
   }
@@ -72,11 +87,13 @@ export function getRegistryService(): RegistryService {
   if (!registryServiceInstance) {
     const registryId = process.env.REGISTRY_ID;
     if (!registryId) {
-      throw new Error('REGISTRY_ID environment variable is required when REGISTRY_ENABLED is true');
+      throw new Error(
+        "REGISTRY_ID environment variable is required when REGISTRY_ENABLED is true",
+      );
     }
     registryServiceInstance = new RegistryService({
       registryId,
-      region: process.env.AWS_REGION || 'us-east-1',
+      region: process.env.AWS_REGION || "us-east-1",
     });
   }
   return registryServiceInstance;
@@ -106,9 +123,11 @@ export interface LambdaContextLike {
  * a large registry returns a partial list instead of timing out (live
  * incident: 340 records × sequential GETs > 30s).
  */
-function budgetOptionsFrom(context?: LambdaContextLike): ListResourcesOptions | undefined {
+function budgetOptionsFrom(
+  context?: LambdaContextLike,
+): ListResourcesOptions | undefined {
   const getRemainingTimeInMillis = context?.getRemainingTimeInMillis;
-  if (typeof getRemainingTimeInMillis !== 'function') return undefined;
+  if (typeof getRemainingTimeInMillis !== "function") return undefined;
   return { getRemainingTimeMs: () => getRemainingTimeInMillis.call(context) };
 }
 
@@ -116,7 +135,7 @@ interface AgentConfig {
   agentId: string;
   orgId: string;
   config: string | Record<string, unknown>;
-  state: 'active' | 'inactive' | 'maintenance' | 'pending' | string;
+  state: "active" | "inactive" | "maintenance" | "pending" | string;
   categories?: string[] | string;
   createdAt?: string;
   updatedAt?: string;
@@ -148,8 +167,11 @@ export interface RawAgentManifest {
   version?: unknown;
 }
 
-export const handler = async (event: AgentConfigResolverEvent, context?: LambdaContextLike) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+export const handler = async (
+  event: AgentConfigResolverEvent,
+  context?: LambdaContextLike,
+) => {
+  console.log("Event:", JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
 
@@ -157,47 +179,68 @@ export const handler = async (event: AgentConfigResolverEvent, context?: LambdaC
     const registryEnabled = isRegistryEnabled();
 
     switch (fieldName) {
-      case 'listAgentConfigs':
+      case "listAgentConfigs":
         return registryEnabled
           ? await listAgentConfigsRegistry(event, context)
           : await listAgentConfigs();
 
-      case 'getAgentConfig':
+      case "getAgentConfig":
         return registryEnabled
-          ? await getAgentConfigRegistry(event.arguments.agentId as string, event)
+          ? await getAgentConfigRegistry(
+              event.arguments.agentId as string,
+              event,
+            )
           : await getAgentConfig(event.arguments.agentId as string);
 
-      case 'createAgentConfig':
+      case "createAgentConfig":
         return registryEnabled
-          ? await createAgentConfigRegistry(event.arguments.input as AgentConfigMutationInput, event)
-          : await createAgentConfig(event.arguments.input as AgentConfigMutationInput);
+          ? await createAgentConfigRegistry(
+              event.arguments.input as AgentConfigMutationInput,
+              event,
+            )
+          : await createAgentConfig(
+              event.arguments.input as AgentConfigMutationInput,
+            );
 
-      case 'updateAgentConfig':
+      case "updateAgentConfig":
         return registryEnabled
-          ? await updateAgentConfigRegistry(event.arguments.input as AgentConfigMutationInput, event)
-          : await updateAgentConfig(event.arguments.input as AgentConfigMutationInput);
+          ? await updateAgentConfigRegistry(
+              event.arguments.input as AgentConfigMutationInput,
+              event,
+            )
+          : await updateAgentConfig(
+              event.arguments.input as AgentConfigMutationInput,
+            );
 
-      case 'deleteAgentConfig':
+      case "deleteAgentConfig":
         return registryEnabled
           ? await deleteAgentConfigRegistry(event.arguments.agentId as string)
           : await deleteAgentConfig(event.arguments.agentId as string);
 
-      case 'publishAgentManifest':
+      case "publishAgentManifest":
         return registryEnabled
-          ? await publishAgentManifestRegistry(event.arguments.agentId as string, event.arguments.manifest as string)
-          : await publishAgentManifest(event.arguments.agentId as string, event.arguments.manifest as string);
+          ? await publishAgentManifestRegistry(
+              event.arguments.agentId as string,
+              event.arguments.manifest as string,
+            )
+          : await publishAgentManifest(
+              event.arguments.agentId as string,
+              event.arguments.manifest as string,
+            );
 
-      case 'searchAgentConfigs':
-        return await searchAgentConfigsRegistry(event.arguments.query as string);
+      case "searchAgentConfigs":
+        return await searchAgentConfigsRegistry(
+          event.arguments.query as string,
+        );
 
-      case 'activateProjectAgents':
+      case "activateProjectAgents":
         return await activateProjectAgents(event.arguments.projectId as string);
 
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
   } catch (error) {
-    console.error('Error:', error);
+    console.error("Error:", error);
     throw error;
   }
 };
@@ -212,12 +255,16 @@ export const handler = async (event: AgentConfigResolverEvent, context?: LambdaC
  * - Registry throws (unavailable / transient error) → log warning, fall
  *   back to DynamoDB so get queries can degrade gracefully
  */
-export async function getAgentConfigRegistry(agentId: string, event?: OrgScopedEvent): Promise<AgentConfig | null> {
+export async function getAgentConfigRegistry(
+  agentId: string,
+  event?: OrgScopedEvent,
+): Promise<AgentConfig | null> {
   const registryService = getRegistryService();
-  const callerOrgId = event !== undefined ? await extractOrgFromEvent(event) : null;
+  const callerOrgId =
+    event !== undefined ? await extractOrgFromEvent(event) : null;
   const admin = event !== undefined ? isAdminFromEvent(event) : false;
   try {
-    const record = await registryService.getResource('agent', agentId);
+    const record = await registryService.getResource("agent", agentId);
     if (record) {
       const mapped = registryService.mapToAgentConfig(record);
       // Cross-org access is reported as not-found (404-style, not 403) so we
@@ -258,11 +305,14 @@ export async function listAgentConfigsRegistry(
   event?: OrgScopedEvent,
   context?: LambdaContextLike,
 ): Promise<AgentConfig[]> {
-  const callerOrgId = event !== undefined ? await extractOrgFromEvent(event) : null;
+  const callerOrgId =
+    event !== undefined ? await extractOrgFromEvent(event) : null;
   const admin = event !== undefined ? isAdminFromEvent(event) : false;
 
   if (!admin && !callerOrgId) {
-    console.warn('listAgentConfigsRegistry: no caller orgId and not admin; returning empty list');
+    console.warn(
+      "listAgentConfigsRegistry: no caller orgId and not admin; returning empty list",
+    );
     return [];
   }
 
@@ -270,20 +320,22 @@ export async function listAgentConfigsRegistry(
   const registryService = getRegistryService();
   const budgetOptions = budgetOptionsFrom(context);
   const registryRecords = budgetOptions
-    ? await registryService.listResources('agent', budgetOptions)
-    : await registryService.listResources('agent');
+    ? await registryService.listResources("agent", budgetOptions)
+    : await registryService.listResources("agent");
   const allRegistryConfigs = registryRecords.map((record) =>
     registryService.mapToAgentConfig(record),
   );
   const registryConfigs = admin
     ? allRegistryConfigs
-    : allRegistryConfigs.filter((a) => a.orgId === callerOrgId || a.orgId === '');
+    : allRegistryConfigs.filter(
+        (a) => a.orgId === callerOrgId || a.orgId === "",
+      );
 
   // 2. Fetch DynamoDB legacy records
   const allDynamoConfigs = await listAgentConfigs();
   const dynamoConfigs = admin
     ? allDynamoConfigs
-    : allDynamoConfigs.filter((a) => a.orgId === callerOrgId || a.orgId === '');
+    : allDynamoConfigs.filter((a) => a.orgId === callerOrgId || a.orgId === "");
 
   // 3. Build set of names from Registry (Registry wins on duplicates).
   //    Post-420d0ae, registryConfigs[].agentId is a 12-char recordId while
@@ -294,9 +346,10 @@ export async function listAgentConfigsRegistry(
   const extractName = (c: AgentConfig): string | undefined => {
     if (!c.config) return undefined;
     try {
-      const parsed = typeof c.config === 'string' ? JSON.parse(c.config) : c.config;
+      const parsed =
+        typeof c.config === "string" ? JSON.parse(c.config) : c.config;
       const name = parsed?.name;
-      return typeof name === 'string' && name.length > 0 ? name : undefined;
+      return typeof name === "string" && name.length > 0 ? name : undefined;
     } catch {
       return undefined;
     }
@@ -304,7 +357,7 @@ export async function listAgentConfigsRegistry(
   const registryNames = new Set(
     registryConfigs
       .map(extractName)
-      .filter((n): n is string => typeof n === 'string' && n.length > 0),
+      .filter((n): n is string => typeof n === "string" && n.length > 0),
   );
 
   // 4. Filter DynamoDB records to exclude duplicates
@@ -326,26 +379,33 @@ export async function listAgentConfigsRegistry(
  * payloads never carry orgId — per D1(a) the backend is the sole source
  * of truth for tenant assignment.
  */
-export async function createAgentConfigRegistry(input: AgentConfigMutationInput, event?: OrgScopedEvent): Promise<AgentConfig> {
+export async function createAgentConfigRegistry(
+  input: AgentConfigMutationInput,
+  event?: OrgScopedEvent,
+): Promise<AgentConfig> {
   const registryService = getRegistryService();
 
   const orgId = await extractOrgFromEvent(event);
   if (!orgId) {
-    throw new Error('Cannot determine caller organization');
+    throw new Error("Cannot determine caller organization");
   }
 
-  const config = typeof input.config === 'string' ? input.config : JSON.stringify(input.config);
-  const parsedConfig = typeof input.config === 'string' ? JSON.parse(input.config) : input.config;
+  const config =
+    typeof input.config === "string"
+      ? input.config
+      : JSON.stringify(input.config);
+  const parsedConfig =
+    typeof input.config === "string" ? JSON.parse(input.config) : input.config;
 
   const customMetadata = registryService.serializeCustomMetadata({
     categories: input.categories || [],
-    icon: input.icon || '',
-    state: input.state || 'active',
+    icon: input.icon || "",
+    state: input.state || "active",
     appId: input.appId || undefined,
     orgId,
   } as AgentCustomMetadata);
 
-  const record = await registryService.createResource('agent', input.agentId, {
+  const record = await registryService.createResource("agent", input.agentId, {
     name: parsedConfig.name || input.agentId,
     description: config,
     customMetadata,
@@ -354,11 +414,15 @@ export async function createAgentConfigRegistry(input: AgentConfigMutationInput,
   // If an initial state is provided, update the status accordingly
   if (input.state) {
     const registryStatus = registryService.toRegistryStatus(input.state);
-    await registryService.updateResourceStatus('agent', input.agentId, registryStatus);
+    await registryService.updateResourceStatus(
+      "agent",
+      input.agentId,
+      registryStatus,
+    );
     // Re-fetch after status transition so the returned state reflects the
     // post-SubmitForApproval record (PENDING_APPROVAL or APPROVED) rather
     // than the stale DRAFT snapshot from createResource above.
-    const refreshed = await registryService.getResource('agent', input.agentId);
+    const refreshed = await registryService.getResource("agent", input.agentId);
     return registryService.mapToAgentConfig(refreshed ?? record);
   }
 
@@ -399,17 +463,17 @@ async function enforceImportActivationGate(
   customDescriptorContent: string | undefined,
 ): Promise<void> {
   const meta = registryService.deserializeCustomMetadata<{
-    governanceAttestation?: { status: 'pending' | 'attested' };
+    governanceAttestation?: { status: "pending" | "attested" };
   }>(customDescriptorContent ?? null, { governanceAttestation: undefined });
 
   const attestation = meta.governanceAttestation;
   // (ii) not imported, or (iii) already attested → no-op.
-  if (!attestation || attestation.status === 'attested') {
+  if (!attestation || attestation.status === "attested") {
     return;
   }
 
-  const mode = await getGovernanceEnforce(process.env.ENVIRONMENT || 'unknown');
-  if (mode === 'strict') {
+  const mode = await getGovernanceEnforce(process.env.ENVIRONMENT || "unknown");
+  if (mode === "strict") {
     throw new Error(
       `Activation blocked: governance attestation pending for imported agent ${agentId}`,
     );
@@ -420,8 +484,8 @@ async function enforceImportActivationGate(
   // (or alter the result of) the activation, so the emit is swallowed on error.
   try {
     await publishEvent({
-      eventType: 'agent.import.activation_gate',
-      projectId: '',
+      eventType: "agent.import.activation_gate",
+      projectId: "",
       agentId,
       payload: {
         agentId,
@@ -448,11 +512,14 @@ async function enforceImportActivationGate(
  * present, and fall back to the caller's JWT org for legacy records that
  * predate Phase-2a. Input payloads never carry orgId.
  */
-export async function updateAgentConfigRegistry(input: AgentConfigMutationInput, event?: OrgScopedEvent): Promise<AgentConfig> {
+export async function updateAgentConfigRegistry(
+  input: AgentConfigMutationInput,
+  event?: OrgScopedEvent,
+): Promise<AgentConfig> {
   const registryService = getRegistryService();
 
   // Fetch existing record to merge with
-  const existing = await registryService.getResource('agent', input.agentId);
+  const existing = await registryService.getResource("agent", input.agentId);
   if (!existing) {
     throw new Error(`Agent config not found: ${input.agentId}`);
   }
@@ -466,8 +533,8 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
     orgId?: string;
   }>(existing.customDescriptorContent ?? null, {
     categories: [],
-    icon: '',
-    state: 'active',
+    icon: "",
+    state: "active",
     appId: undefined,
     manifest: undefined,
     orgId: undefined,
@@ -475,7 +542,9 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
 
   // Merge config
   const newConfig = input.config
-    ? (typeof input.config === 'string' ? input.config : JSON.stringify(input.config))
+    ? typeof input.config === "string"
+      ? input.config
+      : JSON.stringify(input.config)
     : existing.description;
 
   // Parse the merged config to extract the agent's display name. Some legacy
@@ -485,20 +554,23 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
   // Activate / Deactivate button) has no input.config and must not blow up
   // on a malformed legacy description.
   let parsedNewConfig: Record<string, unknown> = {};
-  if (newConfig && typeof newConfig === 'string') {
+  if (newConfig && typeof newConfig === "string") {
     try {
       parsedNewConfig = JSON.parse(newConfig);
     } catch {
       parsedNewConfig = {};
     }
-  } else if (newConfig && typeof newConfig === 'object') {
+  } else if (newConfig && typeof newConfig === "object") {
     parsedNewConfig = newConfig;
   }
 
   // Preserve existing orgId; fall back to caller for legacy records.
   // Never derive orgId from input — that field is backend-owned.
-  const preservedOrgId = existingMeta.orgId
-    ?? (event !== undefined ? (await extractOrgFromEvent(event)) ?? undefined : undefined);
+  const preservedOrgId =
+    existingMeta.orgId ??
+    (event !== undefined
+      ? ((await extractOrgFromEvent(event)) ?? undefined)
+      : undefined);
 
   // Desired Registry status computed up-front: the lazy trust-path attestation
   // below only fires on the APPROVED (activation) transition, and the gate
@@ -525,7 +597,9 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
     origin: undefined,
   });
 
-  let importAttestationToPersist: GovernanceAttestationWithTrustPath | undefined;
+  let importAttestationToPersist:
+    | GovernanceAttestationWithTrustPath
+    | undefined;
   let gateContentOverride: string | undefined;
   const existingAttestation = importView.governanceAttestation;
   const invocationRoleArn = importView.invocation?.roleArn;
@@ -534,8 +608,8 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
     desiredRegistryStatus === RegistryRecordStatusValues.APPROVED &&
     desiredRegistryStatus !== existing.status &&
     existingAttestation &&
-    existingAttestation.status === 'pending' &&
-    typeof invocationRoleArn === 'string' &&
+    existingAttestation.status === "pending" &&
+    typeof invocationRoleArn === "string" &&
     invocationRoleArn.length > 0
   ) {
     // Phase-2 cross-account awareness. When invocation.roleArn lives in a
@@ -558,7 +632,7 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
       // and the temporary credentials never reach this scope (the helper
       // encapsulates them) so they cannot be logged.
       const analysisRoleArn = importView.invocation?.analysisRoleArn;
-      if (typeof analysisRoleArn === 'string' && analysisRoleArn.length > 0) {
+      if (typeof analysisRoleArn === "string" && analysisRoleArn.length > 0) {
         try {
           const crossAccountIamClient = await assumeAnalysisRoleClient(
             analysisRoleArn,
@@ -576,8 +650,8 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
           importAttestationToPersist = tp.clean
             ? {
                 ...existingAttestation,
-                status: 'attested',
-                attestedBy: 'system:trust-path',
+                status: "attested",
+                attestedBy: "system:trust-path",
                 attestedAt: summary.checkedAt,
                 trustPath: summary,
               }
@@ -596,10 +670,13 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
             clean: false,
             crossAccount: true,
             findings: [
-              'cross-account analysis-role assume failed; manual attestation required',
+              "cross-account analysis-role assume failed; manual attestation required",
             ],
           };
-          importAttestationToPersist = { ...existingAttestation, trustPath: summary };
+          importAttestationToPersist = {
+            ...existingAttestation,
+            trustPath: summary,
+          };
         }
       } else {
         const summary: TrustPathAttestationSummary = {
@@ -607,10 +684,13 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
           clean: false,
           crossAccount: true,
           findings: [
-            'cross-account-role: automated trust-path unavailable; manual attestation required',
+            "cross-account-role: automated trust-path unavailable; manual attestation required",
           ],
         };
-        importAttestationToPersist = { ...existingAttestation, trustPath: summary };
+        importAttestationToPersist = {
+          ...existingAttestation,
+          trustPath: summary,
+        };
       }
     } else {
       try {
@@ -623,8 +703,8 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
         importAttestationToPersist = tp.clean
           ? {
               ...existingAttestation,
-              status: 'attested',
-              attestedBy: 'system:trust-path',
+              status: "attested",
+              attestedBy: "system:trust-path",
               attestedAt: summary.checkedAt,
               trustPath: summary,
             }
@@ -646,7 +726,10 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
   // attestation actually ran, so every non-imported / roleless / non-activation
   // update persists exactly the same metadata as before.
   const baseMeta = {
-    categories: input.categories !== undefined ? input.categories : existingMeta.categories,
+    categories:
+      input.categories !== undefined
+        ? input.categories
+        : existingMeta.categories,
     icon: input.icon !== undefined ? input.icon : existingMeta.icon,
     state: input.state || existingMeta.state,
     appId: input.appId !== undefined ? input.appId : existingMeta.appId,
@@ -669,7 +752,7 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
     gateContentOverride = updatedMeta;
   }
 
-  const record = await registryService.updateResource('agent', input.agentId, {
+  const record = await registryService.updateResource("agent", input.agentId, {
     name: (parsedNewConfig.name as string | undefined) || existing.name,
     description: newConfig,
     customMetadata: updatedMeta,
@@ -681,7 +764,11 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
   // to its 'active' default for records missing the field). The user-facing
   // state is derived from record.status via toInternalState, so that's what
   // must change for the toggle to actually take effect.
-  if (input.state && desiredRegistryStatus && desiredRegistryStatus !== existing.status) {
+  if (
+    input.state &&
+    desiredRegistryStatus &&
+    desiredRegistryStatus !== existing.status
+  ) {
     // Governance activation gate (US-IMP): runs ONLY on the APPROVED transition
     // for an imported, unattested record. A no-op for every other record and
     // transition, so all non-activation / non-imported update paths are
@@ -695,11 +782,15 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
         gateContentOverride ?? existing.customDescriptorContent ?? undefined,
       );
     }
-    await registryService.updateResourceStatus('agent', input.agentId, desiredRegistryStatus);
+    await registryService.updateResourceStatus(
+      "agent",
+      input.agentId,
+      desiredRegistryStatus,
+    );
     // Re-fetch after status transition so the returned state reflects the
     // post-SubmitForApproval record (PENDING_APPROVAL or APPROVED) rather
     // than the stale DRAFT/UPDATING snapshot from updateResource above.
-    const refreshed = await registryService.getResource('agent', input.agentId);
+    const refreshed = await registryService.getResource("agent", input.agentId);
     return registryService.mapToAgentConfig(refreshed ?? record);
   }
 
@@ -710,16 +801,18 @@ export async function updateAgentConfigRegistry(input: AgentConfigMutationInput,
  * Registry-backed delete: deletes the resource from the Registry.
  * Returns success/failure object matching the existing shape.
  */
-export async function deleteAgentConfigRegistry(agentId: string): Promise<{ success: boolean; message?: string }> {
+export async function deleteAgentConfigRegistry(
+  agentId: string,
+): Promise<{ success: boolean; message?: string }> {
   const registryService = getRegistryService();
   try {
-    await registryService.deleteResource('agent', agentId);
+    await registryService.deleteResource("agent", agentId);
     return {
       success: true,
       message: `Agent config ${agentId} deleted successfully`,
     };
   } catch (error) {
-    console.error('Error deleting agent config from Registry:', error);
+    console.error("Error deleting agent config from Registry:", error);
     return {
       success: false,
       message: `Failed to delete agent config: ${error}`,
@@ -732,25 +825,30 @@ export async function deleteAgentConfigRegistry(agentId: string): Promise<{ succ
  * existing record, updates custom metadata with the new manifest, and
  * calls updateResource. Returns the mapped AgentConfig.
  */
-export async function publishAgentManifestRegistry(agentId: string, manifestStr: string): Promise<AgentConfig> {
+export async function publishAgentManifestRegistry(
+  agentId: string,
+  manifestStr: string,
+): Promise<AgentConfig> {
   // Parse the AWSJSON manifest string
   let manifest: RawAgentManifest;
   try {
     manifest = JSON.parse(manifestStr);
   } catch {
-    throw new Error('Invalid manifest JSON: unable to parse');
+    throw new Error("Invalid manifest JSON: unable to parse");
   }
 
   // Validate required fields
   const validation = validateManifest(manifest);
   if (!validation.valid) {
-    throw new Error(`Manifest validation failed: ${validation.errors.join('; ')}`);
+    throw new Error(
+      `Manifest validation failed: ${validation.errors.join("; ")}`,
+    );
   }
 
   const registryService = getRegistryService();
 
   // Verify agent exists in Registry
-  const existing = await registryService.getResource('agent', agentId);
+  const existing = await registryService.getResource("agent", agentId);
   if (!existing) {
     throw new Error(`Agent config not found: ${agentId}`);
   }
@@ -765,8 +863,8 @@ export async function publishAgentManifestRegistry(agentId: string, manifestStr:
     orgId?: string;
   }>(existing.customDescriptorContent ?? null, {
     categories: [],
-    icon: '',
-    state: 'active',
+    icon: "",
+    state: "active",
     appId: undefined,
     manifest: undefined,
     orgId: undefined,
@@ -777,7 +875,7 @@ export async function publishAgentManifestRegistry(agentId: string, manifestStr:
     manifest,
   } as AgentCustomMetadata);
 
-  const record = await registryService.updateResource('agent', agentId, {
+  const record = await registryService.updateResource("agent", agentId, {
     name: existing.name,
     description: existing.description,
     customMetadata: updatedMeta,
@@ -790,9 +888,11 @@ export async function publishAgentManifestRegistry(agentId: string, manifestStr:
  * Searches for agent configs via Registry semantic search.
  * Returns results mapped to the AgentConfig GraphQL type.
  */
-async function searchAgentConfigsRegistry(query: string): Promise<AgentConfig[]> {
+async function searchAgentConfigsRegistry(
+  query: string,
+): Promise<AgentConfig[]> {
   const registryService = getRegistryService();
-  const records = await registryService.searchResources('agent', query);
+  const records = await registryService.searchResources("agent", query);
   return records.map((record) => registryService.mapToAgentConfig(record));
 }
 
@@ -809,11 +909,17 @@ export interface ActivateAgentsResult {
  * `undefined` rather than throwing — a single bad record must not abort the
  * whole bulk operation.
  */
-function extractSourceProjectId(customDescriptorContent: string | undefined): string | undefined {
+function extractSourceProjectId(
+  customDescriptorContent: string | undefined,
+): string | undefined {
   if (!customDescriptorContent) return undefined;
   try {
     const parsed = JSON.parse(customDescriptorContent);
-    if (parsed && typeof parsed === 'object' && typeof parsed.sourceProjectId === 'string') {
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.sourceProjectId === "string"
+    ) {
       return parsed.sourceProjectId;
     }
   } catch {
@@ -829,11 +935,14 @@ function extractSourceProjectId(customDescriptorContent: string | undefined): st
  * match — activation (below) and the intake resolver's app-binding path
  * (intakeCreateApp) both rely on it, so the two can never diverge.
  */
-export async function findProjectAgentRecords(projectId: string): Promise<RegistryRecord[]> {
+export async function findProjectAgentRecords(
+  projectId: string,
+): Promise<RegistryRecord[]> {
   const registryService = getRegistryService();
-  const records = await registryService.listResources('agent');
+  const records = await registryService.listResources("agent");
   return records.filter(
-    (record) => extractSourceProjectId(record.customDescriptorContent) === projectId,
+    (record) =>
+      extractSourceProjectId(record.customDescriptorContent) === projectId,
   );
 }
 
@@ -852,9 +961,15 @@ export async function findProjectAgentRecords(projectId: string): Promise<Regist
  * carry org-scoped fields) — only the agent name and error message are
  * logged.
  */
-export async function activateProjectAgents(projectId: string): Promise<ActivateAgentsResult> {
+export async function activateProjectAgents(
+  projectId: string,
+): Promise<ActivateAgentsResult> {
   const registryService = getRegistryService();
-  const result: ActivateAgentsResult = { activated: [], failed: [], alreadyActive: [] };
+  const result: ActivateAgentsResult = {
+    activated: [],
+    failed: [],
+    alreadyActive: [],
+  };
 
   const records = await findProjectAgentRecords(projectId);
   for (const record of records) {
@@ -875,7 +990,11 @@ export async function activateProjectAgents(projectId: string): Promise<Activate
         record.recordId,
         record.customDescriptorContent ?? undefined,
       );
-      await registryService.updateResourceStatus('agent', record.recordId, RegistryRecordStatusValues.APPROVED);
+      await registryService.updateResourceStatus(
+        "agent",
+        record.recordId,
+        RegistryRecordStatusValues.APPROVED,
+      );
       result.activated.push(name);
     } catch (err) {
       console.error(
@@ -892,15 +1011,18 @@ async function listAgentConfigs(): Promise<AgentConfig[]> {
   const result = await docClient.send(
     new ScanCommand({
       TableName: AGENT_CONFIG_TABLE,
-    })
+    }),
   );
 
-  return (result.Items || []).map(item => ({
+  return (result.Items || []).map((item) => ({
     agentId: item.agentId,
-    orgId: item.orgId || '',
+    orgId: item.orgId || "",
     // AWSJSON type expects a JSON string, so ensure it's stringified
-    config: typeof item.config === 'string' ? item.config : JSON.stringify(item.config),
-    state: item.state || 'active',
+    config:
+      typeof item.config === "string"
+        ? item.config
+        : JSON.stringify(item.config),
+    state: item.state || "active",
     categories: item.categories || [],
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
@@ -912,7 +1034,7 @@ async function getAgentConfig(agentId: string): Promise<AgentConfig | null> {
     new GetCommand({
       TableName: AGENT_CONFIG_TABLE,
       Key: { agentId },
-    })
+    }),
   );
 
   if (!result.Item) {
@@ -921,25 +1043,31 @@ async function getAgentConfig(agentId: string): Promise<AgentConfig | null> {
 
   return {
     agentId: result.Item.agentId,
-    orgId: result.Item.orgId || '',
+    orgId: result.Item.orgId || "",
     // AWSJSON type expects a JSON string, so ensure it's stringified
-    config: typeof result.Item.config === 'string' ? result.Item.config : JSON.stringify(result.Item.config),
-    state: result.Item.state || 'active',
+    config:
+      typeof result.Item.config === "string"
+        ? result.Item.config
+        : JSON.stringify(result.Item.config),
+    state: result.Item.state || "active",
     categories: result.Item.categories || [],
     createdAt: result.Item.createdAt,
     updatedAt: result.Item.updatedAt,
   };
 }
 
-async function createAgentConfig(input: AgentConfigMutationInput): Promise<AgentConfig> {
+async function createAgentConfig(
+  input: AgentConfigMutationInput,
+): Promise<AgentConfig> {
   const now = new Date().toISOString();
-  const config = typeof input.config === 'string' ? JSON.parse(input.config) : input.config;
+  const config =
+    typeof input.config === "string" ? JSON.parse(input.config) : input.config;
 
   const agentConfig: AgentConfig = {
     agentId: input.agentId,
-    orgId: '',
+    orgId: "",
     config,
-    state: input.state || 'active',
+    state: input.state || "active",
     categories: input.categories || [],
     createdAt: now,
     updatedAt: now,
@@ -949,7 +1077,7 @@ async function createAgentConfig(input: AgentConfigMutationInput): Promise<Agent
     new PutCommand({
       TableName: AGENT_CONFIG_TABLE,
       Item: agentConfig,
-    })
+    }),
   );
 
   return {
@@ -958,7 +1086,9 @@ async function createAgentConfig(input: AgentConfigMutationInput): Promise<Agent
   };
 }
 
-async function updateAgentConfig(input: AgentConfigMutationInput): Promise<AgentConfig> {
+async function updateAgentConfig(
+  input: AgentConfigMutationInput,
+): Promise<AgentConfig> {
   const existing = await getAgentConfig(input.agentId);
   if (!existing) {
     throw new Error(`Agent config not found: ${input.agentId}`);
@@ -967,23 +1097,37 @@ async function updateAgentConfig(input: AgentConfigMutationInput): Promise<Agent
   const now = new Date().toISOString();
   // Defensive: legacy DynamoDB rows may have non-JSON `config` strings.
   const existingConfig = (() => {
-    if (typeof existing.config !== 'string') return existing.config ?? {};
-    try { return JSON.parse(existing.config); } catch { return {}; }
+    if (typeof existing.config !== "string") return existing.config ?? {};
+    try {
+      return JSON.parse(existing.config);
+    } catch {
+      return {};
+    }
   })();
-  const newConfig = input.config 
-    ? (typeof input.config === 'string' ? (() => { try { return JSON.parse(input.config); } catch { return {}; } })() : input.config)
+  const newConfig = input.config
+    ? typeof input.config === "string"
+      ? (() => {
+          try {
+            return JSON.parse(input.config);
+          } catch {
+            return {};
+          }
+        })()
+      : input.config
     : existingConfig;
 
   // D-02: Optimistic locking — increment version and use conditional write
-  const currentVersion = (existing as AgentConfig & { version?: number }).version || 0;
+  const currentVersion =
+    (existing as AgentConfig & { version?: number }).version || 0;
   const nextVersion = currentVersion + 1;
 
   const updatedConfig: AgentConfig = {
     agentId: input.agentId,
-    orgId: existing.orgId || '',
+    orgId: existing.orgId || "",
     config: newConfig,
     state: input.state || existing.state,
-    categories: input.categories !== undefined ? input.categories : existing.categories,
+    categories:
+      input.categories !== undefined ? input.categories : existing.categories,
     createdAt: existing.createdAt,
     updatedAt: now,
   };
@@ -993,17 +1137,23 @@ async function updateAgentConfig(input: AgentConfigMutationInput): Promise<Agent
       new PutCommand({
         TableName: AGENT_CONFIG_TABLE,
         Item: { ...updatedConfig, version: nextVersion },
-        ConditionExpression: currentVersion === 0
-          ? 'attribute_not_exists(version) OR version = :currentVersion'
-          : 'version = :currentVersion',
+        ConditionExpression:
+          currentVersion === 0
+            ? "attribute_not_exists(version) OR version = :currentVersion"
+            : "version = :currentVersion",
         ExpressionAttributeValues: {
-          ':currentVersion': currentVersion,
+          ":currentVersion": currentVersion,
         },
-      })
+      }),
     );
   } catch (error: unknown) {
-    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
-      throw new Error(`Conflict: agent config ${input.agentId} was modified concurrently. Please retry.`);
+    if (
+      error instanceof Error &&
+      error.name === "ConditionalCheckFailedException"
+    ) {
+      throw new Error(
+        `Conflict: agent config ${input.agentId} was modified concurrently. Please retry.`,
+      );
     }
     throw error;
   }
@@ -1014,13 +1164,15 @@ async function updateAgentConfig(input: AgentConfigMutationInput): Promise<Agent
   };
 }
 
-async function deleteAgentConfig(agentId: string): Promise<{ success: boolean; message?: string }> {
+async function deleteAgentConfig(
+  agentId: string,
+): Promise<{ success: boolean; message?: string }> {
   try {
     await docClient.send(
       new DeleteCommand({
         TableName: AGENT_CONFIG_TABLE,
         Key: { agentId },
-      })
+      }),
     );
 
     return {
@@ -1028,7 +1180,7 @@ async function deleteAgentConfig(agentId: string): Promise<{ success: boolean; m
       message: `Agent config ${agentId} deleted successfully`,
     };
   } catch (error) {
-    console.error('Error deleting agent config:', error);
+    console.error("Error deleting agent config:", error);
     return {
       success: false,
       message: `Failed to delete agent config: ${error}`,
@@ -1036,20 +1188,25 @@ async function deleteAgentConfig(agentId: string): Promise<{ success: boolean; m
   }
 }
 
-
 // ─── Manifest Validation ─────────────────────────────────────
 
-export function validateManifest(manifest: RawAgentManifest): { valid: boolean; errors: string[] } {
+export function validateManifest(manifest: RawAgentManifest): {
+  valid: boolean;
+  errors: string[];
+} {
   const errors: string[] = [];
 
-  if (typeof manifest.name !== 'string' || manifest.name.trim() === '') {
-    errors.push('name is required and must be a non-empty string');
+  if (typeof manifest.name !== "string" || manifest.name.trim() === "") {
+    errors.push("name is required and must be a non-empty string");
   }
-  if (typeof manifest.description !== 'string' || manifest.description.trim() === '') {
-    errors.push('description is required and must be a non-empty string');
+  if (
+    typeof manifest.description !== "string" ||
+    manifest.description.trim() === ""
+  ) {
+    errors.push("description is required and must be a non-empty string");
   }
-  if (typeof manifest.version !== 'string' || manifest.version.trim() === '') {
-    errors.push('version is required and must be a non-empty string');
+  if (typeof manifest.version !== "string" || manifest.version.trim() === "") {
+    errors.push("version is required and must be a non-empty string");
   }
 
   return { valid: errors.length === 0, errors };
@@ -1063,20 +1220,20 @@ export function validateManifest(manifest: RawAgentManifest): { valid: boolean; 
  * list stays in lock-step with the union in registry-service.ts.
  */
 const IMPORT_INVOCATION_PROTOCOLS: readonly AgentInvocationProtocol[] = [
-  'AGENTCORE_RUNTIME',
-  'BEDROCK_AGENT',
-  'LAMBDA_INVOKE',
-  'HTTP_ENDPOINT',
-  'MCP',
-  'A2A',
-  'STEP_FUNCTIONS',
-  'SAGEMAKER_ENDPOINT',
-  'SQS_ASYNC',
+  "AGENTCORE_RUNTIME",
+  "BEDROCK_AGENT",
+  "LAMBDA_INVOKE",
+  "HTTP_ENDPOINT",
+  "MCP",
+  "A2A",
+  "STEP_FUNCTIONS",
+  "SAGEMAKER_ENDPOINT",
+  "SQS_ASYNC",
 ];
 
 /** Narrowing helper: true when `value` is a non-null, non-array object. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -1093,31 +1250,34 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * callers (and the UI) can pinpoint exactly what is wrong. Accepts `unknown`
  * and narrows internally — never throws on malformed input.
  */
-export function validateImportDescriptor(
-  descriptor: unknown,
-): { valid: boolean; errors: string[] } {
+export function validateImportDescriptor(descriptor: unknown): {
+  valid: boolean;
+  errors: string[];
+} {
   const errors: string[] = [];
 
   const root = isPlainObject(descriptor) ? descriptor : {};
-  const invocation = isPlainObject(root.invocation) ? root.invocation : undefined;
+  const invocation = isPlainObject(root.invocation)
+    ? root.invocation
+    : undefined;
   const origin = isPlainObject(root.origin) ? root.origin : undefined;
 
   const protocol = invocation?.protocol;
   if (
-    typeof protocol !== 'string' ||
+    typeof protocol !== "string" ||
     !IMPORT_INVOCATION_PROTOCOLS.includes(protocol as AgentInvocationProtocol)
   ) {
     errors.push(
-      `invocation.protocol is required and must be one of: ${IMPORT_INVOCATION_PROTOCOLS.join(', ')}`,
+      `invocation.protocol is required and must be one of: ${IMPORT_INVOCATION_PROTOCOLS.join(", ")}`,
     );
   }
 
   const target = invocation?.target;
-  if (typeof target !== 'string' || target.trim() === '') {
-    errors.push('invocation.target is required and must be a non-empty string');
+  if (typeof target !== "string" || target.trim() === "") {
+    errors.push("invocation.target is required and must be a non-empty string");
   }
 
-  if (origin?.ownership !== 'external') {
+  if (origin?.ownership !== "external") {
     errors.push("origin.ownership is required and must be 'external'");
   }
 
@@ -1126,19 +1286,24 @@ export function validateImportDescriptor(
 
 // ─── Publish Agent Manifest ──────────────────────────────────
 
-async function publishAgentManifest(agentId: string, manifestStr: string): Promise<unknown> {
+async function publishAgentManifest(
+  agentId: string,
+  manifestStr: string,
+): Promise<unknown> {
   // Parse the AWSJSON manifest string
   let manifest: RawAgentManifest;
   try {
     manifest = JSON.parse(manifestStr);
   } catch {
-    throw new Error('Invalid manifest JSON: unable to parse');
+    throw new Error("Invalid manifest JSON: unable to parse");
   }
 
   // Validate required fields
   const validation = validateManifest(manifest);
   if (!validation.valid) {
-    throw new Error(`Manifest validation failed: ${validation.errors.join('; ')}`);
+    throw new Error(
+      `Manifest validation failed: ${validation.errors.join("; ")}`,
+    );
   }
 
   // Verify agent exists
@@ -1146,7 +1311,7 @@ async function publishAgentManifest(agentId: string, manifestStr: string): Promi
     new GetCommand({
       TableName: AGENT_CONFIG_TABLE,
       Key: { agentId },
-    })
+    }),
   );
 
   if (!existing.Item) {
@@ -1159,25 +1324,28 @@ async function publishAgentManifest(agentId: string, manifestStr: string): Promi
     new UpdateCommand({
       TableName: AGENT_CONFIG_TABLE,
       Key: { agentId },
-      UpdateExpression: 'SET #manifest = :manifest, #updatedAt = :updatedAt',
+      UpdateExpression: "SET #manifest = :manifest, #updatedAt = :updatedAt",
       ExpressionAttributeNames: {
-        '#manifest': 'manifest',
-        '#updatedAt': 'updatedAt',
+        "#manifest": "manifest",
+        "#updatedAt": "updatedAt",
       },
       ExpressionAttributeValues: {
-        ':manifest': manifest,
-        ':updatedAt': now,
+        ":manifest": manifest,
+        ":updatedAt": now,
       },
-      ReturnValues: 'ALL_NEW',
-    })
+      ReturnValues: "ALL_NEW",
+    }),
   );
 
   const item = result.Attributes!;
   return {
     agentId: item.agentId,
-    orgId: item.orgId || '',
-    config: typeof item.config === 'string' ? item.config : JSON.stringify(item.config),
-    state: item.state || 'active',
+    orgId: item.orgId || "",
+    config:
+      typeof item.config === "string"
+        ? item.config
+        : JSON.stringify(item.config),
+    state: item.state || "active",
     categories: item.categories || [],
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,

@@ -10,22 +10,22 @@ import * as kms from "aws-cdk-lib/aws-kms";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
-import * as appsync from '@aws-cdk/aws-appsync-alpha';
+import * as appsync from "@aws-cdk/aws-appsync-alpha";
 // Cfn L1 AppSync constructs — used cross-stack to attach a data source +
 // resolvers to BackendStack's GraphQL API without creating those resources
 // in BackendStack (which would force a stack dependency cycle, since the
 // governance ledger table is owned here in ArbiterStack). Same pattern as
 // governance-stack.ts.
-import { aws_appsync as appsyncCfn } from 'aws-cdk-lib';
-import { PythonFunction } from '@aws-cdk/aws-lambda-python-alpha';
-import { PolicyStatement, Effect } from 'aws-cdk-lib/aws-iam';
-import { Queue } from 'aws-cdk-lib/aws-sqs';
-import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
-import { BlockPublicAccess, Bucket } from 'aws-cdk-lib/aws-s3';
+import { aws_appsync as appsyncCfn } from "aws-cdk-lib";
+import { PythonFunction } from "@aws-cdk/aws-lambda-python-alpha";
+import { PolicyStatement, Effect } from "aws-cdk-lib/aws-iam";
+import { Queue } from "aws-cdk-lib/aws-sqs";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
+import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
-import { NagSuppressions } from 'cdk-nag';
-import path = require('path');
-import * as fs from 'fs';
+import { NagSuppressions } from "cdk-nag";
+import path = require("path");
+import * as fs from "fs";
 
 // Resolve the repo-root `arbiter/` directory regardless of whether this
 // module is loaded from source (`backend/lib/`) via ts-jest or from the
@@ -36,17 +36,17 @@ import * as fs from 'fs';
 // stub `index.py` files and must NOT be selected.
 function resolveArbiterRoot(startDir: string): string {
   const candidates = [
-    path.join(startDir, '..', '..', 'arbiter'),           // source: backend/lib/ -> repo/arbiter
-    path.join(startDir, '..', '..', '..', 'arbiter'),     // dist:   backend/dist/lib/ -> repo/arbiter
+    path.join(startDir, "..", "..", "arbiter"), // source: backend/lib/ -> repo/arbiter
+    path.join(startDir, "..", "..", "..", "arbiter"), // dist:   backend/dist/lib/ -> repo/arbiter
   ];
   for (const candidate of candidates) {
-    if (fs.existsSync(path.join(candidate, 'catalog'))) {
+    if (fs.existsSync(path.join(candidate, "catalog"))) {
       return candidate;
     }
   }
   throw new Error(
     `Unable to locate repo-root arbiter/ directory from ${startDir}. ` +
-    `Tried: ${candidates.join(', ')}`,
+      `Tried: ${candidates.join(", ")}`,
   );
 }
 const ARBITER_ROOT = resolveArbiterRoot(__dirname);
@@ -115,49 +115,81 @@ export class ArbiterStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ArbiterStackProps) {
     super(scope, id, props);
 
-    this.orchestrationTable = new dynamodb.Table(this, 'OrchestrationTable', {
-          tableName: `citadel-agent-orchestration-${props.environment}`,
-          partitionKey: { name: 'orchestrationId', type: dynamodb.AttributeType.STRING },
-          billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-          pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-        });
+    this.orchestrationTable = new dynamodb.Table(this, "OrchestrationTable", {
+      tableName: `citadel-agent-orchestration-${props.environment}`,
+      partitionKey: {
+        name: "orchestrationId",
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
 
-    const workerStateTable = new dynamodb.Table(this, 'WorkerStateTable', {
-          tableName: `citadel-worker-state-${props.environment}`,
-          partitionKey: { name: 'requestId', type: dynamodb.AttributeType.STRING },
-          billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-          pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-        });
+    const workerStateTable = new dynamodb.Table(this, "WorkerStateTable", {
+      tableName: `citadel-worker-state-${props.environment}`,
+      partitionKey: { name: "requestId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
 
     // Shared layer for arbiter root packages so all arbiter PythonFunctions
     // can `from catalog.registry_client import ...` and `from common.region
     // import ...`. The layer structures catalog/ at /opt/python/catalog/ and
     // common/ at /opt/python/common/ per the Python Lambda layer convention.
-    const catalogLayer = new lambda.LayerVersion(this, 'ArbiterCatalogLayer', {
+    const catalogLayer = new lambda.LayerVersion(this, "ArbiterCatalogLayer", {
       layerVersionName: `citadel-arbiter-catalog-${props.environment}`,
       code: lambda.Code.fromAsset(ARBITER_ROOT, {
         bundling: {
           image: lambda.Runtime.PYTHON_3_14.bundlingImage,
           command: [
-            'bash', '-c',
-            'mkdir -p /asset-output/python && cp -r /asset-input/catalog /asset-output/python/catalog && cp -r /asset-input/common /asset-output/python/common',
+            "bash",
+            "-c",
+            "mkdir -p /asset-output/python && cp -r /asset-input/catalog /asset-output/python/catalog && cp -r /asset-input/common /asset-output/python/common",
           ],
         },
       }),
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_14],
       description:
-        'Shared arbiter Python packages (catalog: registry_client and utilities; ' +
-        'common: cross-region prefix helper).',
+        "Shared arbiter Python packages (catalog: registry_client and utilities; " +
+        "common: cross-region prefix helper).",
     });
 
-    const supervisorLambda = new PythonFunction(this, 'SupervisorAgent', {
+    const supervisorLambda = new PythonFunction(this, "SupervisorAgent", {
       runtime: lambda.Runtime.PYTHON_3_14,
-      entry: path.join(ARBITER_ROOT, 'supervisor'),
-      handler: 'handler',
+      // Widened to the arbiter/ root (rather than arbiter/supervisor/) so
+      // the governance package and the common package — both siblings of
+      // supervisor/ that `_load_governance_package()` and the
+      // `from common.region import ...` line in arbiter/supervisor/index.py
+      // resolve at runtime — are inside the bundling container's mounted
+      // input dir and can be included in the asset directly. A prior
+      // commandHooks.afterBundling approach tried to `cp -r
+      // ${inputDir}/../governance` post-bundling, but only `entry` itself is
+      // mounted into the Docker/Finch bundling container, so `../governance`
+      // never existed there and every synth failed with
+      // FailedToBundleAsset. assetExcludes below strips everything under
+      // arbiter/ that the supervisor does not need at runtime, while
+      // keeping supervisor/, governance/, and common/.
+      entry: ARBITER_ROOT,
+      index: "supervisor/index.py",
+      handler: "handler",
       layers: [catalogLayer],
-      bundling: { assetHashType: cdk.AssetHashType.SOURCE },
+      bundling: {
+        assetHashType: cdk.AssetHashType.SOURCE,
+        assetExcludes: [
+          "fabricator",
+          "stepRunner",
+          "workerWrapper",
+          "activator",
+          "seedConfig",
+          "catalog",
+          "__tests__",
+          "__pycache__",
+          "conftest.py",
+          "*.md",
+        ],
+      },
       timeout: cdk.Duration.seconds(30),
       memorySize: 1024,
       environment: {
@@ -171,15 +203,18 @@ export class ArbiterStack extends cdk.Stack {
         // its previous default on any miss.
         MODEL_CONFIG_TABLE: `citadel-model-config-${props.environment}`,
         MODEL_CATALOG_TABLE: `citadel-model-catalog-${props.environment}`,
-        CODE_VERSION: '2', // Force Lambda code update
+        CODE_VERSION: "2", // Force Lambda code update
         ...(props.appsTable && { APPS_TABLE: props.appsTable.tableName }),
         ...(props.registryId && { REGISTRY_ID: props.registryId }),
-        ...(props.registryId && { REGISTRY_ENABLED: 'true' }),
+        ...(props.registryId && { REGISTRY_ENABLED: "true" }),
       },
       initialPolicy: [
         new PolicyStatement({
           effect: Effect.ALLOW,
-          actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+          actions: [
+            "bedrock:InvokeModel",
+            "bedrock:InvokeModelWithResponseStream",
+          ],
           resources: [
             `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
             `arn:aws:bedrock:*::foundation-model/amazon.*`,
@@ -203,8 +238,16 @@ export class ArbiterStack extends cdk.Stack {
     // default. Least privilege: grantReadData only — the supervisor never
     // writes these tables. Referenced by deterministic name via fromTableName
     // (owned elsewhere) to avoid a cross-stack construct dependency.
-    const modelConfigTable = dynamodb.Table.fromTableName(this, 'SupervisorModelConfigTableRef', `citadel-model-config-${props.environment}`);
-    const modelCatalogTable = dynamodb.Table.fromTableName(this, 'SupervisorModelCatalogTableRef', `citadel-model-catalog-${props.environment}`);
+    const modelConfigTable = dynamodb.Table.fromTableName(
+      this,
+      "SupervisorModelConfigTableRef",
+      `citadel-model-config-${props.environment}`,
+    );
+    const modelCatalogTable = dynamodb.Table.fromTableName(
+      this,
+      "SupervisorModelCatalogTableRef",
+      `citadel-model-catalog-${props.environment}`,
+    );
     modelConfigTable.grantReadData(supervisorLambda);
     modelCatalogTable.grantReadData(supervisorLambda);
 
@@ -216,8 +259,8 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
-            'bedrock-agentcore:GetRegistryRecord',
-            'bedrock-agentcore:ListRegistryRecords',
+            "bedrock-agentcore:GetRegistryRecord",
+            "bedrock-agentcore:ListRegistryRecords",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),
@@ -226,17 +269,17 @@ export class ArbiterStack extends cdk.Stack {
 
     // SQS permissions are granted below after queue creation (see workerAgentQueue / fabricatorQueue grants)
 
-    const taskRequestRule = new events.Rule(this, 'TaskRequestRule', {
+    const taskRequestRule = new events.Rule(this, "TaskRequestRule", {
       eventBus: props.agentEventBus,
       eventPattern: {
-        source: ['task.request'],
+        source: ["task.request"],
       },
     });
 
-    const completionRule = new events.Rule(this, 'TaskCompletionRule', {
+    const completionRule = new events.Rule(this, "TaskCompletionRule", {
       eventBus: props.agentEventBus,
       eventPattern: {
-        source: ['task.completion'],
+        source: ["task.completion"],
       },
     });
 
@@ -245,98 +288,107 @@ export class ArbiterStack extends cdk.Stack {
 
     // Dead letter queue for failed worker messages
     const workerAgentDLQ = new Queue(this, `workerAgentDLQ`, {
-          queueName: `citadel-worker-agent-dlq-${props.environment}`,
-          retentionPeriod: cdk.Duration.days(14),
-          enforceSSL: true,
-        });
+      queueName: `citadel-worker-agent-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+    });
 
     const workerAgentQueue = new Queue(this, `workerAgentQueue`, {
-          queueName: `citadel-worker-agent-queue-${props.environment}`,
-          visibilityTimeout: cdk.Duration.minutes(15),
-          retentionPeriod: cdk.Duration.days(7),
-          enforceSSL: true,
-          deadLetterQueue: {
-            queue: workerAgentDLQ,
-            maxReceiveCount: 3, // Retry 3 times before sending to DLQ
-          },
-        });
+      queueName: `citadel-worker-agent-queue-${props.environment}`,
+      visibilityTimeout: cdk.Duration.minutes(15),
+      retentionPeriod: cdk.Duration.days(7),
+      enforceSSL: true,
+      deadLetterQueue: {
+        queue: workerAgentDLQ,
+        maxReceiveCount: 3, // Retry 3 times before sending to DLQ
+      },
+    });
 
     // Agent Credential Vender — lightweight TypeScript Lambda that
     // creates scoped IAM roles and returns temporary credentials
-    const credentialVenderLambda = new lambda.Function(this, 'AgentCredentialVender', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'agent-credential-vender.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 256,
-      environment: {
-        ENVIRONMENT: props.environment,
+    const credentialVenderLambda = new lambda.Function(
+      this,
+      "AgentCredentialVender",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "agent-credential-vender.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 256,
+        environment: {
+          ENVIRONMENT: props.environment,
+        },
+        initialPolicy: [
+          new PolicyStatement({
+            effect: Effect.ALLOW,
+            actions: [
+              "iam:CreateRole",
+              "iam:DeleteRole",
+              "iam:GetRole",
+              "iam:PutRolePolicy",
+              "iam:DeleteRolePolicy",
+              "iam:TagRole",
+            ],
+            resources: [`arn:aws:iam::${this.account}:role/citadel-agent-*`],
+          }),
+          new PolicyStatement({
+            effect: Effect.ALLOW,
+            actions: ["sts:AssumeRole"],
+            resources: [`arn:aws:iam::${this.account}:role/citadel-agent-*`],
+          }),
+          new PolicyStatement({
+            effect: Effect.ALLOW,
+            actions: ["sts:GetCallerIdentity"],
+            resources: ["*"],
+          }),
+        ],
       },
-      initialPolicy: [
-        new PolicyStatement({
-          effect: Effect.ALLOW,
-          actions: [
-            'iam:CreateRole',
-            'iam:DeleteRole',
-            'iam:GetRole',
-            'iam:PutRolePolicy',
-            'iam:DeleteRolePolicy',
-            'iam:TagRole',
-          ],
-          resources: [
-            `arn:aws:iam::${this.account}:role/citadel-agent-*`,
-          ],
-        }),
-        new PolicyStatement({
-                  effect: Effect.ALLOW,
-                  actions: ['sts:AssumeRole'],
-                  resources: [`arn:aws:iam::${this.account}:role/citadel-agent-*`],
-                }),
-                new PolicyStatement({
-                  effect: Effect.ALLOW,
-                  actions: ['sts:GetCallerIdentity'],
-                  resources: ['*'],
-                }),
-      ],
-    });
+    );
 
-    const workerAgentWrapperLambda = new PythonFunction(this, 'WorkerAgentWrapper', {
-      runtime: lambda.Runtime.PYTHON_3_14,
-      entry: path.join(ARBITER_ROOT, 'workerWrapper'),
-      handler: 'lambda_handler',
-      layers: [catalogLayer],
-      bundling: { assetHashType: cdk.AssetHashType.SOURCE },
-      timeout: cdk.Duration.minutes(15),
-      memorySize: 1024,
-      environment: {
-        COMPLETION_BUS_NAME: props.agentEventBus.eventBusName,
-        AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
-        AGENT_BUCKET_NAME: props.codeBucket.bucketName,
-        CREDENTIAL_VENDER_FUNCTION: credentialVenderLambda.functionName,
-        // QT3-6: dispatch-time spec status validation.
-        EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
-        ...(props.registryId && { REGISTRY_ID: props.registryId }),
-        ...(props.registryId && { REGISTRY_ENABLED: 'true' }),
+    const workerAgentWrapperLambda = new PythonFunction(
+      this,
+      "WorkerAgentWrapper",
+      {
+        runtime: lambda.Runtime.PYTHON_3_14,
+        entry: path.join(ARBITER_ROOT, "workerWrapper"),
+        handler: "lambda_handler",
+        layers: [catalogLayer],
+        bundling: { assetHashType: cdk.AssetHashType.SOURCE },
+        timeout: cdk.Duration.minutes(15),
+        memorySize: 1024,
+        environment: {
+          COMPLETION_BUS_NAME: props.agentEventBus.eventBusName,
+          AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+          AGENT_BUCKET_NAME: props.codeBucket.bucketName,
+          CREDENTIAL_VENDER_FUNCTION: credentialVenderLambda.functionName,
+          // QT3-6: dispatch-time spec status validation.
+          EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
+          ...(props.registryId && { REGISTRY_ID: props.registryId }),
+          ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+        },
+        initialPolicy: [
+          new PolicyStatement({
+            effect: Effect.ALLOW,
+            actions: [
+              "bedrock:InvokeModel",
+              "bedrock:InvokeModelWithResponseStream",
+            ],
+            // Scoped to the same foundation models + inference profiles the
+            // supervisor/fabricator are granted — never a blanket '*'. This keeps
+            // the worker role's residual AwsSolutions-IAM5 suppression (below)
+            // pointed ONLY at the unavoidable cloudwatch:PutMetricData /
+            // sts:GetCallerIdentity Resource::*, not at Bedrock. These scoped
+            // Bedrock ARNs are covered by the app-level IAM5 regex suppression
+            // (foundation-model/*, inference-profile/*).
+            resources: [
+              `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
+              `arn:aws:bedrock:*::foundation-model/amazon.*`,
+              `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
+            ],
+          }),
+        ],
       },
-      initialPolicy: [
-        new PolicyStatement({
-          effect: Effect.ALLOW,
-          actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-          // Scoped to the same foundation models + inference profiles the
-          // supervisor/fabricator are granted — never a blanket '*'. This keeps
-          // the worker role's residual AwsSolutions-IAM5 suppression (below)
-          // pointed ONLY at the unavoidable cloudwatch:PutMetricData /
-          // sts:GetCallerIdentity Resource::*, not at Bedrock. These scoped
-          // Bedrock ARNs are covered by the app-level IAM5 regex suppression
-          // (foundation-model/*, inference-profile/*).
-          resources: [
-            `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
-            `arn:aws:bedrock:*::foundation-model/amazon.*`,
-            `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
-          ],
-        }),
-      ],
-    });
+    );
 
     props.agentEventBus.grantPutEventsTo(workerAgentWrapperLambda);
     props.agentConfigTable.grantReadData(workerAgentWrapperLambda);
@@ -350,21 +402,23 @@ export class ArbiterStack extends cdk.Stack {
     // NodeFailure) into the Citadel/Workflows namespace after running each
     // workflow node. PutMetricData has no resource-level scoping; the call is
     // narrowed to that namespace in code.
-    workerAgentWrapperLambda.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['cloudwatch:PutMetricData'],
-      resources: ['*'],
-    }));
+    workerAgentWrapperLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
     NagSuppressions.addResourceSuppressions(
       workerAgentWrapperLambda.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'cloudwatch:PutMetricData has no resource-level scoping; the ' +
-            'worker narrows the call to the Citadel/Workflows namespace ' +
-            '(node duration/failure metrics).',
-          appliesTo: ['Resource::*'],
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "worker narrows the call to the Citadel/Workflows namespace " +
+            "(node duration/failure metrics).",
+          appliesTo: ["Resource::*"],
         },
       ],
       true,
@@ -375,34 +429,32 @@ export class ArbiterStack extends cdk.Stack {
       new PolicyStatement({
         effect: Effect.ALLOW,
         actions: [
-          'iam:CreateRole',
-          'iam:DeleteRole',
-          'iam:GetRole',
-          'iam:PutRolePolicy',
-          'iam:DeleteRolePolicy',
-          'iam:TagRole',
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:GetRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:TagRole",
         ],
-        resources: [
-          `arn:aws:iam::${this.account}:role/citadel-agent-*`,
-        ],
-      })
+        resources: [`arn:aws:iam::${this.account}:role/citadel-agent-*`],
+      }),
     );
 
     // Grant STS permissions for PolicyManager (agent scope)
     workerAgentWrapperLambda.addToRolePolicy(
-          new PolicyStatement({
-            effect: Effect.ALLOW,
-            actions: ['sts:AssumeRole'],
-            resources: [`arn:aws:iam::${this.account}:role/citadel-agent-*`],
-          })
-        );
-        workerAgentWrapperLambda.addToRolePolicy(
-          new PolicyStatement({
-            effect: Effect.ALLOW,
-            actions: ['sts:GetCallerIdentity'],
-            resources: ['*'],
-          })
-        );
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["sts:AssumeRole"],
+        resources: [`arn:aws:iam::${this.account}:role/citadel-agent-*`],
+      }),
+    );
+    workerAgentWrapperLambda.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["sts:GetCallerIdentity"],
+        resources: ["*"],
+      }),
+    );
 
     // Grant WorkerAgentWrapper read-only access to Registry APIs so it
     // can resolve agent/app identifiers at dispatch time. Full CRUD
@@ -412,63 +464,65 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
-            'bedrock-agentcore:GetRegistryRecord',
-            'bedrock-agentcore:ListRegistryRecords',
+            "bedrock-agentcore:GetRegistryRecord",
+            "bedrock-agentcore:ListRegistryRecords",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),
       );
     }
 
-    workerAgentWrapperLambda.addEventSource(new SqsEventSource(workerAgentQueue, {
-      batchSize: 1, // Process one message at a time
-      reportBatchItemFailures: true, // Enable partial batch responses
-    }));
+    workerAgentWrapperLambda.addEventSource(
+      new SqsEventSource(workerAgentQueue, {
+        batchSize: 1, // Process one message at a time
+        reportBatchItemFailures: true, // Enable partial batch responses
+      }),
+    );
 
-    const toolsConfigTable = new dynamodb.Table(this, 'ToolsConfigTable', {
-          tableName: `citadel-tools-${props.environment}`,
-          partitionKey: { name: 'toolId', type: dynamodb.AttributeType.STRING },
-          billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-          pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-        });
+    const toolsConfigTable = new dynamodb.Table(this, "ToolsConfigTable", {
+      tableName: `citadel-tools-${props.environment}`,
+      partitionKey: { name: "toolId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
 
     const fabricatorDLQ = new Queue(this, `fabricatorDLQ`, {
-          queueName: `citadel-fabricator-dlq-${props.environment}`,
-          retentionPeriod: cdk.Duration.days(14),
-          enforceSSL: true,
-        });
+      queueName: `citadel-fabricator-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+    });
 
-        const fabricatorQueue = new Queue(this, `fabricatorQueue`, {
-          queueName: `citadel-fabricator-queue-${props.environment}`,
-          // Reliability hardening: visibilityTimeout MUST strictly exceed the
-          // FabricatorAgent Lambda timeout (15 min, below). When they are
-          // equal, an invocation that runs near the function timeout causes
-          // SQS to redeliver the same message — stacking duplicate
-          // fabrications and prematurely draining the DLQ. AWS guidance for
-          // SQS->Lambda is visibilityTimeout >= 6x the function timeout to
-          // absorb retries/throttling, i.e. 6 x 15 min = 90 min. With
-          // batchSize=1 (see SqsEventSource below) each invocation handles a
-          // single fabrication (~11 min observed worst case), so the message
-          // is well within one visibility window. Tradeoff: a genuinely
-          // poison message takes up to maxReceiveCount(3) x 90 min before it
-          // lands in the DLQ — acceptable because real fabrication failures
-          // surface via the agent.fabrication.failed event and the
-          // FabricatorErrorAlarm, not via DLQ latency. Never set this equal
-          // to (or below) the function timeout.
-          visibilityTimeout: cdk.Duration.minutes(90),
-          retentionPeriod: cdk.Duration.days(7),
-          enforceSSL: true,
-          deadLetterQueue: {
-            queue: fabricatorDLQ,
-            maxReceiveCount: 3,
-          },
-        });
+    const fabricatorQueue = new Queue(this, `fabricatorQueue`, {
+      queueName: `citadel-fabricator-queue-${props.environment}`,
+      // Reliability hardening: visibilityTimeout MUST strictly exceed the
+      // FabricatorAgent Lambda timeout (15 min, below). When they are
+      // equal, an invocation that runs near the function timeout causes
+      // SQS to redeliver the same message — stacking duplicate
+      // fabrications and prematurely draining the DLQ. AWS guidance for
+      // SQS->Lambda is visibilityTimeout >= 6x the function timeout to
+      // absorb retries/throttling, i.e. 6 x 15 min = 90 min. With
+      // batchSize=1 (see SqsEventSource below) each invocation handles a
+      // single fabrication (~11 min observed worst case), so the message
+      // is well within one visibility window. Tradeoff: a genuinely
+      // poison message takes up to maxReceiveCount(3) x 90 min before it
+      // lands in the DLQ — acceptable because real fabrication failures
+      // surface via the agent.fabrication.failed event and the
+      // FabricatorErrorAlarm, not via DLQ latency. Never set this equal
+      // to (or below) the function timeout.
+      visibilityTimeout: cdk.Duration.minutes(90),
+      retentionPeriod: cdk.Duration.days(7),
+      enforceSSL: true,
+      deadLetterQueue: {
+        queue: fabricatorDLQ,
+        maxReceiveCount: 3,
+      },
+    });
 
-    const fabricatorLambda = new PythonFunction(this, 'FabricatorAgent', {
+    const fabricatorLambda = new PythonFunction(this, "FabricatorAgent", {
       runtime: lambda.Runtime.PYTHON_3_14,
-      entry: path.join(ARBITER_ROOT, 'fabricator'),
-      handler: 'lambda_handler',
+      entry: path.join(ARBITER_ROOT, "fabricator"),
+      handler: "lambda_handler",
       layers: [catalogLayer],
       bundling: { assetHashType: cdk.AssetHashType.SOURCE },
       // Platform max reached — Lambda's hard cap is 900s (15 min): verified
@@ -496,25 +550,29 @@ export class ArbiterStack extends cdk.Stack {
         // The consumer writes PROCESSING/COMPLETED/FAILED transitions. Empty
         // string keeps the write a no-op when the table isn't provisioned.
         FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
-        CODE_VERSION: '2', // Force Lambda code update
+        CODE_VERSION: "2", // Force Lambda code update
         // QT3-6: fabrication-time spec status validation.
         EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
         // fabrication-time design-assessment precondition.
         // Empty-string fallback keeps the gate's no-op path active when
         // the table is not provisioned in a given environment.
-        AGENT_DESIGN_ASSESSMENTS_TABLE: props.agentDesignAssessmentsTable?.tableName?? '',
+        AGENT_DESIGN_ASSESSMENTS_TABLE:
+          props.agentDesignAssessmentsTable?.tableName ?? "",
         // Phase 3 Step 2: enables the synchronous AppsTable #META mirror
         // write inside store_agent_config_registry. listApps reads from
         // AppsTable.OrgIndex, so without this env var fabricated agents
         // would only become visible after the reconciler runs.
         ...(props.appsTable && { APPS_TABLE: props.appsTable.tableName }),
         ...(props.registryId && { REGISTRY_ID: props.registryId }),
-        ...(props.registryId && { REGISTRY_ENABLED: 'true' }),
+        ...(props.registryId && { REGISTRY_ENABLED: "true" }),
       },
       initialPolicy: [
         new PolicyStatement({
           effect: Effect.ALLOW,
-          actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
+          actions: [
+            "bedrock:InvokeModel",
+            "bedrock:InvokeModelWithResponseStream",
+          ],
           resources: [
             `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
             `arn:aws:bedrock:*::foundation-model/amazon.*`,
@@ -541,8 +599,16 @@ export class ArbiterStack extends cdk.Stack {
     // name via fromTableName (owned elsewhere) to avoid a cross-stack
     // construct dependency. Construct ids are Fabricator-prefixed so they
     // don't collide with the supervisor's SupervisorModel*TableRef refs.
-    const fabricatorModelConfigTable = dynamodb.Table.fromTableName(this, 'FabricatorModelConfigTableRef', `citadel-model-config-${props.environment}`);
-    const fabricatorModelCatalogTable = dynamodb.Table.fromTableName(this, 'FabricatorModelCatalogTableRef', `citadel-model-catalog-${props.environment}`);
+    const fabricatorModelConfigTable = dynamodb.Table.fromTableName(
+      this,
+      "FabricatorModelConfigTableRef",
+      `citadel-model-config-${props.environment}`,
+    );
+    const fabricatorModelCatalogTable = dynamodb.Table.fromTableName(
+      this,
+      "FabricatorModelCatalogTableRef",
+      `citadel-model-catalog-${props.environment}`,
+    );
     fabricatorModelConfigTable.grantReadData(fabricatorLambda);
     fabricatorModelCatalogTable.grantReadData(fabricatorLambda);
 
@@ -552,11 +618,15 @@ export class ArbiterStack extends cdk.Stack {
     // the BackendStack table construct here would create a circular dependency
     // (ArbiterStack already depends ON ServicesStack which depends ON
     // BackendStack). Least privilege: PutItem + UpdateItem only.
-    fabricatorLambda.addToRolePolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
-      resources: [`arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-fabrication-jobs-${props.environment}`],
-    }));
+    fabricatorLambda.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
+        resources: [
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-fabrication-jobs-${props.environment}`,
+        ],
+      }),
+    );
 
     // Phase 3 Step 2: write-only grant on AppsTable so the fabricator can
     // synchronously mirror new Registry agent records into the #META row
@@ -580,13 +650,13 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
-            'bedrock-agentcore:CreateRegistryRecord',
-            'bedrock-agentcore:UpdateRegistryRecord',
-            'bedrock-agentcore:UpdateRegistryRecordStatus',
-            'bedrock-agentcore:SubmitRegistryRecordForApproval',
-            'bedrock-agentcore:DeleteRegistryRecord',
-            'bedrock-agentcore:GetRegistryRecord',
-            'bedrock-agentcore:ListRegistryRecords',
+            "bedrock-agentcore:CreateRegistryRecord",
+            "bedrock-agentcore:UpdateRegistryRecord",
+            "bedrock-agentcore:UpdateRegistryRecordStatus",
+            "bedrock-agentcore:SubmitRegistryRecordForApproval",
+            "bedrock-agentcore:DeleteRegistryRecord",
+            "bedrock-agentcore:GetRegistryRecord",
+            "bedrock-agentcore:ListRegistryRecords",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),
@@ -598,41 +668,49 @@ export class ArbiterStack extends cdk.Stack {
     // single invocation stack many agents and blow past the 15-min function
     // timeout, triggering redelivery + duplicate fabrication. One message per
     // invocation bounds the invocation to a single agent fabrication.
-    fabricatorLambda.addEventSource(new SqsEventSource(fabricatorQueue, { batchSize: 1 }));
+    fabricatorLambda.addEventSource(
+      new SqsEventSource(fabricatorQueue, { batchSize: 1 }),
+    );
 
     // Grant scoped SQS permissions to Supervisor (S-02 fix)
-    supervisorLambda.addToRolePolicy(new PolicyStatement({
-      effect: Effect.ALLOW,
-      actions: ['sqs:SendMessage', 'sqs:ReceiveMessage', 'sqs:DeleteMessage'],
-      resources: [workerAgentQueue.queueArn, fabricatorQueue.queueArn],
-    }));
+    supervisorLambda.addToRolePolicy(
+      new PolicyStatement({
+        effect: Effect.ALLOW,
+        actions: ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage"],
+        resources: [workerAgentQueue.queueArn, fabricatorQueue.queueArn],
+      }),
+    );
 
     // Seed initial agent configuration
-    const seedAgentConfigLambda = new lambda.Function(this, 'SeedAgentConfigFunction', {
-      runtime: lambda.Runtime.PYTHON_3_14,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'seedConfig')),
-      // Catalog layer so the seed can `from catalog.registry_client import
-      // list_agent_records` for the demo agent registry-record idempotency
-      // lookup (the seed degrades to DDB-only seeding when unavailable).
-      layers: [catalogLayer],
-      timeout: cdk.Duration.seconds(30),
-      environment: {
-        AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
-        WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
-        FABRICATOR_QUEUE_URL: fabricatorQueue.queueUrl,
-        // Lets the seed upload the runnable demo agent module to the code
-        // bucket so the seeded agent config's ``filename`` is reachable.
-        AGENT_BUCKET_NAME: props.codeBucket.bucketName,
-        // Dual-store agent seam: the seed also creates the demo agent's
-        // AgentCore Registry record (the app-publish readiness gate resolves
-        // agents by name in the registry). Same conditional pattern as the
-        // fabricator — unset in registry-less environments, where the seed
-        // logs and skips the registry write.
-        ...(props.registryId && { REGISTRY_ID: props.registryId }),
-        ...(props.registryId && { REGISTRY_ENABLED: 'true' }),
+    const seedAgentConfigLambda = new lambda.Function(
+      this,
+      "SeedAgentConfigFunction",
+      {
+        runtime: lambda.Runtime.PYTHON_3_14,
+        handler: "index.handler",
+        code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "seedConfig")),
+        // Catalog layer so the seed can `from catalog.registry_client import
+        // list_agent_records` for the demo agent registry-record idempotency
+        // lookup (the seed degrades to DDB-only seeding when unavailable).
+        layers: [catalogLayer],
+        timeout: cdk.Duration.seconds(30),
+        environment: {
+          AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+          WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
+          FABRICATOR_QUEUE_URL: fabricatorQueue.queueUrl,
+          // Lets the seed upload the runnable demo agent module to the code
+          // bucket so the seeded agent config's ``filename`` is reachable.
+          AGENT_BUCKET_NAME: props.codeBucket.bucketName,
+          // Dual-store agent seam: the seed also creates the demo agent's
+          // AgentCore Registry record (the app-publish readiness gate resolves
+          // agents by name in the registry). Same conditional pattern as the
+          // fabricator — unset in registry-less environments, where the seed
+          // logs and skips the registry write.
+          ...(props.registryId && { REGISTRY_ID: props.registryId }),
+          ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+        },
       },
-    });
+    );
 
     props.agentConfigTable.grantWriteData(seedAgentConfigLambda);
 
@@ -648,8 +726,8 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
-            'bedrock-agentcore:CreateRegistryRecord',
-            'bedrock-agentcore:ListRegistryRecords',
+            "bedrock-agentcore:CreateRegistryRecord",
+            "bedrock-agentcore:ListRegistryRecords",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),
@@ -662,14 +740,16 @@ export class ArbiterStack extends cdk.Stack {
         seedAgentConfigLambda.role!,
         [
           {
-            id: 'AwsSolutions-IAM5',
+            id: "AwsSolutions-IAM5",
             reason:
-              'AgentCore registry record create/list requires wildcard on ' +
-              'registry ARN sub-resources (records). Scoped to the specific ' +
-              'registry ARN; mirrors the registryArnSuppression applied to ' +
-              'the fabricator/supervisor roles in bin/app.ts.',
+              "AgentCore registry record create/list requires wildcard on " +
+              "registry ARN sub-resources (records). Scoped to the specific " +
+              "registry ARN; mirrors the registryArnSuppression applied to " +
+              "the fabricator/supervisor roles in bin/app.ts.",
             appliesTo: [
-              { regex: '/^Resource::<AgentCoreRegistry\\.RegistryArn>\\/\\*$/g' },
+              {
+                regex: "/^Resource::<AgentCoreRegistry\\.RegistryArn>\\/\\*$/g",
+              },
             ],
           },
         ],
@@ -680,7 +760,7 @@ export class ArbiterStack extends cdk.Stack {
     // deletes from the code bucket. Path-scoped to the agents/* object-key
     // prefix: the seed only writes agents/demo_echo_agent.py, so it never needs
     // write access anywhere else in the bucket.
-    props.codeBucket.grantPut(seedAgentConfigLambda, 'agents/*');
+    props.codeBucket.grantPut(seedAgentConfigLambda, "agents/*");
     // The agents/* object-key prefix is the residual (and unavoidable) S3
     // resource wildcard — you cannot PutObject without a key. The app-level
     // IAM5 suppression covers a bucket-wide <Arn>/* but not this narrower
@@ -691,13 +771,13 @@ export class ArbiterStack extends cdk.Stack {
       seedAgentConfigLambda.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'Seed S3 write is path-scoped to agents/* (writes only ' +
-            'agents/demo_echo_agent.py). The residual wildcard is the object-key ' +
-            'prefix inherent to any S3 PutObject; no bucket-wide or cross-prefix ' +
-            'write is granted.',
-          appliesTo: [{ regex: '/^Resource::<.+\\.Arn>\\/agents\\/\\*$/g' }],
+            "Seed S3 write is path-scoped to agents/* (writes only " +
+            "agents/demo_echo_agent.py). The residual wildcard is the object-key " +
+            "prefix inherent to any S3 PutObject; no bucket-wide or cross-prefix " +
+            "write is granted.",
+          appliesTo: [{ regex: "/^Resource::<.+\\.Arn>\\/agents\\/\\*$/g" }],
         },
       ],
       true,
@@ -708,13 +788,17 @@ export class ArbiterStack extends cdk.Stack {
     // Bumped Version v1.2.0 → v1.3.0 so the CFN Update event fires on the
     // next deploy and the demo agent's AgentCore Registry record is seeded
     // in existing environments (dual-store agent seam).
-    const seedAgentConfigResource = new cdk.CustomResource(this, 'SeedAgentConfigResource', {
-      serviceToken: seedAgentConfigLambda.functionArn,
-      properties: {
-        // O-05: Use content hash instead of Date.now() to avoid unnecessary re-runs
-        Version: 'v1.3.0',
+    const seedAgentConfigResource = new cdk.CustomResource(
+      this,
+      "SeedAgentConfigResource",
+      {
+        serviceToken: seedAgentConfigLambda.functionArn,
+        properties: {
+          // O-05: Use content hash instead of Date.now() to avoid unnecessary re-runs
+          Version: "v1.3.0",
+        },
       },
-    });
+    );
 
     // Ensure the Custom Resource runs after the table and queue are created
     seedAgentConfigResource.node.addDependency(props.agentConfigTable);
@@ -734,10 +818,10 @@ export class ArbiterStack extends cdk.Stack {
     // arrives; a ConditionalCheckFailed turns into statusCode 404 in the
     // handler. Duplicate events are idempotent by construction since
     // UpdateItem overwrites with the same attribute value.
-    const activatorLambda = new PythonFunction(this, 'ActivatorAgent', {
+    const activatorLambda = new PythonFunction(this, "ActivatorAgent", {
       runtime: lambda.Runtime.PYTHON_3_14,
-      entry: path.join(ARBITER_ROOT, 'activator'),
-      handler: 'handler',
+      entry: path.join(ARBITER_ROOT, "activator"),
+      handler: "handler",
       layers: [catalogLayer],
       bundling: { assetHashType: cdk.AssetHashType.SOURCE },
       timeout: cdk.Duration.seconds(30),
@@ -749,37 +833,45 @@ export class ArbiterStack extends cdk.Stack {
 
     props.agentConfigTable.grantReadWriteData(activatorLambda);
 
-    const agentActivateRule = new events.Rule(this, 'AgentActivateRule', {
+    const agentActivateRule = new events.Rule(this, "AgentActivateRule", {
       eventBus: props.agentEventBus,
-      eventPattern: { source: ['agent.activate'] },
+      eventPattern: { source: ["agent.activate"] },
     });
     agentActivateRule.addTarget(new targets.LambdaFunction(activatorLambda));
 
     // --- Step Runner Lambda (Task 1.6) ---
-    if (props.workflowsTable && props.executionsTable && props.appSyncEndpoint) {
-      const stepRunnerFunction = new lambda.Function(this, 'StepRunnerFunction', {
-        runtime: lambda.Runtime.PYTHON_3_14,
-        handler: 'index.handler',
-        code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'stepRunner')),
-        // Shared arbiter layer so `from common import workflow_contract`
-        // resolves at runtime (common/ is staged at /opt/python/common).
-        layers: [catalogLayer],
-        timeout: cdk.Duration.minutes(5),
-        memorySize: 1024,
-        environment: {
-          EXECUTIONS_TABLE: props.executionsTable.tableName,
-          WORKFLOWS_TABLE: props.workflowsTable.tableName,
-          AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
-          TOOLS_CONFIG_TABLE: toolsConfigTable.tableName,
-          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
-          APPSYNC_ENDPOINT: props.appSyncEndpoint,
-          // URL of the worker agent queue. The Step Runner dispatches a
-          // workflow node to the worker by sending a discriminated message to
-          // this SQS queue; the worker runs the agent and emits the node
-          // completed/failed events the rules below consume.
-          WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
+    if (
+      props.workflowsTable &&
+      props.executionsTable &&
+      props.appSyncEndpoint
+    ) {
+      const stepRunnerFunction = new lambda.Function(
+        this,
+        "StepRunnerFunction",
+        {
+          runtime: lambda.Runtime.PYTHON_3_14,
+          handler: "index.handler",
+          code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner")),
+          // Shared arbiter layer so `from common import workflow_contract`
+          // resolves at runtime (common/ is staged at /opt/python/common).
+          layers: [catalogLayer],
+          timeout: cdk.Duration.minutes(5),
+          memorySize: 1024,
+          environment: {
+            EXECUTIONS_TABLE: props.executionsTable.tableName,
+            WORKFLOWS_TABLE: props.workflowsTable.tableName,
+            AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+            TOOLS_CONFIG_TABLE: toolsConfigTable.tableName,
+            EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+            APPSYNC_ENDPOINT: props.appSyncEndpoint,
+            // URL of the worker agent queue. The Step Runner dispatches a
+            // workflow node to the worker by sending a discriminated message to
+            // this SQS queue; the worker runs the agent and emits the node
+            // completed/failed events the rules below consume.
+            WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
+          },
         },
-      });
+      );
 
       // Least-privilege IAM per design 8.2
       props.executionsTable.grantReadWriteData(stepRunnerFunction);
@@ -795,77 +887,105 @@ export class ArbiterStack extends cdk.Stack {
       // The Step Runner emits best-effort node-level metrics (NodeDurationMs /
       // NodeFailure) into the Citadel/Workflows namespace. PutMetricData has no
       // resource-level scoping; the call is narrowed to that namespace in code.
-      stepRunnerFunction.addToRolePolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['cloudwatch:PutMetricData'],
-        resources: ['*'],
-      }));
+      stepRunnerFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["cloudwatch:PutMetricData"],
+          resources: ["*"],
+        }),
+      );
       NagSuppressions.addResourceSuppressions(
         stepRunnerFunction.role!,
         [
           {
-            id: 'AwsSolutions-IAM5',
+            id: "AwsSolutions-IAM5",
             reason:
-              'cloudwatch:PutMetricData has no resource-level scoping; the ' +
-              'step runner narrows the call to the Citadel/Workflows namespace ' +
-              '(node duration/failure metrics).',
-            appliesTo: ['Resource::*'],
+              "cloudwatch:PutMetricData has no resource-level scoping; the " +
+              "step runner narrows the call to the Citadel/Workflows namespace " +
+              "(node duration/failure metrics).",
+            appliesTo: ["Resource::*"],
           },
         ],
         true,
       );
 
       // EventBridge rules targeting StepRunner
-      const stepRunnerStartRule = new events.Rule(this, 'StepRunnerStartRule', {
+      const stepRunnerStartRule = new events.Rule(this, "StepRunnerStartRule", {
         eventBus: props.agentEventBus,
         eventPattern: {
-          detailType: ['execution.start.requested'],
+          detailType: ["execution.start.requested"],
         },
       });
-      stepRunnerStartRule.addTarget(new targets.LambdaFunction(stepRunnerFunction));
+      stepRunnerStartRule.addTarget(
+        new targets.LambdaFunction(stepRunnerFunction),
+      );
 
-      const stepRunnerNodeCompletedRule = new events.Rule(this, 'StepRunnerNodeCompletedRule', {
-        eventBus: props.agentEventBus,
-        eventPattern: {
-          detailType: ['workflow.node.completed'],
+      const stepRunnerNodeCompletedRule = new events.Rule(
+        this,
+        "StepRunnerNodeCompletedRule",
+        {
+          eventBus: props.agentEventBus,
+          eventPattern: {
+            detailType: ["workflow.node.completed"],
+          },
         },
-      });
-      stepRunnerNodeCompletedRule.addTarget(new targets.LambdaFunction(stepRunnerFunction));
+      );
+      stepRunnerNodeCompletedRule.addTarget(
+        new targets.LambdaFunction(stepRunnerFunction),
+      );
 
-      const stepRunnerNodeFailedRule = new events.Rule(this, 'StepRunnerNodeFailedRule', {
-        eventBus: props.agentEventBus,
-        eventPattern: {
-          detailType: ['workflow.node.failed'],
+      const stepRunnerNodeFailedRule = new events.Rule(
+        this,
+        "StepRunnerNodeFailedRule",
+        {
+          eventBus: props.agentEventBus,
+          eventPattern: {
+            detailType: ["workflow.node.failed"],
+          },
         },
-      });
-      stepRunnerNodeFailedRule.addTarget(new targets.LambdaFunction(stepRunnerFunction));
+      );
+      stepRunnerNodeFailedRule.addTarget(
+        new targets.LambdaFunction(stepRunnerFunction),
+      );
 
-      const stepRunnerCancelRule = new events.Rule(this, 'StepRunnerCancelRule', {
-        eventBus: props.agentEventBus,
-        eventPattern: {
-          detailType: ['execution.cancel.requested'],
+      const stepRunnerCancelRule = new events.Rule(
+        this,
+        "StepRunnerCancelRule",
+        {
+          eventBus: props.agentEventBus,
+          eventPattern: {
+            detailType: ["execution.cancel.requested"],
+          },
         },
-      });
-      stepRunnerCancelRule.addTarget(new targets.LambdaFunction(stepRunnerFunction));
+      );
+      stepRunnerCancelRule.addTarget(
+        new targets.LambdaFunction(stepRunnerFunction),
+      );
 
       // WorkflowProgressFanoutRule — matches workflow.* events → FanoutFunction
       if (props.fanoutFunction) {
-        const workflowProgressFanoutRule = new events.Rule(this, 'WorkflowProgressFanoutRule', {
-          eventBus: props.agentEventBus,
-          eventPattern: {
-            source: ['citadel.workflows'],
-            detailType: [
-              'workflow.started',
-              'workflow.node.started',
-              'workflow.node.completed',
-              'workflow.node.failed',
-              'workflow.node.retrying',
-              'workflow.completed',
-              'workflow.failed',
-            ],
+        const workflowProgressFanoutRule = new events.Rule(
+          this,
+          "WorkflowProgressFanoutRule",
+          {
+            eventBus: props.agentEventBus,
+            eventPattern: {
+              source: ["citadel.workflows"],
+              detailType: [
+                "workflow.started",
+                "workflow.node.started",
+                "workflow.node.completed",
+                "workflow.node.failed",
+                "workflow.node.retrying",
+                "workflow.completed",
+                "workflow.failed",
+              ],
+            },
           },
-        });
-        workflowProgressFanoutRule.addTarget(new targets.LambdaFunction(props.fanoutFunction));
+        );
+        workflowProgressFanoutRule.addTarget(
+          new targets.LambdaFunction(props.fanoutFunction),
+        );
       }
 
       // --- Workflow Timeout Watchdog (self-contained) ---
@@ -874,21 +994,25 @@ export class ArbiterStack extends cdk.Stack {
       // module so the rest of the system reacts as it would to any terminal
       // failure. It shares the stepRunner asset but uses its own handler and
       // talks only to the executions table + event bus (no executor coupling).
-      const workflowTimeoutWatchdogFunction = new lambda.Function(this, 'WorkflowTimeoutWatchdogFunction', {
-        runtime: lambda.Runtime.PYTHON_3_14,
-        handler: 'timeout_watchdog.handler',
-        code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, 'stepRunner')),
-        layers: [catalogLayer],
-        timeout: cdk.Duration.minutes(2),
-        memorySize: 256,
-        environment: {
-          EXECUTIONS_TABLE: props.executionsTable.tableName,
-          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
-          // Executions still 'running' after this many seconds are considered
-          // stuck and failed by the sweep. Default 1 hour.
-          WORKFLOW_TIMEOUT_SECONDS: '3600',
+      const workflowTimeoutWatchdogFunction = new lambda.Function(
+        this,
+        "WorkflowTimeoutWatchdogFunction",
+        {
+          runtime: lambda.Runtime.PYTHON_3_14,
+          handler: "timeout_watchdog.handler",
+          code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner")),
+          layers: [catalogLayer],
+          timeout: cdk.Duration.minutes(2),
+          memorySize: 256,
+          environment: {
+            EXECUTIONS_TABLE: props.executionsTable.tableName,
+            EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+            // Executions still 'running' after this many seconds are considered
+            // stuck and failed by the sweep. Default 1 hour.
+            WORKFLOW_TIMEOUT_SECONDS: "3600",
+          },
         },
-      });
+      );
 
       // Least-privilege: the watchdog only Scans for running executions and
       // conditionally UpdateItems the stuck ones to failed (timeout_watchdog.py
@@ -897,39 +1021,47 @@ export class ArbiterStack extends cdk.Stack {
       // ARN rather than full read/write (grantReadWriteData). PutEvents on the
       // shared bus (workflow.failed) and PutMetricData for the best-effort
       // timeout metric (Citadel/Workflows namespace) follow below.
-      workflowTimeoutWatchdogFunction.addToRolePolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['dynamodb:Scan', 'dynamodb:UpdateItem'],
-        resources: [props.executionsTable.tableArn],
-      }));
+      workflowTimeoutWatchdogFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:Scan", "dynamodb:UpdateItem"],
+          resources: [props.executionsTable.tableArn],
+        }),
+      );
       props.agentEventBus.grantPutEventsTo(workflowTimeoutWatchdogFunction);
-      workflowTimeoutWatchdogFunction.addToRolePolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['cloudwatch:PutMetricData'],
-        resources: ['*'],
-      }));
+      workflowTimeoutWatchdogFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["cloudwatch:PutMetricData"],
+          resources: ["*"],
+        }),
+      );
       NagSuppressions.addResourceSuppressions(
         workflowTimeoutWatchdogFunction.role!,
         [
           {
-            id: 'AwsSolutions-IAM5',
+            id: "AwsSolutions-IAM5",
             reason:
-              'cloudwatch:PutMetricData has no resource-level scoping; the ' +
-              'workflow timeout watchdog narrows the call to the ' +
-              'Citadel/Workflows namespace.',
-            appliesTo: ['Resource::*'],
+              "cloudwatch:PutMetricData has no resource-level scoping; the " +
+              "workflow timeout watchdog narrows the call to the " +
+              "Citadel/Workflows namespace.",
+            appliesTo: ["Resource::*"],
           },
         ],
         true,
       );
 
       // Sweep every 5 minutes on an EventBridge schedule.
-      const workflowTimeoutWatchdogSchedule = new events.Rule(this, 'WorkflowTimeoutWatchdogSchedule', {
-        ruleName: `citadel-workflow-timeout-watchdog-${props.environment}`,
-        description:
-          'Periodically fails workflow executions stuck in the running state past their timeout.',
-        schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
-      });
+      const workflowTimeoutWatchdogSchedule = new events.Rule(
+        this,
+        "WorkflowTimeoutWatchdogSchedule",
+        {
+          ruleName: `citadel-workflow-timeout-watchdog-${props.environment}`,
+          description:
+            "Periodically fails workflow executions stuck in the running state past their timeout.",
+          schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+        },
+      );
       workflowTimeoutWatchdogSchedule.addTarget(
         new targets.LambdaFunction(workflowTimeoutWatchdogFunction),
       );
@@ -939,14 +1071,17 @@ export class ArbiterStack extends cdk.Stack {
       // Supervisor/Fabricator pattern: Errors metric, 5-minute period,
       // NOT_BREACHING, threshold 3 (the Step Runner is invoked on every
       // workflow lifecycle event, so a burst of errors is the signal).
-      new cloudwatch.Alarm(this, 'StepRunnerErrorAlarm', {
+      new cloudwatch.Alarm(this, "StepRunnerErrorAlarm", {
         alarmName: `citadel-step-runner-errors-${props.environment}`,
-        metric: stepRunnerFunction.metricErrors({ period: cdk.Duration.minutes(5) }),
+        metric: stepRunnerFunction.metricErrors({
+          period: cdk.Duration.minutes(5),
+        }),
         threshold: 3,
         evaluationPeriods: 1,
-        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-        alarmDescription: 'Step Runner Lambda error rate exceeded threshold',
+        alarmDescription: "Step Runner Lambda error rate exceeded threshold",
       });
 
       // Error-rate alarm for the workflow timeout watchdog. Threshold is 1
@@ -955,14 +1090,18 @@ export class ArbiterStack extends cdk.Stack {
       // period could never be reached and the alarm would be dead. A single
       // failed sweep means stuck executions aren't being reaped, which is
       // itself worth paging on. Same Errors metric / NOT_BREACHING pattern.
-      new cloudwatch.Alarm(this, 'WorkflowTimeoutWatchdogErrorAlarm', {
+      new cloudwatch.Alarm(this, "WorkflowTimeoutWatchdogErrorAlarm", {
         alarmName: `citadel-workflow-timeout-watchdog-errors-${props.environment}`,
-        metric: workflowTimeoutWatchdogFunction.metricErrors({ period: cdk.Duration.minutes(5) }),
+        metric: workflowTimeoutWatchdogFunction.metricErrors({
+          period: cdk.Duration.minutes(5),
+        }),
         threshold: 1,
         evaluationPeriods: 1,
-        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-        alarmDescription: 'Workflow timeout watchdog Lambda error rate exceeded threshold',
+        alarmDescription:
+          "Workflow timeout watchdog Lambda error rate exceeded threshold",
       });
     }
 
@@ -971,47 +1110,55 @@ export class ArbiterStack extends cdk.Stack {
     this.node.findAll().forEach((child) => {
       if (child instanceof lambda.Function || child instanceof PythonFunction) {
         const fn = child as lambda.Function;
-        fn.addEnvironment('POWERTOOLS_LOG_LEVEL', 'INFO');
-        fn.addEnvironment('POWERTOOLS_SERVICE_NAME', 'citadel');
+        fn.addEnvironment("POWERTOOLS_LOG_LEVEL", "INFO");
+        fn.addEnvironment("POWERTOOLS_SERVICE_NAME", "citadel");
         const cfnFunction = fn.node.defaultChild as lambda.CfnFunction;
-        if (cfnFunction &&!cfnFunction.tracingConfig) {
-          cfnFunction.addPropertyOverride('TracingConfig', { Mode: 'Active' });
+        if (cfnFunction && !cfnFunction.tracingConfig) {
+          cfnFunction.addPropertyOverride("TracingConfig", { Mode: "Active" });
         }
       }
     });
 
     // O-01: CloudWatch alarms for DLQ depth and critical Lambda errors
-    new cloudwatch.Alarm(this, 'WorkerDLQDepthAlarm', {
+    new cloudwatch.Alarm(this, "WorkerDLQDepthAlarm", {
       alarmName: `citadel-worker-dlq-depth-${props.environment}`,
       metric: workerAgentDLQ.metricApproximateNumberOfMessagesVisible({
         period: cdk.Duration.minutes(5),
       }),
       threshold: 1,
       evaluationPeriods: 1,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: 'Worker agent DLQ has messages — indicates failed processing',
+      alarmDescription:
+        "Worker agent DLQ has messages — indicates failed processing",
     });
 
-    new cloudwatch.Alarm(this, 'SupervisorErrorAlarm', {
+    new cloudwatch.Alarm(this, "SupervisorErrorAlarm", {
       alarmName: `citadel-supervisor-errors-${props.environment}`,
-      metric: supervisorLambda.metricErrors({ period: cdk.Duration.minutes(5) }),
+      metric: supervisorLambda.metricErrors({
+        period: cdk.Duration.minutes(5),
+      }),
       threshold: 3,
       evaluationPeriods: 1,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: 'Supervisor Lambda error rate exceeded threshold',
+      alarmDescription: "Supervisor Lambda error rate exceeded threshold",
     });
 
-    new cloudwatch.Alarm(this, 'FabricatorErrorAlarm', {
-          alarmName: `citadel-fabricator-errors-${props.environment}`,
-          metric: fabricatorLambda.metricErrors({ period: cdk.Duration.minutes(5) }),
-          threshold: 3,
-          evaluationPeriods: 1,
-          comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-          alarmDescription: 'Fabricator Lambda error rate exceeded threshold',
-        });
+    new cloudwatch.Alarm(this, "FabricatorErrorAlarm", {
+      alarmName: `citadel-fabricator-errors-${props.environment}`,
+      metric: fabricatorLambda.metricErrors({
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 3,
+      evaluationPeriods: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: "Fabricator Lambda error rate exceeded threshold",
+    });
 
     // Worker agent Lambda error-rate alarm (workflow dispatch path). Mirrors
     // the Supervisor/Fabricator pattern: Errors metric, 5-minute period,
@@ -1019,122 +1166,130 @@ export class ArbiterStack extends cdk.Stack {
     // separately by WorkerDLQDepthAlarm; this alarm surfaces in-invocation
     // failures (bad dispatch payload, agent crash) that are retried and may
     // never reach the DLQ.
-    new cloudwatch.Alarm(this, 'WorkerErrorAlarm', {
+    new cloudwatch.Alarm(this, "WorkerErrorAlarm", {
       alarmName: `citadel-worker-errors-${props.environment}`,
-      metric: workerAgentWrapperLambda.metricErrors({ period: cdk.Duration.minutes(5) }),
+      metric: workerAgentWrapperLambda.metricErrors({
+        period: cdk.Duration.minutes(5),
+      }),
       threshold: 3,
       evaluationPeriods: 1,
-      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: 'Worker agent Lambda error rate exceeded threshold',
+      alarmDescription: "Worker agent Lambda error rate exceeded threshold",
     });
 
-        // ============================================================
-        // Jagged-Frontier escalation alarm (follow-up #8)
-        // ============================================================
-        // Every invocation of the ``escalate`` tool in
-        // ``arbiter/workerWrapper/tools/escalate.py`` emits one
-        // ``CitadelGovernance/OffFrontierEscalations`` metric increment
-        // (dimension ``ProjectId``) and one ``governance.offfrontier.escalated``
-        // EventBridge event. Escalations are rare by design — the C12
-        // Jagged-Frontier principle says agents should escalate only tasks
-        // outside AI-analytical scope — so even a single escalation in an
-        // hour is notable and should page operators.
-        //
-        // Threshold: Sum > 0 over 1 hour. Treat missing data as not-breaching
-        // so quiet environments don't fire phantom alarms.
-        //
-        // Routes to a dedicated KMS-encrypted SNS topic (ESCALATION_TOPIC_ARN)
-        // that operators can subscribe to (email / Slack / PagerDuty bridge).
-        // The topic ARN is also exposed as an env var on both the supervisor
-        // and worker Lambdas so a future change can wire escalate() to
-        // publish to SNS directly in addition to the current CloudWatch +
-        // EventBridge emission path.
-        //
-        // No dimension filter on the alarm — any ProjectId that escalates
-        // triggers it. A future refinement could split per-project alarms
-        // using metric math, but for the MVP the aggregate is the right
-        // signal.
-        const escalationTopicKey = new kms.Key(this, 'EscalationTopicKey', {
-          description: `Citadel Jagged-Frontier escalation SNS topic CMK (${props.environment})`,
-          enableKeyRotation: true,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        });
+    // ============================================================
+    // Jagged-Frontier escalation alarm (follow-up #8)
+    // ============================================================
+    // Every invocation of the ``escalate`` tool in
+    // ``arbiter/workerWrapper/tools/escalate.py`` emits one
+    // ``CitadelGovernance/OffFrontierEscalations`` metric increment
+    // (dimension ``ProjectId``) and one ``governance.offfrontier.escalated``
+    // EventBridge event. Escalations are rare by design — the C12
+    // Jagged-Frontier principle says agents should escalate only tasks
+    // outside AI-analytical scope — so even a single escalation in an
+    // hour is notable and should page operators.
+    //
+    // Threshold: Sum > 0 over 1 hour. Treat missing data as not-breaching
+    // so quiet environments don't fire phantom alarms.
+    //
+    // Routes to a dedicated KMS-encrypted SNS topic (ESCALATION_TOPIC_ARN)
+    // that operators can subscribe to (email / Slack / PagerDuty bridge).
+    // The topic ARN is also exposed as an env var on both the supervisor
+    // and worker Lambdas so a future change can wire escalate() to
+    // publish to SNS directly in addition to the current CloudWatch +
+    // EventBridge emission path.
+    //
+    // No dimension filter on the alarm — any ProjectId that escalates
+    // triggers it. A future refinement could split per-project alarms
+    // using metric math, but for the MVP the aggregate is the right
+    // signal.
+    const escalationTopicKey = new kms.Key(this, "EscalationTopicKey", {
+      description: `Citadel Jagged-Frontier escalation SNS topic CMK (${props.environment})`,
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
 
-        // ``enforceSSL: true`` tells CDK 2.100+ to emit the
-        // ``AllowPublishThroughSSLOnly`` DENY statement into the auto-created
-        // TopicPolicy — that alone satisfies AwsSolutions-SNS3. An earlier
-        // version of this block also added the same statement explicitly via
-        // ``addToResourcePolicy`` as a belt-and-braces guard for older CDK
-        // versions; that produced two statements sharing the same SID in one
-        // policy, which SNS rejects with:
-        // "Invalid parameter: Every policy statement must have a unique ID"
-        // Do NOT re-add the explicit statement.
-        const escalationTopic = new sns.Topic(this, 'EscalationTopic', {
-          topicName: `citadel-governance-escalations-${props.environment}`,
-          displayName: `Citadel Governance Escalations (${props.environment})`,
-          masterKey: escalationTopicKey,
-          enforceSSL: true,
-        });
+    // ``enforceSSL: true`` tells CDK 2.100+ to emit the
+    // ``AllowPublishThroughSSLOnly`` DENY statement into the auto-created
+    // TopicPolicy — that alone satisfies AwsSolutions-SNS3. An earlier
+    // version of this block also added the same statement explicitly via
+    // ``addToResourcePolicy`` as a belt-and-braces guard for older CDK
+    // versions; that produced two statements sharing the same SID in one
+    // policy, which SNS rejects with:
+    // "Invalid parameter: Every policy statement must have a unique ID"
+    // Do NOT re-add the explicit statement.
+    const escalationTopic = new sns.Topic(this, "EscalationTopic", {
+      topicName: `citadel-governance-escalations-${props.environment}`,
+      displayName: `Citadel Governance Escalations (${props.environment})`,
+      masterKey: escalationTopicKey,
+      enforceSSL: true,
+    });
 
-        new cloudwatch.Alarm(this, 'OffFrontierEscalationAlarm', {
-          alarmName: `citadel-offfrontier-escalations-${props.environment}`,
-          metric: new cloudwatch.Metric({
-            namespace: 'CitadelGovernance',
-            metricName: 'OffFrontierEscalations',
-            statistic: 'Sum',
-            period: cdk.Duration.hours(1),
-          }),
-          threshold: 0,
-          evaluationPeriods: 1,
-          datapointsToAlarm: 1,
-          comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
-          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-          alarmDescription:
-            'Any Jagged-Frontier escalation within the last hour. ' +
-            'Routes to citadel-governance-escalations-<env> SNS topic — operators ' +
-            'should investigate why an agent escalated and whether the underlying ' +
-            'task belongs on the AI-analytical frontier.',
-        }).addAlarmAction(new cw_actions.SnsAction(escalationTopic));
+    new cloudwatch.Alarm(this, "OffFrontierEscalationAlarm", {
+      alarmName: `citadel-offfrontier-escalations-${props.environment}`,
+      metric: new cloudwatch.Metric({
+        namespace: "CitadelGovernance",
+        metricName: "OffFrontierEscalations",
+        statistic: "Sum",
+        period: cdk.Duration.hours(1),
+      }),
+      threshold: 0,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        "Any Jagged-Frontier escalation within the last hour. " +
+        "Routes to citadel-governance-escalations-<env> SNS topic — operators " +
+        "should investigate why an agent escalated and whether the underlying " +
+        "task belongs on the AI-analytical frontier.",
+    }).addAlarmAction(new cw_actions.SnsAction(escalationTopic));
 
-        // Expose the topic ARN to both Lambdas that can legitimately emit
-        // escalations in the future (today only the worker emits via the
-        // escalate tool; supervisor reserves the env var for a routing
-        // refactor). Grant Publish on both so neither path needs a follow-up
-        // IAM change when wiring lands.
-        workerAgentWrapperLambda.addEnvironment('ESCALATION_TOPIC_ARN', escalationTopic.topicArn);
-        supervisorLambda.addEnvironment('ESCALATION_TOPIC_ARN', escalationTopic.topicArn);
-        escalationTopic.grantPublish(workerAgentWrapperLambda);
-        escalationTopic.grantPublish(supervisorLambda);
+    // Expose the topic ARN to both Lambdas that can legitimately emit
+    // escalations in the future (today only the worker emits via the
+    // escalate tool; supervisor reserves the env var for a routing
+    // refactor). Grant Publish on both so neither path needs a follow-up
+    // IAM change when wiring lands.
+    workerAgentWrapperLambda.addEnvironment(
+      "ESCALATION_TOPIC_ARN",
+      escalationTopic.topicArn,
+    );
+    supervisorLambda.addEnvironment(
+      "ESCALATION_TOPIC_ARN",
+      escalationTopic.topicArn,
+    );
+    escalationTopic.grantPublish(workerAgentWrapperLambda);
+    escalationTopic.grantPublish(supervisorLambda);
 
-            // cdk-nag suppressions: Topic.grantPublish() on a
-            // KMS-encrypted topic auto-attaches kms:GenerateDataKey* (covers
-            // GenerateDataKey and GenerateDataKeyWithoutPlaintext) and
-            // kms:ReEncrypt* to the caller's DefaultPolicy. Standard AWS
-            // pattern — cannot be narrowed without losing SNS publish
-            // functionality. Tracked: AAF-NAG-IAM5-kms. reviewBy: 2026-10-22.
-            const kmsPublishSuppression = [{
-              id: 'AwsSolutions-IAM5',
-              reason:
-                'Topic.grantPublish() on KMS-encrypted SNS topic attaches ' +
-                'kms:GenerateDataKey* and kms:ReEncrypt* wildcards via AWS SDK ' +
-                'defaults; these cannot be narrowed without breaking publish. ' +
-                'Resource is scoped to the escalation topic CMK only.',
-              appliesTo: [
-                'Action::kms:GenerateDataKey*',
-                'Action::kms:ReEncrypt*',
-              ],
-            }];
-            NagSuppressions.addResourceSuppressions(
-              supervisorLambda.role!,
-              kmsPublishSuppression,
-              true,
-            );
-            NagSuppressions.addResourceSuppressions(
-              workerAgentWrapperLambda.role!,
-              kmsPublishSuppression,
-              true,
-            );
+    // cdk-nag suppressions: Topic.grantPublish() on a
+    // KMS-encrypted topic auto-attaches kms:GenerateDataKey* (covers
+    // GenerateDataKey and GenerateDataKeyWithoutPlaintext) and
+    // kms:ReEncrypt* to the caller's DefaultPolicy. Standard AWS
+    // pattern — cannot be narrowed without losing SNS publish
+    // functionality. Tracked: AAF-NAG-IAM5-kms. reviewBy: 2026-10-22.
+    const kmsPublishSuppression = [
+      {
+        id: "AwsSolutions-IAM5",
+        reason:
+          "Topic.grantPublish() on KMS-encrypted SNS topic attaches " +
+          "kms:GenerateDataKey* and kms:ReEncrypt* wildcards via AWS SDK " +
+          "defaults; these cannot be narrowed without breaking publish. " +
+          "Resource is scoped to the escalation topic CMK only.",
+        appliesTo: ["Action::kms:GenerateDataKey*", "Action::kms:ReEncrypt*"],
+      },
+    ];
+    NagSuppressions.addResourceSuppressions(
+      supervisorLambda.role!,
+      kmsPublishSuppression,
+      true,
+    );
+    NagSuppressions.addResourceSuppressions(
+      workerAgentWrapperLambda.role!,
+      kmsPublishSuppression,
+      true,
+    );
 
     // ============================================================
     // Governance authority/ledger tables (Δ8)
@@ -1155,9 +1310,9 @@ export class ArbiterStack extends cdk.Stack {
     // pattern (see /016 in backend-stack.ts) keeps any
     // downstream in-constructor references terse.
 
-    this.authorityUnitsTable = new dynamodb.Table(this, 'AuthorityUnitsTable', {
+    this.authorityUnitsTable = new dynamodb.Table(this, "AuthorityUnitsTable", {
       tableName: `citadel-authority-units-${props.environment}`,
-      partitionKey: { name: 'unitId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "unitId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       deletionProtection: true,
@@ -1167,21 +1322,28 @@ export class ArbiterStack extends cdk.Stack {
       stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
     });
 
-    this.compositionContractsTable = new dynamodb.Table(this, 'CompositionContractsTable', {
-      tableName: `citadel-composition-contracts-${props.environment}`,
-      partitionKey: { name: 'contractId', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      deletionProtection: true,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      // Wave 4.E.A.2: enable DynamoDB streams so governance-graph-snapshot-on-change
-      // produces a fresh snapshot row whenever this table changes.
-      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
-    });
+    this.compositionContractsTable = new dynamodb.Table(
+      this,
+      "CompositionContractsTable",
+      {
+        tableName: `citadel-composition-contracts-${props.environment}`,
+        partitionKey: {
+          name: "contractId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+        // Wave 4.E.A.2: enable DynamoDB streams so governance-graph-snapshot-on-change
+        // produces a fresh snapshot row whenever this table changes.
+        stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+      },
+    );
 
-    this.caseLawTable = new dynamodb.Table(this, 'CaseLawTable', {
+    this.caseLawTable = new dynamodb.Table(this, "CaseLawTable", {
       tableName: `citadel-case-law-${props.environment}`,
-      partitionKey: { name: 'entryId', type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "entryId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       deletionProtection: true,
@@ -1191,17 +1353,21 @@ export class ArbiterStack extends cdk.Stack {
       stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
     });
 
-    this.constitutionalLayersTable = new dynamodb.Table(this, 'ConstitutionalLayersTable', {
-      tableName: `citadel-constitutional-layers-${props.environment}`,
-      partitionKey: { name: 'layerId', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      deletionProtection: true,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      // Wave 4.E.A.2: enable DynamoDB streams so governance-graph-snapshot-on-change
-      // produces a fresh snapshot row whenever this table changes.
-      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
-    });
+    this.constitutionalLayersTable = new dynamodb.Table(
+      this,
+      "ConstitutionalLayersTable",
+      {
+        tableName: `citadel-constitutional-layers-${props.environment}`,
+        partitionKey: { name: "layerId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+        // Wave 4.E.A.2: enable DynamoDB streams so governance-graph-snapshot-on-change
+        // produces a fresh snapshot row whenever this table changes.
+        stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+      },
+    );
 
     // Wave 4.E.A — authority graph snapshots table. Stores daily snapshots
     // of the four source tables (authorityUnits, compositionContracts,
@@ -1211,46 +1377,60 @@ export class ArbiterStack extends cdk.Stack {
     // RETAIN here would orphan storage that has no off-stack restore
     // value. TTL via `expiresAt` enforces the operator-selected
     // retention window without manual cleanup.
-    this.governanceGraphSnapshotsTable = new dynamodb.Table(this, 'GovernanceGraphSnapshotsTable', {
-      tableName: `citadel-governance-graph-snapshots-${props.environment}`,
-      partitionKey: { name: 'snapshotId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'timestamp', type: dynamodb.AttributeType.NUMBER },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      timeToLiveAttribute: 'expiresAt',
-    });
+    this.governanceGraphSnapshotsTable = new dynamodb.Table(
+      this,
+      "GovernanceGraphSnapshotsTable",
+      {
+        tableName: `citadel-governance-graph-snapshots-${props.environment}`,
+        partitionKey: {
+          name: "snapshotId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        sortKey: { name: "timestamp", type: dynamodb.AttributeType.NUMBER },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+        timeToLiveAttribute: "expiresAt",
+      },
+    );
     this.governanceGraphSnapshotsTable.addGlobalSecondaryIndex({
-      indexName: 'kind-timestamp-index',
-      partitionKey: { name: 'kind', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'timestamp', type: dynamodb.AttributeType.NUMBER },
+      indexName: "kind-timestamp-index",
+      partitionKey: { name: "kind", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "timestamp", type: dynamodb.AttributeType.NUMBER },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    this.governanceLedgerTable = new dynamodb.Table(this, 'GovernanceLedgerTable', {
-      tableName: `citadel-governance-ledger-${props.environment}`,
-      partitionKey: { name: 'findingId', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      timeToLiveAttribute: 'ttl',
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      // Wave 3.C: enable DynamoDB streams so the governance-finding-fanout
-      // Lambda can project new ledger rows into the AppSync
-      // `publishGovernanceFinding` mutation. Adding StreamSpecification
-      // is an in-place table update per AWS::DynamoDB::Table CloudFormation
-      // spec (no Replacement: True), so this is safe even though the
-      // existing table is in production. The stream view is
-      // NEW_AND_OLD_IMAGES for forward-compatibility (a future
-      // delete/update fanout could read OldImage); the current Lambda
-      // reads NewImage only.
-      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
-    });
+    this.governanceLedgerTable = new dynamodb.Table(
+      this,
+      "GovernanceLedgerTable",
+      {
+        tableName: `citadel-governance-ledger-${props.environment}`,
+        partitionKey: {
+          name: "findingId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        timeToLiveAttribute: "ttl",
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+        // Wave 3.C: enable DynamoDB streams so the governance-finding-fanout
+        // Lambda can project new ledger rows into the AppSync
+        // `publishGovernanceFinding` mutation. Adding StreamSpecification
+        // is an in-place table update per AWS::DynamoDB::Table CloudFormation
+        // spec (no Replacement: True), so this is safe even though the
+        // existing table is in production. The stream view is
+        // NEW_AND_OLD_IMAGES for forward-compatibility (a future
+        // delete/update fanout could read OldImage); the current Lambda
+        // reads NewImage only.
+        stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+      },
+    );
     const governanceLedgerTable = this.governanceLedgerTable;
 
     governanceLedgerTable.addGlobalSecondaryIndex({
-      indexName: 'workflow-index',
-      partitionKey: { name: 'workflowId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'timestamp', type: dynamodb.AttributeType.NUMBER },
+      indexName: "workflow-index",
+      partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "timestamp", type: dynamodb.AttributeType.NUMBER },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
@@ -1264,10 +1444,12 @@ export class ArbiterStack extends cdk.Stack {
     // CustomResource.addDependency so the put_items cannot race the
     // CreateTable calls.
     seedAgentConfigLambda.addEnvironment(
-      'AUTHORITY_UNITS_TABLE', this.authorityUnitsTable.tableName,
+      "AUTHORITY_UNITS_TABLE",
+      this.authorityUnitsTable.tableName,
     );
     seedAgentConfigLambda.addEnvironment(
-      'CONSTITUTIONAL_LAYERS_TABLE', this.constitutionalLayersTable.tableName,
+      "CONSTITUTIONAL_LAYERS_TABLE",
+      this.constitutionalLayersTable.tableName,
     );
 
     this.authorityUnitsTable.grantWriteData(seedAgentConfigLambda);
@@ -1302,52 +1484,56 @@ export class ArbiterStack extends cdk.Stack {
 }`;
     const LAMBDA_RESPONSE_MAPPING = `$util.toJson($ctx.result)`;
 
-    const governanceUiResolverFn = new lambda.Function(this, 'GovernanceUiResolverFn', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'governance-ui-resolver.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      timeout: cdk.Duration.seconds(30),
-      environment: {
-        ENVIRONMENT: props.environment,
-        GOVERNANCE_LEDGER_TABLE: this.governanceLedgerTable.tableName,
-        AUTHORITY_UNITS_TABLE: this.authorityUnitsTable.tableName,
-        // Wave 4.A: listCompositionContracts reads the composition
-        // contracts table for the authority graph projection. Admin-only
-        // path; the resolver throws when unset.
-        COMPOSITION_CONTRACTS_TABLE: this.compositionContractsTable.tableName,
-        // Wave 4.C: listConstitutionalLayers reads the constitutional
-        // layers table for the rule tree page. Admin-only; the resolver
-        // throws when unset.
-        CONSTITUTIONAL_LAYERS_TABLE: this.constitutionalLayersTable.tableName,
-        // Wave 4.D: listCaseLaw reads the case-law table for the
-        // precedence timeline page. Admin-only (read-only); the
-        // resolver throws when unset. Encode/revoke admin actions ship
-        // in Wave 4.D.2 — no write grant in this wave.
-        CASE_LAW_TABLE: this.caseLawTable.tableName,
-        // Wave 4.E.A: getAuthorityGraphHistorySettings scans the
-        // snapshots table to count snapshots within the retention
-        // window. Same table is also written by the scheduled
-        // governance-graph-snapshot Lambda below.
-        GRAPH_SNAPSHOTS_TABLE: this.governanceGraphSnapshotsTable.tableName,
-        // Wave 2.E: setGovernanceMode emits a governance.mode.transition
-        // EventBridge event via the shared notifier-base helper. The Lambda
-        // needs the bus name on the env so the EventBridgeClient targets the
-        // correct bus (default fallback is 'default', which would silently
-        // drop the audit event on accounts where the agent bus is the only
-        // bus the governance rule is subscribed to).
-        EVENT_BUS_NAME: props.agentEventBus.eventBusName,
-        // Wave 2.B: data-2 + data-3 read from the AgentCore Registry. Only
-        // wire REGISTRY_ID / REGISTRY_ENABLED when an actual registry is
-        // provisioned; the resolver tolerates an unset REGISTRY_ID by
-        // returning UNKNOWN for those checks.
-        ...(props.registryId && { REGISTRY_ID: props.registryId }),
-        ...(props.registryId && { REGISTRY_ENABLED: 'true' }),
+    const governanceUiResolverFn = new lambda.Function(
+      this,
+      "GovernanceUiResolverFn",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "governance-ui-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(30),
+        environment: {
+          ENVIRONMENT: props.environment,
+          GOVERNANCE_LEDGER_TABLE: this.governanceLedgerTable.tableName,
+          AUTHORITY_UNITS_TABLE: this.authorityUnitsTable.tableName,
+          // Wave 4.A: listCompositionContracts reads the composition
+          // contracts table for the authority graph projection. Admin-only
+          // path; the resolver throws when unset.
+          COMPOSITION_CONTRACTS_TABLE: this.compositionContractsTable.tableName,
+          // Wave 4.C: listConstitutionalLayers reads the constitutional
+          // layers table for the rule tree page. Admin-only; the resolver
+          // throws when unset.
+          CONSTITUTIONAL_LAYERS_TABLE: this.constitutionalLayersTable.tableName,
+          // Wave 4.D: listCaseLaw reads the case-law table for the
+          // precedence timeline page. Admin-only (read-only); the
+          // resolver throws when unset. Encode/revoke admin actions ship
+          // in Wave 4.D.2 — no write grant in this wave.
+          CASE_LAW_TABLE: this.caseLawTable.tableName,
+          // Wave 4.E.A: getAuthorityGraphHistorySettings scans the
+          // snapshots table to count snapshots within the retention
+          // window. Same table is also written by the scheduled
+          // governance-graph-snapshot Lambda below.
+          GRAPH_SNAPSHOTS_TABLE: this.governanceGraphSnapshotsTable.tableName,
+          // Wave 2.E: setGovernanceMode emits a governance.mode.transition
+          // EventBridge event via the shared notifier-base helper. The Lambda
+          // needs the bus name on the env so the EventBridgeClient targets the
+          // correct bus (default fallback is 'default', which would silently
+          // drop the audit event on accounts where the agent bus is the only
+          // bus the governance rule is subscribed to).
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          // Wave 2.B: data-2 + data-3 read from the AgentCore Registry. Only
+          // wire REGISTRY_ID / REGISTRY_ENABLED when an actual registry is
+          // provisioned; the resolver tolerates an unset REGISTRY_ID by
+          // returning UNKNOWN for those checks.
+          ...(props.registryId && { REGISTRY_ID: props.registryId }),
+          ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+        },
+        logGroup: new logs.LogGroup(this, "GovernanceUiResolverFnLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
       },
-      logGroup: new logs.LogGroup(this, 'GovernanceUiResolverFnLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    );
 
     // Wave 5.C.1: getTrustPath uses LAMBDA_EXEC_ROLE_ARN as the assumer
     // anchor for hop 1 of the trust chain. Resolved post-construction
@@ -1356,15 +1542,15 @@ export class ArbiterStack extends cdk.Stack {
     // resolver can read resources by id without re-deriving the table
     // name from the environment string.
     governanceUiResolverFn.addEnvironment(
-      'LAMBDA_EXEC_ROLE_ARN',
+      "LAMBDA_EXEC_ROLE_ARN",
       governanceUiResolverFn.role!.roleArn,
     );
     governanceUiResolverFn.addEnvironment(
-      'DATASTORES_TABLE',
+      "DATASTORES_TABLE",
       `citadel-datastores-${props.environment}`,
     );
     governanceUiResolverFn.addEnvironment(
-      'INTEGRATIONS_TABLE',
+      "INTEGRATIONS_TABLE",
       `citadel-integrations-${props.environment}`,
     );
 
@@ -1382,15 +1568,17 @@ export class ArbiterStack extends cdk.Stack {
     // PutItem (we read the row then overwrite with the new rules).
     // GetItem is also required (pre-write reconnaissance + final
     // re-projection). Scoped to the same table only.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:UpdateItem',
-      ],
-      resources: [this.constitutionalLayersTable.tableArn],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+        ],
+        resources: [this.constitutionalLayersTable.tableArn],
+      }),
+    );
     // Wave 4.D: listCaseLaw scans the case-law table. Read-only —
     // the resolver only ever calls Scan on this table; encode/revoke
     // admin actions ship in Wave 4.D.2 with their own write grants.
@@ -1399,20 +1587,22 @@ export class ArbiterStack extends cdk.Stack {
     // mutate the soft-delete + precedence fields via UpdateItem. Scoped
     // to the case-law table only. GetItem is already covered by
     // grantReadData above; only UpdateItem is added here.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'dynamodb:UpdateItem',
-      ],
-      resources: [this.caseLawTable.tableArn],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [this.caseLawTable.tableArn],
+      }),
+    );
     // Allow the GSI to be queried as well — grantReadData covers the base
     // table only; index reads need an explicit /index/* resource grant.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:Query'],
-      resources: [`${this.governanceLedgerTable.tableArn}/index/*`],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:Query"],
+        resources: [`${this.governanceLedgerTable.tableArn}/index/*`],
+      }),
+    );
 
     // Wave 4.E.A: getAuthorityGraphHistorySettings scans the snapshots
     // table to count rows within the retention window. Read-only on
@@ -1424,44 +1614,50 @@ export class ArbiterStack extends cdk.Stack {
     // GSI requires its own /index/* resource grant.
     // getAuthorityGraphSnapshot uses a Query on the base table keyed
     // on the partition key only.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:Scan', 'dynamodb:Query', 'dynamodb:GetItem'],
-      resources: [
-        this.governanceGraphSnapshotsTable.tableArn,
-        `${this.governanceGraphSnapshotsTable.tableArn}/index/*`,
-      ],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:Scan", "dynamodb:Query", "dynamodb:GetItem"],
+        resources: [
+          this.governanceGraphSnapshotsTable.tableArn,
+          `${this.governanceGraphSnapshotsTable.tableArn}/index/*`,
+        ],
+      }),
+    );
 
     // SSM read scope: getReconcilerStatus / governance-flag helper reads,
     // rb-1 readiness check (GetParameter on enforce mode), and rb-2
     // readiness check (GetParameterHistory on enforce mode for transition
     // detection in the last 7 days).
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['ssm:GetParameter', 'ssm:GetParameterHistory'],
-      resources: [
-        `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/*`,
-      ],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter", "ssm:GetParameterHistory"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/*`,
+        ],
+      }),
+    );
 
     // Wave 2.E: setGovernanceMode mutates the enforce + effective_at SSM
     // parameters. Scoped to the two exact ARNs (one per parameter) — never
     // wildcarded over /citadel/governance/* because nothing else under that
     // prefix should be writable from this resolver.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['ssm:PutParameter'],
-      resources: [
-        `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
-        `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
-        // Wave 4.E.A: updateAuthorityGraphHistorySettings writes the
-        // authority-graph-history JSON blob. Scoped to the exact ARN
-        // for this env so no other parameter under /citadel/governance/
-        // becomes writable.
-        `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/authority-graph-history/${props.environment}`,
-      ],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:PutParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+          // Wave 4.E.A: updateAuthorityGraphHistorySettings writes the
+          // authority-graph-history JSON blob. Scoped to the exact ARN
+          // for this env so no other parameter under /citadel/governance/
+          // becomes writable.
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/authority-graph-history/${props.environment}`,
+        ],
+      }),
+    );
 
     // Wave 2.B.2: markReadinessCheckVerified writes operator attestation
     // blobs to /citadel/governance/readiness/manual/<env>/<checkId>. The
@@ -1469,27 +1665,29 @@ export class ArbiterStack extends cdk.Stack {
     // so the wildcard at the end of the ARN is bounded by code rather
     // than IAM. Nag suppression below documents why the trailing `*` is
     // acceptable here.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['ssm:PutParameter'],
-      resources: [
-        `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/readiness/manual/*`,
-      ],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:PutParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/readiness/manual/*`,
+        ],
+      }),
+    );
     NagSuppressions.addResourceSuppressions(
       governanceUiResolverFn.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'ssm:PutParameter on /citadel/governance/readiness/manual/* is ' +
-            'narrowed in code to a 6-item allowlist of manual checkIds ' +
-            '(tel-1, tel-2, rb-2, own-1, own-2, own-3) and the four-value ' +
-            'expiresInDays allowlist; broader IAM scoping would require one ' +
-            'statement per (env, checkId) pair, which adds complexity without ' +
-            'reducing blast radius.',
+            "ssm:PutParameter on /citadel/governance/readiness/manual/* is " +
+            "narrowed in code to a 6-item allowlist of manual checkIds " +
+            "(tel-1, tel-2, rb-2, own-1, own-2, own-3) and the four-value " +
+            "expiresInDays allowlist; broader IAM scoping would require one " +
+            "statement per (env, checkId) pair, which adds complexity without " +
+            "reducing blast radius.",
           appliesTo: [
-            'Resource::arn:<AWS::Partition>:ssm:<AWS::Region>:<AWS::AccountId>:parameter/citadel/governance/readiness/manual/*',
+            "Resource::arn:<AWS::Partition>:ssm:<AWS::Region>:<AWS::AccountId>:parameter/citadel/governance/readiness/manual/*",
           ],
         },
       ],
@@ -1507,21 +1705,23 @@ export class ArbiterStack extends cdk.Stack {
     // scoping — the action must be granted on '*'. The metric query is
     // narrowly bound to the RegistrySync namespace and SyncFailure metric
     // in the resolver.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['cloudwatch:GetMetricStatistics'],
-      resources: ['*'],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:GetMetricStatistics"],
+        resources: ["*"],
+      }),
+    );
     NagSuppressions.addResourceSuppressions(
       governanceUiResolverFn.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'cloudwatch:GetMetricStatistics has no resource-level scoping; ' +
-            'the resolver narrows the query to namespace=RegistrySync, ' +
-            'metric=SyncFailure for the tel-3 readiness check.',
-          appliesTo: ['Resource::*'],
+            "cloudwatch:GetMetricStatistics has no resource-level scoping; " +
+            "the resolver narrows the query to namespace=RegistrySync, " +
+            "metric=SyncFailure for the tel-3 readiness check.",
+          appliesTo: ["Resource::*"],
         },
       ],
       true,
@@ -1532,14 +1732,16 @@ export class ArbiterStack extends cdk.Stack {
     // the policy when the registry ARN is provided; in test paths the
     // resolver tolerates UNKNOWN for these two checks.
     if (props.registryArn) {
-      governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'bedrock-agentcore:GetRegistryRecord',
-          'bedrock-agentcore:ListRegistryRecords',
-        ],
-        resources: [props.registryArn, `${props.registryArn}/*`],
-      }));
+      governanceUiResolverFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: [
+            "bedrock-agentcore:GetRegistryRecord",
+            "bedrock-agentcore:ListRegistryRecords",
+          ],
+          resources: [props.registryArn, `${props.registryArn}/*`],
+        }),
+      );
     }
 
     // Cognito AdminGetUser scope for isAdminFromEvent's fallback path.
@@ -1547,19 +1749,25 @@ export class ArbiterStack extends cdk.Stack {
     // to the broader userpool/* path with a TODO so the wiring can be
     // tightened when bin/app.ts always passes the ARN.
     if (props.userPoolArn) {
-      governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['cognito-idp:AdminGetUser'],
-        resources: [props.userPoolArn],
-      }));
+      governanceUiResolverFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["cognito-idp:AdminGetUser"],
+          resources: [props.userPoolArn],
+        }),
+      );
     } else {
       // TODO(governance-ui): tighten this scope to the BackendStack user pool
       // ARN once bin/app.ts always wires `userPoolArn` into ArbiterStackProps.
-      governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['cognito-idp:AdminGetUser'],
-        resources: [`arn:aws:cognito-idp:${this.region}:${this.account}:userpool/*`],
-      }));
+      governanceUiResolverFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["cognito-idp:AdminGetUser"],
+          resources: [
+            `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/*`,
+          ],
+        }),
+      );
     }
 
     // Wave 5.C.1: getTrustPath inspects the IAM assume chain that the
@@ -1567,31 +1775,33 @@ export class ArbiterStack extends cdk.Stack {
     // hop the resolver calls iam:GetRole + iam:GetRolePolicy. Scope is
     // the three citadel scoped-role prefixes plus the Lambda's own
     // execution role ARN — never wildcarded across all roles.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['iam:GetRole', 'iam:GetRolePolicy'],
-      resources: [
-        `arn:aws:iam::${this.account}:role/citadel-ds-*`,
-        `arn:aws:iam::${this.account}:role/citadel-int-*`,
-        `arn:aws:iam::${this.account}:role/citadel-agent-*`,
-        governanceUiResolverFn.role!.roleArn,
-      ],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["iam:GetRole", "iam:GetRolePolicy"],
+        resources: [
+          `arn:aws:iam::${this.account}:role/citadel-ds-*`,
+          `arn:aws:iam::${this.account}:role/citadel-int-*`,
+          `arn:aws:iam::${this.account}:role/citadel-agent-*`,
+          governanceUiResolverFn.role!.roleArn,
+        ],
+      }),
+    );
     NagSuppressions.addResourceSuppressions(
       governanceUiResolverFn.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'iam:GetRole / iam:GetRolePolicy on citadel-{ds,int,agent}-* ' +
-            'wildcards a single resourceId suffix per scope, mirroring the ' +
-            'PolicyManager naming convention. Read-only inspection used by ' +
-            'the Wave 5.C.1 IAM trust path page; no write actions. The ' +
-            'fourth resource is the Lambda\'s own role ARN (exact).',
+            "iam:GetRole / iam:GetRolePolicy on citadel-{ds,int,agent}-* " +
+            "wildcards a single resourceId suffix per scope, mirroring the " +
+            "PolicyManager naming convention. Read-only inspection used by " +
+            "the Wave 5.C.1 IAM trust path page; no write actions. The " +
+            "fourth resource is the Lambda's own role ARN (exact).",
           appliesTo: [
-            'Resource::arn:aws:iam::<AWS::AccountId>:role/citadel-ds-*',
-            'Resource::arn:aws:iam::<AWS::AccountId>:role/citadel-int-*',
-            'Resource::arn:aws:iam::<AWS::AccountId>:role/citadel-agent-*',
+            "Resource::arn:aws:iam::<AWS::AccountId>:role/citadel-ds-*",
+            "Resource::arn:aws:iam::<AWS::AccountId>:role/citadel-int-*",
+            "Resource::arn:aws:iam::<AWS::AccountId>:role/citadel-agent-*",
           ],
         },
       ],
@@ -1603,21 +1813,23 @@ export class ArbiterStack extends cdk.Stack {
     // allowed via the AWS SDK default, but granted explicitly here so
     // the IAM blast radius is documented next to the other governance
     // UI grants.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['sts:GetCallerIdentity'],
-      resources: ['*'],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sts:GetCallerIdentity"],
+        resources: ["*"],
+      }),
+    );
     NagSuppressions.addResourceSuppressions(
       governanceUiResolverFn.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'sts:GetCallerIdentity has no resource-level scoping; it returns ' +
-            'the caller\'s own identity and grants no access beyond what is ' +
-            'already implicitly available to the Lambda execution role.',
-          appliesTo: ['Resource::*'],
+            "sts:GetCallerIdentity has no resource-level scoping; it returns " +
+            "the caller's own identity and grants no access beyond what is " +
+            "already implicitly available to the Lambda execution role.",
+          appliesTo: ["Resource::*"],
         },
       ],
       true,
@@ -1628,87 +1840,103 @@ export class ArbiterStack extends cdk.Stack {
     // exact table ARNs (and the integrations GSI used by the resolver
     // read path). Audit: neither table is granted on the governance UI
     // resolver in earlier waves.
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:GetItem'],
-      resources: [
-        `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-datastores-${props.environment}`,
-      ],
-    }));
-    governanceUiResolverFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['dynamodb:Query'],
-      resources: [
-        `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-integrations-${props.environment}`,
-        `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-integrations-${props.environment}/index/IntegrationIdIndex`,
-      ],
-    }));
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-datastores-${props.environment}`,
+        ],
+      }),
+    );
+    governanceUiResolverFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:Query"],
+        resources: [
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-integrations-${props.environment}`,
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-integrations-${props.environment}/index/IntegrationIdIndex`,
+        ],
+      }),
+    );
 
     // Only attach the AppSync data source + resolvers when an API is
     // actually wired. Existing arbiter-stack-*.test.ts paths construct the
     // stack without an API, and that should remain a valid synthesis.
     if (props.appSyncApi) {
-      const governanceUiDataSourceRole = new iam.Role(this, 'GovernanceUiDataSourceRole', {
-        assumedBy: new iam.ServicePrincipal('appsync.amazonaws.com'),
-      });
+      const governanceUiDataSourceRole = new iam.Role(
+        this,
+        "GovernanceUiDataSourceRole",
+        {
+          assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+        },
+      );
       governanceUiResolverFn.grantInvoke(governanceUiDataSourceRole);
 
-      const governanceUiLambdaDataSource = new appsyncCfn.CfnDataSource(this, 'GovernanceUiLambdaDataSource', {
-        apiId: props.appSyncApi.apiId,
-        name: 'GovernanceUiLambdaDataSource',
-        type: 'AWS_LAMBDA',
-        serviceRoleArn: governanceUiDataSourceRole.roleArn,
-        lambdaConfig: {
-          lambdaFunctionArn: governanceUiResolverFn.functionArn,
+      const governanceUiLambdaDataSource = new appsyncCfn.CfnDataSource(
+        this,
+        "GovernanceUiLambdaDataSource",
+        {
+          apiId: props.appSyncApi.apiId,
+          name: "GovernanceUiLambdaDataSource",
+          type: "AWS_LAMBDA",
+          serviceRoleArn: governanceUiDataSourceRole.roleArn,
+          lambdaConfig: {
+            lambdaFunctionArn: governanceUiResolverFn.functionArn,
+          },
         },
-      });
+      );
 
       const governanceUiResolverFields = [
-        'getGovernanceMode',
-        'listGovernanceFindings',
-        'getGovernanceFinding',
-        'getReconcilerStatus',
-        'getRolloutReadiness',
-        'getMismatchHeatmap',
-        'getEscalationMetricSeries',
+        "getGovernanceMode",
+        "listGovernanceFindings",
+        "getGovernanceFinding",
+        "getReconcilerStatus",
+        "getRolloutReadiness",
+        "getMismatchHeatmap",
+        "getEscalationMetricSeries",
         // Wave 3.B: 10th resolver — `getDecisionTrace` on the Query type.
         // Same Lambda + data source as the other reads. The resolver
         // composes a finding's reason / scope / contract fields into the
         // engine's 8-step pipeline state for the tracer page.
-        'getDecisionTrace',
+        "getDecisionTrace",
         // Wave 4.A: 11th + 12th resolvers — `listAuthorityUnits` and
         // `listCompositionContracts` on the Query type. Read-only
         // projections of the authority graph, admin-only via the resolver
         // dispatch (defence in depth on top of the AppSync auth layer).
-        'listAuthorityUnits',
-        'listCompositionContracts',
+        "listAuthorityUnits",
+        "listCompositionContracts",
         // Wave 4.B: 13th resolver — `getRevokeImpact` on the Query type.
         // Blast-radius approximation that scans the governance ledger
         // for permit findings where the supplied unitId was the matched
         // scope. No new IAM (already has Scan on the ledger). Admin-only
         // via the resolver dispatch.
-        'getRevokeImpact',
+        "getRevokeImpact",
         // Wave 4.C: 14th + 15th resolvers — `listConstitutionalLayers`
         // and `getConstitutionalRuleStats` on the Query type. Read-only
         // projection of the constitutional rule tree + per-rule
         // override statistics. Admin-only via the resolver dispatch.
-        'listConstitutionalLayers',
-        'getConstitutionalRuleStats',
+        "listConstitutionalLayers",
+        "getConstitutionalRuleStats",
         // Wave 4.D: 16th resolver — `listCaseLaw` on the Query type.
         // Read-only projection of the case-law timeline. Admin-only
         // via the resolver dispatch. Encode/revoke admin actions ship
         // in Wave 4.D.2 as additional Mutation-typed resolvers.
-        'listCaseLaw',
+        "listCaseLaw",
       ];
       for (const fieldName of governanceUiResolverFields) {
-        const resolver = new appsyncCfn.CfnResolver(this, `GovernanceUi_${fieldName}_Resolver`, {
-          apiId: props.appSyncApi.apiId,
-          typeName: 'Query',
-          fieldName,
-          dataSourceName: governanceUiLambdaDataSource.attrName,
-          requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-          responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-        });
+        const resolver = new appsyncCfn.CfnResolver(
+          this,
+          `GovernanceUi_${fieldName}_Resolver`,
+          {
+            apiId: props.appSyncApi.apiId,
+            typeName: "Query",
+            fieldName,
+            dataSourceName: governanceUiLambdaDataSource.attrName,
+            requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+            responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+          },
+        );
         resolver.addDependency(governanceUiLambdaDataSource);
       }
 
@@ -1720,11 +1948,11 @@ export class ArbiterStack extends cdk.Stack {
       // generic loop above would force a typeName branch for one entry.
       const setGovernanceModeResolver = new appsyncCfn.CfnResolver(
         this,
-        'GovernanceUi_setGovernanceMode_Resolver',
+        "GovernanceUi_setGovernanceMode_Resolver",
         {
           apiId: props.appSyncApi.apiId,
-          typeName: 'Mutation',
-          fieldName: 'setGovernanceMode',
+          typeName: "Mutation",
+          fieldName: "setGovernanceMode",
           dataSourceName: governanceUiLambdaDataSource.attrName,
           requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
@@ -1738,11 +1966,11 @@ export class ArbiterStack extends cdk.Stack {
       // resolver dispatch.
       const markReadinessCheckVerifiedResolver = new appsyncCfn.CfnResolver(
         this,
-        'GovernanceUi_markReadinessCheckVerified_Resolver',
+        "GovernanceUi_markReadinessCheckVerified_Resolver",
         {
           apiId: props.appSyncApi.apiId,
-          typeName: 'Mutation',
-          fieldName: 'markReadinessCheckVerified',
+          typeName: "Mutation",
+          fieldName: "markReadinessCheckVerified",
           dataSourceName: governanceUiLambdaDataSource.attrName,
           requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
@@ -1759,11 +1987,11 @@ export class ArbiterStack extends cdk.Stack {
       // `onGovernanceFinding` subscription receives the right shape.
       const publishGovernanceFindingResolver = new appsyncCfn.CfnResolver(
         this,
-        'GovernanceUi_publishGovernanceFinding_Resolver',
+        "GovernanceUi_publishGovernanceFinding_Resolver",
         {
           apiId: props.appSyncApi.apiId,
-          typeName: 'Mutation',
-          fieldName: 'publishGovernanceFinding',
+          typeName: "Mutation",
+          fieldName: "publishGovernanceFinding",
           dataSourceName: governanceUiLambdaDataSource.attrName,
           requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
@@ -1779,9 +2007,9 @@ export class ArbiterStack extends cdk.Stack {
       // governance UI Lambda data source; admin gating + the
       // acknowledgement check happen inside the resolver dispatch.
       const constitutionalRuleMutationFields: ReadonlyArray<string> = [
-        'addConstitutionalRule',
-        'updateConstitutionalRule',
-        'deleteConstitutionalRule',
+        "addConstitutionalRule",
+        "updateConstitutionalRule",
+        "deleteConstitutionalRule",
       ];
       for (const fieldName of constitutionalRuleMutationFields) {
         const resolver = new appsyncCfn.CfnResolver(
@@ -1789,7 +2017,7 @@ export class ArbiterStack extends cdk.Stack {
           `GovernanceUi_${fieldName}_Resolver`,
           {
             apiId: props.appSyncApi.apiId,
-            typeName: 'Mutation',
+            typeName: "Mutation",
             fieldName,
             dataSourceName: governanceUiLambdaDataSource.attrName,
             requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
@@ -1806,9 +2034,9 @@ export class ArbiterStack extends cdk.Stack {
       // dispatch. Each mutation is idempotent (revoke on an already-
       // revoked row no-ops with emittedEventDetailType=null).
       const caseLawMutationFields: ReadonlyArray<string> = [
-        'revokeCaseLaw',
-        'unrevokeCaseLaw',
-        'updateCaseLawPrecedence',
+        "revokeCaseLaw",
+        "unrevokeCaseLaw",
+        "updateCaseLawPrecedence",
       ];
       for (const fieldName of caseLawMutationFields) {
         const resolver = new appsyncCfn.CfnResolver(
@@ -1816,7 +2044,7 @@ export class ArbiterStack extends cdk.Stack {
           `GovernanceUi_${fieldName}_Resolver`,
           {
             apiId: props.appSyncApi.apiId,
-            typeName: 'Mutation',
+            typeName: "Mutation",
             fieldName,
             dataSourceName: governanceUiLambdaDataSource.attrName,
             requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
@@ -1830,18 +2058,19 @@ export class ArbiterStack extends cdk.Stack {
       // (admin-only). Reads the SSM-backed settings + counts snapshots
       // within the retention window. Same Lambda data source as the
       // other governance UI reads.
-      const getAuthorityGraphHistorySettingsResolver = new appsyncCfn.CfnResolver(
-        this,
-        'GovernanceUi_getAuthorityGraphHistorySettings_Resolver',
-        {
-          apiId: props.appSyncApi.apiId,
-          typeName: 'Query',
-          fieldName: 'getAuthorityGraphHistorySettings',
-          dataSourceName: governanceUiLambdaDataSource.attrName,
-          requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-          responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-        },
-      );
+      const getAuthorityGraphHistorySettingsResolver =
+        new appsyncCfn.CfnResolver(
+          this,
+          "GovernanceUi_getAuthorityGraphHistorySettings_Resolver",
+          {
+            apiId: props.appSyncApi.apiId,
+            typeName: "Query",
+            fieldName: "getAuthorityGraphHistorySettings",
+            dataSourceName: governanceUiLambdaDataSource.attrName,
+            requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+            responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+          },
+        );
       getAuthorityGraphHistorySettingsResolver.addDependency(
         governanceUiLambdaDataSource,
       );
@@ -1852,8 +2081,8 @@ export class ArbiterStack extends cdk.Stack {
       // read-only and pipe through the same governance UI Lambda data
       // source.
       const wave4EbQueryFields: ReadonlyArray<string> = [
-        'listAuthorityGraphSnapshots',
-        'getAuthorityGraphSnapshot',
+        "listAuthorityGraphSnapshots",
+        "getAuthorityGraphSnapshot",
       ];
       for (const fieldName of wave4EbQueryFields) {
         const resolver = new appsyncCfn.CfnResolver(
@@ -1861,7 +2090,7 @@ export class ArbiterStack extends cdk.Stack {
           `GovernanceUi_${fieldName}_Resolver`,
           {
             apiId: props.appSyncApi.apiId,
-            typeName: 'Query',
+            typeName: "Query",
             fieldName,
             dataSourceName: governanceUiLambdaDataSource.attrName,
             requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
@@ -1875,18 +2104,19 @@ export class ArbiterStack extends cdk.Stack {
       // `updateAuthorityGraphHistorySettings` (admin-only). Writes the
       // SSM blob and emits a governance.authority-graph-history.config.changed
       // audit event (best-effort).
-      const updateAuthorityGraphHistorySettingsResolver = new appsyncCfn.CfnResolver(
-        this,
-        'GovernanceUi_updateAuthorityGraphHistorySettings_Resolver',
-        {
-          apiId: props.appSyncApi.apiId,
-          typeName: 'Mutation',
-          fieldName: 'updateAuthorityGraphHistorySettings',
-          dataSourceName: governanceUiLambdaDataSource.attrName,
-          requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-          responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-        },
-      );
+      const updateAuthorityGraphHistorySettingsResolver =
+        new appsyncCfn.CfnResolver(
+          this,
+          "GovernanceUi_updateAuthorityGraphHistorySettings_Resolver",
+          {
+            apiId: props.appSyncApi.apiId,
+            typeName: "Mutation",
+            fieldName: "updateAuthorityGraphHistorySettings",
+            dataSourceName: governanceUiLambdaDataSource.attrName,
+            requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+            responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+          },
+        );
       updateAuthorityGraphHistorySettingsResolver.addDependency(
         governanceUiLambdaDataSource,
       );
@@ -1898,11 +2128,11 @@ export class ArbiterStack extends cdk.Stack {
       // no new IAM (the resolver Scans the existing governance ledger).
       const getD4RetrospectiveReportResolver = new appsyncCfn.CfnResolver(
         this,
-        'GovernanceUi_getD4RetrospectiveReport_Resolver',
+        "GovernanceUi_getD4RetrospectiveReport_Resolver",
         {
           apiId: props.appSyncApi.apiId,
-          typeName: 'Query',
-          fieldName: 'getD4RetrospectiveReport',
+          typeName: "Query",
+          fieldName: "getD4RetrospectiveReport",
           dataSourceName: governanceUiLambdaDataSource.attrName,
           requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
@@ -1920,11 +2150,11 @@ export class ArbiterStack extends cdk.Stack {
       // grants are attached to the Lambda role above.
       const getTrustPathResolver = new appsyncCfn.CfnResolver(
         this,
-        'GovernanceUi_getTrustPath_Resolver',
+        "GovernanceUi_getTrustPath_Resolver",
         {
           apiId: props.appSyncApi.apiId,
-          typeName: 'Query',
-          fieldName: 'getTrustPath',
+          typeName: "Query",
+          fieldName: "getTrustPath",
           dataSourceName: governanceUiLambdaDataSource.attrName,
           requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
@@ -1940,19 +2170,17 @@ export class ArbiterStack extends cdk.Stack {
       // the Lambda role above.
       const getResourceIamDriftResolver = new appsyncCfn.CfnResolver(
         this,
-        'GovernanceUi_getResourceIamDrift_Resolver',
+        "GovernanceUi_getResourceIamDrift_Resolver",
         {
           apiId: props.appSyncApi.apiId,
-          typeName: 'Query',
-          fieldName: 'getResourceIamDrift',
+          typeName: "Query",
+          fieldName: "getResourceIamDrift",
           dataSourceName: governanceUiLambdaDataSource.attrName,
           requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
         },
       );
-      getResourceIamDriftResolver.addDependency(
-        governanceUiLambdaDataSource,
-      );
+      getResourceIamDriftResolver.addDependency(governanceUiLambdaDataSource);
     }
 
     // ============================================================
@@ -1973,43 +2201,49 @@ export class ArbiterStack extends cdk.Stack {
     // orphan storage that has no off-stack restore value. TTL via
     // `expiresAt` enforces the operator-selected retention window.
 
-    new ssm.StringParameter(this, 'AuthorityGraphHistorySettingsParam', {
+    new ssm.StringParameter(this, "AuthorityGraphHistorySettingsParam", {
       parameterName: `/citadel/governance/authority-graph-history/${props.environment}`,
       stringValue: '{"enabled":false,"retentionDays":30,"captureMode":"daily"}',
       description:
-        'Authority graph history settings (Wave 4.E.A). Default OFF. ' +
-        'JSON shape: {enabled, retentionDays, captureMode}.',
+        "Authority graph history settings (Wave 4.E.A). Default OFF. " +
+        "JSON shape: {enabled, retentionDays, captureMode}.",
     });
 
-    const governanceGraphSnapshotFn = new lambda.Function(this, 'GovernanceGraphSnapshotFn', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'governance-graph-snapshot.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      timeout: cdk.Duration.minutes(5),
-      memorySize: 512,
-      environment: {
-        ENVIRONMENT: props.environment,
-        AUTHORITY_GRAPH_HISTORY_PARAM: `/citadel/governance/authority-graph-history/${props.environment}`,
-        AUTHORITY_UNITS_TABLE: this.authorityUnitsTable.tableName,
-        COMPOSITION_CONTRACTS_TABLE: this.compositionContractsTable.tableName,
-        CONSTITUTIONAL_LAYERS_TABLE: this.constitutionalLayersTable.tableName,
-        CASE_LAW_TABLE: this.caseLawTable.tableName,
-        GRAPH_SNAPSHOTS_TABLE: this.governanceGraphSnapshotsTable.tableName,
+    const governanceGraphSnapshotFn = new lambda.Function(
+      this,
+      "GovernanceGraphSnapshotFn",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "governance-graph-snapshot.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.minutes(5),
+        memorySize: 512,
+        environment: {
+          ENVIRONMENT: props.environment,
+          AUTHORITY_GRAPH_HISTORY_PARAM: `/citadel/governance/authority-graph-history/${props.environment}`,
+          AUTHORITY_UNITS_TABLE: this.authorityUnitsTable.tableName,
+          COMPOSITION_CONTRACTS_TABLE: this.compositionContractsTable.tableName,
+          CONSTITUTIONAL_LAYERS_TABLE: this.constitutionalLayersTable.tableName,
+          CASE_LAW_TABLE: this.caseLawTable.tableName,
+          GRAPH_SNAPSHOTS_TABLE: this.governanceGraphSnapshotsTable.tableName,
+        },
+        logGroup: new logs.LogGroup(this, "GovernanceGraphSnapshotFnLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
       },
-      logGroup: new logs.LogGroup(this, 'GovernanceGraphSnapshotFnLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    );
 
     // SSM read scope — single exact ARN.
-    governanceGraphSnapshotFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['ssm:GetParameter'],
-      resources: [
-        `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/authority-graph-history/${props.environment}`,
-      ],
-    }));
+    governanceGraphSnapshotFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/authority-graph-history/${props.environment}`,
+        ],
+      }),
+    );
 
     // DDB scans on the four source tables — read-only.
     this.authorityUnitsTable.grantReadData(governanceGraphSnapshotFn);
@@ -2018,25 +2252,29 @@ export class ArbiterStack extends cdk.Stack {
     this.caseLawTable.grantReadData(governanceGraphSnapshotFn);
 
     // DDB write on the snapshots table.
-    this.governanceGraphSnapshotsTable.grantWriteData(governanceGraphSnapshotFn);
+    this.governanceGraphSnapshotsTable.grantWriteData(
+      governanceGraphSnapshotFn,
+    );
 
     // CloudWatch metrics — namespace narrowed in code; no resource-level
     // scoping is available for PutMetricData.
-    governanceGraphSnapshotFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['cloudwatch:PutMetricData'],
-      resources: ['*'],
-    }));
+    governanceGraphSnapshotFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
     NagSuppressions.addResourceSuppressions(
       governanceGraphSnapshotFn.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'cloudwatch:PutMetricData has no resource-level scoping; the ' +
-            'governance-graph-snapshot Lambda narrows the call to the ' +
-            'Citadel/Governance/GraphSnapshot namespace.',
-          appliesTo: ['Resource::*'],
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "governance-graph-snapshot Lambda narrows the call to the " +
+            "Citadel/Governance/GraphSnapshot namespace.",
+          appliesTo: ["Resource::*"],
         },
       ],
       true,
@@ -2046,12 +2284,16 @@ export class ArbiterStack extends cdk.Stack {
     // schedule pattern as governance-mode-refresher (event-driven), but
     // here we use a cron expression because there's no triggering event
     // — the snapshot is intrinsically time-based.
-    const governanceGraphSnapshotSchedule = new events.Rule(this, 'GovernanceGraphSnapshotSchedule', {
-      ruleName: `citadel-governance-graph-snapshot-${props.environment}`,
-      description:
-        'Triggers the governance-graph-snapshot Lambda daily at 03:00 UTC (Wave 4.E.A).',
-      schedule: events.Schedule.cron({ hour: '3', minute: '0' }),
-    });
+    const governanceGraphSnapshotSchedule = new events.Rule(
+      this,
+      "GovernanceGraphSnapshotSchedule",
+      {
+        ruleName: `citadel-governance-graph-snapshot-${props.environment}`,
+        description:
+          "Triggers the governance-graph-snapshot Lambda daily at 03:00 UTC (Wave 4.E.A).",
+        schedule: events.Schedule.cron({ hour: "3", minute: "0" }),
+      },
+    );
     governanceGraphSnapshotSchedule.addTarget(
       new targets.LambdaFunction(governanceGraphSnapshotFn),
     );
@@ -2081,12 +2323,16 @@ export class ArbiterStack extends cdk.Stack {
     // against new event types and keeps the Lambda's invocation
     // count tied to actual graph mutations.
 
-    const governanceGraphSnapshotOnChangeDLQ = new Queue(this, 'GovernanceGraphSnapshotOnChangeDLQ', {
-      queueName: `citadel-governance-graph-snapshot-on-change-dlq-${props.environment}`,
-      retentionPeriod: cdk.Duration.days(14),
-      encryption: cdk.aws_sqs.QueueEncryption.SQS_MANAGED,
-      enforceSSL: true,
-    });
+    const governanceGraphSnapshotOnChangeDLQ = new Queue(
+      this,
+      "GovernanceGraphSnapshotOnChangeDLQ",
+      {
+        queueName: `citadel-governance-graph-snapshot-on-change-dlq-${props.environment}`,
+        retentionPeriod: cdk.Duration.days(14),
+        encryption: cdk.aws_sqs.QueueEncryption.SQS_MANAGED,
+        enforceSSL: true,
+      },
+    );
     // The DLQ is itself the dead-letter target for the four
     // EventSourceMappings; a DLQ for a DLQ would loop on its own
     // failures (same pattern as governanceFindingFanoutDLQ).
@@ -2094,82 +2340,101 @@ export class ArbiterStack extends cdk.Stack {
       governanceGraphSnapshotOnChangeDLQ,
       [
         {
-          id: 'AwsSolutions-SQS3',
+          id: "AwsSolutions-SQS3",
           reason:
-            'This queue IS the dead-letter destination for the ' +
-            'governance-graph-snapshot-on-change DDB stream ' +
-            'EventSourceMappings (one per authority source table). ' +
-            'A DLQ for a DLQ would loop on its own failures.',
+            "This queue IS the dead-letter destination for the " +
+            "governance-graph-snapshot-on-change DDB stream " +
+            "EventSourceMappings (one per authority source table). " +
+            "A DLQ for a DLQ would loop on its own failures.",
         },
       ],
     );
 
-    this.governanceGraphSnapshotOnChangeFn = new lambda.Function(this, 'GovernanceGraphSnapshotOnChangeFn', {
-      functionName: `citadel-governance-graph-snapshot-on-change-${props.environment}`,
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'governance-graph-snapshot-on-change.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      timeout: cdk.Duration.minutes(1),
-      memorySize: 256,
-      environment: {
-        ENVIRONMENT: props.environment,
-        GRAPH_SNAPSHOTS_TABLE: this.governanceGraphSnapshotsTable.tableName,
-        AUTHORITY_UNITS_TABLE: this.authorityUnitsTable.tableName,
-        COMPOSITION_CONTRACTS_TABLE: this.compositionContractsTable.tableName,
-        CONSTITUTIONAL_LAYERS_TABLE: this.constitutionalLayersTable.tableName,
-        CASE_LAW_TABLE: this.caseLawTable.tableName,
+    this.governanceGraphSnapshotOnChangeFn = new lambda.Function(
+      this,
+      "GovernanceGraphSnapshotOnChangeFn",
+      {
+        functionName: `citadel-governance-graph-snapshot-on-change-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "governance-graph-snapshot-on-change.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.minutes(1),
+        memorySize: 256,
+        environment: {
+          ENVIRONMENT: props.environment,
+          GRAPH_SNAPSHOTS_TABLE: this.governanceGraphSnapshotsTable.tableName,
+          AUTHORITY_UNITS_TABLE: this.authorityUnitsTable.tableName,
+          COMPOSITION_CONTRACTS_TABLE: this.compositionContractsTable.tableName,
+          CONSTITUTIONAL_LAYERS_TABLE: this.constitutionalLayersTable.tableName,
+          CASE_LAW_TABLE: this.caseLawTable.tableName,
+        },
+        logGroup: new logs.LogGroup(
+          this,
+          "GovernanceGraphSnapshotOnChangeFnLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
       },
-      logGroup: new logs.LogGroup(this, 'GovernanceGraphSnapshotOnChangeFnLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
-    const governanceGraphSnapshotOnChangeFn = this.governanceGraphSnapshotOnChangeFn;
+    );
+    const governanceGraphSnapshotOnChangeFn =
+      this.governanceGraphSnapshotOnChangeFn;
 
     // SSM read scope — single exact ARN, mirrors the scheduled Lambda.
-    governanceGraphSnapshotOnChangeFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['ssm:GetParameter'],
-      resources: [
-        `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/authority-graph-history/${props.environment}`,
-      ],
-    }));
+    governanceGraphSnapshotOnChangeFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/authority-graph-history/${props.environment}`,
+        ],
+      }),
+    );
 
     // DDB scans on the four source tables — read-only.
     this.authorityUnitsTable.grantReadData(governanceGraphSnapshotOnChangeFn);
-    this.compositionContractsTable.grantReadData(governanceGraphSnapshotOnChangeFn);
-    this.constitutionalLayersTable.grantReadData(governanceGraphSnapshotOnChangeFn);
+    this.compositionContractsTable.grantReadData(
+      governanceGraphSnapshotOnChangeFn,
+    );
+    this.constitutionalLayersTable.grantReadData(
+      governanceGraphSnapshotOnChangeFn,
+    );
     this.caseLawTable.grantReadData(governanceGraphSnapshotOnChangeFn);
 
     // DDB write on the snapshots table.
-    this.governanceGraphSnapshotsTable.grantWriteData(governanceGraphSnapshotOnChangeFn);
+    this.governanceGraphSnapshotsTable.grantWriteData(
+      governanceGraphSnapshotOnChangeFn,
+    );
 
     // CloudWatch metrics — namespace narrowed in code; no resource-level
     // scoping is available for PutMetricData.
-    governanceGraphSnapshotOnChangeFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['cloudwatch:PutMetricData'],
-      resources: ['*'],
-    }));
+    governanceGraphSnapshotOnChangeFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
     NagSuppressions.addResourceSuppressions(
       governanceGraphSnapshotOnChangeFn.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'Two scoped wildcards on the on-change snapshot Lambda role: ' +
-            '(1) cloudwatch:PutMetricData has no resource-level scoping; the ' +
-            'handler narrows calls to the Citadel/Governance/GraphSnapshot ' +
-            'namespace. (2) DynamoDB stream ARNs include a timestamp suffix ' +
-            'that CFN cannot resolve at template time; the wildcards are ' +
-            'bounded to the four authority source-table stream sub-resources ' +
-            'via their tableArn prefixes, so no other table is reachable.',
+            "Two scoped wildcards on the on-change snapshot Lambda role: " +
+            "(1) cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "handler narrows calls to the Citadel/Governance/GraphSnapshot " +
+            "namespace. (2) DynamoDB stream ARNs include a timestamp suffix " +
+            "that CFN cannot resolve at template time; the wildcards are " +
+            "bounded to the four authority source-table stream sub-resources " +
+            "via their tableArn prefixes, so no other table is reachable.",
           appliesTo: [
-            'Resource::*',
-            'Resource::<AuthorityUnitsTableC4FCD799.Arn>/stream/*',
-            'Resource::<CompositionContractsTable03389A48.Arn>/stream/*',
-            'Resource::<CaseLawTable6F50F1D2.Arn>/stream/*',
-            'Resource::<ConstitutionalLayersTable20D1ED32.Arn>/stream/*',
+            "Resource::*",
+            "Resource::<AuthorityUnitsTableC4FCD799.Arn>/stream/*",
+            "Resource::<CompositionContractsTable03389A48.Arn>/stream/*",
+            "Resource::<CaseLawTable6F50F1D2.Arn>/stream/*",
+            "Resource::<ConstitutionalLayersTable20D1ED32.Arn>/stream/*",
           ],
         },
       ],
@@ -2182,25 +2447,29 @@ export class ArbiterStack extends cdk.Stack {
     // table stream sub-resources rather than one). The /stream/*
     // suffix is unavoidable because the stream ARN includes a
     // timestamp suffix CFN cannot resolve at template time.
-    governanceGraphSnapshotOnChangeFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'dynamodb:DescribeStream',
-        'dynamodb:GetRecords',
-        'dynamodb:GetShardIterator',
-        'dynamodb:ListStreams',
-      ],
-      resources: [
-        `${this.authorityUnitsTable.tableArn}/stream/*`,
-        `${this.compositionContractsTable.tableArn}/stream/*`,
-        `${this.caseLawTable.tableArn}/stream/*`,
-        `${this.constitutionalLayersTable.tableArn}/stream/*`,
-      ],
-    }));
+    governanceGraphSnapshotOnChangeFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "dynamodb:DescribeStream",
+          "dynamodb:GetRecords",
+          "dynamodb:GetShardIterator",
+          "dynamodb:ListStreams",
+        ],
+        resources: [
+          `${this.authorityUnitsTable.tableArn}/stream/*`,
+          `${this.compositionContractsTable.tableArn}/stream/*`,
+          `${this.caseLawTable.tableArn}/stream/*`,
+          `${this.constitutionalLayersTable.tableArn}/stream/*`,
+        ],
+      }),
+    );
 
     // SendMessage on the DLQ — the EventSourceMappings need this for
     // their on-failure target.
-    governanceGraphSnapshotOnChangeDLQ.grantSendMessages(governanceGraphSnapshotOnChangeFn);
+    governanceGraphSnapshotOnChangeDLQ.grantSendMessages(
+      governanceGraphSnapshotOnChangeFn,
+    );
 
     // Four EventSourceMappings — one per authority source table.
     // batchSize 100 + maxBatchingWindow 5s amortises Lambda cold starts
@@ -2210,65 +2479,113 @@ export class ArbiterStack extends cdk.Stack {
     // (INSERT/MODIFY/REMOVE) because lambda.FilterRule has no .or()
     // helper — multiple filter entries are OR'd at the EventSourceMapping
     // level per the Lambda filter-criteria spec.
-    new lambda.EventSourceMapping(this, 'GovernanceGraphSnapshotOnChangeAuthorityUnitsESM', {
-      target: governanceGraphSnapshotOnChangeFn,
-      eventSourceArn: this.authorityUnitsTable.tableStreamArn,
-      startingPosition: lambda.StartingPosition.LATEST,
-      batchSize: 100,
-      maxBatchingWindow: cdk.Duration.seconds(5),
-      retryAttempts: 2,
-      onFailure: new cdk.aws_lambda_event_sources.SqsDlq(governanceGraphSnapshotOnChangeDLQ),
-      filters: [
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') }),
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('MODIFY') }),
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('REMOVE') }),
-      ],
-    });
+    new lambda.EventSourceMapping(
+      this,
+      "GovernanceGraphSnapshotOnChangeAuthorityUnitsESM",
+      {
+        target: governanceGraphSnapshotOnChangeFn,
+        eventSourceArn: this.authorityUnitsTable.tableStreamArn,
+        startingPosition: lambda.StartingPosition.LATEST,
+        batchSize: 100,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+        retryAttempts: 2,
+        onFailure: new cdk.aws_lambda_event_sources.SqsDlq(
+          governanceGraphSnapshotOnChangeDLQ,
+        ),
+        filters: [
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("INSERT"),
+          }),
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("MODIFY"),
+          }),
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("REMOVE"),
+          }),
+        ],
+      },
+    );
 
-    new lambda.EventSourceMapping(this, 'GovernanceGraphSnapshotOnChangeCompositionContractsESM', {
-      target: governanceGraphSnapshotOnChangeFn,
-      eventSourceArn: this.compositionContractsTable.tableStreamArn,
-      startingPosition: lambda.StartingPosition.LATEST,
-      batchSize: 100,
-      maxBatchingWindow: cdk.Duration.seconds(5),
-      retryAttempts: 2,
-      onFailure: new cdk.aws_lambda_event_sources.SqsDlq(governanceGraphSnapshotOnChangeDLQ),
-      filters: [
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') }),
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('MODIFY') }),
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('REMOVE') }),
-      ],
-    });
+    new lambda.EventSourceMapping(
+      this,
+      "GovernanceGraphSnapshotOnChangeCompositionContractsESM",
+      {
+        target: governanceGraphSnapshotOnChangeFn,
+        eventSourceArn: this.compositionContractsTable.tableStreamArn,
+        startingPosition: lambda.StartingPosition.LATEST,
+        batchSize: 100,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+        retryAttempts: 2,
+        onFailure: new cdk.aws_lambda_event_sources.SqsDlq(
+          governanceGraphSnapshotOnChangeDLQ,
+        ),
+        filters: [
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("INSERT"),
+          }),
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("MODIFY"),
+          }),
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("REMOVE"),
+          }),
+        ],
+      },
+    );
 
-    new lambda.EventSourceMapping(this, 'GovernanceGraphSnapshotOnChangeCaseLawESM', {
-      target: governanceGraphSnapshotOnChangeFn,
-      eventSourceArn: this.caseLawTable.tableStreamArn,
-      startingPosition: lambda.StartingPosition.LATEST,
-      batchSize: 100,
-      maxBatchingWindow: cdk.Duration.seconds(5),
-      retryAttempts: 2,
-      onFailure: new cdk.aws_lambda_event_sources.SqsDlq(governanceGraphSnapshotOnChangeDLQ),
-      filters: [
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') }),
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('MODIFY') }),
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('REMOVE') }),
-      ],
-    });
+    new lambda.EventSourceMapping(
+      this,
+      "GovernanceGraphSnapshotOnChangeCaseLawESM",
+      {
+        target: governanceGraphSnapshotOnChangeFn,
+        eventSourceArn: this.caseLawTable.tableStreamArn,
+        startingPosition: lambda.StartingPosition.LATEST,
+        batchSize: 100,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+        retryAttempts: 2,
+        onFailure: new cdk.aws_lambda_event_sources.SqsDlq(
+          governanceGraphSnapshotOnChangeDLQ,
+        ),
+        filters: [
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("INSERT"),
+          }),
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("MODIFY"),
+          }),
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("REMOVE"),
+          }),
+        ],
+      },
+    );
 
-    new lambda.EventSourceMapping(this, 'GovernanceGraphSnapshotOnChangeConstitutionalLayersESM', {
-      target: governanceGraphSnapshotOnChangeFn,
-      eventSourceArn: this.constitutionalLayersTable.tableStreamArn,
-      startingPosition: lambda.StartingPosition.LATEST,
-      batchSize: 100,
-      maxBatchingWindow: cdk.Duration.seconds(5),
-      retryAttempts: 2,
-      onFailure: new cdk.aws_lambda_event_sources.SqsDlq(governanceGraphSnapshotOnChangeDLQ),
-      filters: [
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') }),
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('MODIFY') }),
-        lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('REMOVE') }),
-      ],
-    });
+    new lambda.EventSourceMapping(
+      this,
+      "GovernanceGraphSnapshotOnChangeConstitutionalLayersESM",
+      {
+        target: governanceGraphSnapshotOnChangeFn,
+        eventSourceArn: this.constitutionalLayersTable.tableStreamArn,
+        startingPosition: lambda.StartingPosition.LATEST,
+        batchSize: 100,
+        maxBatchingWindow: cdk.Duration.seconds(5),
+        retryAttempts: 2,
+        onFailure: new cdk.aws_lambda_event_sources.SqsDlq(
+          governanceGraphSnapshotOnChangeDLQ,
+        ),
+        filters: [
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("INSERT"),
+          }),
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("MODIFY"),
+          }),
+          lambda.FilterCriteria.filter({
+            eventName: lambda.FilterRule.isEqual("REMOVE"),
+          }),
+        ],
+      },
+    );
 
     // ============================================================
     // Wave 3.A — governance-mode propagation refresher
@@ -2294,65 +2611,73 @@ export class ArbiterStack extends cdk.Stack {
     // See `.kiro/specs/governance-ui/waves-2-5-roadmap.md` §3.5 for the
     // design + acceptance criteria.
 
-    const governanceModeRefresherFn = new lambda.Function(this, 'GovernanceModeRefresherFn', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'governance-mode-refresher.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      timeout: cdk.Duration.seconds(60),
-      environment: {
-        ENVIRONMENT: props.environment,
-        GOVERNANCE_AWARE_FUNCTIONS: JSON.stringify([
-          // For Wave 3.A, the only Lambda reading governance-flag.ts is
-          // governance-ui-resolver itself. As Supervisor /
-          // worker-wrapper / fabricator etc. adopt the helper, add
-          // their function names here.
-          governanceUiResolverFn.functionName,
-        ]),
+    const governanceModeRefresherFn = new lambda.Function(
+      this,
+      "GovernanceModeRefresherFn",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "governance-mode-refresher.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(60),
+        environment: {
+          ENVIRONMENT: props.environment,
+          GOVERNANCE_AWARE_FUNCTIONS: JSON.stringify([
+            // For Wave 3.A, the only Lambda reading governance-flag.ts is
+            // governance-ui-resolver itself. As Supervisor /
+            // worker-wrapper / fabricator etc. adopt the helper, add
+            // their function names here.
+            governanceUiResolverFn.functionName,
+          ]),
+        },
+        logGroup: new logs.LogGroup(this, "GovernanceModeRefresherFnLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
       },
-      logGroup: new logs.LogGroup(this, 'GovernanceModeRefresherFnLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    );
 
     // IAM: GetFunctionConfiguration + UpdateFunctionConfiguration scoped
     // to the exact ARNs of the governance-aware functions in the env-var
     // list above. As that list grows, add the corresponding ARNs here.
-    governanceModeRefresherFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'lambda:GetFunctionConfiguration',
-        'lambda:UpdateFunctionConfiguration',
-      ],
-      resources: [
-        governanceUiResolverFn.functionArn,
-        // TODO(Wave 3.B+): add additional governance-aware Lambda ARNs
-        // here as they adopt governance-flag.ts (Supervisor,
-        // worker-wrapper, fabricator, etc.) and are appended to the
-        // GOVERNANCE_AWARE_FUNCTIONS env var above.
-      ],
-    }));
+    governanceModeRefresherFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "lambda:GetFunctionConfiguration",
+          "lambda:UpdateFunctionConfiguration",
+        ],
+        resources: [
+          governanceUiResolverFn.functionArn,
+          // TODO(Wave 3.B+): add additional governance-aware Lambda ARNs
+          // here as they adopt governance-flag.ts (Supervisor,
+          // worker-wrapper, fabricator, etc.) and are appended to the
+          // GOVERNANCE_AWARE_FUNCTIONS env var above.
+        ],
+      }),
+    );
 
     // CloudWatch metrics — the Citadel/Governance/Refresher namespace
     // does not support resource-level scoping (PutMetricData has no
     // resource ARN). The action stays narrow because the resolver
     // emits only into this single namespace.
-    governanceModeRefresherFn.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['cloudwatch:PutMetricData'],
-      resources: ['*'],
-    }));
+    governanceModeRefresherFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
     NagSuppressions.addResourceSuppressions(
       governanceModeRefresherFn.role!,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'cloudwatch:PutMetricData has no resource-level scoping; the ' +
-            'governance-mode-refresher Lambda narrows the call to the ' +
-            'Citadel/Governance/Refresher namespace and only emits ' +
-            'RefreshAttempt / RefreshSuccess / RefreshFailure counters.',
-          appliesTo: ['Resource::*'],
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "governance-mode-refresher Lambda narrows the call to the " +
+            "Citadel/Governance/Refresher namespace and only emits " +
+            "RefreshAttempt / RefreshSuccess / RefreshFailure counters.",
+          appliesTo: ["Resource::*"],
         },
       ],
       true,
@@ -2360,16 +2685,23 @@ export class ArbiterStack extends cdk.Stack {
 
     // EventBridge rule on the agent event bus — fires on every
     // governance.mode.transition event emitted by setGovernanceMode.
-    const governanceModeTransitionRule = new events.Rule(this, 'GovernanceModeTransitionRule', {
-      eventBus: props.agentEventBus,
-      ruleName: `citadel-governance-mode-transition-${props.environment}`,
-      description: 'Triggers the governance-mode-refresher Lambda on every governance.mode.transition event.',
-      eventPattern: {
-        source: ['citadel.governance'],
-        detailType: ['governance.mode.transition'],
+    const governanceModeTransitionRule = new events.Rule(
+      this,
+      "GovernanceModeTransitionRule",
+      {
+        eventBus: props.agentEventBus,
+        ruleName: `citadel-governance-mode-transition-${props.environment}`,
+        description:
+          "Triggers the governance-mode-refresher Lambda on every governance.mode.transition event.",
+        eventPattern: {
+          source: ["citadel.governance"],
+          detailType: ["governance.mode.transition"],
+        },
       },
-    });
-    governanceModeTransitionRule.addTarget(new targets.LambdaFunction(governanceModeRefresherFn));
+    );
+    governanceModeTransitionRule.addTarget(
+      new targets.LambdaFunction(governanceModeRefresherFn),
+    );
 
     // ============================================================
     // Wave 3.C — governance-finding fanout (DDB stream → AppSync)
@@ -2407,79 +2739,88 @@ export class ArbiterStack extends cdk.Stack {
       // Lambda (init failures, throttling beyond retries). Not for
       // per-record errors — those are absorbed inside the handler and
       // metricised on PublishFailure.
-      const governanceFindingFanoutDLQ = new Queue(this, 'GovernanceFindingFanoutDLQ', {
-        queueName: `citadel-governance-finding-fanout-dlq-${props.environment}`,
-        retentionPeriod: cdk.Duration.days(14),
-        encryption: cdk.aws_sqs.QueueEncryption.SQS_MANAGED,
-        enforceSSL: true,
-      });
+      const governanceFindingFanoutDLQ = new Queue(
+        this,
+        "GovernanceFindingFanoutDLQ",
+        {
+          queueName: `citadel-governance-finding-fanout-dlq-${props.environment}`,
+          retentionPeriod: cdk.Duration.days(14),
+          encryption: cdk.aws_sqs.QueueEncryption.SQS_MANAGED,
+          enforceSSL: true,
+        },
+      );
       // The DLQ is itself the dead-letter target for the
       // EventSourceMapping; suppressing AwsSolutions-SQS3 here is the
       // standard pattern (a DLQ for a DLQ would create an infinite
       // failure regress and accomplish nothing).
-      NagSuppressions.addResourceSuppressions(
-        governanceFindingFanoutDLQ,
-        [
-          {
-            id: 'AwsSolutions-SQS3',
-            reason:
-              'This queue IS the dead-letter destination for the ' +
-              'governance-finding-fanout DDB stream EventSourceMapping. ' +
-              'A DLQ for a DLQ would loop on its own failures.',
-          },
-        ],
-      );
-
-      const governanceFindingFanoutFn = new lambda.Function(this, 'GovernanceFindingFanoutFn', {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: 'governance-finding-fanout.handler',
-        code: lambda.Code.fromAsset('dist/lambda'),
-        timeout: cdk.Duration.seconds(30),
-        // Keep the Lambda small — it only signs + posts a single GraphQL
-        // mutation per record. 256MB handles up to ~10 INSERT records
-        // per batch comfortably.
-        memorySize: 256,
-        environment: {
-          ENVIRONMENT: props.environment,
-          APPSYNC_ENDPOINT: props.appSyncApi.graphqlUrl,
+      NagSuppressions.addResourceSuppressions(governanceFindingFanoutDLQ, [
+        {
+          id: "AwsSolutions-SQS3",
+          reason:
+            "This queue IS the dead-letter destination for the " +
+            "governance-finding-fanout DDB stream EventSourceMapping. " +
+            "A DLQ for a DLQ would loop on its own failures.",
         },
-        logGroup: new logs.LogGroup(this, 'GovernanceFindingFanoutFnLogs', {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      });
+      ]);
+
+      const governanceFindingFanoutFn = new lambda.Function(
+        this,
+        "GovernanceFindingFanoutFn",
+        {
+          runtime: lambda.Runtime.NODEJS_24_X,
+          handler: "governance-finding-fanout.handler",
+          code: lambda.Code.fromAsset("dist/lambda"),
+          timeout: cdk.Duration.seconds(30),
+          // Keep the Lambda small — it only signs + posts a single GraphQL
+          // mutation per record. 256MB handles up to ~10 INSERT records
+          // per batch comfortably.
+          memorySize: 256,
+          environment: {
+            ENVIRONMENT: props.environment,
+            APPSYNC_ENDPOINT: props.appSyncApi.graphqlUrl,
+          },
+          logGroup: new logs.LogGroup(this, "GovernanceFindingFanoutFnLogs", {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          }),
+        },
+      );
 
       // appsync:GraphQL grant scoped to the single mutation field. The
       // ARN format `${apiArn}/types/Mutation/fields/<field>` is per
       // AppSync's IAM authorization spec — broader scopes (e.g. the
       // whole API arn) would let this Lambda call any other mutation,
       // which is unnecessary.
-      governanceFindingFanoutFn.addToRolePolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['appsync:GraphQL'],
-        resources: [
-          `${props.appSyncApi.arn}/types/Mutation/fields/publishGovernanceFinding`,
-        ],
-      }));
+      governanceFindingFanoutFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["appsync:GraphQL"],
+          resources: [
+            `${props.appSyncApi.arn}/types/Mutation/fields/publishGovernanceFinding`,
+          ],
+        }),
+      );
 
       // CloudWatch PutMetricData has no resource-level scoping; the
       // Lambda narrows the call to a single namespace + metric name.
-      governanceFindingFanoutFn.addToRolePolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['cloudwatch:PutMetricData'],
-        resources: ['*'],
-      }));
+      governanceFindingFanoutFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["cloudwatch:PutMetricData"],
+          resources: ["*"],
+        }),
+      );
       NagSuppressions.addResourceSuppressions(
         governanceFindingFanoutFn.role!,
         [
           {
-            id: 'AwsSolutions-IAM5',
+            id: "AwsSolutions-IAM5",
             reason:
-              'cloudwatch:PutMetricData has no resource-level scoping; the ' +
-              'governance-finding-fanout Lambda narrows the call to the ' +
-              'Citadel/Governance/Fanout namespace and only emits the ' +
-              'PublishFailure counter.',
-            appliesTo: ['Resource::*'],
+              "cloudwatch:PutMetricData has no resource-level scoping; the " +
+              "governance-finding-fanout Lambda narrows the call to the " +
+              "Citadel/Governance/Fanout namespace and only emits the " +
+              "PublishFailure counter.",
+            appliesTo: ["Resource::*"],
           },
         ],
         true,
@@ -2491,39 +2832,47 @@ export class ArbiterStack extends cdk.Stack {
       // 10 keeps cold-start overhead amortised; retryAttempts 2 is the
       // sweet spot — three total attempts before the DLQ catches a
       // permanently broken event.
-      new lambda.EventSourceMapping(this, 'GovernanceFindingFanoutEventSourceMapping', {
-        target: governanceFindingFanoutFn,
-        eventSourceArn: this.governanceLedgerTable.tableStreamArn,
-        startingPosition: lambda.StartingPosition.LATEST,
-        batchSize: 10,
-        retryAttempts: 2,
-        onFailure: new cdk.aws_lambda_event_sources.SqsDlq(governanceFindingFanoutDLQ),
-        // EventSourceMapping FilterCriteria narrows the trigger to INSERT
-        // events only. The handler also defensively checks
-        // record.eventName so a future filter-criteria change (e.g.
-        // backfill replay) doesn't accidentally project a MODIFY/REMOVE
-        // row.
-        filters: [
-          lambda.FilterCriteria.filter({ eventName: lambda.FilterRule.isEqual('INSERT') }),
-        ],
-      });
+      new lambda.EventSourceMapping(
+        this,
+        "GovernanceFindingFanoutEventSourceMapping",
+        {
+          target: governanceFindingFanoutFn,
+          eventSourceArn: this.governanceLedgerTable.tableStreamArn,
+          startingPosition: lambda.StartingPosition.LATEST,
+          batchSize: 10,
+          retryAttempts: 2,
+          onFailure: new cdk.aws_lambda_event_sources.SqsDlq(
+            governanceFindingFanoutDLQ,
+          ),
+          // EventSourceMapping FilterCriteria narrows the trigger to INSERT
+          // events only. The handler also defensively checks
+          // record.eventName so a future filter-criteria change (e.g.
+          // backfill replay) doesn't accidentally project a MODIFY/REMOVE
+          // row.
+          filters: [
+            lambda.FilterCriteria.filter({
+              eventName: lambda.FilterRule.isEqual("INSERT"),
+            }),
+          ],
+        },
+      );
 
       // Grant the Lambda permission to read the DDB stream. CDK's
       // EventSourceMapping wires the trigger but does not implicitly
       // grant the read permission on the stream ARN — that requires
       // an explicit IAM statement.
-      governanceFindingFanoutFn.addToRolePolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'dynamodb:DescribeStream',
-          'dynamodb:GetRecords',
-          'dynamodb:GetShardIterator',
-          'dynamodb:ListStreams',
-        ],
-        resources: [
-          `${this.governanceLedgerTable.tableArn}/stream/*`,
-        ],
-      }));
+      governanceFindingFanoutFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: [
+            "dynamodb:DescribeStream",
+            "dynamodb:GetRecords",
+            "dynamodb:GetShardIterator",
+            "dynamodb:ListStreams",
+          ],
+          resources: [`${this.governanceLedgerTable.tableArn}/stream/*`],
+        }),
+      );
       // The /stream/* suffix is unavoidable: the stream ARN includes a
       // timestamp suffix (e.g. /stream/2026-05-19T...) that CFN does
       // not surface at template time. The wildcard is bounded to the
@@ -2533,14 +2882,14 @@ export class ArbiterStack extends cdk.Stack {
         governanceFindingFanoutFn.role!,
         [
           {
-            id: 'AwsSolutions-IAM5',
+            id: "AwsSolutions-IAM5",
             reason:
-              'DynamoDB stream ARNs include a timestamp suffix that CFN ' +
-              'cannot resolve at template time. The wildcard is bounded ' +
-              'to the governanceLedgerTable stream sub-resource via the ' +
-              'tableArn prefix; no other table is reachable.',
+              "DynamoDB stream ARNs include a timestamp suffix that CFN " +
+              "cannot resolve at template time. The wildcard is bounded " +
+              "to the governanceLedgerTable stream sub-resource via the " +
+              "tableArn prefix; no other table is reachable.",
             appliesTo: [
-              'Resource::<GovernanceLedgerTable6CB53D06.Arn>/stream/*',
+              "Resource::<GovernanceLedgerTable6CB53D06.Arn>/stream/*",
             ],
           },
         ],
@@ -2551,6 +2900,5 @@ export class ArbiterStack extends cdk.Stack {
       // its on-failure target.
       governanceFindingFanoutDLQ.grantSendMessages(governanceFindingFanoutFn);
     }
-
   }
 }

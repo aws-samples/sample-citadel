@@ -462,6 +462,134 @@ A: The mode is read per-invocation, so a flip affects any dispatch that
 begins after the configuration change lands. In-flight dispatches
 complete under their original mode. There is no drain window required.
 
+## Supervisor Dispatch Enforcement Mode (SSM-Backed)
+
+This section documents the enforcement-mode control that gates agent
+dispatch inside the Supervisor Lambda (`arbiter/supervisor/index.py`,
+`governed_process_agent_call`). It is a separate control surface from the
+`GOVERNANCE_MODE` environment variable described above: the dispatch mode
+is read from SSM at call time, not baked into Lambda configuration, and
+governs the supervisor's own dispatch decision rather than the workload-
+identity gate.
+
+### Where the mode comes from
+
+The mode is resolved by `arbiter/governance/hierarchy.py`
+(`_resolve_enforcement_mode`) from the SSM parameter:
+
+```text
+/citadel/governance/enforce/{ENVIRONMENT}
+```
+
+where `{ENVIRONMENT}` is the value of the Lambda's `ENVIRONMENT` env var
+(e.g. `dev`, `staging`, `prod`). The same path convention is shared by the
+TypeScript reader in `backend/src/utils/governance-flag.ts`, which also
+reads a companion `/citadel/governance/effective_at/{env}` timestamp — the
+Python resolver does not consume that second parameter.
+
+- **Allowed values:** `permissive`, `shadow`, `strict`.
+- **Default:** `shadow`. Applied whenever `ENVIRONMENT` is unset, the
+  parameter is missing, the value is outside the three literals, or the
+  SSM call raises for any reason (permissions, throttling, network). Note
+  this differs from the TypeScript reader, which defaults to `permissive`
+  on the same failure classes — treat the Python-side supervisor's
+  fallback as `shadow`, not `permissive`.
+- **No-SSM-call condition:** if `ENVIRONMENT` is unset, the SSM lookup is
+  skipped entirely (there is no well-formed parameter path to query) and
+  `shadow` is returned immediately.
+- **Cache TTL:** 300 seconds, cached in-process per environment name.
+  **Operational implication:** after a `put-parameter` flip, an
+  already-warm Lambda container can take up to 5 minutes to observe the
+  new value; cold containers pick it up immediately. Do not expect an
+  instantaneous flip — wait out the TTL window before concluding a flip
+  failed to take effect.
+
+### What each mode does at dispatch
+
+Evaluated in `governed_process_agent_call` after the governance package
+availability check (see below):
+
+- **`permissive`** and **`shadow`** — identical dispatch behavior: the
+  request is evaluated against the governance engine, the finding is
+  written to the ledger, and dispatch **always proceeds** regardless of
+  the decision (PERMIT/DENY/ESCALATE/HALT are all non-blocking). This is
+  evaluate + record + proceed, not a bypass — the evaluation and ledger
+  write still happen on every call.
+- **`strict`** — enforces the decision: `PERMIT` proceeds to dispatch;
+  `DENY` blocks and returns a structured denial; `ESCALATE`/`HALT`
+  publish an SNS notification (when `ESCALATION_TOPIC_ARN` is set) and
+  then block.
+
+### Flipping an environment to `strict`, and rolling back
+
+```bash
+# Flip to strict
+aws ssm put-parameter \
+  --name "/citadel/governance/enforce/prod" \
+  --value "strict" \
+  --type String \
+  --overwrite
+
+# Roll back to shadow
+aws ssm put-parameter \
+  --name "/citadel/governance/enforce/prod" \
+  --value "shadow" \
+  --type String \
+  --overwrite
+```
+
+Allow up to 5 minutes (the cache TTL) for already-running containers to
+pick up the change. To verify the active behavior:
+
+- Look for the supervisor's own findings written via
+  `arbiter/governance/ledger.py` (`write_finding`) for the affected
+  workflow/agent — the `decision` field reflects what the engine returned
+  regardless of mode.
+- In `strict` mode, a blocked dispatch returns a structured result with
+  `denied: true` and a `finding_id`/`reason`, or `escalated: true` with
+  the same fields for ESCALATE/HALT.
+- Escalations in `strict` mode also appear as SNS publishes to
+  `ESCALATION_TOPIC_ARN`, logged with the finding's `finding_id`.
+
+### Fail-closed guarantees
+
+- **Missing governance package, any mode:** if `arbiter/governance/`
+  cannot be imported at Lambda cold start (`_GOVERNANCE_AVAILABLE` is
+  `False`), every dispatch is refused unconditionally — with a structured
+  `denied: true, reason: 'governance_package_unavailable'` result and an
+  error-level log — before the enforcement mode or
+  `ARBITER_GOVERNANCE_BYPASS` are even consulted. There is no code path
+  from "package unavailable" to `process_agent_call`.
+- **CI bundle guarantee:** `backend/scripts/verify-supervisor-bundle.sh`
+  runs against the `cdk synth` output and fails the build (exit code 2)
+  if the bundled SupervisorAgent Lambda asset is missing
+  `governance/__init__.py`, `governance/hierarchy.py`,
+  `common/__init__.py`, or `common/region.py` alongside
+  `supervisor/index.py`. This is the check that prevents shipping an
+  artifact that would trigger the fail-closed refusal above in
+  production.
+- **Ledger write failure, every mode:** `write_finding` is called
+  unconditionally before the mode branch. Any exception it raises
+  propagates and halts dispatch — this applies in `permissive` and
+  `shadow` exactly as it does in `strict`; there is no mode in which a
+  ledger write failure is swallowed.
+
+### Emergency override: `ARBITER_GOVERNANCE_BYPASS`
+
+- **Default:** unset (falsy). Any value other than the literal string
+  `'true'` has no effect.
+- **Effect when `'true'`:** forces shadow-style dispatch (evaluate +
+  record + proceed) even when the resolved persisted mode is `strict`.
+- **Incident-use-only guidance:** this is an emergency escape hatch for a
+  human operator during an incident, not a default deployment posture.
+  Time-box the change, record in the incident ticket why it was set and
+  by whom, and unset it (restoring normal `strict` enforcement) as soon
+  as the incident is resolved.
+- **Explicit limitation:** setting this variable does **not** re-enable
+  dispatch when the governance package itself is unavailable. It only
+  affects gate 2 (enforcement mode); gate 1 (package availability) is
+  refused unconditionally regardless of this variable's value.
+
 ## Governance Scope: Org-Uniform
 
 The governance framework in this system is **organization-uniform**. AuthorityUnits, CaseLaw, ConstitutionalLayers, ProgramReviews, and the GovernanceLedger apply a single ruleset across every organization in the deployment. There is no schema field, resolver logic, or storage dimension that carries an orgId on governance entities.

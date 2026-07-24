@@ -12,15 +12,16 @@ import {
   UpdateRegistryRecordStatusCommand,
   DeleteRegistryRecordCommand,
   ListRegistryRecordsCommand,
-  SubmitRegistryRecordForApprovalCommand,
   RegistryRecordStatus,
-} from '@aws-sdk/client-bedrock-agentcore-control';
+} from "@aws-sdk/client-bedrock-agentcore-control";
 import type {
   GetRegistryRecordCommandOutput,
   ListRegistryRecordsCommandOutput,
   RegistryRecordSummary,
-} from '@aws-sdk/client-bedrock-agentcore-control';
-import { sanitizeRegistryName } from '../utils/registry-name';
+} from "@aws-sdk/client-bedrock-agentcore-control";
+import { sanitizeRegistryName } from "../utils/registry-name";
+import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
+import { ConnectorError } from "../adapters/errors";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -36,7 +37,23 @@ import { sanitizeRegistryName } from '../utils/registry-name';
 export class TypeMismatchError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'TypeMismatchError';
+    this.name = "TypeMismatchError";
+  }
+}
+
+/**
+ * Structured error for the agent-record approval lifecycle gate: illegal
+ * status transitions and pending-immutability violations. Carries a `code`
+ * so callers/UIs can branch on failure kind rather than string-matching the
+ * human message.
+ */
+export class RegistryLifecycleError extends ConnectorError {
+  constructor(
+    message: string,
+    code: "INVALID_TRANSITION" | "RECORD_IMMUTABLE",
+  ) {
+    super(message, code, false);
+    this.name = "RegistryLifecycleError";
   }
 }
 
@@ -49,7 +66,7 @@ export interface RegistryServiceConfig {
   region: string;
 }
 
-export type BindingDirection = 'INPUT' | 'OUTPUT' | 'BIDIRECTIONAL';
+export type BindingDirection = "INPUT" | "OUTPUT" | "BIDIRECTIONAL";
 
 /**
  * Structural view of an AWS SDK error for transient/not-found checks.
@@ -90,27 +107,27 @@ export interface DataStoreBinding {
  * for records with no invocation block.
  */
 export type AgentInvocationProtocol =
-  | 'AGENTCORE_RUNTIME'
-  | 'BEDROCK_AGENT'
-  | 'LAMBDA_INVOKE'
-  | 'HTTP_ENDPOINT'
-  | 'MCP'
-  | 'A2A'
-  | 'STEP_FUNCTIONS'
-  | 'SAGEMAKER_ENDPOINT'
-  | 'SQS_ASYNC';
+  | "AGENTCORE_RUNTIME"
+  | "BEDROCK_AGENT"
+  | "LAMBDA_INVOKE"
+  | "HTTP_ENDPOINT"
+  | "MCP"
+  | "A2A"
+  | "STEP_FUNCTIONS"
+  | "SAGEMAKER_ENDPOINT"
+  | "SQS_ASYNC";
 
 /** Authentication mode used when reaching an invocation target. */
 export type AgentInvocationAuthMode =
-  | 'SIGV4'
-  | 'API_KEY'
-  | 'OAUTH2'
-  | 'COGNITO'
-  | 'NONE'
-  | 'BEARER';
+  | "SIGV4"
+  | "API_KEY"
+  | "OAUTH2"
+  | "COGNITO"
+  | "NONE"
+  | "BEARER";
 
 /** Synchronous request/response vs. asynchronous callback delivery. */
-export type AgentInvocationMode = 'sync' | 'async_callback';
+export type AgentInvocationMode = "sync" | "async_callback";
 
 /**
  * How to reach and invoke an agent. `target` is protocol-specific (an ARN, an
@@ -159,7 +176,7 @@ export interface AgentOrigin {
   region?: string;
   substrate: string;
   discoveredAt: string;
-  ownership: 'external';
+  ownership: "external";
 }
 
 /**
@@ -169,7 +186,7 @@ export interface AgentOrigin {
  * invocation/origin types FROM this file — keeping the alias here avoids a
  * circular module dependency. LLM-proposed manifests are always 'low'.
  */
-export type ProposedManifestConfidence = 'high' | 'medium' | 'low';
+export type ProposedManifestConfidence = "high" | "medium" | "low";
 
 /**
  * UNTRUSTED, LLM-proposed agent manifest stored on a DRAFT import record
@@ -196,9 +213,9 @@ export interface ProposedManifestMetadata {
    * proposed manifest into the trusted manifest. Acceptance NEVER activates the
    * agent — the record still STAYS DRAFT.
    */
-  reviewState: 'pending_review' | 'failed' | 'accepted';
+  reviewState: "pending_review" | "failed" | "accepted";
   /** Provenance — fixed for the Tier-3 LLM path. */
-  source: 'llm_tier3';
+  source: "llm_tier3";
   /** Per-field confidence for the proposed manifest; all 'low' for an LLM proposal. */
   fieldConfidence?: Record<string, ProposedManifestConfidence>;
   /** ISO 8601 timestamp the proposal/marker was stored. */
@@ -232,10 +249,10 @@ export interface ProposedManifestMetadata {
  * {@link ProposedManifestConfidence}.
  */
 export type AgentReachabilityClassification =
-  | 'reachable'
-  | 'unreachable'
-  | 'unverifiable_private'
-  | 'no_endpoint';
+  | "reachable"
+  | "unreachable"
+  | "unverifiable_private"
+  | "no_endpoint";
 
 /**
  * Result of a BACKEND-ONLY best-effort reachability probe of an imported
@@ -274,8 +291,8 @@ export interface AgentReachabilityMetadata {
  * fields are retained across an unpublish.
  */
 export interface GatewayPublicationMetadata {
-  status: 'published' | 'unpublished';
-  targetType: 'mcpServer';
+  status: "published" | "unpublished";
+  targetType: "mcpServer";
   gatewayId: string;
   gatewayTargetId: string;
   /** Present only when auth was offloaded (API_KEY/BEARER); absent for NONE. */
@@ -289,7 +306,7 @@ export interface GatewayPublicationMetadata {
 export interface AgentCustomMetadata {
   categories: string[];
   icon: string;
-  state: 'active' | 'inactive' | 'maintenance';
+  state: "active" | "inactive" | "maintenance";
   appId?: string;
   manifest?: Record<string, unknown>;
   orgId?: string;
@@ -304,7 +321,7 @@ export interface AgentCustomMetadata {
    * once governance has acknowledged the requested authority grant.
    */
   governanceAttestation?: {
-    status: 'pending' | 'attested';
+    status: "pending" | "attested";
     enforcementMode: string;
     authorityRequested: boolean;
     requestedAt: string;
@@ -362,22 +379,22 @@ export interface AgentCustomMetadata {
 export function getInvocationProtocol(meta: {
   invocation?: AgentInvocationBlock;
 }): AgentInvocationProtocol {
-  return meta.invocation?.protocol ?? 'AGENTCORE_RUNTIME';
+  return meta.invocation?.protocol ?? "AGENTCORE_RUNTIME";
 }
 
 export interface ToolCustomMetadata {
   categories: string[];
   icon: string;
-  state: 'active' | 'inactive' | 'maintenance';
+  state: "active" | "inactive" | "maintenance";
   integrationBindings?: IntegrationBinding[];
   dataStoreBindings?: DataStoreBinding[];
   appId?: string;
-  config?: string;      // full tool config JSON (was previously dumped in `description`)
-  createdBy?: string;   // AppSync caller identity or 'unknown'
+  config?: string; // full tool config JSON (was previously dumped in `description`)
+  createdBy?: string; // AppSync caller identity or 'unknown'
   orgId?: string;
 }
 
-export type ResourceType = 'agent' | 'tool';
+export type ResourceType = "agent" | "tool";
 
 /**
  * Registry record status values from the SDK.
@@ -386,15 +403,15 @@ export type ResourceType = 'agent' | 'tool';
  * "APPROVED". We use the SDK constants directly.
  */
 export const RegistryRecordStatusValues = {
-  DRAFT: 'DRAFT',
-  PENDING_APPROVAL: 'PENDING_APPROVAL',
-  APPROVED: 'APPROVED',
-  REJECTED: 'REJECTED',
-  DEPRECATED: 'DEPRECATED',
-  CREATING: 'CREATING',
-  UPDATING: 'UPDATING',
-  CREATE_FAILED: 'CREATE_FAILED',
-  UPDATE_FAILED: 'UPDATE_FAILED',
+  DRAFT: "DRAFT",
+  PENDING_APPROVAL: "PENDING_APPROVAL",
+  APPROVED: "APPROVED",
+  REJECTED: "REJECTED",
+  DEPRECATED: "DEPRECATED",
+  CREATING: "CREATING",
+  UPDATING: "UPDATING",
+  CREATE_FAILED: "CREATE_FAILED",
+  UPDATE_FAILED: "UPDATE_FAILED",
 } as const;
 
 export type RegistryRecordStatusValue =
@@ -502,6 +519,14 @@ export interface ListResourcesOptions {
 
 export class RegistryService {
   private readonly client: BedrockAgentCoreControlClient;
+  /**
+   * Shared LifecycleManager for REGISTRY_TRANSITIONS (agent-record approval
+   * lifecycle). Stateless — safe as a single static instance across all
+   * RegistryService instances.
+   */
+  private static readonly lifecycleManager = new LifecycleManager(
+    REGISTRY_TRANSITIONS,
+  );
   private readonly registryId: string;
 
   /**
@@ -626,15 +651,15 @@ export class RegistryService {
     const statusCode = (err as AwsErrorLike)?.$metadata?.httpStatusCode;
     if (statusCode && statusCode >= 500) return true;
 
-    const name = (err as AwsErrorLike)?.name ?? '';
+    const name = (err as AwsErrorLike)?.name ?? "";
     if (
-      name === 'TimeoutError' ||
-      name === 'NetworkingError' ||
-      name === 'ECONNRESET' ||
-      name === 'ThrottlingException' ||
-      name === 'TooManyRequestsException' ||
-      name === 'ServiceUnavailableException' ||
-      name === 'InternalServerException'
+      name === "TimeoutError" ||
+      name === "NetworkingError" ||
+      name === "ECONNRESET" ||
+      name === "ThrottlingException" ||
+      name === "TooManyRequestsException" ||
+      name === "ServiceUnavailableException" ||
+      name === "InternalServerException"
     ) {
       return true;
     }
@@ -681,7 +706,7 @@ export class RegistryService {
           // The string literal is part of the field's TS union type ('MCP' | 'A2A'
           // | 'CUSTOM' | 'AGENT_SKILLS'), so this type-checks cleanly without the
           // runtime import dependency.
-          descriptorType: 'CUSTOM',
+          descriptorType: "CUSTOM",
           descriptors: {
             custom: {
               inlineContent: input.customMetadata,
@@ -692,9 +717,9 @@ export class RegistryService {
     );
 
     // Extract recordId from the ARN (last segment after '/')
-    const recordArn = createResult.recordArn ?? '';
-    const recordId = recordArn.includes('/')
-      ? recordArn.substring(recordArn.lastIndexOf('/') + 1)
+    const recordArn = createResult.recordArn ?? "";
+    const recordId = recordArn.includes("/")
+      ? recordArn.substring(recordArn.lastIndexOf("/") + 1)
       : id;
 
     // Fetch the full record to populate all fields
@@ -747,12 +772,12 @@ export class RegistryService {
         ? JSON.parse(customDescriptorContent)
         : {};
       const hasManifest = meta.manifest !== undefined;
-      if (type === 'agent' && !hasManifest) {
+      if (type === "agent" && !hasManifest) {
         throw new TypeMismatchError(
           `Record ${recordId} exists but is not an agent (no manifest)`,
         );
       }
-      if (type === 'tool' && hasManifest) {
+      if (type === "tool" && hasManifest) {
         throw new TypeMismatchError(
           `Record ${recordId} exists but is not a tool (has manifest)`,
         );
@@ -760,16 +785,16 @@ export class RegistryService {
 
       return {
         recordId: result.recordId ?? id,
-        name: result.name ?? '',
+        name: result.name ?? "",
         description: result.description,
-        status: result.status ?? '',
+        status: result.status ?? "",
         customDescriptorContent,
         createdAt: result.createdAt,
         updatedAt: result.updatedAt,
       };
     } catch (err: unknown) {
       if (
-        (err as AwsErrorLike).name === 'ResourceNotFoundException' ||
+        (err as AwsErrorLike).name === "ResourceNotFoundException" ||
         (err as AwsErrorLike)?.$metadata?.httpStatusCode === 404
       ) {
         return null;
@@ -823,30 +848,33 @@ export class RegistryService {
           recordId,
           // Renames hit the same name constraint as creates — sanitize with
           // the shared rule (legal names pass through unchanged).
-          name: input.name != null ? sanitizeRegistryName(input.name) : input.name,
-          description: input.description != null
-            ? { optionalValue: input.description }
-            : undefined,
-          descriptors: input.customMetadata != null
-            ? {
-                optionalValue: {
-                  custom: {
-                    optionalValue: {
-                      inlineContent: input.customMetadata,
+          name:
+            input.name != null ? sanitizeRegistryName(input.name) : input.name,
+          description:
+            input.description != null
+              ? { optionalValue: input.description }
+              : undefined,
+          descriptors:
+            input.customMetadata != null
+              ? {
+                  optionalValue: {
+                    custom: {
+                      optionalValue: {
+                        inlineContent: input.customMetadata,
+                      },
                     },
                   },
-                },
-              }
-            : undefined,
+                }
+              : undefined,
         }),
       ),
     );
 
     return {
       recordId: result.recordId ?? id,
-      name: result.name ?? '',
+      name: result.name ?? "",
       description: result.description,
-      status: result.status ?? '',
+      status: result.status ?? "",
       customDescriptorContent: result.descriptors?.custom?.inlineContent,
       createdAt: result.createdAt,
       updatedAt: result.updatedAt,
@@ -859,15 +887,18 @@ export class RegistryService {
   /**
    * Waits for a registry record to leave transitional states (CREATING, UPDATING).
    */
-  private async waitForStableState(recordId: string, maxWaitMs = 10000): Promise<void> {
+  private async waitForStableState(
+    recordId: string,
+    maxWaitMs = 10000,
+  ): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < maxWaitMs) {
       const result = await this.client.send(
         new GetRegistryRecordCommand({ registryId: this.registryId, recordId }),
       );
       const s = result.status as string;
-      if (s !== 'CREATING' && s !== 'UPDATING') return;
-      await new Promise(r => setTimeout(r, 1000));
+      if (s !== "CREATING" && s !== "UPDATING") return;
+      await new Promise((r) => setTimeout(r, 1000));
     }
   }
 
@@ -875,30 +906,41 @@ export class RegistryService {
     type: ResourceType,
     id: string,
     status: RegistryRecordStatusValue,
-    statusReason: string = 'Status update via registry service',
+    statusReason: string = "Status update via registry service",
+    currentStatus?: string,
   ): Promise<RegistryRecord> {
     const recordId = id;
+
+    // Validated-transition gate (agent-record approval lifecycle). Only
+    // enforced when the caller supplies the record's current status — the
+    // legacy tri-state (active/inactive/maintenance) callers in
+    // agent-config-resolver.ts / tool-config-resolver.ts do not pass this
+    // and are unaffected. Callers that DO know the current status (the
+    // RegistryAgentRecord governance resolver) must pass it so every
+    // transition is validated, never silently coerced.
+    if (currentStatus !== undefined) {
+      if (
+        !RegistryService.lifecycleManager.isValidTransition(
+          currentStatus,
+          status,
+        )
+      ) {
+        const valid = REGISTRY_TRANSITIONS.transitions[currentStatus] || [];
+        throw new RegistryLifecycleError(
+          `Invalid status transition: ${currentStatus} → ${status}. ` +
+            `Valid transitions from ${currentStatus}: ${valid.join(", ") || "none"}`,
+          "INVALID_TRANSITION",
+        );
+      }
+    }
+
     // Wait for any in-progress state transition to complete
     await this.waitForStableState(recordId);
 
-    // APPROVED requires SubmitRegistryRecordForApproval (auto-approval handles the rest)
-    if (status === RegistryRecordStatusValues.APPROVED) {
-      const result = await this.withRetry(() =>
-        this.client.send(
-          new SubmitRegistryRecordForApprovalCommand({
-            registryId: this.registryId,
-            recordId,
-          }),
-        ),
-      );
-      return {
-        recordId: result.recordId ?? recordId,
-        name: '',
-        status: result.status ?? status,
-        updatedAt: result.updatedAt,
-      };
-    }
-
+    // Every status change — including APPROVED — goes through
+    // UpdateRegistryRecordStatusCommand directly. SubmitRegistryRecordForApproval
+    // must NEVER be used here: it auto-approves the record on the AgentCore
+    // side, bypassing the human decision this gate exists to enforce.
     const result = await this.withRetry(() =>
       this.client.send(
         new UpdateRegistryRecordStatusCommand({
@@ -912,7 +954,7 @@ export class RegistryService {
 
     return {
       recordId: result.recordId ?? recordId,
-      name: '',
+      name: "",
       status: result.status ?? status,
       updatedAt: result.updatedAt,
     };
@@ -951,14 +993,15 @@ export class RegistryService {
     const summaries: RegistryRecordSummary[] = [];
     let nextToken: string | undefined;
     do {
-      const result: ListRegistryRecordsCommandOutput = await this.withRetry(() =>
-        this.client.send(
-          new ListRegistryRecordsCommand({
-            registryId: this.registryId,
-            descriptorType: 'CUSTOM',
-            nextToken,
-          }),
-        ),
+      const result: ListRegistryRecordsCommandOutput = await this.withRetry(
+        () =>
+          this.client.send(
+            new ListRegistryRecordsCommand({
+              registryId: this.registryId,
+              descriptorType: "CUSTOM",
+              nextToken,
+            }),
+          ),
       );
       if (result.registryRecords) {
         summaries.push(...result.registryRecords);
@@ -1021,7 +1064,9 @@ export class RegistryService {
     // Dedupe by resolved recordId so an agent bound under multiple refs (or
     // a batch with duplicate bindings) is fetched exactly once.
     const uniqueRecordIds = Array.from(
-      new Set(Array.from(refToRecordId.values()).filter((id): id is string => !!id)),
+      new Set(
+        Array.from(refToRecordId.values()).filter((id): id is string => !!id),
+      ),
     );
     const recordIdToRecord = new Map<string, RegistryRecord>();
     await Promise.all(
@@ -1030,7 +1075,7 @@ export class RegistryService {
           const record = await this.getResource(type, recordId);
           if (record) recordIdToRecord.set(recordId, record);
         } catch (err) {
-          console.warn('getResourcesByRefs: getResource failed, dropping ref', {
+          console.warn("getResourcesByRefs: getResource failed, dropping ref", {
             type,
             recordId,
             error: err instanceof Error ? err.message : String(err),
@@ -1055,10 +1100,10 @@ export class RegistryService {
    */
   private summaryToRecord(rec: RegistryRecordSummary): RegistryRecord {
     return {
-      recordId: rec.recordId ?? '',
-      name: rec.name ?? '',
+      recordId: rec.recordId ?? "",
+      name: rec.name ?? "",
       description: rec.description,
-      status: rec.status ?? '',
+      status: rec.status ?? "",
       // Summaries don't include descriptor content
       customDescriptorContent: undefined,
       createdAt: rec.createdAt,
@@ -1122,7 +1167,7 @@ export class RegistryService {
           this.client.send(
             new ListRegistryRecordsCommand({
               registryId: this.registryId,
-              descriptorType: 'CUSTOM',
+              descriptorType: "CUSTOM",
               nextToken,
             }),
           ),
@@ -1133,10 +1178,10 @@ export class RegistryService {
       // Per-summary outcome, index-aligned so output order matches summary
       // order regardless of GET completion order.
       type DetailOutcome =
-        | { kind: 'full'; record: RegistryRecord }
-        | { kind: 'summary' } // GET failed — fall back to the summary shape
-        | { kind: 'filtered' } // wrong type for this listing — drop
-        | { kind: 'skipped' }; // time budget exhausted — drop (see note above)
+        | { kind: "full"; record: RegistryRecord }
+        | { kind: "summary" } // GET failed — fall back to the summary shape
+        | { kind: "filtered" } // wrong type for this listing — drop
+        | { kind: "skipped" }; // time budget exhausted — drop (see note above)
       const outcomes: DetailOutcome[] = new Array(summaries.length);
 
       let cursor = 0;
@@ -1146,14 +1191,14 @@ export class RegistryService {
           cursor += 1;
           if (i >= summaries.length) return;
           const rec = summaries[i];
-          const recId = rec.recordId ?? '';
+          const recId = rec.recordId ?? "";
           if (!recId) {
-            outcomes[i] = { kind: 'summary' };
+            outcomes[i] = { kind: "summary" };
             continue;
           }
           if (budgetLow()) {
             truncated = true;
-            outcomes[i] = { kind: 'skipped' };
+            outcomes[i] = { kind: "skipped" };
             continue;
           }
           try {
@@ -1171,9 +1216,9 @@ export class RegistryService {
             );
             const full: RegistryRecord = {
               recordId: detail.recordId ?? recId,
-              name: detail.name ?? rec.name ?? '',
+              name: detail.name ?? rec.name ?? "",
               description: detail.description,
-              status: detail.status ?? rec.status ?? '',
+              status: detail.status ?? rec.status ?? "",
               customDescriptorContent:
                 detail.descriptors?.custom?.inlineContent,
               createdAt: detail.createdAt,
@@ -1188,12 +1233,12 @@ export class RegistryService {
               ? JSON.parse(full.customDescriptorContent)
               : {};
             const hasManifest = meta.manifest !== undefined;
-            const typeMatches = type === 'agent' ? hasManifest : !hasManifest;
+            const typeMatches = type === "agent" ? hasManifest : !hasManifest;
             outcomes[i] = typeMatches
-              ? { kind: 'full', record: full }
-              : { kind: 'filtered' };
+              ? { kind: "full", record: full }
+              : { kind: "filtered" };
           } catch {
-            outcomes[i] = { kind: 'summary' };
+            outcomes[i] = { kind: "summary" };
           }
         }
       };
@@ -1208,14 +1253,14 @@ export class RegistryService {
         const outcome = outcomes[i];
         if (outcome === undefined) continue;
         switch (outcome.kind) {
-          case 'full':
+          case "full":
             records.push(outcome.record);
             break;
-          case 'summary':
+          case "summary":
             records.push(this.summaryToRecord(summaries[i]));
             break;
-          case 'filtered':
-          case 'skipped':
+          case "filtered":
+          case "skipped":
             break;
         }
       }
@@ -1251,7 +1296,7 @@ export class RegistryService {
           this.client.send(
             new ListRegistryRecordsCommand({
               registryId: this.registryId,
-              descriptorType: 'CUSTOM',
+              descriptorType: "CUSTOM",
               name: query,
               nextToken,
             }),
@@ -1286,11 +1331,11 @@ export class RegistryService {
    */
   toRegistryStatus(internalState: string): RegistryRecordStatusValue {
     switch (internalState) {
-      case 'active':
+      case "active":
         return RegistryRecordStatusValues.APPROVED;
-      case 'inactive':
+      case "inactive":
         return RegistryRecordStatusValues.DEPRECATED;
-      case 'maintenance':
+      case "maintenance":
         return RegistryRecordStatusValues.DRAFT;
       default:
         console.warn(
@@ -1323,7 +1368,9 @@ export class RegistryService {
    *
    * Unknown Registry statuses default to 'inactive' with a warning log.
    */
-  toInternalState(registryStatus: RegistryRecordStatusValue | string | undefined): string {
+  toInternalState(
+    registryStatus: RegistryRecordStatusValue | string | undefined,
+  ): string {
     // Map every RegistryRecordStatus value to the 3-value AgentState enum
     // (active | inactive | maintenance). PENDING_APPROVAL surfaces as 'active'
     // because SubmitRegistryRecordForApproval is async and reflecting user
@@ -1332,18 +1379,20 @@ export class RegistryService {
       case RegistryRecordStatusValues.APPROVED:
       case RegistryRecordStatusValues.UPDATING:
       case RegistryRecordStatusValues.PENDING_APPROVAL:
-        return 'active';
+        return "active";
       case RegistryRecordStatusValues.DRAFT:
       case RegistryRecordStatusValues.CREATING:
-        return 'maintenance';
+        return "maintenance";
       case RegistryRecordStatusValues.DEPRECATED:
       case RegistryRecordStatusValues.REJECTED:
       case RegistryRecordStatusValues.CREATE_FAILED:
       case RegistryRecordStatusValues.UPDATE_FAILED:
-        return 'inactive';
+        return "inactive";
       default:
-        console.warn(`Unknown registry status "${registryStatus}", mapping to 'inactive'`);
-        return 'inactive';
+        console.warn(
+          `Unknown registry status "${registryStatus}", mapping to 'inactive'`,
+        );
+        return "inactive";
     }
   }
 
@@ -1370,14 +1419,20 @@ export class RegistryService {
     json: string | null | undefined,
     defaults: T,
   ): T {
-    if (json == null || json === '') {
+    if (json == null || json === "") {
       return defaults;
     }
 
     try {
       const parsed = JSON.parse(json);
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        console.warn('Custom metadata JSON is not a plain object, returning defaults');
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        console.warn(
+          "Custom metadata JSON is not a plain object, returning defaults",
+        );
         return defaults;
       }
       return { ...defaults, ...parsed };
@@ -1395,8 +1450,8 @@ export class RegistryService {
 
   private static readonly AGENT_METADATA_DEFAULTS: AgentCustomMetadata = {
     categories: [],
-    icon: '',
-    state: 'active',
+    icon: "",
+    state: "active",
     appId: undefined,
     manifest: undefined,
     orgId: undefined,
@@ -1410,8 +1465,8 @@ export class RegistryService {
 
   private static readonly TOOL_METADATA_DEFAULTS: ToolCustomMetadata = {
     categories: [],
-    icon: '',
-    state: 'active',
+    icon: "",
+    state: "active",
     integrationBindings: undefined,
     dataStoreBindings: undefined,
     appId: undefined,
@@ -1433,10 +1488,17 @@ export class RegistryService {
   ): IntegrationBinding[] | null {
     if (!Array.isArray(bindings) || bindings.length === 0) return null;
     const cleaned = bindings.filter(
-      (b: { integrationId?: unknown; integrationType?: unknown } | null | undefined) =>
+      (
+        b:
+          | { integrationId?: unknown; integrationType?: unknown }
+          | null
+          | undefined,
+      ) =>
         b &&
-        typeof b.integrationId === 'string' && b.integrationId.length > 0 &&
-        typeof b.integrationType === 'string' && b.integrationType.length > 0,
+        typeof b.integrationId === "string" &&
+        b.integrationId.length > 0 &&
+        typeof b.integrationType === "string" &&
+        b.integrationType.length > 0,
     );
     return cleaned.length > 0 ? (cleaned as IntegrationBinding[]) : null;
   }
@@ -1446,10 +1508,17 @@ export class RegistryService {
   ): DataStoreBinding[] | null {
     if (!Array.isArray(bindings) || bindings.length === 0) return null;
     const cleaned = bindings.filter(
-      (b: { dataStoreId?: unknown; dataStoreType?: unknown } | null | undefined) =>
+      (
+        b:
+          | { dataStoreId?: unknown; dataStoreType?: unknown }
+          | null
+          | undefined,
+      ) =>
         b &&
-        typeof b.dataStoreId === 'string' && b.dataStoreId.length > 0 &&
-        typeof b.dataStoreType === 'string' && b.dataStoreType.length > 0,
+        typeof b.dataStoreId === "string" &&
+        b.dataStoreId.length > 0 &&
+        typeof b.dataStoreType === "string" &&
+        b.dataStoreType.length > 0,
     );
     return cleaned.length > 0 ? (cleaned as DataStoreBinding[]) : null;
   }
@@ -1473,17 +1542,21 @@ export class RegistryService {
     ...candidates: Array<string | undefined>
   ): string {
     for (const candidate of candidates) {
-      if (typeof candidate !== 'string' || candidate === '') continue;
+      if (typeof candidate !== "string" || candidate === "") continue;
       try {
         const parsed: unknown = JSON.parse(candidate);
-        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray(parsed)
+        ) {
           return candidate;
         }
       } catch {
         // Not JSON (plain-text description) — try the next candidate.
       }
     }
-    return '{}';
+    return "{}";
   }
 
   /**
@@ -1497,8 +1570,8 @@ export class RegistryService {
 
     return {
       agentId: record.recordId,
-      name: record.name ?? '',
-      orgId: meta.orgId ?? '',
+      name: record.name ?? "",
+      orgId: meta.orgId ?? "",
       // AWSJSON contract: config must be a JSON object — a plain-text
       // description falls back to '{}' (see toValidConfigJson).
       config: RegistryService.toValidConfigJson(record.description),
@@ -1517,7 +1590,9 @@ export class RegistryService {
       ...(meta.reachability ? { reachability: meta.reachability } : {}),
       // Surface the gateway publication record READ-ONLY when present
       // (US-IMP-031). Never an active/trusted field; never changes DRAFT state.
-      ...(meta.gatewayPublication ? { gatewayPublication: meta.gatewayPublication } : {}),
+      ...(meta.gatewayPublication
+        ? { gatewayPublication: meta.gatewayPublication }
+        : {}),
     };
   }
 
@@ -1532,16 +1607,23 @@ export class RegistryService {
 
     return {
       toolId: record.recordId,
-      orgId: meta.orgId ?? '',
+      orgId: meta.orgId ?? "",
       // New records: config comes from custom_metadata.config (see tool-config-resolver createToolConfigRegistry).
       // Legacy records: fall back to record.description which previously carried the full JSON blob.
       // AWSJSON contract: whichever candidate wins must be a JSON object —
       // plain text or '' falls back to '{}' (see toValidConfigJson).
-      config: RegistryService.toValidConfigJson(meta.config, record.description),
+      config: RegistryService.toValidConfigJson(
+        meta.config,
+        record.description,
+      ),
       state: this.toInternalState(record.status),
       categories: meta.categories,
-      integrationBindings: RegistryService.sanitizeIntegrationBindings(meta.integrationBindings),
-      dataStoreBindings: RegistryService.sanitizeDataStoreBindings(meta.dataStoreBindings),
+      integrationBindings: RegistryService.sanitizeIntegrationBindings(
+        meta.integrationBindings,
+      ),
+      dataStoreBindings: RegistryService.sanitizeDataStoreBindings(
+        meta.dataStoreBindings,
+      ),
       createdAt: record.createdAt?.toISOString(),
       updatedAt: record.updatedAt?.toISOString(),
     };

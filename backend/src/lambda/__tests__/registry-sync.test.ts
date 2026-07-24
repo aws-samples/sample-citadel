@@ -3,15 +3,23 @@
  */
 
 // Set env vars before importing the module
-process.env.AGENT_CONFIG_TABLE = 'test-agents-table';
-process.env.TOOLS_CONFIG_TABLE = 'test-tools-table';
-process.env.REGISTRY_ID = 'test-registry-id';
-process.env.DLQ_URL = 'https://sqs.us-east-1.amazonaws.com/123456789/test-dlq';
+process.env.AGENT_CONFIG_TABLE = "test-agents-table";
+process.env.TOOLS_CONFIG_TABLE = "test-tools-table";
+process.env.REGISTRY_ID = "test-registry-id";
+process.env.DLQ_URL = "https://sqs.us-east-1.amazonaws.com/123456789/test-dlq";
 
-import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, PutCommand, DeleteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { CloudWatchClient, PutMetricDataCommand } from '@aws-sdk/client-cloudwatch';
+import { mockClient } from "aws-sdk-client-mock";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  DeleteCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 
 import {
   handler,
@@ -26,8 +34,12 @@ import {
   handleStatusChanged,
   sendToDlq,
   emitSyncFailureMetric,
-} from '../registry-sync';
-import type { RegistryEvent, RegistryResourcePayload, ResourceType } from '../registry-sync';
+} from "../registry-sync";
+import type {
+  RegistryEvent,
+  RegistryResourcePayload,
+  ResourceType,
+} from "../registry-sync";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -44,9 +56,9 @@ beforeEach(() => {
   // Default: SQS and CloudWatch succeed
   sqsMock.on(SendMessageCommand).resolves({});
   cwMock.on(PutMetricDataCommand).resolves({});
-  jest.spyOn(console, 'log').mockImplementation();
-  jest.spyOn(console, 'warn').mockImplementation();
-  jest.spyOn(console, 'error').mockImplementation();
+  jest.spyOn(console, "log").mockImplementation();
+  jest.spyOn(console, "warn").mockImplementation();
+  jest.spyOn(console, "error").mockImplementation();
 });
 
 afterEach(() => {
@@ -60,55 +72,67 @@ afterEach(() => {
 /** Loosely-typed overrides so tests can build deliberately malformed events. */
 interface EventOverrides {
   source?: string;
-  'detail-type'?: string;
+  "detail-type"?: string;
   detail?: Record<string, unknown>;
 }
 
 function makeEvent(overrides: EventOverrides = {}): RegistryEvent {
   return {
-    source: 'aws.bedrock-agentcore',
-    'detail-type': 'AgentCore Registry Resource Change',
+    source: "aws.bedrock-agentcore",
+    "detail-type": "AgentCore Registry Resource Change",
     detail: {
-      resourceId: 'res-123',
-      resourceType: 'agent',
-      eventType: 'CREATED',
-      resource: { name: 'TestAgent' },
+      resourceId: "res-123",
+      resourceType: "agent",
+      eventType: "CREATED",
+      resource: { name: "TestAgent" },
       ...overrides.detail,
     },
     ...overrides,
-    ...(overrides.detail ? { detail: { ...makeEvent().detail, ...overrides.detail } } : {}),
+    ...(overrides.detail
+      ? { detail: { ...makeEvent().detail, ...overrides.detail } }
+      : {}),
   } as RegistryEvent;
 }
 
-function makeAgentResource(overrides: RegistryResourcePayload = {}): RegistryResourcePayload {
+function makeAgentResource(
+  overrides: RegistryResourcePayload = {},
+): RegistryResourcePayload {
   return {
-    description: JSON.stringify({ name: 'TestAgent', filename: 'test.py' }),
+    description: JSON.stringify({ name: "TestAgent", filename: "test.py" }),
     customDescriptorContent: JSON.stringify({
-      categories: ['cat1'],
-      icon: 'icon.png',
-      state: 'active',
-      appId: 'app-1',
-      manifest: { name: 'TestAgent', version: '1.0', description: 'A test agent' },
+      categories: ["cat1"],
+      icon: "icon.png",
+      state: "active",
+      appId: "app-1",
+      manifest: {
+        name: "TestAgent",
+        version: "1.0",
+        description: "A test agent",
+      },
     }),
-    createdAt: '2024-01-01T00:00:00.000Z',
-    updatedAt: '2024-01-02T00:00:00.000Z',
+    createdAt: "2024-01-01T00:00:00.000Z",
+    updatedAt: "2024-01-02T00:00:00.000Z",
     ...overrides,
   };
 }
 
-function makeToolResource(overrides: RegistryResourcePayload = {}): RegistryResourcePayload {
+function makeToolResource(
+  overrides: RegistryResourcePayload = {},
+): RegistryResourcePayload {
   return {
-    description: JSON.stringify({ name: 'TestTool', filename: 'tool.py' }),
+    description: JSON.stringify({ name: "TestTool", filename: "tool.py" }),
     customDescriptorContent: JSON.stringify({
-      categories: ['toolcat'],
-      icon: 'tool-icon.png',
-      state: 'active',
-      integrationBindings: [{ integrationId: 'int-1', integrationType: 'REST' }],
-      dataStoreBindings: [{ dataStoreId: 'ds-1', dataStoreType: 'S3' }],
-      appId: 'app-2',
+      categories: ["toolcat"],
+      icon: "tool-icon.png",
+      state: "active",
+      integrationBindings: [
+        { integrationId: "int-1", integrationType: "REST" },
+      ],
+      dataStoreBindings: [{ dataStoreId: "ds-1", dataStoreType: "S3" }],
+      appId: "app-2",
     }),
-    createdAt: '2024-02-01T00:00:00.000Z',
-    updatedAt: '2024-02-02T00:00:00.000Z',
+    createdAt: "2024-02-01T00:00:00.000Z",
+    updatedAt: "2024-02-02T00:00:00.000Z",
     ...overrides,
   };
 }
@@ -117,53 +141,83 @@ function makeToolResource(overrides: RegistryResourcePayload = {}): RegistryReso
 // validateEvent (from task 4.1 — preserved)
 // ---------------------------------------------------------------------------
 
-describe('validateEvent', () => {
-  test('returns null for a valid event', () => {
+describe("validateEvent", () => {
+  test("returns null for a valid event", () => {
     expect(validateEvent(makeEvent())).toBeNull();
   });
 
-  test('rejects null event', () => {
-    expect(validateEvent(null)).toBe('Event is null or undefined');
+  test("rejects null event", () => {
+    expect(validateEvent(null)).toBe("Event is null or undefined");
   });
 
-  test('rejects wrong source', () => {
-    expect(validateEvent(makeEvent({ source: 'aws.s3' }))).toContain('Unexpected event source');
+  test("rejects wrong source", () => {
+    expect(validateEvent(makeEvent({ source: "aws.s3" }))).toContain(
+      "Unexpected event source",
+    );
   });
 
-  test('rejects wrong detail-type', () => {
-    expect(validateEvent(makeEvent({ 'detail-type': 'SomethingElse' }))).toContain('Unexpected detail-type');
+  test("rejects wrong detail-type", () => {
+    expect(
+      validateEvent(makeEvent({ "detail-type": "SomethingElse" })),
+    ).toContain("Unexpected detail-type");
   });
 
-  test('rejects missing detail', () => {
-    const event = { source: 'aws.bedrock-agentcore', 'detail-type': 'AgentCore Registry Resource Change' };
-    expect(validateEvent(event)).toBe('Event detail is missing');
+  test("rejects missing detail", () => {
+    const event = {
+      source: "aws.bedrock-agentcore",
+      "detail-type": "AgentCore Registry Resource Change",
+    };
+    expect(validateEvent(event)).toBe("Event detail is missing");
   });
 
-  test('rejects missing resourceId', () => {
-    const event = makeEvent({ detail: { resourceId: '', resourceType: 'agent', eventType: 'CREATED' } });
-    expect(validateEvent(event)).toContain('resourceId');
+  test("rejects missing resourceId", () => {
+    const event = makeEvent({
+      detail: { resourceId: "", resourceType: "agent", eventType: "CREATED" },
+    });
+    expect(validateEvent(event)).toContain("resourceId");
   });
 
-  test('rejects invalid resourceType', () => {
-    const event = makeEvent({ detail: { resourceId: 'r1', resourceType: 'widget', eventType: 'CREATED' } });
-    expect(validateEvent(event)).toContain('Invalid resourceType');
+  test("rejects invalid resourceType", () => {
+    const event = makeEvent({
+      detail: {
+        resourceId: "r1",
+        resourceType: "widget",
+        eventType: "CREATED",
+      },
+    });
+    expect(validateEvent(event)).toContain("Invalid resourceType");
   });
 
-  test('rejects invalid eventType', () => {
-    const event = makeEvent({ detail: { resourceId: 'r1', resourceType: 'agent', eventType: 'EXPLODED' } });
-    expect(validateEvent(event)).toContain('Invalid eventType');
+  test("rejects invalid eventType", () => {
+    const event = makeEvent({
+      detail: {
+        resourceId: "r1",
+        resourceType: "agent",
+        eventType: "EXPLODED",
+      },
+    });
+    expect(validateEvent(event)).toContain("Invalid eventType");
   });
 
-  test('accepts all valid eventTypes', () => {
-    for (const eventType of ['CREATED', 'UPDATED', 'DELETED', 'STATUS_CHANGED']) {
-      const event = makeEvent({ detail: { resourceId: 'r1', resourceType: 'agent', eventType } });
+  test("accepts all valid eventTypes", () => {
+    for (const eventType of [
+      "CREATED",
+      "UPDATED",
+      "DELETED",
+      "STATUS_CHANGED",
+    ]) {
+      const event = makeEvent({
+        detail: { resourceId: "r1", resourceType: "agent", eventType },
+      });
       expect(validateEvent(event)).toBeNull();
     }
   });
 
-  test('accepts both agent and tool resourceTypes', () => {
-    for (const resourceType of ['agent', 'tool']) {
-      const event = makeEvent({ detail: { resourceId: 'r1', resourceType, eventType: 'CREATED' } });
+  test("accepts both agent and tool resourceTypes", () => {
+    for (const resourceType of ["agent", "tool"]) {
+      const event = makeEvent({
+        detail: { resourceId: "r1", resourceType, eventType: "CREATED" },
+      });
       expect(validateEvent(event)).toBeNull();
     }
   });
@@ -173,17 +227,19 @@ describe('validateEvent', () => {
 // getTableForResourceType (from task 4.1 — preserved)
 // ---------------------------------------------------------------------------
 
-describe('getTableForResourceType', () => {
-  test('routes agent to AGENT_CONFIG_TABLE', () => {
-    expect(getTableForResourceType('agent')).toBe('test-agents-table');
+describe("getTableForResourceType", () => {
+  test("routes agent to AGENT_CONFIG_TABLE", () => {
+    expect(getTableForResourceType("agent")).toBe("test-agents-table");
   });
 
-  test('routes tool to TOOLS_CONFIG_TABLE', () => {
-    expect(getTableForResourceType('tool')).toBe('test-tools-table');
+  test("routes tool to TOOLS_CONFIG_TABLE", () => {
+    expect(getTableForResourceType("tool")).toBe("test-tools-table");
   });
 
-  test('throws for unknown resourceType', () => {
-    expect(() => getTableForResourceType('widget' as unknown as ResourceType)).toThrow('Unknown resourceType');
+  test("throws for unknown resourceType", () => {
+    expect(() =>
+      getTableForResourceType("widget" as unknown as ResourceType),
+    ).toThrow("Unknown resourceType");
   });
 });
 
@@ -191,27 +247,27 @@ describe('getTableForResourceType', () => {
 // toInternalState
 // ---------------------------------------------------------------------------
 
-describe('toInternalState', () => {
-  test('maps APPROVED to active', () => {
-    expect(toInternalState('APPROVED')).toBe('active');
+describe("toInternalState", () => {
+  test("maps APPROVED to active", () => {
+    expect(toInternalState("APPROVED")).toBe("active");
   });
 
-  test('maps DEPRECATED to inactive', () => {
-    expect(toInternalState('DEPRECATED')).toBe('inactive');
+  test("maps DEPRECATED to inactive", () => {
+    expect(toInternalState("DEPRECATED")).toBe("inactive");
   });
 
-  test('maps DRAFT to maintenance', () => {
-    expect(toInternalState('DRAFT')).toBe('maintenance');
+  test("maps DRAFT to maintenance", () => {
+    expect(toInternalState("DRAFT")).toBe("maintenance");
   });
 
-  test('maps PENDING_APPROVAL to pending', () => {
-    expect(toInternalState('PENDING_APPROVAL')).toBe('pending');
+  test("maps PENDING_APPROVAL to pending", () => {
+    expect(toInternalState("PENDING_APPROVAL")).toBe("pending");
   });
 
-  test('maps unknown status to inactive with warning', () => {
-    expect(toInternalState('UNKNOWN_STATUS')).toBe('inactive');
+  test("maps unknown status to inactive with warning", () => {
+    expect(toInternalState("UNKNOWN_STATUS")).toBe("inactive");
     expect(console.warn).toHaveBeenCalledWith(
-      expect.stringContaining('Unknown registry status'),
+      expect.stringContaining("Unknown registry status"),
     );
   });
 });
@@ -220,39 +276,39 @@ describe('toInternalState', () => {
 // deserializeCustomMetadata
 // ---------------------------------------------------------------------------
 
-describe('deserializeCustomMetadata', () => {
-  const defaults = { categories: [] as string[], icon: '', state: 'active' };
+describe("deserializeCustomMetadata", () => {
+  const defaults = { categories: [] as string[], icon: "", state: "active" };
 
-  test('returns defaults for null input', () => {
+  test("returns defaults for null input", () => {
     expect(deserializeCustomMetadata(null, defaults)).toEqual(defaults);
   });
 
-  test('returns defaults for empty string', () => {
-    expect(deserializeCustomMetadata('', defaults)).toEqual(defaults);
+  test("returns defaults for empty string", () => {
+    expect(deserializeCustomMetadata("", defaults)).toEqual(defaults);
   });
 
-  test('returns defaults for invalid JSON', () => {
-    expect(deserializeCustomMetadata('not-json', defaults)).toEqual(defaults);
+  test("returns defaults for invalid JSON", () => {
+    expect(deserializeCustomMetadata("not-json", defaults)).toEqual(defaults);
   });
 
-  test('returns defaults for JSON array', () => {
-    expect(deserializeCustomMetadata('[1,2]', defaults)).toEqual(defaults);
+  test("returns defaults for JSON array", () => {
+    expect(deserializeCustomMetadata("[1,2]", defaults)).toEqual(defaults);
   });
 
-  test('merges valid JSON with defaults', () => {
+  test("merges valid JSON with defaults", () => {
     const result = deserializeCustomMetadata(
-      JSON.stringify({ categories: ['a'], icon: 'x' }),
+      JSON.stringify({ categories: ["a"], icon: "x" }),
       defaults,
     );
-    expect(result).toEqual({ categories: ['a'], icon: 'x', state: 'active' });
+    expect(result).toEqual({ categories: ["a"], icon: "x", state: "active" });
   });
 
-  test('overrides all defaults when all fields present', () => {
+  test("overrides all defaults when all fields present", () => {
     const result = deserializeCustomMetadata(
-      JSON.stringify({ categories: ['b'], icon: 'y', state: 'inactive' }),
+      JSON.stringify({ categories: ["b"], icon: "y", state: "inactive" }),
       defaults,
     );
-    expect(result).toEqual({ categories: ['b'], icon: 'y', state: 'inactive' });
+    expect(result).toEqual({ categories: ["b"], icon: "y", state: "inactive" });
   });
 });
 
@@ -260,66 +316,82 @@ describe('deserializeCustomMetadata', () => {
 // buildAgentCacheRecord
 // ---------------------------------------------------------------------------
 
-describe('buildAgentCacheRecord', () => {
-  test('maps all fields from resource with custom metadata', () => {
+describe("buildAgentCacheRecord", () => {
+  test("maps all fields from resource with custom metadata", () => {
     const resource = makeAgentResource();
-    const record = buildAgentCacheRecord('agent-1', resource);
+    const record = buildAgentCacheRecord("agent-1", resource);
 
-    expect(record.agentId).toBe('agent-1');
+    expect(record.agentId).toBe("agent-1");
     expect(record.config).toBe(resource.description);
-    expect(record.state).toBe('active');
-    expect(record.categories).toEqual(['cat1']);
-    expect(record.icon).toBe('icon.png');
-    expect(record.appId).toBe('app-1');
-    expect(record.manifest).toEqual({ name: 'TestAgent', version: '1.0', description: 'A test agent' });
-    expect(record.createdAt).toBe('2024-01-01T00:00:00.000Z');
-    expect(record.updatedAt).toBe('2024-01-02T00:00:00.000Z');
+    expect(record.state).toBe("active");
+    expect(record.categories).toEqual(["cat1"]);
+    expect(record.icon).toBe("icon.png");
+    expect(record.appId).toBe("app-1");
+    expect(record.manifest).toEqual({
+      name: "TestAgent",
+      version: "1.0",
+      description: "A test agent",
+    });
+    expect(record.createdAt).toBe("2024-01-01T00:00:00.000Z");
+    expect(record.updatedAt).toBe("2024-01-02T00:00:00.000Z");
   });
 
-  test('uses defaults when custom metadata is missing', () => {
-    const resource = { description: 'desc' };
-    const record = buildAgentCacheRecord('agent-2', resource);
+  test("uses defaults when custom metadata is missing", () => {
+    const resource = { description: "desc" };
+    const record = buildAgentCacheRecord("agent-2", resource);
 
-    expect(record.agentId).toBe('agent-2');
-    expect(record.config).toBe('desc');
-    expect(record.state).toBe('active');
+    expect(record.agentId).toBe("agent-2");
+    expect(record.config).toBe("desc");
+    expect(record.state).toBe("active");
     expect(record.categories).toEqual([]);
-    expect(record.icon).toBe('');
+    expect(record.icon).toBe("");
     expect(record.appId).toBeUndefined();
     expect(record.manifest).toBeUndefined();
   });
 
-  test('generates timestamps when not provided', () => {
-    const record = buildAgentCacheRecord('agent-3', {});
+  test("generates timestamps when not provided", () => {
+    const record = buildAgentCacheRecord("agent-3", {});
     expect(record.createdAt).toBeDefined();
     expect(record.updatedAt).toBeDefined();
   });
 
-  test('denormalizes the event resource.name onto the cache record', () => {
-    const resource = makeAgentResource({ name: 'Support Agent' } as unknown as RegistryResourcePayload);
-    const record = buildAgentCacheRecord('agent-1', resource);
-    expect(record.name).toBe('Support Agent');
+  test("denormalizes the event resource.name onto the cache record", () => {
+    const resource = makeAgentResource({
+      name: "Support Agent",
+    } as unknown as RegistryResourcePayload);
+    const record = buildAgentCacheRecord("agent-1", resource);
+    expect(record.name).toBe("Support Agent");
   });
 
-  test('defaults name to empty string when resource.name is absent', () => {
-    const record = buildAgentCacheRecord('agent-2', { description: 'desc' });
-    expect(record.name).toBe('');
+  test("defaults name to empty string when resource.name is absent", () => {
+    const record = buildAgentCacheRecord("agent-2", { description: "desc" });
+    expect(record.name).toBe("");
   });
 
   test('denormalizes an explicit empty-string manifest orgId (system-shared) as ""', () => {
     const resource = makeAgentResource({
-      customDescriptorContent: JSON.stringify({ orgId: '', categories: [], icon: '', state: 'active' }),
+      customDescriptorContent: JSON.stringify({
+        orgId: "",
+        categories: [],
+        icon: "",
+        state: "active",
+      }),
     });
-    const record = buildAgentCacheRecord('agent-1', resource);
-    expect(record.orgId).toBe('');
+    const record = buildAgentCacheRecord("agent-1", resource);
+    expect(record.orgId).toBe("");
   });
 
-  test('denormalizes a specific manifest orgId', () => {
+  test("denormalizes a specific manifest orgId", () => {
     const resource = makeAgentResource({
-      customDescriptorContent: JSON.stringify({ orgId: 'org-1', categories: [], icon: '', state: 'active' }),
+      customDescriptorContent: JSON.stringify({
+        orgId: "org-1",
+        categories: [],
+        icon: "",
+        state: "active",
+      }),
     });
-    const record = buildAgentCacheRecord('agent-1', resource);
-    expect(record.orgId).toBe('org-1');
+    const record = buildAgentCacheRecord("agent-1", resource);
+    expect(record.orgId).toBe("org-1");
   });
 
   test('leaves orgId undefined (NOT coerced to "") when the manifest omits it entirely', () => {
@@ -327,14 +399,18 @@ describe('buildAgentCacheRecord', () => {
     // treated as system-shared by downstream tenant checks, which only
     // special-case an EXPLICIT empty string.
     const resource = makeAgentResource({
-      customDescriptorContent: JSON.stringify({ categories: [], icon: '', state: 'active' }),
+      customDescriptorContent: JSON.stringify({
+        categories: [],
+        icon: "",
+        state: "active",
+      }),
     });
-    const record = buildAgentCacheRecord('agent-1', resource);
+    const record = buildAgentCacheRecord("agent-1", resource);
     expect(record.orgId).toBeUndefined();
   });
 
-  test('leaves orgId undefined when customDescriptorContent is entirely absent', () => {
-    const record = buildAgentCacheRecord('agent-1', { description: 'desc' });
+  test("leaves orgId undefined when customDescriptorContent is entirely absent", () => {
+    const record = buildAgentCacheRecord("agent-1", { description: "desc" });
     expect(record.orgId).toBeUndefined();
   });
 });
@@ -343,29 +419,33 @@ describe('buildAgentCacheRecord', () => {
 // buildToolCacheRecord
 // ---------------------------------------------------------------------------
 
-describe('buildToolCacheRecord', () => {
-  test('maps all fields from resource with custom metadata', () => {
+describe("buildToolCacheRecord", () => {
+  test("maps all fields from resource with custom metadata", () => {
     const resource = makeToolResource();
-    const record = buildToolCacheRecord('tool-1', resource);
+    const record = buildToolCacheRecord("tool-1", resource);
 
-    expect(record.toolId).toBe('tool-1');
+    expect(record.toolId).toBe("tool-1");
     expect(record.config).toBe(resource.description);
-    expect(record.state).toBe('active');
-    expect(record.categories).toEqual(['toolcat']);
-    expect(record.icon).toBe('tool-icon.png');
-    expect(record.integrationBindings).toEqual([{ integrationId: 'int-1', integrationType: 'REST' }]);
-    expect(record.dataStoreBindings).toEqual([{ dataStoreId: 'ds-1', dataStoreType: 'S3' }]);
-    expect(record.appId).toBe('app-2');
-    expect(record.createdAt).toBe('2024-02-01T00:00:00.000Z');
-    expect(record.updatedAt).toBe('2024-02-02T00:00:00.000Z');
+    expect(record.state).toBe("active");
+    expect(record.categories).toEqual(["toolcat"]);
+    expect(record.icon).toBe("tool-icon.png");
+    expect(record.integrationBindings).toEqual([
+      { integrationId: "int-1", integrationType: "REST" },
+    ]);
+    expect(record.dataStoreBindings).toEqual([
+      { dataStoreId: "ds-1", dataStoreType: "S3" },
+    ]);
+    expect(record.appId).toBe("app-2");
+    expect(record.createdAt).toBe("2024-02-01T00:00:00.000Z");
+    expect(record.updatedAt).toBe("2024-02-02T00:00:00.000Z");
   });
 
-  test('uses defaults when custom metadata is missing', () => {
-    const resource = { description: 'tool-desc' };
-    const record = buildToolCacheRecord('tool-2', resource);
+  test("uses defaults when custom metadata is missing", () => {
+    const resource = { description: "tool-desc" };
+    const record = buildToolCacheRecord("tool-2", resource);
 
-    expect(record.toolId).toBe('tool-2');
-    expect(record.state).toBe('active');
+    expect(record.toolId).toBe("tool-2");
+    expect(record.state).toBe("active");
     expect(record.categories).toEqual([]);
     expect(record.integrationBindings).toBeUndefined();
     expect(record.dataStoreBindings).toBeUndefined();
@@ -376,54 +456,71 @@ describe('buildToolCacheRecord', () => {
 // handleCreateOrUpdate
 // ---------------------------------------------------------------------------
 
-describe('handleCreateOrUpdate', () => {
-  test('sends PutCommand for agent CREATED with conditional write', async () => {
+describe("handleCreateOrUpdate", () => {
+  test("sends PutCommand for agent CREATED with conditional write", async () => {
     ddbMock.on(PutCommand).resolves({});
 
     const resource = makeAgentResource();
-    await handleCreateOrUpdate('test-agents-table', 'agent', 'agent-1', resource);
+    await handleCreateOrUpdate(
+      "test-agents-table",
+      "agent",
+      "agent-1",
+      resource,
+    );
 
     const call = ddbMock.commandCalls(PutCommand)[0];
     const input = call.args[0].input;
 
-    expect(input.TableName).toBe('test-agents-table');
-    expect(input.Item!.agentId).toBe('agent-1');
-    expect(input.ConditionExpression).toContain('attribute_not_exists');
-    expect(input.ConditionExpression).toContain('#updatedAt < :newUpdatedAt');
+    expect(input.TableName).toBe("test-agents-table");
+    expect(input.Item!.agentId).toBe("agent-1");
+    expect(input.ConditionExpression).toContain("attribute_not_exists");
+    expect(input.ConditionExpression).toContain("#updatedAt < :newUpdatedAt");
   });
 
-  test('sends PutCommand for tool CREATED with correct key', async () => {
+  test("sends PutCommand for tool CREATED with correct key", async () => {
     ddbMock.on(PutCommand).resolves({});
 
     const resource = makeToolResource();
-    await handleCreateOrUpdate('test-tools-table', 'tool', 'tool-1', resource);
+    await handleCreateOrUpdate("test-tools-table", "tool", "tool-1", resource);
 
     const call = ddbMock.commandCalls(PutCommand)[0];
     const input = call.args[0].input;
 
-    expect(input.TableName).toBe('test-tools-table');
-    expect(input.Item!.toolId).toBe('tool-1');
-    expect(input.ExpressionAttributeNames!['#key']).toBe('toolId');
+    expect(input.TableName).toBe("test-tools-table");
+    expect(input.Item!.toolId).toBe("tool-1");
+    expect(input.ExpressionAttributeNames!["#key"]).toBe("toolId");
   });
 
-  test('sends PutCommand for UPDATED event (same logic as CREATED)', async () => {
+  test("sends PutCommand for UPDATED event (same logic as CREATED)", async () => {
     ddbMock.on(PutCommand).resolves({});
 
-    const resource = makeAgentResource({ updatedAt: '2024-06-01T00:00:00.000Z' });
-    await handleCreateOrUpdate('test-agents-table', 'agent', 'agent-1', resource);
+    const resource = makeAgentResource({
+      updatedAt: "2024-06-01T00:00:00.000Z",
+    });
+    await handleCreateOrUpdate(
+      "test-agents-table",
+      "agent",
+      "agent-1",
+      resource,
+    );
 
     const call = ddbMock.commandCalls(PutCommand)[0];
-    expect(call.args[0].input.Item!.updatedAt).toBe('2024-06-01T00:00:00.000Z');
+    expect(call.args[0].input.Item!.updatedAt).toBe("2024-06-01T00:00:00.000Z");
   });
 
-  test('propagates DynamoDB errors (non-conditional)', async () => {
-    const error = new Error('DynamoDB failure');
-    error.name = 'InternalServerError';
+  test("propagates DynamoDB errors (non-conditional)", async () => {
+    const error = new Error("DynamoDB failure");
+    error.name = "InternalServerError";
     ddbMock.on(PutCommand).rejects(error);
 
     await expect(
-      handleCreateOrUpdate('test-agents-table', 'agent', 'agent-1', makeAgentResource()),
-    ).rejects.toThrow('DynamoDB failure');
+      handleCreateOrUpdate(
+        "test-agents-table",
+        "agent",
+        "agent-1",
+        makeAgentResource(),
+      ),
+    ).rejects.toThrow("DynamoDB failure");
   });
 });
 
@@ -431,32 +528,34 @@ describe('handleCreateOrUpdate', () => {
 // handleDelete
 // ---------------------------------------------------------------------------
 
-describe('handleDelete', () => {
-  test('sends DeleteCommand for agent with correct key', async () => {
+describe("handleDelete", () => {
+  test("sends DeleteCommand for agent with correct key", async () => {
     ddbMock.on(DeleteCommand).resolves({});
 
-    await handleDelete('test-agents-table', 'agent', 'agent-1');
+    await handleDelete("test-agents-table", "agent", "agent-1");
 
     const call = ddbMock.commandCalls(DeleteCommand)[0];
     const input = call.args[0].input;
 
-    expect(input.TableName).toBe('test-agents-table');
-    expect(input.Key).toEqual({ agentId: 'agent-1' });
+    expect(input.TableName).toBe("test-agents-table");
+    expect(input.Key).toEqual({ agentId: "agent-1" });
   });
 
-  test('sends DeleteCommand for tool with correct key', async () => {
+  test("sends DeleteCommand for tool with correct key", async () => {
     ddbMock.on(DeleteCommand).resolves({});
 
-    await handleDelete('test-tools-table', 'tool', 'tool-1');
+    await handleDelete("test-tools-table", "tool", "tool-1");
 
     const call = ddbMock.commandCalls(DeleteCommand)[0];
-    expect(call.args[0].input.Key).toEqual({ toolId: 'tool-1' });
+    expect(call.args[0].input.Key).toEqual({ toolId: "tool-1" });
   });
 
-  test('propagates DynamoDB errors', async () => {
-    ddbMock.on(DeleteCommand).rejects(new Error('Delete failed'));
+  test("propagates DynamoDB errors", async () => {
+    ddbMock.on(DeleteCommand).rejects(new Error("Delete failed"));
 
-    await expect(handleDelete('test-agents-table', 'agent', 'a-1')).rejects.toThrow('Delete failed');
+    await expect(
+      handleDelete("test-agents-table", "agent", "a-1"),
+    ).rejects.toThrow("Delete failed");
   });
 });
 
@@ -464,68 +563,89 @@ describe('handleDelete', () => {
 // handleStatusChanged
 // ---------------------------------------------------------------------------
 
-describe('handleStatusChanged', () => {
-  test('sends UpdateCommand with mapped state for APPROVED', async () => {
+describe("handleStatusChanged", () => {
+  test("sends UpdateCommand with mapped state for APPROVED", async () => {
     ddbMock.on(UpdateCommand).resolves({});
 
-    await handleStatusChanged('test-agents-table', 'agent', 'agent-1', 'APPROVED');
+    await handleStatusChanged(
+      "test-agents-table",
+      "agent",
+      "agent-1",
+      "APPROVED",
+    );
 
     const call = ddbMock.commandCalls(UpdateCommand)[0];
     const input = call.args[0].input;
 
-    expect(input.TableName).toBe('test-agents-table');
-    expect(input.Key).toEqual({ agentId: 'agent-1' });
-    expect(input.ExpressionAttributeValues![':newState']).toBe('active');
-    expect(input.ConditionExpression).toContain('attribute_exists');
-    expect(input.ConditionExpression).toContain('#state <> :newState');
+    expect(input.TableName).toBe("test-agents-table");
+    expect(input.Key).toEqual({ agentId: "agent-1" });
+    expect(input.ExpressionAttributeValues![":newState"]).toBe("active");
+    expect(input.ConditionExpression).toContain("attribute_exists");
+    expect(input.ConditionExpression).toContain("#state <> :newState");
   });
 
-  test('maps DEPRECATED to inactive', async () => {
+  test("maps DEPRECATED to inactive", async () => {
     ddbMock.on(UpdateCommand).resolves({});
 
-    await handleStatusChanged('test-tools-table', 'tool', 'tool-1', 'DEPRECATED');
+    await handleStatusChanged(
+      "test-tools-table",
+      "tool",
+      "tool-1",
+      "DEPRECATED",
+    );
 
     const call = ddbMock.commandCalls(UpdateCommand)[0];
-    expect(call.args[0].input.ExpressionAttributeValues![':newState']).toBe('inactive');
-    expect(call.args[0].input.Key).toEqual({ toolId: 'tool-1' });
+    expect(call.args[0].input.ExpressionAttributeValues![":newState"]).toBe(
+      "inactive",
+    );
+    expect(call.args[0].input.Key).toEqual({ toolId: "tool-1" });
   });
 
-  test('maps DRAFT to maintenance', async () => {
+  test("maps DRAFT to maintenance", async () => {
     ddbMock.on(UpdateCommand).resolves({});
 
-    await handleStatusChanged('test-agents-table', 'agent', 'a-1', 'DRAFT');
+    await handleStatusChanged("test-agents-table", "agent", "a-1", "DRAFT");
 
     const call = ddbMock.commandCalls(UpdateCommand)[0];
-    expect(call.args[0].input.ExpressionAttributeValues![':newState']).toBe('maintenance');
+    expect(call.args[0].input.ExpressionAttributeValues![":newState"]).toBe(
+      "maintenance",
+    );
   });
 
-  test('maps unknown status to inactive', async () => {
+  test("maps unknown status to inactive", async () => {
     ddbMock.on(UpdateCommand).resolves({});
 
-    await handleStatusChanged('test-agents-table', 'agent', 'a-1', 'SOME_UNKNOWN');
+    await handleStatusChanged(
+      "test-agents-table",
+      "agent",
+      "a-1",
+      "SOME_UNKNOWN",
+    );
 
     const call = ddbMock.commandCalls(UpdateCommand)[0];
-    expect(call.args[0].input.ExpressionAttributeValues![':newState']).toBe('inactive');
+    expect(call.args[0].input.ExpressionAttributeValues![":newState"]).toBe(
+      "inactive",
+    );
   });
 
-  test('updates updatedAt timestamp', async () => {
+  test("updates updatedAt timestamp", async () => {
     ddbMock.on(UpdateCommand).resolves({});
 
-    await handleStatusChanged('test-agents-table', 'agent', 'a-1', 'APPROVED');
+    await handleStatusChanged("test-agents-table", "agent", "a-1", "APPROVED");
 
     const call = ddbMock.commandCalls(UpdateCommand)[0];
-    expect(call.args[0].input.UpdateExpression).toContain('#updatedAt');
-    expect(call.args[0].input.ExpressionAttributeValues![':now']).toBeDefined();
+    expect(call.args[0].input.UpdateExpression).toContain("#updatedAt");
+    expect(call.args[0].input.ExpressionAttributeValues![":now"]).toBeDefined();
   });
 
-  test('propagates DynamoDB errors (non-conditional)', async () => {
-    const error = new Error('Update failed');
-    error.name = 'InternalServerError';
+  test("propagates DynamoDB errors (non-conditional)", async () => {
+    const error = new Error("Update failed");
+    error.name = "InternalServerError";
     ddbMock.on(UpdateCommand).rejects(error);
 
     await expect(
-      handleStatusChanged('test-agents-table', 'agent', 'a-1', 'APPROVED'),
-    ).rejects.toThrow('Update failed');
+      handleStatusChanged("test-agents-table", "agent", "a-1", "APPROVED"),
+    ).rejects.toThrow("Update failed");
   });
 });
 
@@ -533,15 +653,15 @@ describe('handleStatusChanged', () => {
 // handler — full integration with DynamoDB mock
 // ---------------------------------------------------------------------------
 
-describe('handler — cache operations', () => {
-  test('CREATED agent event writes to DynamoDB', async () => {
+describe("handler — cache operations", () => {
+  test("CREATED agent event writes to DynamoDB", async () => {
     ddbMock.on(PutCommand).resolves({});
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'CREATED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "CREATED",
         resource: makeAgentResource(),
       },
     });
@@ -550,18 +670,18 @@ describe('handler — cache operations', () => {
 
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
     const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
-    expect(input.TableName).toBe('test-agents-table');
-    expect(input.Item!.agentId).toBe('agent-1');
+    expect(input.TableName).toBe("test-agents-table");
+    expect(input.Item!.agentId).toBe("agent-1");
   });
 
-  test('UPDATED tool event writes to DynamoDB', async () => {
+  test("UPDATED tool event writes to DynamoDB", async () => {
     ddbMock.on(PutCommand).resolves({});
 
     const event = makeEvent({
       detail: {
-        resourceId: 'tool-1',
-        resourceType: 'tool',
-        eventType: 'UPDATED',
+        resourceId: "tool-1",
+        resourceType: "tool",
+        eventType: "UPDATED",
         resource: makeToolResource(),
       },
     });
@@ -570,52 +690,57 @@ describe('handler — cache operations', () => {
 
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
     const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
-    expect(input.TableName).toBe('test-tools-table');
-    expect(input.Item!.toolId).toBe('tool-1');
+    expect(input.TableName).toBe("test-tools-table");
+    expect(input.Item!.toolId).toBe("tool-1");
   });
 
-  test('DELETED event sends DeleteCommand', async () => {
+  test("DELETED event sends DeleteCommand", async () => {
     ddbMock.on(DeleteCommand).resolves({});
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'DELETED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "DELETED",
       },
     });
 
     await handler(event);
 
     expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(1);
-    expect(ddbMock.commandCalls(DeleteCommand)[0].args[0].input.Key).toEqual({ agentId: 'agent-1' });
+    expect(ddbMock.commandCalls(DeleteCommand)[0].args[0].input.Key).toEqual({
+      agentId: "agent-1",
+    });
   });
 
-  test('STATUS_CHANGED event sends UpdateCommand', async () => {
+  test("STATUS_CHANGED event sends UpdateCommand", async () => {
     ddbMock.on(UpdateCommand).resolves({});
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'STATUS_CHANGED',
-        previousStatus: 'DRAFT',
-        newStatus: 'APPROVED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "STATUS_CHANGED",
+        previousStatus: "DRAFT",
+        newStatus: "APPROVED",
       },
     });
 
     await handler(event);
 
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
-    expect(ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues![':newState']).toBe('active');
+    expect(
+      ddbMock.commandCalls(UpdateCommand)[0].args[0].input
+        .ExpressionAttributeValues![":newState"],
+    ).toBe("active");
   });
 
-  test('CREATED event without resource payload skips write', async () => {
+  test("CREATED event without resource payload skips write", async () => {
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'CREATED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "CREATED",
         resource: undefined,
       },
     });
@@ -623,15 +748,17 @@ describe('handler — cache operations', () => {
     await handler(event);
 
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('No resource payload'));
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("No resource payload"),
+    );
   });
 
-  test('STATUS_CHANGED event without newStatus skips update', async () => {
+  test("STATUS_CHANGED event without newStatus skips update", async () => {
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'STATUS_CHANGED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "STATUS_CHANGED",
         newStatus: undefined,
       },
     });
@@ -639,19 +766,21 @@ describe('handler — cache operations', () => {
     await handler(event);
 
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('No newStatus'));
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("No newStatus"),
+    );
   });
 
-  test('ConditionalCheckFailedException is swallowed (idempotency)', async () => {
-    const error = new Error('Conditional check failed');
-    error.name = 'ConditionalCheckFailedException';
+  test("ConditionalCheckFailedException is swallowed (idempotency)", async () => {
+    const error = new Error("Conditional check failed");
+    error.name = "ConditionalCheckFailedException";
     ddbMock.on(PutCommand).rejects(error);
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'CREATED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "CREATED",
         resource: makeAgentResource(),
       },
     });
@@ -660,51 +789,59 @@ describe('handler — cache operations', () => {
     await expect(handler(event)).resolves.toBeUndefined();
   });
 
-  test('ConditionalCheckFailedException on STATUS_CHANGED is swallowed', async () => {
-    const error = new Error('Conditional check failed');
-    error.name = 'ConditionalCheckFailedException';
+  test("ConditionalCheckFailedException on STATUS_CHANGED is swallowed", async () => {
+    const error = new Error("Conditional check failed");
+    error.name = "ConditionalCheckFailedException";
     ddbMock.on(UpdateCommand).rejects(error);
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'STATUS_CHANGED',
-        newStatus: 'APPROVED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "STATUS_CHANGED",
+        newStatus: "APPROVED",
       },
     });
 
     await expect(handler(event)).resolves.toBeUndefined();
   });
 
-  test('non-conditional DynamoDB errors propagate and route to DLQ', async () => {
-    const error = new Error('DynamoDB is down');
-    error.name = 'InternalServerError';
+  test("non-conditional DynamoDB errors propagate and route to DLQ", async () => {
+    const error = new Error("DynamoDB is down");
+    error.name = "InternalServerError";
     ddbMock.on(PutCommand).rejects(error);
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'CREATED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "CREATED",
         resource: makeAgentResource(),
       },
     });
 
-    await expect(handler(event)).rejects.toThrow('DynamoDB is down');
+    await expect(handler(event)).rejects.toThrow("DynamoDB is down");
     // DLQ and metric are verified in the dedicated DLQ routing tests
   });
 
-  test('malformed event sends to DLQ then throws', async () => {
-    const badEvent = { source: 'aws.s3', 'detail-type': 'wrong', detail: {} } as unknown as RegistryEvent;
-    await expect(handler(badEvent)).rejects.toThrow('Malformed registry sync event');
+  test("malformed event sends to DLQ then throws", async () => {
+    const badEvent = {
+      source: "aws.s3",
+      "detail-type": "wrong",
+      detail: {},
+    } as unknown as RegistryEvent;
+    await expect(handler(badEvent)).rejects.toThrow(
+      "Malformed registry sync event",
+    );
 
     // Verify DLQ was called
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
     const sqsInput = sqsMock.commandCalls(SendMessageCommand)[0].args[0].input;
-    expect(sqsInput.QueueUrl).toBe('https://sqs.us-east-1.amazonaws.com/123456789/test-dlq');
+    expect(sqsInput.QueueUrl).toBe(
+      "https://sqs.us-east-1.amazonaws.com/123456789/test-dlq",
+    );
     const body = JSON.parse(sqsInput.MessageBody!);
-    expect(body.reason).toContain('Malformed event');
+    expect(body.reason).toContain("Malformed event");
   });
 });
 
@@ -712,25 +849,27 @@ describe('handler — cache operations', () => {
 // sendToDlq
 // ---------------------------------------------------------------------------
 
-describe('sendToDlq', () => {
-  test('sends event and reason to SQS', async () => {
-    const event = { foo: 'bar' };
-    await sendToDlq(event, 'test reason');
+describe("sendToDlq", () => {
+  test("sends event and reason to SQS", async () => {
+    const event = { foo: "bar" };
+    await sendToDlq(event, "test reason");
 
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
     const input = sqsMock.commandCalls(SendMessageCommand)[0].args[0].input;
-    expect(input.QueueUrl).toBe('https://sqs.us-east-1.amazonaws.com/123456789/test-dlq');
+    expect(input.QueueUrl).toBe(
+      "https://sqs.us-east-1.amazonaws.com/123456789/test-dlq",
+    );
     const body = JSON.parse(input.MessageBody!);
-    expect(body.event).toEqual({ foo: 'bar' });
-    expect(body.reason).toBe('test reason');
+    expect(body.event).toEqual({ foo: "bar" });
+    expect(body.reason).toBe("test reason");
     expect(body.timestamp).toBeDefined();
   });
 
-  test('does not throw when SQS fails', async () => {
-    sqsMock.on(SendMessageCommand).rejects(new Error('SQS down'));
-    await expect(sendToDlq({}, 'reason')).resolves.toBeUndefined();
+  test("does not throw when SQS fails", async () => {
+    sqsMock.on(SendMessageCommand).rejects(new Error("SQS down"));
+    await expect(sendToDlq({}, "reason")).resolves.toBeUndefined();
     expect(console.error).toHaveBeenCalledWith(
-      'Failed to send event to DLQ:',
+      "Failed to send event to DLQ:",
       expect.any(Error),
     );
   });
@@ -740,23 +879,23 @@ describe('sendToDlq', () => {
 // emitSyncFailureMetric
 // ---------------------------------------------------------------------------
 
-describe('emitSyncFailureMetric', () => {
-  test('emits SyncFailure metric to CloudWatch', async () => {
+describe("emitSyncFailureMetric", () => {
+  test("emits SyncFailure metric to CloudWatch", async () => {
     await emitSyncFailureMetric();
 
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
     const input = cwMock.commandCalls(PutMetricDataCommand)[0].args[0].input;
-    expect(input.Namespace).toBe('RegistrySync');
-    expect(input.MetricData![0].MetricName).toBe('SyncFailure');
+    expect(input.Namespace).toBe("RegistrySync");
+    expect(input.MetricData![0].MetricName).toBe("SyncFailure");
     expect(input.MetricData![0].Value).toBe(1);
-    expect(input.MetricData![0].Unit).toBe('Count');
+    expect(input.MetricData![0].Unit).toBe("Count");
   });
 
-  test('does not throw when CloudWatch fails', async () => {
-    cwMock.on(PutMetricDataCommand).rejects(new Error('CW down'));
+  test("does not throw when CloudWatch fails", async () => {
+    cwMock.on(PutMetricDataCommand).rejects(new Error("CW down"));
     await expect(emitSyncFailureMetric()).resolves.toBeUndefined();
     expect(console.error).toHaveBeenCalledWith(
-      'Failed to emit SyncFailure metric:',
+      "Failed to emit SyncFailure metric:",
       expect.any(Error),
     );
   });
@@ -766,84 +905,85 @@ describe('emitSyncFailureMetric', () => {
 // handler — DLQ routing and metric emission
 // ---------------------------------------------------------------------------
 
-describe('handler — DLQ routing and metrics', () => {
-  test('DynamoDB write failure sends to DLQ and emits SyncFailure metric', async () => {
-    const error = new Error('DynamoDB is down');
-    error.name = 'InternalServerError';
+describe("handler — DLQ routing and metrics", () => {
+  test("DynamoDB write failure sends to DLQ and emits SyncFailure metric", async () => {
+    const error = new Error("DynamoDB is down");
+    error.name = "InternalServerError";
     ddbMock.on(PutCommand).rejects(error);
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'CREATED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "CREATED",
         resource: makeAgentResource(),
       },
     });
 
-    await expect(handler(event)).rejects.toThrow('DynamoDB is down');
+    await expect(handler(event)).rejects.toThrow("DynamoDB is down");
 
     // Verify DLQ
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
     const sqsBody = JSON.parse(
       sqsMock.commandCalls(SendMessageCommand)[0].args[0].input.MessageBody!,
     );
-    expect(sqsBody.reason).toContain('DynamoDB write failure');
+    expect(sqsBody.reason).toContain("DynamoDB write failure");
 
     // Verify CloudWatch metric
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
     expect(
-      cwMock.commandCalls(PutMetricDataCommand)[0].args[0].input.MetricData![0].MetricName,
-    ).toBe('SyncFailure');
+      cwMock.commandCalls(PutMetricDataCommand)[0].args[0].input.MetricData![0]
+        .MetricName,
+    ).toBe("SyncFailure");
   });
 
-  test('DynamoDB delete failure sends to DLQ and emits metric', async () => {
-    const error = new Error('Delete failed');
-    error.name = 'InternalServerError';
+  test("DynamoDB delete failure sends to DLQ and emits metric", async () => {
+    const error = new Error("Delete failed");
+    error.name = "InternalServerError";
     ddbMock.on(DeleteCommand).rejects(error);
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'DELETED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "DELETED",
       },
     });
 
-    await expect(handler(event)).rejects.toThrow('Delete failed');
+    await expect(handler(event)).rejects.toThrow("Delete failed");
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
   });
 
-  test('DynamoDB update failure sends to DLQ and emits metric', async () => {
-    const error = new Error('Update failed');
-    error.name = 'InternalServerError';
+  test("DynamoDB update failure sends to DLQ and emits metric", async () => {
+    const error = new Error("Update failed");
+    error.name = "InternalServerError";
     ddbMock.on(UpdateCommand).rejects(error);
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'STATUS_CHANGED',
-        newStatus: 'APPROVED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "STATUS_CHANGED",
+        newStatus: "APPROVED",
       },
     });
 
-    await expect(handler(event)).rejects.toThrow('Update failed');
+    await expect(handler(event)).rejects.toThrow("Update failed");
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
   });
 
-  test('ConditionalCheckFailedException does NOT send to DLQ or emit metric', async () => {
-    const error = new Error('Conditional check failed');
-    error.name = 'ConditionalCheckFailedException';
+  test("ConditionalCheckFailedException does NOT send to DLQ or emit metric", async () => {
+    const error = new Error("Conditional check failed");
+    error.name = "ConditionalCheckFailedException";
     ddbMock.on(PutCommand).rejects(error);
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'CREATED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "CREATED",
         resource: makeAgentResource(),
       },
     });
@@ -853,9 +993,15 @@ describe('handler — DLQ routing and metrics', () => {
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
   });
 
-  test('malformed event sends to DLQ but does NOT emit SyncFailure metric', async () => {
-    const badEvent = { source: 'aws.s3', 'detail-type': 'wrong', detail: {} } as unknown as RegistryEvent;
-    await expect(handler(badEvent)).rejects.toThrow('Malformed registry sync event');
+  test("malformed event sends to DLQ but does NOT emit SyncFailure metric", async () => {
+    const badEvent = {
+      source: "aws.s3",
+      "detail-type": "wrong",
+      detail: {},
+    } as unknown as RegistryEvent;
+    await expect(handler(badEvent)).rejects.toThrow(
+      "Malformed registry sync event",
+    );
 
     // DLQ should be called
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
@@ -863,22 +1009,22 @@ describe('handler — DLQ routing and metrics', () => {
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
   });
 
-  test('handler still throws even if DLQ send fails', async () => {
-    const ddbError = new Error('DynamoDB is down');
-    ddbError.name = 'InternalServerError';
+  test("handler still throws even if DLQ send fails", async () => {
+    const ddbError = new Error("DynamoDB is down");
+    ddbError.name = "InternalServerError";
     ddbMock.on(PutCommand).rejects(ddbError);
-    sqsMock.on(SendMessageCommand).rejects(new Error('SQS also down'));
+    sqsMock.on(SendMessageCommand).rejects(new Error("SQS also down"));
 
     const event = makeEvent({
       detail: {
-        resourceId: 'agent-1',
-        resourceType: 'agent',
-        eventType: 'CREATED',
+        resourceId: "agent-1",
+        resourceType: "agent",
+        eventType: "CREATED",
         resource: makeAgentResource(),
       },
     });
 
     // Original error still propagates
-    await expect(handler(event)).rejects.toThrow('DynamoDB is down');
+    await expect(handler(event)).rejects.toThrow("DynamoDB is down");
   });
 });

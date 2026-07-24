@@ -1,15 +1,29 @@
-import { AppSyncResolverEvent, AppSyncResolverHandler } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanCommand, QueryCommand, type NativeAttributeValue } from '@aws-sdk/lib-dynamodb';
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { v4 as uuidv4 } from 'uuid';
-import { getUserId } from '../utils/appsync';
-import { extractOrgFromEvent, isAdminFromEvent } from '../utils/auth-event';
-import { LifecycleManager, PROJECT_TRANSITIONS } from '../adapters/lifecycle';
-import { isGrandfathered, emitGrandfatheredBypass } from '../utils/is-grandfathered';
-import { listADRsForProject } from './adr-resolver';
-import { listExecutionSpecifications } from './execspec-resolver';
-import { getAgentDesignAssessment } from './agent-design-assessment-resolver';
+import { AppSyncResolverEvent, AppSyncResolverHandler } from "aws-lambda";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+  ScanCommand,
+  QueryCommand,
+  type NativeAttributeValue,
+} from "@aws-sdk/lib-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { v4 as uuidv4 } from "uuid";
+import { getUserId } from "../utils/appsync";
+import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import { LifecycleManager, PROJECT_TRANSITIONS } from "../adapters/lifecycle";
+import {
+  isGrandfathered,
+  emitGrandfatheredBypass,
+} from "../utils/is-grandfathered";
+import { listADRsForProject } from "./adr-resolver";
+import { listExecutionSpecifications } from "./execspec-resolver";
+import { getAgentDesignAssessment } from "./agent-design-assessment-resolver";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -26,7 +40,7 @@ const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
  * `organization: undefined`) silently orphaned the row from the
  * OrganizationIndex GSI and made it invisible to everyone but its owner.
  */
-const DEFAULT_ORGANIZATION = 'Default';
+const DEFAULT_ORGANIZATION = "Default";
 
 interface Project {
   id: string;
@@ -60,9 +74,9 @@ interface Project {
   // governance archetype classification.
   // archetypeStatus defaults to PENDING when absent; normaliseArchetype
   // handles grandfathering for DDB rows written before this story.
-  archetype?: 'MONOLITHIC_DB' | 'ENTERPRISE_APP_SPRAWL' | 'HYBRID_IT_OT';
+  archetype?: "MONOLITHIC_DB" | "ENTERPRISE_APP_SPRAWL" | "HYBRID_IT_OT";
   archetypeConfidence?: number;
-  archetypeStatus?: 'PENDING' | 'CLASSIFIED' | 'PENDING_ESCALATION';
+  archetypeStatus?: "PENDING" | "CLASSIFIED" | "PENDING_ESCALATION";
 }
 
 /** Filter accepted by listProjects — mirrors the GraphQL ProjectFilter input. */
@@ -85,9 +99,9 @@ interface UpdateProjectInput {
   description?: string;
   requirements?: string;
   status?: string;
-  archetype?: 'MONOLITHIC_DB' | 'ENTERPRISE_APP_SPRAWL' | 'HYBRID_IT_OT';
+  archetype?: "MONOLITHIC_DB" | "ENTERPRISE_APP_SPRAWL" | "HYBRID_IT_OT";
   archetypeConfidence?: number;
-  archetypeStatus?: 'PENDING' | 'CLASSIFIED' | 'PENDING_ESCALATION';
+  archetypeStatus?: "PENDING" | "CLASSIFIED" | "PENDING_ESCALATION";
 }
 
 /** File descriptor accepted by uploadDocument. */
@@ -122,16 +136,20 @@ type ResolverEvent = AppSyncResolverEvent<HandlerArgs>;
  * PENDING so clients see a consistent, non-null value without any
  * backfill migration.
  */
-function normaliseArchetype<T extends Partial<Project> | null | undefined>(project: T): T {
+function normaliseArchetype<T extends Partial<Project> | null | undefined>(
+  project: T,
+): T {
   if (!project) return project;
   if (!(project as Project).archetypeStatus) {
-    (project as Project).archetypeStatus = 'PENDING';
+    (project as Project).archetypeStatus = "PENDING";
   }
   return project;
 }
 
-export const handler: AppSyncResolverHandler<HandlerArgs, unknown> = async (event) => {
-  console.log('Project resolver event:', JSON.stringify(event, null, 2));
+export const handler: AppSyncResolverHandler<HandlerArgs, unknown> = async (
+  event,
+) => {
+  console.log("Project resolver event:", JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
   const fieldName = info.fieldName;
@@ -139,26 +157,30 @@ export const handler: AppSyncResolverHandler<HandlerArgs, unknown> = async (even
 
   try {
     switch (fieldName) {
-      case 'getProject':
+      case "getProject":
         return await getProject(args.id, userId, event);
-      case 'listProjects':
+      case "listProjects":
         return await listProjects(args.filter, userId, event, args.nextToken);
-      case 'createProject':
+      case "createProject":
         return await createProject(args.input, userId, event);
-      case 'updateProject':
+      case "updateProject":
         return await updateProject(args.id, args.input, userId, event);
-      case 'uploadDocument':
+      case "uploadDocument":
         return await uploadDocument(args.projectId, args.file, userId, event);
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
   } catch (error) {
-    console.error('Project resolver error:', error);
+    console.error("Project resolver error:", error);
     throw error;
   }
 };
 
-async function getProject(id: string, userId: string, event: ResolverEvent): Promise<Project | null> {
+async function getProject(
+  id: string,
+  userId: string,
+  event: ResolverEvent,
+): Promise<Project | null> {
   const command = new GetCommand({
     TableName: PROJECTS_TABLE,
     Key: { id },
@@ -188,7 +210,7 @@ async function getProject(id: string, userId: string, event: ResolverEvent): Pro
     (userOrganization && project.organization === userOrganization);
 
   if (!hasAccess) {
-    throw new Error('Access denied');
+    throw new Error("Access denied");
   }
 
   return normaliseArchetype(project) as Project;
@@ -206,7 +228,9 @@ async function listProjects(
   if (isAdminFromEvent(event)) {
     const command = new ScanCommand({
       TableName: PROJECTS_TABLE,
-      ExclusiveStartKey: nextToken ? (JSON.parse(nextToken) as Record<string, NativeAttributeValue>) : undefined,
+      ExclusiveStartKey: nextToken
+        ? (JSON.parse(nextToken) as Record<string, NativeAttributeValue>)
+        : undefined,
     });
 
     const result = await docClient.send(command);
@@ -216,7 +240,9 @@ async function listProjects(
 
     return {
       items: items.map((p) => normaliseArchetype(p)!),
-      nextToken: result.LastEvaluatedKey ? JSON.stringify(result.LastEvaluatedKey) : undefined,
+      nextToken: result.LastEvaluatedKey
+        ? JSON.stringify(result.LastEvaluatedKey)
+        : undefined,
     };
   }
 
@@ -224,17 +250,20 @@ async function listProjects(
   // claims default to DEFAULT_ORGANIZATION so users without a
   // custom:organization claim still see (and share) a common project pool
   // instead of being siloed to only the projects they personally created.
-  const userOrganization = (await extractOrgFromEvent(event)) || DEFAULT_ORGANIZATION;
+  const userOrganization =
+    (await extractOrgFromEvent(event)) || DEFAULT_ORGANIZATION;
 
   const command = new QueryCommand({
     TableName: PROJECTS_TABLE,
-    IndexName: 'OrganizationIndex',
-    KeyConditionExpression: 'organization = :org',
+    IndexName: "OrganizationIndex",
+    KeyConditionExpression: "organization = :org",
     ExpressionAttributeValues: {
-      ':org': userOrganization,
+      ":org": userOrganization,
     },
     ScanIndexForward: false, // Sort by createdAt descending (newest first)
-    ExclusiveStartKey: nextToken ? (JSON.parse(nextToken) as Record<string, NativeAttributeValue>) : undefined,
+    ExclusiveStartKey: nextToken
+      ? (JSON.parse(nextToken) as Record<string, NativeAttributeValue>)
+      : undefined,
   });
 
   const result = await docClient.send(command);
@@ -243,12 +272,17 @@ async function listProjects(
 
   return {
     items: items.map((p) => normaliseArchetype(p)!),
-    nextToken: result.LastEvaluatedKey ? JSON.stringify(result.LastEvaluatedKey) : undefined,
+    nextToken: result.LastEvaluatedKey
+      ? JSON.stringify(result.LastEvaluatedKey)
+      : undefined,
   };
 }
 
 /** Applies the optional status/createdAfter/createdBefore filters shared by every listProjects path. */
-function applyProjectFilters(items: Project[], filter: ProjectFilter | undefined): Project[] {
+function applyProjectFilters(
+  items: Project[],
+  filter: ProjectFilter | undefined,
+): Project[] {
   if (!filter) return items;
 
   let filtered = items;
@@ -256,15 +290,23 @@ function applyProjectFilters(items: Project[], filter: ProjectFilter | undefined
     filtered = filtered.filter((item) => item.status === filter.status);
   }
   if (filter.createdAfter) {
-    filtered = filtered.filter((item) => item.createdAt >= filter.createdAfter!);
+    filtered = filtered.filter(
+      (item) => item.createdAt >= filter.createdAfter!,
+    );
   }
   if (filter.createdBefore) {
-    filtered = filtered.filter((item) => item.createdAt <= filter.createdBefore!);
+    filtered = filtered.filter(
+      (item) => item.createdAt <= filter.createdBefore!,
+    );
   }
   return filtered;
 }
 
-async function createProject(input: CreateProjectInput, userId: string, event: ResolverEvent): Promise<Project> {
+async function createProject(
+  input: CreateProjectInput,
+  userId: string,
+  event: ResolverEvent,
+): Promise<Project> {
   const now = new Date().toISOString();
   const projectId = uuidv4();
 
@@ -272,20 +314,21 @@ async function createProject(input: CreateProjectInput, userId: string, event: R
   // claim is missing so the project always lands on a real GSI partition
   // (organization: undefined would silently drop the row out of the
   // OrganizationIndex and make it invisible to everyone but its owner).
-  const userOrganization = (await extractOrgFromEvent(event)) || DEFAULT_ORGANIZATION;
+  const userOrganization =
+    (await extractOrgFromEvent(event)) || DEFAULT_ORGANIZATION;
 
   const project: Project = {
     id: projectId,
     name: input.name,
-    description: input.description || '',
-    requirements: input.requirements || '',
-    status: 'CREATED',
+    description: input.description || "",
+    requirements: input.requirements || "",
+    status: "CREATED",
     currentModule: {
-      id: 'assessment',
-      name: 'Document Assessment',
-      description: 'Initial document review and analysis',
-      status: 'PENDING',
-      agentId: 'agent1',
+      id: "assessment",
+      name: "Document Assessment",
+      description: "Initial document review and analysis",
+      status: "PENDING",
+      agentId: "agent1",
     },
     progress: {
       overall: 0,
@@ -293,7 +336,7 @@ async function createProject(input: CreateProjectInput, userId: string, event: R
       design: 0,
       planning: 0,
       implementation: 0,
-      currentPhase: 'CREATED',
+      currentPhase: "CREATED",
     },
     createdAt: now,
     updatedAt: now,
@@ -301,7 +344,7 @@ async function createProject(input: CreateProjectInput, userId: string, event: R
     organization: userOrganization,
     // new projects start PENDING; archetype/archetypeConfidence
     // stay absent until an archetype classifier populates them.
-    archetypeStatus: 'PENDING',
+    archetypeStatus: "PENDING",
   };
 
   const command = new PutCommand({
@@ -312,7 +355,7 @@ async function createProject(input: CreateProjectInput, userId: string, event: R
   await docClient.send(command);
 
   // Emit project created event
-  await emitEvent('project.created', {
+  await emitEvent("project.created", {
     projectId,
     userId,
     project,
@@ -349,11 +392,11 @@ async function projectPhaseGuard(
     async (_current, next, _context) => {
       // Only the three governance-gated next-statuses trigger a check.
       // Other transitions (ASSESSMENT_COMPLETE, COMPLETED, ERROR, …) pass through.
-      if (next === 'IN_PROGRESS') {
+      if (next === "IN_PROGRESS") {
         await checkC3Assessment(project);
-      } else if (next === 'PLANNING_COMPLETE') {
+      } else if (next === "PLANNING_COMPLETE") {
         await checkC7Adr(project);
-      } else if (next === 'IMPLEMENTATION_READY') {
+      } else if (next === "IMPLEMENTATION_READY") {
         await checkC10Spec(project);
       }
     },
@@ -363,53 +406,57 @@ async function projectPhaseGuard(
 
 async function checkC3Assessment(project: Project): Promise<void> {
   if (await isGrandfathered(project)) {
-    await emitBypass(project, 'C3_assessment_required');
+    await emitBypass(project, "C3_assessment_required");
     return;
   }
   const assessment = await getAgentDesignAssessment(project.id);
   if (!assessment || !assessment.completedAt) {
     throw new Error(
-      'ValidationError: IN_PROGRESS requires a completed AgentDesignAssessment',
+      "ValidationError: IN_PROGRESS requires a completed AgentDesignAssessment",
     );
   }
 }
 
 async function checkC7Adr(project: Project): Promise<void> {
   if (await isGrandfathered(project)) {
-    await emitBypass(project, 'C7_adr_required');
+    await emitBypass(project, "C7_adr_required");
     return;
   }
   const adrs = await listADRsForProject(project.id);
-  if (!adrs.some((a) => a.status === 'LOCKED')) {
+  if (!adrs.some((a) => a.status === "LOCKED")) {
     throw new Error(
-      'ValidationError: PLANNING_COMPLETE requires at least one LOCKED ADR',
+      "ValidationError: PLANNING_COMPLETE requires at least one LOCKED ADR",
     );
   }
 }
 
 async function checkC10Spec(project: Project): Promise<void> {
   if (await isGrandfathered(project)) {
-    await emitBypass(project, 'C10_spec_required');
+    await emitBypass(project, "C10_spec_required");
     return;
   }
   const specs = await listExecutionSpecifications(project.id);
-  if (!specs.some((s) => s.status === 'APPROVED')) {
+  if (!specs.some((s) => s.status === "APPROVED")) {
     throw new Error(
-      'ValidationError: IMPLEMENTATION_READY requires at least one APPROVED ExecutionSpecification',
+      "ValidationError: IMPLEMENTATION_READY requires at least one APPROVED ExecutionSpecification",
     );
   }
 }
 
 async function emitBypass(
   project: Project,
-  bypassedGate: 'C3_assessment_required' | 'C7_adr_required' | 'C10_spec_required',
+  bypassedGate:
+    | "C3_assessment_required"
+    | "C7_adr_required"
+    | "C10_spec_required",
 ): Promise<void> {
   // Read the live effective_at from SSM (cached 60 min by governance-flag.ts).
   // Fire-and-forget: bypass telemetry must not fail the underlying transition.
   try {
-    const { getGovernanceEffectiveAt } = await import('../utils/governance-flag');
-    const env = process.env.ENVIRONMENT ?? 'dev';
-    const effectiveAt = (await getGovernanceEffectiveAt(env)) ?? '';
+    const { getGovernanceEffectiveAt } =
+      await import("../utils/governance-flag");
+    const env = process.env.ENVIRONMENT ?? "dev";
+    const effectiveAt = (await getGovernanceEffectiveAt(env)) ?? "";
     await emitGrandfatheredBypass(
       project.id,
       bypassedGate,
@@ -417,15 +464,20 @@ async function emitBypass(
       effectiveAt,
     );
   } catch (err) {
-    console.warn('Failed to emit governance.grandfathered.bypass', err);
+    console.warn("Failed to emit governance.grandfathered.bypass", err);
   }
 }
 
-async function updateProject(id: string, input: UpdateProjectInput, userId: string, event: ResolverEvent): Promise<Project> {
+async function updateProject(
+  id: string,
+  input: UpdateProjectInput,
+  userId: string,
+  event: ResolverEvent,
+): Promise<Project> {
   // First check if project exists and user has access
   const existingProject = await getProject(id, userId, event);
   if (!existingProject) {
-    throw new Error('Project not found or access denied');
+    throw new Error("Project not found or access denied");
   }
 
   const now = new Date().toISOString();
@@ -434,95 +486,97 @@ async function updateProject(id: string, input: UpdateProjectInput, userId: stri
   const expressionAttributeValues: Record<string, NativeAttributeValue> = {};
 
   if (input.name) {
-    updateExpression.push('#name = :name');
-    expressionAttributeNames['#name'] = 'name';
-    expressionAttributeValues[':name'] = input.name;
+    updateExpression.push("#name = :name");
+    expressionAttributeNames["#name"] = "name";
+    expressionAttributeValues[":name"] = input.name;
   }
 
-  if (input.description!== undefined) {
-    updateExpression.push('#description = :description');
-    expressionAttributeNames['#description'] = 'description';
-    expressionAttributeValues[':description'] = input.description;
+  if (input.description !== undefined) {
+    updateExpression.push("#description = :description");
+    expressionAttributeNames["#description"] = "description";
+    expressionAttributeValues[":description"] = input.description;
   }
 
-  if (input.requirements!== undefined) {
-    updateExpression.push('#requirements = :requirements');
-    expressionAttributeNames['#requirements'] = 'requirements';
-    expressionAttributeValues[':requirements'] = input.requirements;
+  if (input.requirements !== undefined) {
+    updateExpression.push("#requirements = :requirements");
+    expressionAttributeNames["#requirements"] = "requirements";
+    expressionAttributeValues[":requirements"] = input.requirements;
   }
 
-    // governance phase-transition gates.
-    // When status is changing (not same-status write), route through the
-    // LifecycleManager hook so C3/C7/C10 governance preconditions are
-    // enforced (or bypassed + telemetry-logged for grandfathered projects).
-    if (input.status && input.status !== existingProject.status) {
-      await projectPhaseGuard(
-        existingProject.status,
-        input.status,
-        existingProject as Project,
-        userId,
-      );
-      updateExpression.push('#status = :status');
-      expressionAttributeNames['#status'] = 'status';
-      expressionAttributeValues[':status'] = input.status;
-    } else if (input.status) {
-      // Same-status write — no gate. Preserve existing behaviour.
-      updateExpression.push('#status = :status');
-      expressionAttributeNames['#status'] = 'status';
-      expressionAttributeValues[':status'] = input.status;
-    }
+  // governance phase-transition gates.
+  // When status is changing (not same-status write), route through the
+  // LifecycleManager hook so C3/C7/C10 governance preconditions are
+  // enforced (or bypassed + telemetry-logged for grandfathered projects).
+  if (input.status && input.status !== existingProject.status) {
+    await projectPhaseGuard(
+      existingProject.status,
+      input.status,
+      existingProject as Project,
+      userId,
+    );
+    updateExpression.push("#status = :status");
+    expressionAttributeNames["#status"] = "status";
+    expressionAttributeValues[":status"] = input.status;
+  } else if (input.status) {
+    // Same-status write — no gate. Preserve existing behaviour.
+    updateExpression.push("#status = :status");
+    expressionAttributeNames["#status"] = "status";
+    expressionAttributeValues[":status"] = input.status;
+  }
 
   // archetype passthrough. No transition validation — gate logic
   // is deferred to. GraphQL enum parsing guarantees valid values
   // reach the resolver.
-  if (input.archetype!== undefined) {
-    updateExpression.push('#archetype = :archetype');
-    expressionAttributeNames['#archetype'] = 'archetype';
-    expressionAttributeValues[':archetype'] = input.archetype;
+  if (input.archetype !== undefined) {
+    updateExpression.push("#archetype = :archetype");
+    expressionAttributeNames["#archetype"] = "archetype";
+    expressionAttributeValues[":archetype"] = input.archetype;
   }
 
-  if (input.archetypeConfidence!== undefined) {
-    updateExpression.push('#archetypeConfidence = :archetypeConfidence');
-    expressionAttributeNames['#archetypeConfidence'] = 'archetypeConfidence';
-    expressionAttributeValues[':archetypeConfidence'] = input.archetypeConfidence;
+  if (input.archetypeConfidence !== undefined) {
+    updateExpression.push("#archetypeConfidence = :archetypeConfidence");
+    expressionAttributeNames["#archetypeConfidence"] = "archetypeConfidence";
+    expressionAttributeValues[":archetypeConfidence"] =
+      input.archetypeConfidence;
   }
 
-  if (input.archetypeStatus!== undefined) {
-    updateExpression.push('#archetypeStatus = :archetypeStatus');
-    expressionAttributeNames['#archetypeStatus'] = 'archetypeStatus';
-    expressionAttributeValues[':archetypeStatus'] = input.archetypeStatus;
+  if (input.archetypeStatus !== undefined) {
+    updateExpression.push("#archetypeStatus = :archetypeStatus");
+    expressionAttributeNames["#archetypeStatus"] = "archetypeStatus";
+    expressionAttributeValues[":archetypeStatus"] = input.archetypeStatus;
   }
 
-  updateExpression.push('#updatedAt = :updatedAt');
-  expressionAttributeNames['#updatedAt'] = 'updatedAt';
-  expressionAttributeValues[':updatedAt'] = now;
+  updateExpression.push("#updatedAt = :updatedAt");
+  expressionAttributeNames["#updatedAt"] = "updatedAt";
+  expressionAttributeValues[":updatedAt"] = now;
 
   // D-02: Optimistic locking — increment version with conditional write
   const currentVersion = existingProject.version || 0;
-  updateExpression.push('#version = :nextVersion');
-  expressionAttributeNames['#version'] = 'version';
-  expressionAttributeValues[':nextVersion'] = currentVersion + 1;
-  expressionAttributeValues[':currentVersion'] = currentVersion;
+  updateExpression.push("#version = :nextVersion");
+  expressionAttributeNames["#version"] = "version";
+  expressionAttributeValues[":nextVersion"] = currentVersion + 1;
+  expressionAttributeValues[":currentVersion"] = currentVersion;
 
-  const conditionExpression = currentVersion === 0
-    ? '(attribute_not_exists(version) OR version = :currentVersion)'
-    : 'version = :currentVersion';
+  const conditionExpression =
+    currentVersion === 0
+      ? "(attribute_not_exists(version) OR version = :currentVersion)"
+      : "version = :currentVersion";
 
   try {
     const command = new UpdateCommand({
       TableName: PROJECTS_TABLE,
       Key: { id },
-      UpdateExpression: `SET ${updateExpression.join(', ')}`,
+      UpdateExpression: `SET ${updateExpression.join(", ")}`,
       ConditionExpression: conditionExpression,
       ExpressionAttributeNames: expressionAttributeNames,
       ExpressionAttributeValues: expressionAttributeValues,
-      ReturnValues: 'ALL_NEW',
+      ReturnValues: "ALL_NEW",
     });
 
     const result = await docClient.send(command);
 
     // Emit project updated event
-    await emitEvent('project.updated', {
+    await emitEvent("project.updated", {
       projectId: id,
       userId,
       changes: input,
@@ -530,18 +584,28 @@ async function updateProject(id: string, input: UpdateProjectInput, userId: stri
 
     return normaliseArchetype(result.Attributes as Project) as Project;
   } catch (error: unknown) {
-    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
-      throw new Error(`Conflict: project ${id} was modified concurrently. Please retry.`);
+    if (
+      error instanceof Error &&
+      error.name === "ConditionalCheckFailedException"
+    ) {
+      throw new Error(
+        `Conflict: project ${id} was modified concurrently. Please retry.`,
+      );
     }
     throw error;
   }
 }
 
-async function uploadDocument(projectId: string, file: UploadDocumentFile, userId: string, event: ResolverEvent): Promise<unknown> {
+async function uploadDocument(
+  projectId: string,
+  file: UploadDocumentFile,
+  userId: string,
+  event: ResolverEvent,
+): Promise<unknown> {
   // Check if user has access to this project
   const project = await getProject(projectId, userId, event);
   if (!project) {
-    throw new Error('Project not found or access denied');
+    throw new Error("Project not found or access denied");
   }
 
   // In a real implementation, you would handle S3 upload here
@@ -549,7 +613,7 @@ async function uploadDocument(projectId: string, file: UploadDocumentFile, userI
   const documentId = uuidv4();
 
   // Emit document uploaded event
-  await emitEvent('document.uploaded', {
+  await emitEvent("document.uploaded", {
     projectId,
     documentId,
     userId,
@@ -560,7 +624,7 @@ async function uploadDocument(projectId: string, file: UploadDocumentFile, userI
     success: true,
     documentId,
     url: `https://s3.amazonaws.com/${file.bucket}/${file.key}`,
-    message: 'Document uploaded successfully',
+    message: "Document uploaded successfully",
   };
 }
 
@@ -568,7 +632,7 @@ async function emitEvent(eventType: string, detail: unknown): Promise<void> {
   const command = new PutEventsCommand({
     Entries: [
       {
-        Source: 'citadel.backend',
+        Source: "citadel.backend",
         DetailType: eventType,
         Detail: JSON.stringify(detail),
         EventBusName: EVENT_BUS_NAME,

@@ -6,10 +6,10 @@
  *
  * Requirements: 1.1-1.11, 2.1-2.10
  */
-import Ajv from 'ajv';
-import addFormats from 'ajv-formats';
-import { randomBytes, createHash } from 'crypto';
-import { v4 as uuidv4 } from 'uuid';
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+import { randomBytes } from "crypto";
+import { v4 as uuidv4 } from "uuid";
 import {
   ApiGatewayV2Client,
   CreateApiCommand,
@@ -18,17 +18,26 @@ import {
   CreateRouteCommand,
   CreateAuthorizerCommand,
   DeleteApiCommand,
-} from '@aws-sdk/client-apigatewayv2';
+} from "@aws-sdk/client-apigatewayv2";
 import {
   CloudWatchLogsClient,
   CreateLogGroupCommand,
   DescribeLogGroupsCommand,
-} from '@aws-sdk/client-cloudwatch-logs';
-import { DynamoDBDocumentClient, QueryCommand, UpdateCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { PolicyManager } from '../utils/policy-manager';
-import { updateAppMetaFields } from '../utils/apps-table-meta';
+} from "@aws-sdk/client-cloudwatch-logs";
+import {
+  DynamoDBDocumentClient,
+  QueryCommand,
+  UpdateCommand,
+  PutCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { PolicyManager } from "../utils/policy-manager";
+import { updateAppMetaFields } from "../utils/apps-table-meta";
+import { hashApiKey, getApiKeyPepper, HASH_ALG } from "../utils/api-key-hash";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -69,6 +78,7 @@ export interface PublishResult {
 export interface ApiKeyGenResult {
   plaintext: string;
   hashed: string;
+  hashAlg: string;
   prefix: string;
   keyId: string;
 }
@@ -94,16 +104,17 @@ export function deriveEndpointUrl(apiId: string, region: string): string {
 /**
  * Generates a cryptographically random API key.
  * - 32 random bytes → base64url plaintext
- * - SHA-256 hex hash for storage
+ * - HMAC-SHA-256 (server-side pepper) hex hash for storage
  * - First 8 chars of plaintext as prefix for identification
  */
-export function generateApiKey(): ApiKeyGenResult {
+export async function generateApiKey(): Promise<ApiKeyGenResult> {
   const keyBytes = randomBytes(32);
-  const plaintext = keyBytes.toString('base64url');
-  const hashed = createHash('sha256').update(plaintext).digest('hex');
+  const plaintext = keyBytes.toString("base64url");
+  const pepper = await getApiKeyPepper();
+  const hashed = hashApiKey(plaintext, pepper);
   const prefix = plaintext.substring(0, 8);
   const keyId = uuidv4();
-  return { plaintext, hashed, prefix, keyId };
+  return { plaintext, hashed, hashAlg: HASH_ALG, prefix, keyId };
 }
 
 /**
@@ -117,7 +128,7 @@ export function buildStatusTransitionEvent(
   const detailType = `app.status.${fromStatus.toLowerCase()}_to_${toStatus.toLowerCase()}`;
   return {
     detailType,
-    source: 'citadel.apps',
+    source: "citadel.apps",
     detail: {
       ...detail,
       timestamp: detail.timestamp || new Date().toISOString(),
@@ -144,27 +155,33 @@ export function validatePublishPreconditions(
 ): string[] {
   const errors: string[] = [];
 
-  const agentBindings = componentItems.filter(i => i.sortId?.startsWith('AGENT#'));
-  const configSchema = componentItems.find(i => i.sortId === 'CONFIG#schema');
-  const configValues = componentItems.find(i => i.sortId === 'CONFIG#values');
+  const agentBindings = componentItems.filter((i) =>
+    i.sortId?.startsWith("AGENT#"),
+  );
+  const configSchema = componentItems.find((i) => i.sortId === "CONFIG#schema");
+  const configValues = componentItems.find((i) => i.sortId === "CONFIG#values");
 
   // Check 1: All agent bindings must have status=READY
-  const notReadyAgents = agentBindings.filter(b => b.status !== 'READY');
+  const notReadyAgents = agentBindings.filter((b) => b.status !== "READY");
   if (notReadyAgents.length > 0) {
-    const agentIds = notReadyAgents.map(b => b.agentId).join(', ');
+    const agentIds = notReadyAgents.map((b) => b.agentId).join(", ");
     errors.push(`Agents not ready: ${agentIds}`);
   }
 
   // Check 2: Workflow required only for multi-agent apps
   const workflowIds = metadata.workflowIds || [];
   if (workflowIds.length < 1 && agentBindings.length > 1) {
-    errors.push('Multi-agent apps require at least one workflow to define orchestration');
+    errors.push(
+      "Multi-agent apps require at least one workflow to define orchestration",
+    );
   }
 
   // Check 3: If configSchema exists, configValues must exist and validate
   if (configSchema?.schema) {
     if (!configValues?.values) {
-      errors.push('Configuration values are required when a config schema is defined');
+      errors.push(
+        "Configuration values are required when a config schema is defined",
+      );
     } else {
       // ajv 8 compat: config schemas are user-authored and were stored under
       // ajv 6, which ignored unknown keywords and validated `format` built-in.
@@ -174,12 +191,15 @@ export function validatePublishPreconditions(
       const validate = ajv.compile(configSchema.schema);
       const valid = validate(configValues.values);
       if (!valid) {
-        const validationErrors = (validate.errors || []).map((e) => {
-          const path =
-            e.instancePath ||
-            ((e.params as { missingProperty?: string }).missingProperty ?? '');
-          return `${path ? path + ': ' : ''}${e.message}`;
-        }).join('; ');
+        const validationErrors = (validate.errors || [])
+          .map((e) => {
+            const path =
+              e.instancePath ||
+              ((e.params as { missingProperty?: string }).missingProperty ??
+                "");
+            return `${path ? path + ": " : ""}${e.message}`;
+          })
+          .join("; ");
         errors.push(`Config validation failed: ${validationErrors}`);
       }
     }
@@ -197,24 +217,24 @@ export function validatePublishPreconditions(
  * Includes all fields required by Requirement 2.9.
  */
 export const ACCESS_LOG_FORMAT = JSON.stringify({
-  requestId: '$context.requestId',
-  appId: '$context.authorizer.appId',
-  apiKeyId: '$context.authorizer.apiKeyId',
-  status: '$context.status',
-  latency: '$context.responseLatency',
-  timestamp: '$context.requestTime',
-  ip: '$context.identity.sourceIp',
-  method: '$context.httpMethod',
-  path: '$context.path',
+  requestId: "$context.requestId",
+  appId: "$context.authorizer.appId",
+  apiKeyId: "$context.authorizer.apiKeyId",
+  status: "$context.status",
+  latency: "$context.responseLatency",
+  timestamp: "$context.requestTime",
+  ip: "$context.identity.sourceIp",
+  method: "$context.httpMethod",
+  path: "$context.path",
 });
 
 // ── SDK Client Defaults (lazy-initialized) ──────────────────
 
-const APPS_TABLE = process.env.APPS_TABLE || 'citadel-apps-dev';
-const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME || 'citadel-agents-dev';
-const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
-const AUTHORIZER_FUNCTION_ARN = process.env.AUTHORIZER_FUNCTION_ARN || '';
-const REGION = process.env.AWS_REGION || 'us-east-1';
+const APPS_TABLE = process.env.APPS_TABLE || "citadel-apps-dev";
+const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME || "citadel-agents-dev";
+const ENVIRONMENT = process.env.ENVIRONMENT || "dev";
+const AUTHORIZER_FUNCTION_ARN = process.env.AUTHORIZER_FUNCTION_ARN || "";
+const REGION = process.env.AWS_REGION || "us-east-1";
 
 let _docClient: DynamoDBDocumentClient | undefined;
 let _apiGwClient: ApiGatewayV2Client | undefined;
@@ -223,7 +243,8 @@ let _cwLogsClient: CloudWatchLogsClient | undefined;
 let _policyManager: PolicyManager | undefined;
 
 function getDocClient(): DynamoDBDocumentClient {
-  if (!_docClient) _docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+  if (!_docClient)
+    _docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
   return _docClient;
 }
 function getApiGwClient(): ApiGatewayV2Client {
@@ -258,17 +279,24 @@ async function ensureAccessLogGroup(
   try {
     await cwLogsClient.send(new CreateLogGroupCommand({ logGroupName }));
   } catch (error: unknown) {
-    if (!(error instanceof Error) || error.name !== 'ResourceAlreadyExistsException') {
+    if (
+      !(error instanceof Error) ||
+      error.name !== "ResourceAlreadyExistsException"
+    ) {
       throw error;
     }
   }
 
   // Retrieve the ARN for the log group
-  const describeResult = await cwLogsClient.send(new DescribeLogGroupsCommand({
-    logGroupNamePrefix: logGroupName,
-    limit: 1,
-  }));
-  const logGroup = describeResult.logGroups?.find((lg) => lg.logGroupName === logGroupName);
+  const describeResult = await cwLogsClient.send(
+    new DescribeLogGroupsCommand({
+      logGroupNamePrefix: logGroupName,
+      limit: 1,
+    }),
+  );
+  const logGroup = describeResult.logGroups?.find(
+    (lg) => lg.logGroupName === logGroupName,
+  );
   if (logGroup?.arn) {
     return logGroup.arn;
   }
@@ -295,70 +323,94 @@ export async function provisionApiGateway(
 
   try {
     // Step 1: Create HTTP API
-    const createApiResult = await client.send(new CreateApiCommand({
-      Name: apiName,
-      ProtocolType: 'HTTP',
-      Description: `API Gateway for Citadel app ${appId}`,
-    }));
+    const createApiResult = await client.send(
+      new CreateApiCommand({
+        Name: apiName,
+        ProtocolType: "HTTP",
+        Description: `API Gateway for Citadel app ${appId}`,
+      }),
+    );
     apiId = createApiResult.ApiId!;
 
     // Step 1.5: Ensure CloudWatch log group for access logging
     const logGroupName = `/aws/apigateway/${apiName}`;
-    const logGroupArn = await ensureAccessLogGroup(logGroupName, region, cwLogsClient);
+    const logGroupArn = await ensureAccessLogGroup(
+      logGroupName,
+      region,
+      cwLogsClient,
+    );
 
-    // Step 2: Create $default stage with auto-deploy, throttling, and access logging
-    await client.send(new CreateStageCommand({
-      ApiId: apiId,
-      StageName: '$default',
-      AutoDeploy: true,
-      DefaultRouteSettings: {
-        ThrottlingBurstLimit: 5000,
-        ThrottlingRateLimit: 1000,
-      },
-      AccessLogSettings: {
-        DestinationArn: logGroupArn,
-        Format: ACCESS_LOG_FORMAT,
-      },
-    }));
+    // Step 2: Create $default stage with auto-deploy, throttling, access
+    // logging, and the trusted appId as a stage variable (consumed by the
+    // Lambda authorizer via $context.authorizer.appId, and — indirectly, via
+    // the RequestParameters.Resources expression below — by the
+    // app-invoke-handler EventBridge consumer as the sole trusted appId
+    // source).
+    await client.send(
+      new CreateStageCommand({
+        ApiId: apiId,
+        StageName: "$default",
+        AutoDeploy: true,
+        StageVariables: { appId },
+        DefaultRouteSettings: {
+          ThrottlingBurstLimit: 5000,
+          ThrottlingRateLimit: 1000,
+        },
+        AccessLogSettings: {
+          DestinationArn: logGroupArn,
+          Format: ACCESS_LOG_FORMAT,
+        },
+      }),
+    );
 
-    // Step 3: Create EventBridge integration
-    const credentialsArn = process.env.APIGW_EVENTBRIDGE_ROLE_ARN || '';
-    const integrationResult = await client.send(new CreateIntegrationCommand({
-      ApiId: apiId,
-      IntegrationType: 'AWS_PROXY',
-      IntegrationSubtype: 'EventBridge-PutEvents',
-      CredentialsArn: credentialsArn,
-      PayloadFormatVersion: '1.0',
-      RequestParameters: {
-        Source: 'citadel.app.invoke',
-        DetailType: 'app.invoke.requested',
-        Detail: '$request.body',
-        EventBusName: eventBusName,
-      },
-    }));
+    // Step 3: Create EventBridge integration. Resources carries the
+    // AUTHORIZER-RESOLVED appId ($context.authorizer.appId) onto
+    // event.resources[0] — the app-invoke-handler consumer trusts ONLY this
+    // field and never the client-supplied request body.
+    const credentialsArn = process.env.APIGW_EVENTBRIDGE_ROLE_ARN || "";
+    const integrationResult = await client.send(
+      new CreateIntegrationCommand({
+        ApiId: apiId,
+        IntegrationType: "AWS_PROXY",
+        IntegrationSubtype: "EventBridge-PutEvents",
+        CredentialsArn: credentialsArn,
+        PayloadFormatVersion: "1.0",
+        RequestParameters: {
+          Source: "citadel.app.invoke",
+          DetailType: "app.invoke.requested",
+          Detail: "$request.body",
+          EventBusName: eventBusName,
+          Resources: "$context.authorizer.appId",
+        },
+      }),
+    );
     const integrationId = integrationResult.IntegrationId!;
 
     // Step 4: Create Lambda authorizer
-    const authorizerResult = await client.send(new CreateAuthorizerCommand({
-      ApiId: apiId,
-      AuthorizerType: 'REQUEST',
-      AuthorizerUri: `arn:aws:apigateway:${region}:lambda:path/2015-03-31/functions/${authorizerFnArn}/invocations`,
-      IdentitySource: ['$request.header.x-api-key'],
-      Name: `${apiName}-authorizer`,
-      AuthorizerResultTtlInSeconds: 300,
-      AuthorizerPayloadFormatVersion: '2.0',
-      EnableSimpleResponses: true,
-    }));
+    const authorizerResult = await client.send(
+      new CreateAuthorizerCommand({
+        ApiId: apiId,
+        AuthorizerType: "REQUEST",
+        AuthorizerUri: `arn:aws:apigateway:${region}:lambda:path/2015-03-31/functions/${authorizerFnArn}/invocations`,
+        IdentitySource: ["$request.header.x-api-key"],
+        Name: `${apiName}-authorizer`,
+        AuthorizerResultTtlInSeconds: 300,
+        AuthorizerPayloadFormatVersion: "2.0",
+        EnableSimpleResponses: true,
+      }),
+    );
     const authorizerId = authorizerResult.AuthorizerId!;
 
     // Step 5: Create POST /invoke route with authorizer
-    await client.send(new CreateRouteCommand({
-      ApiId: apiId,
-      RouteKey: 'POST /invoke',
-      Target: `integrations/${integrationId}`,
-      AuthorizationType: 'CUSTOM',
-      AuthorizerId: authorizerId,
-    }));
+    await client.send(
+      new CreateRouteCommand({
+        ApiId: apiId,
+        RouteKey: "POST /invoke",
+        Target: `integrations/${integrationId}`,
+        AuthorizationType: "CUSTOM",
+        AuthorizerId: authorizerId,
+      }),
+    );
 
     const endpointUrl = deriveEndpointUrl(apiId!, region);
     return { apiId: apiId!, endpointUrl };
@@ -409,48 +461,60 @@ export async function publishApp(
   const correlationId = uuidv4();
 
   // 1. Fetch app metadata and components
-  const componentsResult = await deps.docClient.send(new QueryCommand({
-    TableName: deps.appsTable,
-    IndexName: 'GroupIndex',
-    KeyConditionExpression: 'groupId = :gid',
-    ExpressionAttributeValues: { ':gid': `APP#${appId}` },
-  }));
+  const componentsResult = await deps.docClient.send(
+    new QueryCommand({
+      TableName: deps.appsTable,
+      IndexName: "GroupIndex",
+      KeyConditionExpression: "groupId = :gid",
+      ExpressionAttributeValues: { ":gid": `APP#${appId}` },
+    }),
+  );
 
   const items = componentsResult.Items || [];
-  const metadata = items.find(i => i.sortId === 'METADATA') as AppMetadata | undefined;
+  const metadata = items.find((i) => i.sortId === "METADATA") as
+    | AppMetadata
+    | undefined;
 
   if (!metadata) {
     throw new Error(`App not found: ${appId}`);
   }
 
   // 2. Idempotency check: if already PUBLISHED, return current state
-  if (metadata.status === 'PUBLISHED') {
+  if (metadata.status === "PUBLISHED") {
     // Find existing API key for the response
-    const existingKey = items.find(i => i.sortId?.startsWith('APIKEY#'));
+    const existingKey = items.find((i) => i.sortId?.startsWith("APIKEY#"));
     return {
       app: metadata,
-      endpointUrl: metadata.endpointUrl || '',
-      apiKey: '', // Never return plaintext after initial creation
-      apiKeyId: existingKey?.keyId || '',
+      endpointUrl: metadata.endpointUrl || "",
+      apiKey: "", // Never return plaintext after initial creation
+      apiKeyId: existingKey?.keyId || "",
     };
   }
 
   // 3. Validate preconditions
-  const errors = validatePublishPreconditions(metadata, items as ComponentItem[]);
+  const errors = validatePublishPreconditions(
+    metadata,
+    items as ComponentItem[],
+  );
   if (errors.length > 0) {
-    throw new Error(`Publish preconditions not met: ${errors.join('; ')}`);
+    throw new Error(`Publish preconditions not met: ${errors.join("; ")}`);
   }
 
   // 4. Aggregate permissions and ensure IAM role (skip if no permissions declared)
   const permissionItems = items
-    .filter(i => i.sortId?.startsWith('PERMISSION#'))
-    .map(i => ({ actions: i.actions || [], resources: i.resources || [] }))
-    .filter(p => p.actions.length > 0 && p.resources.length > 0);
+    .filter((i) => i.sortId?.startsWith("PERMISSION#"))
+    .map((i) => ({ actions: i.actions || [], resources: i.resources || [] }))
+    .filter((p) => p.actions.length > 0 && p.resources.length > 0);
 
   const { accountId } = await deps.policyManager.getAccountContext();
 
   if (permissionItems.length > 0) {
-    await deps.policyManager.ensureRole(appId, permissionItems, accountId, 'agent');
+    await deps.policyManager.ensureRole(
+      appId,
+      permissionItems,
+      accountId,
+      "agent",
+    );
   }
 
   // 5. Provision API Gateway
@@ -464,61 +528,71 @@ export async function publishApp(
   );
 
   // 6. Generate default API key
-  const apiKey = generateApiKey();
-  await deps.docClient.send(new PutCommand({
-    TableName: deps.appsTable,
-    Item: {
-      appId: `${appId}#APIKEY#${apiKey.keyId}`,
-      groupId: `APP#${appId}`,
-      sortId: `APIKEY#${apiKey.keyId}`,
-      keyId: apiKey.keyId,
-      name: 'default',
-      hashedKey: apiKey.hashed,
-      prefix: apiKey.prefix,
-      status: 'ACTIVE',
-      createdAt: new Date().toISOString(),
-    },
-  }));
+  const apiKey = await generateApiKey();
+  await deps.docClient.send(
+    new PutCommand({
+      TableName: deps.appsTable,
+      Item: {
+        appId: `${appId}#APIKEY#${apiKey.keyId}`,
+        groupId: `APP#${appId}`,
+        sortId: `APIKEY#${apiKey.keyId}`,
+        keyId: apiKey.keyId,
+        name: "default",
+        hashedKey: apiKey.hashed,
+        hashAlg: apiKey.hashAlg,
+        prefix: apiKey.prefix,
+        status: "ACTIVE",
+        createdAt: new Date().toISOString(),
+      },
+    }),
+  );
 
   // 7. Update app metadata: status=PUBLISHED, endpointUrl, apiId
-  await deps.docClient.send(new UpdateCommand({
-    TableName: deps.appsTable,
-    Key: { appId },
-    UpdateExpression: 'SET #status = :published, endpointUrl = :url, apiId = :apiId, updatedAt = :now',
-    ExpressionAttributeNames: { '#status': 'status' },
-    ExpressionAttributeValues: {
-      ':published': 'PUBLISHED',
-      ':url': endpointUrl,
-      ':apiId': apiId,
-      ':now': new Date().toISOString(),
-    },
-  }));
+  await deps.docClient.send(
+    new UpdateCommand({
+      TableName: deps.appsTable,
+      Key: { appId },
+      UpdateExpression:
+        "SET #status = :published, endpointUrl = :url, apiId = :apiId, updatedAt = :now",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":published": "PUBLISHED",
+        ":url": endpointUrl,
+        ":apiId": apiId,
+        ":now": new Date().toISOString(),
+      },
+    }),
+  );
 
   // Eventually-consistent mirror to AppsTable.#META so OrgIndex sees the new
   // PUBLISHED status. Helper logs and returns false on failure; never throws.
   await updateAppMetaFields(deps.appsTable, appId, {
-    status: 'PUBLISHED',
+    status: "PUBLISHED",
     updatedAt: new Date().toISOString(),
   });
 
   // 8. Emit EventBridge event
-  const event = buildStatusTransitionEvent('active', 'published', {
+  const event = buildStatusTransitionEvent("active", "published", {
     appId,
-    orgId: metadata.orgId || '',
+    orgId: metadata.orgId || "",
     endpointUrl,
     apiKeyId: apiKey.keyId,
     userId,
     correlationId,
   });
 
-  await deps.eventBridgeClient.send(new PutEventsCommand({
-    Entries: [{
-      Source: event.source,
-      DetailType: event.detailType,
-      Detail: JSON.stringify(event.detail),
-      EventBusName: deps.eventBusName,
-    }],
-  }));
+  await deps.eventBridgeClient.send(
+    new PutEventsCommand({
+      Entries: [
+        {
+          Source: event.source,
+          DetailType: event.detailType,
+          Detail: JSON.stringify(event.detail),
+          EventBusName: deps.eventBusName,
+        },
+      ],
+    }),
+  );
 
   // 8b. Build-segment completion (app published → implementation = 100).
   // When the app originated from an intake project (sourceProjectId stamped
@@ -529,34 +603,42 @@ export async function publishApp(
   // never fail the publish. Duplicate publishes cannot re-emit — the
   // already-PUBLISHED idempotency check above returns before reaching here.
   const sourceProjectId =
-    typeof metadata.sourceProjectId === 'string' && metadata.sourceProjectId.length > 0
+    typeof metadata.sourceProjectId === "string" &&
+    metadata.sourceProjectId.length > 0
       ? metadata.sourceProjectId
       : null;
   if (sourceProjectId) {
     try {
-      await deps.eventBridgeClient.send(new PutEventsCommand({
-        Entries: [{
-          Source: 'agent_intake.implementation',
-          DetailType: 'intake.progress.updated',
-          Detail: JSON.stringify({
-            sessionId: sourceProjectId,
-            phase: 'implementation',
-            completionPercentage: 100,
-            changeSummary: 'App published',
-            timestamp: new Date().toISOString(),
-          }),
-          EventBusName: deps.eventBusName,
-        }],
-      }));
+      await deps.eventBridgeClient.send(
+        new PutEventsCommand({
+          Entries: [
+            {
+              Source: "agent_intake.implementation",
+              DetailType: "intake.progress.updated",
+              Detail: JSON.stringify({
+                sessionId: sourceProjectId,
+                phase: "implementation",
+                completionPercentage: 100,
+                changeSummary: "App published",
+                timestamp: new Date().toISOString(),
+              }),
+              EventBusName: deps.eventBusName,
+            },
+          ],
+        }),
+      );
     } catch (err) {
-      console.error('publishApp: intake progress emission failed', { appId, err: String(err) });
+      console.error("publishApp: intake progress emission failed", {
+        appId,
+        err: String(err),
+      });
     }
   }
 
   // 9. Return PublishResult
   const updatedApp: AppMetadata = {
     ...metadata,
-    status: 'PUBLISHED',
+    status: "PUBLISHED",
     endpointUrl,
     apiId,
   };
@@ -618,100 +700,123 @@ export async function unpublishApp(
   const warnings: string[] = [];
 
   // 1. Fetch app metadata and components
-  const componentsResult = await deps.docClient.send(new QueryCommand({
-    TableName: deps.appsTable,
-    IndexName: 'GroupIndex',
-    KeyConditionExpression: 'groupId = :gid',
-    ExpressionAttributeValues: { ':gid': `APP#${appId}` },
-  }));
+  const componentsResult = await deps.docClient.send(
+    new QueryCommand({
+      TableName: deps.appsTable,
+      IndexName: "GroupIndex",
+      KeyConditionExpression: "groupId = :gid",
+      ExpressionAttributeValues: { ":gid": `APP#${appId}` },
+    }),
+  );
 
   const items = componentsResult.Items || [];
-  const metadata = items.find(i => i.sortId === 'METADATA') as AppMetadata | undefined;
+  const metadata = items.find((i) => i.sortId === "METADATA") as
+    | AppMetadata
+    | undefined;
 
   if (!metadata) {
     throw new Error(`App not found: ${appId}`);
   }
 
   // 2. Idempotency check: if not PUBLISHED, return current state
-  if (metadata.status !== 'PUBLISHED') {
+  if (metadata.status !== "PUBLISHED") {
     return { app: metadata };
   }
 
   // 3. Best-effort teardown: delete API Gateway
   if (metadata.apiId) {
     try {
-      await deps.apiGwClient.send(new DeleteApiCommand({ ApiId: metadata.apiId }));
+      await deps.apiGwClient.send(
+        new DeleteApiCommand({ ApiId: metadata.apiId }),
+      );
     } catch (error: unknown) {
-      warnings.push(`Failed to delete API Gateway: ${error instanceof Error ? error.message : String(error)}`);
+      warnings.push(
+        `Failed to delete API Gateway: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
   // 4. Best-effort teardown: revoke all active APIKEY# items
-  const activeKeys = items.filter(i => i.sortId?.startsWith('APIKEY#') && i.status === 'ACTIVE');
+  const activeKeys = items.filter(
+    (i) => i.sortId?.startsWith("APIKEY#") && i.status === "ACTIVE",
+  );
   for (const key of activeKeys) {
     try {
-      await deps.docClient.send(new UpdateCommand({
-        TableName: deps.appsTable,
-        Key: { appId: `${appId}#APIKEY#${key.keyId}` },
-        UpdateExpression: 'SET #status = :REVOKED, updatedAt = :now',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: {
-          ':REVOKED': 'REVOKED',
-          ':now': new Date().toISOString(),
-        },
-      }));
+      await deps.docClient.send(
+        new UpdateCommand({
+          TableName: deps.appsTable,
+          Key: { appId: `${appId}#APIKEY#${key.keyId}` },
+          UpdateExpression: "SET #status = :REVOKED, updatedAt = :now",
+          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeValues: {
+            ":REVOKED": "REVOKED",
+            ":now": new Date().toISOString(),
+          },
+        }),
+      );
     } catch (error: unknown) {
-      warnings.push(`Failed to revoke key ${key.keyId}: ${error instanceof Error ? error.message : String(error)}`);
+      warnings.push(
+        `Failed to revoke key ${key.keyId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
   // 5. Best-effort teardown: delete scoped IAM role
   try {
-    await deps.policyManager.deleteRole(appId, 'agent');
+    await deps.policyManager.deleteRole(appId, "agent");
   } catch (error: unknown) {
-    warnings.push(`Failed to delete IAM role: ${error instanceof Error ? error.message : String(error)}`);
+    warnings.push(
+      `Failed to delete IAM role: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   // 6. Update app metadata: status=DRAFT, remove endpointUrl and apiId
-  await deps.docClient.send(new UpdateCommand({
-    TableName: deps.appsTable,
-    Key: { appId },
-    UpdateExpression: 'SET #status = :draft, updatedAt = :now REMOVE endpointUrl, apiId',
-    ExpressionAttributeNames: { '#status': 'status' },
-    ExpressionAttributeValues: {
-      ':draft': 'DRAFT',
-      ':now': new Date().toISOString(),
-    },
-  }));
+  await deps.docClient.send(
+    new UpdateCommand({
+      TableName: deps.appsTable,
+      Key: { appId },
+      UpdateExpression:
+        "SET #status = :draft, updatedAt = :now REMOVE endpointUrl, apiId",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":draft": "DRAFT",
+        ":now": new Date().toISOString(),
+      },
+    }),
+  );
 
   // Eventually-consistent mirror to AppsTable.#META so OrgIndex sees the
   // unpublish (status=DRAFT). Helper never throws.
   await updateAppMetaFields(deps.appsTable, appId, {
-    status: 'DRAFT',
+    status: "DRAFT",
     updatedAt: new Date().toISOString(),
   });
 
   // 7. Emit EventBridge event
-  const event = buildStatusTransitionEvent('published', 'draft', {
+  const event = buildStatusTransitionEvent("published", "draft", {
     appId,
-    orgId: metadata.orgId || '',
+    orgId: metadata.orgId || "",
     userId,
     correlationId,
   });
 
-  await deps.eventBridgeClient.send(new PutEventsCommand({
-    Entries: [{
-      Source: event.source,
-      DetailType: event.detailType,
-      Detail: JSON.stringify(event.detail),
-      EventBusName: deps.eventBusName,
-    }],
-  }));
+  await deps.eventBridgeClient.send(
+    new PutEventsCommand({
+      Entries: [
+        {
+          Source: event.source,
+          DetailType: event.detailType,
+          Detail: JSON.stringify(event.detail),
+          EventBusName: deps.eventBusName,
+        },
+      ],
+    }),
+  );
 
   // 8. Return result
   const updatedApp: AppMetadata = {
     ...metadata,
-    status: 'DRAFT',
+    status: "DRAFT",
   };
   delete updatedApp.endpointUrl;
   delete updatedApp.apiId;
@@ -731,17 +836,19 @@ interface AppPublishResolverEvent {
   identity?: { sub?: string; claims?: { sub?: string } };
 }
 
-export const handler = async (event: AppPublishResolverEvent): Promise<unknown> => {
-  console.log('Publish handler event:', JSON.stringify(event, null, 2));
+export const handler = async (
+  event: AppPublishResolverEvent,
+): Promise<unknown> => {
+  console.log("Publish handler event:", JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
   const fieldName = info?.fieldName;
-  const userId = identity?.sub || identity?.claims?.sub || 'unknown';
+  const userId = identity?.sub || identity?.claims?.sub || "unknown";
 
   switch (fieldName) {
-    case 'publishApp':
+    case "publishApp":
       return await publishApp(args.appId, userId);
-    case 'unpublishApp': {
+    case "unpublishApp": {
       const unpublishResult = await unpublishApp(args.appId, userId);
       return unpublishResult.app;
     }

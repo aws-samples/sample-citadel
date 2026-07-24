@@ -5,16 +5,23 @@
  * Routes events to the appropriate DynamoDB cache table (agents or tools)
  * based on the resourceType in the event detail.
  */
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   PutCommand,
   DeleteCommand,
   UpdateCommand,
-} from '@aws-sdk/lib-dynamodb';
-import type { PutCommandInput, DeleteCommandInput, UpdateCommandInput } from '@aws-sdk/lib-dynamodb';
-import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { CloudWatchClient, PutMetricDataCommand } from '@aws-sdk/client-cloudwatch';
+} from "@aws-sdk/lib-dynamodb";
+import type {
+  PutCommandInput,
+  DeleteCommandInput,
+  UpdateCommandInput,
+} from "@aws-sdk/lib-dynamodb";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -42,8 +49,8 @@ const cwClient = new CloudWatchClient({});
 // Types
 // ---------------------------------------------------------------------------
 
-export type ResourceType = 'agent' | 'tool';
-export type EventType = 'CREATED' | 'UPDATED' | 'DELETED' | 'STATUS_CHANGED';
+export type ResourceType = "agent" | "tool";
+export type EventType = "CREATED" | "UPDATED" | "DELETED" | "STATUS_CHANGED";
 
 /**
  * Registry resource payload carried in EventBridge event details. Known fields
@@ -69,7 +76,7 @@ export interface RegistryEventDetail {
 
 export interface RegistryEvent {
   source: string;
-  'detail-type': string;
+  "detail-type": string;
   detail: RegistryEventDetail;
 }
 
@@ -90,12 +97,12 @@ export interface UnvalidatedEvent {
 // Validation
 // ---------------------------------------------------------------------------
 
-const VALID_RESOURCE_TYPES: ReadonlySet<unknown> = new Set(['agent', 'tool']);
+const VALID_RESOURCE_TYPES: ReadonlySet<unknown> = new Set(["agent", "tool"]);
 const VALID_EVENT_TYPES: ReadonlySet<unknown> = new Set([
-  'CREATED',
-  'UPDATED',
-  'DELETED',
-  'STATUS_CHANGED',
+  "CREATED",
+  "UPDATED",
+  "DELETED",
+  "STATUS_CHANGED",
 ]);
 
 /**
@@ -106,24 +113,24 @@ export function validateEvent(
   event: RegistryEvent | UnvalidatedEvent | null | undefined,
 ): string | null {
   if (!event) {
-    return 'Event is null or undefined';
+    return "Event is null or undefined";
   }
 
-  if (event.source !== 'aws.bedrock-agentcore') {
+  if (event.source !== "aws.bedrock-agentcore") {
     return `Unexpected event source: ${event.source}`;
   }
 
-  if (event['detail-type'] !== 'AgentCore Registry Resource Change') {
-    return `Unexpected detail-type: ${event['detail-type']}`;
+  if (event["detail-type"] !== "AgentCore Registry Resource Change") {
+    return `Unexpected detail-type: ${event["detail-type"]}`;
   }
 
   const detail = event.detail;
   if (!detail) {
-    return 'Event detail is missing';
+    return "Event detail is missing";
   }
 
-  if (!detail.resourceId || typeof detail.resourceId !== 'string') {
-    return 'Event detail missing required field: resourceId';
+  if (!detail.resourceId || typeof detail.resourceId !== "string") {
+    return "Event detail missing required field: resourceId";
   }
 
   if (!VALID_RESOURCE_TYPES.has(detail.resourceType)) {
@@ -146,9 +153,9 @@ export function validateEvent(
  */
 export function getTableForResourceType(resourceType: ResourceType): string {
   switch (resourceType) {
-    case 'agent':
+    case "agent":
       return AGENT_CONFIG_TABLE;
-    case 'tool':
+    case "tool":
       return TOOLS_CONFIG_TABLE;
     default:
       throw new Error(`Unknown resourceType: ${resourceType}`);
@@ -165,17 +172,19 @@ export function getTableForResourceType(resourceType: ResourceType): string {
  */
 export function toInternalState(registryStatus: string): string {
   switch (registryStatus) {
-    case 'APPROVED':
-      return 'active';
-    case 'DEPRECATED':
-      return 'inactive';
-    case 'DRAFT':
-      return 'maintenance';
-    case 'PENDING_APPROVAL':
-      return 'pending';
+    case "APPROVED":
+      return "active";
+    case "DEPRECATED":
+      return "inactive";
+    case "DRAFT":
+      return "maintenance";
+    case "PENDING_APPROVAL":
+      return "pending";
     default:
-      console.warn(`Unknown registry status "${registryStatus}", mapping to "inactive"`);
-      return 'inactive';
+      console.warn(
+        `Unknown registry status "${registryStatus}", mapping to "inactive"`,
+      );
+      return "inactive";
   }
 }
 
@@ -185,8 +194,8 @@ export function toInternalState(registryStatus: string): string {
 
 const AGENT_METADATA_DEFAULTS = {
   categories: [] as string[],
-  icon: '',
-  state: 'active' as string,
+  icon: "",
+  state: "active" as string,
   appId: undefined as string | undefined,
   manifest: undefined as Record<string, unknown> | undefined,
   // Deliberately `undefined`, NOT `''` — the cache-record builder below must
@@ -199,8 +208,8 @@ const AGENT_METADATA_DEFAULTS = {
 
 const TOOL_METADATA_DEFAULTS = {
   categories: [] as string[],
-  icon: '',
-  state: 'active' as string,
+  icon: "",
+  state: "active" as string,
   integrationBindings: undefined as unknown[] | undefined,
   dataStoreBindings: undefined as unknown[] | undefined,
   appId: undefined as string | undefined,
@@ -214,18 +223,24 @@ export function deserializeCustomMetadata<T extends Record<string, unknown>>(
   json: string | null | undefined,
   defaults: T,
 ): T {
-  if (json == null || json === '') {
+  if (json == null || json === "") {
     return defaults;
   }
   try {
     const parsed = JSON.parse(json);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      console.warn('Custom metadata JSON is not a plain object, returning defaults');
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      console.warn(
+        "Custom metadata JSON is not a plain object, returning defaults",
+      );
       return defaults;
     }
     return { ...defaults, ...parsed };
   } catch {
-    console.warn('Failed to parse custom metadata JSON, returning defaults');
+    console.warn("Failed to parse custom metadata JSON, returning defaults");
     return defaults;
   }
 }
@@ -238,7 +253,7 @@ function getKeyForResource(
   resourceType: ResourceType,
   resourceId: string,
 ): Record<string, string> {
-  return resourceType === 'agent'
+  return resourceType === "agent"
     ? { agentId: resourceId }
     : { toolId: resourceId };
 }
@@ -307,13 +322,13 @@ export function buildAgentCacheRecord(
 
   return {
     agentId: resourceId,
-    config: resource.description ?? '',
+    config: resource.description ?? "",
     state: meta.state,
     categories: meta.categories,
     icon: meta.icon,
     appId: meta.appId,
     manifest: meta.manifest,
-    name: typeof resource.name === 'string' ? resource.name : '',
+    name: typeof resource.name === "string" ? resource.name : "",
     orgId: meta.orgId,
     createdAt: resource.createdAt
       ? new Date(resource.createdAt).toISOString()
@@ -339,7 +354,7 @@ export function buildToolCacheRecord(
 
   return {
     toolId: resourceId,
-    config: resource.description ?? '',
+    config: resource.description ?? "",
     state: meta.state,
     categories: meta.categories,
     icon: meta.icon,
@@ -371,11 +386,11 @@ export async function handleCreateOrUpdate(
   resource: RegistryResourcePayload,
 ): Promise<void> {
   const item =
-    resourceType === 'agent'
+    resourceType === "agent"
       ? buildAgentCacheRecord(resourceId, resource)
       : buildToolCacheRecord(resourceId, resource);
 
-  const keyAttr = resourceType === 'agent' ? 'agentId' : 'toolId';
+  const keyAttr = resourceType === "agent" ? "agentId" : "toolId";
 
   const params: PutCommandInput = {
     TableName: tableName,
@@ -383,11 +398,11 @@ export async function handleCreateOrUpdate(
     // Idempotency: only write if record doesn't exist or incoming updatedAt is newer
     ConditionExpression: `attribute_not_exists(#key) OR #updatedAt < :newUpdatedAt`,
     ExpressionAttributeNames: {
-      '#key': keyAttr,
-      '#updatedAt': 'updatedAt',
+      "#key": keyAttr,
+      "#updatedAt": "updatedAt",
     },
     ExpressionAttributeValues: {
-      ':newUpdatedAt': item.updatedAt,
+      ":newUpdatedAt": item.updatedAt,
     },
   };
 
@@ -421,23 +436,23 @@ export async function handleStatusChanged(
   newStatus: string,
 ): Promise<void> {
   const mappedState = toInternalState(newStatus);
-  const keyAttr = resourceType === 'agent' ? 'agentId' : 'toolId';
+  const keyAttr = resourceType === "agent" ? "agentId" : "toolId";
   const now = new Date().toISOString();
 
   const params: UpdateCommandInput = {
     TableName: tableName,
     Key: getKeyForResource(resourceType, resourceId),
-    UpdateExpression: 'SET #state = :newState, #updatedAt = :now',
+    UpdateExpression: "SET #state = :newState, #updatedAt = :now",
     // Idempotency: only update if the state is actually different
     ConditionExpression: `attribute_exists(#key) AND (attribute_not_exists(#state) OR #state <> :newState)`,
     ExpressionAttributeNames: {
-      '#key': keyAttr,
-      '#state': 'state',
-      '#updatedAt': 'updatedAt',
+      "#key": keyAttr,
+      "#state": "state",
+      "#updatedAt": "updatedAt",
     },
     ExpressionAttributeValues: {
-      ':newState': mappedState,
-      ':now': now,
+      ":newState": mappedState,
+      ":now": now,
     },
   };
 
@@ -456,13 +471,17 @@ export async function sendToDlq(event: unknown, reason: string): Promise<void> {
     await sqsClient.send(
       new SendMessageCommand({
         QueueUrl: DLQ_URL,
-        MessageBody: JSON.stringify({ event, reason, timestamp: new Date().toISOString() }),
+        MessageBody: JSON.stringify({
+          event,
+          reason,
+          timestamp: new Date().toISOString(),
+        }),
       }),
     );
     console.log(`Event sent to DLQ: ${reason}`);
   } catch (dlqErr) {
     // Best-effort — log but don't mask the original error
-    console.error('Failed to send event to DLQ:', dlqErr);
+    console.error("Failed to send event to DLQ:", dlqErr);
   }
 }
 
@@ -473,12 +492,12 @@ export async function emitSyncFailureMetric(): Promise<void> {
   try {
     await cwClient.send(
       new PutMetricDataCommand({
-        Namespace: 'RegistrySync',
+        Namespace: "RegistrySync",
         MetricData: [
           {
-            MetricName: 'SyncFailure',
+            MetricName: "SyncFailure",
             Value: 1,
-            Unit: 'Count',
+            Unit: "Count",
             Timestamp: new Date(),
           },
         ],
@@ -486,7 +505,7 @@ export async function emitSyncFailureMetric(): Promise<void> {
     );
   } catch (metricErr) {
     // Best-effort — log but don't mask the original error
-    console.error('Failed to emit SyncFailure metric:', metricErr);
+    console.error("Failed to emit SyncFailure metric:", metricErr);
   }
 }
 
@@ -495,7 +514,7 @@ export async function emitSyncFailureMetric(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export const handler = async (event: RegistryEvent): Promise<void> => {
-  console.log('Registry sync event received:', JSON.stringify(event, null, 2));
+  console.log("Registry sync event received:", JSON.stringify(event, null, 2));
 
   // Validate event structure — malformed events go to DLQ, no retry
   const validationError = validateEvent(event);
@@ -505,7 +524,8 @@ export const handler = async (event: RegistryEvent): Promise<void> => {
     throw new Error(`Malformed registry sync event: ${validationError}`);
   }
 
-  const { resourceId, resourceType, eventType, resource, newStatus } = event.detail;
+  const { resourceId, resourceType, eventType, resource, newStatus } =
+    event.detail;
   const tableName = getTableForResourceType(resourceType);
 
   console.log(
@@ -514,28 +534,48 @@ export const handler = async (event: RegistryEvent): Promise<void> => {
 
   try {
     switch (eventType) {
-      case 'CREATED':
-      case 'UPDATED': {
+      case "CREATED":
+      case "UPDATED": {
         if (!resource) {
-          console.warn(`No resource payload in ${eventType} event for "${resourceId}", skipping`);
+          console.warn(
+            `No resource payload in ${eventType} event for "${resourceId}", skipping`,
+          );
           return;
         }
-        await handleCreateOrUpdate(tableName, resourceType, resourceId, resource);
-        console.log(`Cache ${eventType.toLowerCase()} for ${resourceType} "${resourceId}" in ${tableName}`);
+        await handleCreateOrUpdate(
+          tableName,
+          resourceType,
+          resourceId,
+          resource,
+        );
+        console.log(
+          `Cache ${eventType.toLowerCase()} for ${resourceType} "${resourceId}" in ${tableName}`,
+        );
         break;
       }
-      case 'DELETED': {
+      case "DELETED": {
         await handleDelete(tableName, resourceType, resourceId);
-        console.log(`Cache deleted for ${resourceType} "${resourceId}" from ${tableName}`);
+        console.log(
+          `Cache deleted for ${resourceType} "${resourceId}" from ${tableName}`,
+        );
         break;
       }
-      case 'STATUS_CHANGED': {
+      case "STATUS_CHANGED": {
         if (!newStatus) {
-          console.warn(`No newStatus in STATUS_CHANGED event for "${resourceId}", skipping`);
+          console.warn(
+            `No newStatus in STATUS_CHANGED event for "${resourceId}", skipping`,
+          );
           return;
         }
-        await handleStatusChanged(tableName, resourceType, resourceId, newStatus);
-        console.log(`Cache status updated for ${resourceType} "${resourceId}" to "${newStatus}"`);
+        await handleStatusChanged(
+          tableName,
+          resourceType,
+          resourceId,
+          newStatus,
+        );
+        console.log(
+          `Cache status updated for ${resourceType} "${resourceId}" to "${newStatus}"`,
+        );
         break;
       }
       default:
@@ -543,7 +583,10 @@ export const handler = async (event: RegistryEvent): Promise<void> => {
     }
   } catch (err: unknown) {
     // Swallow ConditionalCheckFailedException — idempotency, record already current
-    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+    if (
+      err instanceof Error &&
+      err.name === "ConditionalCheckFailedException"
+    ) {
       console.log(
         `Conditional check failed for ${resourceType} "${resourceId}" — record already current, skipping`,
       );
@@ -551,8 +594,14 @@ export const handler = async (event: RegistryEvent): Promise<void> => {
     }
 
     // DynamoDB write failure — route to DLQ and emit metric, then re-throw
-    console.error(`DynamoDB write failure for ${resourceType} "${resourceId}":`, err);
-    await sendToDlq(event, `DynamoDB write failure: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(
+      `DynamoDB write failure for ${resourceType} "${resourceId}":`,
+      err,
+    );
+    await sendToDlq(
+      event,
+      `DynamoDB write failure: ${err instanceof Error ? err.message : String(err)}`,
+    );
     await emitSyncFailureMetric();
     throw err;
   }

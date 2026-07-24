@@ -1,11 +1,11 @@
-import * as cdk from 'aws-cdk-lib';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as iam from 'aws-cdk-lib/aws-iam';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as logs from 'aws-cdk-lib/aws-logs';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
-import { Construct } from 'constructs';
+import * as cdk from "aws-cdk-lib";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as events from "aws-cdk-lib/aws-events";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as logs from "aws-cdk-lib/aws-logs";
+import * as ssm from "aws-cdk-lib/aws-ssm";
+import { Construct } from "constructs";
 
 export interface GatewayStackProps extends cdk.StackProps {
   environment: string;
@@ -23,33 +23,57 @@ export class GatewayStack extends cdk.Stack {
     super(scope, id, props);
 
     // Shared Lambda authorizer (one per environment, used by all per-app APIs)
-    this.authorizerFunction = new lambda.Function(this, 'AppApiAuthorizer', {
+    this.authorizerFunction = new lambda.Function(this, "AppApiAuthorizer", {
       runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'app-api-authorizer.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
+      handler: "app-api-authorizer.handler",
+      code: lambda.Code.fromAsset("dist/lambda"),
       environment: {
         APPS_TABLE: props.appsTable.tableName,
+        ENVIRONMENT: props.environment,
       },
       timeout: cdk.Duration.seconds(10),
-      logGroup: new logs.LogGroup(this, 'AppApiAuthorizerLogs', {
+      logGroup: new logs.LogGroup(this, "AppApiAuthorizerLogs", {
         retention: logs.RetentionDays.ONE_WEEK,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
     });
 
+    // API key HMAC pepper (getApiKeyPepper in api-key-hash.ts): the
+    // authorizer verifies incoming keys against the HMAC digest, so it needs
+    // read access to the SecureString pepper. Mirrors the governance-flag
+    // ssm:GetParameter grant pattern in backend-stack.ts (~lines 1452-1463),
+    // plus kms:Decrypt since this parameter is a SecureString encrypted with
+    // the AWS-managed SSM key (no dedicated CMK exists for this parameter).
+    this.authorizerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/${props.environment}/app-api-key-pepper`,
+        ],
+      }),
+    );
+    this.authorizerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["kms:Decrypt"],
+        resources: [`arn:aws:kms:${this.region}:${this.account}:alias/aws/ssm`],
+      }),
+    );
+
     // IAM role for API Gateway → EventBridge integration (per-app APIs use this to put events)
-    const apiGwEventBridgeRole = new iam.Role(this, 'ApiGwEventBridgeRole', {
+    const apiGwEventBridgeRole = new iam.Role(this, "ApiGwEventBridgeRole", {
       roleName: `citadel-apigw-eb-${props.environment}`,
-      assumedBy: new iam.ServicePrincipal('apigateway.amazonaws.com'),
+      assumedBy: new iam.ServicePrincipal("apigateway.amazonaws.com"),
     });
     props.eventBus.grantPutEventsTo(apiGwEventBridgeRole);
 
     // Publish handler — orchestrates API Gateway provisioning
-    this.publishHandler = new lambda.Function(this, 'AppPublishHandler', {
+    this.publishHandler = new lambda.Function(this, "AppPublishHandler", {
       functionName: `citadel-app-publish-handler-${props.environment}`,
       runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'app-publish-handler.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
+      handler: "app-publish-handler.handler",
+      code: lambda.Code.fromAsset("dist/lambda"),
       environment: {
         APPS_TABLE: props.appsTable.tableName,
         EVENT_BUS_NAME: props.eventBus.eventBusName,
@@ -59,22 +83,22 @@ export class GatewayStack extends cdk.Stack {
         APIGW_EVENTBRIDGE_ROLE_ARN: apiGwEventBridgeRole.roleArn,
       },
       timeout: cdk.Duration.seconds(120),
-      logGroup: new logs.LogGroup(this, 'AppPublishHandlerLogs', {
+      logGroup: new logs.LogGroup(this, "AppPublishHandlerLogs", {
         retention: logs.RetentionDays.ONE_WEEK,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
     });
 
     // Metrics handler — aggregates API Gateway access logs
-    this.metricsHandler = new lambda.Function(this, 'AppMetricsHandler', {
+    this.metricsHandler = new lambda.Function(this, "AppMetricsHandler", {
       runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'app-metrics-handler.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
+      handler: "app-metrics-handler.handler",
+      code: lambda.Code.fromAsset("dist/lambda"),
       environment: {
         APPS_TABLE: props.appsTable.tableName,
       },
       timeout: cdk.Duration.seconds(60),
-      logGroup: new logs.LogGroup(this, 'AppMetricsHandlerLogs', {
+      logGroup: new logs.LogGroup(this, "AppMetricsHandlerLogs", {
         retention: logs.RetentionDays.ONE_WEEK,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
@@ -93,94 +117,130 @@ export class GatewayStack extends cdk.Stack {
     props.idempotencyTable.grantReadWriteData(this.publishHandler);
 
     // --- Publish Handler: API Gateway management permissions ---
-    this.publishHandler.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'apigateway:POST',
-        'apigateway:GET',
-        'apigateway:DELETE',
-        'apigateway:PUT',
-        'apigateway:PATCH',
-      ],
-      resources: ['arn:aws:apigateway:*::/apis*'],
-    }));
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "apigateway:POST",
+          "apigateway:GET",
+          "apigateway:DELETE",
+          "apigateway:PUT",
+          "apigateway:PATCH",
+        ],
+        resources: ["arn:aws:apigateway:*::/apis*"],
+      }),
+    );
 
     // --- Publish Handler: IAM role management for scoped agent roles ---
-    this.publishHandler.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'iam:CreateRole',
-        'iam:DeleteRole',
-        'iam:PutRolePolicy',
-        'iam:DeleteRolePolicy',
-        'iam:TagRole',
-        'iam:GetRole',
-        'iam:PassRole',
-      ],
-      resources: [
-        `arn:aws:iam::${this.account}:role/citadel-agent-*`,
-        apiGwEventBridgeRole.roleArn,
-      ],
-    }));
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "iam:CreateRole",
+          "iam:DeleteRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:TagRole",
+          "iam:GetRole",
+          "iam:PassRole",
+        ],
+        resources: [
+          `arn:aws:iam::${this.account}:role/citadel-agent-*`,
+          apiGwEventBridgeRole.roleArn,
+        ],
+      }),
+    );
 
     // --- Publish Handler: STS permissions ---
-    this.publishHandler.addToRolePolicy(new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ['sts:AssumeRole'],
-          resources: [`arn:aws:iam::${this.account}:role/citadel-agent-*`],
-        }));
-        this.publishHandler.addToRolePolicy(new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ['sts:GetCallerIdentity'],
-          resources: ['*'],
-        }));
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sts:AssumeRole"],
+        resources: [`arn:aws:iam::${this.account}:role/citadel-agent-*`],
+      }),
+    );
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sts:GetCallerIdentity"],
+        resources: ["*"],
+      }),
+    );
 
     // --- Publish Handler: CloudWatch Logs permissions for API Gateway access logging ---
-    this.publishHandler.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'logs:CreateLogGroup',
-        'logs:DescribeLogGroups',
-        'logs:DeleteLogGroup',
-        'logs:PutRetentionPolicy',
-        'logs:CreateLogDelivery',
-        'logs:GetLogDelivery',
-        'logs:UpdateLogDelivery',
-        'logs:DeleteLogDelivery',
-        'logs:ListLogDeliveries',
-        'logs:PutResourcePolicy',
-        'logs:DescribeResourcePolicies',
-      ],
-      resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:*`],
-    }));
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "logs:CreateLogGroup",
+          "logs:DescribeLogGroups",
+          "logs:DeleteLogGroup",
+          "logs:PutRetentionPolicy",
+          "logs:CreateLogDelivery",
+          "logs:GetLogDelivery",
+          "logs:UpdateLogDelivery",
+          "logs:DeleteLogDelivery",
+          "logs:ListLogDeliveries",
+          "logs:PutResourcePolicy",
+          "logs:DescribeResourcePolicies",
+        ],
+        resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:*`],
+      }),
+    );
     // DescribeLogGroups and log delivery APIs require wildcard resource
-    this.publishHandler.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'logs:DescribeLogGroups',
-        'logs:CreateLogDelivery',
-        'logs:GetLogDelivery',
-        'logs:UpdateLogDelivery',
-        'logs:DeleteLogDelivery',
-        'logs:ListLogDeliveries',
-        'logs:PutResourcePolicy',
-        'logs:DescribeResourcePolicies',
-      ],
-      resources: ['*'],
-    }));
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "logs:DescribeLogGroups",
+          "logs:CreateLogDelivery",
+          "logs:GetLogDelivery",
+          "logs:UpdateLogDelivery",
+          "logs:DeleteLogDelivery",
+          "logs:ListLogDeliveries",
+          "logs:PutResourcePolicy",
+          "logs:DescribeResourcePolicies",
+        ],
+        resources: ["*"],
+      }),
+    );
+
+    // --- Publish Handler: API key HMAC pepper (hashApiKey in api-key-hash.ts) ---
+    // The publish handler hashes newly issued/rotated keys at publish time, so
+    // it needs the same SecureString read + KMS decrypt as the authorizer.
+    // Mirrors the governance-flag ssm:GetParameter grant pattern in
+    // backend-stack.ts (~lines 1452-1463).
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/${props.environment}/app-api-key-pepper`,
+        ],
+      }),
+    );
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["kms:Decrypt"],
+        resources: [`arn:aws:kms:${this.region}:${this.account}:alias/aws/ssm`],
+      }),
+    );
 
     // --- Publish Handler: Lambda permissions for authorizer configuration ---
-    this.publishHandler.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['lambda:AddPermission', 'lambda:RemovePermission'],
-      resources: [this.authorizerFunction.functionArn],
-    }));
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["lambda:AddPermission", "lambda:RemovePermission"],
+        resources: [this.authorizerFunction.functionArn],
+      }),
+    );
 
     // --- SSM Parameter: Export authorizer function ARN for per-app API Gateway configuration ---
-    new ssm.StringParameter(this, 'AuthorizerFunctionArnParam', {
+    new ssm.StringParameter(this, "AuthorizerFunctionArnParam", {
       parameterName: `/citadel/authorizer-arn-${props.environment}`,
       stringValue: this.authorizerFunction.functionArn,
-      description: 'Shared Lambda authorizer ARN for per-app API Gateways',
+      description: "Shared Lambda authorizer ARN for per-app API Gateways",
     });
   }
 }

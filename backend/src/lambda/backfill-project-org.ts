@@ -61,13 +61,13 @@
  * resource, a schedule, or EventBridge wiring — just apply it once per
  * environment, confirm the result, and tear the temporary function down.
  */
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   ScanCommand,
   UpdateCommand,
   type NativeAttributeValue,
-} from '@aws-sdk/lib-dynamodb';
+} from "@aws-sdk/lib-dynamodb";
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -75,10 +75,10 @@ const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
  * constant (rather than importing from project-resolver.ts) so this
  * standalone migration Lambda has no runtime dependency on the resolver
  * module — its only coupling to project-resolver is the value itself. */
-const DEFAULT_ORGANIZATION = 'Default';
+const DEFAULT_ORGANIZATION = "Default";
 
 function projectsTable(): string {
-  return process.env.PROJECTS_TABLE ?? '';
+  return process.env.PROJECTS_TABLE ?? "";
 }
 
 export interface BackfillProjectOrgResult {
@@ -95,7 +95,11 @@ export interface BackfillProjectOrgResult {
  * backfills `organization: 'Default'` onto every item missing it.
  */
 export async function backfillProjectOrg(): Promise<BackfillProjectOrgResult> {
-  const result: BackfillProjectOrgResult = { scanned: 0, updatedIds: [], failedIds: [] };
+  const result: BackfillProjectOrgResult = {
+    scanned: 0,
+    updatedIds: [],
+    failedIds: [],
+  };
   const tableName = projectsTable();
 
   let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
@@ -104,8 +108,9 @@ export async function backfillProjectOrg(): Promise<BackfillProjectOrgResult> {
     const page = await docClient.send(
       new ScanCommand({
         TableName: tableName,
-        FilterExpression: 'attribute_not_exists(organization) OR organization = :nullVal',
-        ExpressionAttributeValues: { ':nullVal': null },
+        FilterExpression:
+          "attribute_not_exists(organization) OR organization = :nullVal",
+        ExpressionAttributeValues: { ":nullVal": null },
         ExclusiveStartKey: exclusiveStartKey,
       }),
     );
@@ -123,33 +128,45 @@ export async function backfillProjectOrg(): Promise<BackfillProjectOrgResult> {
           new UpdateCommand({
             TableName: tableName,
             Key: { id },
-            UpdateExpression: 'SET #organization = :org',
-            ExpressionAttributeNames: { '#organization': 'organization' },
-            ExpressionAttributeValues: { ':org': DEFAULT_ORGANIZATION, ':nullVal': null },
+            UpdateExpression: "SET #organization = :org",
+            ExpressionAttributeNames: { "#organization": "organization" },
+            ExpressionAttributeValues: {
+              ":org": DEFAULT_ORGANIZATION,
+              ":nullVal": null,
+            },
             // Defensive re-check: only stamp rows still missing/null org at
             // write time, so a concurrent createProject/updateProject that
             // has since set a real organization is never clobbered.
-            ConditionExpression: 'attribute_not_exists(organization) OR organization = :nullVal',
+            ConditionExpression:
+              "attribute_not_exists(organization) OR organization = :nullVal",
           }),
         );
         result.updatedIds.push(id);
       } catch (err: unknown) {
-        if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+        if (
+          err instanceof Error &&
+          err.name === "ConditionalCheckFailedException"
+        ) {
           // Organization was set concurrently between scan and update — no
           // action needed, the row is already correctly scoped.
           continue;
         }
-        console.error(`backfillProjectOrg: failed to update project "${id}":`, err);
+        console.error(
+          `backfillProjectOrg: failed to update project "${id}":`,
+          err,
+        );
         result.failedIds.push(id);
       }
     }
 
-    exclusiveStartKey = page.LastEvaluatedKey as Record<string, NativeAttributeValue> | undefined;
+    exclusiveStartKey = page.LastEvaluatedKey as
+      | Record<string, NativeAttributeValue>
+      | undefined;
   } while (exclusiveStartKey);
 
   console.log(
     JSON.stringify({
-      handler: 'backfill-project-org',
+      handler: "backfill-project-org",
       scanned: result.scanned,
       updated: result.updatedIds.length,
       failed: result.failedIds.length,
@@ -161,7 +178,7 @@ export async function backfillProjectOrg(): Promise<BackfillProjectOrgResult> {
 }
 
 export const handler = async (): Promise<BackfillProjectOrgResult> => {
-  console.log('backfill-project-org: starting scan of', projectsTable());
+  console.log("backfill-project-org: starting scan of", projectsTable());
   const result = await backfillProjectOrg();
   console.log(
     `backfill-project-org: complete — scanned ${result.scanned}, updated ${result.updatedIds.length}, failed ${result.failedIds.length}`,

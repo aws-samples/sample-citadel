@@ -9,7 +9,7 @@ import type {
   RegistryRecordStatusValue,
   ResourceType,
   UpdateResourceInput,
-} from '../../../services/registry-service';
+} from "../../../services/registry-service";
 
 export interface MockRegistryRecord extends Partial<RegistryRecord> {
   recordId: string;
@@ -21,11 +21,11 @@ const records = new Map<string, MockRegistryRecord>();
 export function seedMockRegistry(
   resourceType: ResourceType,
   recordId: string,
-  record: Omit<Partial<MockRegistryRecord>, 'recordId'> & { name?: string },
+  record: Omit<Partial<MockRegistryRecord>, "recordId"> & { name?: string },
 ): void {
   records.set(`${resourceType}:${recordId}`, {
     recordId,
-    name: record.name ?? 'mock',
+    name: record.name ?? "mock",
     ...record,
   } as MockRegistryRecord);
 }
@@ -44,13 +44,19 @@ export function getListResourceSummariesCallCount(): number {
 
 /** Test-visible call counter: getResource() invocations per `${type}:${id}` key. */
 const getResourceCallCounts = new Map<string, number>();
-export function getGetResourceCallCount(type: ResourceType, id: string): number {
+export function getGetResourceCallCount(
+  type: ResourceType,
+  id: string,
+): number {
   return getResourceCallCounts.get(`${type}:${id}`) ?? 0;
 }
 
 export function getMockRegistryService() {
   return {
-    async getResource(type: ResourceType, id: string): Promise<RegistryRecord | null> {
+    async getResource(
+      type: ResourceType,
+      id: string,
+    ): Promise<RegistryRecord | null> {
       const key = `${type}:${id}`;
       getResourceCallCounts.set(key, (getResourceCallCounts.get(key) ?? 0) + 1);
       return records.get(key) ?? null;
@@ -99,16 +105,24 @@ export function getMockRegistryService() {
 
       const refToRecordId = new Map<string, string | undefined>();
       for (const ref of uniqueRefs) {
-        refToRecordId.set(ref, isRecordId(ref) ? ref : nameToRecordId?.get(ref));
+        refToRecordId.set(
+          ref,
+          isRecordId(ref) ? ref : nameToRecordId?.get(ref),
+        );
       }
 
       const uniqueRecordIds = Array.from(
-        new Set(Array.from(refToRecordId.values()).filter((id): id is string => !!id)),
+        new Set(
+          Array.from(refToRecordId.values()).filter((id): id is string => !!id),
+        ),
       );
       const recordIdToRecord = new Map<string, RegistryRecord>();
       for (const recordId of uniqueRecordIds) {
         const key = `${type}:${recordId}`;
-        getResourceCallCounts.set(key, (getResourceCallCounts.get(key) ?? 0) + 1);
+        getResourceCallCounts.set(
+          key,
+          (getResourceCallCounts.get(key) ?? 0) + 1,
+        );
         const record = records.get(key);
         if (record) recordIdToRecord.set(recordId, record as RegistryRecord);
       }
@@ -121,19 +135,26 @@ export function getMockRegistryService() {
       return result;
     },
     /** Mirrors RegistryService.mapToAgentConfig's orgId/name extraction. */
-    mapToAgentConfig(record: RegistryRecord): { agentId: string; name: string; orgId: string } {
-      let orgId = '';
+    mapToAgentConfig(record: RegistryRecord): {
+      agentId: string;
+      name: string;
+      orgId: string;
+    } {
+      let orgId = "";
       try {
         const meta = record.customDescriptorContent
           ? JSON.parse(record.customDescriptorContent)
           : {};
-        orgId = typeof meta.orgId === 'string' ? meta.orgId : '';
+        orgId = typeof meta.orgId === "string" ? meta.orgId : "";
       } catch {
-        orgId = '';
+        orgId = "";
       }
-      return { agentId: record.recordId, name: record.name ?? '', orgId };
+      return { agentId: record.recordId, name: record.name ?? "", orgId };
     },
-    async searchResources(type: ResourceType, _query: string): Promise<RegistryRecord[]> {
+    async searchResources(
+      type: ResourceType,
+      _query: string,
+    ): Promise<RegistryRecord[]> {
       return Array.from(records.entries())
         .filter(([k]) => k.startsWith(`${type}:`))
         .map(([, v]) => v) as RegistryRecord[];
@@ -147,7 +168,7 @@ export function getMockRegistryService() {
         recordId: id,
         name: input.name,
         description: input.description,
-        status: 'DRAFT',
+        status: "DRAFT",
         customDescriptorContent: input.customMetadata,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -162,7 +183,18 @@ export function getMockRegistryService() {
     ): Promise<RegistryRecord> {
       const existing = records.get(`${type}:${id}`);
       if (!existing) throw new Error(`Record not found: ${type}:${id}`);
-      const updated = { ...existing, ...input, recordId: id, updatedAt: new Date() };
+      const updated: MockRegistryRecord = {
+        ...existing,
+        ...(input.name !== undefined && { name: input.name }),
+        ...(input.description !== undefined && {
+          description: input.description,
+        }),
+        ...(input.customMetadata !== undefined && {
+          customDescriptorContent: input.customMetadata,
+        }),
+        recordId: id,
+        updatedAt: new Date(),
+      };
       records.set(`${type}:${id}`, updated);
       return updated as RegistryRecord;
     },
@@ -191,15 +223,15 @@ export function getMockRegistryService() {
     // the service maps it → 'active' (async auto-approval reflects intent).
     toInternalState(status: string | undefined): string {
       switch (status) {
-        case 'APPROVED':
-        case 'UPDATING':
-        case 'PENDING_APPROVAL':
-          return 'active';
-        case 'DRAFT':
-        case 'CREATING':
-          return 'maintenance';
+        case "APPROVED":
+        case "UPDATING":
+        case "PENDING_APPROVAL":
+          return "active";
+        case "DRAFT":
+        case "CREATING":
+          return "maintenance";
         default:
-          return 'inactive';
+          return "inactive";
       }
     },
   };

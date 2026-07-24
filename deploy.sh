@@ -149,6 +149,38 @@ cdk_diff() {
   popd > /dev/null
 }
 
+# --- Ensure the API-key HMAC pepper SSM parameter exists (idempotent) ---
+# Never overwrites an existing parameter and never echoes the value.
+ensure_api_key_pepper() {
+  local param_name="/citadel/${ENVIRONMENT}/app-api-key-pepper"
+  local profile_flag=""
+  [ -n "${AWS_PROFILE:-}" ] && profile_flag="--profile $AWS_PROFILE"
+
+  log "Checking API-key HMAC pepper SSM parameter..."
+  if aws ssm get-parameter \
+    --name "$param_name" \
+    --region "$CDK_DEFAULT_REGION" \
+    $profile_flag \
+    >/dev/null 2>&1; then
+    ok "API-key HMAC pepper already exists at $param_name"
+    return 0
+  fi
+
+  log "API-key HMAC pepper not found — generating and storing a new SecureString..."
+  local pepper_value
+  pepper_value=$(openssl rand -base64 32)
+  aws ssm put-parameter \
+    --name "$param_name" \
+    --type SecureString \
+    --value "$pepper_value" \
+    --description "HMAC pepper for Agent App API key hashing (${ENVIRONMENT})" \
+    --region "$CDK_DEFAULT_REGION" \
+    $profile_flag \
+    >/dev/null
+  unset pepper_value
+  ok "API-key HMAC pepper created at $param_name"
+}
+
 # --- Deploy a single stack with retry ---
 deploy_stack() {
   local stack_name="$1"
@@ -544,6 +576,9 @@ if [ ! -d "frontend/build" ]; then
   mkdir -p frontend/build
   echo "<html><body>placeholder</body></html>" > frontend/build/index.html
 fi
+
+# Ensure the API-key HMAC pepper exists before any stack deploys (idempotent)
+ensure_api_key_pepper
 
 # Diff / dry-run
 cdk_diff

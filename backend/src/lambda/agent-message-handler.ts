@@ -51,7 +51,10 @@ const APPSYNC_ENDPOINT = process.env.APPSYNC_ENDPOINT!;
 const idempotencyGuard = new IdempotencyGuard(process.env.IDEMPOTENCY_TABLE!);
 
 // ── SSM Cache (persists across warm Lambda invocations) ──────────────
-let _agentConfigCache: Record<string, { config: AgentCoreConfig; cachedAt: number }> = {};
+let _agentConfigCache: Record<
+  string,
+  { config: AgentCoreConfig; cachedAt: number }
+> = {};
 const SSM_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 // ── SigV4 Credential Cache (per invocation) ─────────────────────────
@@ -134,10 +137,10 @@ async function resolveImportRegistry(
         agentId,
         protocol: invocation.protocol,
         error: message,
-      })
+      }),
     );
     throw new Error(
-      `Cross-account invoke-role assume failed for imported agent ${agentId}: ${message}`
+      `Cross-account invoke-role assume failed for imported agent ${agentId}: ${message}`,
     );
   }
 
@@ -148,10 +151,10 @@ async function resolveImportRegistry(
         msg: "import-dispatch: cross-account invoke-role assume produced no credentials; not falling back to handler identity",
         agentId,
         protocol: invocation.protocol,
-      })
+      }),
     );
     throw new Error(
-      `Cross-account invoke-role assume produced no credentials for imported agent ${agentId}`
+      `Cross-account invoke-role assume produced no credentials for imported agent ${agentId}`,
     );
   }
 
@@ -194,7 +197,9 @@ interface AgentCoreConfig {
 /**
  * Get agent configuration from SSM Parameter Store
  */
-export async function getAgentConfig(agentId: string): Promise<AgentCoreConfig> {
+export async function getAgentConfig(
+  agentId: string,
+): Promise<AgentCoreConfig> {
   // Check cache
   const now = Date.now();
   const cached = _agentConfigCache[agentId];
@@ -203,7 +208,7 @@ export async function getAgentConfig(agentId: string): Promise<AgentCoreConfig> 
     return cached.config;
   }
 
-  const environment = process.env.ENVIRONMENT || 'dev';
+  const environment = process.env.ENVIRONMENT || "dev";
   const parameterName = `/citadel/agents/${agentId}-${environment}`;
 
   try {
@@ -223,7 +228,7 @@ export async function getAgentConfig(agentId: string): Promise<AgentCoreConfig> 
 
     if (!config.agentRuntimeArn) {
       throw new Error(
-        `Invalid agent configuration in parameter: ${parameterName}. Missing agentRuntimeArn`
+        `Invalid agent configuration in parameter: ${parameterName}. Missing agentRuntimeArn`,
       );
     }
 
@@ -253,7 +258,7 @@ async function sendMessageToAgentCore(
   message: string,
   sessionId: string,
   sessionAttributes?: Record<string, unknown>,
-  timing?: { handlerStartMs: number }
+  timing?: { handlerStartMs: number },
 ): Promise<string> {
   try {
     const region = config.region || process.env.AWS_REGION || "ap-southeast-2";
@@ -307,7 +312,8 @@ async function sendMessageToAgentCore(
 
         // Read the stream
         const chunks: string[] = [];
-        const stream = response.response as unknown as AsyncIterable<Uint8Array>;
+        const stream =
+          response.response as unknown as AsyncIterable<Uint8Array>;
 
         // Convert stream to string
         for await (const chunk of stream) {
@@ -375,7 +381,7 @@ async function sendMessageToAgentCore(
 
     console.log(
       "Agent response:",
-      responseText.substring(0, 200) + (responseText.length > 200 ? "..." : "")
+      responseText.substring(0, 200) + (responseText.length > 200 ? "..." : ""),
     );
     console.log("AgentCore invocation completed successfully");
 
@@ -385,12 +391,25 @@ async function sendMessageToAgentCore(
     emitMetrics({
       metrics: [
         ...(timing
-          ? [{ name: "HandlerOverhead_ms", value: invokeStartMs - timing.handlerStartMs }]
+          ? [
+              {
+                name: "HandlerOverhead_ms",
+                value: invokeStartMs - timing.handlerStartMs,
+              },
+            ]
           : []),
         ...(firstChunkAtMs !== undefined
-          ? [{ name: "TimeToFirstToken_ms", value: firstChunkAtMs - invokeStartMs }]
+          ? [
+              {
+                name: "TimeToFirstToken_ms",
+                value: firstChunkAtMs - invokeStartMs,
+              },
+            ]
           : []),
-        { name: "AgentTurnTotal_ms", value: (streamEndAtMs ?? Date.now()) - invokeStartMs },
+        {
+          name: "AgentTurnTotal_ms",
+          value: (streamEndAtMs ?? Date.now()) - invokeStartMs,
+        },
       ],
       properties: { sessionId, requestId: response.$metadata?.requestId },
     });
@@ -409,7 +428,7 @@ async function sendProgressUpdate(
   projectId: string,
   agentId: string,
   message: string,
-  correlationId: string
+  correlationId: string,
 ): Promise<void> {
   const messageId = uuidv4();
   const timestamp = new Date().toISOString();
@@ -452,7 +471,7 @@ async function storeAgentResponse(
   agentId: string,
   message: string,
   correlationId: string,
-  metadata?: Record<string, unknown>
+  metadata?: Record<string, unknown>,
 ): Promise<StoredAgentMessage> {
   const messageId = uuidv4();
   const timestamp = new Date().toISOString();
@@ -472,7 +491,7 @@ async function storeAgentResponse(
     new PutCommand({
       TableName: CONVERSATIONS_TABLE,
       Item: responseRecord,
-    })
+    }),
   );
 
   console.log("Agent response stored in DynamoDB:", responseRecord.id);
@@ -482,7 +501,9 @@ async function storeAgentResponse(
 /**
  * Trigger AppSync mutation to fire subscriptions
  */
-async function triggerAppSyncMutation(messageRecord: StoredAgentMessage): Promise<void> {
+async function triggerAppSyncMutation(
+  messageRecord: StoredAgentMessage,
+): Promise<void> {
   const mutation = `
     mutation PublishMessage($input: PublishMessageInput!) {
       publishConversationMessage(input: $input) {
@@ -550,7 +571,7 @@ async function triggerAppSyncMutation(messageRecord: StoredAgentMessage): Promis
   if (!response.ok || result.errors) {
     console.error("AppSync mutation failed:", result);
     throw new Error(
-      `AppSync mutation failed: ${JSON.stringify(result.errors)}`
+      `AppSync mutation failed: ${JSON.stringify(result.errors)}`,
     );
   }
 
@@ -575,7 +596,7 @@ const IMPORT_AGENT_META_DEFAULTS: AgentCustomMetadata = {
 function buildImportedDescriptor(
   name: string,
   invocation: AgentInvocationBlock,
-  origin: AgentOrigin | undefined
+  origin: AgentOrigin | undefined,
 ): AgentCapabilityDescriptor {
   return {
     name,
@@ -586,12 +607,11 @@ function buildImportedDescriptor(
     inputSchema: {},
     outputSchema: {},
     invocation,
-    origin:
-      origin ?? {
-        substrate: invocation.protocol,
-        discoveredAt: new Date().toISOString(),
-        ownership: "external",
-      },
+    origin: origin ?? {
+      substrate: invocation.protocol,
+      discoveredAt: new Date().toISOString(),
+      ownership: "external",
+    },
   };
 }
 
@@ -615,7 +635,7 @@ async function dispatchImportedInvocation(
   message: string,
   userId: string,
   messageId: string,
-  metadata: Record<string, unknown> | undefined
+  metadata: Record<string, unknown> | undefined,
 ): Promise<boolean> {
   if (!isImportEnabled()) return false;
 
@@ -632,7 +652,7 @@ async function dispatchImportedInvocation(
     if (!record) return false;
     const meta = registryService.deserializeCustomMetadata<AgentCustomMetadata>(
       record.customDescriptorContent ?? null,
-      IMPORT_AGENT_META_DEFAULTS
+      IMPORT_AGENT_META_DEFAULTS,
     );
     invocation = meta.invocation;
     origin = meta.origin;
@@ -645,7 +665,7 @@ async function dispatchImportedInvocation(
         msg: "import-dispatch: registry read failed; falling back to legacy AgentCore path",
         agentId,
         error: error instanceof Error ? error.message : String(error),
-      })
+      }),
     );
     return false;
   }
@@ -682,7 +702,7 @@ async function dispatchImportedInvocation(
           agentId,
           protocol: invocation.protocol,
           error: error.message,
-        })
+        }),
       );
     }
     throw error;
@@ -696,7 +716,11 @@ async function dispatchImportedInvocation(
     ...(metadata && { metadata }),
   };
 
-  const descriptor = buildImportedDescriptor(descriptorName, invocation, origin);
+  const descriptor = buildImportedDescriptor(
+    descriptorName,
+    invocation,
+    origin,
+  );
   const req: InvokeRequest = {
     prompt: message,
     sessionId,
@@ -709,7 +733,7 @@ async function dispatchImportedInvocation(
     projectId,
     agentId,
     "Agent is processing your request...",
-    messageId
+    messageId,
   );
 
   const response = await adapter.invoke(req, descriptor);
@@ -720,7 +744,7 @@ async function dispatchImportedInvocation(
   // like content BEFORE it is stored or published downstream. The trusted
   // legacy AgentCore path (below) is intentionally NOT sanitized.
   const { sanitized, modified, matches } = sanitizeUntrustedAgentOutput(
-    response.output
+    response.output,
   );
   if (modified) {
     // Log the matched pattern IDS only — never the raw (untrusted) payload.
@@ -731,12 +755,12 @@ async function dispatchImportedInvocation(
         agentId,
         protocol: invocation.protocol,
         matches,
-      })
+      }),
     );
   }
 
   console.log(
-    `Imported agent ${agentId} responded via ${invocation.protocol} adapter`
+    `Imported agent ${agentId} responded via ${invocation.protocol} adapter`,
   );
 
   const responseRecord = await storeAgentResponse(
@@ -744,12 +768,12 @@ async function dispatchImportedInvocation(
     agentId,
     sanitized,
     messageId,
-    metadata
+    metadata,
   );
   await triggerAppSyncMutation(responseRecord);
 
   console.log(
-    `Successfully processed imported message for agent ${agentId} for project ${projectId}`
+    `Successfully processed imported message for agent ${agentId} for project ${projectId}`,
   );
   return true;
 }
@@ -758,7 +782,7 @@ async function dispatchImportedInvocation(
  * Lambda handler for EventBridge events
  */
 export const handler = async (
-  event: EventBridgeEvent<"message.sent_to_agent", MessageSentToAgentEvent>
+  event: EventBridgeEvent<"message.sent_to_agent", MessageSentToAgentEvent>,
 ): Promise<void> => {
   // Wave 0 metric anchor: handler start (HandlerOverhead_ms = this → invoke start).
   const handlerStartMs = Date.now();
@@ -773,118 +797,121 @@ export const handler = async (
   const idempotencyKey = event.detail?.messageId ?? event.id;
 
   // Idempotency check using the logical message id (falls back to event.id).
-  const { executed } = await idempotencyGuard.withIdempotency(idempotencyKey, async () => {
-    const { projectId, agentId, message, messageId, userId, metadata } =
-      event.detail;
+  const { executed } = await idempotencyGuard.withIdempotency(
+    idempotencyKey,
+    async () => {
+      const { projectId, agentId, message, messageId, userId, metadata } =
+        event.detail;
 
-    try {
-      // Validate required fields
-      if (!projectId || !agentId || !message) {
-        throw new Error(
-          "Missing required fields: projectId, agentId, or message"
+      try {
+        // Validate required fields
+        if (!projectId || !agentId || !message) {
+          throw new Error(
+            "Missing required fields: projectId, agentId, or message",
+          );
+        }
+
+        console.log(
+          `Processing message for project ${projectId}, agent ${agentId}`,
         );
+
+        // ── Imported-invocation dispatch (additive + gated) ──────────────────
+        // When IMPORT_ENABLED and the agent's Registry record carries an
+        // `invocation` block, route through the protocol adapter registry and
+        // store the response exactly as the legacy path does. Returns false to
+        // fall back to the UNCHANGED AgentCore path below (flag off, no
+        // REGISTRY_ID, no record/invocation, or a Registry read error). An unknown
+        // protocol throws and is handled by the surrounding catch — it must NOT
+        // fall through to the legacy path.
+        if (
+          await dispatchImportedInvocation(
+            projectId,
+            agentId,
+            message,
+            userId,
+            messageId,
+            metadata,
+          )
+        ) {
+          return;
+        }
+
+        // Get agent configuration from SSM
+        const agentConfig = await getAgentConfig(agentId);
+        console.log(`Retrieved agent config:`, agentConfig);
+
+        // Use projectId as sessionId to maintain conversation context
+        const sessionId = projectId;
+
+        // Prepare session attributes
+        const sessionAttributes: Record<string, unknown> = {
+          projectId: projectId,
+          userId: userId,
+          messageId: messageId,
+          ...(metadata && { metadata }),
+        };
+
+        console.log(
+          "Session attributes:",
+          JSON.stringify(sessionAttributes, null, 2),
+        );
+        console.log("Metadata type:", typeof metadata);
+        console.log("Metadata value:", metadata);
+
+        // Send progress update to frontend (agent is thinking)
+        await sendProgressUpdate(
+          projectId,
+          agentId,
+          "Agent is processing your request...",
+          messageId,
+        );
+
+        // Send message to AgentCore
+        const agentResponse = await sendMessageToAgentCore(
+          agentConfig,
+          message,
+          sessionId,
+          sessionAttributes,
+          { handlerStartMs },
+        );
+
+        console.log(`Successfully received response from agent ${agentId}`);
+
+        // Store agent response in DynamoDB
+        const responseRecord = await storeAgentResponse(
+          projectId,
+          agentId,
+          agentResponse,
+          messageId,
+          metadata,
+        );
+
+        // Trigger AppSync mutation to fire subscriptions
+        await triggerAppSyncMutation(responseRecord);
+
+        console.log(
+          `Successfully processed message for agent ${agentId} for project ${projectId}`,
+        );
+      } catch (error: unknown) {
+        console.error("Error processing message:", error);
+
+        // Store error as agent response so frontend gets notified
+        try {
+          const errorMessage = `⚠️ Sorry, I encountered an error processing your request. Please try again.\n\n_Error: ${(error instanceof Error ? error.message : "") || "Unknown error"}_`;
+          const errorRecord = await storeAgentResponse(
+            projectId,
+            agentId,
+            errorMessage,
+            messageId,
+            metadata,
+          );
+          await triggerAppSyncMutation(errorRecord);
+        } catch (notifyError) {
+          console.error("Failed to notify frontend of error:", notifyError);
+        }
       }
-
-      console.log(
-        `Processing message for project ${projectId}, agent ${agentId}`
-      );
-
-    // ── Imported-invocation dispatch (additive + gated) ──────────────────
-    // When IMPORT_ENABLED and the agent's Registry record carries an
-    // `invocation` block, route through the protocol adapter registry and
-    // store the response exactly as the legacy path does. Returns false to
-    // fall back to the UNCHANGED AgentCore path below (flag off, no
-    // REGISTRY_ID, no record/invocation, or a Registry read error). An unknown
-    // protocol throws and is handled by the surrounding catch — it must NOT
-    // fall through to the legacy path.
-    if (
-      await dispatchImportedInvocation(
-        projectId,
-        agentId,
-        message,
-        userId,
-        messageId,
-        metadata
-      )
-    ) {
-      return;
-    }
-
-    // Get agent configuration from SSM
-    const agentConfig = await getAgentConfig(agentId);
-    console.log(`Retrieved agent config:`, agentConfig);
-
-    // Use projectId as sessionId to maintain conversation context
-    const sessionId = projectId;
-
-    // Prepare session attributes
-    const sessionAttributes: Record<string, unknown> = {
-      projectId: projectId,
-      userId: userId,
-      messageId: messageId,
-      ...(metadata && { metadata }),
-    };
-
-    console.log(
-      "Session attributes:",
-      JSON.stringify(sessionAttributes, null, 2)
-    );
-    console.log("Metadata type:", typeof metadata);
-    console.log("Metadata value:", metadata);
-
-    // Send progress update to frontend (agent is thinking)
-    await sendProgressUpdate(
-      projectId,
-      agentId,
-      "Agent is processing your request...",
-      messageId
-    );
-
-    // Send message to AgentCore
-    const agentResponse = await sendMessageToAgentCore(
-      agentConfig,
-      message,
-      sessionId,
-      sessionAttributes,
-      { handlerStartMs }
-    );
-
-    console.log(`Successfully received response from agent ${agentId}`);
-
-    // Store agent response in DynamoDB
-    const responseRecord = await storeAgentResponse(
-      projectId,
-      agentId,
-      agentResponse,
-      messageId,
-      metadata
-    );
-
-    // Trigger AppSync mutation to fire subscriptions
-    await triggerAppSyncMutation(responseRecord);
-
-    console.log(
-      `Successfully processed message for agent ${agentId} for project ${projectId}`
-    );
-  } catch (error: unknown) {
-    console.error("Error processing message:", error);
-
-    // Store error as agent response so frontend gets notified
-    try {
-      const errorMessage = `⚠️ Sorry, I encountered an error processing your request. Please try again.\n\n_Error: ${(error instanceof Error ? error.message : '') || 'Unknown error'}_`;
-      const errorRecord = await storeAgentResponse(
-        projectId,
-        agentId,
-        errorMessage,
-        messageId,
-        metadata
-      );
-      await triggerAppSyncMutation(errorRecord);
-    } catch (notifyError) {
-      console.error("Failed to notify frontend of error:", notifyError);
-    }
-  }
-  }); // end idempotency guard
+    },
+  ); // end idempotency guard
 
   if (!executed) {
     console.log("Skipping duplicate event:", idempotencyKey);

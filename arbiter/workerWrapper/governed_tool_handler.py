@@ -32,15 +32,18 @@ root** on ``sys.path`` and import via the fully-qualified
 
 Wiring status
 -------------
-This module ships the class and unit tests. Wiring the handler into the
-Strands Agent instance inside the subprocess (``agent_runner.py``) is
-deferred to a follow-up task because the backlog-cited
-``_inject_governance`` hook does not yet exist in
-``arbiter/workerWrapper/index.py``. US-ARB-012's scope as executed here
-is the handler class + its tests only.
+Wired. ``arbiter/workerWrapper/agent_runner.py`` installs a
+``strands.Agent.__init__`` patch (``_install_governed_tool_handler``) before
+the agent module is exec'd inside the subprocess, so every ``Agent(...)``
+constructed by the loaded module automatically receives a
+``GovernedToolHandler`` instance as its ``tool_handler`` — unless the caller
+explicitly passes its own, which always wins. The patch is a no-op when
+``CITADEL_AGENT_ID`` is unset in the subprocess environment (back-compat with
+agents run outside the governance envelope). See
+``arbiter/workerWrapper/__tests__/test_agent_runner_properties.py`` for the
+injection-contract tests.
 
 Spec: arbiter-governance-engine/requirements.md Requirement 9.1–9.5.
-Plan: US-ARB-012 Δ4 worker-level GovernedToolHandler.
 """
 
 from __future__ import annotations

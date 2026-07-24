@@ -45,7 +45,7 @@ State is event-driven and eventually consistent: EventBridge carries `citadel.*`
 
 **Visual Workflow Builder.** A drag-and-drop canvas (ReactFlow) compiles to DAGs executed by the StepRunner, including conditional branching and bounded retries. Designs round-trip through a blueprint catalog — save a canvas as a published blueprint, load it back, or import it into an app — and each node can pin a Bedrock model and extend its system prompt via size-capped execution overrides. Workflows publish and run from the canvas or from an app's Workflows tab, stream live per-node progress over GraphQL subscriptions, and expose full execution inspection (per-node status, durations, retries, and outputs). A seeded Echo Demo Workflow runs end to end out of the box.
 
-**27 Data Store Adapters.** A unified `ConnectorAdapter` architecture spanning S3, DynamoDB, RDS, Aurora, Redshift, Snowflake, Databricks, and more — each provisioned with a scoped IAM role (`citadel-ds-{id}`) under least privilege.
+**26 Data Store Adapters.** A unified `ConnectorAdapter` architecture spanning S3, DynamoDB, RDS, Aurora, Redshift, Snowflake, Databricks, and more — each provisioned with a scoped IAM role (`citadel-ds-{id}`) under least privilege.
 
 **13 Integration Types.** Seven SaaS connectors (Confluence, Jira, ServiceNow, Slack, Microsoft, PagerDuty, Zendesk), three AgentCore types (AWS Lambda for custom logic, AWS Services via Smithy, external MCP servers), and three legacy connectors (SharePoint, Salesforce, GitHub — partially implemented). Credentials are vended through scoped, short-lived STS sessions and stored in Secrets Manager.
 
@@ -75,7 +75,7 @@ Citadel turns AI adoption from an open-ended consulting engagement into a **repe
 - **Faster, lower-risk AI adoption.** A guided, four-stage path replaces guesswork, with risk mitigation and KPIs built into the plan.
 - **Architectures you can defend.** Designs follow AWS Well-Architected guidance across all six pillars, and every decision is recorded and traceable.
 - **Governance without friction.** Progressive enforcement and grandfathering let teams adopt guardrails incrementally instead of all at once.
-- **No lock-in to a black box.** Open architecture, 27 data store adapters, and standard integrations mean customers connect their existing estate rather than migrating into a silo.
+- **No lock-in to a black box.** Open architecture, 26 data store adapters, and standard integrations mean customers connect their existing estate rather than migrating into a silo.
 - **Cost-aware by default.** On-demand DynamoDB, serverless compute, and scoped resources align spend with usage.
 
 ## Built on AWS, aligned to Well-Architected
@@ -96,7 +96,7 @@ Service (AgentCore Runtime · Gateway · Knowledge Base)
 Gateway (per-app API Gateway · authorizer · metrics)
 ```
 
-Deployed as focused CDK stacks: `backend`, `services`, `arbiter`, `gateway`, `frontend`, `knowledge-base`, `governance`, and a self-mutating `pipeline`.
+Deployed as focused CDK stacks: `backend`, `services`, `governance`, `arbiter`, `frontend`, and `gateway`.
 
 ## Getting started
 
@@ -130,7 +130,7 @@ Prerequisites: AWS CLI, Node.js 24+, Python 3.14+, CDK 2.100+, and Finch (or Doc
 
 **Is this a single AI agent?** No. It's a coordinated multi-agent system implementing an Arbiter pattern, with a Supervisor that decomposes and routes work to specialized agents, each running under scoped, least-privilege credentials.
 
-**Does it lock me into a proprietary stack?** No. It runs on standard AWS services and connects to your existing data and SaaS estate through 27 data store adapters and 13 integration types.
+**Does it lock me into a proprietary stack?** No. It runs on standard AWS services and connects to your existing data and SaaS estate through 26 data store adapters and 13 integration types.
 
 **How is the output trustworthy?** Every significant decision is recorded (ADRs, execution specs, program reviews) and governed by a constitutional rule hierarchy, with IAM trust-path analysis and decision tracing for audit.
 

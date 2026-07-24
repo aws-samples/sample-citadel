@@ -46,6 +46,10 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      - name: Verify README doc claims (stacks, adapter count)
+        run: node scripts/verify-doc-claims.js
+        working-directory: ${{ github.workspace }}
+
   # ── Backend unit tests + coverage ──
   backend-test:
     name: Backend Tests
@@ -95,8 +99,18 @@ jobs:
       - name: Build CDK
         run: npm run build
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps (required for FrontendStack CDK asset)
+        run: npm ci --prefix frontend
+        working-directory: ${{ github.workspace }}
+
       - name: Build frontend (required for FrontendStack CDK asset)
-        run: npm run build --workspace=frontend
+        run: npm run build --prefix frontend
         working-directory: ${{ github.workspace }}
 
       - name: CDK synth (validate all templates)
@@ -105,6 +119,10 @@ jobs:
           ENVIRONMENT: test
           CDK_DEFAULT_ACCOUNT: "000000000000"
           CDK_DEFAULT_REGION: us-east-1
+
+      - name: Verify SupervisorAgent bundle (governance + common packages present)
+        run: bash backend/scripts/verify-supervisor-bundle.sh
+        working-directory: ${{ github.workspace }}
 
   # ── Governance: backend resolver tests + governance stack synth ──
   # Frontend governance-engine tests run in the Frontend job; arbiter
@@ -138,8 +156,18 @@ jobs:
       - name: Build CDK
         run: npm run build
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps (required for FrontendStack CDK asset)
+        run: npm ci --prefix frontend
+        working-directory: ${{ github.workspace }}
+
       - name: Build frontend (required for FrontendStack CDK asset)
-        run: npm run build --workspace=frontend
+        run: npm run build --prefix frontend
         working-directory: ${{ github.workspace }}
 
       - name: CDK synth (governance stack)
@@ -199,6 +227,12 @@ jobs:
       - name: Run tests
         run: pytest arbiter/ -v --tb=short
 
+      - name: Cognito secret handler tests (isolated process — same-named index.py across lambdas)
+        run: python3 -m pytest backend/src/lambda/cognito-secret-handler/__tests__/test_index.py -v --tb=short
+
+      - name: Seed admin user tests (isolated process — same-named index.py across lambdas)
+        run: python3 -m pytest backend/src/lambda/seed-admin-user/__tests__/test_seed_admin_user_properties.py -v --tb=short
+
   # ── Service (Python): agent intake + pdf generator tests ──
   service:
     name: Service
@@ -234,5 +268,5 @@ jobs:
       - name: Install workspaces (root lockfile)
         run: npm ci
 
-      - name: Audit dependencies (all workspaces)
-        run: npm audit --audit-level=high || true
+      - name: Audit dependencies (blocking, with justified allowlist)
+        run: npx audit-ci --config .audit-ci.json

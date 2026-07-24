@@ -9,6 +9,20 @@ import sys
 from typing import Any
 import boto3
 import os
+
+# Ensure this file's own directory is on sys.path before the flat
+# same-directory imports below. In the repo/pytest layout,
+# arbiter/conftest.py already inserts arbiter/supervisor/ onto sys.path, so
+# this is a no-op there. In the Lambda asset layout (entry=arbiter/,
+# index=supervisor/index.py) only /var/task is on sys.path by default —
+# /var/task/supervisor is not — so `from agent_config import ...` and
+# `from circuit_breaker import ...` would otherwise raise ModuleNotFoundError
+# at runtime. Inserting unconditionally keeps both layouts working from a
+# single code path.
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+if _this_dir not in sys.path:
+    sys.path.insert(0, _this_dir)
+
 from agent_config import load_config_from_dynamodb, load_app_scoped_agents, create_agent_specs, parse_decimals
 from circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 import uuid
@@ -24,11 +38,30 @@ logger = logging.getLogger(__name__)
 # be imported as the ``governance`` package, which in turn requires the
 # parent directory (arbiter/) to be on ``sys.path``.
 #
-# * In production the supervisor Lambda currently bundles only
-#   arbiter/supervisor/ (see backend/lib/arbiter-stack.ts), so the import
-#   will fail — we degrade to bypass-always mode (Req 6, Phase-1).
-# * In tests, arbiter/conftest.py puts arbiter/supervisor/ on sys.path; we
-#   add arbiter/ ourselves below so ``import governance`` resolves.
+# Fail-closed contract: the deployed Lambda asset MUST bundle
+# arbiter/governance/ alongside arbiter/supervisor/ (see
+# backend/lib/arbiter-stack.ts bundling commandHooks, and
+# backend/scripts/verify-supervisor-bundle.sh for a CI-enforced check). If
+# the package files are missing at runtime for any reason (packaging
+# regression, partial deploy), ``_GOVERNANCE_AVAILABLE`` is set to ``False``
+# below and ``governed_process_agent_call`` REFUSES every dispatch with a
+# structured denial result and an error-level log — it never falls through
+# to ungoverned dispatch. This module must still import successfully in that
+# case (the handler has to start) so the refusal itself is observable.
+#
+# ARBITER_GOVERNANCE_BYPASS semantics (documented here per Requirement 6):
+#   Default: unset / any value other than 'true' -> no effect.
+#   'true'  -> emergency override. Forces shadow-style behaviour (evaluate +
+#              record a finding + always proceed) even when the persisted
+#              enforcement mode resolved via ``hierarchy.load_governance_state``
+#              is 'strict'. Intended for a human operator to flip temporarily
+#              during an incident — NOT a default deployment posture. It has
+#              NO effect on the package-availability gate above: a missing
+#              governance package is refused unconditionally regardless of
+#              this variable.
+#
+# In tests, arbiter/conftest.py puts arbiter/supervisor/ on sys.path; we
+# add arbiter/ ourselves below so ``import governance`` resolves.
 # ---------------------------------------------------------------------------
 _supervisor_dir = os.path.dirname(os.path.abspath(__file__))
 _arbiter_dir = os.path.dirname(_supervisor_dir)
@@ -100,15 +133,24 @@ try:
     ArbitrationDecision = _gov_pkg.models.ArbitrationDecision
     GovernanceFinding = _gov_pkg.models.GovernanceFinding
     _GOVERNANCE_AVAILABLE = True
-except ImportError as e:  # pragma: no cover — degraded-mode fallback
-    # Governance module not bundled; fall back to bypass-always behaviour.
-    # This keeps the supervisor deployable even if the governance lambda
-    # layer/bundle is not yet in place.
-    logger.warning(
-        "governance module unavailable (%s); supervisor runs without gates",
+    _GOVERNANCE_IMPORT_ERROR: str | None = None
+except ImportError as e:
+    # Fail-closed (Requirement 6 / D9): the governance package is required
+    # to gate dispatch. If its files are not present in the deployed asset
+    # (e.g. a packaging regression that excludes arbiter/governance/), every
+    # dispatch must be REFUSED rather than silently allowed through. This
+    # branch must NOT crash the module — the handler still has to start so
+    # the Lambda remains invokable and observable (it will simply refuse
+    # every dispatch, which is itself actionable signal via the error log
+    # below and the structured denial result returned per-call).
+    _GOVERNANCE_AVAILABLE = False
+    _GOVERNANCE_IMPORT_ERROR = str(e)
+    logger.error(
+        "governance package unavailable (%s); ALL dispatches will be "
+        "refused fail-closed until the deployed asset includes "
+        "arbiter/governance/. This is not a bypass.",
         e,
     )
-    _GOVERNANCE_AVAILABLE = False
 
 _REGION = os.environ.get('AWS_REGION', 'us-west-2')
 MODEL_ID = load_model_id(
@@ -287,28 +329,85 @@ def governed_process_agent_call(
 ) -> Any:
     """Control-surface wrapper around ``process_agent_call`` (US-ARB-008).
 
-    Phase-1 shadow mode (``ARBITER_GOVERNANCE_BYPASS='true'``, the default):
-    evaluate + write a ledger finding, then always call ``process_agent_call``.
-    Phase-2 hard enforcement (``'false'``): PERMIT → call, DENY → block,
-    ESCALATE/HALT → SNS publish + block.
+    Fail-closed at the dispatch seam. Two independent gates apply, in order:
+
+    1. Governance package availability. If ``arbiter/governance/`` could not
+       be loaded at import time (``_GOVERNANCE_AVAILABLE`` is ``False`` —
+       see the module-level import block above), every dispatch is REFUSED
+       with a structured denial result and an error-level log. This applies
+       regardless of enforcement mode and regardless of
+       ``ARBITER_GOVERNANCE_BYPASS`` — a missing package means the engine
+       cannot be consulted at all, so there is nothing to evaluate against.
+       There is no code path from "package unavailable" to
+       ``process_agent_call`` — dispatch is refused, never bypassed.
+
+    2. Enforcement mode. The persisted mode is read from
+       ``GovernanceState.enforcement_mode`` (``hierarchy.load_governance_state``,
+       itself backed by the same SSM parameter
+       (``/citadel/governance/enforce/{ENVIRONMENT}``) the rest of the
+       platform reads) and controls how an engine DENY/ESCALATE/HALT
+       decision is handled once the package IS available:
+
+       * ``permissive`` / ``shadow`` — evaluate, write the finding, and
+         proceed regardless of the decision. This differs from a bypass:
+         the evaluation and ledger write still happen on every call: only
+         the block on DENY/ESCALATE/HALT is skipped.
+       * ``strict`` — enforce: PERMIT dispatches, DENY/ESCALATE/HALT block
+         (the ESCALATE/HALT branch also publishes to SNS per D7).
+       * If no mode is resolvable, ``load_governance_state`` itself already
+         defaults to ``'shadow'`` (see hierarchy.py), so this function
+         always receives a concrete literal.
+
+    ``ARBITER_GOVERNANCE_BYPASS`` (default unset / falsy) is kept ONLY as an
+    explicit emergency override: when set to ``'true'``, it forces
+    shadow-style behaviour (evaluate + record + proceed) even when the
+    resolved mode is ``'strict'``. It has NO effect on gate 1 above — a
+    missing governance package is refused unconditionally. It is intended
+    for a human operator to flip temporarily during an incident, not as a
+    default deployment posture.
 
     Fail-closed per D9: any exception from ``write_finding`` propagates and
-    halts dispatch.
+    halts dispatch, in every mode.
 
     ``app_id`` scopes the authority graph (D2). ``None`` means no app
     filter.
     """
-    # Feature flag — default 'true' per first-deploy Phase-1 policy.
-    bypass = os.environ.get('ARBITER_GOVERNANCE_BYPASS', 'true').lower() == 'true'
-
-    # If governance module isn't bundled, skip entirely (degraded mode).
+    # Gate 1 — package availability. Fail-closed: refuse, never fall through
+    # to ungoverned dispatch. This is intentionally unconditional; it must
+    # not be affected by ARBITER_GOVERNANCE_BYPASS or enforcement mode.
     if not _GOVERNANCE_AVAILABLE:
-        return process_agent_call(
-            agents_config, orchestration, agent_name, agent_input, agent_use_id
+        workflow_id = (
+            orchestration.get('orchestrationId')
+            or orchestration.get('workflowId')
+            or 'unknown'
         )
+        agent_use_id_for_log = agent_use_id
+        logger.error(
+            "governance dispatch refused: governance package unavailable "
+            "(%s); workflow_id=%s target_agent=%s agent_use_id=%s",
+            _GOVERNANCE_IMPORT_ERROR,
+            workflow_id,
+            agent_name,
+            agent_use_id_for_log,
+        )
+        return {
+            'denied': True,
+            'reason': 'governance_package_unavailable',
+            'detail': _GOVERNANCE_IMPORT_ERROR,
+            'workflow_id': workflow_id,
+            'target_agent': agent_name,
+            'agent_use_id': agent_use_id,
+        }
 
-    # 1. Load governance state (with app-scoped filter per D2).
+    # Emergency override: forces shadow-style (evaluate + record + proceed)
+    # regardless of the resolved persisted mode. Documented as an incident
+    # escape hatch, not a default posture — see module docstring.
+    bypass_override = os.environ.get('ARBITER_GOVERNANCE_BYPASS', 'false').lower() == 'true'
+
+    # 1. Load governance state (with app-scoped filter per D2). Carries the
+    #    persisted enforcement mode alongside the four authority tables.
     state = load_governance_state(registry_id=app_id)
+    enforcement_mode = getattr(state, 'enforcement_mode', 'shadow')
 
     # 2. Build DispatchRequest. The orchestration dict uses
     #    ``orchestrationId`` as its workflow identifier.
@@ -353,14 +452,16 @@ def governed_process_agent_call(
     if not finding.scope_evaluated:
         finding.scope_evaluated = 'supervisor-dispatch'
 
-    # 5. Write finding (fail-closed per D9). Any exception halts dispatch.
+    # 5. Write finding (fail-closed per D9). Any exception halts dispatch,
+    #    in every mode.
     write_finding(finding)
 
-    # 6. Branch on decision.
-    #    Shadow mode (bypass=True): always call regardless of decision.
-    #    Enforce mode (bypass=False): PERMIT → call, DENY → block,
-    #                                 ESCALATE/HALT → SNS + block.
-    if bypass:
+    # 6. Branch on mode + decision.
+    #    permissive/shadow (or the emergency bypass override): evaluate +
+    #      record (already done above) + always proceed regardless of
+    #      decision.
+    #    strict: PERMIT -> call, DENY -> block, ESCALATE/HALT -> SNS + block.
+    if bypass_override or enforcement_mode in ('permissive', 'shadow'):
         return process_agent_call(
             agents_config, orchestration, agent_name, agent_input, agent_use_id
         )
