@@ -156,12 +156,17 @@ describe("TelemetryStack — cost ledger (pass 1)", () => {
     });
     const fnLogicalId = Object.keys(functions)[0];
 
-    const rules = template.findResources("AWS::Events::Rule");
-    const ruleIds = Object.keys(rules);
+    // Scope to event-pattern rules only — the reconciler's schedule-based
+    // rule (rate(1 hour), no EventPattern) is a separate rule asserted in
+    // its own describe block below.
+    const allRules = template.findResources("AWS::Events::Rule");
+    const ruleIds = Object.keys(allRules).filter(
+      (id) => allRules[id].Properties?.EventPattern !== undefined,
+    );
     expect(ruleIds.length).toBeGreaterThanOrEqual(3);
 
     for (const ruleId of ruleIds) {
-      const targets = rules[ruleId].Properties.Targets;
+      const targets = allRules[ruleId].Properties.Targets;
       expect(targets).toHaveLength(1);
       expect(targets[0].RetryPolicy).toMatchObject({
         MaximumRetryAttempts: 2,
@@ -213,5 +218,115 @@ describe("TelemetryStack — cost ledger (pass 1)", () => {
     expect(catalogGrantActions).not.toEqual(
       expect.arrayContaining(["dynamodb:PutItem", "dynamodb:DeleteItem"]),
     );
+  });
+});
+
+describe("TelemetryStack — cost ledger reconciler (Tier A + Tier B skeleton)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("reconciler Lambda: nodejs24.x, 5min timeout, expected env vars incl. Tier B off by default", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "cost-ledger-reconciler.handler",
+      Runtime: "nodejs24.x",
+      Timeout: 300,
+      Environment: {
+        Variables: Match.objectLike({
+          COST_LEDGER_TABLE: Match.anyValue(),
+          ENVIRONMENT: "test",
+          SETTLE_LAG_MINUTES: Match.anyValue(),
+          MAX_WINDOWS_PER_RUN: Match.anyValue(),
+          METRIC_NAMESPACE: "Citadel/CostReconciler",
+          COST_RECONCILER_TIER_B_ENABLED: "false",
+        }),
+      },
+    });
+  });
+
+  test("EventBridge rule schedules the reconciler at rate(1 hour)", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      ScheduleExpression: "rate(1 hour)",
+    });
+
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-ledger-reconciler.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+    expect(fnLogicalId).toBeDefined();
+
+    const rules = template.findResources("AWS::Events::Rule", {
+      Properties: { ScheduleExpression: "rate(1 hour)" },
+    });
+    const ruleId = Object.keys(rules)[0];
+    expect(ruleId).toBeDefined();
+    const targets = rules[ruleId].Properties.Targets;
+    expect(targets).toHaveLength(1);
+    const getAtt = targets[0].Arn?.["Fn::GetAtt"];
+    expect(Array.isArray(getAtt) && getAtt[0] === fnLogicalId).toBe(true);
+  });
+
+  test("reconciler IAM: has Query/Scan/PutItem/UpdateItem + GetMetricData/PutMetricData, and NO DeleteItem/logs:*", () => {
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-ledger-reconciler.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+    expect(fnLogicalId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("CostLedgerReconciler"),
+      );
+    });
+    expect(ownPolicies.length).toBeGreaterThan(0);
+
+    const allStatements = ownPolicies.flatMap(
+      (p: any) => p.Properties?.PolicyDocument?.Statement || [],
+    );
+    const allActions = allStatements.flatMap((s: any) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+
+    expect(allActions).toEqual(
+      expect.arrayContaining([
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+      ]),
+    );
+    expect(allActions).not.toEqual(
+      expect.arrayContaining(["dynamodb:DeleteItem"]),
+    );
+    expect(allActions.some((a: string) => a.startsWith("logs:"))).toBe(false);
+
+    expect(allActions).toEqual(
+      expect.arrayContaining(["cloudwatch:GetMetricData"]),
+    );
+    expect(allActions).toEqual(
+      expect.arrayContaining(["cloudwatch:PutMetricData"]),
+    );
+
+    // PutMetricData must be namespace-conditioned, not a bare grant on '*'.
+    const putMetricStatement = allStatements.find((s: any) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.includes("cloudwatch:PutMetricData");
+    });
+    expect(putMetricStatement?.Condition).toBeDefined();
+  });
+
+  test("cost ledger table remains RETAIN + PITR (regression guard, reconciler must not weaken it)", () => {
+    template.hasResource("AWS::DynamoDB::Table", {
+      Properties: Match.objectLike({
+        TableName: "citadel-cost-ledger-test",
+        PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      }),
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain",
+    });
   });
 });

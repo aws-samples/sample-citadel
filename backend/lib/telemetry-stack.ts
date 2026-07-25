@@ -2,9 +2,11 @@ import * as cdk from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
+import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
 import { Construct } from "constructs";
+import { NagSuppressions } from "cdk-nag";
 
 export interface TelemetryStackProps extends cdk.StackProps {
   environment: string;
@@ -25,6 +27,7 @@ export interface TelemetryStackProps extends cdk.StackProps {
 export class TelemetryStack extends cdk.Stack {
   public readonly costLedgerTable: dynamodb.Table;
   public readonly costLedgerWriterFunction: lambda.Function;
+  public readonly costLedgerReconcilerFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: TelemetryStackProps) {
     super(scope, id, props);
@@ -148,6 +151,110 @@ export class TelemetryStack extends cdk.Stack {
     );
     workflowNodeCompletedRule.addTarget(
       new targets.LambdaFunction(this.costLedgerWriterFunction, retryProps),
+    );
+
+    // --- Cost ledger reconciler (Tier A aggregate drift, Tier B skeleton) --
+    // Scheduled hourly: compares aggregate ledger token totals against
+    // AWS/Bedrock CloudWatch token metrics per model per hour-aligned
+    // window and emits a drift metric. Never flips a ledger row's
+    // `estimate:true` — an aggregate comparison cannot honestly produce a
+    // per-row actual (Tier B, which would, is a feature-flagged-off
+    // skeleton this story).
+    this.costLedgerReconcilerFunction = new lambda.Function(
+      this,
+      "CostLedgerReconciler",
+      {
+        functionName: `citadel-cost-ledger-reconciler-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "cost-ledger-reconciler.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.minutes(5),
+        environment: {
+          COST_LEDGER_TABLE: this.costLedgerTable.tableName,
+          ENVIRONMENT: props.environment,
+          SETTLE_LAG_MINUTES: "15",
+          MAX_WINDOWS_PER_RUN: "6",
+          METRIC_NAMESPACE: "Citadel/CostReconciler",
+          COST_RECONCILER_TIER_B_ENABLED: "false",
+        },
+        logGroup: new logs.LogGroup(this, "CostLedgerReconcilerLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    // Least-privilege inline policy — deliberately NOT
+    // `grantReadWriteData`, which would also grant Delete/BatchWrite the
+    // reconciler never needs. Read-modify-write only, via conditional
+    // Put/Update, so a reconciler failure can never corrupt a ledger row.
+    this.costLedgerReconcilerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "dynamodb:Query",
+          "dynamodb:Scan",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+        ],
+        resources: [
+          this.costLedgerTable.tableArn,
+          `${this.costLedgerTable.tableArn}/index/*`,
+        ],
+      }),
+    );
+    this.costLedgerReconcilerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:GetMetricData"],
+        // GetMetricData has no resource-level permission support.
+        resources: ["*"],
+      }),
+    );
+    this.costLedgerReconcilerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: { "cloudwatch:namespace": "Citadel/CostReconciler" },
+        },
+      }),
+    );
+
+    // cdk-nag: GetMetricData has no resource-level permission support (AWS
+    // requires '*'); PutMetricData is narrowed via a namespace condition
+    // instead of a resource ARN (CloudWatch metric APIs are not ARN-
+    // addressable). Both statements are already scoped as tightly as the
+    // service allows.
+    NagSuppressions.addResourceSuppressions(
+      this.costLedgerReconcilerFunction.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "cloudwatch:GetMetricData has no resource-level scoping (AWS " +
+            "requires Resource:* for this action); cloudwatch:PutMetricData " +
+            "is narrowed via a StringEquals cloudwatch:namespace condition " +
+            "instead of a resource ARN, since CloudWatch metrics are not " +
+            "ARN-addressable.",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+      true,
+    );
+
+    const costReconcilerScheduleRule = new events.Rule(
+      this,
+      "CostReconcilerScheduleRule",
+      {
+        description:
+          "Hourly trigger for the cost-ledger reconciler (Tier A aggregate drift)",
+        schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      },
+    );
+    costReconcilerScheduleRule.addTarget(
+      new targets.LambdaFunction(this.costLedgerReconcilerFunction),
     );
   }
 }
