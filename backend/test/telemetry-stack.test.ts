@@ -1,7 +1,158 @@
+describe("TelemetryStack — cost query surface (pass 1: API + authorizer + budgets)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("declares an HttpApi with CORS from the deploy-time frontend origin", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
+      ProtocolType: "HTTP",
+      CorsConfiguration: Match.objectLike({
+        AllowOrigins: ["https://app.example.com"],
+        AllowMethods: Match.arrayWith(["GET", "PUT"]),
+      }),
+    });
+  });
+
+  test("declares a JWT authorizer with issuer=user-pool and audience=client", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Authorizer", {
+      AuthorizerType: "JWT",
+      JwtConfiguration: Match.objectLike({
+        Issuer: Match.anyValue(),
+        Audience: Match.anyValue(),
+      }),
+    });
+  });
+
+  test("declares all 4 cost-query routes", () => {
+    const routes = template.findResources("AWS::ApiGatewayV2::Route");
+    const routeKeys = Object.values(routes)
+      .map((r: any) => r.Properties.RouteKey)
+      .sort();
+    expect(routeKeys).toEqual(
+      [
+        "GET /budgets",
+        "GET /cost/series",
+        "GET /cost/summary",
+        "PUT /budgets/{scope}",
+      ].sort(),
+    );
+  });
+
+  test("every route is authorized (none use AuthorizationType NONE)", () => {
+    const routes = template.findResources("AWS::ApiGatewayV2::Route");
+    for (const route of Object.values(routes) as any[]) {
+      expect(route.Properties.AuthorizationType).not.toBe("NONE");
+      expect(
+        route.Properties.AuthorizerId ?? route.Properties.AuthorizationType,
+      ).toBeDefined();
+    }
+  });
+
+  test("declares the sparse BudgetIndex GSI on the cost ledger table", () => {
+    const tables = template.findResources("AWS::DynamoDB::Table", {
+      Properties: { TableName: "citadel-cost-ledger-test" },
+    });
+    const logicalId = Object.keys(tables)[0];
+    const gsis = tables[logicalId].Properties.GlobalSecondaryIndexes;
+    const byName: Record<string, any> = {};
+    for (const g of gsis) byName[g.IndexName] = g;
+
+    expect(byName.BudgetIndex).toBeDefined();
+    expect(byName.BudgetIndex.KeySchema).toEqual([
+      { AttributeName: "GSI5PK", KeyType: "HASH" },
+      { AttributeName: "GSI5SK", KeyType: "RANGE" },
+    ]);
+  });
+
+  test("declares the evaluator Lambda with its own hourly schedule rule, separate from the reconciler's", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "cost-budget-evaluator.handler",
+    });
+
+    const hourlyRules = template.findResources("AWS::Events::Rule", {
+      Properties: { ScheduleExpression: "rate(1 hour)" },
+    });
+    // reconciler's rule + the new evaluator rule = 2 distinct rate(1 hour) rules.
+    expect(Object.keys(hourlyRules).length).toBeGreaterThanOrEqual(2);
+
+    const evaluatorFn = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-budget-evaluator.handler" },
+    });
+    const evaluatorFnId = Object.keys(evaluatorFn)[0];
+    const evaluatorRule = Object.values(hourlyRules).find((r: any) =>
+      r.Properties.Targets.some(
+        (t: any) => t.Arn?.["Fn::GetAtt"]?.[0] === evaluatorFnId,
+      ),
+    );
+    expect(evaluatorRule).toBeDefined();
+  });
+
+  test("evaluator role is granted events:PutEvents on the shared bus (telemetry becomes a publisher)", () => {
+    const evaluatorFn = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-budget-evaluator.handler" },
+    });
+    const evaluatorFnId = Object.keys(evaluatorFn)[0];
+    expect(evaluatorFnId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("CostBudgetEvaluator"),
+      );
+    });
+    const allActions = ownPolicies.flatMap((p: any) => {
+      const statements = p.Properties?.PolicyDocument?.Statement || [];
+      return statements.flatMap((s: any) =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+    });
+    expect(allActions).toEqual(expect.arrayContaining(["events:PutEvents"]));
+  });
+
+  test("query handler role has ledger table read access (Query) and no Scan/write grant", () => {
+    const queryFn = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-query-handler.handler" },
+    });
+    const queryFnId = Object.keys(queryFn)[0];
+    expect(queryFnId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("CostQueryHandler"),
+      );
+    });
+    const allActions = ownPolicies.flatMap((p: any) => {
+      const statements = p.Properties?.PolicyDocument?.Statement || [];
+      return statements.flatMap((s: any) =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+    });
+    expect(allActions).toEqual(expect.arrayContaining(["dynamodb:Query"]));
+    // PUT /budgets needs UpdateItem on the same table; no DeleteItem/Scan needed.
+    expect(allActions).not.toEqual(expect.arrayContaining(["dynamodb:Scan"]));
+    expect(allActions).not.toEqual(
+      expect.arrayContaining(["dynamodb:DeleteItem"]),
+    );
+  });
+
+  test("exposes costApiUrl as a stack output for pass-2 frontend plumbing", () => {
+    const outputs = template.findOutputs("*");
+    const hasCostApiUrl = Object.keys(outputs).some((k) =>
+      k.toLowerCase().includes("costapiurl"),
+    );
+    expect(hasCostApiUrl).toBe(true);
+  });
+});
 import * as cdk from "aws-cdk-lib";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
+import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -35,11 +186,17 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
     },
   );
 
+  const userPool = new cognito.UserPool(helperStack, "UserPool");
+  const userPoolClient = userPool.addClient("UserPoolClient");
+
   const stack = new TelemetryStack(app, "TestTelemetryStack", {
     environment: "test",
     env: { account: "123456789012", region: "us-east-1" },
     agentEventBus,
     modelCatalogTable,
+    userPool,
+    userPoolClient,
+    frontendOrigin: "https://app.example.com",
   });
 
   const template = Template.fromStack(stack);
@@ -69,7 +226,7 @@ describe("TelemetryStack — cost ledger (pass 1)", () => {
     });
   });
 
-  test("cost ledger table has 4 sparse time-prefixed GSIs: Project/App/Agent/Workflow", () => {
+  test("cost ledger table has 4 sparse time-prefixed GSIs (Project/App/Agent/Workflow) plus the BudgetIndex GSI added for the cost query surface", () => {
     const tables = template.findResources("AWS::DynamoDB::Table", {
       Properties: { TableName: "citadel-cost-ledger-test" },
     });
@@ -77,12 +234,13 @@ describe("TelemetryStack — cost ledger (pass 1)", () => {
     expect(logicalId).toBeDefined();
 
     const gsis = tables[logicalId].Properties.GlobalSecondaryIndexes;
-    expect(gsis).toHaveLength(4);
+    expect(gsis).toHaveLength(5);
 
     const gsiNames = gsis.map((g: any) => g.IndexName).sort();
     expect(gsiNames).toEqual([
       "AgentIndex",
       "AppIndex",
+      "BudgetIndex",
       "ProjectIndex",
       "WorkflowIndex",
     ]);

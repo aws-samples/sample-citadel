@@ -115,6 +115,43 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   userPoolArn: backendStack.userPool.userPoolArn,
 });
 
+// Telemetry stack — invocation cost ledger + cost query API/budgets
+// (dedicated bounded context per decision ab73ae1b; see
+// docs/EVENTBRIDGE_CATALOG.md follow-up). Depends on backend only, for the
+// shared bus + model catalog table (pricing read) + user pool (JWT
+// authorizer for the cost query HttpApi). Instantiated BEFORE FrontendStack
+// so `telemetryStack.costApiUrl` can be threaded into FrontendStackProps
+// (pass 2) without a circular stack dependency.
+//
+// Deploy-time origin for the cost API's CORS config — sourced from env or
+// CDK context, NOT the FrontendStack/CloudFront construct, to avoid a
+// Telemetry<->Frontend circular stack dependency. Deliberately does NOT
+// fall back to '*': this is a JWT-authorized API, and pairing a wildcard
+// CORS origin with bearer-token auth is a broad-CORS anti-pattern. The
+// fallback is a non-resolvable placeholder host instead — same
+// "safe-to-synth, unsafe-to-actually-use" shape as `CDK_DEFAULT_ACCOUNT`
+// being undefined for local synth. Real deployments MUST set
+// FRONTEND_ORIGIN to the actual CloudFront/app origin.
+const frontendOrigin: string =
+  process.env.FRONTEND_ORIGIN ||
+  (app.node.tryGetContext("frontendOrigin") as string | undefined) ||
+  "https://frontend-origin-not-configured.invalid";
+
+const telemetryStack = new TelemetryStack(
+  app,
+  `citadel-telemetry-${environment}`,
+  {
+    ...stackProps,
+    description: `Model invocation cost telemetry for Citadel - ${environment}`,
+    agentEventBus: backendStack.agentEventBus,
+    modelCatalogTable: backendStack.modelCatalogTable,
+    userPool: backendStack.userPool,
+    userPoolClient: backendStack.userPoolClient,
+    frontendOrigin,
+  },
+);
+telemetryStack.addDependency(backendStack);
+
 // Frontend hosting stack
 const frontendStack = new FrontendStack(
   app,
@@ -138,20 +175,9 @@ const gatewayStack = new GatewayStack(app, `citadel-gateway-${environment}`, {
   idempotencyTable: backendStack.idempotencyTable,
 });
 
-// Telemetry stack — invocation cost ledger (dedicated bounded context per
-// decision ab73ae1b; see docs/EVENTBRIDGE_CATALOG.md follow-up). Depends on
-// backend only, for the shared bus + model catalog table (pricing read,
-// pass 2).
-const telemetryStack = new TelemetryStack(
-  app,
-  `citadel-telemetry-${environment}`,
-  {
-    ...stackProps,
-    description: `Model invocation cost telemetry for Citadel - ${environment}`,
-    agentEventBus: backendStack.agentEventBus,
-    modelCatalogTable: backendStack.modelCatalogTable,
-  },
-);
+// Telemetry stack has already been instantiated above (before FrontendStack)
+// so its costApiUrl can be threaded into FrontendStackProps in pass 2
+// without a circular dependency.
 
 // Add dependencies
 servicesStack.addDependency(backendStack);
@@ -159,7 +185,6 @@ governanceStack.addDependency(backendStack);
 arbiterStack.addDependency(servicesStack);
 frontendStack.addDependency(arbiterStack);
 gatewayStack.addDependency(backendStack);
-telemetryStack.addDependency(backendStack);
 
 // Wire publish handler from GatewayStack as AppSync data source in BackendStack
 // Uses deterministic ARN to avoid circular cross-stack dependency
