@@ -96,3 +96,28 @@ export function ChartRow4Skeleton() {
     </div>
   );
 }
+
+/**
+ * Skeleton for the Cost Row: Cost Over Time + By App/Model/Agent panels.
+ * Matches: mt-5 wrapper, one full-width chart + two-up dimension charts.
+ */
+export function CostChartRowSkeleton() {
+  return (
+    <div className="mt-5" data-testid="cost-chart-row-skeleton">
+      <div className="mb-4">
+        <div className="h-5 w-16 bg-accent rounded animate-pulse mb-2" />
+        <div className="h-4 w-64 bg-accent rounded animate-pulse" />
+      </div>
+      <Card className="rounded-lg p-[15px] gap-0 mb-4">
+        <div className="h-[300px] bg-accent rounded animate-pulse" />
+      </Card>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {[0, 1].map((i) => (
+          <Card key={i} className="rounded-lg p-[15px] gap-0">
+            <div className="h-[300px] bg-accent rounded animate-pulse" />
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}

@@ -7,10 +7,11 @@ import { PageContainer } from '../components/PageContainer';
 import { LazyLoadSection } from '../components/LazyLoadSection';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { Skeleton } from '../components/ui/skeleton';
-import { ChartRow2Skeleton, ChartRow3Skeleton, ChartRow4Skeleton } from '../components/ChartSkeletons';
+import { ChartRow2Skeleton, ChartRow3Skeleton, ChartRow4Skeleton, CostChartRowSkeleton } from '../components/ChartSkeletons';
 import ChartRow2 from './dashboard/ChartRow2';
 import ChartRow3 from './dashboard/ChartRow3';
 import ChartRow4 from './dashboard/ChartRow4';
+import CostChartRow from './dashboard/CostChartRow';
 import { useDashboardData } from '../hooks/useDashboardData';
 import { appApiService } from '../services/appApiService';
 import { CHART_TOOLTIP_STYLE, CHART_GRID_STROKE, CHART_AXIS_STROKE, CHART_LEGEND_STYLE } from './dashboard/chartStyles';
@@ -190,6 +191,12 @@ export function Dashboard() {
         <ErrorBoundary>
           <LazyLoadSection fallback={<ChartRow4Skeleton />}>
             <ChartRow4 counts={counts} dataStores={dataStores} />
+          </LazyLoadSection>
+        </ErrorBoundary>
+
+        <ErrorBoundary>
+          <LazyLoadSection fallback={<CostChartRowSkeleton />}>
+            <CostChartRow />
           </LazyLoadSection>
         </ErrorBoundary>
       </div>

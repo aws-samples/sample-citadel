@@ -163,8 +163,14 @@ const frontendStack = new FrontendStack(
     userPool: backendStack.userPool,
     userPoolClient: backendStack.userPoolClient,
     agentEventBus: backendStack.agentEventBus,
+    // Cost query HttpApi endpoint (TelemetryStack, pass 1) — threaded into
+    // aws-exports.json as `aws_cost_api_url` (pass 2). TelemetryStack is
+    // instantiated above, so this is a straightforward same-app
+    // export/import — no circular dependency.
+    costApiUrl: telemetryStack.costApiUrl,
   },
 );
+frontendStack.addDependency(telemetryStack);
 
 // Gateway stack (depends on backend — receives shared resources)
 const gatewayStack = new GatewayStack(app, `citadel-gateway-${environment}`, {

@@ -45,6 +45,9 @@ import serverService from '../services/server';
 import { EndpointUrlDisplay } from './components/EndpointUrlDisplay';
 import { PlaintextKeyReveal } from './components/PlaintextKeyReveal';
 import { useMetricsAutoRefresh } from '../hooks/useMetricsAutoRefresh';
+import { costService } from '../services/costService';
+import type { CostSeriesResponse } from '../services/costService';
+import { CostOverTimeChart } from '../components/cost/CostOverTimeChart';
 
 // ---- Types ----
 
@@ -150,6 +153,12 @@ export function AppApiDashboard({ appId, onBack, onNavigate: _onNavigate }: AppA
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [selectedRange, setSelectedRange] = useState(TIME_RANGES[2]); // default 24h
 
+  // Cost state (per-app panel, dimension=app) — gracefully hidden when
+  // the cost API isn't configured for this deployment.
+  const [costAvailable, setCostAvailable] = useState(false);
+  const [costSeries, setCostSeries] = useState<CostSeriesResponse | null>(null);
+  const [costLoading, setCostLoading] = useState(true);
+
   // ---- Data fetching ----
 
   const fetchApp = useCallback(async () => {
@@ -207,6 +216,22 @@ export function AppApiDashboard({ appId, onBack, onNavigate: _onNavigate }: AppA
     }
   }, [appId]);
 
+  // Per-app cost panel (dimension=app). Gracefully degrades to "hidden"
+  // when the cost API isn't configured — no fetch attempt, no error UI.
+  const fetchCost = useCallback(async (hours: number) => {
+    if (!costService.isAvailable()) {
+      setCostAvailable(false);
+      return;
+    }
+    setCostAvailable(true);
+    const from = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    const to = new Date().toISOString();
+    const result = await costService.getSeries('app', appId, 'day', from, to);
+    if (result.available) {
+      setCostSeries(result.data);
+    }
+  }, [appId]);
+
   useEffect(() => {
     fetchApp();
   }, [fetchApp]);
@@ -215,13 +240,24 @@ export function AppApiDashboard({ appId, onBack, onNavigate: _onNavigate }: AppA
     if (appStatus === 'PUBLISHED') {
       fetchKeys();
       fetchMetrics(selectedRange.hours);
+      setCostLoading(true);
+      fetchCost(selectedRange.hours)
+        .catch(() => console.warn('AppApiDashboard: failed to load cost data'))
+        .finally(() => setCostLoading(false));
     }
-  }, [appStatus, fetchKeys, fetchMetrics, selectedRange.hours]);
+  }, [appStatus, fetchKeys, fetchMetrics, fetchCost, selectedRange.hours]);
 
-  // Auto-refresh metrics (Req 12)
+  // Auto-refresh metrics + per-app cost (Req 12). Cost refresh reuses
+  // fetchCost's own unconfigured-guard, so this is a no-op when the cost
+  // API isn't configured.
   const autoRefreshCallback = useMemo(
-    () => () => refreshMetrics(selectedRange.hours),
-    [refreshMetrics, selectedRange.hours],
+    () => () => {
+      refreshMetrics(selectedRange.hours);
+      fetchCost(selectedRange.hours).catch(() =>
+        console.warn('AppApiDashboard: failed to refresh cost data'),
+      );
+    },
+    [refreshMetrics, fetchCost, selectedRange.hours],
   );
   useMetricsAutoRefresh({
     enabled: appStatus === 'PUBLISHED',
@@ -705,6 +741,17 @@ export function AppApiDashboard({ appId, onBack, onNavigate: _onNavigate }: AppA
             </>
           ) : null}
         </Card>
+
+        {/* ===== Cost Section (per-app, dimension=app) ===== */}
+        {/* Gracefully hidden when the cost API isn't configured for this deployment. */}
+        {costAvailable && (
+          <CostOverTimeChart
+            title="App Cost Over Time"
+            description="Estimated model invocation spend for this app"
+            data={costSeries}
+            loading={costLoading}
+          />
+        )}
 
         {/* ===== Create API Key Dialog (two-step state machine) ===== */}
         <Dialog

@@ -177,11 +177,23 @@ BackendStack (core infra — no dependencies)
   │                              BackendStack.workflowsTable, BackendStack.executionsTable)
   ├── GatewayStack (depends on: BackendStack.appsTable, BackendStack.eventBus,
   │                              BackendStack.idempotencyTable)
-  └── FrontendStack (depends on: BackendStack.appSyncApi, BackendStack.userPool)
+  ├── TelemetryStack (depends on: BackendStack.agentEventBus, BackendStack.modelCatalogTable,
+  │                                BackendStack.userPool, BackendStack.userPoolClient)
+  └── FrontendStack (depends on: BackendStack.appSyncApi, BackendStack.userPool,
+                                   TelemetryStack.costApiUrl)
 
 KnowledgeBaseStack — standalone (Bedrock Knowledge Base for document ingestion)
 PipelineStack — standalone (CI/CD CodePipeline, self-mutating, multi-env)
 ```
+
+### TelemetryStack — invocation cost ledger, cost query API, and budget alerts
+
+`TelemetryStack` owns the invocation cost ledger (`citadel-cost-ledger-{env}`, populated by `cost-ledger-writer` from `task.completion` / `intake.usage.captured` / `workflow.node.completed` events) plus two additions layered on the same single-table design:
+
+- **Cost query HttpApi** (`citadel-cost-api-{env}`) — a Cognito-JWT-authorized HTTP API (`GET /cost/summary`, `GET /cost/series`, `GET`/`PUT /budgets`) fronting a single `cost-query-handler` Lambda. Every non-admin read is a base-table `Query` keyed on `PK=ORG#<verified JWT claim>` — never a Scan, never a dimension GSI — so org isolation lives in the DynamoDB key condition itself. The stack exposes `costApiUrl` (the HttpApi endpoint), threaded into `FrontendStack` as `aws_cost_api_url` in `aws-exports.json` (see [COST_QUERY.md](./COST_QUERY.md)).
+- **Budget alerts** — budget rows share the ledger table under `SK=BUDGET#ORG` / `BUDGET#APP#<appId>` (disjoint from the ISO-timestamped cost rows), enumerated via a sparse `BudgetIndex` GSI. A separate hourly-scheduled `cost-budget-evaluator` Lambda computes period-to-date spend and publishes `cost.budget.threshold.crossed` / `cost.budget.breached` to the shared event bus — making `TelemetryStack` an EventBridge **publisher** for the first time (it was consume-only before). See [EVENTBRIDGE_CATALOG.md](./EVENTBRIDGE_CATALOG.md#cost-budget-events).
+
+This keeps the platform at **7 stacks** (BackendStack, ServicesStack, ArbiterStack, GatewayStack, TelemetryStack, FrontendStack, GovernanceStack) — the cost query/budget surface is additive to the existing TelemetryStack rather than a new stack.
 
 ## Key Architectural Patterns
 
