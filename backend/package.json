@@ -22,7 +22,8 @@
     "deploy:backend": "./scripts/deploy.sh BackendStack",
     "deploy:all": "./scripts/deploy.sh --all",
     "deploy:quick": "npm run build && cdk deploy BackendStack",
-    "nag": "cdk synth --all --quiet"
+    "nag": "cdk synth --all --quiet",
+    "split:gates": "bash scripts/split-gates.sh"
   },
   "dependencies": {
     "@aws-cdk/aws-appsync-alpha": "^2.59.0-alpha.0",
