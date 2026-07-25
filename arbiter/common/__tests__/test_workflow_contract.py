@@ -298,6 +298,87 @@ def test_completed_result_requires_output():
         )
 
 
+# --- Node-result event: additive usage passthrough (rollup) -----------------
+
+
+def test_build_result_completed_with_usage_sets_top_level_usage():
+    """A completed result built with usage=[...] carries a top-level 'usage'
+    key, additive to (and separate from) any usage nested inside output."""
+    usage = [{'inputTokens': 5, 'outputTokens': 7}]
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'response': 'ok'}, timestamp='t',
+        usage=usage,
+    )
+    assert detail['usage'] == usage
+    assert detail['output'] == {'response': 'ok'}
+
+
+def test_build_result_completed_without_usage_omits_usage_key():
+    """Omitting usage entirely keeps the detail byte-identical to before this
+    feature — no 'usage' key appears."""
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'response': 'ok'}, timestamp='t',
+    )
+    assert 'usage' not in detail
+
+
+def test_build_result_failed_ignores_usage():
+    """A failed result never carries a top-level usage key, even if a caller
+    passes one — failed results have no output to attribute usage to."""
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_FAILED, error='boom', timestamp='t',
+        usage=[{'inputTokens': 1, 'outputTokens': 1}],
+    )
+    assert 'usage' not in detail
+
+
+def test_build_result_malformed_usage_never_raises_and_is_sanitized():
+    """A non-list usage value is sanitized to [] rather than raising or
+    passing through garbage — build_node_result_detail must never raise on
+    malformed usage."""
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'response': 'ok'}, timestamp='t',
+        usage='not-a-list',  # type: ignore[arg-type]
+    )
+    assert detail['usage'] == []
+
+
+def test_parse_result_detail_passes_through_top_level_usage():
+    usage = [{'inputTokens': 3, 'outputTokens': 4}]
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'response': 'ok'}, timestamp='t',
+        usage=usage,
+    )
+    parsed = parse_node_result_detail(detail)
+    assert parsed.usage == usage
+
+
+def test_parse_result_detail_defaults_usage_to_empty_list_when_absent():
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'response': 'ok'}, timestamp='t',
+    )
+    parsed = parse_node_result_detail(detail)
+    assert parsed.usage == []
+
+
+def test_parse_result_detail_sanitizes_malformed_usage_on_the_wire():
+    """A detail body that arrived over the wire with a malformed 'usage'
+    value (e.g. hand-crafted or corrupted) is sanitized, never raised on."""
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'response': 'ok'}, timestamp='t',
+    )
+    detail['usage'] = 'garbage'
+    parsed = parse_node_result_detail(detail)
+    assert parsed.usage == []
+
+
 def test_failed_result_requires_error():
     with pytest.raises(ValueError):
         build_node_result_detail(

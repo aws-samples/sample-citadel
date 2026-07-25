@@ -446,7 +446,7 @@ def post_task_complete(response, agent_use_id, agent_name, orchestration_id, *, 
     print(f"event posted: {response}")
     return f"event posted: {event}"
 
-def _emit_node_result(msg, *, status, output=None, error=None):
+def _emit_node_result(msg, *, status, output=None, error=None, usage=None):
     """Emit a workflow node-result event (completed/failed) to the agent event
     bus the step runner consumes.
 
@@ -455,6 +455,12 @@ def _emit_node_result(msg, *, status, output=None, error=None):
     step runner's node.completed/failed rules listen on). This is SEPARATE from
     the supervisor task.completion path in post_task_complete — a distinct
     Source/DetailType, not a different client or bus.
+
+    ``usage`` is additive and optional: forwarded to
+    ``workflow_contract.build_node_result_detail`` so a completed result also
+    carries a top-level ``usage`` key (in addition to the existing
+    ``output['usage']``) for the step runner's usage rollup. Ignored for a
+    failed result (the contract already drops it there).
     """
     detail = workflow_contract.build_node_result_detail(
         execution_id=msg.execution_id,
@@ -464,6 +470,7 @@ def _emit_node_result(msg, *, status, output=None, error=None):
         status=status,
         output=output,
         error=error,
+        usage=usage,
     )
     detail_type = (
         workflow_contract.NODE_COMPLETED_DETAIL_TYPE
@@ -633,6 +640,7 @@ def _process_workflow_node(event):
         msg,
         status=workflow_contract.STATUS_COMPLETED,
         output={'response': response, 'usage': usage_sink},
+        usage=usage_sink,
     )
 
 def process_event(event, context):

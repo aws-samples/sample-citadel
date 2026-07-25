@@ -144,3 +144,33 @@ def parse_usage_array(raw: Any) -> list[dict]:
         return [entry for entry in raw if isinstance(entry, dict)]
     except Exception:  # noqa: BLE001 — boundary sanitizer must never raise
         return []
+
+
+def aggregate_usage(records: Any) -> dict:
+    """Sum a (possibly unsanitized) usage array into per-node totals.
+
+    Pure, defensive rollup used to derive per-node ``usageTotals`` from the
+    sanitized usage records a workflow node accumulated. ``records`` is
+    passed through ``parse_usage_array`` first, so any non-list input or
+    non-dict entries are dropped rather than raising. Missing/malformed
+    ``inputTokens``/``outputTokens`` fields within a surviving record
+    coerce to 0 via ``_coerce_non_negative_int``. Never raises.
+
+    Returns::
+
+        {
+            "inputTokens": int,   # sum across records, >= 0
+            "outputTokens": int,  # sum across records, >= 0
+            "totalTokens": int,   # inputTokens + outputTokens
+            "callCount": int,     # number of sanitized records
+        }
+    """
+    recs = parse_usage_array(records)
+    total_in = sum(_coerce_non_negative_int(r.get("inputTokens")) for r in recs)
+    total_out = sum(_coerce_non_negative_int(r.get("outputTokens")) for r in recs)
+    return {
+        "inputTokens": total_in,
+        "outputTokens": total_out,
+        "totalTokens": total_in + total_out,
+        "callCount": len(recs),
+    }

@@ -257,4 +257,95 @@ describe('ExecutionDetailSheet', () => {
 
     expect(screen.queryByText('Result')).not.toBeInTheDocument();
   });
+
+  // ─── Usage rollup (additive: per-node tokens + execution total) ───
+
+  describe('usage rollup', () => {
+    const execWithUsage = {
+      ...baseExecution,
+      usageTotals: JSON.stringify({ inputTokens: 30, outputTokens: 20, totalTokens: 50, callCount: 3 }),
+      nodeResults: JSON.stringify({
+        'node-b': {
+          nodeId: 'node-b',
+          agentId: 'agent-2',
+          status: 'completed',
+          startedAt: '2024-03-01T12:02:00Z',
+          completedAt: '2024-03-01T12:05:00Z',
+          output: '{"step":"two"}',
+          error: null,
+          retryCount: 2,
+          usageTotals: { inputTokens: 12, outputTokens: 8, totalTokens: 20, callCount: 1 },
+        },
+        'node-a': {
+          nodeId: 'node-a',
+          agentId: 'agent-1',
+          status: 'completed',
+          startedAt: '2024-03-01T12:00:00Z',
+          completedAt: '2024-03-01T12:02:00Z',
+          output: '{"step":"one"}',
+          error: null,
+          retryCount: 0,
+          usageTotals: { inputTokens: 18, outputTokens: 12, totalTokens: 30, callCount: 2 },
+        },
+      }),
+    };
+
+    it('shows a per-node token badge next to duration when usageTotals.totalTokens > 0', () => {
+      render(<ExecutionDetailSheet execution={execWithUsage} open onClose={jest.fn()} />);
+
+      const stepA = screen.getByRole('button', { name: /node-a/ });
+      const stepB = screen.getByRole('button', { name: /node-b/ });
+
+      expect(within(stepA).getByText('30 tok')).toBeInTheDocument();
+      expect(within(stepB).getByText('20 tok')).toBeInTheDocument();
+    });
+
+    it('omits the per-node token badge when a node has no usage (legacy/zero)', () => {
+      render(<ExecutionDetailSheet execution={baseExecution} open onClose={jest.fn()} />);
+
+      const stepA = screen.getByRole('button', { name: /node-a/ });
+      expect(within(stepA).queryByText(/tok$/)).not.toBeInTheDocument();
+    });
+
+    it('shows an input/output/total/call-count breakdown in the expanded node body', () => {
+      render(<ExecutionDetailSheet execution={execWithUsage} open onClose={jest.fn()} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /node-a/ }));
+
+      expect(screen.getByText(/Input 18/)).toBeInTheDocument();
+      expect(screen.getByText(/Output 12/)).toBeInTheDocument();
+      expect(screen.getByText(/Total 30/)).toBeInTheDocument();
+      expect(screen.getByText(/2 calls/)).toBeInTheDocument();
+    });
+
+    it('shows the execution total tokens in the header metadata block', () => {
+      render(<ExecutionDetailSheet execution={execWithUsage} open onClose={jest.fn()} />);
+
+      expect(screen.getByText(/Total tokens 50/)).toBeInTheDocument();
+    });
+
+    it('omits the header total-tokens line when the execution has no usage', () => {
+      render(<ExecutionDetailSheet execution={baseExecution} open onClose={jest.fn()} />);
+
+      expect(screen.queryByText(/Total tokens/)).not.toBeInTheDocument();
+    });
+
+    it('accepts an already-parsed usageTotals object (not just a JSON string)', () => {
+      const exec = {
+        ...execWithUsage,
+        usageTotals: { inputTokens: 30, outputTokens: 20, totalTokens: 50, callCount: 3 },
+      };
+      render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+      expect(screen.getByText(/Total tokens 50/)).toBeInTheDocument();
+    });
+
+    it('never throws on malformed usageTotals and simply omits the header line', () => {
+      const exec = { ...execWithUsage, usageTotals: 'not-json{' };
+      expect(() =>
+        render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />),
+      ).not.toThrow();
+      expect(screen.queryByText(/Total tokens/)).not.toBeInTheDocument();
+    });
+  });
 });

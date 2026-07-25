@@ -11,7 +11,15 @@ def handler(event, context):
     if detail_type == 'execution.start.requested':
         start_execution(detail['executionId'], detail['workflowId'])
     elif detail_type == 'workflow.node.completed':
-        handle_node_completion(detail['executionId'], detail['nodeId'], detail.get('output', {}))
+        output = detail.get('output', {})
+        # Usage rollup hop: prefer the additive top-level 'usage' key (the
+        # worker promotes it there via workflow_contract.build_node_result_detail);
+        # fall back to output['usage'] for an in-flight event emitted before
+        # this change, and finally to [] when neither is present.
+        usage = detail.get('usage')
+        if usage is None:
+            usage = output.get('usage', [])
+        handle_node_completion(detail['executionId'], detail['nodeId'], output, usage)
     elif detail_type == 'workflow.node.failed':
         handle_node_failure(detail['executionId'], detail['nodeId'], detail.get('error', ''))
     elif detail_type == 'execution.cancel.requested':

@@ -20,6 +20,14 @@ import { toast } from 'sonner';
 
 // ---- Types ----
 
+/** Usage rollup: aggregated token usage (per-node or execution-level). */
+export interface UsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  callCount: number;
+}
+
 export interface ExecutionNodeResult {
   nodeId: string;
   agentId?: string | null;
@@ -29,6 +37,8 @@ export interface ExecutionNodeResult {
   output?: string | null;
   error?: string | null;
   retryCount?: number | null;
+  /** Additive: this node's precomputed usage totals (usage rollup). */
+  usageTotals?: UsageTotals | null;
 }
 
 export interface ExecutionDetail {
@@ -44,6 +54,8 @@ export interface ExecutionDetail {
   error?: string | null;
   /** JSON string map keyed by nodeId (AWSJSON) or an already-parsed object. */
   nodeResults?: string | Record<string, unknown> | null;
+  /** Additive: execution-level usage totals (AWSJSON string or parsed object). */
+  usageTotals?: string | UsageTotals | null;
 }
 
 interface ExecutionDetailSheetProps {
@@ -103,6 +115,7 @@ function parseNodeResults(raw?: string | Record<string, unknown> | null): Execut
       output: typeof v.output === 'string' ? v.output : null,
       error: typeof v.error === 'string' ? v.error : null,
       retryCount: typeof v.retryCount === 'number' ? v.retryCount : 0,
+      usageTotals: parseUsageTotals(v.usageTotals),
     };
   });
   nodes.sort((a, b) => {
@@ -112,6 +125,35 @@ function parseNodeResults(raw?: string | Record<string, unknown> | null): Execut
     return a.startedAt.localeCompare(b.startedAt);
   });
   return nodes;
+}
+
+/** Parse a usageTotals value (JSON string, already-parsed object, or absent)
+ * into a UsageTotals shape, or null when absent/malformed/all-zero. Never
+ * throws — a corrupted string or a non-object value degrades to null so the
+ * caller can render nothing for it (legacy runs before this feature). */
+function parseUsageTotals(raw: unknown): UsageTotals | null {
+  let value: unknown = raw;
+  if (typeof value === 'string') {
+    if (value === '') return null;
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  const toNonNegInt = (x: unknown): number => {
+    const n = typeof x === 'string' ? Number(x) : x;
+    return typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
+  };
+  const totals: UsageTotals = {
+    inputTokens: toNonNegInt(v.inputTokens),
+    outputTokens: toNonNegInt(v.outputTokens),
+    totalTokens: toNonNegInt(v.totalTokens),
+    callCount: toNonNegInt(v.callCount),
+  };
+  return totals;
 }
 
 function formatDate(dateStr?: string | null): string {
@@ -167,6 +209,10 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
   );
   const prettyOutput = useMemo(() => prettyJson(execution?.output), [execution?.output]);
   const prettyInput = useMemo(() => prettyJson(execution?.input), [execution?.input]);
+  const executionUsageTotals = useMemo(
+    () => parseUsageTotals(execution?.usageTotals),
+    [execution?.usageTotals],
+  );
 
   if (!execution) return null;
 
@@ -213,6 +259,9 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
             {execution.triggeredBy && <span>Triggered by {execution.triggeredBy}</span>}
             {execution.workflowVersion != null && (
               <span>Workflow v{execution.workflowVersion}</span>
+            )}
+            {executionUsageTotals && executionUsageTotals.totalTokens > 0 && (
+              <span>Total tokens {executionUsageTotals.totalTokens.toLocaleString()}</span>
             )}
           </div>
         </SheetHeader>
@@ -288,6 +337,14 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
                         <span className="ml-auto text-muted-foreground flex-shrink-0">
                           {computeDuration(node.startedAt, node.completedAt)}
                         </span>
+                        {node.usageTotals && node.usageTotals.totalTokens > 0 && (
+                          <span
+                            className="text-muted-foreground flex-shrink-0"
+                            title={`in ${node.usageTotals.inputTokens} / out ${node.usageTotals.outputTokens}`}
+                          >
+                            {node.usageTotals.totalTokens.toLocaleString()} tok
+                          </span>
+                        )}
                         {retryCount > 0 && (
                           <Badge className="bg-chart-4/20 text-chart-4 text-xs border-0 flex-shrink-0">
                             {retryCount} {retryCount === 1 ? 'retry' : 'retries'}
@@ -300,6 +357,13 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
                             <div className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive whitespace-pre-wrap">
                               {node.error}
                             </div>
+                          )}
+                          {node.usageTotals && node.usageTotals.totalTokens > 0 && (
+                            <p className="text-xs text-muted-foreground">
+                              Input {node.usageTotals.inputTokens} · Output {node.usageTotals.outputTokens} ·
+                              {' '}Total {node.usageTotals.totalTokens} · {node.usageTotals.callCount}{' '}
+                              {node.usageTotals.callCount === 1 ? 'call' : 'calls'}
+                            </p>
                           )}
                           {nodeOutput !== null ? (
                             <pre className={PRE_CLASSES}>{nodeOutput}</pre>

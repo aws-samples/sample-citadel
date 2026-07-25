@@ -18,6 +18,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from common.usage import (
+    aggregate_usage,
     build_usage_record,
     extract_converse_usage,
     parse_usage_array,
@@ -249,3 +250,98 @@ class TestParseUsageArray:
         """Non-dict entries in the list are dropped, not raised on."""
         result = parse_usage_array([{"a": 1}, "garbage", 42, None, {"b": 2}])
         assert result == [{"a": 1}, {"b": 2}]
+
+
+# ---------------------------------------------------------------------------
+# aggregate_usage
+# ---------------------------------------------------------------------------
+
+class TestAggregateUsage:
+    """Property tests for aggregate_usage — pure per-node usage rollup."""
+
+    @given(raw=st.one_of(
+        st.none(),
+        st.text(max_size=30),
+        st.integers(),
+        st.dictionaries(st.text(max_size=5), st.text(max_size=5), max_size=3),
+        st.lists(st.one_of(
+            st.dictionaries(st.text(max_size=10), st.text(max_size=10), max_size=5),
+            st.integers(),
+            st.text(max_size=10),
+            st.none(),
+        ), max_size=10),
+    ))
+    @settings(max_examples=100)
+    def test_never_raises_on_arbitrary_input(self, raw):
+        """aggregate_usage must never raise regardless of input shape."""
+        result = aggregate_usage(raw)
+        assert isinstance(result, dict)
+        for key in ("inputTokens", "outputTokens", "totalTokens", "callCount"):
+            assert key in result
+
+    def test_empty_input_returns_all_zeros(self):
+        """No records -> every total is zero, never raises."""
+        assert aggregate_usage([]) == {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "totalTokens": 0,
+            "callCount": 0,
+        }
+        assert aggregate_usage(None) == {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "totalTokens": 0,
+            "callCount": 0,
+        }
+
+    @given(
+        records=st.lists(
+            st.fixed_dictionaries({
+                "inputTokens": st.integers(min_value=0, max_value=10_000),
+                "outputTokens": st.integers(min_value=0, max_value=10_000),
+            }),
+            max_size=10,
+        ),
+    )
+    @settings(max_examples=100)
+    def test_totals_equal_sum_of_inputs_and_outputs(self, records):
+        """totalTokens is always inputTokens + outputTokens; callCount == len(records)."""
+        result = aggregate_usage(records)
+        expected_in = sum(r["inputTokens"] for r in records)
+        expected_out = sum(r["outputTokens"] for r in records)
+        assert result["inputTokens"] == expected_in
+        assert result["outputTokens"] == expected_out
+        assert result["totalTokens"] == expected_in + expected_out
+        assert result["callCount"] == len(records)
+
+    def test_garbage_entries_dropped_before_summing(self):
+        """Non-dict entries in the raw list are dropped, not summed as zero."""
+        records = [
+            {"inputTokens": 5, "outputTokens": 10},
+            "garbage",
+            42,
+            None,
+            {"inputTokens": 3, "outputTokens": 2},
+        ]
+        result = aggregate_usage(records)
+        assert result == {
+            "inputTokens": 8,
+            "outputTokens": 12,
+            "totalTokens": 20,
+            "callCount": 2,
+        }
+
+    def test_missing_or_malformed_token_fields_coerce_to_zero(self):
+        """A record missing inputTokens/outputTokens (or with malformed values)
+        contributes 0 for that field rather than raising."""
+        records = [
+            {"inputTokens": "not-a-number", "outputTokens": None},
+            {"outputTokens": 7},
+        ]
+        result = aggregate_usage(records)
+        assert result == {
+            "inputTokens": 0,
+            "outputTokens": 7,
+            "totalTokens": 7,
+            "callCount": 2,
+        }

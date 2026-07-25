@@ -81,6 +81,36 @@ class TestWorkflowNodeRouting:
         # subprocess stdout carries no usage array); 'response' is unchanged.
         assert detail['output']['response'] == 'done'
         assert detail['output']['usage'] == []
+        # The additive top-level 'usage' key mirrors output['usage'] — the
+        # usage rollup hop promotes it out of output for the step runner.
+        assert detail['usage'] == []
+
+    def test_node_message_with_usage_promotes_top_level_usage(self):
+        """When the subprocess stdout carries a usage array, the emitted
+        node-completed detail promotes it to a top-level 'usage' key in
+        addition to output['usage'] (unchanged, additive)."""
+        stdout = json.dumps({
+            'response': 'done',
+            'usage': [{'inputTokens': 5, 'outputTokens': 9}],
+        })
+        mock_result = MagicMock(returncode=0, stdout=stdout, stderr='')
+        mock_events = MagicMock()
+        mock_events.put_events.return_value = {'FailedEntryCount': 0}
+
+        with patch.dict('os.environ', _NODE_ENV):
+            with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
+                index = _fresh_index()
+                with patch.object(index, 'load_config_from_dynamodb',
+                                  return_value={'config': {'filename': 'agent.py'}}), \
+                     patch.object(index, 'get_scoped_credentials', return_value=None), \
+                     patch.object(index, 'load_file_from_s3_into_tmp'), \
+                     patch('subprocess.run', return_value=mock_result):
+                    index.process_event(dict(NODE_MESSAGE), {})
+
+        entry = mock_events.put_events.call_args.kwargs['Entries'][0]
+        detail = json.loads(entry['Detail'])
+        assert detail['output']['usage'] == [{'inputTokens': 5, 'outputTokens': 9}]
+        assert detail['usage'] == [{'inputTokens': 5, 'outputTokens': 9}]
 
     def test_node_message_subprocess_failure_emits_node_failed(self):
         # Non-zero exit → run_agent_in_subprocess(raise_on_error=True) raises →

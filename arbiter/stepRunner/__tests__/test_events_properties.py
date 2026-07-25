@@ -117,6 +117,30 @@ class TestPublishNodeCompletedEvent:
         assert detail['output'] == {'result': 'success'}
         assert detail['correlationId'] == 'exec-002'
         assert 'timestamp' in detail
+        # Additive: usage omitted by this call — no 'usage' key present,
+        # byte-identical to the pre-rollup-feature detail shape.
+        assert 'usage' not in detail
+
+    def test_publish_node_completed_with_usage_adds_top_level_usage_key(self, mock_eb_client):
+        """Usage rollup hop (additive): passing usage=[...] adds a top-level
+        'usage' key to the detail, mirroring the worker's producer shape."""
+        from events import publish_node_completed
+
+        usage = [{'inputTokens': 3, 'outputTokens': 4}]
+        publish_node_completed(
+            execution_id='exec-003',
+            workflow_id='wf-003',
+            node_id='node-B',
+            agent_id='agent-2',
+            completed_at='2025-01-01T00:06:00Z',
+            output={'result': 'success'},
+            usage=usage,
+        )
+
+        call_args = mock_eb_client.put_events.call_args
+        entries = call_args[1].get('Entries') or call_args.kwargs.get('Entries')
+        detail = json.loads(entries[0]['Detail'])
+        assert detail['usage'] == usage
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from dag import (
 from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
+from common.usage import aggregate_usage, parse_usage_array
 
 # DynamoDB table names from environment
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'citadel-workflows-dev')
@@ -288,16 +289,28 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
     )
 
 
-def handle_node_completion(execution_id: str, node_id: str, output: dict) -> None:
+def handle_node_completion(execution_id: str, node_id: str, output: dict, usage: list | None = None) -> None:
     """Handle a completed node and advance the workflow.
 
-    1. Update node status → completed in DynamoDB
+    1. Update node status → completed in DynamoDB (same call also persists
+       the sanitized usage array + per-node usage totals — usage rollup hop)
     2. Publish workflow.node.completed event
     3. Evaluate conditional edges on outgoing edges
     4. For conditional edges that evaluate to false → mark downstream as skipped
     5. For convergence nodes → check if all predecessors complete
     6. Invoke ready nodes
     7. If all nodes complete → mark execution completed
+
+    ``usage`` is additive and optional: a list of worker usage records for
+    this node (the caller — ``index.handler`` — extracts it from the
+    event's top-level ``usage`` key, falling back to ``output['usage']``).
+    When omitted, this function itself falls back to ``output.get('usage',
+    [])`` so a direct caller need not duplicate that fallback. Sanitized via
+    ``parse_usage_array``/``aggregate_usage`` — malformed usage degrades to
+    empty totals rather than raising. Persisted as a per-node SET (never an
+    ADD) in the SAME update_item call that marks the node completed, so a
+    duplicate delivery guarded by the status check below writes it at most
+    once, and even an unguarded re-write is byte-identical (last-write-wins).
     """
     execution = _load_execution(execution_id)
     if not execution:
@@ -326,17 +339,42 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict) -> Non
 
     now = _now_iso()
 
-    # Update node to completed
+    # Usage rollup: sanitize the caller-supplied usage array (falling back to
+    # output['usage'] when the caller omitted it) and compute this node's
+    # totals. Both are defensive — malformed input degrades to [] / all-zero
+    # totals rather than raising, so usage processing can never fail the
+    # workflow.
+    sanitized_usage = parse_usage_array(usage if usage is not None else output.get('usage', []))
+    node_usage_totals = aggregate_usage(sanitized_usage)
+
+    # Update node to completed. The usage + usageTotals SET rides in the SAME
+    # update_item call as status/completedAt/output — never a second call,
+    # never an ADD — so reprocessing (if the guard above were ever bypassed)
+    # writes the identical bytes under the same nodeResults[node_id] key.
     _executions_table.update_item(
         Key={'executionId': execution_id},
-        UpdateExpression='SET nodeResults.#nid.#status = :status, nodeResults.#nid.#completedAt = :completedAt, nodeResults.#nid.#output = :output',
+        UpdateExpression=(
+            'SET nodeResults.#nid.#status = :status, '
+            'nodeResults.#nid.#completedAt = :completedAt, '
+            'nodeResults.#nid.#output = :output, '
+            'nodeResults.#nid.#usage = :usage, '
+            'nodeResults.#nid.#usageTotals = :usageTotals'
+        ),
         ExpressionAttributeNames={
             '#nid': node_id,
             '#status': 'status',
             '#completedAt': 'completedAt',
             '#output': 'output',
+            '#usage': 'usage',
+            '#usageTotals': 'usageTotals',
         },
-        ExpressionAttributeValues={':status': 'completed', ':completedAt': now, ':output': output},
+        ExpressionAttributeValues={
+            ':status': 'completed',
+            ':completedAt': now,
+            ':output': output,
+            ':usage': sanitized_usage,
+            ':usageTotals': node_usage_totals,
+        },
     )
 
     # Best-effort telemetry (WF-053). A metric or log failure must never break
