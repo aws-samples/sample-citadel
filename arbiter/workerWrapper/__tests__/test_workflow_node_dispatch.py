@@ -77,7 +77,10 @@ class TestWorkflowNodeRouting:
         assert detail['workflowId'] == 'wf-1'
         assert detail['agentId'] == 'agent-A'
         assert detail['status'] == 'completed'
-        assert detail['output'] == {'response': 'done'}
+        # output gained an additive 'usage' key (empty here since the mocked
+        # subprocess stdout carries no usage array); 'response' is unchanged.
+        assert detail['output']['response'] == 'done'
+        assert detail['output']['usage'] == []
 
     def test_node_message_subprocess_failure_emits_node_failed(self):
         # Non-zero exit → run_agent_in_subprocess(raise_on_error=True) raises →

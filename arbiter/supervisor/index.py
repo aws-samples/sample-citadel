@@ -71,6 +71,15 @@ if _arbiter_dir not in sys.path:
 from common.region import cross_region_prefix
 from model_config_loader import load_model_id
 
+# Shared usage-record schema/helpers (arbiter/common/usage.py). arbiter/ is
+# already on sys.path (inserted above for the governance package import), so
+# this resolves the same way as ``common.region``/``common.workflow_contract``
+# elsewhere in the codebase. Kept as a hard import (not defensively guarded)
+# because ``arbiter/common/`` ships alongside the supervisor Lambda asset
+# today — unlike workerWrapper's deferred-bundling situation for
+# ``tools_config``/``workflow_contract``.
+from common.usage import build_usage_record, extract_converse_usage
+
 
 def _load_governance_package():
     """Load ``arbiter/governance/`` as a package under a private name.
@@ -326,6 +335,7 @@ def governed_process_agent_call(
     agent_input: Any,
     agent_use_id: str,
     app_id: str | None = None,
+    supervisor_usage: dict | None = None,
 ) -> Any:
     """Control-surface wrapper around ``process_agent_call`` (US-ARB-008).
 
@@ -463,13 +473,15 @@ def governed_process_agent_call(
     #    strict: PERMIT -> call, DENY -> block, ESCALATE/HALT -> SNS + block.
     if bypass_override or enforcement_mode in ('permissive', 'shadow'):
         return process_agent_call(
-            agents_config, orchestration, agent_name, agent_input, agent_use_id
+            agents_config, orchestration, agent_name, agent_input, agent_use_id,
+            supervisor_usage=supervisor_usage,
         )
 
     decision = finding.decision
     if decision == ArbitrationDecision.PERMIT:
         return process_agent_call(
-            agents_config, orchestration, agent_name, agent_input, agent_use_id
+            agents_config, orchestration, agent_name, agent_input, agent_use_id,
+            supervisor_usage=supervisor_usage,
         )
     elif decision == ArbitrationDecision.DENY:
         return {
@@ -517,7 +529,7 @@ def _route_escalation(finding) -> None:
         )
 
 
-def process_agent_call(agents_config, orchestration, agent_name, agent_input, agent_use_id):
+def process_agent_call(agents_config, orchestration, agent_name, agent_input, agent_use_id, *, supervisor_usage=None):
     agent_config = next(
         (agent for agent in agents_config['agents'] if agent['name'] == agent_name), None)
 
@@ -534,6 +546,13 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
         "agent_use_id": agent_use_id,
         "node": agent_name
     }
+
+    # Additive: stamp the supervisor's own Converse-call usage record on the
+    # dispatch payload when one was captured. Omitted entirely (not a null
+    # key) when the caller didn't supply one — keeps the payload unchanged
+    # for existing callers/tests.
+    if supervisor_usage is not None:
+        payload['supervisorUsage'] = supervisor_usage
 
     # Activate the per-agent modelOverride binding: resolve the configured
     # model key to a concrete inference-profile id and forward it in the
@@ -593,7 +612,7 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
         return response
 
 
-def invoke_agents_from_conversation(orchestration, agents_config, app_id=None):
+def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, supervisor_usage=None):
     agent_ids = []
     output_message = orchestration["conversation"][-1]
     text_response = None
@@ -614,6 +633,7 @@ def invoke_agents_from_conversation(orchestration, agents_config, app_id=None):
                 tool_use['input'],
                 tool_use['toolUseId'],
                 app_id=app_id if app_id is not None else orchestration.get('app_id'),
+                supervisor_usage=supervisor_usage,
             )
             print(f'Agent call result: {result}')
         elif 'text' in content:
@@ -707,6 +727,7 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
     print(f"Agent specs created: {json.dumps(agent_specs, default=str)}")
     print(f"Calling Bedrock with conversation: {json.dumps(orchestration['conversation'], default=str)}")
 
+    _converse_start = time.perf_counter()
     response = bedrock_circuit_breaker.call(
         bedrock.converse,
         modelId=MODEL_ID,
@@ -721,14 +742,36 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
             "toolChoice": {"auto": {}}
         }
     )
+    _converse_latency_ms = int((time.perf_counter() - _converse_start) * 1000)
 
     print(f"Bedrock response: {json.dumps(response, default=str)}")
     print(f"Response output message: {json.dumps(response['output']['message'], default=str)}")
 
     orchestration["conversation"].append(response['output']['message'])
 
+    # Capture this Converse call's usage as a source='supervisor' record.
+    # extract_converse_usage degrades to (0, 0, None) on a missing/malformed
+    # usage block rather than raising, so a provider response that omits
+    # usage still lets orchestration proceed — just logged as a WARN.
+    input_tokens, output_tokens, total_tokens = extract_converse_usage(response)
+    if 'usage' not in response:
+        logger.warning(
+            'Bedrock Converse response for orchestration %s carried no '
+            'usage block; recording a zeroed supervisor usage record.',
+            orchestration.get('orchestrationId', 'unknown'),
+        )
+    supervisor_usage = build_usage_record(
+        model_id=MODEL_ID,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        latency_ms=_converse_latency_ms,
+        call_index=0,
+        source='supervisor',
+        total_tokens=total_tokens,
+    )
+
     invoke_agents_from_conversation(
-        orchestration, agent_configs, app_id=app_id
+        orchestration, agent_configs, app_id=app_id, supervisor_usage=supervisor_usage
     )
 
     save_orchestration(orchestration=orchestration)
