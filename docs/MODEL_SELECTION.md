@@ -96,6 +96,24 @@ Partition key: `modelKey` (a slug derived from the Bedrock model id).
 | `regionProfiles` | AWSJSON | Map of cross-region prefix → inference-profile id (e.g. `{"us": "...", "global": "..."}`) |
 | `discoveredAt` | String | Timestamp first seen by the sync |
 
+### Pricing metadata
+
+Additive fields on the same catalog row, read by the cost-ledger writer (`backend/src/lambda/cost-ledger-writer.ts`, see [EVENTBRIDGE_CATALOG.md](./EVENTBRIDGE_CATALOG.md#cost-ledger-events-consumer-cost-ledger-writer)) to compute per-invocation token cost. The Bedrock `ListFoundationModels` API does not expose pricing, so these fields are populated by the sync's `PROVIDER_PRICING` overlay (provider-keyed, mirroring `PROVIDER_CAPABILITIES`) or the deployment-time seed — never by the resolver.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `inputPer1kTokens` | Number | List price per 1000 input tokens |
+| `outputPer1kTokens` | Number | List price per 1000 output tokens |
+| `currency` | String | ISO 4217 code, e.g. `USD` |
+| `pricingSource` | String | `seed` \| `synced_default` \| `operator` |
+| `pricingUpdatedAt` | String | ISO 8601 timestamp of the last pricing write |
+
+**Additive-only merge.** `model-catalog-sync.ts` applies the provider default pricing **only when the row has no pricing yet** — exactly like the existing operator-`status` preservation (`{...existing, ...apiDerived, status: existing.status}`): a row with any usable pricing (all three of `inputPer1kTokens`/`outputPer1kTokens`/`currency` present) keeps its values untouched on every subsequent sync, and `pricingSource` is left as `'operator'` rather than being overwritten to `'synced_default'`. Newly-discovered rows and the deployment seed get `pricingSource: 'synced_default'` / `'seed'` respectively.
+
+**No mutation added this story.** `listModelCatalog` passes pricing fields through verbatim (interface passthrough only — `ModelCatalogEntry` in `model-config-resolver.ts` was extended with the five optional fields above). An operator-facing `updateModelPricing` mutation to edit pricing directly through the GraphQL API is a **deferred follow-up**; until it lands, pricing is set by the seed, the sync overlay, or a direct edit of the catalog row.
+
+**Unpriced policy.** The cost-ledger writer never fabricates a price: a model absent from the catalog, or present without a complete pricing set, produces `priced:false` with null cost fields rather than a guessed value — see [EVENTBRIDGE_CATALOG.md](./EVENTBRIDGE_CATALOG.md#pricing-resolution-per-row) for the full policy.
+
 ### `citadel-model-config-{env}` — resolved defaults & overrides
 
 Partition key: `scope` (the platform-wide row uses `scope = "platform"`).

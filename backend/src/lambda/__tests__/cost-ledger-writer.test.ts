@@ -204,3 +204,162 @@ describe("cost-ledger-writer (pass 1 — usage-only rows)", () => {
 // keep the exported error class referenced so an unused-import lint rule
 // doesn't flag it if a future test needs to construct one directly.
 void ConditionalCheckFailedError;
+
+describe("cost-ledger-writer (pass 2 — pricing + decomposition)", () => {
+  beforeEach(() => {
+    ddbMock.reset();
+    ddbMock.onAnyCommand().resolves({});
+  });
+
+  test("priced row: GetItem resolves catalog pricing, cost is computed and populated", async () => {
+    const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        modelKey: "anthropic-claude-sonnet-5",
+        inputPer1kTokens: 3,
+        outputPer1kTokens: 15,
+        currency: "USD",
+      },
+    });
+
+    await handler(intakeUsageEvent());
+
+    const putCalls = ddbMock.commandCalls(
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+    );
+    const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.priced).toBe(true);
+    // intakeUsageEvent: inputTokens 10, outputTokens 5 @ $3/$15 per 1k
+    // = 10/1000*3 + 5/1000*15 = 0.03 + 0.075 = 0.105
+    expect(item.tokenCost).toBeCloseTo(0.105, 8);
+    expect(item.costMicros).toBe(105000);
+    expect(item.currency).toBe("USD");
+    expect(item.estimate).toBe(true);
+  });
+
+  test("priced row: decomposition shape has tokenCost populated, compute/idle/memory null, runtimeComponentsPending true", async () => {
+    const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        modelKey: "anthropic-claude-sonnet-5",
+        inputPer1kTokens: 3,
+        outputPer1kTokens: 15,
+        currency: "USD",
+      },
+    });
+
+    await handler(intakeUsageEvent());
+
+    const putCalls = ddbMock.commandCalls(
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+    );
+    const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    const decomp = item.decomposition as Record<string, unknown>;
+    expect(decomp.currency).toBe("USD");
+    expect(decomp.tokenCost).toBeCloseTo(0.105, 8);
+    expect(decomp.compute).toBeNull();
+    expect(decomp.idle).toBeNull();
+    expect(decomp.memory).toBeNull();
+    expect(decomp.runtimeComponentsPending).toBe(true);
+  });
+
+  test("unpriced row: model not in catalog (GetItem returns no Item) → still written, priced:false, unpricedReason set", async () => {
+    const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock.on(GetCommand).resolves({});
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    await handler(intakeUsageEvent());
+
+    const putCalls = ddbMock.commandCalls(
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+    );
+    expect(putCalls).toHaveLength(1); // never dropped
+    const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.priced).toBe(false);
+    expect(item.tokenCost).toBeNull();
+    expect(item.costMicros).toBeNull();
+    expect(item.unpricedReason).toBe("model_not_in_catalog");
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  test("unpriced row: catalog row exists but lacks pricing fields → still written, priced:false, reason pricing_absent", async () => {
+    const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock.on(GetCommand).resolves({
+      Item: { modelKey: "anthropic-claude-sonnet-5", status: "enabled" },
+    });
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    await handler(intakeUsageEvent());
+
+    const putCalls = ddbMock.commandCalls(
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+    );
+    expect(putCalls).toHaveLength(1);
+    const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.priced).toBe(false);
+    expect(item.unpricedReason).toBe("pricing_absent");
+    warnSpy.mockRestore();
+  });
+
+  test("catalog-read failure: GetItem throws → row STILL written unpriced and logged, never dropped", async () => {
+    const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock
+      .on(GetCommand)
+      .rejects(new Error("ProvisionedThroughputExceededException"));
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(handler(intakeUsageEvent())).resolves.not.toThrow();
+
+    const putCalls = ddbMock.commandCalls(
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+    );
+    expect(putCalls).toHaveLength(1); // never dropped despite catalog-read failure
+    const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.priced).toBe(false);
+    expect(item.tokenCost).toBeNull();
+    expect(item.unpricedReason).toBe("pricing_absent");
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  test("modelKey is resolved from the raw modelId using the same slug logic as catalog sync", async () => {
+    const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        modelKey: "anthropic-claude-sonnet-5",
+        inputPer1kTokens: 1,
+        outputPer1kTokens: 2,
+        currency: "USD",
+      },
+    });
+
+    await handler(intakeUsageEvent()); // modelId: "anthropic.claude-sonnet-5"
+
+    const getCalls = ddbMock.commandCalls(GetCommand);
+    expect(getCalls[0].args[0].input.Key).toEqual({
+      modelKey: "anthropic-claude-sonnet-5",
+    });
+  });
+
+  test("multiple usage records in one event each resolve pricing independently", async () => {
+    const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        modelKey: "anthropic-claude-sonnet-5",
+        inputPer1kTokens: 1,
+        outputPer1kTokens: 1,
+        currency: "USD",
+      },
+    });
+
+    await handler(workflowNodeCompletedEvent());
+
+    const putCalls = ddbMock.commandCalls(
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+    );
+    expect(putCalls).toHaveLength(1);
+    const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.priced).toBe(true);
+  });
+});

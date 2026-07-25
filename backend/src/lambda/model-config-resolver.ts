@@ -1,7 +1,12 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { isAdminFromEvent } from '../utils/auth-event';
-import { publishEvent, createProjectEvent, EventTypes } from '../utils/events';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { isAdminFromEvent } from "../utils/auth-event";
+import { publishEvent, createProjectEvent, EventTypes } from "../utils/events";
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -12,9 +17,14 @@ const MODEL_CATALOG_TABLE = process.env.MODEL_CATALOG_TABLE!;
 // Enum-ish value sets are enforced in-code. This resolver is DATA-DRIVEN: the
 // set of valid models lives entirely in the catalog table — there are no
 // hardcoded model-id literals anywhere in this file.
-const VALID_STATUS = new Set(['enabled', 'disabled', 'deprecated', 'discovered']);
-const VALID_LOCALITY = new Set(['off', 'regional_preferred', 'strict']);
-const DEFAULT_SCOPE = 'platform';
+const VALID_STATUS = new Set([
+  "enabled",
+  "disabled",
+  "deprecated",
+  "discovered",
+]);
+const VALID_LOCALITY = new Set(["off", "regional_preferred", "strict"]);
+const DEFAULT_SCOPE = "platform";
 
 interface ModelCatalogEntry {
   modelKey: string;
@@ -27,6 +37,13 @@ interface ModelCatalogEntry {
   supportsSystemPrompt: boolean;
   supportsStreaming: boolean;
   regionProfiles?: unknown;
+  // Pricing metadata (additive, pass 2) — read-through only, no mutation
+  // added this story. Absent on rows that have never been priced.
+  inputPer1kTokens?: number;
+  outputPer1kTokens?: number;
+  currency?: string;
+  pricingSource?: "seed" | "synced_default" | "operator";
+  pricingUpdatedAt?: string;
 }
 
 interface ModelConfig {
@@ -51,7 +68,11 @@ interface UpdateModelConfigInput {
 /** AppSync event slice this resolver reads. */
 interface ModelConfigResolverEvent {
   info: { fieldName: string };
-  identity?: { username?: string; claims?: { sub?: string }; [claim: string]: unknown };
+  identity?: {
+    username?: string;
+    claims?: { sub?: string };
+    [claim: string]: unknown;
+  };
   arguments: {
     scope?: string;
     modelKey: string;
@@ -61,36 +82,36 @@ interface ModelConfigResolverEvent {
 }
 
 export const handler = async (event: ModelConfigResolverEvent) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log("Event:", JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
 
   try {
     switch (fieldName) {
-      case 'listModelCatalog':
+      case "listModelCatalog":
         return await listModelCatalog();
 
-      case 'getModelConfig':
+      case "getModelConfig":
         return await getModelConfig(event.arguments?.scope);
 
-      case 'updateModelConfig':
+      case "updateModelConfig":
         return await updateModelConfig(event.arguments.input, event);
 
-      case 'setModelCatalogEntryStatus':
+      case "setModelCatalogEntryStatus":
         return await setModelCatalogEntryStatus(
           event.arguments.modelKey,
           event.arguments.status,
           event,
         );
 
-      case 'syncModelCatalog':
+      case "syncModelCatalog":
         return await syncModelCatalog(event);
 
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
   } catch (error) {
-    console.error('Error:', error);
+    console.error("Error:", error);
     throw error;
   }
 };
@@ -128,7 +149,7 @@ async function getModelConfig(scope?: string): Promise<ModelConfig> {
       slotDefaults: {},
       orgDefaults: {},
       agentOverrides: {},
-      localityMode: 'off',
+      localityMode: "off",
     };
   }
 
@@ -154,9 +175,12 @@ async function loadCatalog(): Promise<Record<string, ModelCatalogEntry>> {
  * config row, stamps updatedAt/updatedBy, persists it, and emits
  * MODEL_CONFIG_CHANGED.
  */
-async function updateModelConfig(input: UpdateModelConfigInput, event: ModelConfigResolverEvent): Promise<ModelConfig> {
+async function updateModelConfig(
+  input: UpdateModelConfigInput,
+  event: ModelConfigResolverEvent,
+): Promise<ModelConfig> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Only administrators can update model configuration');
+    throw new Error("Only administrators can update model configuration");
   }
 
   if (
@@ -173,7 +197,7 @@ async function updateModelConfig(input: UpdateModelConfigInput, event: ModelConf
     if (!entry) {
       throw new Error(`Unknown model: ${key}`);
     }
-    if (entry.status !== 'enabled') {
+    if (entry.status !== "enabled") {
       throw new Error(`Model not enabled: ${key}`);
     }
   };
@@ -185,10 +209,12 @@ async function updateModelConfig(input: UpdateModelConfigInput, event: ModelConf
   let slotDefaults: Record<string, unknown> | undefined;
   if (input.slotDefaults !== undefined && input.slotDefaults !== null) {
     slotDefaults =
-      typeof input.slotDefaults === 'string'
+      typeof input.slotDefaults === "string"
         ? JSON.parse(input.slotDefaults)
         : input.slotDefaults;
-    for (const value of Object.values(slotDefaults as Record<string, unknown>)) {
+    for (const value of Object.values(
+      slotDefaults as Record<string, unknown>,
+    )) {
       assertEnabled(value as string);
     }
   }
@@ -201,18 +227,17 @@ async function updateModelConfig(input: UpdateModelConfigInput, event: ModelConf
       Key: { scope },
     }),
   );
-  const existing: ModelConfig =
-    (existingResult.Item as ModelConfig) || {
-      scope,
-      globalDefaultKey: null,
-      slotDefaults: {},
-      orgDefaults: {},
-      agentOverrides: {},
-      localityMode: 'off',
-    };
+  const existing: ModelConfig = (existingResult.Item as ModelConfig) || {
+    scope,
+    globalDefaultKey: null,
+    slotDefaults: {},
+    orgDefaults: {},
+    agentOverrides: {},
+    localityMode: "off",
+  };
 
   const updatedBy =
-    event.identity?.username || event.identity?.claims?.sub || 'unknown';
+    event.identity?.username || event.identity?.claims?.sub || "unknown";
 
   const merged: ModelConfig = {
     ...existing,
@@ -221,7 +246,8 @@ async function updateModelConfig(input: UpdateModelConfigInput, event: ModelConf
       input.globalDefaultKey !== undefined
         ? input.globalDefaultKey
         : existing.globalDefaultKey,
-    slotDefaults: slotDefaults !== undefined ? slotDefaults : existing.slotDefaults,
+    slotDefaults:
+      slotDefaults !== undefined ? slotDefaults : existing.slotDefaults,
     localityMode:
       input.localityMode !== undefined && input.localityMode !== null
         ? input.localityMode
@@ -259,7 +285,7 @@ async function setModelCatalogEntryStatus(
   event: ModelConfigResolverEvent,
 ): Promise<ModelCatalogEntry> {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Only administrators can update model configuration');
+    throw new Error("Only administrators can update model configuration");
   }
 
   if (!VALID_STATUS.has(status)) {
@@ -292,7 +318,7 @@ async function setModelCatalogEntryStatus(
   await publishEvent(
     createProjectEvent(
       EventTypes.MODEL_CONFIG_CHANGED,
-      'catalog',
+      "catalog",
       { modelKey, status },
       undefined,
     ),
@@ -310,14 +336,14 @@ async function setModelCatalogEntryStatus(
  */
 async function syncModelCatalog(event: ModelConfigResolverEvent) {
   if (!isAdminFromEvent(event)) {
-    throw new Error('Only administrators can trigger a model catalog sync');
+    throw new Error("Only administrators can trigger a model catalog sync");
   }
   const requestedBy =
-    event.identity?.username || event.identity?.claims?.sub || 'unknown';
+    event.identity?.username || event.identity?.claims?.sub || "unknown";
   await publishEvent(
-    createProjectEvent(EventTypes.MODEL_CATALOG_SYNC_REQUESTED, 'catalog', {
+    createProjectEvent(EventTypes.MODEL_CATALOG_SYNC_REQUESTED, "catalog", {
       requestedBy,
     }),
   );
-  return { triggered: true, message: 'Model catalog sync started' };
+  return { triggered: true, message: "Model catalog sync started" };
 }

@@ -17,14 +17,14 @@ import {
   BedrockClient,
   ListFoundationModelsCommand,
   ListInferenceProfilesCommand,
-} from '@aws-sdk/client-bedrock';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+} from "@aws-sdk/client-bedrock";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   ScanCommand,
   PutCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { publishEvent, createProjectEvent, EventTypes } from '../utils/events';
+} from "@aws-sdk/lib-dynamodb";
+import { publishEvent, createProjectEvent, EventTypes } from "../utils/events";
 
 const bedrock = new BedrockClient({});
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -43,15 +43,51 @@ interface ProviderCaps {
  * API-derived fields. Keyed by PROVIDER only — never by model id/family.
  */
 const PROVIDER_CAPABILITIES: Record<string, ProviderCaps> = {
-  anthropic: { supportsTools: true, supportsSystemPrompt: true, supportsConverse: true },
-  mistral: { supportsTools: true, supportsSystemPrompt: true, supportsConverse: true },
-  meta: { supportsTools: true, supportsSystemPrompt: true, supportsConverse: true },
-  amazon: { supportsTools: true, supportsSystemPrompt: true, supportsConverse: true },
-  cohere: { supportsTools: true, supportsSystemPrompt: true, supportsConverse: true },
-  ai21: { supportsTools: true, supportsSystemPrompt: true, supportsConverse: true },
-  openai: { supportsTools: true, supportsSystemPrompt: true, supportsConverse: true },
-  deepseek: { supportsTools: false, supportsSystemPrompt: true, supportsConverse: true },
-  stability: { supportsTools: false, supportsSystemPrompt: false, supportsConverse: false },
+  anthropic: {
+    supportsTools: true,
+    supportsSystemPrompt: true,
+    supportsConverse: true,
+  },
+  mistral: {
+    supportsTools: true,
+    supportsSystemPrompt: true,
+    supportsConverse: true,
+  },
+  meta: {
+    supportsTools: true,
+    supportsSystemPrompt: true,
+    supportsConverse: true,
+  },
+  amazon: {
+    supportsTools: true,
+    supportsSystemPrompt: true,
+    supportsConverse: true,
+  },
+  cohere: {
+    supportsTools: true,
+    supportsSystemPrompt: true,
+    supportsConverse: true,
+  },
+  ai21: {
+    supportsTools: true,
+    supportsSystemPrompt: true,
+    supportsConverse: true,
+  },
+  openai: {
+    supportsTools: true,
+    supportsSystemPrompt: true,
+    supportsConverse: true,
+  },
+  deepseek: {
+    supportsTools: false,
+    supportsSystemPrompt: true,
+    supportsConverse: true,
+  },
+  stability: {
+    supportsTools: false,
+    supportsSystemPrompt: false,
+    supportsConverse: false,
+  },
 };
 
 /** Conservative fallback for providers not in the overlay. */
@@ -61,21 +97,92 @@ const DEFAULT_CAPS: ProviderCaps = {
   supportsConverse: true,
 };
 
+interface ProviderPricing {
+  inputPer1kTokens: number;
+  outputPer1kTokens: number;
+  currency: string;
+}
+
+/**
+ * Pricing overlay keyed by lowercase provider name — mirrors
+ * PROVIDER_CAPABILITIES. The Bedrock ListFoundationModels API does NOT
+ * expose pricing, so this is the sanctioned source of SYNCED DEFAULT list
+ * prices. Applied ONLY when a catalog row has no pricing yet (see the
+ * preserve-like-status merge below) — an operator-set price is never
+ * overwritten by a sync. Values are illustrative list-price placeholders;
+ * operators are expected to correct them via the (deferred) pricing mutation
+ * or by editing the catalog row directly.
+ */
+const PROVIDER_PRICING: Record<string, ProviderPricing> = {
+  anthropic: { inputPer1kTokens: 3, outputPer1kTokens: 15, currency: "USD" },
+  mistral: { inputPer1kTokens: 2, outputPer1kTokens: 6, currency: "USD" },
+  meta: { inputPer1kTokens: 1, outputPer1kTokens: 3, currency: "USD" },
+  amazon: { inputPer1kTokens: 0.8, outputPer1kTokens: 1.6, currency: "USD" },
+  cohere: { inputPer1kTokens: 1.5, outputPer1kTokens: 2, currency: "USD" },
+  ai21: { inputPer1kTokens: 2, outputPer1kTokens: 2, currency: "USD" },
+  openai: { inputPer1kTokens: 5, outputPer1kTokens: 15, currency: "USD" },
+  deepseek: { inputPer1kTokens: 0.5, outputPer1kTokens: 1.5, currency: "USD" },
+  stability: { inputPer1kTokens: 0, outputPer1kTokens: 0, currency: "USD" },
+};
+
+/** Conservative fallback pricing for providers not in the overlay — never left unpriced. */
+const DEFAULT_PRICING: ProviderPricing = {
+  inputPer1kTokens: 1,
+  outputPer1kTokens: 3,
+  currency: "USD",
+};
+
+/** True when a catalog row already carries a complete, usable pricing set. */
+function hasPricing(entry: Record<string, unknown>): boolean {
+  return (
+    typeof entry.inputPer1kTokens === "number" &&
+    typeof entry.outputPer1kTokens === "number" &&
+    typeof entry.currency === "string" &&
+    (entry.currency as string).length > 0
+  );
+}
+
+/**
+ * Additive pricing fields to merge onto a row that has NO pricing yet.
+ * Returns an empty object when the row is already priced (operator or a
+ * prior sync) — the caller spreads this after the operator/existing fields
+ * so preservation is a pure no-op-if-present merge, exactly like `status`.
+ */
+function pricingOverlayFor(
+  provider: string,
+  existing: Record<string, unknown> | undefined,
+  now: string,
+): Partial<
+  ProviderPricing & { pricingSource: string; pricingUpdatedAt: string }
+> {
+  if (existing && hasPricing(existing)) {
+    return {};
+  }
+  const pricing = PROVIDER_PRICING[provider] || DEFAULT_PRICING;
+  return {
+    inputPer1kTokens: pricing.inputPer1kTokens,
+    outputPer1kTokens: pricing.outputPer1kTokens,
+    currency: pricing.currency,
+    pricingSource: "synced_default",
+    pricingUpdatedAt: now,
+  };
+}
+
 /** Derive a stable, slug-like partition key from a raw Bedrock model id. */
-function modelKeyFromId(id: string): string {
+export function modelKeyFromId(id: string): string {
   return id
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 /** Collapse Bedrock output modalities into a single coarse modality bucket. */
 function modalityFrom(outputModalities?: string[]): string {
   const mods = outputModalities || [];
-  if (mods.includes('TEXT')) return 'text';
-  if (mods.includes('EMBEDDING')) return 'embedding';
-  if (mods.includes('IMAGE')) return 'image';
-  return 'other';
+  if (mods.includes("TEXT")) return "text";
+  if (mods.includes("EMBEDDING")) return "embedding";
+  if (mods.includes("IMAGE")) return "image";
+  return "other";
 }
 
 /**
@@ -116,12 +223,12 @@ export async function syncModelCatalog(): Promise<{
   // 3. Map baseModelId -> { regionPrefix -> inferenceProfileId }.
   const regionProfileMap: Record<string, Record<string, string>> = {};
   for (const profile of inferenceProfileSummaries) {
-    const profileId: string = profile.inferenceProfileId || '';
+    const profileId: string = profile.inferenceProfileId || "";
     if (!profileId) continue;
-    const prefix = profileId.split('.')[0];
+    const prefix = profileId.split(".")[0];
     for (const model of profile.models || []) {
-      const modelArn: string = model.modelArn || '';
-      const baseModelId = modelArn.split('foundation-model/')[1];
+      const modelArn: string = model.modelArn || "";
+      const baseModelId = modelArn.split("foundation-model/")[1];
       if (!baseModelId) continue;
       if (!regionProfileMap[baseModelId]) regionProfileMap[baseModelId] = {};
       regionProfileMap[baseModelId][prefix] = profileId;
@@ -156,13 +263,13 @@ export async function syncModelCatalog(): Promise<{
   let deprecated = 0;
 
   for (const summary of modelSummaries) {
-    const modelId = summary.modelId || '';
+    const modelId = summary.modelId || "";
     if (!modelId) continue;
 
     const key = modelKeyFromId(modelId);
     seenKeys.add(key);
 
-    const provider = (summary.providerName || '').toLowerCase();
+    const provider = (summary.providerName || "").toLowerCase();
     const caps = PROVIDER_CAPABILITIES[provider] || DEFAULT_CAPS;
     const modality = modalityFrom(summary.outputModalities);
     const regionProfiles = regionProfileMap[modelId] || {};
@@ -172,7 +279,7 @@ export async function syncModelCatalog(): Promise<{
       provider,
       baseModelId: modelId,
       modality,
-      invocationMode: modality === 'text' ? 'converse' : 'invoke_model',
+      invocationMode: modality === "text" ? "converse" : "invoke_model",
       supportsTools: caps.supportsTools,
       supportsSystemPrompt: caps.supportsSystemPrompt,
       supportsStreaming: !!summary.responseStreamingSupported,
@@ -181,21 +288,30 @@ export async function syncModelCatalog(): Promise<{
 
     const existing = existingByKey[key];
     if (!existing) {
+      const pricingOverlay = pricingOverlayFor(provider, undefined, now);
       await docClient.send(
         new PutCommand({
           TableName: CATALOG_TABLE,
-          Item: { ...apiDerived, status: 'discovered', discoveredAt: now },
+          Item: {
+            ...apiDerived,
+            ...pricingOverlay,
+            status: "discovered",
+            discoveredAt: now,
+          },
         }),
       );
       discovered++;
     } else {
-      // Refresh API-derived metadata but PRESERVE the operator-owned status.
+      // Refresh API-derived metadata but PRESERVE the operator-owned status
+      // and any pricing already present (operator-set or from a prior sync).
+      const pricingOverlay = pricingOverlayFor(provider, existing, now);
       await docClient.send(
         new PutCommand({
           TableName: CATALOG_TABLE,
           Item: {
             ...existing,
             ...apiDerived,
+            ...pricingOverlay,
             status: existing.status,
             discoveredAt: existing.discoveredAt || now,
           },
@@ -207,11 +323,11 @@ export async function syncModelCatalog(): Promise<{
 
   // 6. Deprecate catalog entries Bedrock no longer returns.
   for (const [key, entry] of Object.entries(existingByKey)) {
-    if (!seenKeys.has(key) && entry.status !== 'deprecated') {
+    if (!seenKeys.has(key) && entry.status !== "deprecated") {
       await docClient.send(
         new PutCommand({
           TableName: CATALOG_TABLE,
-          Item: { ...entry, status: 'deprecated' },
+          Item: { ...entry, status: "deprecated" },
         }),
       );
       deprecated++;
@@ -227,7 +343,7 @@ export async function syncModelCatalog(): Promise<{
     syncedAt: now,
   };
   await publishEvent(
-    createProjectEvent(EventTypes.MODEL_CATALOG_SYNCED, 'catalog', summary),
+    createProjectEvent(EventTypes.MODEL_CATALOG_SYNCED, "catalog", summary),
   );
   return summary;
 }
@@ -242,10 +358,10 @@ export const handler = async (): Promise<{
 }> => {
   try {
     const summary = await syncModelCatalog();
-    console.log('[model-catalog-sync] summary:', JSON.stringify(summary));
+    console.log("[model-catalog-sync] summary:", JSON.stringify(summary));
     return { statusCode: 200, body: JSON.stringify(summary) };
   } catch (err) {
-    console.error('model-catalog-sync failed', err);
+    console.error("model-catalog-sync failed", err);
     throw err;
   }
 };

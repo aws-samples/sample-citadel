@@ -10,88 +10,94 @@
  * provider overlay is driven off the separate providerName field.
  */
 
-import { mockClient } from 'aws-sdk-client-mock';
+import { mockClient } from "aws-sdk-client-mock";
 import {
   BedrockClient,
   ListFoundationModelsCommand,
   ListInferenceProfilesCommand,
-} from '@aws-sdk/client-bedrock';
+} from "@aws-sdk/client-bedrock";
 import {
   DynamoDBDocumentClient,
   ScanCommand,
   PutCommand,
-} from '@aws-sdk/lib-dynamodb';
+} from "@aws-sdk/lib-dynamodb";
 
 // Stub only publishEvent; keep createProjectEvent + EventTypes real.
-jest.mock('../../utils/events', () => {
-  const actual = jest.requireActual('../../utils/events');
+jest.mock("../../utils/events", () => {
+  const actual = jest.requireActual("../../utils/events");
   return { ...actual, publishEvent: jest.fn().mockResolvedValue(undefined) };
 });
 
-import { publishEvent, EventTypes } from '../../utils/events';
+import { publishEvent, EventTypes } from "../../utils/events";
 
 const bedrockMock = mockClient(BedrockClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 // SUT reads MODEL_CATALOG_TABLE at module load — import lazily after env is set.
-let syncModelCatalog: typeof import('../model-catalog-sync').syncModelCatalog;
+let syncModelCatalog: typeof import("../model-catalog-sync").syncModelCatalog;
 
 const FOUNDATION_MODELS = [
   // New (not in catalog) + anthropic overlay + region profile target.
   {
-    modelId: 'prov.model-a',
-    providerName: 'Anthropic',
-    outputModalities: ['TEXT'],
+    modelId: "prov.model-a",
+    providerName: "Anthropic",
+    outputModalities: ["TEXT"],
     responseStreamingSupported: true,
   },
   // Existing + cohere overlay; has stale metadata to prove a refresh.
   {
-    modelId: 'prov.model-b',
-    providerName: 'Cohere',
-    outputModalities: ['TEXT'],
+    modelId: "prov.model-b",
+    providerName: "Cohere",
+    outputModalities: ["TEXT"],
     responseStreamingSupported: true,
   },
   // New + stability overlay (tools disabled) + image modality.
   {
-    modelId: 'prov.model-c',
-    providerName: 'Stability',
-    outputModalities: ['IMAGE'],
+    modelId: "prov.model-c",
+    providerName: "Stability",
+    outputModalities: ["IMAGE"],
     responseStreamingSupported: false,
   },
 ];
 
 const INFERENCE_PROFILES = [
   {
-    inferenceProfileId: 'us.prov.model-a',
+    inferenceProfileId: "us.prov.model-a",
     models: [
-      { modelArn: 'arn:aws:bedrock:us-east-1::foundation-model/prov.model-a' },
+      { modelArn: "arn:aws:bedrock:us-east-1::foundation-model/prov.model-a" },
     ],
   },
 ];
 
 const EXISTING_ITEMS = [
   {
-    modelKey: 'prov-model-b',
-    provider: 'cohere',
-    baseModelId: 'prov.model-b',
-    modality: 'other', // stale — should refresh to 'text'
-    status: 'enabled', // operator-owned — must be preserved
-    discoveredAt: '2020-01-01T00:00:00.000Z',
+    modelKey: "prov-model-b",
+    provider: "cohere",
+    baseModelId: "prov.model-b",
+    modality: "other", // stale — should refresh to 'text'
+    status: "enabled", // operator-owned — must be preserved
+    discoveredAt: "2020-01-01T00:00:00.000Z",
     supportsStreaming: false, // stale — should refresh to true
+    // Operator-set pricing — must be preserved verbatim on sync (like status).
+    inputPer1kTokens: 9.99,
+    outputPer1kTokens: 19.99,
+    currency: "EUR",
+    pricingSource: "operator",
+    pricingUpdatedAt: "2021-06-01T00:00:00.000Z",
   },
   {
-    modelKey: 'prov-model-old',
-    provider: 'prov',
-    baseModelId: 'prov.model-old',
-    modality: 'text',
-    status: 'enabled', // present in catalog but absent from API → deprecate
-    discoveredAt: '2019-01-01T00:00:00.000Z',
+    modelKey: "prov-model-old",
+    provider: "prov",
+    baseModelId: "prov.model-old",
+    modality: "text",
+    status: "enabled", // present in catalog but absent from API → deprecate
+    discoveredAt: "2019-01-01T00:00:00.000Z",
   },
 ];
 
 beforeAll(async () => {
-  process.env.MODEL_CATALOG_TABLE = 'citadel-model-catalog-test';
-  ({ syncModelCatalog } = await import('../model-catalog-sync'));
+  process.env.MODEL_CATALOG_TABLE = "citadel-model-catalog-test";
+  ({ syncModelCatalog } = await import("../model-catalog-sync"));
 });
 
 beforeEach(() => {
@@ -119,49 +125,49 @@ function putFor(modelKey: string): Record<string, unknown> {
   return putItems().find((i) => i.modelKey === modelKey)!;
 }
 
-describe('model-catalog-sync', () => {
+describe("model-catalog-sync", () => {
   test('writes a new model with status "discovered"', async () => {
     await syncModelCatalog();
-    const item = putFor('prov-model-a');
+    const item = putFor("prov-model-a");
     expect(item).toBeDefined();
-    expect(item.status).toBe('discovered');
-    expect(item.baseModelId).toBe('prov.model-a');
+    expect(item.status).toBe("discovered");
+    expect(item.baseModelId).toBe("prov.model-a");
     expect(item.discoveredAt).toEqual(expect.any(String));
   });
 
   test('preserves operator status "enabled" while refreshing metadata', async () => {
     await syncModelCatalog();
-    const item = putFor('prov-model-b');
+    const item = putFor("prov-model-b");
     expect(item).toBeDefined();
-    expect(item.status).toBe('enabled'); // preserved, not overwritten
-    expect(item.discoveredAt).toBe('2020-01-01T00:00:00.000Z'); // preserved
-    expect(item.modality).toBe('text'); // refreshed from stale 'other'
+    expect(item.status).toBe("enabled"); // preserved, not overwritten
+    expect(item.discoveredAt).toBe("2020-01-01T00:00:00.000Z"); // preserved
+    expect(item.modality).toBe("text"); // refreshed from stale 'other'
     expect(item.supportsStreaming).toBe(true); // refreshed from stale false
   });
 
   test('marks a catalog entry absent from the API as "deprecated"', async () => {
     await syncModelCatalog();
-    const item = putFor('prov-model-old');
+    const item = putFor("prov-model-old");
     expect(item).toBeDefined();
-    expect(item.status).toBe('deprecated');
+    expect(item.status).toBe("deprecated");
   });
 
   test('maps an "us.<modelId>" inference profile to regionProfiles.us', async () => {
     await syncModelCatalog();
-    const item = putFor('prov-model-a');
-    expect(item.regionProfiles).toEqual({ us: 'us.prov.model-a' });
+    const item = putFor("prov-model-a");
+    expect(item.regionProfiles).toEqual({ us: "us.prov.model-a" });
   });
 
-  test('applies the provider overlay: anthropic tools=true, stability tools=false', async () => {
+  test("applies the provider overlay: anthropic tools=true, stability tools=false", async () => {
     await syncModelCatalog();
-    expect(putFor('prov-model-a').supportsTools).toBe(true);
-    expect(putFor('prov-model-c').supportsTools).toBe(false);
+    expect(putFor("prov-model-a").supportsTools).toBe(true);
+    expect(putFor("prov-model-c").supportsTools).toBe(false);
     // Non-text modality drives invoke_model rather than converse.
-    expect(putFor('prov-model-c').modality).toBe('image');
-    expect(putFor('prov-model-c').invocationMode).toBe('invoke_model');
+    expect(putFor("prov-model-c").modality).toBe("image");
+    expect(putFor("prov-model-c").invocationMode).toBe("invoke_model");
   });
 
-  test('publishes MODEL_CATALOG_SYNCED once with the summary', async () => {
+  test("publishes MODEL_CATALOG_SYNCED once with the summary", async () => {
     const result = await syncModelCatalog();
     expect(result).toEqual({
       discovered: 2,
@@ -174,5 +180,35 @@ describe('model-catalog-sync', () => {
     const arg = (publishEvent as jest.Mock).mock.calls[0][0];
     expect(arg.eventType).toBe(EventTypes.MODEL_CATALOG_SYNCED);
     expect(arg.payload).toEqual(result);
+  });
+});
+
+describe("model-catalog-sync — pricing overlay (pass 2)", () => {
+  test("applies the PROVIDER_PRICING default to a brand-new discovered row (no prior pricing)", async () => {
+    await syncModelCatalog();
+    const item = putFor("prov-model-a"); // provider: anthropic
+    expect(item.inputPer1kTokens).toEqual(expect.any(Number));
+    expect(item.outputPer1kTokens).toEqual(expect.any(Number));
+    expect(item.currency).toEqual(expect.any(String));
+    expect(item.pricingSource).toBe("synced_default");
+    expect(item.pricingUpdatedAt).toEqual(expect.any(String));
+  });
+
+  test("preserves operator-set pricing on an existing row exactly, like status", async () => {
+    await syncModelCatalog();
+    const item = putFor("prov-model-b"); // has operator pricing in EXISTING_ITEMS
+    expect(item.inputPer1kTokens).toBe(9.99);
+    expect(item.outputPer1kTokens).toBe(19.99);
+    expect(item.currency).toBe("EUR");
+    expect(item.pricingSource).toBe("operator");
+    expect(item.pricingUpdatedAt).toBe("2021-06-01T00:00:00.000Z");
+  });
+
+  test("unrecognized provider still gets a pricing default (fallback overlay), never left unpriced", async () => {
+    await syncModelCatalog();
+    const item = putFor("prov-model-c"); // provider: stability
+    expect(item.inputPer1kTokens).toEqual(expect.any(Number));
+    expect(item.outputPer1kTokens).toEqual(expect.any(Number));
+    expect(item.pricingSource).toBe("synced_default");
   });
 });
