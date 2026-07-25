@@ -1,4 +1,45 @@
 """Shared Bedrock Converse response parsing helpers."""
+import logging
+import time
+
+from tools.usage import UsageCallCounter, build_usage_record, extract_converse_usage
+
+logger = logging.getLogger(__name__)
+
+# Monotonic call-index counter shared by every direct bedrock.converse()
+# caller that routes through this module (extract.py, design.py) — mirrors
+# the arbiter convention of a 0-based per-process callIndex.
+_call_counter = UsageCallCounter()
+
+
+def capture_converse_usage(resp: dict, model_id: str, session_id: str, started_at: float | None = None) -> dict:
+    """Build a ``source="intake"`` usage record for a completed
+    ``bedrock.converse()`` call and emit it onto the ``agent_intake.usage``
+    EventBridge namespace, attributed to ``session_id``.
+
+    This is the single shared extraction point for all direct
+    ``bedrock.converse()`` callers (extract.py, design.py) — call it right
+    after ``bedrock.converse()`` returns, alongside ``extract_text``.
+    Defensive by contract: never raises, so a malformed response or an
+    EventBridge publish failure can never break the calling tool's turn.
+    """
+    try:
+        input_tokens, output_tokens = extract_converse_usage(resp)
+        latency_ms = int((time.monotonic() - started_at) * 1000) if started_at is not None else 0
+        record = build_usage_record(
+            model_id=model_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            call_index=_call_counter.next(),
+        )
+        from tools.state import publish_usage_event  # local import avoids a
+        # module-load-time cycle (state.py doesn't import converse_utils).
+        publish_usage_event(session_id, record)
+        return record
+    except Exception as exc:  # noqa: BLE001 — usage capture must never break a turn
+        logger.warning("converse_utils: usage capture failed: %s", exc)
+        return {}
 
 
 def extract_text(resp: dict) -> str:

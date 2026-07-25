@@ -45,7 +45,7 @@ from tools.postfab import (
     generate_process_blueprint, import_blueprint_to_app,
 )
 from tools.state import get_intake_state, update_intake_progress, get_postfab_marker
-from tools.emf import emit_turn_metrics
+from tools.emf import emit_turn_metrics, capture_turn_usage
 from tools.kb import kb_query as _kb_query
 from strands.tools import tool
 
@@ -324,6 +324,13 @@ async def invoke(payload, context: RequestContext):
 
     # One EMF flush per completed turn; emit_turn_metrics never raises.
     emit_turn_metrics(
+        session_id=session_id,
+        turn_duration_ms=(time.monotonic() - turn_start) * 1000.0,
+        agent_result=agent_result,
+    )
+
+    # Per-turn usage capture (source="intake"); never raises.
+    capture_turn_usage(
         session_id=session_id,
         turn_duration_ms=(time.monotonic() - turn_start) * 1000.0,
         agent_result=agent_result,

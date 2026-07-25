@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from strands.tools import tool
 from tools.kb import kb_retrieve, load_json_from_s3, save_json_to_s3
-from tools.converse_utils import extract_text
+from tools.converse_utils import extract_text, capture_converse_usage
 from config import bedrock, AWS_REGION
 from region import cross_region_prefix
 from model_config_loader import load_extraction_model_id
@@ -161,12 +161,14 @@ If the information is clearly present, return: {{"value": "<extracted value>"}}
 If not present or too ambiguous, return: {{"value": null}}
 JSON only, no explanation."""
 
+    started_at = time.monotonic()
     response = bedrock.converse(
         modelId=EXTRACTION_MODEL,
         system=[{'text': EXTRACTION_SYSTEM_PROMPT}],
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
         inferenceConfig={'maxTokens': 256},
     )
+    capture_converse_usage(response, EXTRACTION_MODEL, session_id, started_at)
     raw = extract_text(response)
     # Strip markdown code fences if present
     if raw.startswith('```'):

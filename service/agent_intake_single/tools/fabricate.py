@@ -8,7 +8,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from strands.tools import tool
 from tools.kb import s3_get, s3_put
-from tools.converse_utils import extract_text
+from tools.converse_utils import extract_text, capture_converse_usage
 from config import bedrock, get_agent_model_id
 
 logger = logging.getLogger(__name__)
@@ -220,13 +220,19 @@ def _plain_join(names: list[str]) -> str:
     return ", ".join(quoted[:-1]) + " and " + quoted[-1]
 
 
-def _llm(system: str, user: str, max_tokens: int = 8192) -> str:
+def _llm(system: str, user: str, session_id: str = "", max_tokens: int = 8192) -> str:
+    started_at = time.monotonic()
     resp = bedrock.converse(
         modelId=get_agent_model_id(),
         system=[{"text": system}],
         messages=[{"role": "user", "content": [{"text": user}]}],
         inferenceConfig={"maxTokens": max_tokens},
     )
+    if session_id:
+        try:
+            capture_converse_usage(resp, get_agent_model_id(), session_id, started_at)
+        except Exception as exc:
+            logger.warning("converse_utils: usage capture failed: %s", exc)
     raw = extract_text(resp)
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -235,7 +241,7 @@ def _llm(system: str, user: str, max_tokens: int = 8192) -> str:
     return raw.strip()
 
 
-def _extract_agents(td2_content: str) -> list[dict]:
+def _extract_agents(td2_content: str, session_id: str = "") -> list[dict]:
     """Extract agents from td_2.md. Returns list of {name, spec, requires_external}."""
     raw = _llm(
         "You extract structured data from technical design documents. Return only valid JSON.",
@@ -250,7 +256,8 @@ IMPORTANT: Most agents should be "requires_external": false. An agent that calls
 
 Return ONLY a JSON array, no markdown.
 
-{td2_content}"""
+{td2_content}""",
+        session_id,
     )
     return json.loads(raw)
 
@@ -394,7 +401,7 @@ def plan_fabrication(session_id: str) -> str:
     if not td2:
         return "Error: Agent Definitions (td_2.md) not found. Generate the technical design first."
 
-    needed = _extract_agents(td2)
+    needed = _extract_agents(td2, session_id)
     existing = _get_existing_agents()
 
     plan = []
