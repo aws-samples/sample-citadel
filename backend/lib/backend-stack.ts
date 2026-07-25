@@ -49,6 +49,9 @@ export class BackendStack extends cdk.Stack {
   public readonly adrReopenAttemptsTable: dynamodb.Table;
   public readonly registryArn: string;
   public readonly registryId: string;
+  // Exposed for TelemetryStack (pass-1 cost ledger): the writer Lambda needs
+  // read access to model pricing metadata (pass-2 cost computation).
+  public readonly modelCatalogTable: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props);
@@ -187,13 +190,17 @@ export class BackendStack extends cdk.Stack {
 
     // Model Catalog Table — inventory of invokable foundation models. Additive and
     // not yet wired into any runtime/Lambda env; operators curate rows over time.
-    const modelCatalogTable = new dynamodb.Table(this, "ModelCatalogTable", {
-      tableName: `citadel-model-catalog-${props.environment}`,
-      partitionKey: { name: "modelKey", type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    const modelCatalogTable = (this.modelCatalogTable = new dynamodb.Table(
+      this,
+      "ModelCatalogTable",
+      {
+        tableName: `citadel-model-catalog-${props.environment}`,
+        partitionKey: { name: "modelKey", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    ));
 
     // Model Config Table — resolved model-selection defaults/overrides. Additive and
     // not yet wired into any runtime/Lambda env.
