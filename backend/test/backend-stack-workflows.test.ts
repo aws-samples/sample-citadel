@@ -60,36 +60,10 @@ describe("BackendStack — Workflow/App/Execution Lambda functions and AppSync w
     });
   });
 
-  // --- RegistryAgentRecordResolverFunction (PR 6a rename of the former AgentAppShimResolverFunction) ---
-  describe("RegistryAgentRecordResolverFunction", () => {
-    test("exists with Node.js 24.x runtime, 30s timeout, and correct env vars", () => {
-      template.hasResourceProperties("AWS::Lambda::Function", {
-        Handler: "registry-agent-record-resolver.handler",
-        Runtime: "nodejs24.x",
-        Timeout: 30,
-        Environment: {
-          Variables: Match.objectLike({
-            APPS_TABLE: Match.anyValue(),
-            WORKFLOWS_TABLE: Match.anyValue(),
-            AGENT_CONFIG_TABLE: Match.anyValue(),
-            EVENT_BUS_NAME: Match.anyValue(),
-            USER_POOL_ID: Match.anyValue(),
-          }),
-        },
-      });
-    });
-
-    test("has X-Ray active tracing enabled", () => {
-      const functions = template.findResources("AWS::Lambda::Function", {
-        Properties: { Handler: "registry-agent-record-resolver.handler" },
-      });
-      const logicalId = Object.keys(functions)[0];
-      expect(logicalId).toBeDefined();
-      expect(functions[logicalId].Properties.TracingConfig).toEqual({
-        Mode: "Active",
-      });
-    });
-  });
+  // NOTE: RegistryAgentRecordResolverFunction (+ its App CRUD/API-key/
+  // access-control/metrics resolvers and RegistryAgentRecordLambdaDataSource)
+  // moved to CitadelRegistryStack (backend-stack-split phase 2, decision
+  // 30e6d067). See registry-stack.test.ts for that coverage.
 
   // --- ExecutionResolverFunction ---
   describe("ExecutionResolverFunction", () => {
@@ -157,12 +131,7 @@ describe("BackendStack — Workflow/App/Execution Lambda functions and AppSync w
       });
     });
 
-    test("RegistryAgentRecordLambdaDataSource exists", () => {
-      template.hasResourceProperties("AWS::AppSync::DataSource", {
-        Type: "AWS_LAMBDA",
-        Name: "RegistryAgentRecordLambdaDataSource",
-      });
-    });
+    // NOTE: RegistryAgentRecordLambdaDataSource moved to CitadelRegistryStack.
 
     test("ExecutionLambdaDataSource exists", () => {
       template.hasResourceProperties("AWS::AppSync::DataSource", {
@@ -213,33 +182,10 @@ describe("BackendStack — Workflow/App/Execution Lambda functions and AppSync w
     );
   });
 
-  describe("AppSync Resolvers — App", () => {
-    const appQueryFields = ["getApp", "listApps"];
-    const appMutationFields = [
-      "createApp",
-      "updateApp",
-      "deleteApp",
-      "bindWorkflowToApp",
-      "unbindWorkflowFromApp",
-    ];
-
-    test.each(appQueryFields)("Query resolver for %s exists", (fieldName) => {
-      template.hasResourceProperties("AWS::AppSync::Resolver", {
-        TypeName: "Query",
-        FieldName: fieldName,
-      });
-    });
-
-    test.each(appMutationFields)(
-      "Mutation resolver for %s exists",
-      (fieldName) => {
-        template.hasResourceProperties("AWS::AppSync::Resolver", {
-          TypeName: "Mutation",
-          FieldName: fieldName,
-        });
-      },
-    );
-  });
+  // NOTE: "AppSync Resolvers — App" (getApp/listApps/createApp/updateApp/
+  // deleteApp/bindWorkflowToApp/unbindWorkflowFromApp) moved to
+  // CitadelRegistryStack along with registryAgentRecordResolverFunction.
+  // See registry-stack.test.ts.
 
   describe("AppSync Resolvers — Execution", () => {
     const executionQueryFields = ["getExecution", "listExecutions"];
@@ -285,74 +231,8 @@ describe("BackendStack — Workflow/App/Execution Lambda functions and AppSync w
       });
     });
 
-    test("RegistryAgentRecordResolver is granted EXACTLY cognito-idp:AdminGetUser, scoped to the concrete UserPool ARN (not a broader/wildcard grant)", () => {
-      // Locate the resolver's own IAM role via its Lambda function properties.
-      const functions = template.findResources("AWS::Lambda::Function", {
-        Properties: { Handler: "registry-agent-record-resolver.handler" },
-      });
-      const fnLogicalId = Object.keys(functions)[0];
-      expect(fnLogicalId).toBeDefined();
-      const roleRef = functions[fnLogicalId].Properties.Role;
-      // Role is always `{ 'Fn::GetAtt': [ '<RoleLogicalId>', 'Arn' ] }`.
-      const roleLogicalId = roleRef?.["Fn::GetAtt"]?.[0];
-      expect(roleLogicalId).toBeDefined();
-
-      // Find the IAM::Policy attached to that exact role that grants
-      // cognito-idp:AdminGetUser, and assert the statement is scoped to a
-      // single resource referencing the UserPool construct's Arn — never a
-      // wildcard ('*') and never bundled with a broader/unscoped action
-      // (e.g. ListUsers) in the same statement.
-      const policies = template.findResources("AWS::IAM::Policy");
-      const matchingStatements = Object.values(policies).flatMap((p: any) => {
-        const roles = p.Properties?.Roles || [];
-        const attachedToResolver = roles.some(
-          (r: any) => r?.Ref === roleLogicalId,
-        );
-        if (!attachedToResolver) return [];
-        const statements = p.Properties?.PolicyDocument?.Statement || [];
-        return statements.filter((s: any) => {
-          const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
-          return actions.includes("cognito-idp:AdminGetUser");
-        });
-      });
-
-      expect(matchingStatements.length).toBeGreaterThan(0);
-      for (const statement of matchingStatements) {
-        // Exactly this one action in the statement — not broadened to
-        // ListUsers or any other cognito-idp action.
-        const actions = Array.isArray(statement.Action)
-          ? statement.Action
-          : [statement.Action];
-        expect(actions).toEqual(["cognito-idp:AdminGetUser"]);
-
-        const resources = Array.isArray(statement.Resource)
-          ? statement.Resource
-          : [statement.Resource];
-        // Never a bare wildcard.
-        expect(resources).not.toContain("*");
-        // Scoped to a concrete resource reference (GetAtt/Ref/Fn::Join off
-        // the UserPool construct), not a hand-written ARN string that could
-        // silently drift from the real pool.
-        const isConcreteUserPoolRef = resources.some((r: any) => {
-          if (typeof r === "string") return false; // no literal ARN strings
-          const getAttTarget = r?.["Fn::GetAtt"]?.[0];
-          const joinParts = r?.["Fn::Join"]?.[1];
-          const joinReferencesUserPool =
-            Array.isArray(joinParts) &&
-            joinParts.some(
-              (part: any) =>
-                part?.Ref?.includes("UserPool") ||
-                part?.["Fn::GetAtt"]?.[0]?.includes("UserPool"),
-            );
-          return (
-            (typeof getAttTarget === "string" &&
-              getAttTarget.includes("UserPool")) ||
-            joinReferencesUserPool
-          );
-        });
-        expect(isConcreteUserPoolRef).toBe(true);
-      }
-    });
+    // NOTE: the RegistryAgentRecordResolver-specific cognito-idp:AdminGetUser
+    // scoping test moved to registry-stack.test.ts along with the resolver.
 
     test("WorkflowProgressFanout has appsync:GraphQL permission for publishWorkflowProgress", () => {
       // Find all IAM policies and check that one grants appsync:GraphQL

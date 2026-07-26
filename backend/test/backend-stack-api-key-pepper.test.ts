@@ -2,9 +2,8 @@
  * API-key HMAC pepper — infra follow-up.
  *
  * createAppApiKey/rotateAppApiKey (backend/src/lambda/app-api-key-management.ts)
- * are wired into the registry-agent-record-resolver Lambda (see
- * registry-agent-record-resolver.ts imports + the CreateAppApiKeyResolver /
- * RotateAppApiKeyResolver AppSync resolvers in backend-stack.ts). Both
+ * are wired into the registry-agent-record-resolver Lambda, which moved to
+ * CitadelRegistryStack (backend-stack-split phase 2, decision 30e6d067). Both
  * createAppApiKey (new keys) and rotateAppApiKey (rotated keys) call
  * hashApiKey, which reads the pepper via getApiKeyPepper() at
  * `/citadel/${ENVIRONMENT}/app-api-key-pepper`.
@@ -32,15 +31,31 @@ for (const dir of assetDirs) {
 }
 
 import { BackendStack } from "../lib/backend-stack";
+import { RegistryStack } from "../lib/registry-stack";
 
-describe("BackendStack — API-key HMAC pepper wiring (registry-agent-record-resolver)", () => {
+describe("CitadelRegistryStack — API-key HMAC pepper wiring (registry-agent-record-resolver)", () => {
   let template: Template;
 
   beforeAll(() => {
     const app = new cdk.App();
-    const stack = new BackendStack(app, "TestBackendStackApiKeyPepper", {
+    const backendStack = new BackendStack(app, "TestBackendStackApiKeyPepper", {
       environment: "test",
       env: { account: "123456789012", region: "us-east-1" },
+    });
+    const stack = new RegistryStack(app, "TestRegistryStackApiKeyPepper", {
+      environment: "test",
+      env: { account: "123456789012", region: "us-east-1" },
+      appSyncApi: backendStack.appSyncApi,
+      agentEventBus: backendStack.agentEventBus,
+      appsTable: backendStack.appsTable,
+      workflowsTable: backendStack.workflowsTable,
+      agentConfigTable: backendStack.agentConfigTable,
+      modelCatalogTable: backendStack.modelCatalogTable,
+      idempotencyTable: backendStack.idempotencyTable,
+      userPool: backendStack.userPool,
+      registryArn: backendStack.registryArn,
+      registryId: backendStack.registryId,
+      adrsTable: backendStack.adrsTable,
     });
     template = Template.fromStack(stack);
   });

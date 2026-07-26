@@ -6,7 +6,6 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
-import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
@@ -19,7 +18,6 @@ import { Construct } from "constructs";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import { CustomResource, Duration } from "aws-cdk-lib";
 import { NagSuppressions } from "cdk-nag";
-import { buildImportDiscoveryPolicy } from "../src/utils/agent-import-policy";
 
 interface BackendStackProps extends cdk.StackProps {
   environment: string;
@@ -52,6 +50,10 @@ export class BackendStack extends cdk.Stack {
   // Exposed for TelemetryStack (pass-1 cost ledger): the writer Lambda needs
   // read access to model pricing metadata (pass-2 cost computation).
   public readonly modelCatalogTable: dynamodb.Table;
+  // Exposed for ProjectsStack (backend-split phase 1): shared with the
+  // unmoved agentMessageHandlerFunction, so it stays in BackendStack and is
+  // passed to ProjectsStack as a prop rather than moving.
+  public readonly agentStatusTable: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props);
@@ -171,14 +173,21 @@ export class BackendStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
-    const agentStatusTable = new dynamodb.Table(this, "AgentStatusTable", {
-      tableName: `citadel-agent-status-${props.environment}`,
-      partitionKey: { name: "projectId", type: dynamodb.AttributeType.STRING },
-      sortKey: { name: "agentId", type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    const agentStatusTable = (this.agentStatusTable = new dynamodb.Table(
+      this,
+      "AgentStatusTable",
+      {
+        tableName: `citadel-agent-status-${props.environment}`,
+        partitionKey: {
+          name: "projectId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        sortKey: { name: "agentId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    ));
 
     this.agentConfigTable = new dynamodb.Table(this, "AgentConfigTable", {
       tableName: `citadel-agents-${props.environment}`,
@@ -379,85 +388,9 @@ export class BackendStack extends cdk.Stack {
       exportName: `${this.stackName}-RegistryId`,
     });
 
-    // EventBridge rule for Registry change events (sync to DynamoDB cache)
-    const registrySyncRule = new events.Rule(this, "RegistrySyncRule", {
-      description:
-        "Captures AgentCore Registry resource changes for DynamoDB cache sync",
-      eventPattern: {
-        source: ["aws.bedrock-agentcore"],
-        detailType: ["AgentCore Registry Resource Change"],
-        detail: {
-          registryId: [registryId],
-        },
-      },
-    });
-
-    // Dead-letter queue for failed sync events
-    const registrySyncDlq = new sqs.Queue(this, "RegistrySyncDLQ", {
-      queueName: `citadel-registry-sync-dlq-${props.environment}`,
-      retentionPeriod: cdk.Duration.days(14),
-      enforceSSL: true,
-    });
-
-    // Sync Lambda — processes Registry change events into DynamoDB cache
-    const registrySyncLambda = new lambda.Function(this, "RegistrySyncLambda", {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: "registry-sync.handler",
-      code: lambda.Code.fromAsset("dist/lambda"),
-      environment: {
-        AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
-        TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
-        REGISTRY_ID: registryId,
-      },
-      timeout: cdk.Duration.seconds(30),
-      logGroup: new logs.LogGroup(this, "RegistrySyncLambdaLogs", {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
-
-    // Grant Sync Lambda write access to both DynamoDB cache tables
-    this.agentConfigTable.grantReadWriteData(registrySyncLambda);
-    registrySyncLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "dynamodb:GetItem",
-          "dynamodb:PutItem",
-          "dynamodb:DeleteItem",
-        ],
-        resources: [
-          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-tools-${props.environment}`,
-        ],
-      }),
-    );
-
-    // Grant Sync Lambda permission to call Registry APIs
-    registrySyncLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:CreateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
-          "bedrock-agentcore:DeleteRegistryRecord",
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
-        ],
-        resources: [registryArn, `${registryArn}/*`],
-      }),
-    );
-
-    // Grant Sync Lambda permission to send failed events to DLQ
-    registrySyncDlq.grantSendMessages(registrySyncLambda);
-
-    // Wire EventBridge rule → Sync Lambda with DLQ on failure
-    registrySyncRule.addTarget(
-      new targets.LambdaFunction(registrySyncLambda, {
-        deadLetterQueue: registrySyncDlq,
-        retryAttempts: 2,
-      }),
-    );
+    // NOTE: registrySyncRule, registrySyncDlq, and registrySyncLambda moved
+    // to CitadelRegistryStack (backend-stack-split phase 2, decision
+    // 30e6d067).
 
     // --- Scheduled AppsTable #META reconciler -------------------------------
     // Runs the existing reconcile-apps-meta logic in --apply mode every 6
@@ -785,135 +718,13 @@ export class BackendStack extends cdk.Stack {
     });
 
     // Lambda functions for resolvers
-    const projectResolverFunction = new lambda.Function(
-      this,
-      "ProjectResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "project-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          PROJECTS_TABLE: this.projectsTable.tableName,
-          ENVIRONMENT: props.environment,
-          // ADRS_TABLE, EXECUTION_SPECS_TABLE, and
-          // AGENT_DESIGN_ASSESSMENTS_TABLE are injected via addEnvironment()
-          // after their tables are instantiated later in the constructor.
-          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
-          AGENT_STATUS_TABLE: agentStatusTable.tableName,
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-          USER_POOL_ID: this.userPool.userPoolId,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ProjectResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    // Grant Cognito permissions to project resolver
-    projectResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["cognito-idp:AdminGetUser"],
-        resources: [this.userPool.userPoolArn],
-      }),
-    );
-
-    const conversationResolverFunction = new lambda.Function(
-      this,
-      "ConversationResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "conversation-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          PROJECTS_TABLE: this.projectsTable.tableName,
-          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
-          AGENT_STATUS_TABLE: agentStatusTable.tableName,
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ConversationResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    const agentResolverFunction = new lambda.Function(
-      this,
-      "AgentResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "agent-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          PROJECTS_TABLE: this.projectsTable.tableName,
-          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
-          AGENT_STATUS_TABLE: agentStatusTable.tableName,
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "AgentResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    const documentUploadResolverFunction = new lambda.Function(
-      this,
-      "DocumentUploadResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "document-upload-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          DOCUMENT_BUCKET: this.documentBucket.bucketName,
-          KB_ID_PARAM: `/citadel/knowledge-base-id-${props.environment}`,
-          DS_ID_PARAM: `/citadel/knowledge-base-datasource-id-${props.environment}`,
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-          // Source-of-truth jobs table (created in ServicesStack). Referenced by
-          // deterministic name — NOT a cross-stack construct import — because
-          // ServicesStack already depends ON BackendStack (it consumes
-          // props.documentBucket / props.agentEventBus); importing the table
-          // construct here would create a circular stack dependency. The
-          // resolver reads this table first and degrades to a Bedrock KB query
-          // if the var/table is absent.
-          INGESTION_TABLE: `citadel-document-ingestion-${props.environment}`,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "DocumentUploadResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    const documentResolverFunction = new lambda.Function(
-      this,
-      "DocumentResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "document-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          SESSION_BUCKET: `citadel-sessions-${props.environment}-${this.account}-${this.region}`,
-          PDF_GENERATOR_FUNCTION: `citadel-pdf-generator-${props.environment}`,
-        },
-        timeout: cdk.Duration.minutes(6), // PDF generation can take up to 5 min
-        logGroup: new logs.LogGroup(this, "DocumentResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
+    //
+    // NOTE: projectResolverFunction, conversationResolverFunction,
+    // agentResolverFunction, documentUploadResolverFunction, and
+    // documentResolverFunction moved to CitadelProjectsStack in the
+    // backend-stack-split phase 1 (see backend/lib/projects-stack.ts).
+    // agentStatusTable stays here (shared with the unmoved
+    // agentMessageHandlerFunction) and is passed to ProjectsStack as a prop.
     const agentConfigResolverFunction = new lambda.Function(
       this,
       "AgentConfigResolverFunction",
@@ -977,260 +788,13 @@ export class BackendStack extends cdk.Stack {
     this.agentEventBus.grantPutEventsTo(modelConfigResolverFunction);
 
     // Agent Import Resolver - registers externally-owned agents (importAgent
-    // mutation). Same runtime/bundling/env as the agent-config resolver; it
-    // reuses that resolver's RegistryService + import-descriptor validator.
-    const agentImportResolverFunction = new lambda.Function(
-      this,
-      "AgentImportResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "agent-import-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
-          REGISTRY_ENABLED: "true",
-          REGISTRY_ID: registryId,
-          // Best-effort agent.import.{discovered,registered,failed} emission via
-          // backend/src/utils/events.ts (source citadel.backend). Scoped grant below.
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-          // Governance attestation: imported agents request one fabricator
-          // authority unit. AuthorityUnitsTable lives on ArbiterStack; we use the
-          // deterministic table name to avoid a circular cross-stack dep (mirrors
-          // RegistryAgentRecordResolverFunction). Scoped IAM grant below.
-          AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
-          // Phase-2 cross-account INVOKE: the deploying account id powers
-          // isCrossAccountRoleArn so the test-invoke/probe paths detect when an
-          // import candidate's invocation.roleArn lives in a DIFFERENT account and
-          // assume the operator-supplied invoke role (sts:AssumeRole grant below)
-          // instead of using this Lambda's identity. Mirrors the
-          // agent-message-handler + agent-config-resolver.
-          ACCOUNT_ID: this.account,
-          // Tier-3 agent-import B2: the import resolver's proposeAgentManifestTier3
-          // mutation enqueues a `manifest-proposal` job to the Fabricator queue.
-          // The queue is owned by ArbiterStack; we use the deterministic URL
-          // (not fabricatorQueue.queueUrl) to avoid a circular cross-stack
-          // dependency — the SAME no-cross-ref mechanism the fabricator-request
-          // resolver uses. Scoped sqs:SendMessage grant below.
-          FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "AgentImportResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    // Least-privilege: events:PutEvents scoped to the shared agent event bus
-    // ARN, mirroring the other emitting resolvers.
-    this.agentEventBus.grantPutEventsTo(agentImportResolverFunction);
-
-    // Governance attestation: Write access (PutItem/UpdateItem) to the per-env
-    // AuthorityUnitsTable owned by ArbiterStack so an import can grant its
-    // fabricator authority unit. Referenced by explicit ARN pattern to avoid the
-    // circular cross-stack dependency a Table.grantWriteData would introduce —
-    // identical to RegistryAgentRecordResolverFunction's grant.
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
-        resources: [
-          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-authority-units-${props.environment}`,
-        ],
-      }),
-    );
-
-    // Import-side auth-secret storage (US-IMP): a caller may submit a RAW
-    // invocation secret with an imported agent. It is persisted to Secrets
-    // Manager via credential-manager.storeAgentInvocationSecret and the Registry
-    // record stores ONLY the returned secretRef (never the raw value). Least
-    // privilege: WRITE-only (CreateSecret/PutSecretValue/TagResource) scoped to
-    // the agent secret-path convention /citadel/agents/*. No GetSecretValue here.
-    // TODO(agent-import): invoke-side secretRef resolution (GetSecretValue) is a
-    // follow-up on the invoke path (agent-message-handler), not this resolver.
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "secretsmanager:CreateSecret",
-          "secretsmanager:PutSecretValue",
-          "secretsmanager:TagResource",
-        ],
-        resources: [
-          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
-        ],
-      }),
-    );
-
-    // Pre-activation TEST-INVOKE (testImportedAgent): the admin/architect-gated
-    // dry-run actually invokes an operator-supplied import CANDIDATE through the
-    // existing per-protocol adapters and returns a sanitized result WITHOUT
-    // persisting anything. Because the target is operator-supplied/arbitrary,
-    // the invoke actions are scoped to THIS ACCOUNT (never bare '*' where an
-    // account-scoped ARN exists). The residual ':*'/'/*' wildcards are suppressed
-    // (AwsSolutions-IAM5) in bin/app.ts with this justification.
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:InvokeAgentRuntime",
-          "lambda:InvokeFunction",
-          "bedrock:InvokeAgent",
-          "execute-api:Invoke",
-        ],
-        resources: [
-          `arn:aws:bedrock-agentcore:*:${this.account}:runtime/*`,
-          `arn:aws:lambda:*:${this.account}:function:*`,
-          `arn:aws:bedrock:*:${this.account}:agent-alias/*`,
-          `arn:aws:execute-api:*:${this.account}:*`,
-        ],
-      }),
-    );
-    // READ a pre-existing invocation secret for the test-invoke. Scoped to the
-    // agent secret-path convention /citadel/agents/* (the same scope as the
-    // import-time write grant above). A raw inline secret needs no AWS read.
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["secretsmanager:GetSecretValue"],
-        resources: [
-          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/citadel/agents/*`,
-        ],
-      }),
-    );
-
-    // Phase-2 cross-account INVOKE (testImportedAgent / probeAgentCandidate):
-    // when an import candidate's invocation.roleArn is in a DIFFERENT account,
-    // the admin/architect-gated dry-run assumes that operator-supplied invoke
-    // role (reusing vendImportCredentials) and runs the AWS-native protocol
-    // invoke under the assumed credentials. The invoke role is operator-supplied
-    // and may live in ANY account, so the assume cannot be account-scoped; it is
-    // scoped to the cross-account IAM role namespace (arn:aws:iam::*:role/*). The
-    // runtime confused-deputy control is the externalId threaded into the
-    // AssumeRole call — the target role must trust Citadel under sts:ExternalId.
-    // Same-account invokes never assume. The role/* wildcard is suppressed
-    // (AwsSolutions-IAM5) in bin/app.ts. Mirrors the agent-message-handler grant.
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["sts:AssumeRole"],
-        resources: ["arn:aws:iam::*:role/*"],
-      }),
-    );
-
-    // Tier-3 agent-import B2 (proposeAgentManifestTier3): enqueue a
-    // `manifest-proposal` job to the Fabricator queue. Least privilege:
-    // sqs:SendMessage ONLY (the URL is constructed, so no GetQueueUrl is
-    // needed), scoped to the single fully-qualified queue ARN (no wildcard ⇒ no
-    // AwsSolutions-IAM5 nag). Mirrors the fabricator-request resolver's grant
-    // and references the queue by ARN string (not arbiter-stack's queueArn) so
-    // no cross-stack dependency cycle is introduced.
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["sqs:SendMessage"],
-        resources: [
-          `arn:aws:sqs:${this.region}:${this.account}:citadel-fabricator-queue-${props.environment}`,
-        ],
-      }),
-    );
-
-    // ── Agent Import — Manifest RESULT handler (Tier-3 agent import, B1) ─────
-    // Consumes an ASYNC, LLM-proposed manifest from the Fabricator on the shared
-    // agent bus and parks it on the DRAFT import record as UNTRUSTED /
-    // low-confidence / pending-review (NEVER activated). Mirrors the
-    // EventBridge-triggered handler convention: NODEJS_24_X, dist/lambda esbuild
-    // bundle, idempotency table, scoped Registry perms.
-    const agentImportManifestResultHandler = new lambda.Function(
-      this,
-      "AgentImportManifestResultHandler",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "agent-import-manifest-result-handler.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          REGISTRY_ENABLED: "true",
-          REGISTRY_ID: registryId,
-          IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "AgentImportManifestResultHandlerLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    // Idempotency table: dedupe on correlationId||requestId (duplicate emits).
-    this.idempotencyTable.grantReadWriteData(agentImportManifestResultHandler);
-
-    // Least privilege: READ the DRAFT import record and UPDATE only its custom
-    // metadata. NO status/approval/delete/create — this handler never activates
-    // an agent; it only parks a pending-review proposal under
-    // customMetadata.proposedManifest. Scoped to the registry + its records. The
-    // residual ${registryArn}/* wildcard is covered by the stack-level
-    // AwsSolutions-IAM5 suppression (citadel-scoped bedrock-agentcore ARNs).
-    agentImportManifestResultHandler.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-        ],
-        resources: [registryArn, `${registryArn}/*`],
-      }),
-    );
-
-    // EventBridge rule on the shared agent bus: route the proposed/failed
-    // manifest-result detail-types to the handler. Detail-type-only match
-    // mirrors FabricationRegistrationRule. This is the CONTRACT anchor — B2 and
-    // the arbiter Fabricator branch MUST emit these detail-types on this bus.
-    const agentImportManifestResultRule = new events.Rule(
-      this,
-      "AgentImportManifestResultRule",
-      {
-        eventBus: this.agentEventBus,
-        ruleName: `citadel-agent-import-manifest-result-${props.environment}`,
-        description:
-          "Routes async LLM-proposed agent-import manifest results (proposed/failed) to the result handler",
-        eventPattern: {
-          detailType: [
-            "agent.import.manifest.proposed",
-            "agent.import.manifest.failed",
-          ],
-        },
-      },
-    );
-    agentImportManifestResultRule.addTarget(
-      new targets.LambdaFunction(agentImportManifestResultHandler, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
-
-    // Agent Code Resolver - for reading/writing agent code from S3
-    const agentCodeResolverFunction = new lambda.Function(
-      this,
-      "AgentCodeResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "agent-code-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          AGENT_BUCKET_NAME: `citadel-code-${props.environment}-${this.account}-${this.region}`,
-          AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "AgentCodeResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
+    // NOTE: agentImportResolverFunction (+ AgentImport data source/resolvers,
+    // all its IAM grants incl. Secrets Manager/STS/gateway-target/ADR write,
+    // and the FABRICATOR_QUEUE_URL sqs:SendMessage grant),
+    // agentImportManifestResultHandler (+ its rule), agentCodeResolverFunction
+    // (+ AgentCode data source/resolvers), fabricatorRequestResolverFunction,
+    // and fabricatorQueueResolverFunction moved to CitadelRegistryStack
+    // (backend-stack-split phase 2, decision 30e6d067).
 
     const toolConfigResolverFunction = new lambda.Function(
       this,
@@ -1252,120 +816,21 @@ export class BackendStack extends cdk.Stack {
       },
     );
 
-    const fabricatorRequestResolverFunction = new lambda.Function(
-      this,
-      "FabricatorRequestResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "fabricator-request-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
-          FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "FabricatorRequestResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    const fabricatorQueueResolverFunction = new lambda.Function(
-      this,
-      "FabricatorQueueResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "fabricator-queue-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
-          FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "FabricatorQueueResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
     // Grant permissions to Lambda functions
-    this.projectsTable.grantReadWriteData(projectResolverFunction);
-    // adrsTable, executionSpecificationsTable, and
-    // agentDesignAssessmentsTable grants are issued after the tables are
-    // instantiated later in the constructor.
-    this.conversationsTable.grantReadWriteData(projectResolverFunction);
-    agentStatusTable.grantReadWriteData(projectResolverFunction);
-
-    this.conversationsTable.grantReadWriteData(conversationResolverFunction);
-    agentStatusTable.grantReadWriteData(conversationResolverFunction);
-    this.projectsTable.grantReadData(conversationResolverFunction);
-
-    agentStatusTable.grantReadWriteData(agentResolverFunction);
-    this.projectsTable.grantReadData(agentResolverFunction);
-
-    // Grant S3 permissions for document upload
-    this.documentBucket.grantPut(documentUploadResolverFunction);
-    this.documentBucket.grantRead(documentUploadResolverFunction);
-    this.documentBucket.grantDelete(documentUploadResolverFunction);
-    documentUploadResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "bedrock:GetKnowledgeBaseDocuments",
-          "bedrock:DeleteKnowledgeBaseDocuments",
-        ],
-        resources: ["*"],
-      }),
-    );
-    documentUploadResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["ssm:GetParameter"],
-        resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/knowledge-base-id-${props.environment}`,
-          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/knowledge-base-datasource-id-${props.environment}`,
-        ],
-      }),
-    );
-    this.agentEventBus.grantPutEventsTo(documentUploadResolverFunction);
-
-    // Read-only access to the authoritative document-ingestion jobs table
-    // (source of truth for per-document ingestion status). The resolver only
-    // READS this table (GetItem on the base table, Query on the base table /
-    // status-index GSI), so grant the minimum required actions. ARNs are built
-    // from account/region/name rather than importing the ServicesStack table
-    // construct, which would create a circular stack dependency (ServicesStack
-    // already depends ON BackendStack).
-    const ingestionTableName = `citadel-document-ingestion-${props.environment}`;
-    const ingestionTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/${ingestionTableName}`;
-    documentUploadResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:GetItem", "dynamodb:Query"],
-        resources: [
-          ingestionTableArn,
-          `${ingestionTableArn}/index/status-index`,
-        ],
-      }),
-    );
+    // NOTE: grants for projectResolverFunction, conversationResolverFunction,
+    // agentResolverFunction, and documentUploadResolverFunction moved to
+    // CitadelProjectsStack (backend-stack-split phase 1).
 
     // ── Durable fabrication-jobs status table ────────────────────────────────
     // Source of truth for per-agent fabrication status, replacing the old
     // SQS-peek queue read. Owned HERE in BackendStack because it is the
     // dependency root (services→backend, arbiter→services→backend): owning it
-    // here lets the two fabricator resolvers below use scoped grants, ensures
-    // the table is provisioned before any cross-stack writer (the services
-    // intake runtime and the arbiter fabricator Lambda) deploys, and makes a
-    // circular stack dependency impossible because those stacks reference the
-    // table only by deterministic name + constructed ARN.
+    // here lets the fabricator resolvers (now in CitadelRegistryStack) use
+    // scoped grants via deterministic ARN, ensures the table is provisioned
+    // before any cross-stack writer (the services intake runtime and the
+    // arbiter fabricator Lambda) deploys, and makes a circular stack
+    // dependency impossible because those stacks reference the table only by
+    // deterministic name + constructed ARN.
     // PK orchestrationId (intake session id, or '0' for direct UI requests) /
     // SK agentUseId (agent name / requestId). On-demand + PITR per conventions;
     // a `ttl` attribute (epoch seconds, ~7 days) keeps the table self-pruning.
@@ -1382,54 +847,12 @@ export class BackendStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // Grants use the deterministic name + constructed ARN so the wiring is
-    // uniform with the cross-stack writers in ServicesStack / ArbiterStack,
-    // which cannot import this construct without a circular dependency. Least
-    // privilege: the request resolver only writes PENDING rows; the queue
-    // resolver only reads (Query for a given project, Scan otherwise).
-    const fabricationJobsTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-fabrication-jobs-${props.environment}`;
-    fabricatorRequestResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:PutItem"],
-        resources: [fabricationJobsTableArn],
-      }),
-    );
-    fabricatorQueueResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:Query", "dynamodb:Scan"],
-        resources: [fabricationJobsTableArn],
-      }),
-    );
+    // NOTE: fabricatorRequestResolverFunction/fabricatorQueueResolverFunction
+    // grants against FabricationJobsTable (by deterministic ARN) now live in
+    // CitadelRegistryStack, following the exact same no-cross-ref pattern.
 
-    // Grant S3 + Lambda permissions for document resolver
-    const sessionBucketArn = `arn:aws:s3:::citadel-sessions-${props.environment}-${this.account}-${this.region}`;
-    documentResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "s3:GetObject",
-          "s3:ListBucket",
-          "s3:ListBucketVersions",
-          "s3:GetObjectVersion",
-        ],
-        resources: [sessionBucketArn, `${sessionBucketArn}/*`],
-      }),
-    );
-    documentResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["s3:PutObject"],
-        resources: [`${sessionBucketArn}/*`],
-      }),
-    );
-    documentResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["lambda:InvokeFunction"],
-        resources: [
-          `arn:aws:lambda:${this.region}:${this.account}:function:citadel-pdf-generator-${props.environment}`,
-        ],
-      }),
-    );
+    // NOTE: documentResolverFunction's S3 session-bucket + pdf-generator
+    // invoke grants moved to CitadelProjectsStack along with the function.
 
     // Grant permissions for agent config
     this.agentConfigTable.grantReadWriteData(agentConfigResolverFunction);
@@ -1523,95 +946,10 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
-    // Grant permissions for agent import (same DynamoDB + Registry grants as
-    // agent-config-resolver; the import resolver reuses RegistryService).
-    this.agentConfigTable.grantReadWriteData(agentImportResolverFunction);
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:CreateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
-          "bedrock-agentcore:SubmitRegistryRecordForApproval",
-          "bedrock-agentcore:DeleteRegistryRecord",
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
-        ],
-        resources: [registryArn, `${registryArn}/*`],
-      }),
-    );
-
-    // Grant read-only discovery permissions for the discoverAgents /
-    // describeAgentCandidate queries. buildImportDiscoveryPolicy() is the
-    // single source of truth for the List/Describe/Get actions across the
-    // phase-1 substrates (lambda, bedrock, bedrock-agentcore, ecs, ec2, eks,
-    // apigateway, tag). These are read-only and use Resource '*' (List/Describe
-    // has no resource-level scoping); the cdk-nag IAM5 finding on this role's
-    // DefaultPolicy is suppressed with that justification in bin/app.ts.
-    for (const statement of buildImportDiscoveryPolicy().Statement) {
-      agentImportResolverFunction.addToRolePolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: statement.Action,
-          resources: statement.Resource,
-        }),
-      );
-    }
-
-    // US-IMP-018 (ECS) + US-IMP-019 (EKS) + US-IMP-020 (EC2): three DISCOVERY
-    // SUBSTRATES that resolve an agent's HTTP endpoint via a load balancer. ECS
-    // follows its service's target group (loadBalancers -> targetGroupArn ->
-    // DescribeTargetGroups -> LoadBalancerArns -> DescribeLoadBalancers ->
-    // DNSName); EKS enumerates load balancers and matches one tagged for the
-    // cluster (DescribeLoadBalancers + DescribeTags -> kubernetes.io/cluster/
-    // <name>=owned|shared or elbv2.k8s.aws/cluster=<name> -> DNSName); EC2
-    // enumerates target groups and matches one the instance is a REGISTERED
-    // target of (DescribeTargetGroups -> DescribeTargetHealth match on the
-    // InstanceId -> DescribeLoadBalancers -> DNSName). The ECS reads
-    // (ecs:ListClusters/ListServices/DescribeServices/DescribeTaskDefinition),
-    // the EKS reads (eks:ListClusters/eks:DescribeCluster) and the EC2 reads
-    // (ec2:DescribeInstances/DescribeTags) are ALREADY granted by
-    // buildImportDiscoveryPolicy() above; this adds the companion read-only ELBv2
-    // Describe actions (DescribeTags is required by the EKS LB->cluster match;
-    // DescribeTargetHealth by the EC2 instance->target-group match). All four
-    // ELBv2 calls are List/Describe-class reads with no resource-level scoping,
-    // so Resource '*' (the cdk-nag IAM5 finding on this role's DefaultPolicy is
-    // suppressed with the read-only ECS/ELB discovery justification in
-    // bin/app.ts).
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "elasticloadbalancing:DescribeTargetGroups",
-          "elasticloadbalancing:DescribeTargetHealth",
-          "elasticloadbalancing:DescribeLoadBalancers",
-          "elasticloadbalancing:DescribeTags",
-        ],
-        resources: ["*"],
-      }),
-    );
-
-    // Grant S3 permissions for agent code
-    // The bucket is created in the arbiter stack, so we grant permissions by ARN
-    agentCodeResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:GetObjectVersion",
-          "s3:ListBucket",
-        ],
-        resources: [
-          `arn:aws:s3:::citadel-code-${props.environment}-${this.account}-${this.region}`,
-          `arn:aws:s3:::citadel-code-${props.environment}-${this.account}-${this.region}/agents/*`,
-        ],
-      }),
-    );
-
-    // Grant DynamoDB read permissions to get agent config (for filename)
-    this.agentConfigTable.grantReadData(agentCodeResolverFunction);
+    // NOTE: agentImportResolverFunction's registry-CRUD/discovery/ELB grants,
+    // agentCodeResolverFunction's S3/DynamoDB grants, and
+    // fabricatorRequestResolverFunction/fabricatorQueueResolverFunction's SQS
+    // grants moved to CitadelRegistryStack (backend-stack-split phase 2).
 
     // Grant permissions for tool config
     toolConfigResolverFunction.addToRolePolicy(
@@ -1643,28 +981,6 @@ export class BackendStack extends cdk.Stack {
           "bedrock-agentcore:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
-      }),
-    );
-
-    // Grant permissions for fabricator request
-    fabricatorRequestResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["sqs:SendMessage", "sqs:GetQueueUrl"],
-        resources: [
-          `arn:aws:sqs:${this.region}:${this.account}:citadel-fabricator-queue-${props.environment}`,
-        ],
-      }),
-    );
-
-    // Grant permissions for fabricator queue query
-    fabricatorQueueResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["sqs:ReceiveMessage", "sqs:GetQueueAttributes"],
-        resources: [
-          `arn:aws:sqs:${this.region}:${this.account}:citadel-fabricator-queue-${props.environment}`,
-        ],
       }),
     );
 
@@ -1992,64 +1308,11 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
-    // ── US-IMP-031: MCP Gateway publish/unpublish for the import resolver ────
-    // The admin/architect-gated publishImportToGateway / unpublishImportFromGateway
-    // mutations publish a PUBLICLY-REACHABLE, governance-ATTESTED, MCP-substrate
-    // imported agent as an `mcpServer` target on the shared AgentCore Gateway and
-    // tear it down. Least-privilege grants MIRRORING the gateway-registration
-    // handler (the only other gateway-target lifecycle path):
-    //   • CreateGatewayTarget / DeleteGatewayTarget on the gateway + its targets.
-    //   • Create/Update/DeleteApiKeyCredentialProvider for API_KEY/BEARER auth
-    //     offload, scoped to the `integration-*` provider namespace the reused
-    //     credential-provider-manager uses (provider integration-<importId>-api-key).
-    //   • ssm:GetParameter on the EXACT gateway-id parameter (owned by
-    //     ServicesStack), resolved at RUNTIME — the same mechanism the
-    //     gateway-registration handler uses; the resolver bridges the value into
-    //     AGENTCORE_GATEWAY_ID for the reused gateway-target-manager delete helper.
-    // GetSecretValue on /citadel/agents/* (the offload secret) is ALREADY granted
-    // by the test-invoke READ grant above (no second grant). The wildcard ARNs
-    // here (bedrock-agentcore gateway/* + credential-provider/integration-*) are
-    // covered by the stack-level IAM5 suppression in bin/app.ts; the SSM ARN is
-    // exact (no wildcard ⇒ no finding).
-    agentImportResolverFunction.addEnvironment(
-      "GATEWAY_ID_PARAM",
-      gatewayIdParamName,
-    );
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:CreateGatewayTarget",
-          "bedrock-agentcore:DeleteGatewayTarget",
-        ],
-        resources: [
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`,
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*/target/*`,
-        ],
-      }),
-    );
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:CreateApiKeyCredentialProvider",
-          "bedrock-agentcore:UpdateApiKeyCredentialProvider",
-          "bedrock-agentcore:DeleteApiKeyCredentialProvider",
-        ],
-        resources: [
-          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:credential-provider/integration-*`,
-        ],
-      }),
-    );
-    agentImportResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["ssm:GetParameter"],
-        resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter${gatewayIdParamName}`,
-        ],
-      }),
-    );
+    // NOTE: US-IMP-031 MCP Gateway publish/unpublish grants for
+    // agentImportResolverFunction (GATEWAY_ID_PARAM env var,
+    // CreateGatewayTarget/DeleteGatewayTarget, API-key credential-provider
+    // lifecycle, gateway-id ssm:GetParameter) moved to CitadelRegistryStack
+    // (backend-stack-split phase 2).
 
     // EventBridge rule for gateway registration
     const gatewayRegistrationRule = new events.Rule(
@@ -2334,9 +1597,8 @@ export class BackendStack extends cdk.Stack {
     seedAdminUserResource.node.addDependency(adminGroup);
 
     // Grant EventBridge permissions
-    this.agentEventBus.grantPutEventsTo(projectResolverFunction);
-    this.agentEventBus.grantPutEventsTo(conversationResolverFunction);
-    this.agentEventBus.grantPutEventsTo(agentResolverFunction);
+    // NOTE: grants for projectResolverFunction, conversationResolverFunction,
+    // and agentResolverFunction moved to CitadelProjectsStack.
     this.agentEventBus.grantPutEventsTo(taskRunnerResolverFunction);
 
     // --- Workflow, App, Execution Resolver Lambdas ---
@@ -2377,154 +1639,10 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
-    // Registry Agent Record Resolver Lambda (registry-native AgentApp-shape
-    // resolver — PR 6a rename of the previous `agent-app-shim-resolver.ts`).
-    const registryAgentRecordResolverFunction = new lambda.Function(
-      this,
-      "RegistryAgentRecordResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "registry-agent-record-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        functionName: `citadel-registry-agent-record-resolver-${props.environment}`,
-        environment: {
-          APPS_TABLE: this.appsTable.tableName,
-          WORKFLOWS_TABLE: this.workflowsTable.tableName,
-          AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-          USER_POOL_ID: this.userPool.userPoolId,
-          REGISTRY_ID: registryId,
-          // US-ARB-014: AuthorityUnitsTable lives on ArbiterStack. We use the
-          // deterministic table name here to avoid a circular cross-stack dep
-          // (ArbiterStack already depends on BackendStack outputs). The IAM
-          // grant below references the table by explicit ARN pattern.
-          AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
-          // Per-agent-binding modelOverride catalog validation
-          // (assertEnabledCatalogModel). Read-only grant below. Non-breaking:
-          // when this env var is unset the resolver treats validation as a
-          // no-op, so non-deploy/test paths are never blocked.
-          MODEL_CATALOG_TABLE: modelCatalogTable.tableName,
-          // API-key HMAC pepper (createAppApiKey/rotateAppApiKey in
-          // app-api-key-management.ts, wired via this resolver): getApiKeyPepper
-          // reads process.env.ENVIRONMENT to build the SSM parameter path.
-          ENVIRONMENT: props.environment,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "RegistryAgentRecordResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    // Registry Agent Record Resolver IAM — least-privilege per design 8.2
-    this.appsTable.grantReadWriteData(registryAgentRecordResolverFunction);
-    this.workflowsTable.grantReadWriteData(registryAgentRecordResolverFunction);
-    this.agentConfigTable.grantReadData(registryAgentRecordResolverFunction);
-    // Read-only: per-agent-binding modelOverride catalog validation.
-    modelCatalogTable.grantReadData(registryAgentRecordResolverFunction);
-    this.agentEventBus.grantPutEventsTo(registryAgentRecordResolverFunction);
-    // US-ARB-014: Write access (PutItem/UpdateItem) to the per-env AuthorityUnitsTable
-    // owned by ArbiterStack. Referenced by explicit ARN pattern to avoid the
-    // circular cross-stack dependency that a Table.grantWriteData would introduce.
-    registryAgentRecordResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
-        resources: [
-          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-authority-units-${props.environment}`,
-        ],
-      }),
-    );
-    registryAgentRecordResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["cognito-idp:AdminGetUser"],
-        resources: [this.userPool.userPoolArn],
-      }),
-    );
-    // PolicyManager needs IAM permissions to create/delete app-scoped roles (Req 4.3, 4.6)
-    registryAgentRecordResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "iam:CreateRole",
-          "iam:DeleteRole",
-          "iam:PutRolePolicy",
-          "iam:DeleteRolePolicy",
-          "iam:GetRole",
-          "iam:PassRole",
-          "iam:TagRole",
-          "iam:UntagRole",
-        ],
-        resources: [
-          `arn:aws:iam::${this.account}:role/citadel-agent-*`,
-          `arn:aws:iam::${this.account}:role/citadel-agent-*`,
-        ],
-      }),
-    );
-    registryAgentRecordResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["sts:GetCallerIdentity"],
-        resources: ["*"],
-      }),
-    );
-
-    // API key HMAC pepper (getApiKeyPepper/hashApiKey in api-key-hash.ts):
-    // createAppApiKey/rotateAppApiKey hash new/rotated keys with the
-    // server-side pepper. Mirrors the governance-flag ssm:GetParameter grant
-    // pattern above (~lines 1452-1463), plus kms:Decrypt since this
-    // parameter is a SecureString encrypted with the AWS-managed SSM key (no
-    // dedicated CMK exists for this parameter).
-    registryAgentRecordResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["ssm:GetParameter"],
-        resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/${props.environment}/app-api-key-pepper`,
-        ],
-      }),
-    );
-    registryAgentRecordResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["kms:Decrypt"],
-        resources: [`arn:aws:kms:${this.region}:${this.account}:alias/aws/ssm`],
-      }),
-    );
-
-    // Registry API access — registryAgentRecordResolverFunction performs
-    // CRUD on registry records via RegistryService (createResource,
-    // getResource, updateResource, deleteResource, listResources).
-    // Mirrors the policy set used by FabricatorAgent in arbiter-stack.
-    registryAgentRecordResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: [
-          "bedrock-agentcore:CreateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
-          "bedrock-agentcore:SubmitRegistryRecordForApproval",
-          "bedrock-agentcore:DeleteRegistryRecord",
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
-        ],
-        resources: [registryArn, `${registryArn}/*`],
-      }),
-    );
-
-    // NOTE: the intake-orchestration resolver Lambda (the 4 IAM-only intake
-    // post-fabrication mutations) deliberately lives in ServicesStack, next
-    // to the intake runtime it serves, attached to this stack's API via the
-    // L1 CfnDataSource/CfnResolver cross-stack pattern (see arbiter-stack's
-    // governance-ui resolver). BackendStack sits at CloudFormation's
-    // 500-resource ceiling — adding the Lambda + data source + 4 resolvers
-    // here would push it over.
+    // NOTE: registryAgentRecordResolverFunction (the 28-field hot resolver:
+    // App CRUD, workflow binding, config, API-key management, auth config,
+    // access control, metrics) + all its IAM grants moved to
+    // CitadelRegistryStack (backend-stack-split phase 2, decision 30e6d067).
 
     // App Component Registration Handler — subscribes to fabrication events (Req 6.3)
     const appComponentRegistrationHandler = new lambda.Function(
@@ -2922,295 +2040,27 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
-    // Project Progress Updater Lambda
-    const projectProgressUpdater = new lambda.Function(
-      this,
-      "ProjectProgressUpdater",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "project-progress-updater.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          PROJECTS_TABLE: this.projectsTable.tableName,
-          IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ProjectProgressUpdaterLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
+    // NOTE: projectProgressUpdater and assessmentCompletionNotifier moved to
+    // CitadelProjectsStack (backend-stack-split phase 1), along with their
+    // ProgressUpdateRule / AssessmentCompletionRule EventBridge targets.
 
-    this.projectsTable.grantReadWriteData(projectProgressUpdater);
-    this.idempotencyTable.grantReadWriteData(projectProgressUpdater);
-
-    // Assessment Completion Notifier Lambda
-    const assessmentCompletionNotifier = new lambda.Function(
-      this,
-      "AssessmentCompletionNotifier",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "assessment-completion-notifier.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "AssessmentCompletionNotifierLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    this.appSyncApi.grantMutation(
-      assessmentCompletionNotifier,
-      "publishAssessmentCompletion",
-    );
-
-    // Fabrication Event Handler Lambda
-    const fabricationEventHandlerFunction = new lambda.Function(
-      this,
-      "FabricationEventHandlerFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "fabrication-event-handler.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "FabricationEventHandlerFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    // Grant AppSync permissions for fabrication event handler
-    fabricationEventHandlerFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["appsync:GraphQL"],
-        resources: [
-          `${this.appSyncApi.arn}/types/Mutation/fields/publishFabricationEvent`,
-        ],
-      }),
-    );
-
-    // Create AppSync data source for fabrication event handler
-    const fabricationEventLambdaDataSource =
-      this.appSyncApi.addLambdaDataSource(
-        "FabricationEventLambdaDataSource",
-        fabricationEventHandlerFunction,
-      );
-
-    // EventBridge rule for assessment completion
-    const assessmentCompletionRule = new events.Rule(
-      this,
-      "AssessmentCompletionRule",
-      {
-        eventBus: this.agentEventBus,
-        ruleName: `citadel-assessment-completion-${props.environment}`,
-        description: "Triggers when all assessment dimensions are complete",
-        eventPattern: {
-          detailType: ["assessment.completed"],
-          source: ["citadel.assessment"],
-        },
-      },
-    );
-
-    assessmentCompletionRule.addTarget(
-      new targets.LambdaFunction(assessmentCompletionNotifier, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
-
-    // Design Progress Notifier Lambda
-    const designProgressNotifier = new lambda.Function(
-      this,
-      "DesignProgressNotifier",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "design-progress-notifier.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "DesignProgressNotifierLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    this.appSyncApi.grantMutation(
-      designProgressNotifier,
-      "publishDesignProgress",
-    );
-
-    // EventBridge rule for design progress updates
-    const designProgressRule = new events.Rule(this, "DesignProgressRule", {
-      eventBus: this.agentEventBus,
-      ruleName: `citadel-design-progress-${props.environment}`,
-      description: "Triggers when design section progress is updated",
-      eventPattern: {
-        detailType: ["design.progress.updated"],
-        source: ["agent2.design"],
-      },
-    });
-
-    designProgressRule.addTarget(
-      new targets.LambdaFunction(designProgressNotifier, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
-
-    // Chatter Publisher Lambda - publishes all EventBridge messages to AppSync
-    const chatterPublisherFunction = new lambda.Function(
-      this,
-      "ChatterPublisherFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "chatter-publisher.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ChatterPublisherFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    // Grant AppSync permissions to chatter publisher
-    chatterPublisherFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["appsync:GraphQL"],
-        resources: [
-          `${this.appSyncApi.arn}/types/Mutation/fields/publishChatter`,
-        ],
-      }),
-    );
-
-    // Chatter Resolver Lambda
-    const chatterResolverFunction = new lambda.Function(
-      this,
-      "ChatterResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "chatter-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ChatterResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    // EventBridge rule for ALL agent chatter - captures all messages on the bus
-    const chatterRule = new events.Rule(this, "ChatterRule", {
-      eventBus: this.agentEventBus,
-      ruleName: `citadel-chatter-${props.environment}`,
-      description: "Captures all agent communication for real-time display",
-      // Match all events on this bus by not specifying a pattern
-      eventPattern: {
-        source: [{ prefix: "" }] as any[],
-      },
-    });
-
-    chatterRule.addTarget(
-      new targets.LambdaFunction(chatterPublisherFunction, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
-
-    // EventBridge rule for fabrication events
-    const fabricationEventRule = new events.Rule(this, "FabricationEventRule", {
-      eventBus: this.agentEventBus,
-      ruleName: `citadel-fabrication-${props.environment}`,
-      description: "Captures agent fabrication completion and error events",
-      eventPattern: {
-        source: ["agent.fabricated", "agent.fabrication.failed"],
-      },
-    });
-
-    fabricationEventRule.addTarget(
-      new targets.LambdaFunction(fabricationEventHandlerFunction, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
-
-    // EventBridge rule for progress updates
-    const progressUpdateRule = new events.Rule(this, "ProgressUpdateRule", {
-      eventBus: this.agentEventBus,
-      ruleName: `citadel-progress-update-${props.environment}`,
-      description: "Updates project progress from agent events",
-      eventPattern: {
-        detailType: ["intake.progress.updated"],
-        source: [
-          "agent_intake.assessment",
-          "agent_intake.design",
-          "agent_intake.planning",
-          "agent_intake.implementation",
-        ],
-      },
-    });
-
-    progressUpdateRule.addTarget(
-      new targets.LambdaFunction(projectProgressUpdater, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
+    // NOTE: fabricationEventHandlerFunction (+ its AppSync GraphQL grant,
+    // FabricationEventLambdaDataSource, and FabricationEventRule) moved to
+    // CitadelRegistryStack (backend-stack-split phase 2, decision 30e6d067) —
+    // the rule was left in BackendStack during phase 1 specifically because
+    // its target function moves here, in phase 2.
 
     // Data sources
-    const projectsDataSource = this.appSyncApi.addDynamoDbDataSource(
-      "ProjectsDataSource",
-      this.projectsTable,
-    );
-    const conversationsDataSource = this.appSyncApi.addDynamoDbDataSource(
-      "ConversationsDataSource",
-      this.conversationsTable,
-    );
-    const agentStatusDataSource = this.appSyncApi.addDynamoDbDataSource(
-      "AgentStatusDataSource",
-      agentStatusTable,
-    );
-    const projectLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "ProjectLambdaDataSource",
-      projectResolverFunction,
-    );
-    const conversationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "ConversationLambdaDataSource",
-      conversationResolverFunction,
-    );
-    const agentLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "AgentLambdaDataSource",
-      agentResolverFunction,
-    );
-    const documentUploadLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "DocumentUploadLambdaDataSource",
-      documentUploadResolverFunction,
-    );
-    const documentLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "DocumentLambdaDataSource",
-      documentResolverFunction,
-    );
+    // NOTE: ProjectsDataSource/ConversationsDataSource/AgentStatusDataSource
+    // (unused DynamoDB data sources — no resolver ever attached) and
+    // ProjectLambdaDataSource/ConversationLambdaDataSource/
+    // AgentLambdaDataSource/DocumentUploadLambdaDataSource/
+    // DocumentLambdaDataSource/ChatterLambdaDataSource moved to
+    // CitadelProjectsStack. AgentImportLambdaDataSource/
+    // AgentCodeLambdaDataSource/FabricatorRequestLambdaDataSource/
+    // FabricatorQueueLambdaDataSource/RegistryAgentRecordLambdaDataSource/
+    // FabricationEventLambdaDataSource moved to CitadelRegistryStack
+    // (backend-stack-split phase 2).
     const agentConfigLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentConfigLambdaDataSource",
       agentConfigResolverFunction,
@@ -3219,26 +2069,9 @@ export class BackendStack extends cdk.Stack {
       "ModelConfigLambdaDataSource",
       modelConfigResolverFunction,
     );
-    const agentImportLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "AgentImportLambdaDataSource",
-      agentImportResolverFunction,
-    );
-    const agentCodeLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "AgentCodeLambdaDataSource",
-      agentCodeResolverFunction,
-    );
     const toolConfigLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "ToolConfigLambdaDataSource",
       toolConfigResolverFunction,
-    );
-    const fabricatorRequestLambdaDataSource =
-      this.appSyncApi.addLambdaDataSource(
-        "FabricatorRequestLambdaDataSource",
-        fabricatorRequestResolverFunction,
-      );
-    const fabricatorQueueLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "FabricatorQueueLambdaDataSource",
-      fabricatorQueueResolverFunction,
     );
     const taskRunnerLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "TaskRunnerLambdaDataSource",
@@ -3252,47 +2085,23 @@ export class BackendStack extends cdk.Stack {
       "OrganizationLambdaDataSource",
       organizationResolverFunction,
     );
-    const chatterLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "ChatterLambdaDataSource",
-      chatterResolverFunction,
-    );
+    // NOTE: ChatterLambdaDataSource moved to CitadelProjectsStack.
     const integrationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "IntegrationLambdaDataSource",
       integrationResolverFunction,
     );
 
+    // NOTE: GetProjectResolver, ListProjectsResolver, GetAgentStatusResolver,
+    // GetConversationHistoryResolver, SendMessageResolver,
+    // PublishConversationMessageResolver, CreateProjectResolver,
+    // UpdateProjectResolver, SendMessageToAgentResolver,
+    // UploadDocumentResolver, GenerateDocumentUploadUrlResolver,
+    // GetDocumentIngestionStatusResolver, ListProjectDocumentsResolver,
+    // DeleteDocumentResolver, GetProjectDocumentResolver,
+    // ListDocumentVersionsResolver, GetDocumentVersionResolver, and
+    // GenerateDocumentPdfResolver moved to CitadelProjectsStack.
+
     // Query resolvers
-    projectLambdaDataSource.createResolver("GetProjectResolver", {
-      typeName: "Query",
-      fieldName: "getProject",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    projectLambdaDataSource.createResolver("ListProjectsResolver", {
-      typeName: "Query",
-      fieldName: "listProjects",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    agentLambdaDataSource.createResolver("GetAgentStatusResolver", {
-      typeName: "Query",
-      fieldName: "getAgentStatus",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    conversationLambdaDataSource.createResolver(
-      "GetConversationHistoryResolver",
-      {
-        typeName: "Query",
-        fieldName: "getConversationHistory",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
     agentConfigLambdaDataSource.createResolver("ListAgentConfigsResolver", {
       typeName: "Query",
       fieldName: "listAgentConfigs",
@@ -3345,123 +2154,19 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    agentCodeLambdaDataSource.createResolver("GetAgentCodeResolver", {
-      typeName: "Query",
-      fieldName: "getAgentCode",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    // NOTE: GetAgentCodeResolver moved to CitadelRegistryStack.
 
-    conversationLambdaDataSource.createResolver("SendMessageResolver", {
-      typeName: "Mutation",
-      fieldName: "sendMessage",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    conversationLambdaDataSource.createResolver(
-      "PublishConversationMessageResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "publishConversationMessage",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
+    // NOTE: SendMessageResolver, PublishConversationMessageResolver moved to
+    // CitadelProjectsStack.
 
     // Mutation resolvers
-    projectLambdaDataSource.createResolver("CreateProjectResolver", {
-      typeName: "Mutation",
-      fieldName: "createProject",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    projectLambdaDataSource.createResolver("UpdateProjectResolver", {
-      typeName: "Mutation",
-      fieldName: "updateProject",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    conversationLambdaDataSource.createResolver("SendMessageToAgentResolver", {
-      typeName: "Mutation",
-      fieldName: "sendMessageToAgent",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    projectLambdaDataSource.createResolver("UploadDocumentResolver", {
-      typeName: "Mutation",
-      fieldName: "uploadDocument",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentUploadLambdaDataSource.createResolver(
-      "GenerateDocumentUploadUrlResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "generateDocumentUploadUrl",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    documentUploadLambdaDataSource.createResolver(
-      "GetDocumentIngestionStatusResolver",
-      {
-        typeName: "Query",
-        fieldName: "getDocumentIngestionStatus",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    documentUploadLambdaDataSource.createResolver(
-      "ListProjectDocumentsResolver",
-      {
-        typeName: "Query",
-        fieldName: "listProjectDocuments",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    documentUploadLambdaDataSource.createResolver("DeleteDocumentResolver", {
-      typeName: "Mutation",
-      fieldName: "deleteDocument",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentLambdaDataSource.createResolver("GetProjectDocumentResolver", {
-      typeName: "Query",
-      fieldName: "getProjectDocument",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentLambdaDataSource.createResolver("ListDocumentVersionsResolver", {
-      typeName: "Query",
-      fieldName: "listDocumentVersions",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentLambdaDataSource.createResolver("GetDocumentVersionResolver", {
-      typeName: "Query",
-      fieldName: "getDocumentVersion",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentLambdaDataSource.createResolver("GenerateDocumentPdfResolver", {
-      typeName: "Mutation",
-      fieldName: "generateDocumentPdf",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    // NOTE: CreateProjectResolver, UpdateProjectResolver,
+    // SendMessageToAgentResolver, UploadDocumentResolver,
+    // GenerateDocumentUploadUrlResolver, GetDocumentIngestionStatusResolver,
+    // ListProjectDocumentsResolver, DeleteDocumentResolver,
+    // GetProjectDocumentResolver, ListDocumentVersionsResolver,
+    // GetDocumentVersionResolver, and GenerateDocumentPdfResolver moved to
+    // CitadelProjectsStack.
 
     agentConfigLambdaDataSource.createResolver("CreateAgentConfigResolver", {
       typeName: "Mutation",
@@ -3470,122 +2175,13 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    agentImportLambdaDataSource.createResolver("ImportAgentResolver", {
-      typeName: "Mutation",
-      fieldName: "importAgent",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    // Reuses the existing AgentImport data source — the import resolver already
-    // has Registry CRUD + events:PutEvents, so no new Lambda/data source/perms.
-    agentImportLambdaDataSource.createResolver("AttestAgentImportResolver", {
-      typeName: "Mutation",
-      fieldName: "attestAgentImport",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    agentImportLambdaDataSource.createResolver("DiscoverAgentsResolver", {
-      typeName: "Query",
-      fieldName: "discoverAgents",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    agentImportLambdaDataSource.createResolver(
-      "DescribeAgentCandidateResolver",
-      {
-        typeName: "Query",
-        fieldName: "describeAgentCandidate",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Pre-activation test-invoke. Reuses the existing AgentImport data source —
-    // the import resolver now also carries the account-scoped invoke +
-    // GetSecretValue grants needed to invoke an operator-supplied candidate.
-    agentImportLambdaDataSource.createResolver("TestImportedAgentResolver", {
-      typeName: "Mutation",
-      fieldName: "testImportedAgent",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    // Tier-2 sandboxed probe (probeAgentCandidate): describe() + a single
-    // guarded dry-run that enriches the descriptor at confidence='medium'.
-    // Reuses the existing AgentImport data source — the import resolver already
-    // carries the account-scoped invoke + GetSecretValue grants (test-invoke),
-    // so no new Lambda/data source/perms are required.
-    agentImportLambdaDataSource.createResolver("ProbeAgentCandidateResolver", {
-      typeName: "Mutation",
-      fieldName: "probeAgentCandidate",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    // US-IMP-017 post-import reachability probe (probeImportReachability).
-    // Reuses the existing AgentImport data source — the import resolver already
-    // implements this field (agent-import-resolver.ts) and carries the Registry
-    // CRUD grants it needs, so no new Lambda/data source/perms are required.
-    agentImportLambdaDataSource.createResolver(
-      "ProbeImportReachabilityResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "probeImportReachability",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Tier-3 agent-import B2 — manifest-proposal REQUEST + human-gated ACCEPT.
-    // Both reuse the existing AgentImport data source: the import resolver now
-    // also carries the scoped sqs:SendMessage grant (propose) and already has
-    // Registry CRUD (accept), so no new Lambda/data source/perms are required.
-    agentImportLambdaDataSource.createResolver(
-      "ProposeAgentManifestTier3Resolver",
-      {
-        typeName: "Mutation",
-        fieldName: "proposeAgentManifestTier3",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    agentImportLambdaDataSource.createResolver(
-      "AcceptProposedManifestTier3Resolver",
-      {
-        typeName: "Mutation",
-        fieldName: "acceptProposedManifestTier3",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // US-IMP-031 MCP Gateway publish/unpublish. Reuse the existing AgentImport
-    // data source — the import resolver now also has the gateway-target +
-    // credential-provider + gateway-id grants (see the gateway-publish IAM block
-    // above), so no new Lambda/data source is required.
-    agentImportLambdaDataSource.createResolver(
-      "PublishImportToGatewayResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "publishImportToGateway",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    agentImportLambdaDataSource.createResolver(
-      "UnpublishImportFromGatewayResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "unpublishImportFromGateway",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
+    // NOTE: ImportAgentResolver, AttestAgentImportResolver,
+    // DiscoverAgentsResolver, DescribeAgentCandidateResolver,
+    // TestImportedAgentResolver, ProbeAgentCandidateResolver,
+    // ProbeImportReachabilityResolver, ProposeAgentManifestTier3Resolver,
+    // AcceptProposedManifestTier3Resolver, PublishImportToGatewayResolver,
+    // UnpublishImportFromGatewayResolver moved to CitadelRegistryStack
+    // (backend-stack-split phase 2).
 
     agentConfigLambdaDataSource.createResolver("UpdateAgentConfigResolver", {
       typeName: "Mutation",
@@ -3618,12 +2214,7 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    agentCodeLambdaDataSource.createResolver("UpdateAgentCodeResolver", {
-      typeName: "Mutation",
-      fieldName: "updateAgentCode",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    // NOTE: UpdateAgentCodeResolver moved to CitadelRegistryStack.
 
     // Tool Config Resolvers
     toolConfigLambdaDataSource.createResolver("ListToolConfigsResolver", {
@@ -3676,48 +2267,9 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    // Fabricator Request Resolvers
-    fabricatorRequestLambdaDataSource.createResolver(
-      "RequestAgentCreationResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "requestAgentCreation",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    fabricatorRequestLambdaDataSource.createResolver(
-      "RequestToolCreationResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "requestToolCreation",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Fabricator Queue Resolver
-    fabricatorQueueLambdaDataSource.createResolver(
-      "GetFabricatorQueueResolver",
-      {
-        typeName: "Query",
-        fieldName: "getFabricatorQueue",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Fabrication Event Resolver
-    fabricationEventLambdaDataSource.createResolver(
-      "PublishFabricationEventResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "publishFabricationEvent",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
+    // NOTE: RequestAgentCreationResolver, RequestToolCreationResolver,
+    // GetFabricatorQueueResolver, PublishFabricationEventResolver moved to
+    // CitadelRegistryStack (backend-stack-split phase 2).
 
     // Task Runner Resolver
     taskRunnerLambdaDataSource.createResolver("SubmitTaskResolver", {
@@ -3832,13 +2384,7 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    // Chatter Resolver
-    chatterLambdaDataSource.createResolver("PublishChatterResolver", {
-      typeName: "Mutation",
-      fieldName: "publishChatter",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    // NOTE: PublishChatterResolver moved to CitadelProjectsStack.
 
     // Integration Resolvers
     integrationLambdaDataSource.createResolver("ListIntegrationsResolver", {
@@ -3900,175 +2446,12 @@ export class BackendStack extends cdk.Stack {
       },
     );
 
-    // Assessment Completion Resolver
-    const assessmentCompletionResolverFunction = new lambda.Function(
-      this,
-      "AssessmentCompletionResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "assessment-completion-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "AssessmentCompletionResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    const assessmentCompletionLambdaDataSource =
-      this.appSyncApi.addLambdaDataSource(
-        "AssessmentCompletionLambdaDataSource",
-        assessmentCompletionResolverFunction,
-      );
-
-    assessmentCompletionLambdaDataSource.createResolver(
-      "PublishAssessmentCompletionResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "publishAssessmentCompletion",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Assessment Progress Resolver
-    const sessionMemoryTableName = `citadel-session-memory-${props.environment}`;
-    const sessionMemoryTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-session-memory-${props.environment}`;
-
-    const assessmentProgressResolverFunction = new lambda.Function(
-      this,
-      "AssessmentProgressResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "assessment-progress-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          SESSION_MEMORY_TABLE: sessionMemoryTableName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "AssessmentProgressResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    assessmentProgressResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:GetItem", "dynamodb:Query"],
-        resources: [sessionMemoryTableArn],
-      }),
-    );
-
-    const assessmentProgressLambdaDataSource =
-      this.appSyncApi.addLambdaDataSource(
-        "AssessmentProgressLambdaDataSource",
-        assessmentProgressResolverFunction,
-      );
-
-    assessmentProgressLambdaDataSource.createResolver(
-      "GetAssessmentProgressResolver",
-      {
-        typeName: "Query",
-        fieldName: "getAssessmentProgress",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Design Progress Resolver
-    const designProgressResolverFunction = new lambda.Function(
-      this,
-      "DesignProgressResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "design-progress-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "DesignProgressResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    const designProgressLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "DesignProgressLambdaDataSource",
-      designProgressResolverFunction,
-    );
-
-    designProgressLambdaDataSource.createResolver(
-      "PublishDesignProgressResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "publishDesignProgress",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Report Download URL Generator
-    const sessionBucketName = `citadel-sessions-${props.environment}-${this.account}-${this.region}`;
-
-    const generateReportUrlFunction = new lambda.Function(
-      this,
-      "GenerateReportUrlFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "generate-report-url.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          SESSION_BUCKET: sessionBucketName,
-          PROJECTS_TABLE: this.projectsTable.tableName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "GenerateReportUrlFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    generateReportUrlFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["s3:GetObject", "s3:ListBucket"],
-        resources: [
-          `arn:aws:s3:::${sessionBucketName}/*`,
-          `arn:aws:s3:::${sessionBucketName}`,
-        ],
-      }),
-    );
-    this.projectsTable.grantReadData(generateReportUrlFunction);
-
-    const generateReportUrlDataSource = this.appSyncApi.addLambdaDataSource(
-      "GenerateReportUrlDataSource",
-      generateReportUrlFunction,
-    );
-
-    generateReportUrlDataSource.createResolver(
-      "GenerateReportDownloadUrlResolver",
-      {
-        typeName: "Query",
-        fieldName: "generateReportDownloadUrl",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
+    // NOTE: assessmentCompletionResolverFunction, assessmentProgressResolverFunction,
+    // designProgressResolverFunction, and generateReportUrlFunction (+ their
+    // DataSources and resolvers: PublishAssessmentCompletionResolver,
+    // GetAssessmentProgressResolver, PublishDesignProgressResolver,
+    // GenerateReportDownloadUrlResolver) moved to CitadelProjectsStack
+    // (backend-stack-split phase 1).
 
     // DataStores Table
     const dataStoresTable = new dynamodb.Table(this, "DataStoresTable", {
@@ -4290,11 +2673,8 @@ export class BackendStack extends cdk.Stack {
       workflowResolverFunction,
     );
 
-    const registryAgentRecordLambdaDataSource =
-      this.appSyncApi.addLambdaDataSource(
-        "RegistryAgentRecordLambdaDataSource",
-        registryAgentRecordResolverFunction,
-      );
+    // NOTE: RegistryAgentRecordLambdaDataSource moved to CitadelRegistryStack
+    // (backend-stack-split phase 2).
 
     const executionLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "ExecutionLambdaDataSource",
@@ -4396,217 +2776,9 @@ export class BackendStack extends cdk.Stack {
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
-
-    // App Resolver — Query resolvers
-    registryAgentRecordLambdaDataSource.createResolver("GetAppResolver", {
-      typeName: "Query",
-      fieldName: "getApp",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    registryAgentRecordLambdaDataSource.createResolver("ListAppsResolver", {
-      typeName: "Query",
-      fieldName: "listApps",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    // App Resolver — Mutation resolvers
-    registryAgentRecordLambdaDataSource.createResolver("CreateAppResolver", {
-      typeName: "Mutation",
-      fieldName: "createApp",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    registryAgentRecordLambdaDataSource.createResolver("UpdateAppResolver", {
-      typeName: "Mutation",
-      fieldName: "updateApp",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    registryAgentRecordLambdaDataSource.createResolver("DeleteAppResolver", {
-      typeName: "Mutation",
-      fieldName: "deleteApp",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "BindWorkflowToAppResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "bindWorkflowToApp",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "UnbindWorkflowFromAppResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "unbindWorkflowFromApp",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "UpdateAgentBindingResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "updateAgentBinding",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "AddAppComponentResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "addAppComponent",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "RemoveAppComponentResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "removeAppComponent",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "SetAppConfigSchemaResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "setAppConfigSchema",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "SetAppConfigValuesResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "setAppConfigValues",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "PublishAppStatusEventResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "publishAppStatusEvent",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // API Key Management resolvers
-    registryAgentRecordLambdaDataSource.createResolver(
-      "CreateAppApiKeyResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "createAppApiKey",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "RevokeAppApiKeyResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "revokeAppApiKey",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "RotateAppApiKeyResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "rotateAppApiKey",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "ListAppApiKeysResolver",
-      {
-        typeName: "Query",
-        fieldName: "listAppApiKeys",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Auth Config resolver
-    registryAgentRecordLambdaDataSource.createResolver(
-      "SetAppAuthConfigResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "setAppAuthConfig",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Access Control resolvers
-    registryAgentRecordLambdaDataSource.createResolver(
-      "GrantAppAccessResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "grantAppAccess",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "RevokeAppAccessResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "revokeAppAccess",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    registryAgentRecordLambdaDataSource.createResolver(
-      "ListAppAccessEntriesResolver",
-      {
-        typeName: "Query",
-        fieldName: "listAppAccessEntries",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Metrics resolver
-    registryAgentRecordLambdaDataSource.createResolver(
-      "GetAppMetricsResolver",
-      {
-        typeName: "Query",
-        fieldName: "getAppMetrics",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
+    // NOTE: App CRUD/API-key/access-control/metrics resolvers on
+    // registryAgentRecordLambdaDataSource (28 fields) moved to
+    // CitadelRegistryStack (backend-stack-split phase 2).
 
     // Execution Resolver — Query resolvers
     executionLambdaDataSource.createResolver("GetExecutionResolver", {
@@ -4680,8 +2852,9 @@ export class BackendStack extends cdk.Stack {
     });
 
     // Lambda error alarms for critical functions
+    // NOTE: ProjectResolver's alarms moved to CitadelProjectsStack along with
+    // the function itself.
     const criticalFunctions = [
-      { fn: projectResolverFunction, name: "ProjectResolver" },
       { fn: agentMessageHandlerFunction, name: "AgentMessageHandler" },
       { fn: gatewayRegistrationHandler, name: "GatewayRegistration" },
       { fn: integrationResolverFunction, name: "IntegrationResolver" },
@@ -4933,40 +3106,15 @@ export class BackendStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    // wire projectResolverFunction to the governance-gate tables.
-    // These env vars and grants are deferred to this point because the tables
-    // are instantiated later in the constructor than the function itself.
-    // Gates C3 (assessment), C7 (ADR), C10 (ExecutionSpec) read from these
-    // tables during updateProject phase transitions.
-    projectResolverFunction.addEnvironment(
-      "ADRS_TABLE",
-      this.adrsTable.tableName,
-    );
-    projectResolverFunction.addEnvironment(
-      "EXECUTION_SPECS_TABLE",
-      this.executionSpecificationsTable.tableName,
-    );
-    projectResolverFunction.addEnvironment(
-      "AGENT_DESIGN_ASSESSMENTS_TABLE",
-      this.agentDesignAssessmentsTable.tableName,
-    );
-    this.adrsTable.grantReadData(projectResolverFunction);
-    this.executionSpecificationsTable.grantReadData(projectResolverFunction);
-    this.agentDesignAssessmentsTable.grantReadData(projectResolverFunction);
+    // NOTE: projectResolverFunction's governance-gate wiring (ADRS_TABLE,
+    // EXECUTION_SPECS_TABLE, AGENT_DESIGN_ASSESSMENTS_TABLE env vars + read
+    // grants for gates C3/C7/C10) moved to CitadelProjectsStack, where the
+    // function is created directly with those tables passed in as props —
+    // no deferred addEnvironment() dance needed there since ProjectsStack
+    // receives the already-instantiated tables from BackendStack.
 
-    // ADR-on-import (US-IMP): the agent import resolver records a
-    // system-generated ADR keyed to the synthetic GLOBAL import project. Write-
-    // only grant — it creates ADRs (createADR → PutItem) and never reads them.
-    // Deferred to here, mirroring projectResolverFunction's ADRS_TABLE wiring,
-    // because adrsTable is instantiated later in the constructor than the
-    // function. Same-stack reference (ADRsTable lives in this BackendStack); the
-    // resulting GSI /index/* wildcard is covered by the stack-level
-    // AwsSolutions-IAM5 suppression in bin/app.ts.
-    agentImportResolverFunction.addEnvironment(
-      "ADRS_TABLE",
-      this.adrsTable.tableName,
-    );
-    this.adrsTable.grantWriteData(agentImportResolverFunction);
+    // NOTE: agentImportResolverFunction's ADRS_TABLE env var + ADRs
+    // write grant moved to CitadelRegistryStack (backend-stack-split phase 2).
   }
 
   /**
