@@ -20,9 +20,24 @@ from worker_governance import (
 # lands, a missing import must NOT break the supervisor task path — so we fall
 # back to None and treat every message as a supervisor task (see process_event).
 try:
-    from common import workflow_contract  # noqa: E402
-except ImportError:  # pragma: no cover — Lambda bundle path before follow-up
-    workflow_contract = None  # type: ignore[assignment]
+    from common import workflow_contract # noqa: E402
+except ImportError: # pragma: no cover — Lambda bundle path before follow-up
+    workflow_contract = None # type: ignore[assignment]
+
+# Shared usage-record boundary sanitizer (same deferred-bundling situation as
+# workflow_contract above — the worker Lambda bundle currently ships only
+# arbiter/workerWrapper/). A missing import must NOT break dispatch: fall
+# back to an inline mirror with the same never-raises contract.
+try:
+    from common.usage import parse_usage_array # noqa: E402
+except ImportError: # pragma: no cover — Lambda bundle path before follow-up
+    def parse_usage_array(raw): # type: ignore[no-redef]
+        try:
+            if not isinstance(raw, list):
+                return []
+            return [entry for entry in raw if isinstance(entry, dict)]
+        except Exception: # noqa: BLE001 — boundary sanitizer must never raise
+            return []
 
 # QT3-6: dispatch-time defence-in-depth for the code-generating
 # tool / ExecutionSpecification binding rule. We depend on the rule predicate
@@ -314,7 +329,7 @@ def get_scoped_credentials(agent_name: str, required_permissions: dict, app_id: 
         print(f"Failed to invoke credential vender: {e}")
         return None
 
-def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extra_env: dict | None = None, *, raise_on_error: bool = False) -> str:
+def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extra_env: dict | None = None, *, raise_on_error: bool = False, usage_sink: list | None = None) -> str:
     """
     Execute the agent code in an isolated subprocess.
 
@@ -329,6 +344,16 @@ def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extr
     human-readable fallback string. The workflow-node path passes True so a
     subprocess failure raises and is surfaced as workflow.node.failed rather
     than a canned success.
+
+    ``usage_sink`` is an optional list the caller supplies to collect worker
+    usage records. The return type stays a bare ``str`` (backward
+    compatible): the child's stdout envelope is
+    ``{"response": str, "usage": [...]}`` (was response-only), and on a
+    successful JSON parse this function extends ``usage_sink`` in place with
+    the sanitized ``usage`` array via ``parse_usage_array``. Old
+    ``{"response": ...}``-only stdout and legacy non-JSON stdout still parse
+    exactly as before, leaving ``usage_sink`` unchanged (empty). Malformed
+    usage data never raises here — ``parse_usage_array`` degrades to ``[]``.
     """
     # Build the child's environment: inherit parent env for Python path etc.,
     # but override AWS credentials with scoped ones if available
@@ -379,11 +404,28 @@ def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extr
     # Parse the response from stdout
     try:
         output = json.loads(result.stdout.strip())
+        if usage_sink is not None:
+            try:
+                usage_sink.extend(parse_usage_array(output.get('usage', [])))
+            except Exception as exc:  # noqa: BLE001 — usage parsing must never break dispatch
+                print(json.dumps({
+                    'level': 'WARN',
+                    'component': 'WorkerWrapper',
+                    'action': 'usage_sink_extend_failed',
+                    'error': str(exc),
+                }))
         return output.get('response', result.stdout.strip())
     except json.JSONDecodeError:
         return result.stdout.strip() or "Agent produced no output"
 
-def post_task_complete(response, agent_use_id, agent_name, orchestration_id):
+def post_task_complete(response, agent_use_id, agent_name, orchestration_id, *, usage=None):
+    """Publish the supervisor-task completion event.
+
+    ``usage`` is additive and optional: a list of worker usage records
+    (or ``None``). The Detail always carries a ``'usage'`` key — ``usage or
+    []`` so a missing/None value degrades to an empty list rather than
+    omitting the key or passing ``None`` through to consumers.
+    """
     client = boto3.client('events')
 
     COMPLETION_BUS_NAME = os.environ.get('COMPLETION_BUS_NAME')
@@ -395,7 +437,8 @@ def post_task_complete(response, agent_use_id, agent_name, orchestration_id):
             'orchestration_id': orchestration_id,
             'data': f"Task completed, details: {response}",
             'agent_use_id': agent_use_id,
-            'node': agent_name
+            'node': agent_name,
+            'usage': usage or [],
         })
     }
     print(f"posting event, {json.dumps(event)}")
@@ -403,7 +446,7 @@ def post_task_complete(response, agent_use_id, agent_name, orchestration_id):
     print(f"event posted: {response}")
     return f"event posted: {event}"
 
-def _emit_node_result(msg, *, status, output=None, error=None):
+def _emit_node_result(msg, *, status, output=None, error=None, usage=None):
     """Emit a workflow node-result event (completed/failed) to the agent event
     bus the step runner consumes.
 
@@ -412,6 +455,12 @@ def _emit_node_result(msg, *, status, output=None, error=None):
     step runner's node.completed/failed rules listen on). This is SEPARATE from
     the supervisor task.completion path in post_task_complete — a distinct
     Source/DetailType, not a different client or bus.
+
+    ``usage`` is additive and optional: forwarded to
+    ``workflow_contract.build_node_result_detail`` so a completed result also
+    carries a top-level ``usage`` key (in addition to the existing
+    ``output['usage']``) for the step runner's usage rollup. Ignored for a
+    failed result (the contract already drops it there).
     """
     detail = workflow_contract.build_node_result_detail(
         execution_id=msg.execution_id,
@@ -421,6 +470,7 @@ def _emit_node_result(msg, *, status, output=None, error=None):
         status=status,
         output=output,
         error=error,
+        usage=usage,
     )
     detail_type = (
         workflow_contract.NODE_COMPLETED_DETAIL_TYPE
@@ -554,8 +604,10 @@ def _process_workflow_node(event):
             workflow_id=msg.execution_id,
         )
 
+        usage_sink: list = []
         response = run_agent_in_subprocess(
-            msg.input, scoped_credentials, extra_env, raise_on_error=True
+            msg.input, scoped_credentials, extra_env, raise_on_error=True,
+            usage_sink=usage_sink,
         )
     except Exception as exc:  # noqa: BLE001 — any failure becomes node.failed
         print(json.dumps({
@@ -587,7 +639,8 @@ def _process_workflow_node(event):
     _emit_node_result(
         msg,
         status=workflow_contract.STATUS_COMPLETED,
-        output={'response': response},
+        output={'response': response, 'usage': usage_sink},
+        usage=usage_sink,
     )
 
 def process_event(event, context):
@@ -772,10 +825,11 @@ def process_event(event, context):
     )
 
     print("running agent in isolated subprocess...")
-    response = run_agent_in_subprocess(request, scoped_credentials, extra_env if extra_env else None)
+    usage_sink: list = []
+    response = run_agent_in_subprocess(request, scoped_credentials, extra_env if extra_env else None, usage_sink=usage_sink)
     print(f"agent response: {response}")
 
-    post_task_complete(response, agent_use_id, agent_name, orchestration_id)
+    post_task_complete(response, agent_use_id, agent_name, orchestration_id, usage=usage_sink)
 
 def lambda_handler(event, context):
     print(f"processing event {event}")

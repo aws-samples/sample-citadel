@@ -96,6 +96,21 @@ jest.mock('../../services/appApiService', () => ({
   },
 }));
 
+// ── Mock costService as unconfigured — the cost row (4th lazy section)
+// renders null once it resolves isAvailable()=false, so it doesn't
+// interfere with the pre-existing chart-row assertions below. Dedicated
+// coverage for the configured/data states lives in
+// pages/dashboard/__tests__/CostChartRow.test.tsx.
+jest.mock('../../services/costService', () => ({
+  costService: {
+    isAvailable: jest.fn().mockReturnValue(false),
+    getSummary: jest.fn(),
+    getSeries: jest.fn(),
+    listBudgets: jest.fn(),
+    putBudget: jest.fn(),
+  },
+}));
+
 // ── Import Dashboard after mocks ───────────────────────────────────────────
 import { Dashboard } from '../Dashboard';
 import { useDashboardData } from '../../hooks/useDashboardData';
@@ -200,15 +215,15 @@ describe('Dashboard lazy loading', () => {
   // Requirement 15.7: Uses IntersectionObserver
   test('creates IntersectionObserver instances for lazy sections', () => {
     render(<Dashboard />);
-    // 3 lazy sections = 3 IO instances
-    expect(ioInstances.length).toBe(3);
+    // 4 lazy sections (chart rows 2-4 + cost row) = 4 IO instances
+    expect(ioInstances.length).toBe(4);
   });
 
   // Requirement 15.8: No layout shift — skeleton and chart wrapped in same container
   test('lazy sections are wrapped in consistent container divs', () => {
     render(<Dashboard />);
     const lazySections = screen.getAllByTestId('lazy-load-section');
-    expect(lazySections.length).toBe(3);
+    expect(lazySections.length).toBe(4);
     // Each lazy section wraps either skeleton or content in the same div
     lazySections.forEach((section) => {
       expect(section.tagName).toBe('DIV');
@@ -252,14 +267,15 @@ describe('Dashboard lazy loading', () => {
   // Verify ErrorBoundary wraps lazy sections (structural check)
   test('lazy sections are wrapped in ErrorBoundary', () => {
     // ErrorBoundary renders children directly when no error — so we verify
-    // the structure by checking that all 3 lazy sections render without error
+    // the structure by checking that all 4 lazy sections render without error
     render(<Dashboard />);
     const lazySections = screen.getAllByTestId('lazy-load-section');
-    expect(lazySections.length).toBe(3);
+    expect(lazySections.length).toBe(4);
     // Trigger all intersections — no errors thrown
     triggerIntersection(0);
     triggerIntersection(1);
     triggerIntersection(2);
+    triggerIntersection(3);
     expect(screen.getByTestId('chart-row-2')).toBeTruthy();
     expect(screen.getByTestId('chart-row-3')).toBeTruthy();
     expect(screen.getByTestId('chart-row-4')).toBeTruthy();

@@ -1,0 +1,490 @@
+describe("TelemetryStack — cost query surface (pass 1: API + authorizer + budgets)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("declares an HttpApi with CORS from the deploy-time frontend origin", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
+      ProtocolType: "HTTP",
+      CorsConfiguration: Match.objectLike({
+        AllowOrigins: ["https://app.example.com"],
+        AllowMethods: Match.arrayWith(["GET", "PUT"]),
+      }),
+    });
+  });
+
+  test("declares a JWT authorizer with issuer=user-pool and audience=client", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Authorizer", {
+      AuthorizerType: "JWT",
+      JwtConfiguration: Match.objectLike({
+        Issuer: Match.anyValue(),
+        Audience: Match.anyValue(),
+      }),
+    });
+  });
+
+  test("declares all 4 cost-query routes", () => {
+    const routes = template.findResources("AWS::ApiGatewayV2::Route");
+    const routeKeys = Object.values(routes)
+      .map((r: any) => r.Properties.RouteKey)
+      .sort();
+    expect(routeKeys).toEqual(
+      [
+        "GET /budgets",
+        "GET /cost/series",
+        "GET /cost/summary",
+        "PUT /budgets/{scope}",
+      ].sort(),
+    );
+  });
+
+  test("every route is authorized (none use AuthorizationType NONE)", () => {
+    const routes = template.findResources("AWS::ApiGatewayV2::Route");
+    for (const route of Object.values(routes) as any[]) {
+      expect(route.Properties.AuthorizationType).not.toBe("NONE");
+      expect(
+        route.Properties.AuthorizerId ?? route.Properties.AuthorizationType,
+      ).toBeDefined();
+    }
+  });
+
+  test("declares the sparse BudgetIndex GSI on the cost ledger table", () => {
+    const tables = template.findResources("AWS::DynamoDB::Table", {
+      Properties: { TableName: "citadel-cost-ledger-test" },
+    });
+    const logicalId = Object.keys(tables)[0];
+    const gsis = tables[logicalId].Properties.GlobalSecondaryIndexes;
+    const byName: Record<string, any> = {};
+    for (const g of gsis) byName[g.IndexName] = g;
+
+    expect(byName.BudgetIndex).toBeDefined();
+    expect(byName.BudgetIndex.KeySchema).toEqual([
+      { AttributeName: "GSI5PK", KeyType: "HASH" },
+      { AttributeName: "GSI5SK", KeyType: "RANGE" },
+    ]);
+  });
+
+  test("declares the evaluator Lambda with its own hourly schedule rule, separate from the reconciler's", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "cost-budget-evaluator.handler",
+    });
+
+    const hourlyRules = template.findResources("AWS::Events::Rule", {
+      Properties: { ScheduleExpression: "rate(1 hour)" },
+    });
+    // reconciler's rule + the new evaluator rule = 2 distinct rate(1 hour) rules.
+    expect(Object.keys(hourlyRules).length).toBeGreaterThanOrEqual(2);
+
+    const evaluatorFn = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-budget-evaluator.handler" },
+    });
+    const evaluatorFnId = Object.keys(evaluatorFn)[0];
+    const evaluatorRule = Object.values(hourlyRules).find((r: any) =>
+      r.Properties.Targets.some(
+        (t: any) => t.Arn?.["Fn::GetAtt"]?.[0] === evaluatorFnId,
+      ),
+    );
+    expect(evaluatorRule).toBeDefined();
+  });
+
+  test("evaluator role is granted events:PutEvents on the shared bus (telemetry becomes a publisher)", () => {
+    const evaluatorFn = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-budget-evaluator.handler" },
+    });
+    const evaluatorFnId = Object.keys(evaluatorFn)[0];
+    expect(evaluatorFnId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("CostBudgetEvaluator"),
+      );
+    });
+    const allActions = ownPolicies.flatMap((p: any) => {
+      const statements = p.Properties?.PolicyDocument?.Statement || [];
+      return statements.flatMap((s: any) =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+    });
+    expect(allActions).toEqual(expect.arrayContaining(["events:PutEvents"]));
+  });
+
+  test("query handler role has ledger table read access (Query) and no Scan/write grant", () => {
+    const queryFn = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-query-handler.handler" },
+    });
+    const queryFnId = Object.keys(queryFn)[0];
+    expect(queryFnId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("CostQueryHandler"),
+      );
+    });
+    const allActions = ownPolicies.flatMap((p: any) => {
+      const statements = p.Properties?.PolicyDocument?.Statement || [];
+      return statements.flatMap((s: any) =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+    });
+    expect(allActions).toEqual(expect.arrayContaining(["dynamodb:Query"]));
+    // PUT /budgets needs UpdateItem on the same table; no DeleteItem/Scan needed.
+    expect(allActions).not.toEqual(expect.arrayContaining(["dynamodb:Scan"]));
+    expect(allActions).not.toEqual(
+      expect.arrayContaining(["dynamodb:DeleteItem"]),
+    );
+  });
+
+  test("exposes costApiUrl as a stack output for pass-2 frontend plumbing", () => {
+    const outputs = template.findOutputs("*");
+    const hasCostApiUrl = Object.keys(outputs).some((k) =>
+      k.toLowerCase().includes("costapiurl"),
+    );
+    expect(hasCostApiUrl).toBe(true);
+  });
+});
+import * as cdk from "aws-cdk-lib";
+import { Template, Match } from "aws-cdk-lib/assertions";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as events from "aws-cdk-lib/aws-events";
+import * as cognito from "aws-cdk-lib/aws-cognito";
+import * as path from "path";
+import * as fs from "fs";
+
+// Ensure asset directories exist for CDK synthesis
+const assetDirs = [path.resolve(__dirname, "../dist/lambda")];
+for (const dir of assetDirs) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+import { TelemetryStack } from "../lib/telemetry-stack";
+
+function createTestStack(): { stack: TelemetryStack; template: Template } {
+  const app = new cdk.App();
+
+  const helperStack = new cdk.Stack(app, "HelperStack", {
+    env: { account: "123456789012", region: "us-east-1" },
+  });
+
+  const agentEventBus = new events.EventBus(helperStack, "EventBus", {
+    eventBusName: "citadel-agents-test",
+  });
+
+  const modelCatalogTable = new dynamodb.Table(
+    helperStack,
+    "ModelCatalogTable",
+    {
+      tableName: "citadel-model-catalog-test",
+      partitionKey: { name: "modelKey", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+
+  const userPool = new cognito.UserPool(helperStack, "UserPool");
+  const userPoolClient = userPool.addClient("UserPoolClient");
+
+  const stack = new TelemetryStack(app, "TestTelemetryStack", {
+    environment: "test",
+    env: { account: "123456789012", region: "us-east-1" },
+    agentEventBus,
+    modelCatalogTable,
+    userPool,
+    userPoolClient,
+    frontendOrigin: "https://app.example.com",
+  });
+
+  const template = Template.fromStack(stack);
+  return { stack, template };
+}
+
+describe("TelemetryStack — cost ledger (pass 1)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("cost ledger table has PK/SK, PAY_PER_REQUEST, PITR, and RETAIN", () => {
+    template.hasResource("AWS::DynamoDB::Table", {
+      Properties: Match.objectLike({
+        TableName: "citadel-cost-ledger-test",
+        KeySchema: [
+          { AttributeName: "PK", KeyType: "HASH" },
+          { AttributeName: "SK", KeyType: "RANGE" },
+        ],
+        BillingMode: "PAY_PER_REQUEST",
+        PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      }),
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain",
+    });
+  });
+
+  test("cost ledger table has 4 sparse time-prefixed GSIs (Project/App/Agent/Workflow) plus the BudgetIndex GSI added for the cost query surface", () => {
+    const tables = template.findResources("AWS::DynamoDB::Table", {
+      Properties: { TableName: "citadel-cost-ledger-test" },
+    });
+    const logicalId = Object.keys(tables)[0];
+    expect(logicalId).toBeDefined();
+
+    const gsis = tables[logicalId].Properties.GlobalSecondaryIndexes;
+    expect(gsis).toHaveLength(5);
+
+    const gsiNames = gsis.map((g: any) => g.IndexName).sort();
+    expect(gsiNames).toEqual([
+      "AgentIndex",
+      "AppIndex",
+      "BudgetIndex",
+      "ProjectIndex",
+      "WorkflowIndex",
+    ]);
+
+    const byName: Record<string, any> = {};
+    for (const g of gsis) byName[g.IndexName] = g;
+
+    expect(byName.ProjectIndex.KeySchema).toEqual([
+      { AttributeName: "GSI1PK", KeyType: "HASH" },
+      { AttributeName: "GSI1SK", KeyType: "RANGE" },
+    ]);
+    expect(byName.AppIndex.KeySchema).toEqual([
+      { AttributeName: "GSI2PK", KeyType: "HASH" },
+      { AttributeName: "GSI2SK", KeyType: "RANGE" },
+    ]);
+    expect(byName.AgentIndex.KeySchema).toEqual([
+      { AttributeName: "GSI3PK", KeyType: "HASH" },
+      { AttributeName: "GSI3SK", KeyType: "RANGE" },
+    ]);
+    expect(byName.WorkflowIndex.KeySchema).toEqual([
+      { AttributeName: "GSI4PK", KeyType: "HASH" },
+      { AttributeName: "GSI4SK", KeyType: "RANGE" },
+    ]);
+  });
+
+  test("cost-ledger-writer Lambda: nodejs24.x, 30s timeout, own LogGroup", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "cost-ledger-writer.handler",
+      Runtime: "nodejs24.x",
+      Timeout: 30,
+      Environment: {
+        Variables: Match.objectLike({
+          COST_LEDGER_TABLE: Match.anyValue(),
+          MODEL_CATALOG_TABLE: Match.anyValue(),
+        }),
+      },
+    });
+
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-ledger-writer.handler" },
+    });
+    const logicalId = Object.keys(functions)[0];
+    expect(logicalId).toBeDefined();
+
+    const logGroups = template.findResources("AWS::Logs::LogGroup");
+    expect(Object.keys(logGroups).length).toBeGreaterThan(0);
+  });
+
+  test("3 EventBridge rules target the writer with correct source/detailType", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: Match.objectLike({
+        source: ["task.completion"],
+        "detail-type": ["task.completion"],
+      }),
+    });
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: Match.objectLike({
+        source: ["agent_intake.usage"],
+        "detail-type": ["intake.usage.captured"],
+      }),
+    });
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: Match.objectLike({
+        source: ["citadel.workflows"],
+        "detail-type": ["workflow.node.completed"],
+      }),
+    });
+
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-ledger-writer.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+
+    // Scope to event-pattern rules only — the reconciler's schedule-based
+    // rule (rate(1 hour), no EventPattern) is a separate rule asserted in
+    // its own describe block below.
+    const allRules = template.findResources("AWS::Events::Rule");
+    const ruleIds = Object.keys(allRules).filter(
+      (id) => allRules[id].Properties?.EventPattern !== undefined,
+    );
+    expect(ruleIds.length).toBeGreaterThanOrEqual(3);
+
+    for (const ruleId of ruleIds) {
+      const targets = allRules[ruleId].Properties.Targets;
+      expect(targets).toHaveLength(1);
+      expect(targets[0].RetryPolicy).toMatchObject({
+        MaximumRetryAttempts: 2,
+      });
+      expect(typeof targets[0].RetryPolicy.MaximumEventAgeInSeconds).toBe(
+        "number",
+      );
+      const getAtt = targets[0].Arn?.["Fn::GetAtt"];
+      expect(Array.isArray(getAtt) && getAtt[0] === fnLogicalId).toBe(true);
+    }
+  });
+
+  test("writer has write access to ledger table and read access to catalog table, no other grants", () => {
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-ledger-writer.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+    expect(fnLogicalId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("CostLedgerWriter"),
+      );
+    });
+    expect(ownPolicies.length).toBeGreaterThan(0);
+
+    const allActions = ownPolicies.flatMap((p: any) => {
+      const statements = p.Properties?.PolicyDocument?.Statement || [];
+      return statements.flatMap((s: any) =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+    });
+
+    expect(allActions).toEqual(
+      expect.arrayContaining(["dynamodb:PutItem", "dynamodb:GetItem"]),
+    );
+    // Least-privilege: writer must not be granted delete/write on the catalog
+    // table (grantReadData only) — read-only pricing lookup.
+    const catalogGrantActions = ownPolicies.flatMap((p: any) => {
+      const statements = p.Properties?.PolicyDocument?.Statement || [];
+      return statements
+        .filter((s: any) =>
+          JSON.stringify(s.Resource || "").includes("ModelCatalogTable"),
+        )
+        .flatMap((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+    });
+    expect(catalogGrantActions).not.toEqual(
+      expect.arrayContaining(["dynamodb:PutItem", "dynamodb:DeleteItem"]),
+    );
+  });
+});
+
+describe("TelemetryStack — cost ledger reconciler (Tier A + Tier B skeleton)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("reconciler Lambda: nodejs24.x, 5min timeout, expected env vars incl. Tier B off by default", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "cost-ledger-reconciler.handler",
+      Runtime: "nodejs24.x",
+      Timeout: 300,
+      Environment: {
+        Variables: Match.objectLike({
+          COST_LEDGER_TABLE: Match.anyValue(),
+          ENVIRONMENT: "test",
+          SETTLE_LAG_MINUTES: Match.anyValue(),
+          MAX_WINDOWS_PER_RUN: Match.anyValue(),
+          METRIC_NAMESPACE: "Citadel/CostReconciler",
+          COST_RECONCILER_TIER_B_ENABLED: "false",
+        }),
+      },
+    });
+  });
+
+  test("EventBridge rule schedules the reconciler at rate(1 hour)", () => {
+    template.hasResourceProperties("AWS::Events::Rule", {
+      ScheduleExpression: "rate(1 hour)",
+    });
+
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-ledger-reconciler.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+    expect(fnLogicalId).toBeDefined();
+
+    const rules = template.findResources("AWS::Events::Rule", {
+      Properties: { ScheduleExpression: "rate(1 hour)" },
+    });
+    const ruleId = Object.keys(rules)[0];
+    expect(ruleId).toBeDefined();
+    const targets = rules[ruleId].Properties.Targets;
+    expect(targets).toHaveLength(1);
+    const getAtt = targets[0].Arn?.["Fn::GetAtt"];
+    expect(Array.isArray(getAtt) && getAtt[0] === fnLogicalId).toBe(true);
+  });
+
+  test("reconciler IAM: has Query/Scan/PutItem/UpdateItem + GetMetricData/PutMetricData, and NO DeleteItem/logs:*", () => {
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-ledger-reconciler.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+    expect(fnLogicalId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("CostLedgerReconciler"),
+      );
+    });
+    expect(ownPolicies.length).toBeGreaterThan(0);
+
+    const allStatements = ownPolicies.flatMap(
+      (p: any) => p.Properties?.PolicyDocument?.Statement || [],
+    );
+    const allActions = allStatements.flatMap((s: any) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+
+    expect(allActions).toEqual(
+      expect.arrayContaining([
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+      ]),
+    );
+    expect(allActions).not.toEqual(
+      expect.arrayContaining(["dynamodb:DeleteItem"]),
+    );
+    expect(allActions.some((a: string) => a.startsWith("logs:"))).toBe(false);
+
+    expect(allActions).toEqual(
+      expect.arrayContaining(["cloudwatch:GetMetricData"]),
+    );
+    expect(allActions).toEqual(
+      expect.arrayContaining(["cloudwatch:PutMetricData"]),
+    );
+
+    // PutMetricData must be namespace-conditioned, not a bare grant on '*'.
+    const putMetricStatement = allStatements.find((s: any) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.includes("cloudwatch:PutMetricData");
+    });
+    expect(putMetricStatement?.Condition).toBeDefined();
+  });
+
+  test("cost ledger table remains RETAIN + PITR (regression guard, reconciler must not weaken it)", () => {
+    template.hasResource("AWS::DynamoDB::Table", {
+      Properties: Match.objectLike({
+        TableName: "citadel-cost-ledger-test",
+        PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      }),
+      DeletionPolicy: "Retain",
+      UpdateReplacePolicy: "Retain",
+    });
+  });
+});

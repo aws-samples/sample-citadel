@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from common.usage import parse_usage_array
+
 # --- EventBridge identifiers (mirror the step runner's event helpers) --------
 
 # Event source stamped on every workflow lifecycle event. Matches ``SOURCE``
@@ -83,7 +85,9 @@ class NodeResultDetail:
     """The EventBridge detail body of a node-completed / node-failed event.
 
     A completed result carries ``output`` (and no ``error``); a failed result
-    carries ``error`` (and no ``output``).
+    carries ``error`` (and no ``output``). ``usage`` is additive: a sanitized
+    list of worker usage records lifted to the top level for a completed
+    result (``[]`` when absent or when the result is failed).
     """
 
     execution_id: str
@@ -94,6 +98,7 @@ class NodeResultDetail:
     timestamp: str
     output: Optional[dict[str, Any]] = None
     error: Optional[str] = None
+    usage: list[dict[str, Any]] = field(default_factory=list)
 
 
 # --- Internal validation helpers ---------------------------------------------
@@ -233,6 +238,7 @@ def build_node_result_detail(
     output: Optional[dict[str, Any]] = None,
     error: Optional[str] = None,
     timestamp: Optional[str] = None,
+    usage: Optional[list[dict[str, Any]]] = None,
 ) -> dict:
     """Build the EventBridge detail body for a node-result event.
 
@@ -240,6 +246,15 @@ def build_node_result_detail(
     an ``output`` object; a failed result requires a non-empty ``error``
     string. ``timestamp`` defaults to the current UTC time (ISO 8601) when not
     supplied; pass it explicitly for deterministic output.
+
+    ``usage`` is additive and optional: a list of worker usage records
+    promoted to a top-level ``detail['usage']`` key for a completed result
+    (additive to, and separate from, any ``usage`` nested inside ``output``).
+    Sanitized via ``parse_usage_array`` — a malformed value degrades to ``[]``
+    rather than raising. Only set when a completed result AND a non-None
+    ``usage`` was supplied, so omitting it keeps the detail byte-identical to
+    pre-feature callers. A failed result never carries a top-level ``usage``
+    key, even if one is passed, since there is no output to attribute it to.
     """
     _validate_identity(
         'node-result event',
@@ -271,6 +286,8 @@ def build_node_result_detail(
                 "node-result event: a 'completed' result requires an 'output' object"
             )
         detail['output'] = output
+        if usage is not None:
+            detail['usage'] = parse_usage_array(usage)
     else:  # STATUS_FAILED
         if not isinstance(error, str) or error == '':
             raise ValueError(
@@ -326,4 +343,5 @@ def parse_node_result_detail(detail: Any) -> NodeResultDetail:
         timestamp=timestamp,
         output=output,
         error=error,
+        usage=parse_usage_array(detail.get('usage')),
     )

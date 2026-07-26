@@ -15,6 +15,7 @@ All async coordination in Citadel flows through a single EventBridge bus: `citad
 | `citadel.backend` | Backend | Lambda resolver events (project, agent, document lifecycle) |
 | `citadel.workflows` | Arbiter (StepRunner) | Workflow execution lifecycle events |
 | `citadel.apps` | Backend | App status transitions and component changes |
+| `citadel.telemetry` | Backend (TelemetryStack) | Cost budget threshold/breach notifications — the one publisher exception in an otherwise consume-only stack |
 | `agent_intake.<phase>` | Service (intake runtime), Arbiter (Fabricator), Backend (app publish handler) | Intake project-progress milestones — one source per phase: `agent_intake.assessment`, `agent_intake.design`, `agent_intake.planning`, `agent_intake.implementation` |
 | `task.request` | Backend | New task submissions for the Supervisor |
 | `task.completion` | Arbiter (Worker) | Worker agent task completion signals |
@@ -695,6 +696,62 @@ All EventBridge-triggered handlers use the `IdempotencyGuard` class (`backend/sr
 4. The idempotency table is `citadel-idempotency-{env}`
 
 This ensures safe retries — EventBridge may deliver the same event multiple times, and the system produces the same result without duplicate side effects.
+
+## Cost Ledger Events (consumer: `cost-ledger-writer`)
+
+The invocation cost ledger (`citadel-cost-ledger-{env}`, `TelemetryStack`) is populated by a single writer Lambda, `backend/src/lambda/cost-ledger-writer.ts`, subscribed to three separate EventBridge rules that all target the **same** function. The writer branches on `source`/`detail-type` and applies its own idempotency (`PutCommand` + `ConditionExpression: attribute_not_exists(PK)`, keyed on `<eventId>:<callIndex>`) rather than the shared `IdempotencyGuard` table.
+
+| Source | DetailType | Meaning |
+|--------|------------|---------|
+| `task.completion` | `task.completion` | Standalone (non-workflow) worker task usage |
+| `agent_intake.usage` | `intake.usage.captured` | Intake-runtime model usage |
+| `citadel.workflows` | `workflow.node.completed` | Per-node workflow usage |
+
+### Dedupe rule (cross-source, enforced in the writer)
+
+`task.completion` and `workflow.node.completed` can describe the **same** model calls for a workflow node (the worker task ran inside a StepRunner node). EventBridge patterns cannot correlate across sources, so the writer enforces this stateless rule itself:
+
+- `workflow.node.completed` is **authoritative for all workflow-node model calls** — always written.
+- `task.completion` is authoritative **only** for standalone tasks. If its detail carries workflow correlation (`workflowExecutionId` **and** `nodeId`), the event is **dropped** — those calls are already owned by the corresponding `node.completed` event.
+- `intake.usage.captured` never overlaps the other two sources and is always authoritative.
+
+This prevents double-billing without any cross-event lookup.
+
+### Pricing resolution (per row)
+
+For each usage record, the writer resolves the raw `modelId` to a catalog `modelKey` (same slug logic as `model-catalog-sync.ts`'s `modelKeyFromId`) and reads pricing via `GetItem` on the model-catalog table. A catalog-read failure, a missing row, or a row without usable pricing (`inputPer1kTokens`/`outputPer1kTokens`/`currency`) never drops the ledger row — it is written with `priced:false`, null cost fields, and an `unpricedReason` (`model_not_in_catalog` | `pricing_absent`), logged via `console.warn`/`console.error`. See [MODEL_SELECTION.md](./MODEL_SELECTION.md#pricing-metadata) for the pricing field contract.
+
+## Cost Budget Events (producer: `cost-budget-evaluator` / `cost-notifier`, source: `citadel.telemetry`)
+
+`TelemetryStack` is a consume-only bus subscriber everywhere else in this catalog (see Cost Ledger Events above). The budget evaluator is the **one exception**: it is a bus **publisher**, emitting threshold-crossing notifications so downstream SNS/notification subscribers can alert users. `agentEventBus.grantPutEventsTo(evaluator)` is granted specifically for this.
+
+| Source | DetailType | Meaning |
+|--------|------------|---------|
+| `citadel.telemetry` | `cost.budget.threshold.crossed` | A budget's period-to-date spend crossed a configured soft threshold (e.g. 0.8 of `limitMicros`) |
+| `citadel.telemetry` | `cost.budget.breached` | A budget's period-to-date spend crossed the 1.0 (hard) threshold |
+
+### Event schema
+
+```json
+{
+  "source": "citadel.telemetry",
+  "detail-type": "cost.budget.threshold.crossed",
+  "detail": {
+    "orgId": "string",
+    "scope": "org | app:<appId>",
+    "periodType": "monthly | daily",
+    "periodKey": "YYYY-MM | YYYY-MM-DD",
+    "threshold": "number (0-1 fraction of limitMicros)",
+    "spentMicros": "number",
+    "limitMicros": "number",
+    "currency": "string"
+  }
+}
+```
+
+### Producer and dedupe
+
+Emitted by `backend/src/lambda/cost-budget-evaluator.ts` (hourly `CostBudgetEvaluatorScheduleRule`) via `backend/src/lambda/cost-notifier.ts`. Each budget row (enumerated via the sparse `BudgetIndex` GSI, never a Scan) is compared against its thresholds using period-to-date spend from a base-table Query (`PK=ORG#<org> AND SK BETWEEN periodStartIso AND nowIso`, summing only `priced===true` rows). Publication is gated by an atomic conditional `UpdateItem` on the budget row's `notified.<periodKey>` map (`ConditionExpression: attribute_not_exists(...) OR notified.<periodKey> < :threshold`) — this guarantees at most one publish per (period, threshold) even under concurrent or retried evaluator runs, and a higher threshold crossed later in the same period (e.g. 0.8 → 1.0) publishes again as a new escalation.
 
 ## Adding a New Event Type
 

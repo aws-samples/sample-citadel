@@ -12,15 +12,15 @@
  * Follows the existing seed-blueprints Custom Resource pattern.
  */
 
-import * as https from 'https';
-import * as url from 'url';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import * as https from "https";
+import * as url from "url";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import type {
   CloudFormationCustomResourceEvent,
   CloudFormationCustomResourceHandler,
   Context,
-} from 'aws-lambda';
+} from "aws-lambda";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -29,29 +29,36 @@ const MODEL_CONFIG_TABLE = process.env.MODEL_CONFIG_TABLE!;
 
 /** Baseline catalog entry — the default invokable model. Operators may edit later. */
 export const SEED_MODEL_CATALOG_ITEM = {
-  modelKey: 'anthropic-claude-sonnet-5',
-  provider: 'anthropic',
-  baseModelId: 'anthropic.claude-sonnet-5',
-  status: 'enabled',
-  modality: 'text',
-  invocationMode: 'converse',
+  modelKey: "anthropic-claude-sonnet-5",
+  provider: "anthropic",
+  baseModelId: "anthropic.claude-sonnet-5",
+  status: "enabled",
+  modality: "text",
+  invocationMode: "converse",
   supportsTools: true,
   supportsSystemPrompt: true,
   supportsStreaming: true,
   regionProfiles: {
-    us: 'us.anthropic.claude-sonnet-5',
-    global: 'global.anthropic.claude-sonnet-5',
+    us: "us.anthropic.claude-sonnet-5",
+    global: "global.anthropic.claude-sonnet-5",
   },
+  // Baseline list pricing — additive, same shape as the sync overlay.
+  // Illustrative placeholder; operators may correct via the catalog row.
+  inputPer1kTokens: 3,
+  outputPer1kTokens: 15,
+  currency: "USD",
+  pricingSource: "seed",
+  pricingUpdatedAt: new Date().toISOString(),
 };
 
 /** Baseline platform config entry — resolved defaults. Operators may edit later. */
 export const SEED_MODEL_CONFIG_ITEM = {
-  scope: 'platform',
-  globalDefaultKey: 'anthropic-claude-sonnet-5',
+  scope: "platform",
+  globalDefaultKey: "anthropic-claude-sonnet-5",
   slotDefaults: {},
   orgDefaults: {},
   agentOverrides: {},
-  localityMode: 'off',
+  localityMode: "off",
 };
 
 /**
@@ -70,12 +77,17 @@ export async function seedModelCatalog(
       new PutCommand({
         TableName: catalogTable,
         Item: SEED_MODEL_CATALOG_ITEM,
-        ConditionExpression: 'attribute_not_exists(modelKey)',
+        ConditionExpression: "attribute_not_exists(modelKey)",
       }),
     );
-    console.log(`✓ Seeded model catalog entry: ${SEED_MODEL_CATALOG_ITEM.modelKey}`);
+    console.log(
+      `✓ Seeded model catalog entry: ${SEED_MODEL_CATALOG_ITEM.modelKey}`,
+    );
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+    if (
+      err instanceof Error &&
+      err.name === "ConditionalCheckFailedException"
+    ) {
       console.log(
         `⊘ Model catalog entry already exists, skipping: ${SEED_MODEL_CATALOG_ITEM.modelKey}`,
       );
@@ -90,13 +102,16 @@ export async function seedModelCatalog(
         TableName: configTable,
         Item: SEED_MODEL_CONFIG_ITEM,
         // `scope` is a DynamoDB reserved word — escape it via an alias.
-        ConditionExpression: 'attribute_not_exists(#scope)',
-        ExpressionAttributeNames: { '#scope': 'scope' },
+        ConditionExpression: "attribute_not_exists(#scope)",
+        ExpressionAttributeNames: { "#scope": "scope" },
       }),
     );
     console.log(`✓ Seeded model config entry: ${SEED_MODEL_CONFIG_ITEM.scope}`);
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+    if (
+      err instanceof Error &&
+      err.name === "ConditionalCheckFailedException"
+    ) {
       console.log(
         `⊘ Model config entry already exists, skipping: ${SEED_MODEL_CONFIG_ITEM.scope}`,
       );
@@ -110,7 +125,7 @@ export async function seedModelCatalog(
 async function sendCfnResponse(
   event: CloudFormationCustomResourceEvent,
   context: Context,
-  status: 'SUCCESS' | 'FAILED',
+  status: "SUCCESS" | "FAILED",
   data: Record<string, unknown>,
 ): Promise<void> {
   const responseBody = JSON.stringify({
@@ -131,37 +146,44 @@ async function sendCfnResponse(
         hostname: parsedUrl.hostname,
         port: 443,
         path: parsedUrl.path,
-        method: 'PUT',
+        method: "PUT",
         headers: {
-          'Content-Type': '',
-          'Content-Length': responseBody.length,
+          "Content-Type": "",
+          "Content-Length": responseBody.length,
         },
       },
       () => resolve(),
     );
-    req.on('error', reject);
+    req.on("error", reject);
     req.write(responseBody);
     req.end();
   });
 }
 
-export const handler: CloudFormationCustomResourceHandler = async (event, context) => {
-  console.log('Event:', JSON.stringify(event));
+export const handler: CloudFormationCustomResourceHandler = async (
+  event,
+  context,
+) => {
+  console.log("Event:", JSON.stringify(event));
 
-  if (event.RequestType === 'Delete') {
-    await sendCfnResponse(event, context, 'SUCCESS', { Message: 'Nothing to clean up' });
+  if (event.RequestType === "Delete") {
+    await sendCfnResponse(event, context, "SUCCESS", {
+      Message: "Nothing to clean up",
+    });
     return;
   }
 
   try {
     await seedModelCatalog(docClient, MODEL_CATALOG_TABLE, MODEL_CONFIG_TABLE);
 
-    await sendCfnResponse(event, context, 'SUCCESS', {
-      Message: 'Model catalog seeded successfully',
+    await sendCfnResponse(event, context, "SUCCESS", {
+      Message: "Model catalog seeded successfully",
     });
   } catch (err: unknown) {
-    console.error('Error seeding model catalog:', err);
-    await sendCfnResponse(event, context, 'FAILED', { Message: err instanceof Error ? err.message : String(err) });
+    console.error("Error seeding model catalog:", err);
+    await sendCfnResponse(event, context, "FAILED", {
+      Message: err instanceof Error ? err.message : String(err),
+    });
     throw err;
   }
 };

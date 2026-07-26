@@ -5,6 +5,7 @@ import time
 import os
 from strands.tools import tool
 from datetime import datetime
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,38 @@ def _publish_event(phase: str, session_id: str, progress: int, summary: str):
         }])
     except Exception as e:
         print(f"Failed to publish event: {e}")
+
+
+def publish_usage_event(session_id: str, usage_record: dict) -> None:
+    """Publish one model-invocation usage record onto the
+    ``agent_intake.usage`` EventBridge namespace, additive to the existing
+    ``agent_intake.<phase>`` progress namespaces.
+
+    Attribution rides ``sessionId`` (== ``projectId`` per the existing
+    session/project convention — see ``_internal_update_progress``) plus a
+    per-event ``correlationId`` so downstream consumers can join usage
+    records to a single model call without any existing consumer needing to
+    change (a brand-new Source/DetailType, so nothing currently subscribed
+    to ``agent_intake.<phase>`` sees this event). Best-effort: usage capture
+    must never break a conversation turn, so failures are logged and
+    swallowed, never raised.
+    """
+    if not EVENT_BUS_NAME:
+        return
+    try:
+        events_client.put_events(Entries=[{
+            'Source': 'agent_intake.usage',
+            'DetailType': 'intake.usage.captured',
+            'Detail': json.dumps({
+                'sessionId': session_id,
+                'projectId': session_id,
+                'correlationId': str(uuid4()),
+                **usage_record,
+            }),
+            'EventBusName': EVENT_BUS_NAME,
+        }])
+    except Exception as e:
+        logger.warning('Failed to publish usage event for session %s: %s', session_id, e)
 
 
 @tool

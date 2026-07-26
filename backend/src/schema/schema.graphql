@@ -1874,6 +1874,10 @@ type Execution {
   completedAt: AWSDateTime
   triggeredBy: String!
   error: String
+  # Additive (usage rollup): execution-level token usage folded from
+  # nodeResults[*].usageTotals on read. Null when no node carries usage
+  # (e.g. a run predating this feature).
+  usageTotals: AWSJSON
 }
 
 type ExecutionConnection {

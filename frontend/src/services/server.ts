@@ -33,6 +33,8 @@ interface AmplifyConfig {
   appsyncApiKey?: string;
   environment?: string;
   eventBusUrl?: string;
+  /** Cost query HttpApi base URL (TelemetryStack). Absent/empty = cost surface unconfigured — costService degrades gracefully. */
+  costApiUrl?: string;
 }
 
 interface SignUpParams {

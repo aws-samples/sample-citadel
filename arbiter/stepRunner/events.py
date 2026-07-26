@@ -60,9 +60,22 @@ def publish_node_started(execution_id: str, workflow_id: str, node_id: str, agen
     })
 
 
-def publish_node_completed(execution_id: str, workflow_id: str, node_id: str, agent_id: str, completed_at: str, output: dict) -> None:
-    """Publish workflow.node.completed event when a node completes successfully."""
-    publish_event('workflow.node.completed', {
+def publish_node_completed(
+    execution_id: str, workflow_id: str, node_id: str, agent_id: str, completed_at: str,
+    output: dict, usage: list | None = None,
+) -> None:
+    """Publish workflow.node.completed event when a node completes successfully.
+
+    ``usage`` is additive and optional (usage rollup hop): forwarded as a
+    top-level ``usage`` key on the detail, mirroring the shape
+    ``workflow_contract.build_node_result_detail`` produces on the worker's
+    hot-path producer. This helper is not the live producer today (the
+    worker's ``_emit_node_result`` is — see module docstring caveat below),
+    but keeping the same additive shape here avoids drift if a caller adopts
+    it later. Omitted (``None``) keeps the detail identical to pre-feature
+    callers — no ``usage`` key is added.
+    """
+    detail = {
         'executionId': execution_id,
         'workflowId': workflow_id,
         'nodeId': node_id,
@@ -70,7 +83,10 @@ def publish_node_completed(execution_id: str, workflow_id: str, node_id: str, ag
         'completedAt': completed_at,
         'output': output,
         'correlationId': execution_id,
-    })
+    }
+    if usage is not None:
+        detail['usage'] = usage
+    publish_event('workflow.node.completed', detail)
 
 
 def publish_node_failed(execution_id: str, workflow_id: str, node_id: str, agent_id: str, error: str, retry_count: int) -> None:

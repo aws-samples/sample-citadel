@@ -200,8 +200,11 @@ class TestModeDrivenPermissiveShadow:
 
         assert mock_load.called
         mock_write.assert_called_once_with(finding)
+        # governed_process_agent_call forwards the additive supervisor_usage
+        # kwarg (default None when the caller doesn't supply one).
         mock_dispatch.assert_called_once_with(
             _AGENTS_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
+            supervisor_usage=None,
         )
         assert result == {"dispatched": True}
 

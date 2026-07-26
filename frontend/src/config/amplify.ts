@@ -4,20 +4,9 @@
  */
 
 import serverService from '../services/server';
+import { convertAWSExportsToConfig, type AWSExports } from './awsExportsConfig';
 
-interface AWSExports {
-  aws_project_region: string;
-  aws_cognito_region: string;
-  aws_user_pools_id: string;
-  aws_user_pools_web_client_id: string;
-  aws_cognito_identity_pool_id?: string;
-  aws_appsync_graphqlEndpoint: string;
-  aws_appsync_region: string;
-  aws_appsync_authenticationType: 'API_KEY' | 'AMAZON_COGNITO_USER_POOLS' | 'AWS_IAM';
-  aws_appsync_apiKey?: string;
-  environment?: string;
-  aws_event_bus_url?: string;
-}
+export { convertAWSExportsToConfig, type AWSExports };
 
 /**
  * Load AWS configuration from aws-exports.json file
@@ -56,24 +45,7 @@ function getEnvConfig() {
     appsyncApiKey: import.meta.env.VITE_APPSYNC_API_KEY,
     environment: import.meta.env.VITE_ENVIRONMENT,
     eventBusUrl: import.meta.env.VITE_EVENT_BUS_URL || '',
-  };
-}
-
-/**
- * Convert AWS exports format to Amplify config format
- */
-function convertAWSExportsToConfig(awsExports: AWSExports) {
-  return {
-    region: awsExports.aws_project_region,
-    userPoolId: awsExports.aws_user_pools_id,
-    userPoolClientId: awsExports.aws_user_pools_web_client_id,
-    identityPoolId: awsExports.aws_cognito_identity_pool_id,
-    appsyncEndpoint: awsExports.aws_appsync_graphqlEndpoint,
-    appsyncRegion: awsExports.aws_appsync_region,
-    appsyncAuthenticationType: awsExports.aws_appsync_authenticationType,
-    appsyncApiKey: awsExports.aws_appsync_apiKey,
-    environment: awsExports.environment,
-    eventBusUrl: awsExports.aws_event_bus_url || '',
+    costApiUrl: import.meta.env.VITE_COST_API_URL || '',
   };
 }
 

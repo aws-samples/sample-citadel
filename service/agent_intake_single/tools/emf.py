@@ -154,3 +154,46 @@ def emit_turn_metrics(session_id, turn_duration_ms, agent_result=None):
             logger.warning("emf: emit failed: %s", exc)
         except Exception:
             pass
+
+
+def capture_turn_usage(session_id, turn_duration_ms, agent_result=None):
+    """Capture per-turn model usage from the strands ``AgentResult`` and
+    publish it as a ``source="intake"`` usage record.
+
+    Reuses the same defensive ``_extract_result_metrics`` extraction seam as
+    ``emit_turn_metrics`` (``AgentResult.metrics.accumulated_usage``) rather
+    than adding a second parallel hook into the strands event loop — the
+    strands Agent doesn't expose a per-call-index breakdown for the
+    conversational loop the way the direct ``bedrock.converse()`` call sites
+    do, so this captures one usage record per completed TURN (call_index is
+    always 0 for this source's per-turn granularity) rather than per
+    underlying model round trip. Defensive: never raises, so a malformed
+    result or a publish failure can never break the conversation turn.
+    """
+    try:
+        extracted, _tool_durations = _extract_result_metrics(agent_result)
+        input_tokens = extracted.get("InputTokens")
+        output_tokens = extracted.get("OutputTokens")
+        if input_tokens is None and output_tokens is None:
+            return  # nothing to report — e.g. no result event, or no usage on it
+        model_id = ""
+        try:
+            from config import get_agent_model_id
+            model_id = get_agent_model_id()
+        except Exception as model_id_exc:  # noqa: BLE001 — fallback must never break the turn
+            logger.warning(
+                "emf: model id resolution failed, using empty modelId: %s",
+                model_id_exc,
+            )
+        from tools.usage import build_usage_record
+        record = build_usage_record(
+            model_id=model_id,
+            input_tokens=input_tokens or 0,
+            output_tokens=output_tokens or 0,
+            latency_ms=turn_duration_ms,
+            call_index=0,
+        )
+        from tools.state import publish_usage_event
+        publish_usage_event(session_id, record)
+    except Exception as exc:  # noqa: BLE001 — usage capture must never break the turn
+        logger.warning("emf: turn usage capture failed: %s", exc)

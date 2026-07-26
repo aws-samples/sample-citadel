@@ -186,6 +186,149 @@ class TestRunAgentSubprocessProperties:
 
 
 # ---------------------------------------------------------------------------
+# run_agent_in_subprocess — usage_sink envelope handling
+#
+# The child's stdout envelope is now {"response": str, "usage": [...]}.
+# run_agent_in_subprocess keeps returning a bare str (backward compatible)
+# and, when the caller passes usage_sink=[...], extends it in place with the
+# parsed usage records. Old {"response": ...}-only stdout and legacy
+# non-JSON stdout must continue to parse exactly as before, with usage_sink
+# staying empty.
+# ---------------------------------------------------------------------------
+
+class TestRunAgentUsageSinkEnvelope:
+    """Property tests for the additive usage_sink kwarg."""
+
+    def _fresh_index(self):
+        import sys
+        sys.modules.pop('index', None)
+        import index
+        return index
+
+    def test_usage_sink_extended_with_worker_usage_records(self):
+        """A well-formed {"response","usage":[...]}-shaped child envelope
+        extends the caller-supplied usage_sink in place."""
+        records = [
+            {'modelId': 'm', 'inputTokens': 1, 'outputTokens': 2,
+             'latencyMs': 3, 'callIndex': 0,
+             'capturedAt': '2024-01-01T00:00:00Z', 'source': 'worker'},
+        ]
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"response": "ok", "usage": records})
+        mock_result.stderr = ""
+
+        with patch.dict('os.environ', {
+            'AGENT_CONFIG_TABLE': 'test-table',
+            'CREDENTIAL_VENDER_FUNCTION': 'test-fn',
+        }):
+            with patch('boto3.resource'), patch('boto3.client'):
+                index = self._fresh_index()
+                with patch('subprocess.run', return_value=mock_result):
+                    sink = []
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink)
+                    assert result == "ok"
+                    assert sink == records
+
+    def test_no_usage_sink_kwarg_is_backward_compatible(self):
+        """Callers that don't pass usage_sink see identical behavior to
+        before the envelope change — a bare str is returned."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"response": "ok", "usage": [{"a": 1}]})
+        mock_result.stderr = ""
+
+        with patch.dict('os.environ', {
+            'AGENT_CONFIG_TABLE': 'test-table',
+            'CREDENTIAL_VENDER_FUNCTION': 'test-fn',
+        }):
+            with patch('boto3.resource'), patch('boto3.client'):
+                index = self._fresh_index()
+                with patch('subprocess.run', return_value=mock_result):
+                    result = index.run_agent_in_subprocess({}, None)
+                    assert result == "ok"
+
+    def test_old_response_only_envelope_still_parses_usage_sink_stays_empty(self):
+        """Legacy {"response": ...}-only stdout (no 'usage' key) still parses
+        exactly as today; a supplied usage_sink stays empty rather than
+        raising on the missing key."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"response": "legacy-ok"})
+        mock_result.stderr = ""
+
+        with patch.dict('os.environ', {
+            'AGENT_CONFIG_TABLE': 'test-table',
+            'CREDENTIAL_VENDER_FUNCTION': 'test-fn',
+        }):
+            with patch('boto3.resource'), patch('boto3.client'):
+                index = self._fresh_index()
+                with patch('subprocess.run', return_value=mock_result):
+                    sink = []
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink)
+                    assert result == "legacy-ok"
+                    assert sink == []
+
+    def test_legacy_non_json_stdout_still_returns_raw_and_sink_stays_empty(self):
+        """Non-JSON stdout (legacy handler behavior) still returns the raw
+        string; usage_sink stays empty rather than raising."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "plain text output"
+        mock_result.stderr = ""
+
+        with patch.dict('os.environ', {
+            'AGENT_CONFIG_TABLE': 'test-table',
+            'CREDENTIAL_VENDER_FUNCTION': 'test-fn',
+        }):
+            with patch('boto3.resource'), patch('boto3.client'):
+                index = self._fresh_index()
+                with patch('subprocess.run', return_value=mock_result):
+                    sink = []
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink)
+                    assert result == "plain text output"
+                    assert sink == []
+
+    def test_malformed_usage_field_never_crashes_parent(self):
+        """A malformed 'usage' field (wrong type) in the child envelope must
+        never crash the parent — usage_sink stays empty via the defensive
+        parser."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"response": "ok", "usage": "not-a-list"})
+        mock_result.stderr = ""
+
+        with patch.dict('os.environ', {
+            'AGENT_CONFIG_TABLE': 'test-table',
+            'CREDENTIAL_VENDER_FUNCTION': 'test-fn',
+        }):
+            with patch('boto3.resource'), patch('boto3.client'):
+                index = self._fresh_index()
+                with patch('subprocess.run', return_value=mock_result):
+                    sink = []
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink)
+                    assert result == "ok"
+                    assert sink == []
+
+    def test_usage_sink_none_default_never_raises(self):
+        """The default usage_sink=None must never attempt to extend anything."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps({"response": "ok", "usage": [{"a": 1}]})
+        mock_result.stderr = ""
+
+        with patch.dict('os.environ', {
+            'AGENT_CONFIG_TABLE': 'test-table',
+            'CREDENTIAL_VENDER_FUNCTION': 'test-fn',
+        }):
+            with patch('boto3.resource'), patch('boto3.client'):
+                index = self._fresh_index()
+                with patch('subprocess.run', return_value=mock_result):
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=None)
+                    assert result == "ok"
+
+
+# ---------------------------------------------------------------------------
 # post_task_complete properties
 # ---------------------------------------------------------------------------
 

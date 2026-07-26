@@ -1,9 +1,10 @@
 """generate_technical_design tool — bedrock.converse() loop, one section per call."""
 import json
 import os
+import time
 from strands.tools import tool
 from tools.kb import kb_query, load_json_from_s3, save_json_to_s3, s3_get, s3_put
-from tools.converse_utils import extract_text
+from tools.converse_utils import extract_text, capture_converse_usage
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import bedrock, get_agent_model_id
 
@@ -103,12 +104,15 @@ Write the section now in markdown. Start with ## {section['id']}. {section['titl
 After the section content, add a final line in this exact format (do not omit it):
 <!-- summary: one sentence describing the key decisions or content of this section -->"""
 
+    started_at = time.monotonic()
+
     response = bedrock.converse(
         modelId=get_agent_model_id(),
         system=[{'text': SYSTEM_PROMPT}],
         messages=[{'role': 'user', 'content': [{'text': user_message}]}],
         inferenceConfig={'maxTokens': 8192},
     )
+    capture_converse_usage(response, get_agent_model_id(), session_id, started_at)
     return extract_text(response)
 
 
@@ -304,11 +308,14 @@ Return JSON:
 }}"""
 
     def _converse(user_prompt: str, max_tokens: int) -> dict:
-        return bedrock.converse(
+        started_at = time.monotonic()
+        resp = bedrock.converse(
             modelId=get_agent_model_id(),
             messages=[{'role': 'user', 'content': [{'text': user_prompt}]}],
             inferenceConfig={'maxTokens': max_tokens},
         )
+        capture_converse_usage(resp, get_agent_model_id(), session_id, started_at)
+        return resp
 
     response = _converse(prompt, RESOURCING_MAX_TOKENS)
 
@@ -529,11 +536,13 @@ Current inputs:
 Current defaults:
 {json.dumps(defaults, indent=2)}"""
 
+    started_at = time.monotonic()
     response = bedrock.converse(
         modelId=get_agent_model_id(),
         messages=[{'role': 'user', 'content': [{'text': prompt}]}],
         inferenceConfig={'maxTokens': 2048},
     )
+    capture_converse_usage(response, get_agent_model_id(), session_id, started_at)
     raw = extract_text(response)
     import re
     match = re.search(r'\{.*\}', raw, re.DOTALL)

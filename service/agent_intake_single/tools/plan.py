@@ -1,9 +1,10 @@
 """Planning document tools — business_plan and commercial_plan generation and editing."""
 import json
 import os
+import time
 from strands.tools import tool
 from tools.kb import s3_get, s3_put, load_json_from_s3, save_json_to_s3
-from tools.converse_utils import extract_text
+from tools.converse_utils import extract_text, capture_converse_usage
 from tools.design import SECTION_KEY, RESOURCING_KEY, RESOURCING_INPUTS_KEY, SYSTEM_PROMPT, _assessment_summary, _rolling_summary
 from config import bedrock, get_agent_model_id
 
@@ -47,12 +48,14 @@ Required content:
 
 Write in markdown. Start with ## {section['title']}. Be specific and concise — no filler."""
 
+        started_at = time.monotonic()
         response = bedrock.converse(
             modelId=get_agent_model_id(),
             system=[{'text': SYSTEM_PROMPT}],
             messages=[{'role': 'user', 'content': [{'text': prompt}]}],
             inferenceConfig={'maxTokens': 4096},
         )
+        capture_converse_usage(response, get_agent_model_id(), session_id, started_at)
         content = extract_text(response)
         parts.append(content)
         parts.append("\n\n---\n\n")
@@ -201,11 +204,13 @@ Edit instruction: {edit_instruction}
 Current config:
 {json.dumps(config)}"""
 
+        started_at = time.monotonic()
         response = bedrock.converse(
             modelId=get_agent_model_id(),
             messages=[{'role': 'user', 'content': [{'text': patch_prompt}]}],
             inferenceConfig={'maxTokens': 256},
         )
+        capture_converse_usage(response, get_agent_model_id(), session_id, started_at)
         import re
         raw = extract_text(response)
         match = re.search(r'\{.*\}', raw, re.DOTALL)
