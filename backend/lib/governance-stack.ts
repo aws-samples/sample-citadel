@@ -20,24 +20,24 @@
  * Outputs (public): governanceTranscriptsKey, governanceTranscriptsBucket,
  *                   governanceEnforceParam, governanceEffectiveAtParam.
  */
-import * as cdk from 'aws-cdk-lib';
-import { CustomResource, Duration } from 'aws-cdk-lib';
-import * as appsync from '@aws-cdk/aws-appsync-alpha';
+import * as cdk from "aws-cdk-lib";
+import { CustomResource, Duration } from "aws-cdk-lib";
+import * as appsync from "@aws-cdk/aws-appsync-alpha";
 // Cfn L1 AppSync constructs — used cross-stack to avoid creating data sources
 // in the API owner's stack (see governance-stack.ts constructor for rationale).
-import { aws_appsync as appsyncCfn } from 'aws-cdk-lib';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
-import * as iam from 'aws-cdk-lib/aws-iam';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as logs from 'aws-cdk-lib/aws-logs';
-import { BlockPublicAccess, Bucket } from 'aws-cdk-lib/aws-s3';
-import * as sqs from 'aws-cdk-lib/aws-sqs';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
-import { Provider } from 'aws-cdk-lib/custom-resources';
-import { Construct } from 'constructs';
-import { NagSuppressions } from 'cdk-nag';
+import { aws_appsync as appsyncCfn } from "aws-cdk-lib";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as logs from "aws-cdk-lib/aws-logs";
+import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3";
+import * as sqs from "aws-cdk-lib/aws-sqs";
+import * as ssm from "aws-cdk-lib/aws-ssm";
+import { Provider } from "aws-cdk-lib/custom-resources";
+import { Construct } from "constructs";
+import { NagSuppressions } from "cdk-nag";
 
 export interface GovernanceStackProps extends cdk.StackProps {
   environment: string;
@@ -90,35 +90,47 @@ export class GovernanceStack extends cdk.Stack {
     // Governance Rollout Flags
     // ============================================================
 
-    const governanceEnforceParam = new ssm.StringParameter(this, 'GovernanceEnforceParam', {
-      parameterName: `/citadel/governance/enforce/${props.environment}`,
-      stringValue: 'permissive',
-      allowedPattern: '^(permissive|shadow|strict)$',
-      description:
-        'AI-Accelerated Modernization Governance enforcement mode. ' +
-        'permissive = telemetry only (default); shadow = block in logs, allow action; ' +
-        'strict = hard block. Flip is data-driven per QD-1; effective_at companion ' +
-        'parameter auto-written on first permissive → shadow transition.',
-      tier: ssm.ParameterTier.STANDARD,
-    });
+    const governanceEnforceParam = new ssm.StringParameter(
+      this,
+      "GovernanceEnforceParam",
+      {
+        parameterName: `/citadel/governance/enforce/${props.environment}`,
+        stringValue: "permissive",
+        allowedPattern: "^(permissive|shadow|strict)$",
+        description:
+          "AI-Accelerated Modernization Governance enforcement mode. " +
+          "permissive = telemetry only (default); shadow = block in logs, allow action; " +
+          "strict = hard block. Flip is data-driven per QD-1; effective_at companion " +
+          "parameter auto-written on first permissive → shadow transition.",
+        tier: ssm.ParameterTier.STANDARD,
+      },
+    );
     this.governanceEnforceParam = governanceEnforceParam;
 
-    const governanceEffectiveAtParam = new ssm.StringParameter(this, 'GovernanceEffectiveAtParam', {
-      parameterName: `/citadel/governance/effective_at/${props.environment}`,
-      stringValue: '__EMPTY__',
-      description:
-        'ISO-8601 timestamp of first permissive → shadow flip. ' +
-        'Projects with createdAt < effective_at bypass new governance gates (grandfathering). ' +
-        '"__EMPTY__" means no cutoff set; all projects grandfathered.',
-      tier: ssm.ParameterTier.STANDARD,
-    });
+    const governanceEffectiveAtParam = new ssm.StringParameter(
+      this,
+      "GovernanceEffectiveAtParam",
+      {
+        parameterName: `/citadel/governance/effective_at/${props.environment}`,
+        stringValue: "__EMPTY__",
+        description:
+          "ISO-8601 timestamp of first permissive → shadow flip. " +
+          "Projects with createdAt < effective_at bypass new governance gates (grandfathering). " +
+          '"__EMPTY__" means no cutoff set; all projects grandfathered.',
+        tier: ssm.ParameterTier.STANDARD,
+      },
+    );
     this.governanceEffectiveAtParam = governanceEffectiveAtParam;
 
-    const effectiveAtAutoWriterFn = new lambda.Function(this, 'GovernanceEffectiveAtAutoWriterFn', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'index.handler',
-      timeout: Duration.seconds(30),
-      code: lambda.Code.fromInline(`
+    const effectiveAtAutoWriterFn = new lambda.Function(
+      this,
+      "GovernanceEffectiveAtAutoWriterFn",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "index.handler",
+        timeout: Duration.seconds(30),
+        code: lambda.Code.fromInline(
+          `
 const { SSMClient, GetParameterCommand, PutParameterCommand } = require('@aws-sdk/client-ssm');
 const https = require('https');
 const url = require('url');
@@ -187,26 +199,34 @@ exports.handler = async (event) => {
     await sendCfnResponse(event, 'FAILED', (e && e.message)? e.message: String(e), {});
   }
 };
-      `.trim()),
-      environment: {
-        ENFORCE_PARAM_NAME: governanceEnforceParam.parameterName,
-        EFFECTIVE_AT_PARAM_NAME: governanceEffectiveAtParam.parameterName,
+      `.trim(),
+        ),
+        environment: {
+          ENFORCE_PARAM_NAME: governanceEnforceParam.parameterName,
+          EFFECTIVE_AT_PARAM_NAME: governanceEffectiveAtParam.parameterName,
+        },
       },
-    });
+    );
 
-    effectiveAtAutoWriterFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ssm:GetParameter', 'ssm:PutParameter'],
-      resources: [
-        governanceEnforceParam.parameterArn,
-        governanceEffectiveAtParam.parameterArn,
-      ],
-    }));
+    effectiveAtAutoWriterFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter", "ssm:PutParameter"],
+        resources: [
+          governanceEnforceParam.parameterArn,
+          governanceEffectiveAtParam.parameterArn,
+        ],
+      }),
+    );
 
-    const effectiveAtProvider = new Provider(this, 'GovernanceEffectiveAtProvider', {
-      onEventHandler: effectiveAtAutoWriterFn,
-    });
+    const effectiveAtProvider = new Provider(
+      this,
+      "GovernanceEffectiveAtProvider",
+      {
+        onEventHandler: effectiveAtAutoWriterFn,
+      },
+    );
 
-    new CustomResource(this, 'GovernanceEffectiveAtTrigger', {
+    new CustomResource(this, "GovernanceEffectiveAtTrigger", {
       serviceToken: effectiveAtProvider.serviceToken,
       properties: {
         EnforceParamName: governanceEnforceParam.parameterName,
@@ -217,16 +237,16 @@ exports.handler = async (event) => {
       effectiveAtAutoWriterFn,
       [
         {
-          id: 'AwsSolutions-IAM4',
+          id: "AwsSolutions-IAM4",
           reason:
-            'AWS Lambda basic-execution managed policy is required for CloudWatch Logs; ' +
-            'scoped role also carries least-privilege SSM permissions on the two governance parameters only.',
+            "AWS Lambda basic-execution managed policy is required for CloudWatch Logs; " +
+            "scoped role also carries least-privilege SSM permissions on the two governance parameters only.",
         },
         {
-          id: 'AwsSolutions-L1',
+          id: "AwsSolutions-L1",
           reason:
-            'Inline Lambda uses the latest Node.js runtime available to the stack; upgrade is ' +
-            'a mechanical follow-up when the project bumps its NodeJS runtime convention.',
+            "Inline Lambda uses the latest Node.js runtime available to the stack; upgrade is " +
+            "a mechanical follow-up when the project bumps its NodeJS runtime convention.",
         },
       ],
       true,
@@ -235,9 +255,18 @@ exports.handler = async (event) => {
     NagSuppressions.addResourceSuppressions(
       effectiveAtProvider,
       [
-        { id: 'AwsSolutions-IAM4', reason: 'CDK Provider framework internal role — upstream managed.' },
-        { id: 'AwsSolutions-IAM5', reason: 'CDK Provider framework internal role — upstream managed.' },
-        { id: 'AwsSolutions-L1', reason: 'CDK Provider framework internal Lambda — upstream managed.' },
+        {
+          id: "AwsSolutions-IAM4",
+          reason: "CDK Provider framework internal role — upstream managed.",
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          reason: "CDK Provider framework internal role — upstream managed.",
+        },
+        {
+          id: "AwsSolutions-L1",
+          reason: "CDK Provider framework internal Lambda — upstream managed.",
+        },
       ],
       true,
     );
@@ -247,71 +276,84 @@ exports.handler = async (event) => {
     // ============================================================
 
     // Dedicated KMS key for transcript bucket (SSE-KMS).
-    const governanceTranscriptsKey = new cdk.aws_kms.Key(this, 'GovernanceTranscriptsKey', {
-      description: 'Citadel Governance Transcripts bucket encryption key',
-      enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      alias: `alias/citadel-governance-transcripts-${props.environment}`,
-    });
+    const governanceTranscriptsKey = new cdk.aws_kms.Key(
+      this,
+      "GovernanceTranscriptsKey",
+      {
+        description: "Citadel Governance Transcripts bucket encryption key",
+        enableKeyRotation: true,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        alias: `alias/citadel-governance-transcripts-${props.environment}`,
+      },
+    );
     this.governanceTranscriptsKey = governanceTranscriptsKey;
 
-    const governanceTranscriptsBucket = new Bucket(this, 'GovernanceTranscriptsBucket', {
-      bucketName: `citadel-governance-transcripts-${props.environment}-${this.account}-${this.region}`,
-      encryption: cdk.aws_s3.BucketEncryption.KMS,
-      encryptionKey: governanceTranscriptsKey,
-      bucketKeyEnabled: true,
-      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
-      enforceSSL: true,
-      versioned: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      serverAccessLogsBucket: accessLogsBucket,
-      serverAccessLogsPrefix: 'governance-transcripts/',
-      lifecycleRules: [
-        {
-          id: 'governance-transcripts-lifecycle',
-          enabled: true,
-          transitions: [
-            {
-              storageClass: cdk.aws_s3.StorageClass.INFREQUENT_ACCESS,
-              transitionAfter: Duration.days(90),
-            },
-            {
-              storageClass: cdk.aws_s3.StorageClass.GLACIER,
-              transitionAfter: Duration.days(180),
-            },
-          ],
-          expiration: Duration.days(2555),
-          noncurrentVersionExpiration: Duration.days(2555),
-        },
-      ],
-    });
+    const governanceTranscriptsBucket = new Bucket(
+      this,
+      "GovernanceTranscriptsBucket",
+      {
+        bucketName: `citadel-governance-transcripts-${props.environment}-${this.account}-${this.region}`,
+        encryption: cdk.aws_s3.BucketEncryption.KMS,
+        encryptionKey: governanceTranscriptsKey,
+        bucketKeyEnabled: true,
+        blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+        enforceSSL: true,
+        versioned: true,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        serverAccessLogsBucket: accessLogsBucket,
+        serverAccessLogsPrefix: "governance-transcripts/",
+        lifecycleRules: [
+          {
+            id: "governance-transcripts-lifecycle",
+            enabled: true,
+            transitions: [
+              {
+                storageClass: cdk.aws_s3.StorageClass.INFREQUENT_ACCESS,
+                transitionAfter: Duration.days(90),
+              },
+              {
+                storageClass: cdk.aws_s3.StorageClass.GLACIER,
+                transitionAfter: Duration.days(180),
+              },
+            ],
+            expiration: Duration.days(2555),
+            noncurrentVersionExpiration: Duration.days(2555),
+          },
+        ],
+      },
+    );
     this.governanceTranscriptsBucket = governanceTranscriptsBucket;
 
     // Deny any PutObject that is not SSE-KMS encrypted.
-    governanceTranscriptsBucket.addToResourcePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.DENY,
-      principals: [new iam.AnyPrincipal()],
-      actions: ['s3:PutObject'],
-      resources: [governanceTranscriptsBucket.arnForObjects('*')],
-      conditions: {
-        StringNotEquals: {
-          's3:x-amz-server-side-encryption': 'aws:kms',
+    governanceTranscriptsBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["s3:PutObject"],
+        resources: [governanceTranscriptsBucket.arnForObjects("*")],
+        conditions: {
+          StringNotEquals: {
+            "s3:x-amz-server-side-encryption": "aws:kms",
+          },
         },
-      },
-    }));
+      }),
+    );
 
     // Deny any PutObject that uses a different KMS key.
-    governanceTranscriptsBucket.addToResourcePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.DENY,
-      principals: [new iam.AnyPrincipal()],
-      actions: ['s3:PutObject'],
-      resources: [governanceTranscriptsBucket.arnForObjects('*')],
-      conditions: {
-        StringNotEqualsIfExists: {
-          's3:x-amz-server-side-encryption-aws-kms-key-id': governanceTranscriptsKey.keyArn,
+    governanceTranscriptsBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["s3:PutObject"],
+        resources: [governanceTranscriptsBucket.arnForObjects("*")],
+        conditions: {
+          StringNotEqualsIfExists: {
+            "s3:x-amz-server-side-encryption-aws-kms-key-id":
+              governanceTranscriptsKey.keyArn,
+          },
         },
-      },
-    }));
+      }),
+    );
 
     // ============================================================
     // Governance Notifier Lambda + EventBridge rule
@@ -330,7 +372,7 @@ exports.handler = async (event) => {
     // Dead-letter queue for events the Lambda fails to relay after
     // EventBridge async-invoke retries. Inspected by operators when
     // the live tail subscription drops governance events.
-    const governanceNotifierDlq = new sqs.Queue(this, 'GovernanceNotifierDlq', {
+    const governanceNotifierDlq = new sqs.Queue(this, "GovernanceNotifierDlq", {
       queueName: `citadel-governance-notifier-dlq-${props.environment}`,
       // 14 days — the max EventBridge-side retention window plus
       // headroom for human operator triage.
@@ -342,23 +384,27 @@ exports.handler = async (event) => {
       enforceSSL: true,
     });
 
-    const governanceNotifierFn = new lambda.Function(this, 'GovernanceNotifierFn', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'governance-notifier.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      timeout: Duration.seconds(10),
-      environment: {
-        EVENT_BUS_NAME: props.agentEventBus.eventBusName,
-        APPSYNC_ENDPOINT: props.appSyncApi.graphqlUrl,
+    const governanceNotifierFn = new lambda.Function(
+      this,
+      "GovernanceNotifierFn",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "governance-notifier.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: Duration.seconds(10),
+        environment: {
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          APPSYNC_ENDPOINT: props.appSyncApi.graphqlUrl,
+        },
+        // EventBridge invokes Lambda async; failed invocations land in
+        // the DLQ after the default 2 retries (configurable on the
+        // EventBridge target as well, but the Lambda-side DLQ also
+        // catches init failures and synchronous throws inside the
+        // handler).
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: governanceNotifierDlq,
       },
-      // EventBridge invokes Lambda async; failed invocations land in
-      // the DLQ after the default 2 retries (configurable on the
-      // EventBridge target as well, but the Lambda-side DLQ also
-      // catches init failures and synchronous throws inside the
-      // handler).
-      deadLetterQueueEnabled: true,
-      deadLetterQueue: governanceNotifierDlq,
-    });
+    );
 
     // Field-scoped IAM grant: only the publishGovernanceEvent mutation
     // is callable. The notifier MUST NOT be able to invoke any other
@@ -367,40 +413,40 @@ exports.handler = async (event) => {
     governanceNotifierFn.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ['appsync:GraphQL'],
+        actions: ["appsync:GraphQL"],
         resources: [
           `${props.appSyncApi.arn}/types/Mutation/fields/publishGovernanceEvent`,
         ],
       }),
     );
 
-    new events.Rule(this, 'GovernanceEventsRule', {
+    new events.Rule(this, "GovernanceEventsRule", {
       eventBus: props.agentEventBus,
       ruleName: `citadel-governance-events-${props.environment}`,
       description:
-        'Routes all 14 governance.* detail-types (the canonical list in ' +
-        'GOVERNANCE_DETAIL_TYPES) to the governance-notifier relay Lambda.',
+        "Routes all 14 governance.* detail-types (the canonical list in " +
+        "GOVERNANCE_DETAIL_TYPES) to the governance-notifier relay Lambda.",
       eventPattern: {
-        source: ['citadel.backend'],
+        source: ["citadel.backend"],
         // Keep this list in lock-step with GOVERNANCE_DETAIL_TYPES in
         // backend/src/utils/notifier-base.ts. The handler also drops
         // unknown detail-types as defence in depth, so the rule
         // expanding ahead of the handler is safe.
         detailType: [
-          'governance.adr.locked',
-          'governance.adr.reopen.attempted',
-          'governance.specification.created',
-          'governance.specification.approved',
-          'governance.specification.rejected',
-          'governance.round.started',
-          'governance.round.completed',
-          'governance.round.transcript.overflow',
-          'governance.archetype.classified',
-          'governance.offfrontier.escalated',
-          'governance.grandfathered.bypass',
-          'governance.mode.transition',
-          'governance.constitutional.rule.changed',
-          'governance.caselaw.changed',
+          "governance.adr.locked",
+          "governance.adr.reopen.attempted",
+          "governance.specification.created",
+          "governance.specification.approved",
+          "governance.specification.rejected",
+          "governance.round.started",
+          "governance.round.completed",
+          "governance.round.transcript.overflow",
+          "governance.archetype.classified",
+          "governance.offfrontier.escalated",
+          "governance.grandfathered.bypass",
+          "governance.mode.transition",
+          "governance.constitutional.rule.changed",
+          "governance.caselaw.changed",
         ],
       },
       targets: [
@@ -418,11 +464,11 @@ exports.handler = async (event) => {
       governanceNotifierFn,
       [
         {
-          id: 'AwsSolutions-IAM4',
+          id: "AwsSolutions-IAM4",
           reason:
-            'AWS Lambda basic-execution managed policy is required for CloudWatch Logs. ' +
-            'The relay also has a field-scoped appsync:GraphQL grant on the single ' +
-            'publishGovernanceEvent mutation — no API-wide permissions.',
+            "AWS Lambda basic-execution managed policy is required for CloudWatch Logs. " +
+            "The relay also has a field-scoped appsync:GraphQL grant on the single " +
+            "publishGovernanceEvent mutation — no API-wide permissions.",
         },
       ],
       true,
@@ -442,23 +488,23 @@ exports.handler = async (event) => {
 
     const governanceEventNoneDataSource = new appsyncCfn.CfnDataSource(
       this,
-      'GovernanceEventNoneDataSource',
+      "GovernanceEventNoneDataSource",
       {
         apiId: props.appSyncApi.apiId,
-        name: 'GovernanceEventNoneDataSource',
-        type: 'NONE',
+        name: "GovernanceEventNoneDataSource",
+        type: "NONE",
         description:
-          'Passthrough data source for the publishGovernanceEvent fanout mutation.',
+          "Passthrough data source for the publishGovernanceEvent fanout mutation.",
       },
     );
 
     const publishGovernanceEventResolver = new appsyncCfn.CfnResolver(
       this,
-      'PublishGovernanceEventResolver',
+      "PublishGovernanceEventResolver",
       {
         apiId: props.appSyncApi.apiId,
-        typeName: 'Mutation',
-        fieldName: 'publishGovernanceEvent',
+        typeName: "Mutation",
+        fieldName: "publishGovernanceEvent",
         dataSourceName: governanceEventNoneDataSource.attrName,
         // NONE-type passthrough: echo the input back as the result so
         // the @aws_subscribe-driven subscription fan-outs the same
@@ -470,7 +516,9 @@ exports.handler = async (event) => {
         responseMappingTemplate: `$util.toJson($ctx.result)`,
       },
     );
-    publishGovernanceEventResolver.addDependency(governanceEventNoneDataSource);
+    publishGovernanceEventResolver.addResourceDependency(
+      governanceEventNoneDataSource,
+    );
 
     // ============================================================
     // ADR Resolver
@@ -481,287 +529,405 @@ exports.handler = async (event) => {
     // live here so the stack can be redeployed without touching the data
     // plane.
 
-    const adrResolverFunction = new lambda.Function(this, 'ADRResolverFunction', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'adr-resolver.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      environment: {
-        ADRS_TABLE: props.adrsTable.tableName,
-        ADR_REOPEN_ATTEMPTS_TABLE: props.adrReopenAttemptsTable.tableName,
-        EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+    const adrResolverFunction = new lambda.Function(
+      this,
+      "ADRResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "adr-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          ADRS_TABLE: props.adrsTable.tableName,
+          ADR_REOPEN_ATTEMPTS_TABLE: props.adrReopenAttemptsTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+        },
+        timeout: Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, "ADRResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
       },
-      timeout: Duration.seconds(30),
-      logGroup: new logs.LogGroup(this, 'ADRResolverFunctionLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    );
 
     props.adrsTable.grantReadWriteData(adrResolverFunction);
     props.adrReopenAttemptsTable.grantReadWriteData(adrResolverFunction);
     props.agentEventBus.grantPutEventsTo(adrResolverFunction);
 
-    const adrDataSourceRole = new iam.Role(this, 'ADRDataSourceRole', {
-      assumedBy: new iam.ServicePrincipal('appsync.amazonaws.com'),
+    const adrDataSourceRole = new iam.Role(this, "ADRDataSourceRole", {
+      assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
     });
     adrResolverFunction.grantInvoke(adrDataSourceRole);
 
-    const adrLambdaDataSource = new appsyncCfn.CfnDataSource(this, 'ADRLambdaDataSource', {
-      apiId: props.appSyncApi.apiId,
-      name: 'ADRLambdaDataSource',
-      type: 'AWS_LAMBDA',
-      serviceRoleArn: adrDataSourceRole.roleArn,
-      lambdaConfig: {
-        lambdaFunctionArn: adrResolverFunction.functionArn,
+    const adrLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "ADRLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "ADRLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: adrDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: adrResolverFunction.functionArn,
+        },
       },
-    });
+    );
 
-    const createADRResolver = new appsyncCfn.CfnResolver(this, 'CreateADRResolver', {
+    const createADRResolver = new appsyncCfn.CfnResolver(
+      this,
+      "CreateADRResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "createADR",
+        dataSourceName: adrLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    createADRResolver.addResourceDependency(adrLambdaDataSource);
+
+    const supersedeADRResolver = new appsyncCfn.CfnResolver(
+      this,
+      "SupersedeADRResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "supersedeADR",
+        dataSourceName: adrLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    supersedeADRResolver.addResourceDependency(adrLambdaDataSource);
+
+    const getADRResolver = new appsyncCfn.CfnResolver(this, "GetADRResolver", {
       apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'createADR',
+      typeName: "Query",
+      fieldName: "getADR",
       dataSourceName: adrLambdaDataSource.attrName,
       requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
       responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
     });
-    createADRResolver.addDependency(adrLambdaDataSource);
+    getADRResolver.addResourceDependency(adrLambdaDataSource);
 
-    const supersedeADRResolver = new appsyncCfn.CfnResolver(this, 'SupersedeADRResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'supersedeADR',
-      dataSourceName: adrLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    supersedeADRResolver.addDependency(adrLambdaDataSource);
+    const listADRsForProjectResolver = new appsyncCfn.CfnResolver(
+      this,
+      "ListADRsForProjectResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "listADRsForProject",
+        dataSourceName: adrLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    listADRsForProjectResolver.addResourceDependency(adrLambdaDataSource);
 
-    const getADRResolver = new appsyncCfn.CfnResolver(this, 'GetADRResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Query',
-      fieldName: 'getADR',
-      dataSourceName: adrLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    getADRResolver.addDependency(adrLambdaDataSource);
-
-    const listADRsForProjectResolver = new appsyncCfn.CfnResolver(this, 'ListADRsForProjectResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Query',
-      fieldName: 'listADRsForProject',
-      dataSourceName: adrLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    listADRsForProjectResolver.addDependency(adrLambdaDataSource);
-
-    const reopenADRResolver = new appsyncCfn.CfnResolver(this, 'ReopenADRResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'reopenADR',
-      dataSourceName: adrLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    reopenADRResolver.addDependency(adrLambdaDataSource);
+    const reopenADRResolver = new appsyncCfn.CfnResolver(
+      this,
+      "ReopenADRResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "reopenADR",
+        dataSourceName: adrLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    reopenADRResolver.addResourceDependency(adrLambdaDataSource);
 
     // ============================================================
     // ExecutionSpecification Resolver
     // ============================================================
 
-    const execSpecResolverFunction = new lambda.Function(this, 'ExecSpecResolverFunction', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'execspec-resolver.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      environment: {
-        EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
-        EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+    const execSpecResolverFunction = new lambda.Function(
+      this,
+      "ExecSpecResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "execspec-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, "ExecSpecResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
       },
-      timeout: cdk.Duration.seconds(30),
-      logGroup: new logs.LogGroup(this, 'ExecSpecResolverFunctionLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    );
 
-    props.executionSpecificationsTable.grantReadWriteData(execSpecResolverFunction);
+    props.executionSpecificationsTable.grantReadWriteData(
+      execSpecResolverFunction,
+    );
     props.agentEventBus.grantPutEventsTo(execSpecResolverFunction);
 
-    const execSpecDataSourceRole = new iam.Role(this, 'ExecSpecDataSourceRole', {
-      assumedBy: new iam.ServicePrincipal('appsync.amazonaws.com'),
-    });
+    const execSpecDataSourceRole = new iam.Role(
+      this,
+      "ExecSpecDataSourceRole",
+      {
+        assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+      },
+    );
     execSpecResolverFunction.grantInvoke(execSpecDataSourceRole);
 
-    const execSpecLambdaDataSource = new appsyncCfn.CfnDataSource(this, 'ExecSpecLambdaDataSource', {
-      apiId: props.appSyncApi.apiId,
-      name: 'ExecSpecLambdaDataSource',
-      type: 'AWS_LAMBDA',
-      serviceRoleArn: execSpecDataSourceRole.roleArn,
-      lambdaConfig: {
-        lambdaFunctionArn: execSpecResolverFunction.functionArn,
+    const execSpecLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "ExecSpecLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "ExecSpecLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: execSpecDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: execSpecResolverFunction.functionArn,
+        },
       },
-    });
+    );
 
-    const createExecSpecResolver = new appsyncCfn.CfnResolver(this, 'CreateExecutionSpecResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'createExecutionSpecification',
-      dataSourceName: execSpecLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    createExecSpecResolver.addDependency(execSpecLambdaDataSource);
+    const createExecSpecResolver = new appsyncCfn.CfnResolver(
+      this,
+      "CreateExecutionSpecResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "createExecutionSpecification",
+        dataSourceName: execSpecLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    createExecSpecResolver.addResourceDependency(execSpecLambdaDataSource);
 
-    const submitExecSpecResolver = new appsyncCfn.CfnResolver(this, 'SubmitExecutionSpecResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'submitExecutionSpecification',
-      dataSourceName: execSpecLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    submitExecSpecResolver.addDependency(execSpecLambdaDataSource);
+    const submitExecSpecResolver = new appsyncCfn.CfnResolver(
+      this,
+      "SubmitExecutionSpecResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "submitExecutionSpecification",
+        dataSourceName: execSpecLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    submitExecSpecResolver.addResourceDependency(execSpecLambdaDataSource);
 
-    const approveExecSpecResolver = new appsyncCfn.CfnResolver(this, 'ApproveExecutionSpecResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'approveExecutionSpecification',
-      dataSourceName: execSpecLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    approveExecSpecResolver.addDependency(execSpecLambdaDataSource);
+    const approveExecSpecResolver = new appsyncCfn.CfnResolver(
+      this,
+      "ApproveExecutionSpecResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "approveExecutionSpecification",
+        dataSourceName: execSpecLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    approveExecSpecResolver.addResourceDependency(execSpecLambdaDataSource);
 
-    const rejectExecSpecResolver = new appsyncCfn.CfnResolver(this, 'RejectExecutionSpecResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'rejectExecutionSpecification',
-      dataSourceName: execSpecLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    rejectExecSpecResolver.addDependency(execSpecLambdaDataSource);
+    const rejectExecSpecResolver = new appsyncCfn.CfnResolver(
+      this,
+      "RejectExecutionSpecResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "rejectExecutionSpecification",
+        dataSourceName: execSpecLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    rejectExecSpecResolver.addResourceDependency(execSpecLambdaDataSource);
 
-    const reviseExecSpecResolver = new appsyncCfn.CfnResolver(this, 'ReviseExecutionSpecResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'reviseExecutionSpecification',
-      dataSourceName: execSpecLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    reviseExecSpecResolver.addDependency(execSpecLambdaDataSource);
+    const reviseExecSpecResolver = new appsyncCfn.CfnResolver(
+      this,
+      "ReviseExecutionSpecResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "reviseExecutionSpecification",
+        dataSourceName: execSpecLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    reviseExecSpecResolver.addResourceDependency(execSpecLambdaDataSource);
 
-    const getExecSpecResolver = new appsyncCfn.CfnResolver(this, 'GetExecutionSpecResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Query',
-      fieldName: 'getExecutionSpecification',
-      dataSourceName: execSpecLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    getExecSpecResolver.addDependency(execSpecLambdaDataSource);
+    const getExecSpecResolver = new appsyncCfn.CfnResolver(
+      this,
+      "GetExecutionSpecResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "getExecutionSpecification",
+        dataSourceName: execSpecLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    getExecSpecResolver.addResourceDependency(execSpecLambdaDataSource);
 
-    const listExecSpecsResolver = new appsyncCfn.CfnResolver(this, 'ListExecutionSpecsResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Query',
-      fieldName: 'listExecutionSpecifications',
-      dataSourceName: execSpecLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    listExecSpecsResolver.addDependency(execSpecLambdaDataSource);
+    const listExecSpecsResolver = new appsyncCfn.CfnResolver(
+      this,
+      "ListExecutionSpecsResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "listExecutionSpecifications",
+        dataSourceName: execSpecLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    listExecSpecsResolver.addResourceDependency(execSpecLambdaDataSource);
 
     // ============================================================
     // InterrogationRound Resolver
     // ============================================================
 
-    const interrogationRoundResolverFunction = new lambda.Function(this, 'InterrogationRoundResolverFunction', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'interrogation-round-resolver.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      environment: {
-        INTERROGATION_ROUNDS_TABLE: props.interrogationRoundsTable.tableName,
-        GOVERNANCE_TRANSCRIPTS_BUCKET: governanceTranscriptsBucket.bucketName,
-        EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+    const interrogationRoundResolverFunction = new lambda.Function(
+      this,
+      "InterrogationRoundResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "interrogation-round-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          INTERROGATION_ROUNDS_TABLE: props.interrogationRoundsTable.tableName,
+          GOVERNANCE_TRANSCRIPTS_BUCKET: governanceTranscriptsBucket.bucketName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(
+          this,
+          "InterrogationRoundResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
       },
-      timeout: cdk.Duration.seconds(30),
-      logGroup: new logs.LogGroup(this, 'InterrogationRoundResolverFunctionLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    );
 
-    props.interrogationRoundsTable.grantReadWriteData(interrogationRoundResolverFunction);
+    props.interrogationRoundsTable.grantReadWriteData(
+      interrogationRoundResolverFunction,
+    );
     governanceTranscriptsBucket.grantWrite(interrogationRoundResolverFunction);
-    governanceTranscriptsKey.grantEncryptDecrypt(interrogationRoundResolverFunction);
+    governanceTranscriptsKey.grantEncryptDecrypt(
+      interrogationRoundResolverFunction,
+    );
     props.agentEventBus.grantPutEventsTo(interrogationRoundResolverFunction);
 
-    const interrogationRoundDataSourceRole = new iam.Role(this, 'InterrogationRoundDataSourceRole', {
-      assumedBy: new iam.ServicePrincipal('appsync.amazonaws.com'),
-    });
-    interrogationRoundResolverFunction.grantInvoke(interrogationRoundDataSourceRole);
-
-    const interrogationRoundLambdaDataSource = new appsyncCfn.CfnDataSource(this, 'InterrogationRoundLambdaDataSource', {
-      apiId: props.appSyncApi.apiId,
-      name: 'InterrogationRoundLambdaDataSource',
-      type: 'AWS_LAMBDA',
-      serviceRoleArn: interrogationRoundDataSourceRole.roleArn,
-      lambdaConfig: {
-        lambdaFunctionArn: interrogationRoundResolverFunction.functionArn,
+    const interrogationRoundDataSourceRole = new iam.Role(
+      this,
+      "InterrogationRoundDataSourceRole",
+      {
+        assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
       },
-    });
+    );
+    interrogationRoundResolverFunction.grantInvoke(
+      interrogationRoundDataSourceRole,
+    );
 
-    const startInterrogationRoundResolver = new appsyncCfn.CfnResolver(this, 'StartInterrogationRoundResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'startInterrogationRound',
-      dataSourceName: interrogationRoundLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    startInterrogationRoundResolver.addDependency(interrogationRoundLambdaDataSource);
+    const interrogationRoundLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "InterrogationRoundLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "InterrogationRoundLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: interrogationRoundDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: interrogationRoundResolverFunction.functionArn,
+        },
+      },
+    );
 
-    const injectConstraintsResolver = new appsyncCfn.CfnResolver(this, 'InjectConstraintsResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'injectConstraints',
-      dataSourceName: interrogationRoundLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    injectConstraintsResolver.addDependency(interrogationRoundLambdaDataSource);
+    const startInterrogationRoundResolver = new appsyncCfn.CfnResolver(
+      this,
+      "StartInterrogationRoundResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "startInterrogationRound",
+        dataSourceName: interrogationRoundLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    startInterrogationRoundResolver.addResourceDependency(
+      interrogationRoundLambdaDataSource,
+    );
 
-    const stabiliseRoundResolver = new appsyncCfn.CfnResolver(this, 'StabiliseRoundResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'stabiliseRound',
-      dataSourceName: interrogationRoundLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    stabiliseRoundResolver.addDependency(interrogationRoundLambdaDataSource);
+    const injectConstraintsResolver = new appsyncCfn.CfnResolver(
+      this,
+      "InjectConstraintsResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "injectConstraints",
+        dataSourceName: interrogationRoundLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    injectConstraintsResolver.addResourceDependency(
+      interrogationRoundLambdaDataSource,
+    );
 
-    const getInterrogationRoundResolver = new appsyncCfn.CfnResolver(this, 'GetInterrogationRoundResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Query',
-      fieldName: 'getInterrogationRound',
-      dataSourceName: interrogationRoundLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    getInterrogationRoundResolver.addDependency(interrogationRoundLambdaDataSource);
+    const stabiliseRoundResolver = new appsyncCfn.CfnResolver(
+      this,
+      "StabiliseRoundResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "stabiliseRound",
+        dataSourceName: interrogationRoundLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    stabiliseRoundResolver.addResourceDependency(
+      interrogationRoundLambdaDataSource,
+    );
 
-    const listInterrogationRoundsResolver = new appsyncCfn.CfnResolver(this, 'ListInterrogationRoundsResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Query',
-      fieldName: 'listInterrogationRounds',
-      dataSourceName: interrogationRoundLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    listInterrogationRoundsResolver.addDependency(interrogationRoundLambdaDataSource);
+    const getInterrogationRoundResolver = new appsyncCfn.CfnResolver(
+      this,
+      "GetInterrogationRoundResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "getInterrogationRound",
+        dataSourceName: interrogationRoundLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    getInterrogationRoundResolver.addResourceDependency(
+      interrogationRoundLambdaDataSource,
+    );
+
+    const listInterrogationRoundsResolver = new appsyncCfn.CfnResolver(
+      this,
+      "ListInterrogationRoundsResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "listInterrogationRounds",
+        dataSourceName: interrogationRoundLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    listInterrogationRoundsResolver.addResourceDependency(
+      interrogationRoundLambdaDataSource,
+    );
 
     // Suppress the KMS wildcards that grantEncryptDecrypt() on the
     // governanceTranscriptsKey adds to the function's DefaultPolicy. These
@@ -772,16 +938,13 @@ exports.handler = async (event) => {
       interrogationRoundResolverFunction,
       [
         {
-          id: 'AwsSolutions-IAM5',
+          id: "AwsSolutions-IAM5",
           reason:
-            'kms:GenerateDataKey* and kms:ReEncrypt* are required by the S3 SSE-KMS ' +
-            'PutObject code path when writing interrogation-round transcripts. The ' +
-            'wildcards are action-level only; the resource scope is already narrowed ' +
-            'to governanceTranscriptsKey by CDK grantEncryptDecrypt().',
-          appliesTo: [
-            'Action::kms:GenerateDataKey*',
-            'Action::kms:ReEncrypt*',
-          ],
+            "kms:GenerateDataKey* and kms:ReEncrypt* are required by the S3 SSE-KMS " +
+            "PutObject code path when writing interrogation-round transcripts. The " +
+            "wildcards are action-level only; the resource scope is already narrowed " +
+            "to governanceTranscriptsKey by CDK grantEncryptDecrypt().",
+          appliesTo: ["Action::kms:GenerateDataKey*", "Action::kms:ReEncrypt*"],
         },
       ],
       true,
@@ -792,70 +955,111 @@ exports.handler = async (event) => {
     // ============================================================
     // Contract: types/index.ts FourDimension + AgentDesignAssessment + interface
 
-    const agentDesignAssessmentResolverFunction = new lambda.Function(this, 'AgentDesignAssessmentResolverFunction', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'agent-design-assessment-resolver.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      environment: {
-        AGENT_DESIGN_ASSESSMENTS_TABLE: props.agentDesignAssessmentsTable.tableName,
-        PROJECTS_TABLE: props.projectsTable.tableName,
-        EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+    const agentDesignAssessmentResolverFunction = new lambda.Function(
+      this,
+      "AgentDesignAssessmentResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "agent-design-assessment-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          AGENT_DESIGN_ASSESSMENTS_TABLE:
+            props.agentDesignAssessmentsTable.tableName,
+          PROJECTS_TABLE: props.projectsTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(
+          this,
+          "AgentDesignAssessmentResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
       },
-      timeout: cdk.Duration.seconds(30),
-      logGroup: new logs.LogGroup(this, 'AgentDesignAssessmentResolverFunctionLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    );
 
-    props.agentDesignAssessmentsTable.grantReadWriteData(agentDesignAssessmentResolverFunction);
-    props.projectsTable.grantReadWriteData(agentDesignAssessmentResolverFunction);
+    props.agentDesignAssessmentsTable.grantReadWriteData(
+      agentDesignAssessmentResolverFunction,
+    );
+    props.projectsTable.grantReadWriteData(
+      agentDesignAssessmentResolverFunction,
+    );
     props.agentEventBus.grantPutEventsTo(agentDesignAssessmentResolverFunction);
 
-    const agentDesignAssessmentDataSourceRole = new iam.Role(this, 'AgentDesignAssessmentDataSourceRole', {
-      assumedBy: new iam.ServicePrincipal('appsync.amazonaws.com'),
-    });
-    agentDesignAssessmentResolverFunction.grantInvoke(agentDesignAssessmentDataSourceRole);
-
-    const agentDesignAssessmentLambdaDataSource = new appsyncCfn.CfnDataSource(this, 'AgentDesignAssessmentLambdaDataSource', {
-      apiId: props.appSyncApi.apiId,
-      name: 'AgentDesignAssessmentLambdaDataSource',
-      type: 'AWS_LAMBDA',
-      serviceRoleArn: agentDesignAssessmentDataSourceRole.roleArn,
-      lambdaConfig: {
-        lambdaFunctionArn: agentDesignAssessmentResolverFunction.functionArn,
+    const agentDesignAssessmentDataSourceRole = new iam.Role(
+      this,
+      "AgentDesignAssessmentDataSourceRole",
+      {
+        assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
       },
-    });
+    );
+    agentDesignAssessmentResolverFunction.grantInvoke(
+      agentDesignAssessmentDataSourceRole,
+    );
 
-    const startAgentDesignAssessmentResolver = new appsyncCfn.CfnResolver(this, 'StartAgentDesignAssessmentResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'startAgentDesignAssessment',
-      dataSourceName: agentDesignAssessmentLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    startAgentDesignAssessmentResolver.addDependency(agentDesignAssessmentLambdaDataSource);
+    const agentDesignAssessmentLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "AgentDesignAssessmentLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "AgentDesignAssessmentLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: agentDesignAssessmentDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: agentDesignAssessmentResolverFunction.functionArn,
+        },
+      },
+    );
 
-    const submitAgentDesignAssessmentResolver = new appsyncCfn.CfnResolver(this, 'SubmitAgentDesignAssessmentResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'submitAgentDesignAssessment',
-      dataSourceName: agentDesignAssessmentLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    submitAgentDesignAssessmentResolver.addDependency(agentDesignAssessmentLambdaDataSource);
+    const startAgentDesignAssessmentResolver = new appsyncCfn.CfnResolver(
+      this,
+      "StartAgentDesignAssessmentResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "startAgentDesignAssessment",
+        dataSourceName: agentDesignAssessmentLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    startAgentDesignAssessmentResolver.addResourceDependency(
+      agentDesignAssessmentLambdaDataSource,
+    );
 
-    const getAgentDesignAssessmentResolver = new appsyncCfn.CfnResolver(this, 'GetAgentDesignAssessmentResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Query',
-      fieldName: 'getAgentDesignAssessment',
-      dataSourceName: agentDesignAssessmentLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    getAgentDesignAssessmentResolver.addDependency(agentDesignAssessmentLambdaDataSource);
+    const submitAgentDesignAssessmentResolver = new appsyncCfn.CfnResolver(
+      this,
+      "SubmitAgentDesignAssessmentResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "submitAgentDesignAssessment",
+        dataSourceName: agentDesignAssessmentLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    submitAgentDesignAssessmentResolver.addResourceDependency(
+      agentDesignAssessmentLambdaDataSource,
+    );
+
+    const getAgentDesignAssessmentResolver = new appsyncCfn.CfnResolver(
+      this,
+      "GetAgentDesignAssessmentResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "getAgentDesignAssessment",
+        dataSourceName: agentDesignAssessmentLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    getAgentDesignAssessmentResolver.addResourceDependency(
+      agentDesignAssessmentLambdaDataSource,
+    );
 
     // ============================================================
     // ProgramReview Resolver (Δ12)
@@ -871,74 +1075,109 @@ exports.handler = async (event) => {
     // by the `copy:templates` npm script so the resolver can parse it at
     // cold-start via path.join(__dirname, 'governance-checklist.md').
 
-    const programReviewResolverFunction = new lambda.Function(this, 'ProgramReviewResolverFunction', {
-      runtime: lambda.Runtime.NODEJS_24_X,
-      handler: 'program-review-resolver.handler',
-      code: lambda.Code.fromAsset('dist/lambda'),
-      environment: {
-        PROGRAM_REVIEWS_TABLE: props.programReviewsTable.tableName,
-        ADRS_TABLE: props.adrsTable.tableName,
-        EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
-        INTERROGATION_ROUNDS_TABLE: props.interrogationRoundsTable.tableName,
-        AGENT_DESIGN_ASSESSMENTS_TABLE: props.agentDesignAssessmentsTable.tableName,
-        ENVIRONMENT: props.environment,
+    const programReviewResolverFunction = new lambda.Function(
+      this,
+      "ProgramReviewResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "program-review-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          PROGRAM_REVIEWS_TABLE: props.programReviewsTable.tableName,
+          ADRS_TABLE: props.adrsTable.tableName,
+          EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
+          INTERROGATION_ROUNDS_TABLE: props.interrogationRoundsTable.tableName,
+          AGENT_DESIGN_ASSESSMENTS_TABLE:
+            props.agentDesignAssessmentsTable.tableName,
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, "ProgramReviewResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
       },
-      timeout: cdk.Duration.seconds(30),
-      logGroup: new logs.LogGroup(this, 'ProgramReviewResolverFunctionLogs', {
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    });
+    );
 
     props.programReviewsTable.grantReadWriteData(programReviewResolverFunction);
     props.adrsTable.grantReadData(programReviewResolverFunction);
-    props.executionSpecificationsTable.grantReadData(programReviewResolverFunction);
+    props.executionSpecificationsTable.grantReadData(
+      programReviewResolverFunction,
+    );
     props.interrogationRoundsTable.grantReadData(programReviewResolverFunction);
-    props.agentDesignAssessmentsTable.grantReadData(programReviewResolverFunction);
+    props.agentDesignAssessmentsTable.grantReadData(
+      programReviewResolverFunction,
+    );
 
-    const programReviewDataSourceRole = new iam.Role(this, 'ProgramReviewDataSourceRole', {
-      assumedBy: new iam.ServicePrincipal('appsync.amazonaws.com'),
-    });
+    const programReviewDataSourceRole = new iam.Role(
+      this,
+      "ProgramReviewDataSourceRole",
+      {
+        assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+      },
+    );
     programReviewResolverFunction.grantInvoke(programReviewDataSourceRole);
 
-    const programReviewLambdaDataSource = new appsyncCfn.CfnDataSource(this, 'ProgramReviewLambdaDataSource', {
-      apiId: props.appSyncApi.apiId,
-      name: 'ProgramReviewLambdaDataSource',
-      type: 'AWS_LAMBDA',
-      serviceRoleArn: programReviewDataSourceRole.roleArn,
-      lambdaConfig: {
-        lambdaFunctionArn: programReviewResolverFunction.functionArn,
+    const programReviewLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "ProgramReviewLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "ProgramReviewLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: programReviewDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: programReviewResolverFunction.functionArn,
+        },
       },
-    });
+    );
 
-    const runProgramReviewResolver = new appsyncCfn.CfnResolver(this, 'RunProgramReviewResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Mutation',
-      fieldName: 'runProgramReview',
-      dataSourceName: programReviewLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    runProgramReviewResolver.addDependency(programReviewLambdaDataSource);
+    const runProgramReviewResolver = new appsyncCfn.CfnResolver(
+      this,
+      "RunProgramReviewResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "runProgramReview",
+        dataSourceName: programReviewLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    runProgramReviewResolver.addResourceDependency(
+      programReviewLambdaDataSource,
+    );
 
-    const getProgramReviewResolver = new appsyncCfn.CfnResolver(this, 'GetProgramReviewResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Query',
-      fieldName: 'getProgramReview',
-      dataSourceName: programReviewLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    getProgramReviewResolver.addDependency(programReviewLambdaDataSource);
+    const getProgramReviewResolver = new appsyncCfn.CfnResolver(
+      this,
+      "GetProgramReviewResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "getProgramReview",
+        dataSourceName: programReviewLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    getProgramReviewResolver.addResourceDependency(
+      programReviewLambdaDataSource,
+    );
 
-    const listProgramReviewsForProjectResolver = new appsyncCfn.CfnResolver(this, 'ListProgramReviewsForProjectResolver', {
-      apiId: props.appSyncApi.apiId,
-      typeName: 'Query',
-      fieldName: 'listProgramReviewsForProject',
-      dataSourceName: programReviewLambdaDataSource.attrName,
-      requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
-      responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
-    });
-    listProgramReviewsForProjectResolver.addDependency(programReviewLambdaDataSource);
+    const listProgramReviewsForProjectResolver = new appsyncCfn.CfnResolver(
+      this,
+      "ListProgramReviewsForProjectResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "listProgramReviewsForProject",
+        dataSourceName: programReviewLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    listProgramReviewsForProjectResolver.addResourceDependency(
+      programReviewLambdaDataSource,
+    );
   }
 }

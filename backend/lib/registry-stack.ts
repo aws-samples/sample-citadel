@@ -169,7 +169,7 @@ export class RegistryStack extends cdk.Stack {
         requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
         responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
       });
-      resolver.addDependency(dataSource);
+      resolver.addResourceDependency(dataSource);
       return resolver;
     };
 
