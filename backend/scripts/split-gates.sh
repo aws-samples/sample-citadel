@@ -40,9 +40,10 @@ fi
 # Also synth every satellite stack participating in the split (per
 # move-manifest.ts's SATELLITE_STACK_NAMES) so rails 3/6/7 compare against
 # a FRESH satellite template, never a stale one left over from a previous
-# manual synth. citadel-projects-dev is the phase-1 satellite; extend this
-# list as later phases add satellites.
-SATELLITE_STACKS="citadel-projects-${ENV}"
+# manual synth. citadel-projects-dev is the phase-1 satellite;
+# citadel-registry-dev is the phase-2 satellite. Extend this list as later
+# phases add satellites.
+SATELLITE_STACKS="citadel-projects-${ENV} citadel-registry-${ENV}"
 for sat in ${SATELLITE_STACKS}; do
   log "=== split-gates: synthesizing ${sat} ==="
   if ! npx cdk synth "${sat}" --quiet >/dev/null; then

@@ -11,6 +11,7 @@ import { GatewayStack } from "../lib/gateway-stack";
 import { GovernanceStack } from "../lib/governance-stack";
 import { TelemetryStack } from "../lib/telemetry-stack";
 import { ProjectsStack } from "../lib/projects-stack";
+import { RegistryStack } from "../lib/registry-stack";
 
 const app = new cdk.App();
 
@@ -63,6 +64,39 @@ const projectsStack = new ProjectsStack(
   },
 );
 projectsStack.addDependency(backendStack);
+
+// Registry satellite stack — backend-stack-split phase 2 (decision 30e6d067).
+// Owns the registry/agent-import/fabricator-request/fabricator-queue/
+// fabrication-event/app-CRUD-and-api-key domain, moved out of BackendStack.
+// Depends on backend only, for the shared API/bus/tables/registry/pool/
+// codeBucket passed in as props; resolvers attach to BackendStack's AppSync
+// API via the same L1 cross-stack pattern as ProjectsStack. Instantiated
+// before ServicesStack/GovernanceStack — no dependency on either — and
+// before GatewayStack, which it does NOT depend on: the publishApp/
+// unpublishApp resolvers (targeting a GatewayStack-owned function) stay in
+// BackendStack (documented exclusion in registry-stack.ts), so no
+// RegistryStack -> GatewayStack edge is introduced and ordering vs
+// GatewayStack is a non-issue.
+const registryStack = new RegistryStack(
+  app,
+  `citadel-registry-${environment}`,
+  {
+    ...stackProps,
+    description: `Registry domain satellite for Citadel - ${environment}`,
+    appSyncApi: backendStack.appSyncApi,
+    agentEventBus: backendStack.agentEventBus,
+    appsTable: backendStack.appsTable,
+    workflowsTable: backendStack.workflowsTable,
+    agentConfigTable: backendStack.agentConfigTable,
+    modelCatalogTable: backendStack.modelCatalogTable,
+    idempotencyTable: backendStack.idempotencyTable,
+    userPool: backendStack.userPool,
+    registryArn: backendStack.registryArn,
+    registryId: backendStack.registryId,
+    adrsTable: backendStack.adrsTable,
+  },
+);
+registryStack.addDependency(backendStack);
 
 // Services stack (depends on backend)
 const servicesStack = new ServicesStack(
@@ -361,6 +395,7 @@ if (app.node.tryGetContext("nag") !== "false") {
   for (const stack of [
     backendStack,
     projectsStack,
+    registryStack,
     servicesStack,
     arbiterStack,
     frontendStack,
@@ -519,7 +554,7 @@ if (app.node.tryGetContext("nag") !== "false") {
       "RegistryProvisionerFunction/ServiceRole/DefaultPolicy/Resource",
     ],
     [
-      backendStack,
+      registryStack,
       "RegistryAgentRecordResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
   ];
@@ -634,8 +669,8 @@ if (app.node.tryGetContext("nag") !== "false") {
 
   // SQS3 — RegistrySyncDLQ is itself a dead-letter queue; adding a DLQ to a DLQ is unnecessary.
   NagSuppressions.addResourceSuppressionsByPath(
-    backendStack,
-    `/${backendStack.stackName}/RegistrySyncDLQ/Resource`,
+    registryStack,
+    `/${registryStack.stackName}/RegistrySyncDLQ/Resource`,
     [
       {
         id: "AwsSolutions-SQS3",
@@ -673,13 +708,13 @@ if (app.node.tryGetContext("nag") !== "false") {
     },
   ];
   const registryArnPaths: Array<[cdk.Stack, string]> = [
-    [backendStack, "RegistrySyncLambda/ServiceRole/DefaultPolicy/Resource"],
+    [registryStack, "RegistrySyncLambda/ServiceRole/DefaultPolicy/Resource"],
     [
       backendStack,
       "AgentConfigResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
     [
-      backendStack,
+      registryStack,
       "AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
     [
@@ -691,7 +726,7 @@ if (app.node.tryGetContext("nag") !== "false") {
     [arbiterStack, "WorkerAgentWrapper/ServiceRole/DefaultPolicy/Resource"],
     [arbiterStack, "GovernanceUiResolverFn/ServiceRole/DefaultPolicy/Resource"],
     [
-      backendStack,
+      registryStack,
       "RegistryAgentRecordResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
     [
@@ -703,7 +738,7 @@ if (app.node.tryGetContext("nag") !== "false") {
     // (GetRegistryRecord + UpdateRegistryRecord), scoped to the
     // registry ARN + its records (<AgentCoreRegistry.RegistryArn>/*).
     [
-      backendStack,
+      registryStack,
       "AgentImportManifestResultHandler/ServiceRole/DefaultPolicy/Resource",
     ],
     [
@@ -733,8 +768,8 @@ if (app.node.tryGetContext("nag") !== "false") {
   // Additive to the registry-ARN suppression already registered for
   // this role above.
   NagSuppressions.addResourceSuppressionsByPath(
-    backendStack,
-    `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+    registryStack,
+    `/${registryStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
     [
       {
         id: "AwsSolutions-IAM5",
@@ -753,8 +788,8 @@ if (app.node.tryGetContext("nag") !== "false") {
   // resource-level scoping, so they require Resource '*'. Additive to
   // the discovery suppression registered just above; read-only only.
   NagSuppressions.addResourceSuppressionsByPath(
-    backendStack,
-    `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+    registryStack,
+    `/${registryStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
     [
       {
         id: "AwsSolutions-IAM5",
@@ -773,8 +808,8 @@ if (app.node.tryGetContext("nag") !== "false") {
   // wildcards are already covered by the stack-level IAM5 suppression.
   // Additive to the discovery suppression registered just above.
   NagSuppressions.addResourceSuppressionsByPath(
-    backendStack,
-    `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+    registryStack,
+    `/${registryStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
     [
       {
         id: "AwsSolutions-IAM5",
@@ -804,8 +839,8 @@ if (app.node.tryGetContext("nag") !== "false") {
   // the discovery + test-invoke suppressions already registered for
   // this role above.
   NagSuppressions.addResourceSuppressionsByPath(
-    backendStack,
-    `/${backendStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+    registryStack,
+    `/${registryStack.stackName}/AgentImportResolverFunction/ServiceRole/DefaultPolicy/Resource`,
     [
       {
         id: "AwsSolutions-IAM5",
@@ -813,6 +848,33 @@ if (app.node.tryGetContext("nag") !== "false") {
           "cross-account invoke-role assume for imported-agent test/probe; " +
           "externalId-gated; operator-supplied target role must trust Citadel",
         appliesTo: [{ regex: "/^Resource::arn:aws:iam::\\*:role\\/\\*$/g" }],
+      },
+    ],
+  );
+
+  // IAM5 — AgentCodeResolverFunction's S3 grant on the code bucket's agents/*
+  // prefix (read/write/list agent code artifacts). The base bucket ARN grant
+  // (list) plus the agents/* prefix grant (get/put/version) is the same
+  // narrowing pattern the generic appLambdaSuppressions S3-prefix regex
+  // (`Resource::arn:aws:s3:::.+\/\*$`) already covers for LITERAL ARN
+  // strings — this one is a CDK token reference (`<CodeBucketFF4C7AD6.Arn>
+  // /agents/*`), which the literal-string regex does not match. Same IAM5
+  // category, same narrowing rationale (prefix-scoped, not bucket-wide *).
+  NagSuppressions.addResourceSuppressionsByPath(
+    registryStack,
+    `/${registryStack.stackName}/AgentCodeResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+    [
+      {
+        id: "AwsSolutions-IAM5",
+        reason:
+          "S3 grant scoped to the code bucket's agents/* prefix (CDK token " +
+          "resource, not a literal ARN string) for get/put/version/list of " +
+          "agent code artifacts. Narrow prefix, not bucket-wide wildcard.",
+        appliesTo: [
+          {
+            regex: "/^Resource::<CodeBucket[A-F0-9]+\\.Arn>\\/agents\\/\\*$/g",
+          },
+        ],
       },
     ],
   );

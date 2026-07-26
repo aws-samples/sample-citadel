@@ -2,14 +2,23 @@
  * The move manifest — the single source of truth for "what has moved out of
  * the backend stack, to where, and why".
  *
- * Phase 1 (decision 30e6d067, this stage): the projects / conversations /
- * documents / assessment / design-progress / planning / chatter domain
- * moved from BackendStack to CitadelProjectsStack. Every entry below was
- * derived directly from a diff between the committed pre-split baseline
- * (`split-baseline/citadel-backend-dev.json`, captured at commit ce6497b)
- * and a fresh synth of both citadel-backend-dev and citadel-projects-dev
- * after the move — not hand-typed. Re-derive with the same diff if the
- * moved Lambdas' construct IDs ever change.
+ * Phase 1 (decision 30e6d067): the projects / conversations / documents /
+ * assessment / design-progress / planning / chatter domain moved from
+ * BackendStack to CitadelProjectsStack.
+ *
+ * Phase 2 (decision 30e6d067, this stage): the registry / agent-import /
+ * fabricator-request / fabricator-queue / fabrication-event / app-CRUD-
+ * and-api-key domain moved from BackendStack to CitadelRegistryStack.
+ * gateway-registration-handler and agent-config-resolver were NOT moved
+ * this phase (see registry-stack.ts's file-header EXCLUSIONS section for
+ * reasons); publishApp/unpublishApp resolvers (targeting a GatewayStack-
+ * owned function) also stay in BackendStack, documented the same way.
+ *
+ * Every entry below was derived directly from a diff between the committed
+ * pre-split baseline (`split-baseline/citadel-backend-dev.json`) and a
+ * fresh synth of citadel-backend-dev + citadel-projects-dev +
+ * citadel-registry-dev after each move — not hand-typed. Re-derive with the
+ * same diff if the moved Lambdas' construct IDs ever change.
  */
 import { AllowlistEntry } from "./rails/rail1-removals-only";
 import { MovedLambdaMapping } from "./rails/rail6-iam-equivalence";
@@ -631,6 +640,501 @@ export const REMOVAL_ALLOWLIST: AllowlistEntry[] = [
     justification:
       "Alarm on ProjectResolverFunction; recreated in CitadelProjectsStack as ProjectResolverThrottleAlarm.",
   },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Phase 2 (decision 30e6d067, this stage): the registry / agent-import /
+  // fabricator-request / fabricator-queue / fabrication-event / app-CRUD-
+  // and-api-key domain moved from BackendStack to CitadelRegistryStack.
+  // Derived the same way as phase 1 — diff between the committed baseline
+  // and a fresh synth of citadel-backend-dev + citadel-registry-dev.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // --- Lambda functions (7 clusters, 4 CFN each: fn, log group, role, policy) ---
+  {
+    logicalId: "AgentImportResolverFunctionE5B20F94",
+    justification:
+      "Moved to CitadelRegistryStack (phase 2, decision 30e6d067).",
+  },
+  {
+    logicalId: "AgentImportResolverFunctionLogsDAFF048F",
+    justification: "LogGroup of AgentImportResolverFunction; moved with it.",
+  },
+  {
+    logicalId: "AgentImportResolverFunctionServiceRole079601F5",
+    justification:
+      "Execution role of AgentImportResolverFunction; moved with it.",
+  },
+  {
+    logicalId: "AgentImportResolverFunctionServiceRoleDefaultPolicy48899C8B",
+    justification:
+      "DefaultPolicy of AgentImportResolverFunction's role; moved with it.",
+  },
+  {
+    logicalId: "AgentImportManifestResultHandlerAC7A0B8E",
+    justification:
+      "Moved to CitadelRegistryStack (phase 2, decision 30e6d067).",
+  },
+  {
+    logicalId: "AgentImportManifestResultHandlerLogs33C7F708",
+    justification:
+      "LogGroup of AgentImportManifestResultHandler; moved with it.",
+  },
+  {
+    logicalId: "AgentImportManifestResultHandlerServiceRole3DEB3E3F",
+    justification:
+      "Execution role of AgentImportManifestResultHandler; moved with it.",
+  },
+  {
+    logicalId:
+      "AgentImportManifestResultHandlerServiceRoleDefaultPolicy8E6A2C14",
+    justification:
+      "DefaultPolicy of AgentImportManifestResultHandler's role; moved with it.",
+  },
+  {
+    logicalId: "AgentCodeResolverFunction720FFFB6",
+    justification:
+      "Moved to CitadelRegistryStack (phase 2, decision 30e6d067).",
+  },
+  {
+    logicalId: "AgentCodeResolverFunctionLogs4FD4D0A2",
+    justification: "LogGroup of AgentCodeResolverFunction; moved with it.",
+  },
+  {
+    logicalId: "AgentCodeResolverFunctionServiceRoleD2F7BE23",
+    justification:
+      "Execution role of AgentCodeResolverFunction; moved with it.",
+  },
+  {
+    logicalId: "AgentCodeResolverFunctionServiceRoleDefaultPolicyF9A56B5F",
+    justification:
+      "DefaultPolicy of AgentCodeResolverFunction's role; moved with it.",
+  },
+  {
+    logicalId: "FabricatorRequestResolverFunctionBCCF3ABD",
+    justification:
+      "Moved to CitadelRegistryStack (phase 2, decision 30e6d067).",
+  },
+  {
+    logicalId: "FabricatorRequestResolverFunctionLogsB7EB3A42",
+    justification:
+      "LogGroup of FabricatorRequestResolverFunction; moved with it.",
+  },
+  {
+    logicalId: "FabricatorRequestResolverFunctionServiceRoleA672CCA1",
+    justification:
+      "Execution role of FabricatorRequestResolverFunction; moved with it.",
+  },
+  {
+    logicalId:
+      "FabricatorRequestResolverFunctionServiceRoleDefaultPolicy142FDFD7",
+    justification:
+      "DefaultPolicy of FabricatorRequestResolverFunction's role; moved with it.",
+  },
+  {
+    logicalId: "FabricatorQueueResolverFunctionE2D38CA8",
+    justification:
+      "Moved to CitadelRegistryStack (phase 2, decision 30e6d067).",
+  },
+  {
+    logicalId: "FabricatorQueueResolverFunctionLogs906F666F",
+    justification:
+      "LogGroup of FabricatorQueueResolverFunction; moved with it.",
+  },
+  {
+    logicalId: "FabricatorQueueResolverFunctionServiceRole88E78362",
+    justification:
+      "Execution role of FabricatorQueueResolverFunction; moved with it.",
+  },
+  {
+    logicalId:
+      "FabricatorQueueResolverFunctionServiceRoleDefaultPolicy9DFE3201",
+    justification:
+      "DefaultPolicy of FabricatorQueueResolverFunction's role; moved with it.",
+  },
+  {
+    logicalId: "FabricationEventHandlerFunctionA425E3C0",
+    justification:
+      "Moved to CitadelRegistryStack (phase 2, decision 30e6d067).",
+  },
+  {
+    logicalId: "FabricationEventHandlerFunctionLogs8701156E",
+    justification:
+      "LogGroup of FabricationEventHandlerFunction; moved with it.",
+  },
+  {
+    logicalId: "FabricationEventHandlerFunctionServiceRole2C1FA004",
+    justification:
+      "Execution role of FabricationEventHandlerFunction; moved with it.",
+  },
+  {
+    logicalId:
+      "FabricationEventHandlerFunctionServiceRoleDefaultPolicyDE9EB2EF",
+    justification:
+      "DefaultPolicy of FabricationEventHandlerFunction's role; moved with it.",
+  },
+  {
+    logicalId: "RegistryAgentRecordResolverFunction5D7EA0BC",
+    justification:
+      "Moved to CitadelRegistryStack (phase 2, decision 30e6d067). Keeps its " +
+      "deterministic functionName (citadel-registry-agent-record-resolver-<env>) " +
+      "in the satellite — the only moved function in this phase that is not " +
+      "auto-named, since it was already deterministically named in the baseline.",
+  },
+  {
+    logicalId: "RegistryAgentRecordResolverFunctionLogs25CD0897",
+    justification:
+      "LogGroup of RegistryAgentRecordResolverFunction; moved with it.",
+  },
+  {
+    logicalId: "RegistryAgentRecordResolverFunctionServiceRoleB465E208",
+    justification:
+      "Execution role of RegistryAgentRecordResolverFunction; moved with it.",
+  },
+  {
+    logicalId:
+      "RegistryAgentRecordResolverFunctionServiceRoleDefaultPolicy27F40C93",
+    justification:
+      "DefaultPolicy of RegistryAgentRecordResolverFunction's role; moved with it.",
+  },
+  // --- Registry sync Lambda + its rule/DLQ (not a resolver-serving fn) ---
+  {
+    logicalId: "RegistrySyncLambdaC145524B",
+    justification:
+      "Moved to CitadelRegistryStack (phase 2, decision 30e6d067).",
+  },
+  {
+    logicalId: "RegistrySyncLambdaLogsB9C7EC7F",
+    justification: "LogGroup of RegistrySyncLambda; moved with it.",
+  },
+  {
+    logicalId: "RegistrySyncLambdaServiceRoleB56E9F10",
+    justification: "Execution role of RegistrySyncLambda; moved with it.",
+  },
+  {
+    logicalId: "RegistrySyncLambdaServiceRoleDefaultPolicy81D64F97",
+    justification: "DefaultPolicy of RegistrySyncLambda's role; moved with it.",
+  },
+  {
+    logicalId: "RegistrySyncRuleE4DF9965",
+    justification: "Targets RegistrySyncLambda only; moved with it.",
+  },
+  {
+    logicalId:
+      "RegistrySyncRuleAllowEventRulecitadelbackenddevRegistrySyncLambda2FD0F1C48FD5EDF2",
+    justification:
+      "Auto-generated Lambda::Permission for RegistrySyncRule's target; moved with it.",
+  },
+  {
+    logicalId: "RegistrySyncDLQFB920991",
+    justification:
+      "Dead-letter queue for RegistrySyncLambda's EventBridge target; moved with it.",
+  },
+  {
+    logicalId: "RegistrySyncDLQPolicyCBFB114B",
+    justification: "Queue policy of RegistrySyncDLQ; moved with it.",
+  },
+  // --- EventBridge rules + auto-generated Lambda invoke permissions (2 rules) ---
+  {
+    logicalId: "AgentImportManifestResultRule30ACE2BF",
+    justification:
+      "Targets AgentImportManifestResultHandler only; moved with it.",
+  },
+  {
+    logicalId:
+      "AgentImportManifestResultRuleAllowEventRulecitadelbackenddevAgentImportManifestResultHandler778E32F2467C753E",
+    justification:
+      "Auto-generated Lambda::Permission for AgentImportManifestResultRule's target; moved with it.",
+  },
+  {
+    logicalId: "FabricationEventRuleC8C213DE",
+    justification:
+      "Targets FabricationEventHandlerFunction only; moved with it. Left in " +
+      "BackendStack during phase 1 specifically because its target function " +
+      "moves here, in phase 2.",
+  },
+  {
+    logicalId:
+      "FabricationEventRuleAllowEventRulecitadelbackenddevFabricationEventHandlerFunctionB1717AEE49C3388A",
+    justification:
+      "Auto-generated Lambda::Permission for FabricationEventRule's target; moved with it.",
+  },
+  // --- AppSync DataSources + their service roles (6 Lambda DS) ---
+  {
+    logicalId: "AgenticAIApiAgentImportLambdaDataSource8A5EDBB8",
+    justification:
+      "DataSource for moved AgentImport resolvers; recreated as AgentImportLambdaDataSource in CitadelRegistryStack.",
+  },
+  {
+    logicalId: "AgenticAIApiAgentImportLambdaDataSourceServiceRole753E40F4",
+    justification:
+      "Service role of AgentImportLambdaDataSource; moved with it.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiAgentImportLambdaDataSourceServiceRoleDefaultPolicy8DF04456",
+    justification:
+      "DefaultPolicy of AgentImportLambdaDataSource's role; moved with it.",
+  },
+  {
+    logicalId: "AgenticAIApiAgentCodeLambdaDataSourceC71C6DFB",
+    justification:
+      "DataSource for moved AgentCode resolvers; recreated as AgentCodeLambdaDataSource in CitadelRegistryStack.",
+  },
+  {
+    logicalId: "AgenticAIApiAgentCodeLambdaDataSourceServiceRoleDC7BC345",
+    justification: "Service role of AgentCodeLambdaDataSource; moved with it.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiAgentCodeLambdaDataSourceServiceRoleDefaultPolicy28AE0658",
+    justification:
+      "DefaultPolicy of AgentCodeLambdaDataSource's role; moved with it.",
+  },
+  {
+    logicalId: "AgenticAIApiFabricatorRequestLambdaDataSource14885F51",
+    justification:
+      "DataSource for moved fabricator-request resolvers; recreated as FabricatorRequestLambdaDataSource in CitadelRegistryStack.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiFabricatorRequestLambdaDataSourceServiceRole77597578",
+    justification:
+      "Service role of FabricatorRequestLambdaDataSource; moved with it.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiFabricatorRequestLambdaDataSourceServiceRoleDefaultPolicyA8DE0203",
+    justification:
+      "DefaultPolicy of FabricatorRequestLambdaDataSource's role; moved with it.",
+  },
+  {
+    logicalId: "AgenticAIApiFabricatorQueueLambdaDataSource0B0CBA20",
+    justification:
+      "DataSource for moved getFabricatorQueue resolver; recreated as FabricatorQueueLambdaDataSource in CitadelRegistryStack.",
+  },
+  {
+    logicalId: "AgenticAIApiFabricatorQueueLambdaDataSourceServiceRole0ED2B05B",
+    justification:
+      "Service role of FabricatorQueueLambdaDataSource; moved with it.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiFabricatorQueueLambdaDataSourceServiceRoleDefaultPolicyE7DDBD64",
+    justification:
+      "DefaultPolicy of FabricatorQueueLambdaDataSource's role; moved with it.",
+  },
+  {
+    logicalId: "AgenticAIApiFabricationEventLambdaDataSourceCE69D09B",
+    justification:
+      "DataSource for moved publishFabricationEvent resolver; recreated as FabricationEventLambdaDataSource in CitadelRegistryStack.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiFabricationEventLambdaDataSourceServiceRole0EF3972F",
+    justification:
+      "Service role of FabricationEventLambdaDataSource; moved with it.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiFabricationEventLambdaDataSourceServiceRoleDefaultPolicy157A43E8",
+    justification:
+      "DefaultPolicy of FabricationEventLambdaDataSource's role; moved with it.",
+  },
+  {
+    logicalId: "AgenticAIApiRegistryAgentRecordLambdaDataSourceF0EF0666",
+    justification:
+      "DataSource for the 28-field registry-agent-record resolver; recreated as RegistryAgentRecordLambdaDataSource in CitadelRegistryStack.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiRegistryAgentRecordLambdaDataSourceServiceRoleDB2B26E3",
+    justification:
+      "Service role of RegistryAgentRecordLambdaDataSource; moved with it.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiRegistryAgentRecordLambdaDataSourceServiceRoleDefaultPolicy976E3B9A",
+    justification:
+      "DefaultPolicy of RegistryAgentRecordLambdaDataSource's role; moved with it.",
+  },
+  // --- AppSync Resolvers (39) ---
+  {
+    logicalId: "AgenticAIApiImportAgentResolver18D4DC83",
+    justification: "Moved to CitadelRegistryStack as ImportAgentResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiAttestAgentImportResolverDF2A989D",
+    justification:
+      "Moved to CitadelRegistryStack as AttestAgentImportResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiDiscoverAgentsResolver979B354A",
+    justification: "Moved to CitadelRegistryStack as DiscoverAgentsResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiDescribeAgentCandidateResolverB33253A4",
+    justification:
+      "Moved to CitadelRegistryStack as DescribeAgentCandidateResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiTestImportedAgentResolver5D05A3FE",
+    justification:
+      "Moved to CitadelRegistryStack as TestImportedAgentResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiProbeAgentCandidateResolverEC03C31D",
+    justification:
+      "Moved to CitadelRegistryStack as ProbeAgentCandidateResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiProbeImportReachabilityResolverF1E2801F",
+    justification:
+      "Moved to CitadelRegistryStack as ProbeImportReachabilityResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiProposeAgentManifestTier3Resolver7FA15006",
+    justification:
+      "Moved to CitadelRegistryStack as ProposeAgentManifestTier3Resolver.",
+  },
+  {
+    logicalId: "AgenticAIApiAcceptProposedManifestTier3Resolver6B5376BB",
+    justification:
+      "Moved to CitadelRegistryStack as AcceptProposedManifestTier3Resolver.",
+  },
+  {
+    logicalId: "AgenticAIApiPublishImportToGatewayResolver36C8E28E",
+    justification:
+      "Moved to CitadelRegistryStack as PublishImportToGatewayResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiUnpublishImportFromGatewayResolverA95B0229",
+    justification:
+      "Moved to CitadelRegistryStack as UnpublishImportFromGatewayResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiGetAgentCodeResolverC63C1519",
+    justification: "Moved to CitadelRegistryStack as GetAgentCodeResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiUpdateAgentCodeResolver6EAE7F99",
+    justification: "Moved to CitadelRegistryStack as UpdateAgentCodeResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiRequestAgentCreationResolver45590254",
+    justification:
+      "Moved to CitadelRegistryStack as RequestAgentCreationResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiRequestToolCreationResolver8588C4BC",
+    justification:
+      "Moved to CitadelRegistryStack as RequestToolCreationResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiGetFabricatorQueueResolver99A2754B",
+    justification:
+      "Moved to CitadelRegistryStack as GetFabricatorQueueResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiPublishFabricationEventResolver8E74BC3F",
+    justification:
+      "Moved to CitadelRegistryStack as PublishFabricationEventResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiGetAppResolver5424C672",
+    justification: "Moved to CitadelRegistryStack as GetAppResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiListAppsResolverB92B8C88",
+    justification: "Moved to CitadelRegistryStack as ListAppsResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiCreateAppResolverE50F85FD",
+    justification: "Moved to CitadelRegistryStack as CreateAppResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiUpdateAppResolver538DD59F",
+    justification: "Moved to CitadelRegistryStack as UpdateAppResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiDeleteAppResolver9A463411",
+    justification: "Moved to CitadelRegistryStack as DeleteAppResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiBindWorkflowToAppResolverD0843AB8",
+    justification:
+      "Moved to CitadelRegistryStack as BindWorkflowToAppResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiUnbindWorkflowFromAppResolver3133738D",
+    justification:
+      "Moved to CitadelRegistryStack as UnbindWorkflowFromAppResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiUpdateAgentBindingResolverC80D5608",
+    justification:
+      "Moved to CitadelRegistryStack as UpdateAgentBindingResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiAddAppComponentResolverB8A446B4",
+    justification: "Moved to CitadelRegistryStack as AddAppComponentResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiRemoveAppComponentResolverF6B9A4CD",
+    justification:
+      "Moved to CitadelRegistryStack as RemoveAppComponentResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiSetAppConfigSchemaResolver56CF4186",
+    justification:
+      "Moved to CitadelRegistryStack as SetAppConfigSchemaResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiSetAppConfigValuesResolverDB2149F4",
+    justification:
+      "Moved to CitadelRegistryStack as SetAppConfigValuesResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiPublishAppStatusEventResolver5DE69E7B",
+    justification:
+      "Moved to CitadelRegistryStack as PublishAppStatusEventResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiCreateAppApiKeyResolverCAA23E27",
+    justification: "Moved to CitadelRegistryStack as CreateAppApiKeyResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiRevokeAppApiKeyResolverB88C6619",
+    justification: "Moved to CitadelRegistryStack as RevokeAppApiKeyResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiRotateAppApiKeyResolverD4039849",
+    justification: "Moved to CitadelRegistryStack as RotateAppApiKeyResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiListAppApiKeysResolverC3BC1C96",
+    justification: "Moved to CitadelRegistryStack as ListAppApiKeysResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiSetAppAuthConfigResolver8C6D30A5",
+    justification: "Moved to CitadelRegistryStack as SetAppAuthConfigResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiGrantAppAccessResolver951B96B9",
+    justification: "Moved to CitadelRegistryStack as GrantAppAccessResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiRevokeAppAccessResolverCBB2ED0B",
+    justification: "Moved to CitadelRegistryStack as RevokeAppAccessResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiListAppAccessEntriesResolver5107E67D",
+    justification:
+      "Moved to CitadelRegistryStack as ListAppAccessEntriesResolver.",
+  },
+  {
+    logicalId: "AgenticAIApiGetAppMetricsResolverCD9FD173",
+    justification: "Moved to CitadelRegistryStack as GetAppMetricsResolver.",
+  },
 ];
 
 /** Resolver fields moved to a satellite stack, for rail 3 parity + rail 7 equivalence. */
@@ -724,6 +1228,158 @@ export const MOVED_RESOLVERS: MovedResolverMapping[] = [
     fieldKey: "Query.generateReportDownloadUrl",
     satelliteStackName: "citadel-projects-dev",
   },
+
+  // Phase 2 (decision 30e6d067)
+  {
+    fieldKey: "Mutation.importAgent",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.attestAgentImport",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Query.discoverAgents",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Query.describeAgentCandidate",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.testImportedAgent",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.probeAgentCandidate",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.probeImportReachability",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.proposeAgentManifestTier3",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.acceptProposedManifestTier3",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.publishImportToGateway",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.unpublishImportFromGateway",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Query.getAgentCode",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.updateAgentCode",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.requestAgentCreation",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.requestToolCreation",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Query.getFabricatorQueue",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.publishFabricationEvent",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  { fieldKey: "Query.getApp", satelliteStackName: "citadel-registry-dev" },
+  { fieldKey: "Query.listApps", satelliteStackName: "citadel-registry-dev" },
+  {
+    fieldKey: "Mutation.createApp",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.updateApp",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.deleteApp",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.bindWorkflowToApp",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.unbindWorkflowFromApp",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.updateAgentBinding",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.addAppComponent",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.removeAppComponent",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.setAppConfigSchema",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.setAppConfigValues",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.publishAppStatusEvent",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.createAppApiKey",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.revokeAppApiKey",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.rotateAppApiKey",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Query.listAppApiKeys",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.setAppAuthConfig",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.grantAppAccess",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Mutation.revokeAppAccess",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Query.listAppAccessEntries",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    fieldKey: "Query.getAppMetrics",
+    satelliteStackName: "citadel-registry-dev",
+  },
 ];
 
 /** Lambda logical-ID name-mapping (backend baseline -> satellite) for rail 6 IAM equivalence. */
@@ -798,7 +1454,54 @@ export const MOVED_LAMBDA_ROLES: MovedLambdaMapping[] = [
     satelliteLogicalId: "GenerateReportUrlFunction63D5CCD0",
     satelliteStackName: "citadel-projects-dev",
   },
+
+  // Phase 2 (decision 30e6d067) — logical IDs are identical baseline<->
+  // satellite (same construct ID, different stack), except
+  // RegistryAgentRecordResolverFunction which keeps functionName pinning.
+  {
+    baselineLogicalId: "AgentImportResolverFunctionE5B20F94",
+    satelliteLogicalId: "AgentImportResolverFunctionE5B20F94",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    baselineLogicalId: "AgentImportManifestResultHandlerAC7A0B8E",
+    satelliteLogicalId: "AgentImportManifestResultHandlerAC7A0B8E",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    baselineLogicalId: "AgentCodeResolverFunction720FFFB6",
+    satelliteLogicalId: "AgentCodeResolverFunction720FFFB6",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    baselineLogicalId: "FabricatorRequestResolverFunctionBCCF3ABD",
+    satelliteLogicalId: "FabricatorRequestResolverFunctionBCCF3ABD",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    baselineLogicalId: "FabricatorQueueResolverFunctionE2D38CA8",
+    satelliteLogicalId: "FabricatorQueueResolverFunctionE2D38CA8",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    baselineLogicalId: "FabricationEventHandlerFunctionA425E3C0",
+    satelliteLogicalId: "FabricationEventHandlerFunctionA425E3C0",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    baselineLogicalId: "RegistryAgentRecordResolverFunction5D7EA0BC",
+    satelliteLogicalId: "RegistryAgentRecordResolverFunction5D7EA0BC",
+    satelliteStackName: "citadel-registry-dev",
+  },
+  {
+    baselineLogicalId: "RegistrySyncLambdaC145524B",
+    satelliteLogicalId: "RegistrySyncLambdaC145524B",
+    satelliteStackName: "citadel-registry-dev",
+  },
 ];
 
 /** Satellite stack names participating in the split, for rail 3's merged-set computation. */
-export const SATELLITE_STACK_NAMES: string[] = ["citadel-projects-dev"];
+export const SATELLITE_STACK_NAMES: string[] = [
+  "citadel-projects-dev",
+  "citadel-registry-dev",
+];
