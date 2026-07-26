@@ -37,6 +37,19 @@ if ! npx cdk synth "${STACK_NAME}" --quiet >/dev/null; then
   die "cdk synth failed for ${STACK_NAME}"
 fi
 
+# Also synth every satellite stack participating in the split (per
+# move-manifest.ts's SATELLITE_STACK_NAMES) so rails 3/6/7 compare against
+# a FRESH satellite template, never a stale one left over from a previous
+# manual synth. citadel-projects-dev is the phase-1 satellite; extend this
+# list as later phases add satellites.
+SATELLITE_STACKS="citadel-projects-${ENV}"
+for sat in ${SATELLITE_STACKS}; do
+  log "=== split-gates: synthesizing ${sat} ==="
+  if ! npx cdk synth "${sat}" --quiet >/dev/null; then
+    die "cdk synth failed for ${sat}"
+  fi
+done
+
 if [ ! -f "split-baseline/${STACK_NAME}.json" ]; then
   log "No committed baseline found at split-baseline/${STACK_NAME}.json — capturing it now."
   npx ts-node -P tsconfig.scripts.json scripts/split-baseline.ts --env "${ENV}" || die "baseline capture failed"

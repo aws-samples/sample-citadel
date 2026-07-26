@@ -10,6 +10,7 @@ import { FrontendStack } from "../lib/frontend-stack";
 import { GatewayStack } from "../lib/gateway-stack";
 import { GovernanceStack } from "../lib/governance-stack";
 import { TelemetryStack } from "../lib/telemetry-stack";
+import { ProjectsStack } from "../lib/projects-stack";
 
 const app = new cdk.App();
 
@@ -35,6 +36,33 @@ const backendStack = new BackendStack(app, `citadel-backend-${environment}`, {
   ...stackProps,
   description: `Backend infrastructure for Citadel - ${environment}`,
 });
+
+// Projects satellite stack — backend-stack-split phase 1 (decision 30e6d067).
+// Owns the projects/conversations/documents/assessment/design-progress/
+// planning/chatter domain, moved out of BackendStack. Depends on backend
+// only, for the shared API/bus/tables/bucket/pool passed in as props;
+// resolvers attach to BackendStack's AppSync API via the L1 cross-stack
+// pattern (see projects-stack.ts).
+const projectsStack = new ProjectsStack(
+  app,
+  `citadel-projects-${environment}`,
+  {
+    ...stackProps,
+    description: `Projects domain satellite for Citadel - ${environment}`,
+    appSyncApi: backendStack.appSyncApi,
+    agentEventBus: backendStack.agentEventBus,
+    projectsTable: backendStack.projectsTable,
+    conversationsTable: backendStack.conversationsTable,
+    agentStatusTable: backendStack.agentStatusTable,
+    documentBucket: backendStack.documentBucket,
+    idempotencyTable: backendStack.idempotencyTable,
+    adrsTable: backendStack.adrsTable,
+    executionSpecificationsTable: backendStack.executionSpecificationsTable,
+    agentDesignAssessmentsTable: backendStack.agentDesignAssessmentsTable,
+    userPool: backendStack.userPool,
+  },
+);
+projectsStack.addDependency(backendStack);
 
 // Services stack (depends on backend)
 const servicesStack = new ServicesStack(
@@ -332,6 +360,7 @@ if (app.node.tryGetContext("nag") !== "false") {
   ];
   for (const stack of [
     backendStack,
+    projectsStack,
     servicesStack,
     arbiterStack,
     frontendStack,
@@ -439,7 +468,7 @@ if (app.node.tryGetContext("nag") !== "false") {
   ];
   const resourceStarPaths: Array<[cdk.Stack, string]> = [
     [
-      backendStack,
+      projectsStack,
       "DocumentUploadResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
     [

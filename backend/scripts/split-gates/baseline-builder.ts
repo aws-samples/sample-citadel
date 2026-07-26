@@ -37,6 +37,7 @@ function resolveFunctionRoleLogicalId(
 function collectPolicyStatementsForRole(
   template: CfnTemplate,
   roleLogicalId: string,
+  knownLogicalIds: ReadonlySet<string>,
 ) {
   const statements = [];
   const role = template.Resources[roleLogicalId];
@@ -47,6 +48,7 @@ function collectPolicyStatementsForRole(
         statements.push(
           ...normalizePolicyStatements(
             (p as Record<string, unknown>).PolicyDocument,
+            knownLogicalIds,
           ),
         );
       }
@@ -66,18 +68,77 @@ function collectPolicyStatementsForRole(
       );
     if (refsThisRole) {
       statements.push(
-        ...normalizePolicyStatements(res.Properties?.PolicyDocument),
+        ...normalizePolicyStatements(
+          res.Properties?.PolicyDocument,
+          knownLogicalIds,
+        ),
       );
     }
   }
   return statements;
 }
 
+/**
+ * Resolve a resolver's `DataSourceName` property to a plain string.
+ *
+ * L2 `dataSource.createResolver()` emits `DataSourceName` as a literal
+ * string (the DS's `name` prop). L1 `CfnResolver` built cross-stack (the
+ * governance-stack.ts / projects-stack.ts pattern) instead passes
+ * `dataSourceName: cfnDataSource.attrName`, a `Fn::GetAtt
+ * [dataSourceLogicalId, "Name"]` token — CFN resolves this to the same
+ * literal at deploy time, but naively stringifying the token object here
+ * would collapse it to the useless `"[object Object]"` and silently break
+ * every dataSourceName-keyed lookup (rail 7's baseline/satellite join).
+ * Resolve the GetAtt back to the referenced DataSource's own `Name`
+ * property so both resolver-construction styles produce the same
+ * comparable string.
+ */
+function resolveDataSourceName(
+  template: CfnTemplate,
+  dataSourceNameProp: unknown,
+): string {
+  if (typeof dataSourceNameProp === "string") {
+    return dataSourceNameProp;
+  }
+  if (
+    dataSourceNameProp !== null &&
+    typeof dataSourceNameProp === "object" &&
+    "Fn::GetAtt" in (dataSourceNameProp as Record<string, unknown>)
+  ) {
+    const getAtt = (dataSourceNameProp as Record<string, unknown>)[
+      "Fn::GetAtt"
+    ];
+    if (Array.isArray(getAtt) && typeof getAtt[0] === "string") {
+      const referencedDs = template.Resources[getAtt[0]];
+      const referencedName = referencedDs?.Properties?.Name;
+      if (typeof referencedName === "string") {
+        return referencedName;
+      }
+    }
+  }
+  return "";
+}
+
 export function buildBaseline(
   stackName: string,
   template: CfnTemplate,
   capturedAt: string = new Date().toISOString(),
+  /**
+   * Logical IDs from OTHER stacks this template cross-references via
+   * `Fn::ImportValue` (e.g. a satellite's grants on BackendStack tables).
+   * Merged with this template's own logical IDs so `Fn::ImportValue` names
+   * referencing either this stack or an external one resolve to the same
+   * canonical `GETATT:<logicalId>:<attr>` form a same-stack `Fn::GetAtt`
+   * produces — required for rail 6 to compare cross-stack satellite grants
+   * against the pre-split same-stack baseline without false "broadening"
+   * positives caused purely by token-shape differences.
+   */
+  externalLogicalIds: ReadonlySet<string> = new Set(),
 ): StackBaseline {
+  const knownLogicalIds = new Set<string>([
+    ...Object.keys(template.Resources),
+    ...externalLogicalIds,
+  ]);
   const baseline: StackBaseline = {
     stackName,
     capturedAt,
@@ -106,7 +167,7 @@ export function buildBaseline(
         logicalId,
         typeName,
         fieldName,
-        dataSourceName: String(props.DataSourceName ?? ""),
+        dataSourceName: resolveDataSourceName(template, props.DataSourceName),
         requestMappingTemplateHash: req.hash,
         responseMappingTemplateHash: resp.hash,
         requestMappingTemplateBytes: req.bytes,
@@ -151,6 +212,7 @@ export function buildBaseline(
         baseline.lambdaRolePolicies[logicalId] = collectPolicyStatementsForRole(
           template,
           roleLogicalId,
+          knownLogicalIds,
         );
       } else {
         baseline.lambdaRolePolicies[logicalId] = [];

@@ -52,6 +52,10 @@ export class BackendStack extends cdk.Stack {
   // Exposed for TelemetryStack (pass-1 cost ledger): the writer Lambda needs
   // read access to model pricing metadata (pass-2 cost computation).
   public readonly modelCatalogTable: dynamodb.Table;
+  // Exposed for ProjectsStack (backend-split phase 1): shared with the
+  // unmoved agentMessageHandlerFunction, so it stays in BackendStack and is
+  // passed to ProjectsStack as a prop rather than moving.
+  public readonly agentStatusTable: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props);
@@ -171,14 +175,21 @@ export class BackendStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
-    const agentStatusTable = new dynamodb.Table(this, "AgentStatusTable", {
-      tableName: `citadel-agent-status-${props.environment}`,
-      partitionKey: { name: "projectId", type: dynamodb.AttributeType.STRING },
-      sortKey: { name: "agentId", type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    const agentStatusTable = (this.agentStatusTable = new dynamodb.Table(
+      this,
+      "AgentStatusTable",
+      {
+        tableName: `citadel-agent-status-${props.environment}`,
+        partitionKey: {
+          name: "projectId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        sortKey: { name: "agentId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    ));
 
     this.agentConfigTable = new dynamodb.Table(this, "AgentConfigTable", {
       tableName: `citadel-agents-${props.environment}`,
@@ -785,135 +796,13 @@ export class BackendStack extends cdk.Stack {
     });
 
     // Lambda functions for resolvers
-    const projectResolverFunction = new lambda.Function(
-      this,
-      "ProjectResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "project-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          PROJECTS_TABLE: this.projectsTable.tableName,
-          ENVIRONMENT: props.environment,
-          // ADRS_TABLE, EXECUTION_SPECS_TABLE, and
-          // AGENT_DESIGN_ASSESSMENTS_TABLE are injected via addEnvironment()
-          // after their tables are instantiated later in the constructor.
-          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
-          AGENT_STATUS_TABLE: agentStatusTable.tableName,
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-          USER_POOL_ID: this.userPool.userPoolId,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ProjectResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    // Grant Cognito permissions to project resolver
-    projectResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["cognito-idp:AdminGetUser"],
-        resources: [this.userPool.userPoolArn],
-      }),
-    );
-
-    const conversationResolverFunction = new lambda.Function(
-      this,
-      "ConversationResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "conversation-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          PROJECTS_TABLE: this.projectsTable.tableName,
-          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
-          AGENT_STATUS_TABLE: agentStatusTable.tableName,
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ConversationResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    const agentResolverFunction = new lambda.Function(
-      this,
-      "AgentResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "agent-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          PROJECTS_TABLE: this.projectsTable.tableName,
-          CONVERSATIONS_TABLE: this.conversationsTable.tableName,
-          AGENT_STATUS_TABLE: agentStatusTable.tableName,
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "AgentResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    const documentUploadResolverFunction = new lambda.Function(
-      this,
-      "DocumentUploadResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "document-upload-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          DOCUMENT_BUCKET: this.documentBucket.bucketName,
-          KB_ID_PARAM: `/citadel/knowledge-base-id-${props.environment}`,
-          DS_ID_PARAM: `/citadel/knowledge-base-datasource-id-${props.environment}`,
-          EVENT_BUS_NAME: this.agentEventBus.eventBusName,
-          // Source-of-truth jobs table (created in ServicesStack). Referenced by
-          // deterministic name — NOT a cross-stack construct import — because
-          // ServicesStack already depends ON BackendStack (it consumes
-          // props.documentBucket / props.agentEventBus); importing the table
-          // construct here would create a circular stack dependency. The
-          // resolver reads this table first and degrades to a Bedrock KB query
-          // if the var/table is absent.
-          INGESTION_TABLE: `citadel-document-ingestion-${props.environment}`,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "DocumentUploadResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    const documentResolverFunction = new lambda.Function(
-      this,
-      "DocumentResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "document-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          SESSION_BUCKET: `citadel-sessions-${props.environment}-${this.account}-${this.region}`,
-          PDF_GENERATOR_FUNCTION: `citadel-pdf-generator-${props.environment}`,
-        },
-        timeout: cdk.Duration.minutes(6), // PDF generation can take up to 5 min
-        logGroup: new logs.LogGroup(this, "DocumentResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
+    //
+    // NOTE: projectResolverFunction, conversationResolverFunction,
+    // agentResolverFunction, documentUploadResolverFunction, and
+    // documentResolverFunction moved to CitadelProjectsStack in the
+    // backend-stack-split phase 1 (see backend/lib/projects-stack.ts).
+    // agentStatusTable stays here (shared with the unmoved
+    // agentMessageHandlerFunction) and is passed to ProjectsStack as a prop.
     const agentConfigResolverFunction = new lambda.Function(
       this,
       "AgentConfigResolverFunction",
@@ -1299,63 +1188,9 @@ export class BackendStack extends cdk.Stack {
     );
 
     // Grant permissions to Lambda functions
-    this.projectsTable.grantReadWriteData(projectResolverFunction);
-    // adrsTable, executionSpecificationsTable, and
-    // agentDesignAssessmentsTable grants are issued after the tables are
-    // instantiated later in the constructor.
-    this.conversationsTable.grantReadWriteData(projectResolverFunction);
-    agentStatusTable.grantReadWriteData(projectResolverFunction);
-
-    this.conversationsTable.grantReadWriteData(conversationResolverFunction);
-    agentStatusTable.grantReadWriteData(conversationResolverFunction);
-    this.projectsTable.grantReadData(conversationResolverFunction);
-
-    agentStatusTable.grantReadWriteData(agentResolverFunction);
-    this.projectsTable.grantReadData(agentResolverFunction);
-
-    // Grant S3 permissions for document upload
-    this.documentBucket.grantPut(documentUploadResolverFunction);
-    this.documentBucket.grantRead(documentUploadResolverFunction);
-    this.documentBucket.grantDelete(documentUploadResolverFunction);
-    documentUploadResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "bedrock:GetKnowledgeBaseDocuments",
-          "bedrock:DeleteKnowledgeBaseDocuments",
-        ],
-        resources: ["*"],
-      }),
-    );
-    documentUploadResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["ssm:GetParameter"],
-        resources: [
-          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/knowledge-base-id-${props.environment}`,
-          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/knowledge-base-datasource-id-${props.environment}`,
-        ],
-      }),
-    );
-    this.agentEventBus.grantPutEventsTo(documentUploadResolverFunction);
-
-    // Read-only access to the authoritative document-ingestion jobs table
-    // (source of truth for per-document ingestion status). The resolver only
-    // READS this table (GetItem on the base table, Query on the base table /
-    // status-index GSI), so grant the minimum required actions. ARNs are built
-    // from account/region/name rather than importing the ServicesStack table
-    // construct, which would create a circular stack dependency (ServicesStack
-    // already depends ON BackendStack).
-    const ingestionTableName = `citadel-document-ingestion-${props.environment}`;
-    const ingestionTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/${ingestionTableName}`;
-    documentUploadResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:GetItem", "dynamodb:Query"],
-        resources: [
-          ingestionTableArn,
-          `${ingestionTableArn}/index/status-index`,
-        ],
-      }),
-    );
+    // NOTE: grants for projectResolverFunction, conversationResolverFunction,
+    // agentResolverFunction, and documentUploadResolverFunction moved to
+    // CitadelProjectsStack (backend-stack-split phase 1).
 
     // ── Durable fabrication-jobs status table ────────────────────────────────
     // Source of truth for per-agent fabrication status, replacing the old
@@ -1403,33 +1238,8 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
-    // Grant S3 + Lambda permissions for document resolver
-    const sessionBucketArn = `arn:aws:s3:::citadel-sessions-${props.environment}-${this.account}-${this.region}`;
-    documentResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "s3:GetObject",
-          "s3:ListBucket",
-          "s3:ListBucketVersions",
-          "s3:GetObjectVersion",
-        ],
-        resources: [sessionBucketArn, `${sessionBucketArn}/*`],
-      }),
-    );
-    documentResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["s3:PutObject"],
-        resources: [`${sessionBucketArn}/*`],
-      }),
-    );
-    documentResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["lambda:InvokeFunction"],
-        resources: [
-          `arn:aws:lambda:${this.region}:${this.account}:function:citadel-pdf-generator-${props.environment}`,
-        ],
-      }),
-    );
+    // NOTE: documentResolverFunction's S3 session-bucket + pdf-generator
+    // invoke grants moved to CitadelProjectsStack along with the function.
 
     // Grant permissions for agent config
     this.agentConfigTable.grantReadWriteData(agentConfigResolverFunction);
@@ -2334,9 +2144,8 @@ export class BackendStack extends cdk.Stack {
     seedAdminUserResource.node.addDependency(adminGroup);
 
     // Grant EventBridge permissions
-    this.agentEventBus.grantPutEventsTo(projectResolverFunction);
-    this.agentEventBus.grantPutEventsTo(conversationResolverFunction);
-    this.agentEventBus.grantPutEventsTo(agentResolverFunction);
+    // NOTE: grants for projectResolverFunction, conversationResolverFunction,
+    // and agentResolverFunction moved to CitadelProjectsStack.
     this.agentEventBus.grantPutEventsTo(taskRunnerResolverFunction);
 
     // --- Workflow, App, Execution Resolver Lambdas ---
@@ -2922,52 +2731,9 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
-    // Project Progress Updater Lambda
-    const projectProgressUpdater = new lambda.Function(
-      this,
-      "ProjectProgressUpdater",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "project-progress-updater.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          PROJECTS_TABLE: this.projectsTable.tableName,
-          IDEMPOTENCY_TABLE: this.idempotencyTable.tableName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ProjectProgressUpdaterLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    this.projectsTable.grantReadWriteData(projectProgressUpdater);
-    this.idempotencyTable.grantReadWriteData(projectProgressUpdater);
-
-    // Assessment Completion Notifier Lambda
-    const assessmentCompletionNotifier = new lambda.Function(
-      this,
-      "AssessmentCompletionNotifier",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "assessment-completion-notifier.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "AssessmentCompletionNotifierLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    this.appSyncApi.grantMutation(
-      assessmentCompletionNotifier,
-      "publishAssessmentCompletion",
-    );
+    // NOTE: projectProgressUpdater and assessmentCompletionNotifier moved to
+    // CitadelProjectsStack (backend-stack-split phase 1), along with their
+    // ProgressUpdateRule / AssessmentCompletionRule EventBridge targets.
 
     // Fabrication Event Handler Lambda
     const fabricationEventHandlerFunction = new lambda.Function(
@@ -3010,133 +2776,9 @@ export class BackendStack extends cdk.Stack {
         fabricationEventHandlerFunction,
       );
 
-    // EventBridge rule for assessment completion
-    const assessmentCompletionRule = new events.Rule(
-      this,
-      "AssessmentCompletionRule",
-      {
-        eventBus: this.agentEventBus,
-        ruleName: `citadel-assessment-completion-${props.environment}`,
-        description: "Triggers when all assessment dimensions are complete",
-        eventPattern: {
-          detailType: ["assessment.completed"],
-          source: ["citadel.assessment"],
-        },
-      },
-    );
-
-    assessmentCompletionRule.addTarget(
-      new targets.LambdaFunction(assessmentCompletionNotifier, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
-
-    // Design Progress Notifier Lambda
-    const designProgressNotifier = new lambda.Function(
-      this,
-      "DesignProgressNotifier",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "design-progress-notifier.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "DesignProgressNotifierLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    this.appSyncApi.grantMutation(
-      designProgressNotifier,
-      "publishDesignProgress",
-    );
-
-    // EventBridge rule for design progress updates
-    const designProgressRule = new events.Rule(this, "DesignProgressRule", {
-      eventBus: this.agentEventBus,
-      ruleName: `citadel-design-progress-${props.environment}`,
-      description: "Triggers when design section progress is updated",
-      eventPattern: {
-        detailType: ["design.progress.updated"],
-        source: ["agent2.design"],
-      },
-    });
-
-    designProgressRule.addTarget(
-      new targets.LambdaFunction(designProgressNotifier, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
-
-    // Chatter Publisher Lambda - publishes all EventBridge messages to AppSync
-    const chatterPublisherFunction = new lambda.Function(
-      this,
-      "ChatterPublisherFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "chatter-publisher.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          APPSYNC_ENDPOINT: this.appSyncApi.graphqlUrl,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ChatterPublisherFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    // Grant AppSync permissions to chatter publisher
-    chatterPublisherFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["appsync:GraphQL"],
-        resources: [
-          `${this.appSyncApi.arn}/types/Mutation/fields/publishChatter`,
-        ],
-      }),
-    );
-
-    // Chatter Resolver Lambda
-    const chatterResolverFunction = new lambda.Function(
-      this,
-      "ChatterResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "chatter-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "ChatterResolverFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    // EventBridge rule for ALL agent chatter - captures all messages on the bus
-    const chatterRule = new events.Rule(this, "ChatterRule", {
-      eventBus: this.agentEventBus,
-      ruleName: `citadel-chatter-${props.environment}`,
-      description: "Captures all agent communication for real-time display",
-      // Match all events on this bus by not specifying a pattern
-      eventPattern: {
-        source: [{ prefix: "" }] as any[],
-      },
-    });
-
-    chatterRule.addTarget(
-      new targets.LambdaFunction(chatterPublisherFunction, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
+    // NOTE: designProgressNotifier, DesignProgressRule, chatterPublisherFunction,
+    // chatterResolverFunction, ChatterRule, and ProgressUpdateRule moved to
+    // CitadelProjectsStack (backend-stack-split phase 1).
 
     // EventBridge rule for fabrication events
     const fabricationEventRule = new events.Rule(this, "FabricationEventRule", {
@@ -3155,62 +2797,13 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
-    // EventBridge rule for progress updates
-    const progressUpdateRule = new events.Rule(this, "ProgressUpdateRule", {
-      eventBus: this.agentEventBus,
-      ruleName: `citadel-progress-update-${props.environment}`,
-      description: "Updates project progress from agent events",
-      eventPattern: {
-        detailType: ["intake.progress.updated"],
-        source: [
-          "agent_intake.assessment",
-          "agent_intake.design",
-          "agent_intake.planning",
-          "agent_intake.implementation",
-        ],
-      },
-    });
-
-    progressUpdateRule.addTarget(
-      new targets.LambdaFunction(projectProgressUpdater, {
-        retryAttempts: 2,
-        maxEventAge: cdk.Duration.hours(2),
-      }),
-    );
-
     // Data sources
-    const projectsDataSource = this.appSyncApi.addDynamoDbDataSource(
-      "ProjectsDataSource",
-      this.projectsTable,
-    );
-    const conversationsDataSource = this.appSyncApi.addDynamoDbDataSource(
-      "ConversationsDataSource",
-      this.conversationsTable,
-    );
-    const agentStatusDataSource = this.appSyncApi.addDynamoDbDataSource(
-      "AgentStatusDataSource",
-      agentStatusTable,
-    );
-    const projectLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "ProjectLambdaDataSource",
-      projectResolverFunction,
-    );
-    const conversationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "ConversationLambdaDataSource",
-      conversationResolverFunction,
-    );
-    const agentLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "AgentLambdaDataSource",
-      agentResolverFunction,
-    );
-    const documentUploadLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "DocumentUploadLambdaDataSource",
-      documentUploadResolverFunction,
-    );
-    const documentLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "DocumentLambdaDataSource",
-      documentResolverFunction,
-    );
+    // NOTE: ProjectsDataSource/ConversationsDataSource/AgentStatusDataSource
+    // (unused DynamoDB data sources — no resolver ever attached) and
+    // ProjectLambdaDataSource/ConversationLambdaDataSource/
+    // AgentLambdaDataSource/DocumentUploadLambdaDataSource/
+    // DocumentLambdaDataSource/ChatterLambdaDataSource moved to
+    // CitadelProjectsStack.
     const agentConfigLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "AgentConfigLambdaDataSource",
       agentConfigResolverFunction,
@@ -3252,47 +2845,23 @@ export class BackendStack extends cdk.Stack {
       "OrganizationLambdaDataSource",
       organizationResolverFunction,
     );
-    const chatterLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "ChatterLambdaDataSource",
-      chatterResolverFunction,
-    );
+    // NOTE: ChatterLambdaDataSource moved to CitadelProjectsStack.
     const integrationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "IntegrationLambdaDataSource",
       integrationResolverFunction,
     );
 
+    // NOTE: GetProjectResolver, ListProjectsResolver, GetAgentStatusResolver,
+    // GetConversationHistoryResolver, SendMessageResolver,
+    // PublishConversationMessageResolver, CreateProjectResolver,
+    // UpdateProjectResolver, SendMessageToAgentResolver,
+    // UploadDocumentResolver, GenerateDocumentUploadUrlResolver,
+    // GetDocumentIngestionStatusResolver, ListProjectDocumentsResolver,
+    // DeleteDocumentResolver, GetProjectDocumentResolver,
+    // ListDocumentVersionsResolver, GetDocumentVersionResolver, and
+    // GenerateDocumentPdfResolver moved to CitadelProjectsStack.
+
     // Query resolvers
-    projectLambdaDataSource.createResolver("GetProjectResolver", {
-      typeName: "Query",
-      fieldName: "getProject",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    projectLambdaDataSource.createResolver("ListProjectsResolver", {
-      typeName: "Query",
-      fieldName: "listProjects",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    agentLambdaDataSource.createResolver("GetAgentStatusResolver", {
-      typeName: "Query",
-      fieldName: "getAgentStatus",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    conversationLambdaDataSource.createResolver(
-      "GetConversationHistoryResolver",
-      {
-        typeName: "Query",
-        fieldName: "getConversationHistory",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
     agentConfigLambdaDataSource.createResolver("ListAgentConfigsResolver", {
       typeName: "Query",
       fieldName: "listAgentConfigs",
@@ -3352,116 +2921,17 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    conversationLambdaDataSource.createResolver("SendMessageResolver", {
-      typeName: "Mutation",
-      fieldName: "sendMessage",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    conversationLambdaDataSource.createResolver(
-      "PublishConversationMessageResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "publishConversationMessage",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
+    // NOTE: SendMessageResolver, PublishConversationMessageResolver moved to
+    // CitadelProjectsStack.
 
     // Mutation resolvers
-    projectLambdaDataSource.createResolver("CreateProjectResolver", {
-      typeName: "Mutation",
-      fieldName: "createProject",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    projectLambdaDataSource.createResolver("UpdateProjectResolver", {
-      typeName: "Mutation",
-      fieldName: "updateProject",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    conversationLambdaDataSource.createResolver("SendMessageToAgentResolver", {
-      typeName: "Mutation",
-      fieldName: "sendMessageToAgent",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    projectLambdaDataSource.createResolver("UploadDocumentResolver", {
-      typeName: "Mutation",
-      fieldName: "uploadDocument",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentUploadLambdaDataSource.createResolver(
-      "GenerateDocumentUploadUrlResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "generateDocumentUploadUrl",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    documentUploadLambdaDataSource.createResolver(
-      "GetDocumentIngestionStatusResolver",
-      {
-        typeName: "Query",
-        fieldName: "getDocumentIngestionStatus",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    documentUploadLambdaDataSource.createResolver(
-      "ListProjectDocumentsResolver",
-      {
-        typeName: "Query",
-        fieldName: "listProjectDocuments",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    documentUploadLambdaDataSource.createResolver("DeleteDocumentResolver", {
-      typeName: "Mutation",
-      fieldName: "deleteDocument",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentLambdaDataSource.createResolver("GetProjectDocumentResolver", {
-      typeName: "Query",
-      fieldName: "getProjectDocument",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentLambdaDataSource.createResolver("ListDocumentVersionsResolver", {
-      typeName: "Query",
-      fieldName: "listDocumentVersions",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentLambdaDataSource.createResolver("GetDocumentVersionResolver", {
-      typeName: "Query",
-      fieldName: "getDocumentVersion",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
-    documentLambdaDataSource.createResolver("GenerateDocumentPdfResolver", {
-      typeName: "Mutation",
-      fieldName: "generateDocumentPdf",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    // NOTE: CreateProjectResolver, UpdateProjectResolver,
+    // SendMessageToAgentResolver, UploadDocumentResolver,
+    // GenerateDocumentUploadUrlResolver, GetDocumentIngestionStatusResolver,
+    // ListProjectDocumentsResolver, DeleteDocumentResolver,
+    // GetProjectDocumentResolver, ListDocumentVersionsResolver,
+    // GetDocumentVersionResolver, and GenerateDocumentPdfResolver moved to
+    // CitadelProjectsStack.
 
     agentConfigLambdaDataSource.createResolver("CreateAgentConfigResolver", {
       typeName: "Mutation",
@@ -3832,13 +3302,7 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    // Chatter Resolver
-    chatterLambdaDataSource.createResolver("PublishChatterResolver", {
-      typeName: "Mutation",
-      fieldName: "publishChatter",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
+    // NOTE: PublishChatterResolver moved to CitadelProjectsStack.
 
     // Integration Resolvers
     integrationLambdaDataSource.createResolver("ListIntegrationsResolver", {
@@ -3900,175 +3364,12 @@ export class BackendStack extends cdk.Stack {
       },
     );
 
-    // Assessment Completion Resolver
-    const assessmentCompletionResolverFunction = new lambda.Function(
-      this,
-      "AssessmentCompletionResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "assessment-completion-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "AssessmentCompletionResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    const assessmentCompletionLambdaDataSource =
-      this.appSyncApi.addLambdaDataSource(
-        "AssessmentCompletionLambdaDataSource",
-        assessmentCompletionResolverFunction,
-      );
-
-    assessmentCompletionLambdaDataSource.createResolver(
-      "PublishAssessmentCompletionResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "publishAssessmentCompletion",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Assessment Progress Resolver
-    const sessionMemoryTableName = `citadel-session-memory-${props.environment}`;
-    const sessionMemoryTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-session-memory-${props.environment}`;
-
-    const assessmentProgressResolverFunction = new lambda.Function(
-      this,
-      "AssessmentProgressResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "assessment-progress-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          SESSION_MEMORY_TABLE: sessionMemoryTableName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "AssessmentProgressResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    assessmentProgressResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:GetItem", "dynamodb:Query"],
-        resources: [sessionMemoryTableArn],
-      }),
-    );
-
-    const assessmentProgressLambdaDataSource =
-      this.appSyncApi.addLambdaDataSource(
-        "AssessmentProgressLambdaDataSource",
-        assessmentProgressResolverFunction,
-      );
-
-    assessmentProgressLambdaDataSource.createResolver(
-      "GetAssessmentProgressResolver",
-      {
-        typeName: "Query",
-        fieldName: "getAssessmentProgress",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Design Progress Resolver
-    const designProgressResolverFunction = new lambda.Function(
-      this,
-      "DesignProgressResolverFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "design-progress-resolver.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(
-          this,
-          "DesignProgressResolverFunctionLogs",
-          {
-            retention: logs.RetentionDays.ONE_WEEK,
-            removalPolicy: cdk.RemovalPolicy.DESTROY,
-          },
-        ),
-      },
-    );
-
-    const designProgressLambdaDataSource = this.appSyncApi.addLambdaDataSource(
-      "DesignProgressLambdaDataSource",
-      designProgressResolverFunction,
-    );
-
-    designProgressLambdaDataSource.createResolver(
-      "PublishDesignProgressResolver",
-      {
-        typeName: "Mutation",
-        fieldName: "publishDesignProgress",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
-
-    // Report Download URL Generator
-    const sessionBucketName = `citadel-sessions-${props.environment}-${this.account}-${this.region}`;
-
-    const generateReportUrlFunction = new lambda.Function(
-      this,
-      "GenerateReportUrlFunction",
-      {
-        runtime: lambda.Runtime.NODEJS_24_X,
-        handler: "generate-report-url.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          SESSION_BUCKET: sessionBucketName,
-          PROJECTS_TABLE: this.projectsTable.tableName,
-        },
-        timeout: cdk.Duration.seconds(30),
-        logGroup: new logs.LogGroup(this, "GenerateReportUrlFunctionLogs", {
-          retention: logs.RetentionDays.ONE_WEEK,
-          removalPolicy: cdk.RemovalPolicy.DESTROY,
-        }),
-      },
-    );
-
-    generateReportUrlFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["s3:GetObject", "s3:ListBucket"],
-        resources: [
-          `arn:aws:s3:::${sessionBucketName}/*`,
-          `arn:aws:s3:::${sessionBucketName}`,
-        ],
-      }),
-    );
-    this.projectsTable.grantReadData(generateReportUrlFunction);
-
-    const generateReportUrlDataSource = this.appSyncApi.addLambdaDataSource(
-      "GenerateReportUrlDataSource",
-      generateReportUrlFunction,
-    );
-
-    generateReportUrlDataSource.createResolver(
-      "GenerateReportDownloadUrlResolver",
-      {
-        typeName: "Query",
-        fieldName: "generateReportDownloadUrl",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
+    // NOTE: assessmentCompletionResolverFunction, assessmentProgressResolverFunction,
+    // designProgressResolverFunction, and generateReportUrlFunction (+ their
+    // DataSources and resolvers: PublishAssessmentCompletionResolver,
+    // GetAssessmentProgressResolver, PublishDesignProgressResolver,
+    // GenerateReportDownloadUrlResolver) moved to CitadelProjectsStack
+    // (backend-stack-split phase 1).
 
     // DataStores Table
     const dataStoresTable = new dynamodb.Table(this, "DataStoresTable", {
@@ -4680,8 +3981,9 @@ export class BackendStack extends cdk.Stack {
     });
 
     // Lambda error alarms for critical functions
+    // NOTE: ProjectResolver's alarms moved to CitadelProjectsStack along with
+    // the function itself.
     const criticalFunctions = [
-      { fn: projectResolverFunction, name: "ProjectResolver" },
       { fn: agentMessageHandlerFunction, name: "AgentMessageHandler" },
       { fn: gatewayRegistrationHandler, name: "GatewayRegistration" },
       { fn: integrationResolverFunction, name: "IntegrationResolver" },
@@ -4933,26 +4235,12 @@ export class BackendStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
-    // wire projectResolverFunction to the governance-gate tables.
-    // These env vars and grants are deferred to this point because the tables
-    // are instantiated later in the constructor than the function itself.
-    // Gates C3 (assessment), C7 (ADR), C10 (ExecutionSpec) read from these
-    // tables during updateProject phase transitions.
-    projectResolverFunction.addEnvironment(
-      "ADRS_TABLE",
-      this.adrsTable.tableName,
-    );
-    projectResolverFunction.addEnvironment(
-      "EXECUTION_SPECS_TABLE",
-      this.executionSpecificationsTable.tableName,
-    );
-    projectResolverFunction.addEnvironment(
-      "AGENT_DESIGN_ASSESSMENTS_TABLE",
-      this.agentDesignAssessmentsTable.tableName,
-    );
-    this.adrsTable.grantReadData(projectResolverFunction);
-    this.executionSpecificationsTable.grantReadData(projectResolverFunction);
-    this.agentDesignAssessmentsTable.grantReadData(projectResolverFunction);
+    // NOTE: projectResolverFunction's governance-gate wiring (ADRS_TABLE,
+    // EXECUTION_SPECS_TABLE, AGENT_DESIGN_ASSESSMENTS_TABLE env vars + read
+    // grants for gates C3/C7/C10) moved to CitadelProjectsStack, where the
+    // function is created directly with those tables passed in as props —
+    // no deferred addEnvironment() dance needed there since ProjectsStack
+    // receives the already-instantiated tables from BackendStack.
 
     // ADR-on-import (US-IMP): the agent import resolver records a
     // system-generated ADR keyed to the synthetic GLOBAL import project. Write-

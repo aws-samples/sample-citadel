@@ -156,17 +156,40 @@ function main(): void {
   ]);
 
   // Rails 6/7 need per-satellite Lambda-policy / resolver snapshots — built
-  // the same way the baseline was, from each satellite's own template. In
-  // this no-move stage MOVED_LAMBDA_ROLES / MOVED_RESOLVERS are empty, so
-  // no snapshot-building is required; a move stage extends this block.
+  // the same way the baseline was, from each satellite's own template.
+  // MOVED_LAMBDA_ROLES / MOVED_RESOLVERS are empty until a move stage
+  // populates the manifest; when populated, this block must translate each
+  // satellite's own StackBaseline (resolvers keyed by fieldKey + dataSources
+  // keyed by logical ID) into the flat SatelliteResolverSnapshot shape rail 7
+  // expects (fieldKey -> {requestHash, responseHash, dataSourceType,
+  // dataSourceLambdaFunctionArnRef}) by joining each resolver's
+  // dataSourceName back to that satellite's own dataSources map.
   const satelliteLambdaPolicies: Record<
     string,
     ReturnType<typeof buildBaseline>["lambdaRolePolicies"][string]
   > = {};
   const satelliteResolvers: Record<string, SatelliteResolverSnapshot> = {};
+  const backendLogicalIds = new Set(Object.keys(baseline.resources));
   for (const { stackName: satName, template } of satelliteTemplates) {
-    const satBaseline = buildBaseline(satName, template);
+    const satBaseline = buildBaseline(
+      satName,
+      template,
+      undefined,
+      backendLogicalIds,
+    );
     Object.assign(satelliteLambdaPolicies, satBaseline.lambdaRolePolicies);
+
+    for (const [fieldKey, resolver] of Object.entries(satBaseline.resolvers)) {
+      const ds = Object.values(satBaseline.dataSources).find(
+        (d) => d.name === resolver.dataSourceName,
+      );
+      satelliteResolvers[fieldKey] = {
+        requestMappingTemplateHash: resolver.requestMappingTemplateHash,
+        responseMappingTemplateHash: resolver.responseMappingTemplateHash,
+        dataSourceType: ds?.type ?? null,
+        dataSourceLambdaFunctionArnRef: ds?.lambdaFunctionArnRef ?? null,
+      };
+    }
   }
 
   const rail6 = runIamEquivalence(

@@ -99,6 +99,7 @@ export function extractResolverKeys(
  */
 export function normalizePolicyStatements(
   policyDocument: unknown,
+  knownLogicalIds?: ReadonlySet<string>,
 ): NormalizedPolicyStatement[] {
   if (
     policyDocument === null ||
@@ -114,9 +115,10 @@ export function normalizePolicyStatements(
     if (stmt === null || typeof stmt !== "object") continue;
     const s = stmt as Record<string, unknown>;
     const effect = typeof s.Effect === "string" ? s.Effect : "Allow";
-    const actions = toStringArray(s.Action ?? s.NotAction);
-    const resources = toStringArray(s.Resource ?? s.NotResource).map(
-      resourceToComparableString,
+    const actions = toStringArray(s.Action ?? s.NotAction, knownLogicalIds);
+    const resources = toStringArray(
+      s.Resource ?? s.NotResource,
+      knownLogicalIds,
     );
     const conditionKeys = s.Condition
       ? flattenConditionKeys(s.Condition as Record<string, unknown>)
@@ -131,10 +133,15 @@ export function normalizePolicyStatements(
   return out;
 }
 
-function toStringArray(value: unknown): string[] {
+function toStringArray(
+  value: unknown,
+  knownLogicalIds?: ReadonlySet<string>,
+): string[] {
   if (value === undefined || value === null) return [];
-  if (Array.isArray(value)) return value.map(resourceToComparableString);
-  return [resourceToComparableString(value)];
+  if (Array.isArray(value)) {
+    return value.map((v) => resourceToComparableString(v, knownLogicalIds));
+  }
+  return [resourceToComparableString(value, knownLogicalIds)];
 }
 
 /**
@@ -142,11 +149,151 @@ function toStringArray(value: unknown): string[] {
  * intrinsic function object like Fn::GetAtt / Fn::Join) into a stable,
  * comparable string. Intrinsics are serialized via stableStringify rather
  * than resolved, since we compare synthesized templates to each other, not
- * to deployed ARNs.
+ * to deployed ARNs — EXCEPT for `Fn::GetAtt` and the CDK-auto-generated
+ * `Fn::ImportValue` form of the same reference, which are normalized to an
+ * identical canonical string. This matters for rail 6 (IAM equivalence):
+ * a satellite stack's cross-stack grant on a BackendStack table renders as
+ * `Fn::ImportValue "citadel-backend-dev:ExportsOutputFnGetAtt<LogicalId><Attr><hash>"`,
+ * while the pre-split baseline (same-stack) grant on the identical table
+ * renders as `Fn::GetAtt [LogicalId, Attr]`. Without normalization these
+ * look like different resources and every recreate-in-satellite Lambda
+ * fails rail 6 on every table/bus/bucket grant it legitimately still needs
+ * — a false positive, not a real privilege broadening. CDK's auto-export
+ * naming (`ExportsOutputFnGetAtt<LogicalId><Attr><hash8>` /
+ * `ExportsOutputRef<LogicalId><hash8>`) is stable across CDK versions used
+ * in this repo; the regex below parses it back into the same
+ * `GETATT:<LogicalId>:<Attr>` / `REF:<LogicalId>` canonical form
+ * `Fn::GetAtt`/`Fn::Ref` produce directly.
  */
-function resourceToComparableString(value: unknown): string {
+function resourceToComparableString(
+  value: unknown,
+  knownLogicalIds?: ReadonlySet<string>,
+): string {
   if (typeof value === "string") return value;
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "Fn::GetAtt" in (value as Record<string, unknown>)
+  ) {
+    const getAtt = (value as Record<string, unknown>)["Fn::GetAtt"];
+    if (Array.isArray(getAtt) && typeof getAtt[0] === "string") {
+      const attr = typeof getAtt[1] === "string" ? getAtt[1] : "Ref";
+      return `GETATT:${getAtt[0]}:${attr}`;
+    }
+  }
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "Ref" in (value as Record<string, unknown>) &&
+    Object.keys(value as Record<string, unknown>).length === 1
+  ) {
+    const ref = (value as Record<string, unknown>)["Ref"];
+    if (typeof ref === "string") {
+      return `GETATT:${ref}:Ref`;
+    }
+  }
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "Fn::ImportValue" in (value as Record<string, unknown>)
+  ) {
+    const importName = (value as Record<string, unknown>)["Fn::ImportValue"];
+    if (typeof importName === "string") {
+      const canonical = canonicalizeImportValue(importName, knownLogicalIds);
+      if (canonical) return canonical;
+    }
+  }
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    "Fn::Join" in (value as Record<string, unknown>)
+  ) {
+    const join = (value as Record<string, unknown>)["Fn::Join"];
+    if (
+      Array.isArray(join) &&
+      typeof join[0] === "string" &&
+      Array.isArray(join[1])
+    ) {
+      const parts = (join[1] as unknown[]).map((p) =>
+        resourceToComparableString(p, knownLogicalIds),
+      );
+      return `JOIN:${join[0]}:${parts.join(join[0])}`;
+    }
+  }
   return stableStringify(value);
+}
+
+/**
+ * Parse a CDK-auto-generated cross-stack export name back into the same
+ * canonical form `Fn::GetAtt`/`Ref` produce, e.g.
+ * `citadel-backend-dev:ExportsOutputFnGetAttAgentStatusTable5F3D8429ArnB509A2EC`
+ * -> `GETATT:AgentStatusTable5F3D8429:Arn`, or
+ * `citadel-backend-dev:ExportsOutputRefAgentStatusTable5F3D842936E7D685`
+ * -> `GETATT:AgentStatusTable5F3D8429:Ref`.
+ *
+ * A bare regex split is ambiguous: CDK logical IDs themselves end in an
+ * 8-hex-char hash (e.g. `AgentEventBusB8B466DF`), which looks identical in
+ * shape to the export name's own trailing hash suffix, so a naive
+ * "logicalId + attr + hash8" pattern can split at the wrong boundary (e.g.
+ * mis-parsing `AgentEventBusB8B466DFArn03EB6E49` as logicalId=
+ * `AgentEventBusB8B466`, attr=`DFArn` instead of logicalId=
+ * `AgentEventBusB8B466DF`, attr=`Arn`). Disambiguate by matching against
+ * the KNOWN logical ID set from the source stack's own baseline (passed by
+ * the caller) and picking the longest logical ID that is a valid prefix —
+ * this is unambiguous because logical IDs are unique per stack.
+ */
+function canonicalizeImportValue(
+  importName: string,
+  knownLogicalIds?: ReadonlySet<string>,
+): string | null {
+  const colonIdx = importName.indexOf(":");
+  const localName = colonIdx >= 0 ? importName.slice(colonIdx + 1) : importName;
+
+  if (knownLogicalIds && knownLogicalIds.size > 0) {
+    const getAttPrefix = "ExportsOutputFnGetAtt";
+    const refPrefix = "ExportsOutputRef";
+    if (localName.startsWith(getAttPrefix)) {
+      const rest = localName.slice(getAttPrefix.length);
+      const match = findLongestLogicalIdPrefix(rest, knownLogicalIds);
+      if (match) {
+        const remainder = rest.slice(match.length);
+        const attr = remainder.replace(/[0-9A-F]{8}$/, "");
+        if (attr) return `GETATT:${match}:${attr}`;
+      }
+    } else if (localName.startsWith(refPrefix)) {
+      const rest = localName.slice(refPrefix.length);
+      const match = findLongestLogicalIdPrefix(rest, knownLogicalIds);
+      if (match) return `GETATT:${match}:Ref`;
+    }
+  }
+
+  // Fallback (no known-logical-ID set supplied): best-effort regex parse.
+  // May mis-split when the logical ID's own hash collides with the export
+  // hash shape, but is still better than treating the whole string opaque.
+  const getAttMatch = /^ExportsOutputFnGetAtt(.+?)([A-Za-z]+)[0-9A-F]{8}$/.exec(
+    localName,
+  );
+  if (getAttMatch) {
+    return `GETATT:${getAttMatch[1]}:${getAttMatch[2]}`;
+  }
+  const refMatch = /^ExportsOutputRef(.+?)[0-9A-F]{8}$/.exec(localName);
+  if (refMatch) {
+    return `GETATT:${refMatch[1]}:Ref`;
+  }
+  return null;
+}
+
+function findLongestLogicalIdPrefix(
+  rest: string,
+  knownLogicalIds: ReadonlySet<string>,
+): string | null {
+  let best: string | null = null;
+  for (const id of knownLogicalIds) {
+    if (rest.startsWith(id) && (best === null || id.length > best.length)) {
+      best = id;
+    }
+  }
+  return best;
 }
 
 function flattenConditionKeys(condition: Record<string, unknown>): string[] {

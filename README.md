@@ -96,7 +96,7 @@ Service (AgentCore Runtime · Gateway · Knowledge Base)
 Gateway (per-app API Gateway · authorizer · metrics)
 ```
 
-Deployed as focused CDK stacks: `backend`, `services`, `governance`, `arbiter`, `frontend`, `gateway`, and `telemetry`.
+Deployed as focused CDK stacks: `backend`, `projects`, `services`, `governance`, `arbiter`, `frontend`, `gateway`, and `telemetry`.
 
 ## Getting started
 

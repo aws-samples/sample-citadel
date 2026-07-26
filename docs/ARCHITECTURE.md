@@ -13,7 +13,7 @@ Citadel is a multi-agent AI platform for enterprise application transformation. 
 └──────────────────────────────┬──────────────────────────────────────────┘
                                │ GraphQL + WebSocket subscriptions
 ┌──────────────────────────────▼──────────────────────────────────────────┐
-│                     Backend (CDK TypeScript — 7 stacks)                 │
+│                     Backend (CDK TypeScript — 8 stacks)                 │
 │  AppSync API → 40+ Lambda resolvers → DynamoDB (9 tables)               │
 │  EventBridge bus (citadel-agents-{env}) for async coordination          │
 │  Cognito (auth) · S3 (documents + code) · Secrets Manager (creds)       │
@@ -193,7 +193,7 @@ PipelineStack — standalone (CI/CD CodePipeline, self-mutating, multi-env)
 - **Cost query HttpApi** (`citadel-cost-api-{env}`) — a Cognito-JWT-authorized HTTP API (`GET /cost/summary`, `GET /cost/series`, `GET`/`PUT /budgets`) fronting a single `cost-query-handler` Lambda. Every non-admin read is a base-table `Query` keyed on `PK=ORG#<verified JWT claim>` — never a Scan, never a dimension GSI — so org isolation lives in the DynamoDB key condition itself. The stack exposes `costApiUrl` (the HttpApi endpoint), threaded into `FrontendStack` as `aws_cost_api_url` in `aws-exports.json` (see [COST_QUERY.md](./COST_QUERY.md)).
 - **Budget alerts** — budget rows share the ledger table under `SK=BUDGET#ORG` / `BUDGET#APP#<appId>` (disjoint from the ISO-timestamped cost rows), enumerated via a sparse `BudgetIndex` GSI. A separate hourly-scheduled `cost-budget-evaluator` Lambda computes period-to-date spend and publishes `cost.budget.threshold.crossed` / `cost.budget.breached` to the shared event bus — making `TelemetryStack` an EventBridge **publisher** for the first time (it was consume-only before). See [EVENTBRIDGE_CATALOG.md](./EVENTBRIDGE_CATALOG.md#cost-budget-events).
 
-This keeps the platform at **7 stacks** (BackendStack, ServicesStack, ArbiterStack, GatewayStack, TelemetryStack, FrontendStack, GovernanceStack) — the cost query/budget surface is additive to the existing TelemetryStack rather than a new stack.
+This keeps the TelemetryStack itself at a fixed surface (BackendStack, ServicesStack, ArbiterStack, GatewayStack, TelemetryStack, FrontendStack, GovernanceStack, ProjectsStack — **8 stacks** total) — the cost query/budget surface is additive to the existing TelemetryStack rather than a new stack. `ProjectsStack` (`citadel-projects-{env}`) is a backend-stack-split satellite: it owns the projects/conversations/documents/assessment/design-progress/planning/chatter domain resolvers, attaching to BackendStack's AppSync API via the same L1 cross-stack pattern GovernanceStack uses.
 
 ## Key Architectural Patterns
 

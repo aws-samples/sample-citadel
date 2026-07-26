@@ -4885,7 +4885,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentConfigTableE9BDF3BA\",\"Arn\"]}"
+          "GETATT:AgentConfigTableE9BDF3BA:Arn"
         ],
         "conditionKeys": []
       },
@@ -4912,8 +4912,8 @@
           "bedrock-agentcore:UpdateRegistryRecordStatus"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]},\"/*\"]]}"
+          "GETATT:AgentCoreRegistry:RegistryArn",
+          "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*"
         ],
         "conditionKeys": []
       },
@@ -4925,7 +4925,7 @@
           "sqs:SendMessage"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"RegistrySyncDLQFB920991\",\"Arn\"]}"
+          "GETATT:RegistrySyncDLQFB920991:Arn"
         ],
         "conditionKeys": []
       }
@@ -4938,8 +4938,8 @@
           "bedrock-agentcore:ListRegistryRecords"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]},\"/*\"]]}"
+          "GETATT:AgentCoreRegistry:RegistryArn",
+          "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*"
         ],
         "conditionKeys": []
       },
@@ -4960,8 +4960,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:AppsTable172E1E77:Arn",
+          "JOIN::GETATT:AppsTable172E1E77:Arn/index/*"
         ],
         "conditionKeys": []
       }
@@ -4997,7 +4997,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ModelCatalogTable73D35921\",\"Arn\"]}"
+          "GETATT:ModelCatalogTable73D35921:Arn"
         ],
         "conditionKeys": []
       },
@@ -5007,7 +5007,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       }
@@ -5020,7 +5020,7 @@
           "cognito-idp:AdminGetUser"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"UserPool6BA7E5F2\",\"Arn\"]}"
+          "GETATT:UserPool6BA7E5F2:Arn"
         ],
         "conditionKeys": []
       },
@@ -5041,10 +5041,10 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentStatusTable5F3D8429\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"ConversationsTableCD91EB96\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:AgentStatusTable5F3D8429:Arn",
+          "GETATT:ConversationsTableCD91EB96:Arn",
+          "GETATT:ProjectsTableAA0A2089:Arn",
+          "JOIN::GETATT:ProjectsTableAA0A2089:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -5054,7 +5054,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       },
@@ -5071,11 +5071,11 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ADRsTableE034D2A5\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"AgentDesignAssessmentsTable4E1E78B7\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"ExecutionSpecificationsTableB9D97720\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ADRsTableE034D2A5\",\"Arn\"]},\"/index/*\"]]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ExecutionSpecificationsTableB9D97720\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:ADRsTableE034D2A5:Arn",
+          "GETATT:AgentDesignAssessmentsTable4E1E78B7:Arn",
+          "GETATT:ExecutionSpecificationsTableB9D97720:Arn",
+          "JOIN::GETATT:ADRsTableE034D2A5:Arn/index/*",
+          "JOIN::GETATT:ExecutionSpecificationsTableB9D97720:Arn/index/*"
         ],
         "conditionKeys": []
       }
@@ -5098,8 +5098,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentStatusTable5F3D8429\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"ConversationsTableCD91EB96\",\"Arn\"]}"
+          "GETATT:AgentStatusTable5F3D8429:Arn",
+          "GETATT:ConversationsTableCD91EB96:Arn"
         ],
         "conditionKeys": []
       },
@@ -5116,8 +5116,8 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:ProjectsTableAA0A2089:Arn",
+          "JOIN::GETATT:ProjectsTableAA0A2089:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -5127,7 +5127,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       }
@@ -5150,7 +5150,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentStatusTable5F3D8429\",\"Arn\"]}"
+          "GETATT:AgentStatusTable5F3D8429:Arn"
         ],
         "conditionKeys": []
       },
@@ -5167,8 +5167,8 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:ProjectsTableAA0A2089:Arn",
+          "JOIN::GETATT:ProjectsTableAA0A2089:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -5178,7 +5178,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       }
@@ -5196,7 +5196,7 @@
           "s3:PutObjectVersionTagging"
         ],
         "resources": [
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"DocumentBucketAE41E5A9\",\"Arn\"]},\"/*\"]]}"
+          "JOIN::GETATT:DocumentBucketAE41E5A9:Arn/*"
         ],
         "conditionKeys": []
       },
@@ -5208,8 +5208,8 @@
           "s3:List*"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"DocumentBucketAE41E5A9\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"DocumentBucketAE41E5A9\",\"Arn\"]},\"/*\"]]}"
+          "GETATT:DocumentBucketAE41E5A9:Arn",
+          "JOIN::GETATT:DocumentBucketAE41E5A9:Arn/*"
         ],
         "conditionKeys": []
       },
@@ -5241,7 +5241,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       },
@@ -5312,7 +5312,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentConfigTableE9BDF3BA\",\"Arn\"]}"
+          "GETATT:AgentConfigTableE9BDF3BA:Arn"
         ],
         "conditionKeys": []
       },
@@ -5328,8 +5328,8 @@
           "bedrock-agentcore:UpdateRegistryRecordStatus"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]},\"/*\"]]}"
+          "GETATT:AgentCoreRegistry:RegistryArn",
+          "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*"
         ],
         "conditionKeys": []
       },
@@ -5339,7 +5339,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       },
@@ -5407,8 +5407,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ModelCatalogTable73D35921\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"ModelConfigTable2CFCAEFE\",\"Arn\"]}"
+          "GETATT:ModelCatalogTable73D35921:Arn",
+          "GETATT:ModelConfigTable2CFCAEFE:Arn"
         ],
         "conditionKeys": []
       },
@@ -5418,7 +5418,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       }
@@ -5430,7 +5430,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       },
@@ -5511,7 +5511,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentConfigTableE9BDF3BA\",\"Arn\"]}"
+          "GETATT:AgentConfigTableE9BDF3BA:Arn"
         ],
         "conditionKeys": []
       },
@@ -5527,8 +5527,8 @@
           "bedrock-agentcore:UpdateRegistryRecordStatus"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]},\"/*\"]]}"
+          "GETATT:AgentCoreRegistry:RegistryArn",
+          "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*"
         ],
         "conditionKeys": []
       },
@@ -5614,8 +5614,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ADRsTableE034D2A5\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ADRsTableE034D2A5\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:ADRsTableE034D2A5:Arn",
+          "JOIN::GETATT:ADRsTableE034D2A5:Arn/index/*"
         ],
         "conditionKeys": []
       }
@@ -5638,7 +5638,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"IdempotencyTable22A5A209\",\"Arn\"]}"
+          "GETATT:IdempotencyTable22A5A209:Arn"
         ],
         "conditionKeys": []
       },
@@ -5649,8 +5649,8 @@
           "bedrock-agentcore:UpdateRegistryRecord"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]},\"/*\"]]}"
+          "GETATT:AgentCoreRegistry:RegistryArn",
+          "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*"
         ],
         "conditionKeys": []
       }
@@ -5683,7 +5683,7 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentConfigTableE9BDF3BA\",\"Arn\"]}"
+          "GETATT:AgentConfigTableE9BDF3BA:Arn"
         ],
         "conditionKeys": []
       }
@@ -5714,8 +5714,8 @@
           "bedrock-agentcore:UpdateRegistryRecordStatus"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]},\"/*\"]]}"
+          "GETATT:AgentCoreRegistry:RegistryArn",
+          "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*"
         ],
         "conditionKeys": []
       }
@@ -5774,7 +5774,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       }
@@ -5794,7 +5794,7 @@
           "cognito-idp:ListUsers"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"UserPool6BA7E5F2\",\"Arn\"]}"
+          "GETATT:UserPool6BA7E5F2:Arn"
         ],
         "conditionKeys": []
       },
@@ -5811,7 +5811,7 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"OrganisationTableF468D173\",\"Arn\"]}"
+          "GETATT:OrganisationTableF468D173:Arn"
         ],
         "conditionKeys": []
       }
@@ -5834,8 +5834,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"IntegrationsTable781EC78A\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"IntegrationsTable781EC78A\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:IntegrationsTable781EC78A:Arn",
+          "JOIN::GETATT:IntegrationsTable781EC78A:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -5873,7 +5873,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       },
@@ -5921,7 +5921,7 @@
           "ssm:GetParameters"
         ],
         "resources": [
-          "{\"Fn::Join\":[\"\",[\"arn:aws:ssm:us-west-2:257192363080:parameter\",{\"Ref\":\"OAuthReturnUrlParam5C6CC3B4\"}]]}"
+          "JOIN::arn:aws:ssm:us-west-2:257192363080:parameterGETATT:OAuthReturnUrlParam5C6CC3B4:Ref"
         ],
         "conditionKeys": []
       },
@@ -5970,9 +5970,9 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"IdempotencyTable22A5A209\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"IntegrationsTable781EC78A\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"IntegrationsTable781EC78A\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:IdempotencyTable22A5A209:Arn",
+          "GETATT:IntegrationsTable781EC78A:Arn",
+          "JOIN::GETATT:IntegrationsTable781EC78A:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -6035,7 +6035,7 @@
           "ssm:GetParameters"
         ],
         "resources": [
-          "{\"Fn::Join\":[\"\",[\"arn:aws:ssm:us-west-2:257192363080:parameter\",{\"Ref\":\"OAuthReturnUrlParam5C6CC3B4\"}]]}"
+          "JOIN::arn:aws:ssm:us-west-2:257192363080:parameterGETATT:OAuthReturnUrlParam5C6CC3B4:Ref"
         ],
         "conditionKeys": []
       },
@@ -6068,7 +6068,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"OrganisationTableF468D173\",\"Arn\"]}"
+          "GETATT:OrganisationTableF468D173:Arn"
         ],
         "conditionKeys": []
       },
@@ -6078,7 +6078,7 @@
           "cognito-idp:ListUsers"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"UserPool6BA7E5F2\",\"Arn\"]}"
+          "GETATT:UserPool6BA7E5F2:Arn"
         ],
         "conditionKeys": []
       }
@@ -6094,7 +6094,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"OrganisationTableF468D173\",\"Arn\"]}"
+          "GETATT:OrganisationTableF468D173:Arn"
         ],
         "conditionKeys": []
       }
@@ -6110,8 +6110,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:WorkflowsTable4E215008:Arn",
+          "JOIN::GETATT:WorkflowsTable4E215008:Arn/index/*"
         ],
         "conditionKeys": []
       }
@@ -6127,8 +6127,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ModelCatalogTable73D35921\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"ModelConfigTable2CFCAEFE\",\"Arn\"]}"
+          "GETATT:ModelCatalogTable73D35921:Arn",
+          "GETATT:ModelConfigTable2CFCAEFE:Arn"
         ],
         "conditionKeys": []
       }
@@ -6141,7 +6141,7 @@
           "secretsmanager:GetSecretValue"
         ],
         "resources": [
-          "{\"Ref\":\"AdminPasswordSecret47C701F9\"}"
+          "GETATT:AdminPasswordSecret47C701F9:Ref"
         ],
         "conditionKeys": []
       },
@@ -6154,7 +6154,7 @@
           "cognito-idp:AdminUpdateUserAttributes"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"UserPool6BA7E5F2\",\"Arn\"]}"
+          "GETATT:UserPool6BA7E5F2:Arn"
         ],
         "conditionKeys": []
       }
@@ -6177,10 +6177,10 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]},\"/index/*\"]]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:AppsTable172E1E77:Arn",
+          "GETATT:WorkflowsTable4E215008:Arn",
+          "JOIN::GETATT:AppsTable172E1E77:Arn/index/*",
+          "JOIN::GETATT:WorkflowsTable4E215008:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -6197,7 +6197,7 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentConfigTableE9BDF3BA\",\"Arn\"]}"
+          "GETATT:AgentConfigTableE9BDF3BA:Arn"
         ],
         "conditionKeys": []
       },
@@ -6207,7 +6207,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       },
@@ -6217,7 +6217,7 @@
           "cognito-idp:AdminGetUser"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"UserPool6BA7E5F2\",\"Arn\"]}"
+          "GETATT:UserPool6BA7E5F2:Arn"
         ],
         "conditionKeys": []
       }
@@ -6240,10 +6240,10 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]},\"/index/*\"]]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:AppsTable172E1E77:Arn",
+          "GETATT:WorkflowsTable4E215008:Arn",
+          "JOIN::GETATT:AppsTable172E1E77:Arn/index/*",
+          "JOIN::GETATT:WorkflowsTable4E215008:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -6260,8 +6260,8 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentConfigTableE9BDF3BA\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"ModelCatalogTable73D35921\",\"Arn\"]}"
+          "GETATT:AgentConfigTableE9BDF3BA:Arn",
+          "GETATT:ModelCatalogTable73D35921:Arn"
         ],
         "conditionKeys": []
       },
@@ -6271,7 +6271,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       },
@@ -6292,7 +6292,7 @@
           "cognito-idp:AdminGetUser"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"UserPool6BA7E5F2\",\"Arn\"]}"
+          "GETATT:UserPool6BA7E5F2:Arn"
         ],
         "conditionKeys": []
       },
@@ -6355,8 +6355,8 @@
           "bedrock-agentcore:UpdateRegistryRecordStatus"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgentCoreRegistry\",\"RegistryArn\"]},\"/*\"]]}"
+          "GETATT:AgentCoreRegistry:RegistryArn",
+          "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*"
         ],
         "conditionKeys": []
       }
@@ -6379,8 +6379,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:AppsTable172E1E77:Arn",
+          "JOIN::GETATT:AppsTable172E1E77:Arn/index/*"
         ],
         "conditionKeys": []
       }
@@ -6403,8 +6403,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ExecutionsTableA2EE59C2\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ExecutionsTableA2EE59C2\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:ExecutionsTableA2EE59C2:Arn",
+          "JOIN::GETATT:ExecutionsTableA2EE59C2:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -6421,8 +6421,8 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:WorkflowsTable4E215008:Arn",
+          "JOIN::GETATT:WorkflowsTable4E215008:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -6432,7 +6432,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       },
@@ -6442,7 +6442,7 @@
           "cognito-idp:AdminGetUser"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"UserPool6BA7E5F2\",\"Arn\"]}"
+          "GETATT:UserPool6BA7E5F2:Arn"
         ],
         "conditionKeys": []
       }
@@ -6467,7 +6467,7 @@
           "appsync:GraphQL"
         ],
         "resources": [
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgenticAIApiABAE82BE\",\"Arn\"]},\"/types/Mutation/fields/publishWorkflowProgress\"]]}"
+          "JOIN::GETATT:AgenticAIApiABAE82BE:Arn/types/Mutation/fields/publishWorkflowProgress"
         ],
         "conditionKeys": []
       },
@@ -6500,9 +6500,9 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentStatusTable5F3D8429\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"ConversationsTableCD91EB96\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"IdempotencyTable22A5A209\",\"Arn\"]}"
+          "GETATT:AgentStatusTable5F3D8429:Arn",
+          "GETATT:ConversationsTableCD91EB96:Arn",
+          "GETATT:IdempotencyTable22A5A209:Arn"
         ],
         "conditionKeys": []
       },
@@ -6555,7 +6555,7 @@
           "appsync:GraphQL"
         ],
         "resources": [
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgenticAIApiABAE82BE\",\"Arn\"]},\"/types/Mutation/fields/publishConversationMessage\"]]}"
+          "JOIN::GETATT:AgenticAIApiABAE82BE:Arn/types/Mutation/fields/publishConversationMessage"
         ],
         "conditionKeys": []
       }
@@ -6574,10 +6574,10 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AppsTable172E1E77\",\"Arn\"]},\"/index/*\"]]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"WorkflowsTable4E215008\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:AppsTable172E1E77:Arn",
+          "GETATT:WorkflowsTable4E215008:Arn",
+          "JOIN::GETATT:AppsTable172E1E77:Arn/index/*",
+          "JOIN::GETATT:WorkflowsTable4E215008:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -6591,8 +6591,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ExecutionsTableA2EE59C2\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ExecutionsTableA2EE59C2\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:ExecutionsTableA2EE59C2:Arn",
+          "JOIN::GETATT:ExecutionsTableA2EE59C2:Arn/index/*"
         ],
         "conditionKeys": []
       },
@@ -6613,7 +6613,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"IdempotencyTable22A5A209\",\"Arn\"]}"
+          "GETATT:IdempotencyTable22A5A209:Arn"
         ],
         "conditionKeys": []
       },
@@ -6623,7 +6623,7 @@
           "events:PutEvents"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"AgentEventBusB8B466DF\",\"Arn\"]}"
+          "GETATT:AgentEventBusB8B466DF:Arn"
         ],
         "conditionKeys": []
       }
@@ -6646,9 +6646,9 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"IdempotencyTable22A5A209\",\"Arn\"]}",
-          "{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:IdempotencyTable22A5A209:Arn",
+          "GETATT:ProjectsTableAA0A2089:Arn",
+          "JOIN::GETATT:ProjectsTableAA0A2089:Arn/index/*"
         ],
         "conditionKeys": []
       }
@@ -6660,7 +6660,7 @@
           "appsync:GraphQL"
         ],
         "resources": [
-          "{\"Fn::Join\":[\"\",[\"arn:aws:appsync:us-west-2:257192363080:apis/\",{\"Fn::GetAtt\":[\"AgenticAIApiABAE82BE\",\"ApiId\"]},\"/types/Mutation/fields/publishAssessmentCompletion\"]]}"
+          "JOIN::arn:aws:appsync:us-west-2:257192363080:apis/GETATT:AgenticAIApiABAE82BE:ApiId/types/Mutation/fields/publishAssessmentCompletion"
         ],
         "conditionKeys": []
       }
@@ -6672,7 +6672,7 @@
           "appsync:GraphQL"
         ],
         "resources": [
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgenticAIApiABAE82BE\",\"Arn\"]},\"/types/Mutation/fields/publishFabricationEvent\"]]}"
+          "JOIN::GETATT:AgenticAIApiABAE82BE:Arn/types/Mutation/fields/publishFabricationEvent"
         ],
         "conditionKeys": []
       }
@@ -6684,7 +6684,7 @@
           "appsync:GraphQL"
         ],
         "resources": [
-          "{\"Fn::Join\":[\"\",[\"arn:aws:appsync:us-west-2:257192363080:apis/\",{\"Fn::GetAtt\":[\"AgenticAIApiABAE82BE\",\"ApiId\"]},\"/types/Mutation/fields/publishDesignProgress\"]]}"
+          "JOIN::arn:aws:appsync:us-west-2:257192363080:apis/GETATT:AgenticAIApiABAE82BE:ApiId/types/Mutation/fields/publishDesignProgress"
         ],
         "conditionKeys": []
       }
@@ -6696,7 +6696,7 @@
           "appsync:GraphQL"
         ],
         "resources": [
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"AgenticAIApiABAE82BE\",\"Arn\"]},\"/types/Mutation/fields/publishChatter\"]]}"
+          "JOIN::GETATT:AgenticAIApiABAE82BE:Arn/types/Mutation/fields/publishChatter"
         ],
         "conditionKeys": []
       }
@@ -6743,8 +6743,8 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"ProjectsTableAA0A2089\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:ProjectsTableAA0A2089:Arn",
+          "JOIN::GETATT:ProjectsTableAA0A2089:Arn/index/*"
         ],
         "conditionKeys": []
       }
@@ -6767,8 +6767,8 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "{\"Fn::GetAtt\":[\"DataStoresTable7EF47B2F\",\"Arn\"]}",
-          "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"DataStoresTable7EF47B2F\",\"Arn\"]},\"/index/*\"]]}"
+          "GETATT:DataStoresTable7EF47B2F:Arn",
+          "JOIN::GETATT:DataStoresTable7EF47B2F:Arn/index/*"
         ],
         "conditionKeys": []
       },
