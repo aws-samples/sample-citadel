@@ -1,8 +1,6 @@
-bedrock-agentcore
-strands-agents
-strands-agents[otel]
-fastapi
-boto3
-python-dotenv
-requests
-# rebuild: 1781507693
+bedrock-agentcore>=1.18.1
+strands-agents[otel]>=1.50.1
+fastapi>=0.140.0
+boto3>=1.43.56
+python-dotenv>=1.2.2
+requests>=2.34.2

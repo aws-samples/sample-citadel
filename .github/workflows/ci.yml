@@ -248,8 +248,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest hypothesis boto3 strands-agents strands-agents-tools
+          pip install boto3 strands-agents strands-agents-tools
           pip install -r service/agent_intake_single/requirements.txt
+          pip install -r service/agent_intake_single/requirements-dev.txt
 
       - name: Run tests
         run: pytest service/ -v --tb=short
