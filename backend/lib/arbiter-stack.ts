@@ -1937,7 +1937,7 @@ export class ArbiterStack extends cdk.Stack {
             responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
           },
         );
-        resolver.addDependency(governanceUiLambdaDataSource);
+        resolver.addResourceDependency(governanceUiLambdaDataSource);
       }
 
       // Wave 2.E: 8th resolver — `setGovernanceMode` on the Mutation type.
@@ -1958,7 +1958,9 @@ export class ArbiterStack extends cdk.Stack {
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
         },
       );
-      setGovernanceModeResolver.addDependency(governanceUiLambdaDataSource);
+      setGovernanceModeResolver.addResourceDependency(
+        governanceUiLambdaDataSource,
+      );
 
       // Wave 2.B.2: 9th resolver — `markReadinessCheckVerified` on the
       // Mutation type. Same Lambda data source as the queries because the
@@ -1976,7 +1978,7 @@ export class ArbiterStack extends cdk.Stack {
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
         },
       );
-      markReadinessCheckVerifiedResolver.addDependency(
+      markReadinessCheckVerifiedResolver.addResourceDependency(
         governanceUiLambdaDataSource,
       );
 
@@ -1997,7 +1999,7 @@ export class ArbiterStack extends cdk.Stack {
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
         },
       );
-      publishGovernanceFindingResolver.addDependency(
+      publishGovernanceFindingResolver.addResourceDependency(
         governanceUiLambdaDataSource,
       );
 
@@ -2024,7 +2026,7 @@ export class ArbiterStack extends cdk.Stack {
             responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
           },
         );
-        resolver.addDependency(governanceUiLambdaDataSource);
+        resolver.addResourceDependency(governanceUiLambdaDataSource);
       }
 
       // Wave 4.D.2: 14th, 15th, 16th Mutation-typed resolvers —
@@ -2051,7 +2053,7 @@ export class ArbiterStack extends cdk.Stack {
             responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
           },
         );
-        resolver.addDependency(governanceUiLambdaDataSource);
+        resolver.addResourceDependency(governanceUiLambdaDataSource);
       }
 
       // Wave 4.E.A: 17th Query-typed resolver — `getAuthorityGraphHistorySettings`
@@ -2071,7 +2073,7 @@ export class ArbiterStack extends cdk.Stack {
             responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
           },
         );
-      getAuthorityGraphHistorySettingsResolver.addDependency(
+      getAuthorityGraphHistorySettingsResolver.addResourceDependency(
         governanceUiLambdaDataSource,
       );
 
@@ -2097,7 +2099,7 @@ export class ArbiterStack extends cdk.Stack {
             responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
           },
         );
-        resolver.addDependency(governanceUiLambdaDataSource);
+        resolver.addResourceDependency(governanceUiLambdaDataSource);
       }
 
       // Wave 4.E.A: 17th Mutation-typed resolver —
@@ -2117,7 +2119,7 @@ export class ArbiterStack extends cdk.Stack {
             responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
           },
         );
-      updateAuthorityGraphHistorySettingsResolver.addDependency(
+      updateAuthorityGraphHistorySettingsResolver.addResourceDependency(
         governanceUiLambdaDataSource,
       );
 
@@ -2138,7 +2140,7 @@ export class ArbiterStack extends cdk.Stack {
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
         },
       );
-      getD4RetrospectiveReportResolver.addDependency(
+      getD4RetrospectiveReportResolver.addResourceDependency(
         governanceUiLambdaDataSource,
       );
 
@@ -2160,7 +2162,7 @@ export class ArbiterStack extends cdk.Stack {
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
         },
       );
-      getTrustPathResolver.addDependency(governanceUiLambdaDataSource);
+      getTrustPathResolver.addResourceDependency(governanceUiLambdaDataSource);
 
       // Wave 5.C.1: 29th Query-typed resolver — `getResourceIamDrift`
       // (admin-only). Compares the recorded baseline IAM trust/policy
@@ -2180,7 +2182,9 @@ export class ArbiterStack extends cdk.Stack {
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
         },
       );
-      getResourceIamDriftResolver.addDependency(governanceUiLambdaDataSource);
+      getResourceIamDriftResolver.addResourceDependency(
+        governanceUiLambdaDataSource,
+      );
     }
 
     // ============================================================

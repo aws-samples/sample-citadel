@@ -63,7 +63,7 @@ const projectsStack = new ProjectsStack(
     userPool: backendStack.userPool,
   },
 );
-projectsStack.addDependency(backendStack);
+projectsStack.addStackDependency(backendStack);
 
 // Registry satellite stack — backend-stack-split phase 2 (decision 30e6d067).
 // Owns the registry/agent-import/fabricator-request/fabricator-queue/
@@ -96,7 +96,7 @@ const registryStack = new RegistryStack(
     adrsTable: backendStack.adrsTable,
   },
 );
-registryStack.addDependency(backendStack);
+registryStack.addStackDependency(backendStack);
 
 // Services stack (depends on backend)
 const servicesStack = new ServicesStack(
@@ -212,7 +212,7 @@ const telemetryStack = new TelemetryStack(
     frontendOrigin,
   },
 );
-telemetryStack.addDependency(backendStack);
+telemetryStack.addStackDependency(backendStack);
 
 // Frontend hosting stack
 const frontendStack = new FrontendStack(
@@ -232,7 +232,7 @@ const frontendStack = new FrontendStack(
     costApiUrl: telemetryStack.costApiUrl,
   },
 );
-frontendStack.addDependency(telemetryStack);
+frontendStack.addStackDependency(telemetryStack);
 
 // Gateway stack (depends on backend — receives shared resources)
 const gatewayStack = new GatewayStack(app, `citadel-gateway-${environment}`, {
@@ -248,11 +248,11 @@ const gatewayStack = new GatewayStack(app, `citadel-gateway-${environment}`, {
 // without a circular dependency.
 
 // Add dependencies
-servicesStack.addDependency(backendStack);
-governanceStack.addDependency(backendStack);
-arbiterStack.addDependency(servicesStack);
-frontendStack.addDependency(arbiterStack);
-gatewayStack.addDependency(backendStack);
+servicesStack.addStackDependency(backendStack);
+governanceStack.addStackDependency(backendStack);
+arbiterStack.addStackDependency(servicesStack);
+frontendStack.addStackDependency(arbiterStack);
+gatewayStack.addStackDependency(backendStack);
 
 // Wire publish handler from GatewayStack as AppSync data source in BackendStack
 // Uses deterministic ARN to avoid circular cross-stack dependency

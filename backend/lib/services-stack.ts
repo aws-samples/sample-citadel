@@ -515,8 +515,8 @@ export class ServicesStack extends cdk.Stack {
         type: "VECTORSEARCH",
       },
     );
-    kbCollection.addDependency(kbEncryptionPolicy);
-    kbCollection.addDependency(kbNetworkPolicy);
+    kbCollection.addResourceDependency(kbEncryptionPolicy);
+    kbCollection.addResourceDependency(kbNetworkPolicy);
 
     // IAM role for the KB
     const kbRole = new iam.Role(this, "KbRole", {
@@ -594,7 +594,7 @@ export class ServicesStack extends cdk.Stack {
         ]),
       },
     );
-    kbDataAccessPolicy.addDependency(kbCollection);
+    kbDataAccessPolicy.addResourceDependency(kbCollection);
 
     // Custom Resource Lambda — creates the vector index via signed HTTP to AOSS
     const kbIndexCreatorFn = new lambda.Function(this, "KbIndexCreatorFn", {
@@ -1502,7 +1502,7 @@ def handler(event, context):
             responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
           },
         );
-        resolver.addDependency(intakeOrchestrationDataSource);
+        resolver.addResourceDependency(intakeOrchestrationDataSource);
       }
     }
 
