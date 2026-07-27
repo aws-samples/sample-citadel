@@ -5,9 +5,10 @@
   "high": true,
   "critical": true,
   "allowlist": [
-    "GHSA-mh99-v99m-4gvg"
+    "GHSA-mh99-v99m-4gvg",
+    "GHSA-qwww-vcr4-c8h2"
   ],
   "report": true,
   "skip-dev": false,
-  "_comment": "Carries GHSA-mh99-v99m-4gvg (brace-expansion). See audit-ci-allowlist-justifications.md for details and remediation path."
+  "_comment": "Carries GHSA-mh99-v99m-4gvg (brace-expansion) and GHSA-qwww-vcr4-c8h2 (react-router, no fix version published yet). See audit-ci-allowlist-justifications.md for details and remediation path."
 }
