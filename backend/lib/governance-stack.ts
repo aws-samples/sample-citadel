@@ -22,7 +22,7 @@
  */
 import * as cdk from "aws-cdk-lib";
 import { CustomResource, Duration } from "aws-cdk-lib";
-import * as appsync from "@aws-cdk/aws-appsync-alpha";
+import * as appsync from "aws-cdk-lib/aws-appsync";
 // Cfn L1 AppSync constructs — used cross-stack to avoid creating data sources
 // in the API owner's stack (see governance-stack.ts constructor for rationale).
 import { aws_appsync as appsyncCfn } from "aws-cdk-lib";

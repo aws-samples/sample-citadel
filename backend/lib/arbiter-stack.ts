@@ -10,7 +10,7 @@ import * as kms from "aws-cdk-lib/aws-kms";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
-import * as appsync from "@aws-cdk/aws-appsync-alpha";
+import * as appsync from "aws-cdk-lib/aws-appsync";
 // Cfn L1 AppSync constructs — used cross-stack to attach a data source +
 // resolvers to BackendStack's GraphQL API without creating those resources
 // in BackendStack (which would force a stack dependency cycle, since the

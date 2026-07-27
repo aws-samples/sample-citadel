@@ -1,5 +1,5 @@
 import * as cdk from "aws-cdk-lib";
-import * as appsync from "@aws-cdk/aws-appsync-alpha";
+import * as appsync from "aws-cdk-lib/aws-appsync";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as lambda from "aws-cdk-lib/aws-lambda";
@@ -1730,7 +1730,7 @@ export class BackendStack extends cdk.Stack {
     // the CDK Asset, so any byte-level change forces CFN to diff.
     this.appSyncApi = new appsync.GraphqlApi(this, "AgenticAIApi", {
       name: `citadel-api-${props.environment}`,
-      schema: appsync.SchemaFile.fromAsset("src/schema/schema.graphql"),
+      definition: appsync.Definition.fromFile("src/schema/schema.graphql"),
       authorizationConfig: {
         defaultAuthorization: {
           authorizationType: appsync.AuthorizationType.USER_POOL,
