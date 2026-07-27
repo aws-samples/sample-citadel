@@ -35,7 +35,7 @@
  *          stack imports anything from it.
  */
 import * as cdk from "aws-cdk-lib";
-import * as appsync from "@aws-cdk/aws-appsync-alpha";
+import * as appsync from "aws-cdk-lib/aws-appsync";
 // Cfn L1 AppSync constructs — used cross-stack to avoid creating data
 // sources in the API owner's stack (see governance-stack.ts for the same
 // pattern, applied there to the governance domain).
@@ -75,7 +75,7 @@ export class ProjectsStack extends cdk.Stack {
     // These literals match the CDK L2 defaults for
     // appsync.MappingTemplate.lambdaRequest() / lambdaResult() exactly
     // (single-line JSON, default payload `$util.toJson($ctx)`) — verified
-    // against node_modules/@aws-cdk/aws-appsync-alpha/lib/mapping-template.js
+    // against node_modules/aws-cdk-lib/aws-appsync/lib/mapping-template.js
     // — so the moved resolvers' behavior (rail 7) byte-matches the
     // pre-split baseline.
     const LAMBDA_REQUEST_MAPPING = `{"version": "2017-02-28", "operation": "Invoke", "payload": $util.toJson($ctx)}`;
