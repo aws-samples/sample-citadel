@@ -39,24 +39,15 @@
  */
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import {
-  DynamoDBDocumentClient,
-  GetCommand,
-  PutCommand,
-} from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import type { EventBridgeEvent } from "aws-lambda";
-import { modelKeyFromId } from "./model-catalog-sync";
-import {
-  computeTokenCost,
-  type PricingInfo,
-  type UnpricedReason,
-} from "./utils/cost-compute";
+import { resolvePricing } from "./utils/cost-pricing";
+import { computeTokenCost, type UnpricedReason } from "./utils/cost-compute";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 
 const COST_LEDGER_TABLE = process.env.COST_LEDGER_TABLE!;
-const MODEL_CATALOG_TABLE = process.env.MODEL_CATALOG_TABLE!;
 
 /** Thrown internally to make the conditional-check-failed branch explicit and testable. */
 export class ConditionalCheckFailedError extends Error {
@@ -80,6 +71,8 @@ export interface UsageRecord {
   callIndex?: unknown;
   capturedAt?: string;
   source?: "worker" | "supervisor" | "intake" | "workflow_node";
+  /** Additive, nullable: only present when the SDK reported a request id. Never fabricated. */
+  bedrockRequestId?: string;
 }
 
 interface TaskCompletionDetail {
@@ -112,9 +105,7 @@ interface WorkflowNodeCompletedDetail {
 }
 
 export type IncomingDetail =
-  | TaskCompletionDetail
-  | IntakeUsageDetail
-  | WorkflowNodeCompletedDetail;
+  TaskCompletionDetail | IntakeUsageDetail | WorkflowNodeCompletedDetail;
 
 /** Non-negative-int coercion mirroring `usage.py`'s `_coerce_non_negative_int`. Never throws. */
 function coerceNonNegativeInt(value: unknown): number {
@@ -184,6 +175,8 @@ interface LedgerRow {
   latencyMs: number;
   capturedAt: string;
   ingestedAt: string;
+  /** Additive, nullable: only present when the usage record carried one. Enables Tier-B matching. */
+  bedrockRequestId?: string;
   // Pricing fields (pass 2): populated when the catalog row resolves to a
   // usable price; null + unpricedReason when it does not.
   currency: string | null;
@@ -203,80 +196,6 @@ interface LedgerRow {
   GSI3SK?: string;
   GSI4PK?: string;
   GSI4SK?: string;
-}
-
-/** Shape of the catalog row fields this writer reads — a narrow, defensive view. */
-interface CatalogPricingRow {
-  inputPer1kTokens?: unknown;
-  outputPer1kTokens?: unknown;
-  currency?: unknown;
-}
-
-/**
- * Resolves pricing for a raw modelId via the model-catalog table.
- *
- * NEVER throws and NEVER drops the caller's row: a missing row, a row
- * without usable pricing, or a transient DynamoDB read failure all resolve
- * to `{pricing: undefined, reason}` — the caller (buildLedgerRow) passes
- * that straight into `computeTokenCost`, which produces the unpriced shape.
- * A catalog-read failure is logged at `error`; a missing/unpriced row is
- * logged at `warn` (per design: "unpriced rows still written + warn log").
- */
-async function resolvePricing(
-  modelId: string,
-): Promise<{
-  pricing: PricingInfo | undefined;
-  reason: UnpricedReason;
-  modelKey: string;
-}> {
-  const modelKey = modelId ? modelKeyFromId(modelId) : "";
-
-  let item: CatalogPricingRow | undefined;
-  try {
-    const result = await docClient.send(
-      new GetCommand({
-        TableName: MODEL_CATALOG_TABLE,
-        Key: { modelKey },
-      }),
-    );
-    item = result.Item as CatalogPricingRow | undefined;
-  } catch (err: unknown) {
-    console.error(
-      "cost-ledger-writer: model-catalog read failed; writing row unpriced (never dropped)",
-      { modelKey, error: err instanceof Error ? err.message : String(err) },
-    );
-    return { pricing: undefined, reason: "pricing_absent", modelKey };
-  }
-
-  if (!item) {
-    console.warn(
-      `cost-ledger-writer: modelKey not found in catalog, writing unpriced row: ${modelKey}`,
-    );
-    return { pricing: undefined, reason: "model_not_in_catalog", modelKey };
-  }
-
-  const usable =
-    typeof item.inputPer1kTokens === "number" &&
-    typeof item.outputPer1kTokens === "number" &&
-    typeof item.currency === "string" &&
-    item.currency.length > 0;
-
-  if (!usable) {
-    console.warn(
-      `cost-ledger-writer: catalog row for ${modelKey} has no usable pricing, writing unpriced row`,
-    );
-    return { pricing: undefined, reason: "pricing_absent", modelKey };
-  }
-
-  return {
-    pricing: {
-      inputPer1kTokens: item.inputPer1kTokens as number,
-      outputPer1kTokens: item.outputPer1kTokens as number,
-      currency: item.currency as string,
-    },
-    reason: "pricing_absent", // unused when pricing is defined
-    modelKey,
-  };
 }
 
 /** Builds one idempotent ledger row from a usage record + shared dimensions. */
@@ -340,6 +259,10 @@ async function buildLedgerRow(
 
   if (!cost.priced && cost.unpricedReason) {
     row.unpricedReason = cost.unpricedReason;
+  }
+
+  if (typeof usage.bedrockRequestId === "string" && usage.bedrockRequestId) {
+    row.bedrockRequestId = usage.bedrockRequestId;
   }
 
   if (dims.projectId) {

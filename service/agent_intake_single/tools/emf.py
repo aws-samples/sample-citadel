@@ -186,12 +186,19 @@ def capture_turn_usage(session_id, turn_duration_ms, agent_result=None):
                 model_id_exc,
             )
         from tools.usage import build_usage_record
+        # No per-call bedrockRequestId is available on this seam: strands'
+        # AgentResult.metrics.accumulated_usage is a per-TURN rollup (see
+        # module docstring), not a per-underlying-model-call boundary, so
+        # there is no single ResponseMetadata.RequestId to attribute here.
+        # Passing None (never fabricating) keeps this honest — the key is
+        # simply omitted from the resulting record.
         record = build_usage_record(
             model_id=model_id,
             input_tokens=input_tokens or 0,
             output_tokens=output_tokens or 0,
             latency_ms=turn_duration_ms,
             call_index=0,
+            bedrock_request_id=None,
         )
         from tools.state import publish_usage_event
         publish_usage_event(session_id, record)

@@ -19,6 +19,7 @@ Schema (``UsageRecord``)::
         "source": "worker" | "supervisor",
         # optional, additive:
         "totalTokens": int,    # >= 0, only present when known
+        "bedrockRequestId": str,  # only present when known; NEVER fabricated
     }
 
 Every helper here is defensive: malformed input is coerced/clamped rather
@@ -71,6 +72,7 @@ def build_usage_record(
     source: str,
     captured_at: Optional[str] = None,
     total_tokens: Any = None,
+    bedrock_request_id: Optional[str] = None,
 ) -> dict:
     """Build a validated ``UsageRecord`` dict.
 
@@ -84,6 +86,13 @@ def build_usage_record(
     non-None value is supplied (or successfully coerced), so callers that
     don't have a total omit the key entirely rather than writing a
     misleading ``0``.
+
+    ``bedrock_request_id`` is optional and additive, mirroring
+    ``total_tokens``'s omit-when-absent contract: included only when a
+    non-empty string is supplied. Never fabricated — a caller with no
+    request id (or an id it isn't confident in) must pass ``None`` rather
+    than guessing, so downstream Tier-B matching can trust that a present
+    key really came from the SDK response metadata.
     """
     if source not in VALID_SOURCES:
         raise ValueError(
@@ -103,7 +112,33 @@ def build_usage_record(
     if total_tokens is not None:
         record["totalTokens"] = _coerce_non_negative_int(total_tokens)
 
+    if isinstance(bedrock_request_id, str) and bedrock_request_id:
+        record["bedrockRequestId"] = bedrock_request_id
+
     return record
+
+
+def extract_request_id(resp: Any) -> Optional[str]:
+    """Extract the Bedrock request id from a boto3 Converse-shaped response.
+
+    Source per SDK: ``resp["ResponseMetadata"]["RequestId"]`` — the field
+    boto3 populates on every successful client call. Defensive by contract:
+    any non-conforming shape (None, wrong type, missing/empty id) returns
+    ``None`` rather than raising or fabricating a value. Callers pass the
+    result straight to ``build_usage_record(bedrock_request_id=...)``, whose
+    omit-when-absent contract keeps a ``None`` here from ever becoming a
+    misleading key in the record.
+    """
+    try:
+        if not isinstance(resp, dict):
+            return None
+        metadata = resp.get("ResponseMetadata")
+        if not isinstance(metadata, dict):
+            return None
+        request_id = metadata.get("RequestId")
+        return request_id if isinstance(request_id, str) and request_id else None
+    except Exception:  # noqa: BLE001 — boundary extractor must never raise
+        return None
 
 
 def extract_converse_usage(resp: Any) -> tuple[int, int, Optional[int]]:

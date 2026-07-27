@@ -78,7 +78,7 @@ from model_config_loader import load_model_id
 # because ``arbiter/common/`` ships alongside the supervisor Lambda asset
 # today — unlike workerWrapper's deferred-bundling situation for
 # ``tools_config``/``workflow_contract``.
-from common.usage import build_usage_record, extract_converse_usage
+from common.usage import build_usage_record, extract_converse_usage, extract_request_id
 
 
 def _load_governance_package():
@@ -768,6 +768,7 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
         call_index=0,
         source='supervisor',
         total_tokens=total_tokens,
+        bedrock_request_id=extract_request_id(response),
     )
 
     invoke_agents_from_conversation(

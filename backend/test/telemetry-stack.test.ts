@@ -112,7 +112,7 @@ describe("TelemetryStack — cost query surface (pass 1: API + authorizer + budg
     expect(allActions).toEqual(expect.arrayContaining(["events:PutEvents"]));
   });
 
-  test("query handler role has ledger table read access (Query) and no Scan/write grant", () => {
+  test("query handler role has ledger table read access (Query) and no write/Scan grant (query/budgets IAM split)", () => {
     const queryFn = template.findResources("AWS::Lambda::Function", {
       Properties: { Handler: "cost-query-handler.handler" },
     });
@@ -133,7 +133,42 @@ describe("TelemetryStack — cost query surface (pass 1: API + authorizer + budg
       );
     });
     expect(allActions).toEqual(expect.arrayContaining(["dynamodb:Query"]));
-    // PUT /budgets needs UpdateItem on the same table; no DeleteItem/Scan needed.
+    // Query/budgets IAM split: this Lambda now serves ONLY GET
+    // /cost/summary + GET /cost/series — no UpdateItem, no Scan, no
+    // DeleteItem. PUT /budgets moved to the dedicated budgets Lambda
+    // (see "budgets handler role" test below).
+    expect(allActions).not.toEqual(
+      expect.arrayContaining(["dynamodb:UpdateItem"]),
+    );
+    expect(allActions).not.toEqual(expect.arrayContaining(["dynamodb:Scan"]));
+    expect(allActions).not.toEqual(
+      expect.arrayContaining(["dynamodb:DeleteItem"]),
+    );
+  });
+
+  test("budgets handler role has both Query and UpdateItem on the ledger table (owns the BUDGET# SK domain)", () => {
+    const budgetFn = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "cost-budget-handler.handler" },
+    });
+    const budgetFnId = Object.keys(budgetFn)[0];
+    expect(budgetFnId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("CostBudgetHandler"),
+      );
+    });
+    const allActions = ownPolicies.flatMap((p: any) => {
+      const statements = p.Properties?.PolicyDocument?.Statement || [];
+      return statements.flatMap((s: any) =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+    });
+    expect(allActions).toEqual(
+      expect.arrayContaining(["dynamodb:Query", "dynamodb:UpdateItem"]),
+    );
     expect(allActions).not.toEqual(expect.arrayContaining(["dynamodb:Scan"]));
     expect(allActions).not.toEqual(
       expect.arrayContaining(["dynamodb:DeleteItem"]),
@@ -197,6 +232,7 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
     userPool,
     userPoolClient,
     frontendOrigin: "https://app.example.com",
+    bedrockInvocationLogGroupName: "/aws/bedrock/invocation-logs",
   });
 
   const template = Template.fromStack(stack);
@@ -394,11 +430,13 @@ describe("TelemetryStack — cost ledger reconciler (Tier A + Tier B skeleton)",
       Environment: {
         Variables: Match.objectLike({
           COST_LEDGER_TABLE: Match.anyValue(),
+          MODEL_CATALOG_TABLE: Match.anyValue(),
           ENVIRONMENT: "test",
           SETTLE_LAG_MINUTES: Match.anyValue(),
           MAX_WINDOWS_PER_RUN: Match.anyValue(),
           METRIC_NAMESPACE: "Citadel/CostReconciler",
           COST_RECONCILER_TIER_B_ENABLED: "false",
+          MAX_LOG_EVENTS_PER_WINDOW: Match.anyValue(),
         }),
       },
     });
@@ -426,7 +464,7 @@ describe("TelemetryStack — cost ledger reconciler (Tier A + Tier B skeleton)",
     expect(Array.isArray(getAtt) && getAtt[0] === fnLogicalId).toBe(true);
   });
 
-  test("reconciler IAM: has Query/Scan/PutItem/UpdateItem + GetMetricData/PutMetricData, and NO DeleteItem/logs:*", () => {
+  test("reconciler IAM: has Query/Scan/PutItem/UpdateItem + GetMetricData/PutMetricData + logs:FilterLogEvents (Tier B), and NO DeleteItem", () => {
     const functions = template.findResources("AWS::Lambda::Function", {
       Properties: { Handler: "cost-ledger-reconciler.handler" },
     });
@@ -460,7 +498,33 @@ describe("TelemetryStack — cost ledger reconciler (Tier A + Tier B skeleton)",
     expect(allActions).not.toEqual(
       expect.arrayContaining(["dynamodb:DeleteItem"]),
     );
-    expect(allActions.some((a: string) => a.startsWith("logs:"))).toBe(false);
+
+    // Tier B activation (real estimate->actual matching, per architect
+    // design): the reconciler now legitimately needs
+    // logs:FilterLogEvents against the Bedrock model-invocation log
+    // group, scoped to that log group's ARN — never a bare '*' grant.
+    const filterLogEventsStatement = allStatements.find((s: any) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.includes("logs:FilterLogEvents");
+    });
+    expect(filterLogEventsStatement).toBeDefined();
+    const logsResources = Array.isArray(filterLogEventsStatement.Resource)
+      ? filterLogEventsStatement.Resource
+      : [filterLogEventsStatement.Resource];
+    expect(logsResources.every((r: unknown) => r === "*")).toBe(false);
+    expect(logsResources).toHaveLength(1);
+    const serializedLogsResource = JSON.stringify(logsResources[0]);
+    expect(serializedLogsResource).not.toContain("*bedrock*invocation*");
+    expect(serializedLogsResource).toContain(
+      "logs:us-east-1:123456789012:log-group:/aws/bedrock/invocation-logs:*",
+    );
+
+    // No OTHER logs:* action was granted beyond FilterLogEvents (still
+    // least-privilege — the reconciler never writes/deletes/tails logs).
+    const otherLogsActions = allActions.filter(
+      (a: string) => a.startsWith("logs:") && a !== "logs:FilterLogEvents",
+    );
+    expect(otherLogsActions).toHaveLength(0);
 
     expect(allActions).toEqual(
       expect.arrayContaining(["cloudwatch:GetMetricData"]),
@@ -475,6 +539,30 @@ describe("TelemetryStack — cost ledger reconciler (Tier A + Tier B skeleton)",
       return actions.includes("cloudwatch:PutMetricData");
     });
     expect(putMetricStatement?.Condition).toBeDefined();
+  });
+
+  test("reconciler is granted read access to the model catalog table (Tier B cost recompute)", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("CostLedgerReconciler"),
+      );
+    });
+    const catalogGrantActions = ownPolicies.flatMap((p: any) => {
+      const statements = p.Properties?.PolicyDocument?.Statement || [];
+      return statements
+        .filter((s: any) =>
+          JSON.stringify(s.Resource || "").includes("ModelCatalogTable"),
+        )
+        .flatMap((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+    });
+    expect(catalogGrantActions).toEqual(
+      expect.arrayContaining(["dynamodb:GetItem"]),
+    );
+    expect(catalogGrantActions).not.toEqual(
+      expect.arrayContaining(["dynamodb:PutItem", "dynamodb:DeleteItem"]),
+    );
   });
 
   test("cost ledger table remains RETAIN + PITR (regression guard, reconciler must not weaken it)", () => {

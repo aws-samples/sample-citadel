@@ -78,8 +78,12 @@ export interface LedgerRowProjection {
   estimate?: unknown;
 }
 
-/** Result of the Tier B feature-gate check (skeleton only — no matching logic). */
-export interface TierBGateResult {
-  active: boolean;
-  reason: "disabled" | "missing_requestId";
-}
+/** Result of the Tier B feature-gate check / matching pass. */
+export type TierBGateResult =
+  | { active: false; reason: "disabled" | "log_group_unconfigured" }
+  | {
+      active: true;
+      rowsMatched: number;
+      rowsUnmatched: number;
+      rowsUpgraded: number;
+    };

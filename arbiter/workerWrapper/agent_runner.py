@@ -54,6 +54,7 @@ def _usage_builder():
         def _inline_build_usage_record(
             *, model_id, input_tokens, output_tokens, latency_ms,
             call_index, source, captured_at=None, total_tokens=None,
+            bedrock_request_id=None,
         ):
             import datetime as _dt
 
@@ -87,6 +88,8 @@ def _usage_builder():
             }
             if total_tokens is not None:
                 record['totalTokens'] = _nn_int(total_tokens)
+            if isinstance(bedrock_request_id, str) and bedrock_request_id:
+                record['bedrockRequestId'] = bedrock_request_id
             return record
 
         return _inline_build_usage_record
@@ -122,6 +125,31 @@ def _extract_usage_from_response(resp):
         return (0, 0, None)
 
 
+def _extract_request_id_from_response(resp):
+    """Best-effort Bedrock request-id extraction from a Converse-shaped
+    dict result, per SDK: ``resp['ResponseMetadata']['RequestId']``.
+
+    VERIFY-then-degrade: the installed strands version's dict result shape
+    is not guaranteed to carry ``ResponseMetadata`` the way a raw boto3
+    Converse response does (strands may wrap/strip it) — this extractor
+    checks defensively for the field and returns ``None`` when absent,
+    rather than assuming its presence. Never raises, never fabricates.
+    """
+    try:
+        if not isinstance(resp, dict):
+            return None
+        metadata = resp.get('ResponseMetadata')
+        if not isinstance(metadata, dict):
+            return None
+        request_id = metadata.get('RequestId')
+        return request_id if isinstance(request_id, str) and request_id else None
+    except Exception as exc:  # noqa: BLE001 — extraction must never raise
+        sys.stderr.write(
+            f'[agent_runner] WARN request-id extraction failed: {exc}\n'
+        )
+        return None
+
+
 def _wrap_streaming_usage_capture(event_iterator, model_id, start_time, build_record):
     """Passthrough generator wrapping a streaming response iterator.
 
@@ -131,6 +159,7 @@ def _wrap_streaming_usage_capture(event_iterator, model_id, start_time, build_re
     disrupted by capture bookkeeping.
     """
     last_usage = None
+    last_request_id = None
     try:
         for event in event_iterator:
             try:
@@ -138,6 +167,18 @@ def _wrap_streaming_usage_capture(event_iterator, model_id, start_time, build_re
                     metadata = event.get('metadata')
                     if isinstance(metadata, dict) and isinstance(metadata.get('usage'), dict):
                         last_usage = metadata['usage']
+                    # Per-event metadata may also carry response-metadata
+                    # style request-id fields on some strands streaming
+                    # shapes. Best-effort: keep the last non-empty id seen
+                    # (mirrors last_usage's "last wins" semantics), never
+                    # fabricated when absent.
+                    extracted_id = _extract_request_id_from_response(
+                        {'ResponseMetadata': metadata.get('ResponseMetadata')}
+                        if isinstance(metadata, dict) and isinstance(metadata.get('ResponseMetadata'), dict)
+                        else {}
+                    )
+                    if extracted_id:
+                        last_request_id = extracted_id
             except Exception as exc:  # noqa: BLE001 — never break the stream
                 sys.stderr.write(
                     f'[agent_runner] WARN streaming usage inspection failed: {exc}\n'
@@ -157,6 +198,7 @@ def _wrap_streaming_usage_capture(event_iterator, model_id, start_time, build_re
                 call_index=len(_CAPTURED_USAGE),
                 source='worker',
                 total_tokens=total_tokens,
+                bedrock_request_id=last_request_id,
             )
             _CAPTURED_USAGE.append(record)
         except Exception as exc:  # noqa: BLE001 — capture must never raise
@@ -242,6 +284,7 @@ def _install_usage_capture():
 
         try:
             input_tokens, output_tokens, total_tokens = _extract_usage_from_response(result)
+            request_id = _extract_request_id_from_response(result)
             latency_ms = int((time.perf_counter() - start_time) * 1000)
             record = build_record(
                 model_id=model_id,
@@ -251,6 +294,7 @@ def _install_usage_capture():
                 call_index=len(_CAPTURED_USAGE),
                 source='worker',
                 total_tokens=total_tokens,
+                bedrock_request_id=request_id,
             )
             _CAPTURED_USAGE.append(record)
         except Exception as exc:  # noqa: BLE001 — capture must never raise

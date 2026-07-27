@@ -21,6 +21,7 @@ from common.usage import (
     aggregate_usage,
     build_usage_record,
     extract_converse_usage,
+    extract_request_id,
     parse_usage_array,
 )
 
@@ -152,6 +153,104 @@ class TestBuildUsageRecord:
             source="worker",
         )
         assert record["callIndex"] >= 0
+
+    def test_bedrock_request_id_omitted_when_none(self):
+        """bedrock_request_id=None (default) never adds the key — mirrors
+        totalTokens's omit-when-absent contract."""
+        record = build_usage_record(
+            model_id="m",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=1,
+            call_index=0,
+            source="worker",
+        )
+        assert "bedrockRequestId" not in record
+
+    def test_bedrock_request_id_omitted_when_empty_string(self):
+        """An empty string is treated as absent, not a real id."""
+        record = build_usage_record(
+            model_id="m",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=1,
+            call_index=0,
+            source="worker",
+            bedrock_request_id="",
+        )
+        assert "bedrockRequestId" not in record
+
+    @given(request_id=st.text(min_size=1, max_size=64).filter(lambda s: s.strip() != ""))
+    @settings(max_examples=30)
+    def test_bedrock_request_id_present_when_nonempty_string(self, request_id):
+        """A non-empty string bedrock_request_id is carried through verbatim."""
+        record = build_usage_record(
+            model_id="m",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=1,
+            call_index=0,
+            source="worker",
+            bedrock_request_id=request_id,
+        )
+        assert record["bedrockRequestId"] == request_id
+
+    @given(garbage=st.one_of(
+        st.integers(), st.floats(), st.booleans(), st.lists(st.integers(), max_size=3),
+        st.dictionaries(st.text(max_size=5), st.text(max_size=5), max_size=3),
+    ))
+    @settings(max_examples=30)
+    def test_bedrock_request_id_non_string_never_raises_and_is_omitted(self, garbage):
+        """A non-string bedrock_request_id is treated as absent — never
+        fabricated, never raises."""
+        record = build_usage_record(
+            model_id="m",
+            input_tokens=1,
+            output_tokens=1,
+            latency_ms=1,
+            call_index=0,
+            source="worker",
+            bedrock_request_id=garbage,
+        )
+        assert "bedrockRequestId" not in record
+
+
+# ---------------------------------------------------------------------------
+# extract_request_id
+# ---------------------------------------------------------------------------
+
+class TestExtractRequestId:
+    """Property tests for extract_request_id — boto3 ResponseMetadata.RequestId extractor."""
+
+    @given(request_id=st.text(min_size=1, max_size=64).filter(lambda s: s.strip() != ""))
+    @settings(max_examples=30)
+    def test_extracts_request_id_from_response_metadata(self, request_id):
+        resp = {"ResponseMetadata": {"RequestId": request_id}}
+        assert extract_request_id(resp) == request_id
+
+    def test_missing_response_metadata_returns_none(self):
+        assert extract_request_id({}) is None
+        assert extract_request_id({"output": {}}) is None
+
+    def test_missing_request_id_key_returns_none(self):
+        assert extract_request_id({"ResponseMetadata": {}}) is None
+
+    def test_empty_request_id_returns_none(self):
+        assert extract_request_id({"ResponseMetadata": {"RequestId": ""}}) is None
+
+    @given(garbage=st.one_of(
+        st.none(),
+        st.text(max_size=20),
+        st.integers(),
+        st.lists(st.integers(), max_size=3),
+    ))
+    @settings(max_examples=50)
+    def test_arbitrary_garbage_never_raises(self, garbage):
+        result = extract_request_id(garbage)
+        assert result is None or isinstance(result, str)
+
+    def test_non_string_request_id_value_returns_none(self):
+        assert extract_request_id({"ResponseMetadata": {"RequestId": 12345}}) is None
 
 
 # ---------------------------------------------------------------------------

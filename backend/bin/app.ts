@@ -199,6 +199,15 @@ const frontendOrigin: string =
   (app.node.tryGetContext("frontendOrigin") as string | undefined) ||
   "https://frontend-origin-not-configured.invalid";
 
+// Bedrock model-invocation log group name (operator opt-in feature,
+// account-level, provisioned outside CDK). Left unset by default: the
+// TelemetryStack treats an unconfigured log group as "Tier B inactive"
+// and adds no IAM grant for it at all — see telemetry-stack.ts.
+const bedrockInvocationLogGroupName: string | undefined =
+  process.env.BEDROCK_INVOCATION_LOG_GROUP ||
+  (app.node.tryGetContext("bedrockInvocationLogGroupName") as
+    string | undefined);
+
 const telemetryStack = new TelemetryStack(
   app,
   `citadel-telemetry-${environment}`,
@@ -210,6 +219,7 @@ const telemetryStack = new TelemetryStack(
     userPool: backendStack.userPool,
     userPoolClient: backendStack.userPoolClient,
     frontendOrigin,
+    bedrockInvocationLogGroupName,
   },
 );
 telemetryStack.addStackDependency(backendStack);

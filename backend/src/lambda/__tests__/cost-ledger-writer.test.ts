@@ -40,7 +40,7 @@ function taskCompletionEvent(overrides: Record<string, unknown> = {}) {
   } as unknown as IncomingEvent;
 }
 
-function intakeUsageEvent() {
+function intakeUsageEvent(usageOverrides: Record<string, unknown> = {}) {
   return {
     id: "evt-2",
     source: "agent_intake.usage",
@@ -56,6 +56,7 @@ function intakeUsageEvent() {
         callIndex: 0,
         capturedAt: "2026-07-25T00:00:01.000Z",
         source: "worker",
+        ...usageOverrides,
       },
     },
   } as unknown as IncomingEvent;
@@ -199,6 +200,36 @@ describe("cost-ledger-writer (pass 1 — usage-only rows)", () => {
     expect(item.tokenCost).toBeNull();
     expect(item.estimate).toBe(true);
   });
+
+  test("usage record WITH bedrockRequestId: row.bedrockRequestId is copied through (Tier B match key)", async () => {
+    await handler(intakeUsageEvent({ bedrockRequestId: "req-abc-123" }));
+    const putCalls = ddbMock.commandCalls(
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+    );
+    const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.bedrockRequestId).toBe("req-abc-123");
+  });
+
+  test.each([
+    ["absent", undefined],
+    ["empty string", ""],
+    ["non-string (number)", 42],
+    ["non-string (null)", null],
+  ])(
+    "usage record with %s bedrockRequestId: row is still written, key omitted, never throws",
+    async (_label, value) => {
+      await expect(
+        handler(intakeUsageEvent({ bedrockRequestId: value })),
+      ).resolves.not.toThrow();
+      const putCalls = ddbMock.commandCalls(
+        (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+      );
+      expect(putCalls).toHaveLength(1);
+      const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+      expect(item.bedrockRequestId).toBeUndefined();
+      expect("bedrockRequestId" in item).toBe(false);
+    },
+  );
 });
 
 // keep the exported error class referenced so an unused-import lint rule
