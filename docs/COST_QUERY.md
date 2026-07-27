@@ -4,13 +4,22 @@ Citadel tracks estimated model-invocation spend per organization and exposes it 
 
 ## Overview
 
-- **Ledger**: `citadel-cost-ledger-{env}` (DynamoDB). Rows are written by `cost-ledger-writer.ts` from three EventBridge sources (`task.completion`, `agent_intake.usage`, workflow node completion). Every row carries `estimate: true` — costs are derived from token usage and catalog pricing, never a billing invoice.
-- **Query surface**: a Cognito-JWT-authorized HTTP API (`citadel-cost-api-{env}`), single Lambda (`cost-query-handler.ts`) branching on route.
+- **Ledger**: `citadel-cost-ledger-{env}` (DynamoDB). Rows are written by `cost-ledger-writer.ts` from three EventBridge sources (`task.completion`, `agent_intake.usage`, workflow node completion). Every row carries `estimate: true` — costs are derived from token usage and catalog pricing, never a billing invoice. Rows may additionally carry a `bedrockRequestId` (additive, nullable — present only when the originating SDK call reported one) used by Tier B reconciliation below.
+- **Query surface**: a Cognito-JWT-authorized HTTP API (`citadel-cost-api-{env}`), split across two Lambdas by IAM role: `cost-query-handler.ts` (read-only — `GET /cost/summary`, `GET /cost/series`; role carries `dynamodb:Query` only, never `UpdateItem`) and `cost-budget-handler.ts` (`GET /budgets`, `PUT /budgets/{scope}`; role carries `dynamodb:Query` + `dynamodb:UpdateItem`, since it owns the whole `BUDGET#` SK domain). The route paths and response shapes are unchanged by the split — only the backing Lambda/IAM role differs per route.
 - **Budgets**: stored in the same ledger table under a disjoint `SK` namespace, evaluated hourly by a separate Lambda, with alerts published to the shared EventBridge bus.
 
 ## Routes
 
 All routes require a valid Cognito JWT (the HttpApi's default authorizer). CORS is restricted to the deployed frontend origin (`FRONTEND_ORIGIN` env/context) — no wildcard origin, since this is a bearer-token-authorized API.
+
+| Route | Lambda | IAM role grants |
+|---|---|---|
+| `GET /cost/summary` | `cost-query-handler.ts` | `dynamodb:Query` only |
+| `GET /cost/series` | `cost-query-handler.ts` | `dynamodb:Query` only |
+| `GET /budgets` | `cost-budget-handler.ts` | `dynamodb:Query`, `dynamodb:UpdateItem` |
+| `PUT /budgets/{scope}` | `cost-budget-handler.ts` | `dynamodb:Query`, `dynamodb:UpdateItem` |
+
+The split exists purely at the IAM/Lambda layer — request/response shapes below are identical to before the split.
 
 ### `GET /cost/summary?groupBy=app|agent|model|project&from&to`
 
@@ -96,6 +105,19 @@ Upserts a budget. `{scope}` is `org` or `app:<appId>`. Body:
 Every non-admin read is a **base-table Query** with `KeyConditionExpression: PK = :org AND SK BETWEEN :fromIso AND :toIso`, where `:org` is derived **only** from the verified JWT claim `custom:organization` — never from a query parameter. A non-admin passing a different `?orgId=` is rejected with `403` before any DynamoDB call is made. Admins may pass `?orgId=` to read another org's data; an admin "all orgs" view would be a separate, explicitly documented Scan exception (not implemented — no route requests it).
 
 There is deliberately **no ModelIndex GSI**: `groupBy=model` and per-model series both require aggregating base-table rows in-Lambda, which is also why every org-scoped read hits the base table rather than the per-dimension GSIs (App/Agent/Project/Workflow) — those GSI partitions aren't org-keyed, so reading them for an org rollup would require an unsafe post-filter.
+
+### Query/budgets IAM split — an honest limitation
+
+`cost-budget-handler.ts`'s role carries `dynamodb:UpdateItem` table-wide at the IAM layer — **IAM cannot scope `UpdateItem` to the `BUDGET#` SK namespace**. `dynamodb:LeadingKeys` constrains the *partition* key only, and `PK=ORG#<org>` comes from a verified JWT claim (the Lambda serves every org), so neither SK-level nor per-org IAM scoping of the write is possible. What the split actually guarantees is a **role-level read-vs-write separation**: `cost-query-handler.ts`'s role can never call `UpdateItem` at all, full stop. Within the budgets Lambda, the only thing standing between the table-wide grant and an accidental overwrite of a rollup row is the app-level `validatePutBudgetBody` + `parseBudgetScope` guard, which rejects anything that doesn't resolve to a `BUDGET#` SK before an `UpdateCommand` is ever built.
+
+## Tier B reconciliation (estimate → actual)
+
+The hourly `cost-ledger-reconciler.ts` runs two tiers:
+
+- **Tier A** (always on): aggregate drift only — compares summed ledger tokens against `AWS/Bedrock` CloudWatch metrics per model per hour window and emits a drift metric. Never flips a row's `estimate` flag; an aggregate comparison can't honestly produce a per-row actual.
+- **Tier B** (opt-in via `COST_RECONCILER_TIER_B_ENABLED=true` **and** `BEDROCK_INVOCATION_LOG_GROUP` configured to the account's Bedrock model-invocation log group): real per-row matching. Candidate rows are those with `estimate:true` and a non-empty `bedrockRequestId`. Each candidate is looked up by request id against the configured CloudWatch log group via `FilterLogEvents` (a bounded-hour window; deliberately not Logs Insights `StartQuery`, which would add async start/poll overhead and IAM surface for no benefit at this cardinality). A match triggers a conditional `UpdateItem` (`attribute_exists(PK) AND estimate = :true`) that recomputes cost via the same `computeTokenCost`/catalog-pricing lookup the writer uses, then flips `estimate` to `false` and stamps `reconciledAt`. Idempotent: re-running an already-upgraded row's conditional check fails harmlessly and is not counted as an upgrade. Unmatched rows stay `estimate:true` and are counted, never fabricated; an unpriced actual (catalog miss) still upgrades with `tokenCost:null` rather than guessing a price.
+- Tier B is cleanly **inactive** — logs and skips, mutates nothing — whenever the flag is off or the log group is unconfigured, regardless of how many `bedrockRequestId`-bearing rows exist.
+
 
 ## Budget model
 
