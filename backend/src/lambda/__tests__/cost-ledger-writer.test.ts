@@ -5,6 +5,21 @@ import type { EventBridgeEvent } from "aws-lambda";
 process.env.COST_LEDGER_TABLE = "citadel-cost-ledger-test";
 process.env.MODEL_CATALOG_TABLE = "citadel-model-catalog-test";
 
+// Mocked once at module scope (not per-test resetModules) so the handler's
+// module-level DynamoDBDocumentClient instance — and therefore ddbMock's
+// interception of it — stays stable across the whole file. getSegment
+// defaults to "no active segment" (undefined), matching the real Jest/CI
+// behavior for every test that doesn't opt into the mock segment below.
+const mockXraySegment = {
+  addAnnotation: jest.fn(),
+  addMetadata: jest.fn(),
+};
+jest.mock("aws-xray-sdk-core", () => ({
+  getSegment: jest.fn().mockReturnValue(undefined),
+  setContextMissingStrategy: jest.fn(),
+  captureAWSv3Client: jest.fn((c: unknown) => c),
+}));
+
 import {
   handler,
   ConditionalCheckFailedError,
@@ -392,5 +407,52 @@ describe("cost-ledger-writer (pass 2 — pricing + decomposition)", () => {
     expect(putCalls).toHaveLength(1);
     const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
     expect(item.priced).toBe(true);
+  });
+});
+
+describe("cost-ledger-writer: trace-propagation consumer wiring (design file-list item 4)", () => {
+  beforeEach(() => {
+    ddbMock.reset();
+    ddbMock.onAnyCommand().resolves({});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test("R9 property: an event with NO traceContext never throws and business result is unchanged (no active segment in Jest)", async () => {
+    await expect(handler(intakeUsageEvent())).resolves.not.toThrow();
+    const putCalls = ddbMock.commandCalls(
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+    );
+    expect(putCalls).toHaveLength(1);
+  });
+
+  test("annotates the active segment with the stable key contract when the event carries a traceContext", async () => {
+    const AWSXRay = jest.requireMock("aws-xray-sdk-core") as {
+      getSegment: jest.Mock;
+    };
+    AWSXRay.getSegment.mockReturnValue(mockXraySegment);
+    mockXraySegment.addAnnotation.mockClear();
+    mockXraySegment.addMetadata.mockClear();
+
+    const event = intakeUsageEvent();
+    (event.detail as Record<string, unknown>).traceContext = {
+      traceId: "1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb",
+      correlationId: "corr-1",
+    };
+
+    await handler(event);
+
+    expect(mockXraySegment.addAnnotation).toHaveBeenCalledWith(
+      "source_trace_id",
+      "1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb",
+    );
+    expect(mockXraySegment.addAnnotation).toHaveBeenCalledWith(
+      "correlation_id",
+      "corr-1",
+    );
+
+    AWSXRay.getSegment.mockReturnValue(undefined);
   });
 });

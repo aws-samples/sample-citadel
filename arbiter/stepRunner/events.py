@@ -15,6 +15,8 @@ import uuid
 from datetime import datetime, timezone
 import os
 
+import common.tracing as tracing
+
 eb_client = boto3.client('events')
 EVENT_BUS_NAME = os.environ.get('EVENT_BUS_NAME', 'citadel-agents-dev')
 SOURCE = 'citadel.workflows'
@@ -27,8 +29,17 @@ _logger = logging.getLogger(__name__)
 
 
 def publish_event(detail_type: str, detail: dict) -> None:
-    """Publish a single event to EventBridge with timestamp injection."""
+    """Publish a single event to EventBridge with timestamp injection.
+
+    Additive, optional traceContext (design §"Carried-context format
+    decision"): merged in only when an active X-Ray (sub)segment exists, so
+    the detail is byte-identical to pre-feature callers when there is no
+    segment (property-tested — this is the case for every pytest run).
+    """
     detail['timestamp'] = datetime.now(timezone.utc).isoformat()
+    trace_context = tracing.active_trace_context()
+    if trace_context:
+        detail['traceContext'] = trace_context
     eb_client.put_events(Entries=[{
         'Source': SOURCE,
         'DetailType': detail_type,

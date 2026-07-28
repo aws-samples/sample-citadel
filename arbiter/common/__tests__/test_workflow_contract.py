@@ -547,3 +547,56 @@ def test_build_result_defaults_timestamp_when_omitted():
     )
     assert isinstance(detail['timestamp'], str) and detail['timestamp'] != ''
     assert parse_node_result_detail(detail).status == STATUS_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# R18: trace_context is an additive, optional kwarg on both builders.
+# Architect task f4f4bab3-7a07-4acf-ba43-ba43bb488444, design §"File-by-file
+# list" item 10 — omitted entirely when the kwarg is not passed, keeping the
+# detail/message byte-identical to pre-feature callers.
+# ---------------------------------------------------------------------------
+
+
+def test_r18_build_node_dispatch_message_omits_trace_context_key_when_not_passed():
+    message = build_node_dispatch_message(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+    )
+    assert 'traceContext' not in message
+
+
+def test_r18_build_node_dispatch_message_includes_trace_context_when_passed():
+    ctx = {'traceId': '1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb', 'parentId': 'cccccccccccccccc'}
+    message = build_node_dispatch_message(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        trace_context=ctx,
+    )
+    assert message['traceContext'] == ctx
+    # Round-trips through the contract's own parser without raising.
+    parsed = parse_node_dispatch_message(message)
+    assert parsed.node_id == 'n'
+
+
+def test_r18_build_node_result_detail_omits_trace_context_key_when_not_passed():
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'k': 'v'}, timestamp='t',
+    )
+    assert 'traceContext' not in detail
+
+
+def test_r18_build_node_result_detail_includes_trace_context_when_passed():
+    ctx = {'traceId': '1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb', 'parentId': 'cccccccccccccccc'}
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'k': 'v'}, timestamp='t',
+        trace_context=ctx,
+    )
+    assert detail['traceContext'] == ctx
+
+
+def test_r18_build_node_result_detail_failed_omits_trace_context_when_not_passed():
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_FAILED, error='boom', timestamp='t',
+    )
+    assert 'traceContext' not in detail

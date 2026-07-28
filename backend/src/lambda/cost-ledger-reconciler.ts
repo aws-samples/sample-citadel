@@ -722,6 +722,13 @@ export async function tierBReconcile(
 }
 
 export const handler = async (): Promise<{ windowsProcessed: number }> => {
+  // Trace-propagation note (design file-list item 4, architect task
+  // f4f4bab3): this handler is `rate(1 hour)` SCHEDULE-triggered — it takes
+  // no event argument and has no EventBridge Detail/traceContext to
+  // extract from. There is no upstream hop to stitch here; the reconciler
+  // originates its own trace per invocation (native X-Ray root via
+  // EnableLambdaTracing), same as any other scheduled Lambda. Annotation
+  // wiring is intentionally NOT added — there is nothing to annotate FROM.
   const nowSec = Math.floor(Date.now() / 1000);
   const targetEnd = alignToHour(nowSec - settleLagSec());
 

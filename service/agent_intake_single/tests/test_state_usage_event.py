@@ -92,3 +92,93 @@ class TestPublishUsageEvent:
         assert set(detail.keys()) == {
             "sessionId", "phase", "completionPercentage", "changeSummary", "timestamp",
         }
+
+
+class TestTraceContextPropagation:
+    """R19/R20 (design file-list item 11, H6): traceContext is additive on
+    both intake event paths — present only when an active X-Ray segment
+    exists, absent (byte-identical to pre-feature) otherwise. Mirrors
+    stepRunner/events.py's publish_event contract for the intake runtime.
+    """
+
+    def test_r19_publish_usage_event_includes_trace_context_when_active(self, monkeypatch):
+        import tools.state as state
+
+        client = mock.MagicMock()
+        monkeypatch.setattr(state, "events_client", client)
+        monkeypatch.setattr(state, "EVENT_BUS_NAME", "test-bus")
+        monkeypatch.setattr(
+            state.tracing, "active_trace_context",
+            lambda: {"traceId": "1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb", "parentId": "cccccccccccccccc"},
+        )
+
+        state.publish_usage_event("sess-6", {"source": "intake"})
+
+        detail = json.loads(client.put_events.call_args.kwargs["Entries"][0]["Detail"])
+        assert detail["traceContext"] == {
+            "traceId": "1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb",
+            "parentId": "cccccccccccccccc",
+        }
+
+    def test_r19_internal_update_progress_includes_trace_context_when_active(self, monkeypatch):
+        import tools.state as state
+
+        client = mock.MagicMock()
+        monkeypatch.setattr(state, "events_client", client)
+        monkeypatch.setattr(state, "EVENT_BUS_NAME", "test-bus")
+        monkeypatch.setattr(state, "_table", lambda: mock.MagicMock())
+        monkeypatch.setattr(
+            state.tracing, "active_trace_context",
+            lambda: {"traceId": "1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb", "parentId": "cccccccccccccccc"},
+        )
+
+        state._publish_event("design", "sess-7", 50, "half done")
+
+        detail = json.loads(client.put_events.call_args.kwargs["Entries"][0]["Detail"])
+        assert detail["traceContext"] == {
+            "traceId": "1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb",
+            "parentId": "cccccccccccccccc",
+        }
+
+    def test_r20_publish_usage_event_omits_trace_context_when_absent(self, monkeypatch):
+        """Property/no-throw guarantee: with no active segment (the real
+        current state of this service — aws-xray-sdk is not even a
+        dependency), traceContext is entirely absent, not null/empty —
+        byte-identical to the pre-feature Detail shape. Unknown-key-safe
+        consumers are unaffected."""
+        import tools.state as state
+
+        client = mock.MagicMock()
+        monkeypatch.setattr(state, "events_client", client)
+        monkeypatch.setattr(state, "EVENT_BUS_NAME", "test-bus")
+
+        state.publish_usage_event("sess-8", {"source": "intake"})
+
+        detail = json.loads(client.put_events.call_args.kwargs["Entries"][0]["Detail"])
+        assert "traceContext" not in detail
+
+    def test_r20_internal_update_progress_omits_trace_context_when_absent(self, monkeypatch):
+        import tools.state as state
+
+        client = mock.MagicMock()
+        monkeypatch.setattr(state, "events_client", client)
+        monkeypatch.setattr(state, "EVENT_BUS_NAME", "test-bus")
+        monkeypatch.setattr(state, "_table", lambda: mock.MagicMock())
+
+        state._publish_event("design", "sess-9", 50, "half done")
+
+        entry = client.put_events.call_args.kwargs["Entries"][0]
+        detail = json.loads(entry["Detail"])
+        assert "traceContext" not in detail
+        # Byte-identical to the pre-feature exact-keys assertion above.
+        assert set(detail.keys()) == {
+            "sessionId", "phase", "completionPercentage", "changeSummary", "timestamp",
+        }
+
+    def test_r20_no_active_segment_never_throws_with_aws_xray_sdk_absent(self):
+        """active_trace_context() must degrade to None, never raise, when
+        aws_xray_sdk is not installed — the real, permanent state of this
+        service's requirements.txt today."""
+        import tools.tracing as tracing
+
+        assert tracing.active_trace_context() is None

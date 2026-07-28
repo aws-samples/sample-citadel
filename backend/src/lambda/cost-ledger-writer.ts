@@ -43,6 +43,11 @@ import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import type { EventBridgeEvent } from "aws-lambda";
 import { resolvePricing } from "./utils/cost-pricing";
 import { computeTokenCost, type UnpricedReason } from "./utils/cost-compute";
+import {
+  annotateFromCarried,
+  extractCarried,
+  logFields,
+} from "../utils/trace-context";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -420,6 +425,22 @@ export const handler = async (
   const detailType = event["detail-type"];
   const source = event.source;
   const ingestedAt = new Date().toISOString();
+
+  // Consumer parse+annotate (design §"Annotation-key contract", file-list
+  // item 4): no-op-safe when event.detail carries no traceContext
+  // (property-tested).
+  const carried = extractCarried(event.detail);
+  annotateFromCarried(carried);
+  console.log(
+    JSON.stringify({
+      level: "info",
+      message: "cost-ledger-writer received event",
+      detailType,
+      source,
+      eventId,
+      ...logFields(carried),
+    }),
+  );
 
   let rows: LedgerRow[];
 

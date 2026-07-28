@@ -4,6 +4,7 @@ import {
 } from "@aws-sdk/client-eventbridge";
 import * as AWSXRay from "aws-xray-sdk-core";
 import { AgentEvent } from "../types";
+import { getActiveTraceContext } from "./trace-context";
 
 // Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c,
 // design §1(a)/§6 item 3): this is the acceptance-critical PutEvents
@@ -18,6 +19,11 @@ const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME || "agentic-ai-agents";
 
 export async function publishEvent(event: AgentEvent): Promise<void> {
   try {
+    // Additive, optional traceContext (design §"Carried-context format
+    // decision"): spread only when an active X-Ray segment exists, so the
+    // Detail body is byte-identical to pre-feature callers when there is no
+    // segment (property-tested in events.test.ts).
+    const traceContext = getActiveTraceContext();
     const command = new PutEventsCommand({
       Entries: [
         {
@@ -29,6 +35,7 @@ export async function publishEvent(event: AgentEvent): Promise<void> {
             payload: event.payload,
             timestamp: event.timestamp,
             correlationId: event.correlationId,
+            ...(traceContext ? { traceContext } : {}),
           }),
           EventBusName: EVENT_BUS_NAME,
         },

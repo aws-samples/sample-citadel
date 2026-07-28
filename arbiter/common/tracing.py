@@ -75,3 +75,162 @@ def configure() -> None:
 # without needing to remember to call configure() explicitly. configure()
 # itself is defensive (see above), so this is safe at import time.
 configure()
+
+
+# ---------------------------------------------------------------------------
+# Trace-context propagation helpers (architect task f4f4bab3-7a07-4acf-ba43-
+# ba43bb488444, design §"Carried-context format decision" /
+# §"Annotation-key contract"). Mirror the TS backend/src/utils/trace-context.ts
+# helpers so both runtimes carry the identical additive, optional
+# `traceContext` shape and stamp the identical stable annotation keys.
+#
+# Root-segment constraint (honest framing, see design): Lambda owns its root
+# segment, so these helpers never attempt to make a consumer adopt an
+# upstream trace-id as its own root — they carry the additive context across
+# async hops and annotate the CONSUMER's own active segment/subsegment with
+# searchable `source_trace_id` / `correlation_id` keys, delivering
+# provably-linked traces rather than a false merge.
+#
+# No-op-safety: every helper below is safe to call with NO active X-Ray
+# segment/subsegment (pytest, local dev, a cold path before the Lambda
+# runtime attaches a segment) — none of them raise.
+# ---------------------------------------------------------------------------
+import os
+import re
+from typing import Any, Optional
+
+_XRAY_ROOT_RE = re.compile(r"^1-([0-9a-f]{8})-([0-9a-f]{24})$", re.IGNORECASE)
+_TRACE_HEADER_ROOT_RE = re.compile(r"Root=([^;]+)")
+
+
+def render_xray_header(trace_id: str, parent_id: str, sampled: bool) -> Optional[str]:
+    """Render the standard X-Ray header string:
+    "Root=<traceId>;Parent=<id>;Sampled=<0|1>" — the exact format the
+    `AWSTraceHeader` SQS MessageAttribute and `_X_AMZN_TRACE_ID` env var use.
+    """
+    if not trace_id or not parent_id:
+        return None
+    return f"Root={trace_id};Parent={parent_id};Sampled={1 if sampled else 0}"
+
+
+def to_traceparent(xray_trace_id: str, parent_id: str, sampled: bool) -> Optional[str]:
+    """Mechanical, best-effort X-Ray Root -> W3C `traceparent` conversion —
+    identical mapping to the TS-side `toTraceparent`. Returns None for a
+    malformed X-Ray trace id rather than raising or fabricating a value.
+    """
+    match = _XRAY_ROOT_RE.match(xray_trace_id or "")
+    if not match or not parent_id:
+        return None
+    trace_id_32 = f"{match.group(1)}{match.group(2)}"
+    flags = "01" if sampled else "00"
+    return f"00-{trace_id_32}-{parent_id}-{flags}"
+
+
+def active_trace_context() -> Optional[dict]:
+    """Read the active X-Ray (sub)segment (if any) and render it into the
+    additive `traceContext` shape. Returns None outside a segment — never
+    raises.
+    """
+    try:
+        from aws_xray_sdk.core import xray_recorder
+
+        segment = xray_recorder.current_subsegment() or xray_recorder.current_segment()
+        if not segment:
+            return None
+        trace_id = getattr(segment, "trace_id", None)
+        parent_id = getattr(segment, "id", None)
+        if not trace_id or not parent_id:
+            return None
+        sampled = not getattr(segment, "not_traced", False)
+        xray_trace_header = render_xray_header(trace_id, parent_id, sampled)
+        traceparent = to_traceparent(trace_id, parent_id, sampled)
+        result: dict = {"traceId": trace_id, "parentId": parent_id}
+        if xray_trace_header:
+            result["xrayTraceHeader"] = xray_trace_header
+        if traceparent:
+            result["traceparent"] = traceparent
+        return result
+    except Exception:  # noqa: BLE001 — no-op-safe, tracing must never break the caller
+        return None
+
+
+def extract_carried(detail: Any) -> Optional[dict]:
+    """Extract a well-formed carried `traceContext` dict from an arbitrary
+    EventBridge detail / SQS message-body object. Returns None for a
+    missing, non-dict, or malformed `traceContext` field — never raises.
+    """
+    try:
+        if not isinstance(detail, dict):
+            return None
+        candidate = detail.get("traceContext")
+        if not isinstance(candidate, dict):
+            return None
+        return candidate
+    except Exception:  # noqa: BLE001 — extraction must never raise
+        return None
+
+
+def annotate_from_carried(carried: Optional[dict]) -> None:
+    """Annotate the active X-Ray segment/subsegment from a carried
+    `traceContext` (stable annotation-key contract — the waterfall-viewer
+    story consumes these keys). No-op when there is no active segment AND
+    no-op when `carried` is None/malformed — never raises.
+    """
+    try:
+        from aws_xray_sdk.core import xray_recorder
+
+        segment = xray_recorder.current_subsegment() or xray_recorder.current_segment()
+        if not segment:
+            return
+        if not isinstance(carried, dict):
+            return
+        if carried.get("correlationId"):
+            segment.put_annotation("correlation_id", carried["correlationId"])
+        if carried.get("traceId"):
+            segment.put_annotation("source_trace_id", carried["traceId"])
+        if carried.get("executionId"):
+            segment.put_annotation("execution_id", carried["executionId"])
+        if carried.get("nodeId"):
+            segment.put_annotation("node_id", carried["nodeId"])
+        if carried.get("sessionId"):
+            segment.put_annotation("session_id", carried["sessionId"])
+        segment.put_metadata("trace_context", carried)
+    except Exception:  # noqa: BLE001 — annotation failure must never break the consumer
+        logger.debug("annotate_from_carried failed; continuing untraced.", exc_info=True)
+
+
+class TraceIdLogFilter(logging.Filter):
+    """Logging filter injecting `trace_id` into every record (stable
+    contract, mirrors the TS `logger.ts` behaviour): read the active
+    X-Ray segment first; fall back to parsing the Lambda-injected
+    `_X_AMZN_TRACE_ID` env var; absent-safe otherwise. Never raises —
+    a filter exception would silently drop the log record.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003 — logging.Filter API
+        try:
+            ctx = active_trace_context()
+            trace_id = ctx.get("traceId") if ctx else None
+            if not trace_id:
+                header = os.environ.get("_X_AMZN_TRACE_ID", "")
+                match = _TRACE_HEADER_ROOT_RE.search(header)
+                if match:
+                    trace_id = match.group(1)
+            if trace_id:
+                record.trace_id = trace_id
+        except Exception:  # noqa: BLE001 — filter must never break logging
+            pass
+        return True
+
+
+def install_log_filter(target_logger: logging.Logger) -> None:
+    """Attach a `TraceIdLogFilter` to *target_logger*, idempotently (a
+    second call is a no-op rather than a duplicate filter). Never raises.
+    """
+    try:
+        if any(isinstance(f, TraceIdLogFilter) for f in target_logger.filters):
+            return
+        target_logger.addFilter(TraceIdLogFilter())
+    except Exception:  # noqa: BLE001 — filter installation must never break startup
+        logger.debug("install_log_filter failed; continuing without trace_id injection.", exc_info=True)
+

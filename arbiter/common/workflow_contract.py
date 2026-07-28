@@ -133,12 +133,19 @@ def build_node_dispatch_message(
     input: Optional[dict[str, Any]] = None,  # noqa: A002 — field name is part of the contract
     configuration: Optional[dict[str, Any]] = None,
     correlation_id: Optional[str] = None,
+    trace_context: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Build a JSON-serializable node-dispatch message for the worker queue.
 
     Validates identifiers and field types up front so a producer cannot emit a
     message the consumer would later reject. ``correlation_id`` is omitted from
     the wire body when not supplied.
+
+    ``trace_context`` is additive and optional (architect task
+    f4f4bab3-7a07-4acf-ba43-ba43bb488444, H3 SQS hop): a carried traceContext
+    dict promoted to a top-level ``traceContext`` key when supplied. Omitted
+    entirely when not passed, keeping the message byte-identical to
+    pre-feature callers.
     """
     input_data = {} if input is None else input
     config = {} if configuration is None else configuration
@@ -170,6 +177,8 @@ def build_node_dispatch_message(
     }
     if correlation_id is not None:
         message['correlation_id'] = correlation_id
+    if trace_context is not None:
+        message['traceContext'] = trace_context
     return message
 
 
@@ -239,6 +248,7 @@ def build_node_result_detail(
     error: Optional[str] = None,
     timestamp: Optional[str] = None,
     usage: Optional[list[dict[str, Any]]] = None,
+    trace_context: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Build the EventBridge detail body for a node-result event.
 
@@ -255,6 +265,12 @@ def build_node_result_detail(
     ``usage`` was supplied, so omitting it keeps the detail byte-identical to
     pre-feature callers. A failed result never carries a top-level ``usage``
     key, even if one is passed, since there is no output to attribute it to.
+
+    ``trace_context`` is additive and optional (architect task
+    f4f4bab3-7a07-4acf-ba43-ba43bb488444): a carried traceContext dict
+    promoted to a top-level ``traceContext`` key when supplied, regardless of
+    ``status``. Omitted entirely when not passed, keeping the detail
+    byte-identical to pre-feature callers.
     """
     _validate_identity(
         'node-result event',
@@ -294,6 +310,8 @@ def build_node_result_detail(
                 "node-result event: a 'failed' result requires a non-empty 'error' string"
             )
         detail['error'] = error
+    if trace_context is not None:
+        detail['traceContext'] = trace_context
     return detail
 
 

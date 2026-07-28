@@ -28,15 +28,20 @@
  * non-governance event onto the admin-only subscription.
  */
 
-import type { EventBridgeEvent } from 'aws-lambda';
-import { SignatureV4 } from '@smithy/signature-v4';
-import { Sha256 } from '@aws-crypto/sha256-js';
-import { HttpRequest } from '@smithy/protocol-http';
-import { defaultProvider } from '@aws-sdk/credential-provider-node';
+import type { EventBridgeEvent } from "aws-lambda";
+import { SignatureV4 } from "@smithy/signature-v4";
+import { Sha256 } from "@aws-crypto/sha256-js";
+import { HttpRequest } from "@smithy/protocol-http";
+import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
   GOVERNANCE_DETAIL_TYPES,
   type GovernanceDetailType,
-} from '../utils/notifier-base';
+} from "../utils/notifier-base";
+import {
+  annotateFromCarried,
+  extractCarried,
+  logFields,
+} from "../utils/trace-context";
 
 const PUBLISH_MUTATION = `
   mutation PublishGovernanceEvent($input: GovernanceEventInput!) {
@@ -77,7 +82,7 @@ class GovernanceNotifierError extends Error {
   public readonly statusCode: number | null;
   constructor(message: string, statusCode: number | null = null) {
     super(message);
-    this.name = 'GovernanceNotifierError';
+    this.name = "GovernanceNotifierError";
     this.statusCode = statusCode;
   }
 }
@@ -87,8 +92,8 @@ function getSigner(): SignatureV4 {
   if (!_signer) {
     _signer = new SignatureV4({
       credentials: defaultProvider(),
-      region: process.env.AWS_REGION || 'us-east-1',
-      service: 'appsync',
+      region: process.env.AWS_REGION || "us-east-1",
+      service: "appsync",
       sha256: Sha256,
     });
   }
@@ -106,9 +111,7 @@ async function publishGovernanceEvent(
 ): Promise<void> {
   const endpoint = process.env.APPSYNC_ENDPOINT;
   if (!endpoint) {
-    throw new GovernanceNotifierError(
-      'APPSYNC_ENDPOINT env var is required',
-    );
+    throw new GovernanceNotifierError("APPSYNC_ENDPOINT env var is required");
   }
 
   const url = new URL(endpoint);
@@ -118,11 +121,11 @@ async function publishGovernanceEvent(
   });
 
   const request = new HttpRequest({
-    method: 'POST',
+    method: "POST",
     hostname: url.hostname,
     path: url.pathname,
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       host: url.hostname,
     },
     body,
@@ -131,7 +134,7 @@ async function publishGovernanceEvent(
   const signed = await getSigner().sign(request);
 
   const response = await fetch(`https://${url.hostname}${url.pathname}`, {
-    method: 'POST',
+    method: "POST",
     headers: signed.headers as Record<string, string>,
     body,
   });
@@ -170,14 +173,28 @@ async function publishGovernanceEvent(
 export const handler = async (
   event: EventBridgeEvent<string, unknown>,
 ): Promise<{ statusCode: number; body: string }> => {
-  const detailType = event['detail-type'];
+  const detailType = event["detail-type"];
+
+  // Consumer parse+annotate (design §"Annotation-key contract", H2/H4 hop):
+  // no-op-safe when event.detail carries no traceContext (property-tested).
+  const carried = extractCarried(event.detail);
+  annotateFromCarried({ ...carried, correlationId: carried?.correlationId });
+  console.log(
+    JSON.stringify({
+      level: "info",
+      message: "governance-notifier received event",
+      detailType,
+      eventId: event.id,
+      ...logFields(carried),
+    }),
+  );
 
   // Defence-in-depth: even though the EventBridge rule already filters
   // to governance.* detail-types, drop unrecognised entries here too.
   // Returning success keeps EventBridge from retrying (the event will
   // never become valid).
   if (!isGovernanceDetailType(detailType)) {
-    console.log('governance-notifier: dropping non-governance event', {
+    console.log("governance-notifier: dropping non-governance event", {
       detailType,
       source: event.source,
       eventId: event.id,
@@ -202,13 +219,13 @@ export const handler = async (
     // Structured log so the DLQ message is correlatable from the
     // CloudWatch side. Rethrow is mandatory — EventBridge async invoke
     // relies on the throw to drive the retry / DLQ pipeline.
-    console.error('governance-notifier: publish failed', {
+    console.error("governance-notifier: publish failed", {
       detailType,
       source: event.source,
       eventId: event.id,
       eventTime: event.time,
       error: err instanceof Error ? err.message : String(err),
-      errorName: err instanceof Error ? err.name : 'unknown',
+      errorName: err instanceof Error ? err.name : "unknown",
     });
     throw err;
   }

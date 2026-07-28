@@ -186,3 +186,43 @@ class TestAllEventsIncludeTimestampAndCorrelationId:
 
             assert 'timestamp' in detail, f"Event {i} missing timestamp"
             assert 'correlationId' in detail, f"Event {i} missing correlationId"
+
+
+# ---------------------------------------------------------------------------
+# Trace-context propagation (architect task f4f4bab3-7a07-4acf-ba43-
+# ba43bb488444): publish_event merges an additive `traceContext` into the
+# detail when common.tracing.active_trace_context() returns one, and is
+# byte-identical to pre-feature callers when it returns None (as it always
+# does under pytest with no active X-Ray segment — R14 property).
+# ---------------------------------------------------------------------------
+
+class TestPublishEventTraceContextPropagation:
+    def test_publish_event_omits_trace_context_key_with_no_active_segment(self, mock_eb_client):
+        """R14: no active segment under pytest -> detail has no traceContext
+        key at all, byte-identical to the pre-feature shape."""
+        from events import publish_event
+
+        publish_event('workflow.started', {'executionId': 'e1', 'correlationId': 'e1'})
+
+        call_args = mock_eb_client.put_events.call_args
+        entries = call_args[1].get('Entries') or call_args.kwargs.get('Entries')
+        detail = json.loads(entries[0]['Detail'])
+        assert 'traceContext' not in detail
+
+    def test_publish_event_merges_trace_context_when_active_segment_present(self, mock_eb_client):
+        """R13/R14 counterpart: when common.tracing reports an active trace
+        context, publish_event merges it into the detail additively."""
+        import events
+
+        fake_ctx = {
+            'xrayTraceHeader': 'Root=1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb;Parent=cccccccccccccccc;Sampled=1',
+            'traceId': '1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb',
+            'parentId': 'cccccccccccccccc',
+        }
+        with patch('common.tracing.active_trace_context', return_value=fake_ctx):
+            events.publish_event('workflow.started', {'executionId': 'e2', 'correlationId': 'e2'})
+
+        call_args = mock_eb_client.put_events.call_args
+        entries = call_args[1].get('Entries') or call_args.kwargs.get('Entries')
+        detail = json.loads(entries[0]['Detail'])
+        assert detail['traceContext'] == fake_ctx

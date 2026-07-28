@@ -1,12 +1,19 @@
 """Step Runner Lambda handler — routes EventBridge events to executor functions."""
 
 from executor import start_execution, handle_node_completion, handle_node_failure, cancel_execution
+from common.tracing import annotate_from_carried, extract_carried
 
 
 def handler(event, context):
     """Route EventBridge events to the appropriate executor function."""
     detail_type = event.get('detail-type', '')
     detail = event.get('detail', {})
+
+    # Consumer parse+annotate (architect task f4f4bab3-7a07-4acf-ba43-
+    # ba43bb488444, H2/H4 hop): no-op-safe when detail carries no
+    # traceContext or a malformed one (property-tested in
+    # common/__tests__/test_tracing.py).
+    annotate_from_carried(extract_carried(detail))
 
     if detail_type == 'execution.start.requested':
         start_execution(detail['executionId'], detail['workflowId'])

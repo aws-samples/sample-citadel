@@ -13,8 +13,16 @@ import boto3
 # must NOT break dispatch: tracing is best-effort, never required.
 try:
     import common.tracing # noqa: F401,E402 — import activates tracing as a side effect
+    from common.tracing import annotate_from_carried, extract_carried, render_xray_header
 except ImportError: # pragma: no cover — Lambda bundle path before follow-up
-    pass
+    def annotate_from_carried(carried): # type: ignore[no-redef]
+        pass
+
+    def extract_carried(detail): # type: ignore[no-redef]
+        return None
+
+    def render_xray_header(trace_id, parent_id, sampled): # type: ignore[no-redef]
+        return None
 
 from worker_governance import (
     apply_step_constraints,
@@ -457,7 +465,7 @@ def post_task_complete(response, agent_use_id, agent_name, orchestration_id, *, 
     print(f"event posted: {response}")
     return f"event posted: {event}"
 
-def _emit_node_result(msg, *, status, output=None, error=None, usage=None):
+def _emit_node_result(msg, *, status, output=None, error=None, usage=None, trace_context=None):
     """Emit a workflow node-result event (completed/failed) to the agent event
     bus the step runner consumes.
 
@@ -472,6 +480,13 @@ def _emit_node_result(msg, *, status, output=None, error=None, usage=None):
     carries a top-level ``usage`` key (in addition to the existing
     ``output['usage']``) for the step runner's usage rollup. Ignored for a
     failed result (the contract already drops it there).
+
+    ``trace_context`` is additive and optional (architect task
+    f4f4bab3-7a07-4acf-ba43-ba43bb488444, R17): forwarded to
+    ``workflow_contract.build_node_result_detail`` so the emitted Detail
+    carries a top-level ``traceContext`` key when available, regardless of
+    ``status``. Omitted entirely when None, keeping the Detail
+    byte-identical to pre-feature callers.
     """
     detail = workflow_contract.build_node_result_detail(
         execution_id=msg.execution_id,
@@ -482,6 +497,7 @@ def _emit_node_result(msg, *, status, output=None, error=None, usage=None):
         output=output,
         error=error,
         usage=usage,
+        trace_context=trace_context,
     )
     detail_type = (
         workflow_contract.NODE_COMPLETED_DETAIL_TYPE
@@ -552,7 +568,27 @@ def extract_node_overrides(configuration) -> tuple[str | None, str | None]:
 
     return _string_override('modelOverride'), _string_override('systemPromptAddition')
 
-def _process_workflow_node(event):
+def _extract_worker_trace_context(event, message_attributes):
+    """Resolve the effective carried traceContext for a workflow-node
+    dispatch (H3 SQS hop, architect task f4f4bab3-7a07-4acf-ba43-
+    ba43bb488444, R16): the standard ``AWSTraceHeader`` SQS MessageAttribute
+    takes priority (the attribute X-Ray/Lambda natively recognize for SQS
+    linking); falls back to the message body's own ``traceContext`` (the
+    belt-and-suspenders annotation floor) when the attribute is absent.
+    Returns None when neither is present — never raises.
+    """
+    try:
+        if isinstance(message_attributes, dict):
+            attr = message_attributes.get('AWSTraceHeader')
+            if isinstance(attr, dict):
+                header = attr.get('stringValue') or attr.get('StringValue')
+                if header:
+                    return {'xrayTraceHeader': header}
+    except Exception:  # noqa: BLE001 — extraction must never raise
+        pass
+    return extract_carried(event)
+
+def _process_workflow_node(event, message_attributes=None):
     """Run the agent for a dispatched workflow node and emit its result.
 
     Reuses the worker's existing agent-execution path — config load →
@@ -560,8 +596,18 @@ def _process_workflow_node(event):
     workflow.node.completed on success. On any failure (bad config, missing
     module, or a non-zero subprocess exit) emits workflow.node.failed rather
     than a canned success, so the step runner's failure path is exercised.
+
+    H3 trace-context propagation (architect task f4f4bab3-7a07-4acf-ba43-
+    ba43bb488444): ``message_attributes`` (the SQS record's
+    messageAttributes, threaded through from ``lambda_handler`) is checked
+    first for the standard ``AWSTraceHeader`` attribute — the format
+    X-Ray/Lambda natively recognize for SQS linking. Falls back to the
+    message body's own ``traceContext`` (belt-and-suspenders annotation
+    floor) when the attribute is absent. Neither present → no-op (R16).
     """
     msg = workflow_contract.parse_node_dispatch_message(event)
+    carried_ctx = _extract_worker_trace_context(event, message_attributes)
+    annotate_from_carried(carried_ctx)
     print(json.dumps({
         'level': 'INFO',
         'component': 'WorkerWrapper',
@@ -635,6 +681,7 @@ def _process_workflow_node(event):
             msg,
             status=workflow_contract.STATUS_FAILED,
             error=str(exc) or 'agent execution failed',
+            trace_context=carried_ctx,
         )
         return
 
@@ -652,9 +699,10 @@ def _process_workflow_node(event):
         status=workflow_contract.STATUS_COMPLETED,
         output={'response': response, 'usage': usage_sink},
         usage=usage_sink,
+        trace_context=carried_ctx,
     )
 
-def process_event(event, context):
+def process_event(event, context, message_attributes=None):
     print("processing...")
 
     # Discriminated shared queue: the step runner dispatches workflow-node
@@ -662,7 +710,7 @@ def process_event(event, context):
     # A workflow-node message carries the contract's message_type discriminator;
     # a supervisor task message does not, so it falls through unchanged below.
     if workflow_contract is not None and workflow_contract.is_workflow_node_message(event):
-        _process_workflow_node(event)
+        _process_workflow_node(event, message_attributes=message_attributes)
         return
 
     orchestration_id = event["orchestration_id"]
@@ -850,7 +898,12 @@ def lambda_handler(event, context):
         try:
             message_body = json.loads(record['body'])
             print(f"Processing message: {record['messageId']}")
-            process_event(message_body, context)
+            # H3 trace-context propagation (architect task f4f4bab3-7a07-4acf-
+            # ba43-ba43bb488444): thread the record's SQS messageAttributes
+            # through so process_event can extract the AWSTraceHeader
+            # attribute (SQS's native X-Ray-linked attribute). Additive —
+            # absent on any record that predates this change (defaults to {}).
+            process_event(message_body, context, message_attributes=record.get('messageAttributes'))
             print(f"Successfully processed message: {record['messageId']}")
         except Exception as e:
             print(f"Error processing message {record['messageId']}: {e}")

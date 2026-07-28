@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 # module (see the `from common import workflow_contract` hard import below),
 # so no deferred-bundling fallback is needed here.
 import common.tracing # noqa: F401 — import activates tracing as a side effect
+import common.tracing as tracing
 
 import events
 from dag import (
@@ -88,9 +89,18 @@ def _log_event(action: str, **fields) -> None:
     the step runner and the worker. Emitted via stdout (Lambda ships stdout to
     CloudWatch Logs), matching the worker's structured-logging convention.
     None-valued fields are dropped to keep lines terse.
+
+    Additive, no-op-safe ``trace_id`` injection (design §"Structured-log
+    trace-id inclusion at the cited logger seams both languages"): read via
+    ``common.tracing.active_trace_context()``, omitted entirely with no
+    active X-Ray segment (the default under pytest / local dev) so the line
+    is byte-identical to the pre-feature shape.
     """
     payload = {'component': 'StepRunner', 'action': action}
     payload.update({k: v for k, v in fields.items() if v is not None})
+    trace_context = tracing.active_trace_context()
+    if trace_context and trace_context.get('traceId'):
+        payload['trace_id'] = trace_context['traceId']
     print(json.dumps(payload))
 
 
@@ -290,11 +300,27 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
         agent_id=agent_id,
         input=input_data,
         configuration=configuration,
+        trace_context=tracing.active_trace_context(),
     )
-    _get_sqs_client().send_message(
-        QueueUrl=queue_url,
-        MessageBody=json.dumps(message),
-    )
+
+    # H3 trace-context propagation (architect task f4f4bab3-7a07-4acf-ba43-
+    # ba43bb488444): add the standard AWSTraceHeader MessageAttribute (the
+    # exact attribute name X-Ray/Lambda natively recognize for SQS linking)
+    # ONLY when an active X-Ray segment exists. The body traceContext above
+    # is already additive via the contract builder's kwarg. With no active
+    # segment (the default in tests / local dev), neither is added — the
+    # dispatch stays byte-identical to the pre-feature message
+    # (property-tested).
+    send_kwargs = {'QueueUrl': queue_url, 'MessageBody': json.dumps(message)}
+    trace_context = message.get('traceContext')
+    if trace_context and trace_context.get('xrayTraceHeader'):
+        send_kwargs['MessageAttributes'] = {
+            'AWSTraceHeader': {
+                'DataType': 'String',
+                'StringValue': trace_context['xrayTraceHeader'],
+            },
+        }
+    _get_sqs_client().send_message(**send_kwargs)
 
 
 def handle_node_completion(execution_id: str, node_id: str, output: dict, usage: list | None = None) -> None:
