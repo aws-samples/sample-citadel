@@ -286,3 +286,162 @@ class TestInstallUsageCaptureDegradation:
 
         installed = _install_usage_capture()
         assert installed is False
+
+
+# ---------------------------------------------------------------------------
+# _install_usage_capture — bedrockRequestId capture (present/absent, never raises)
+# ---------------------------------------------------------------------------
+
+class TestInstallUsageCaptureBedrockRequestId:
+    """bedrockRequestId is captured when the SDK response carries
+    ResponseMetadata.RequestId, and cleanly omitted (never fabricated) when
+    it does not — for both the non-streaming and streaming capture paths."""
+
+    def test_non_streaming_response_with_request_id_is_captured(self, monkeypatch):
+        def _converse_with_request_id(self, *args, **kwargs):
+            return {
+                "usage": {"inputTokens": 1, "outputTokens": 2, "totalTokens": 3},
+                "ResponseMetadata": {"RequestId": "req-abc-123"},
+            }
+
+        _install_fake_strands_with_bedrock(monkeypatch, converse_impl=_converse_with_request_id)
+        module_src = (
+            "from strands.models import BedrockModel\n"
+            "def handler(**kwargs):\n"
+            "    m = BedrockModel(model_id='m.test')\n"
+            "    m.converse()\n"
+            "    return 'ok'\n"
+        )
+        captured = []
+        _run_runner_with_module(module_src, {}, captured)
+        parsed = json.loads(captured[0])
+        record = parsed["usage"][0]
+        assert record["bedrockRequestId"] == "req-abc-123"
+
+    def test_non_streaming_response_without_request_id_omits_key(self, monkeypatch):
+        """Default fake converse() (no ResponseMetadata) never fabricates a
+        bedrockRequestId — the key must be absent entirely, not null."""
+        _install_fake_strands_with_bedrock(monkeypatch)
+        module_src = (
+            "from strands.models import BedrockModel\n"
+            "def handler(**kwargs):\n"
+            "    m = BedrockModel(model_id='m.test')\n"
+            "    m.converse()\n"
+            "    return 'ok'\n"
+        )
+        captured = []
+        _run_runner_with_module(module_src, {}, captured)
+        parsed = json.loads(captured[0])
+        record = parsed["usage"][0]
+        assert "bedrockRequestId" not in record
+
+    def test_malformed_response_metadata_never_raises_and_omits_key(self, monkeypatch):
+        def _converse_with_bad_metadata(self, *args, **kwargs):
+            return {
+                "usage": {"inputTokens": 1, "outputTokens": 1},
+                "ResponseMetadata": "not-a-dict",
+            }
+
+        _install_fake_strands_with_bedrock(monkeypatch, converse_impl=_converse_with_bad_metadata)
+        module_src = (
+            "from strands.models import BedrockModel\n"
+            "def handler(**kwargs):\n"
+            "    m = BedrockModel(model_id='m.test')\n"
+            "    m.converse()\n"
+            "    return 'ok'\n"
+        )
+        captured = []
+        _run_runner_with_module(module_src, {}, captured)
+        parsed = json.loads(captured[0])
+        record = parsed["usage"][0]
+        assert "bedrockRequestId" not in record
+
+    def test_streaming_response_with_metadata_request_id_is_captured(self, monkeypatch):
+        """Streaming seam: the wrapped generator's per-event metadata may
+        carry a ResponseMetadata block; the last non-empty id observed
+        across the stream wins (mirrors last_usage's semantics)."""
+        fake_mod = types.ModuleType("strands")
+
+        class _FakeAgent:
+            def __init__(self, *args, tool_handler=None, tools=None, **kwargs):
+                pass
+
+        fake_mod.Agent = _FakeAgent
+        fake_models = types.ModuleType("strands.models")
+
+        def _stream_events(self, *args, **kwargs):
+            yield {"chunk": "part1"}
+            yield {
+                "metadata": {
+                    "usage": {"inputTokens": 4, "outputTokens": 5, "totalTokens": 9},
+                    "ResponseMetadata": {"RequestId": "req-stream-1"},
+                }
+            }
+
+        class _BedrockModelStub:
+            def __init__(self, *args, **kwargs):
+                self.model_id = kwargs.get("model_id")
+
+            def stream(self, *args, **kwargs):
+                return _stream_events(self, *args, **kwargs)
+
+        fake_models.BedrockModel = _BedrockModelStub
+        fake_mod.models = fake_models
+        monkeypatch.setitem(sys.modules, "strands", fake_mod)
+        monkeypatch.setitem(sys.modules, "strands.models", fake_models)
+
+        module_src = (
+            "from strands.models import BedrockModel\n"
+            "def handler(**kwargs):\n"
+            "    m = BedrockModel(model_id='m.test')\n"
+            "    for _ in m.stream():\n"
+            "        pass\n"
+            "    return 'ok'\n"
+        )
+        captured = []
+        _run_runner_with_module(module_src, {}, captured)
+        parsed = json.loads(captured[0])
+        record = parsed["usage"][0]
+        assert record["bedrockRequestId"] == "req-stream-1"
+
+    def test_streaming_response_without_request_id_omits_key(self, monkeypatch):
+        """Streaming path with no ResponseMetadata anywhere in the stream
+        never fabricates a bedrockRequestId."""
+        fake_mod = types.ModuleType("strands")
+
+        class _FakeAgent:
+            def __init__(self, *args, tool_handler=None, tools=None, **kwargs):
+                pass
+
+        fake_mod.Agent = _FakeAgent
+        fake_models = types.ModuleType("strands.models")
+
+        def _stream_events(self, *args, **kwargs):
+            yield {"chunk": "part1"}
+            yield {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}}
+
+        class _BedrockModelStub:
+            def __init__(self, *args, **kwargs):
+                self.model_id = kwargs.get("model_id")
+
+            def stream(self, *args, **kwargs):
+                return _stream_events(self, *args, **kwargs)
+
+        fake_models.BedrockModel = _BedrockModelStub
+        fake_mod.models = fake_models
+        monkeypatch.setitem(sys.modules, "strands", fake_mod)
+        monkeypatch.setitem(sys.modules, "strands.models", fake_models)
+
+        module_src = (
+            "from strands.models import BedrockModel\n"
+            "def handler(**kwargs):\n"
+            "    m = BedrockModel(model_id='m.test')\n"
+            "    for _ in m.stream():\n"
+            "        pass\n"
+            "    return 'ok'\n"
+        )
+        captured = []
+        _run_runner_with_module(module_src, {}, captured)
+        parsed = json.loads(captured[0])
+        record = parsed["usage"][0]
+        assert "bedrockRequestId" not in record

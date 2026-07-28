@@ -1,7 +1,13 @@
 /**
  * Unit tests for cost-query-handler.ts: routing, base-table key condition
- * discipline (PK=ORG#<claimOrg>), PUT /budgets validation, pagination
- * cap/truncated flag, and response shapes.
+ * discipline (PK=ORG#<claimOrg>), pagination cap/truncated flag, and
+ * response shapes.
+ *
+ * Budget routes (GET /budgets, PUT /budgets/{scope}) moved to
+ * cost-budget-handler.test.ts as part of the query/budgets Lambda IAM
+ * split — this handler now serves ONLY the two read-only routes and its
+ * IAM role carries zero write permission, so no test here should ever
+ * need an UpdateCommand mock.
  *
  * Cross-org leak / admin-bypass / never-Scan invariants live in the
  * companion property test (cost-query-handler.property.test.ts) — this
@@ -112,68 +118,6 @@ describe("cost-query-handler routing", () => {
     expect(body.points).toHaveLength(1);
   });
 
-  test("PUT /budgets/{scope} validates and upserts a budget row", async () => {
-    ddbMock.on(UpdateCommand).resolves({});
-
-    const event = makeEvent({
-      routeKey: "PUT /budgets/{scope}",
-      rawPath: "/budgets/org",
-      pathParameters: { scope: "org" },
-      body: JSON.stringify({
-        periodType: "monthly",
-        limitMicros: 1_000_000_000,
-        thresholds: [0.8, 1.0],
-        currency: "USD",
-      }),
-    } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>);
-
-    const res = await handler(event);
-    expect(res.statusCode).toBe(200);
-    const calls = ddbMock.commandCalls(UpdateCommand);
-    expect(calls).toHaveLength(1);
-    const input = calls[0].args[0].input;
-    expect(input.Key).toEqual({ PK: "ORG#org-1", SK: "BUDGET#ORG" });
-  });
-
-  test("PUT /budgets/{scope} rejects a malformed body with 400", async () => {
-    const event = makeEvent({
-      routeKey: "PUT /budgets/{scope}",
-      rawPath: "/budgets/org",
-      pathParameters: { scope: "org" },
-      body: JSON.stringify({ periodType: "yearly" }),
-    } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>);
-
-    const res = await handler(event);
-    expect(res.statusCode).toBe(400);
-  });
-
-  test("GET /budgets lists budgets for the caller org via base-table Query", async () => {
-    ddbMock.on(QueryCommand).resolves({
-      Items: [
-        {
-          PK: "ORG#org-1",
-          SK: "BUDGET#ORG",
-          periodType: "monthly",
-          limitMicros: 1_000_000_000,
-          thresholds: [0.8],
-          currency: "USD",
-          updatedAt: "2026-07-01T00:00:00.000Z",
-        },
-      ],
-    });
-
-    const event = makeEvent({
-      routeKey: "GET /budgets",
-      rawPath: "/budgets",
-    } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>);
-
-    const res = await handler(event);
-    expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body!);
-    expect(body.budgets).toHaveLength(1);
-    expect(body.budgets[0].scope).toBe("org");
-  });
-
   test("missing org claim returns 403 on every route", async () => {
     const event = makeEvent(
       {
@@ -186,6 +130,25 @@ describe("cost-query-handler routing", () => {
     expect(res.statusCode).toBe(403);
   });
 
+  test("GET /budgets is no longer served by this handler (moved to cost-budget-handler) -> 404", async () => {
+    const event = makeEvent({
+      routeKey: "GET /budgets",
+      rawPath: "/budgets",
+    } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>);
+    const res = await handler(event);
+    expect(res.statusCode).toBe(404);
+  });
+
+  test("PUT /budgets/{scope} is no longer served by this handler -> 404", async () => {
+    const event = makeEvent({
+      routeKey: "PUT /budgets/{scope}",
+      rawPath: "/budgets/org",
+      pathParameters: { scope: "org" },
+    } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>);
+    const res = await handler(event);
+    expect(res.statusCode).toBe(404);
+  });
+
   test("unrecognized route returns 404", async () => {
     const event = makeEvent({
       routeKey: "GET /unknown",
@@ -193,5 +156,26 @@ describe("cost-query-handler routing", () => {
     } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>);
     const res = await handler(event);
     expect(res.statusCode).toBe(404);
+  });
+
+  test("no request handled by this Lambda ever issues an UpdateCommand (read-only IAM role invariant)", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [ledgerRow()] });
+
+    await handler(
+      makeEvent({
+        routeKey: "GET /cost/summary",
+        rawPath: "/cost/summary",
+        queryStringParameters: { groupBy: "app" },
+      } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>),
+    );
+    await handler(
+      makeEvent({
+        routeKey: "GET /cost/series",
+        rawPath: "/cost/series",
+        queryStringParameters: { dimension: "org", bucket: "day" },
+      } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>),
+    );
+
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 });

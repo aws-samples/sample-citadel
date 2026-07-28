@@ -90,6 +90,24 @@ class TestCaptureConverseUsage:
         record = cu.capture_converse_usage(_converse_resp(), "m", "s")
         assert record == {}
 
+    def test_response_metadata_request_id_is_captured(self, monkeypatch):
+        import tools.converse_utils as cu
+        import tools.state as state
+
+        monkeypatch.setattr(state, "publish_usage_event", lambda sid, rec: None)
+        resp = _converse_resp()
+        resp["ResponseMetadata"] = {"RequestId": "req-intake-abc"}
+        record = cu.capture_converse_usage(resp, "m", "s")
+        assert record["bedrockRequestId"] == "req-intake-abc"
+
+    def test_missing_response_metadata_omits_bedrock_request_id_key(self, monkeypatch):
+        import tools.converse_utils as cu
+        import tools.state as state
+
+        monkeypatch.setattr(state, "publish_usage_event", lambda sid, rec: None)
+        record = cu.capture_converse_usage(_converse_resp(), "m", "s")
+        assert "bedrockRequestId" not in record
+
 
 class TestDirectCallSitesInvokeUsageCapture:
     """Integration-shaped: each direct bedrock.converse() caller must invoke

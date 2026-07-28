@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from tools.usage import (
     build_usage_record,
     extract_converse_usage,
+    extract_request_id,
     UsageCallCounter,
     SOURCE,
 )
@@ -76,6 +77,55 @@ class TestBuildUsageRecord:
             call_index=0, captured_at="2026-01-01T00:00:00+00:00",
         )
         assert record["capturedAt"] == "2026-01-01T00:00:00+00:00"
+
+    def test_bedrock_request_id_omitted_when_not_supplied(self):
+        record = build_usage_record(
+            model_id="m", input_tokens=1, output_tokens=1, latency_ms=1, call_index=0,
+        )
+        assert "bedrockRequestId" not in record
+
+    def test_bedrock_request_id_present_when_nonempty_string(self):
+        record = build_usage_record(
+            model_id="m", input_tokens=1, output_tokens=1, latency_ms=1, call_index=0,
+            bedrock_request_id="req-intake-1",
+        )
+        assert record["bedrockRequestId"] == "req-intake-1"
+
+    def test_bedrock_request_id_empty_string_omitted(self):
+        record = build_usage_record(
+            model_id="m", input_tokens=1, output_tokens=1, latency_ms=1, call_index=0,
+            bedrock_request_id="",
+        )
+        assert "bedrockRequestId" not in record
+
+    def test_bedrock_request_id_non_string_never_raises_and_omitted(self):
+        record = build_usage_record(
+            model_id="m", input_tokens=1, output_tokens=1, latency_ms=1, call_index=0,
+            bedrock_request_id=12345,
+        )
+        assert "bedrockRequestId" not in record
+
+
+class TestExtractRequestId:
+    def test_extracts_request_id_from_response_metadata(self):
+        resp = {"ResponseMetadata": {"RequestId": "req-xyz"}}
+        assert extract_request_id(resp) == "req-xyz"
+
+    def test_missing_response_metadata_returns_none(self):
+        assert extract_request_id({}) is None
+        assert extract_request_id({"output": {}}) is None
+
+    def test_none_response_never_raises(self):
+        assert extract_request_id(None) is None
+
+    def test_empty_request_id_returns_none(self):
+        assert extract_request_id({"ResponseMetadata": {"RequestId": ""}}) is None
+
+    def test_non_string_request_id_returns_none(self):
+        assert extract_request_id({"ResponseMetadata": {"RequestId": 42}}) is None
+
+    def test_malformed_response_metadata_never_raises(self):
+        assert extract_request_id({"ResponseMetadata": "not-a-dict"}) is None
 
 
 class TestExtractConverseUsage:

@@ -2,7 +2,7 @@
 import logging
 import time
 
-from tools.usage import UsageCallCounter, build_usage_record, extract_converse_usage
+from tools.usage import UsageCallCounter, build_usage_record, extract_converse_usage, extract_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ def capture_converse_usage(resp: dict, model_id: str, session_id: str, started_a
             output_tokens=output_tokens,
             latency_ms=latency_ms,
             call_index=_call_counter.next(),
+            bedrock_request_id=extract_request_id(resp),
         )
         from tools.state import publish_usage_event  # local import avoids a
         # module-load-time cycle (state.py doesn't import converse_utils).

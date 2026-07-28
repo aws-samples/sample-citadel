@@ -57,6 +57,9 @@ import {
   computeDriftPct,
   enumerateWindows,
 } from "./utils/cost-drift";
+import { fetchInvocationTokenActuals } from "./utils/cost-invocation-logs";
+import { resolvePricing } from "./utils/cost-pricing";
+import { computeTokenCost } from "./utils/cost-compute";
 import {
   RECON_PK,
   WATERMARK_SK,
@@ -107,6 +110,19 @@ function metricNamespace(): string {
 
 function tierBEnabled(): boolean {
   return process.env.COST_RECONCILER_TIER_B_ENABLED === "true";
+}
+
+function invocationLogGroup(): string | undefined {
+  const value = process.env.BEDROCK_INVOCATION_LOG_GROUP;
+  return value && value.length > 0 ? value : undefined;
+}
+
+function maxLogEventsPerWindow(): number {
+  const raw = Number(process.env.MAX_LOG_EVENTS_PER_WINDOW);
+  const DEFAULT_MAX_LOG_EVENTS_PER_WINDOW = 10_000;
+  return Number.isFinite(raw) && raw > 0
+    ? Math.trunc(raw)
+    : DEFAULT_MAX_LOG_EVENTS_PER_WINDOW;
 }
 
 function isConditionalCheckFailed(err: unknown): boolean {
@@ -300,6 +316,7 @@ async function emitMetrics(
   entries: ModelDriftEntry[],
   ledgerRowCount: number,
   unmatchedModelCount: number,
+  tierBGate?: TierBGateResult,
 ): Promise<void> {
   const env = environment();
   const namespace = metricNamespace();
@@ -373,6 +390,45 @@ async function emitMetrics(
   }
 
   void ledgerRowCount; // reserved for future cardinality metric; not emitted yet.
+
+  // Tier B gauge/counters — emitted only when Tier B actually ran this
+  // window (tierBEnabled()===true), matching the design's "Emitted only
+  // when Tier B ran" contract. TierBActive is a 0/1 gauge distinguishing
+  // "ran but gated inactive" (log_group_unconfigured etc., value 0) from
+  // "ran and matched" (value 1); the row counters are only meaningful
+  // (and only present on the result type) in the active branch.
+  if (tierBGate) {
+    metricData.push({
+      MetricName: "TierBActive",
+      Value: tierBGate.active ? 1 : 0,
+      Unit: StandardUnit.None,
+      Timestamp: timestamp,
+      Dimensions: [{ Name: "Environment", Value: env }],
+    });
+    if (tierBGate.active) {
+      metricData.push({
+        MetricName: "TierBRowsMatched",
+        Value: tierBGate.rowsMatched,
+        Unit: StandardUnit.Count,
+        Timestamp: timestamp,
+        Dimensions: [{ Name: "Environment", Value: env }],
+      });
+      metricData.push({
+        MetricName: "TierBRowsUnmatched",
+        Value: tierBGate.rowsUnmatched,
+        Unit: StandardUnit.Count,
+        Timestamp: timestamp,
+        Dimensions: [{ Name: "Environment", Value: env }],
+      });
+      metricData.push({
+        MetricName: "TierBRowsUpgraded",
+        Value: tierBGate.rowsUpgraded,
+        Unit: StandardUnit.Count,
+        Timestamp: timestamp,
+        Dimensions: [{ Name: "Environment", Value: env }],
+      });
+    }
+  }
 
   // PutMetricData batches are capped at 1000 data points; our per-window
   // cardinality is bounded by distinct models, well under that.
@@ -504,49 +560,165 @@ async function reconcileWindow(window: ReconcilerWindow): Promise<void> {
   }
 
   // Marker created — safe to emit/annotate/advance. Best-effort from here.
-  await emitMetrics(entries, ledgerRows.length, unmatchedCount);
+  let tierBGate: TierBGateResult | undefined;
+  if (tierBEnabled()) {
+    tierBGate = await tierBReconcile(window, ledgerRows);
+    if (!tierBGate.active) {
+      console.warn(
+        `cost-ledger-reconciler: Tier B gate inactive (${tierBGate.reason})`,
+        { windowStartEpochSec: window.startSec },
+      );
+    } else {
+      console.log("cost-ledger-reconciler: Tier B matching complete", {
+        windowStartEpochSec: window.startSec,
+        rowsMatched: tierBGate.rowsMatched,
+        rowsUnmatched: tierBGate.rowsUnmatched,
+        rowsUpgraded: tierBGate.rowsUpgraded,
+      });
+    }
+  }
+
+  await emitMetrics(entries, ledgerRows.length, unmatchedCount, tierBGate);
 
   const allRowKeys = [...ledgerAgg.values()].flatMap((agg) => agg.rowKeys);
   await annotateRows(allRowKeys, computedAt);
 
   await advanceWatermark(window.endSec);
-
-  if (tierBEnabled()) {
-    const gate = await tierBReconcile(window, ledgerAgg);
-    if (!gate.active) {
-      console.warn(
-        `cost-ledger-reconciler: Tier B gate inactive (${gate.reason})`,
-        { windowStartEpochSec: window.startSec },
-      );
-    }
-  }
 }
 
 /**
- * Tier B skeleton (feature-flagged OFF). Ships the gate + signature + the
- * inactive log path only — NOT the log-parsing/matching logic described in
- * the design's follow-ups. Never throws, never mutates a ledger row.
+ * Tier B — real estimate->actual matching against CloudWatch Bedrock
+ * model-invocation logs (opt-in, account-level setting).
+ *
+ * Inactive (never Scans/Filters, mutates no row) when:
+ *   - the feature flag is off (`reason: "disabled"`), or
+ *   - `BEDROCK_INVOCATION_LOG_GROUP` is unconfigured
+ *     (`reason: "log_group_unconfigured"`).
+ *
+ * When active: the candidate set is every in-window row with
+ * `estimate:true && bedrockRequestId` (rows without a request id, or
+ * already `estimate:false`, are excluded entirely — never re-evaluated).
+ * Candidates are matched against `fetchInvocationTokenActuals` by
+ * `bedrockRequestId`. A match triggers a conditional `UpdateItem`
+ * (`attribute_exists(PK) AND estimate = :true`) that recomputes cost via
+ * the shared `computeTokenCost`/`resolvePricing` helpers and flips
+ * `estimate` to `false` — idempotent: a re-run's conditional check fails
+ * harmlessly (already `estimate:false`) and is NOT counted as an upgrade.
+ * Unmatched rows stay `estimate:true` and are counted, never fabricated.
+ * An unpriced actual (catalog miss) still upgrades with `tokenCost:null` —
+ * never fabricates a price. Never throws: a log-fetch failure degrades to
+ * an empty actuals map (every candidate becomes unmatched), a per-row
+ * UpdateItem failure (other than the expected CCF) is logged and skipped
+ * so one bad row can't abort the batch.
  */
 export async function tierBReconcile(
-  _window: ReconcilerWindow,
-  ledgerAgg: Map<string, LedgerModelAggregate>,
+  window: ReconcilerWindow,
+  ledgerRows: LedgerRowProjection[],
 ): Promise<TierBGateResult> {
   if (!tierBEnabled()) {
     console.debug("cost-ledger-reconciler: Tier B disabled, skipping");
     return { active: false, reason: "disabled" };
   }
 
-  // Tier B is inert today because no ledger row carries a bedrockRequestId
-  // (upstream capture change is out of scope — follow-up). We check the
-  // in-window aggregate for any row that would plausibly carry one; today
-  // that is always none, by construction of `aggregateLedgerWindow`'s
-  // input shape.
-  void ledgerAgg;
-  console.warn(
-    "cost-ledger-reconciler: Tier B enabled but ledger rows carry no bedrockRequestId; " +
-      "per-row upgrade requires upstream capture (follow-up). Skipping.",
+  const logGroup = invocationLogGroup();
+  if (!logGroup) {
+    console.warn(
+      "cost-ledger-reconciler: Tier B enabled but BEDROCK_INVOCATION_LOG_GROUP is unconfigured; skipping",
+    );
+    return { active: false, reason: "log_group_unconfigured" };
+  }
+
+  const candidates = ledgerRows.filter(
+    (row) =>
+      row.estimate === true &&
+      typeof row.bedrockRequestId === "string" &&
+      row.bedrockRequestId.length > 0,
   );
-  return { active: false, reason: "missing_requestId" };
+
+  const actuals = await fetchInvocationTokenActuals(
+    logGroup,
+    window.startSec,
+    window.endSec,
+    maxLogEventsPerWindow(),
+  );
+
+  let rowsMatched = 0;
+  let rowsUnmatched = 0;
+  let rowsUpgraded = 0;
+
+  for (const row of candidates) {
+    const requestId = row.bedrockRequestId as string;
+    const actual = actuals.get(requestId);
+    if (!actual) {
+      rowsUnmatched += 1;
+      continue;
+    }
+    rowsMatched += 1;
+
+    const modelId =
+      typeof row.modelId === "string" && row.modelId.length > 0
+        ? row.modelId
+        : "";
+    const { pricing, reason: unpricedFallbackReason } =
+      await resolvePricing(modelId);
+    const cost = computeTokenCost(
+      actual.inputTokens,
+      actual.outputTokens,
+      pricing,
+      unpricedFallbackReason,
+    );
+    const reconciledAt = new Date().toISOString();
+    const totalTokens = actual.inputTokens + actual.outputTokens;
+
+    try {
+      await docClient.send(
+        new UpdateCommand({
+          TableName: costLedgerTable(),
+          Key: { PK: row.PK, SK: row.SK },
+          UpdateExpression:
+            "SET inputTokens = :inputTokens, outputTokens = :outputTokens, " +
+            "totalTokens = :totalTokens, tokenCost = :tokenCost, " +
+            "costMicros = :costMicros, currency = :currency, priced = :priced, " +
+            "estimate = :estimate, reconciledAt = :reconciledAt",
+          ConditionExpression: "attribute_exists(PK) AND estimate = :true",
+          ExpressionAttributeValues: {
+            ":inputTokens": actual.inputTokens,
+            ":outputTokens": actual.outputTokens,
+            ":totalTokens": totalTokens,
+            ":tokenCost": cost.tokenCost,
+            ":costMicros": cost.costMicros,
+            ":currency": cost.currency,
+            ":priced": cost.priced,
+            ":estimate": false,
+            ":reconciledAt": reconciledAt,
+            ":true": true,
+          },
+        }),
+      );
+      rowsUpgraded += 1;
+    } catch (err: unknown) {
+      if (isConditionalCheckFailed(err)) {
+        // Already upgraded by a previous run (or the row's estimate flag
+        // changed underneath us) — idempotent no-op, not an upgrade.
+        console.log(
+          "cost-ledger-reconciler: Tier B row already actualized, skipping",
+          { PK: row.PK, SK: row.SK, requestId },
+        );
+        continue;
+      }
+      console.error(
+        "cost-ledger-reconciler: Tier B row upgrade failed, skipping",
+        {
+          PK: row.PK,
+          SK: row.SK,
+          requestId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
+  }
+
+  return { active: true, rowsMatched, rowsUnmatched, rowsUpgraded };
 }
 
 export const handler = async (): Promise<{ windowsProcessed: number }> => {

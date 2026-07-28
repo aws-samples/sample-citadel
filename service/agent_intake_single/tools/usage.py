@@ -16,6 +16,8 @@ Schema (``UsageRecord``), identical field names to the arbiter version::
         "callIndex": int,      # >= 0, 0-based monotonic per process
         "capturedAt": str,     # ISO8601 UTC
         "source": "intake",
+        # optional, additive:
+        "bedrockRequestId": str,  # only present when known; NEVER fabricated
     }
 
 Defensive by contract: malformed numeric input is coerced/clamped to 0
@@ -60,14 +62,19 @@ def build_usage_record(
     latency_ms: Any,
     call_index: Any,
     captured_at: Optional[str] = None,
+    bedrock_request_id: Optional[str] = None,
 ) -> dict:
     """Build a validated ``UsageRecord`` dict with ``source="intake"``.
 
     All numeric fields are coerced/clamped to non-negative ints; ``model_id``
     defaults to ``""`` when falsy/None; ``captured_at`` defaults to the
     current UTC time in ISO8601 form when not supplied. Never raises.
+
+    ``bedrock_request_id`` is optional and additive: included only when a
+    non-empty string is supplied. Mirrors the arbiter schema's
+    omit-when-absent contract — never fabricated.
     """
-    return {
+    record: dict = {
         "modelId": model_id if isinstance(model_id, str) and model_id else "",
         "inputTokens": _coerce_non_negative_int(input_tokens),
         "outputTokens": _coerce_non_negative_int(output_tokens),
@@ -76,6 +83,30 @@ def build_usage_record(
         "capturedAt": captured_at or datetime.now(timezone.utc).isoformat(),
         "source": SOURCE,
     }
+    if isinstance(bedrock_request_id, str) and bedrock_request_id:
+        record["bedrockRequestId"] = bedrock_request_id
+    return record
+
+
+def extract_request_id(resp: Any) -> Optional[str]:
+    """Extract the Bedrock request id from a boto3 Converse-shaped response.
+
+    Mirrors ``arbiter/common/usage.py``'s ``extract_request_id`` (this
+    module is a container-local copy — see module docstring). Source per
+    SDK: ``resp["ResponseMetadata"]["RequestId"]``. Defensive by contract:
+    any non-conforming shape returns ``None`` rather than raising or
+    fabricating a value.
+    """
+    try:
+        if not isinstance(resp, dict):
+            return None
+        metadata = resp.get("ResponseMetadata")
+        if not isinstance(metadata, dict):
+            return None
+        request_id = metadata.get("RequestId")
+        return request_id if isinstance(request_id, str) and request_id else None
+    except Exception:  # noqa: BLE001 — boundary extractor must never raise
+        return None
 
 
 def extract_converse_usage(resp: Any) -> tuple[int, int]:

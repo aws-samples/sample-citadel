@@ -159,6 +159,53 @@ class TestOrchestrateSupervisorUsageCapture:
         supervisor_mod.orchestrate(initial_message="hello")
         assert mock_governed.called
 
+    @patch.object(supervisor_mod, "save_orchestration")
+    @patch.object(supervisor_mod, "create_workflow_tracking_record", return_value="req-1")
+    @patch.object(supervisor_mod, "governed_process_agent_call")
+    @patch.object(supervisor_mod, "bedrock_circuit_breaker")
+    @patch.object(supervisor_mod, "load_config_from_dynamodb")
+    def test_response_metadata_request_id_captured_on_supervisor_usage(
+        self, mock_load, mock_breaker, mock_governed, mock_tracking, mock_save
+    ):
+        """A Converse response carrying ResponseMetadata.RequestId results
+        in a supervisor_usage record with bedrockRequestId set."""
+        mock_load.return_value = {"agents": _AGENTS_CONFIG["agents"]}
+        resp = _bedrock_response_with_tool_use(
+            usage={"inputTokens": 1, "outputTokens": 1, "totalTokens": 2}
+        )
+        resp["ResponseMetadata"] = {"RequestId": "req-supervisor-1"}
+        mock_breaker.call.return_value = resp
+        mock_governed.return_value = {"ok": True}
+
+        supervisor_mod.orchestrate(initial_message="hello")
+
+        _, kwargs = mock_governed.call_args
+        supervisor_usage = kwargs.get("supervisor_usage")
+        assert supervisor_usage["bedrockRequestId"] == "req-supervisor-1"
+
+    @patch.object(supervisor_mod, "save_orchestration")
+    @patch.object(supervisor_mod, "create_workflow_tracking_record", return_value="req-1")
+    @patch.object(supervisor_mod, "governed_process_agent_call")
+    @patch.object(supervisor_mod, "bedrock_circuit_breaker")
+    @patch.object(supervisor_mod, "load_config_from_dynamodb")
+    def test_missing_response_metadata_omits_bedrock_request_id_key(
+        self, mock_load, mock_breaker, mock_governed, mock_tracking, mock_save
+    ):
+        """No ResponseMetadata on the Converse response -> the
+        supervisor_usage record never carries a bedrockRequestId key
+        (never fabricated; omitted, not null)."""
+        mock_load.return_value = {"agents": _AGENTS_CONFIG["agents"]}
+        mock_breaker.call.return_value = _bedrock_response_with_tool_use(
+            usage={"inputTokens": 1, "outputTokens": 1, "totalTokens": 2}
+        )
+        mock_governed.return_value = {"ok": True}
+
+        supervisor_mod.orchestrate(initial_message="hello")
+
+        _, kwargs = mock_governed.call_args
+        supervisor_usage = kwargs.get("supervisor_usage")
+        assert "bedrockRequestId" not in supervisor_usage
+
 
 class TestProcessAgentCallSupervisorUsageStamping:
     """process_agent_call stamps payload['supervisorUsage'] on the SQS body."""

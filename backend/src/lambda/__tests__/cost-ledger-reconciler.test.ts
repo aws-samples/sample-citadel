@@ -8,6 +8,10 @@
 
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
+import {
+  CloudWatchLogsClient,
+  FilterLogEventsCommand,
+} from "@aws-sdk/client-cloudwatch-logs";
 import { mockClient } from "aws-sdk-client-mock";
 
 process.env.COST_LEDGER_TABLE = "citadel-cost-ledger-test";
@@ -312,33 +316,213 @@ describe("cost-ledger-reconciler handler", () => {
   });
 });
 
-describe("tierBReconcile — feature gate (skeleton only)", () => {
-  test("returns inactive/disabled when COST_RECONCILER_TIER_B_ENABLED is unset/false, mutates no ledger row", async () => {
-    process.env.COST_RECONCILER_TIER_B_ENABLED = "false";
-    const result = await tierBReconcile(
-      { startSec: 0, endSec: 3600 },
-      new Map(),
-    );
-    expect(result).toEqual({ active: false, reason: "disabled" });
+describe("tierBReconcile — real matching (log-source-gated)", () => {
+  const cwlMock = mockClient(CloudWatchLogsClient);
+
+  beforeEach(() => {
+    cwlMock.reset();
+    ddbMock.reset();
+    delete process.env.BEDROCK_INVOCATION_LOG_GROUP;
+    process.env.MODEL_CATALOG_TABLE = "citadel-model-catalog-test";
+    process.env.MAX_LOG_EVENTS_PER_WINDOW = "1000";
   });
 
-  test("returns inactive/missing_requestId when flag is true but ledger rows lack bedrockRequestId", async () => {
-    process.env.COST_RECONCILER_TIER_B_ENABLED = "true";
-    const result = await tierBReconcile(
-      { startSec: 0, endSec: 3600 },
-      new Map([
-        [
-          "claude-sonnet",
-          {
-            modelId: "anthropic.claude-sonnet-5",
-            inputTokens: 10,
-            outputTokens: 5,
-            rowKeys: [{ PK: "ORG#a", SK: "s1" }],
-          },
-        ],
-      ]),
-    );
-    expect(result).toEqual({ active: false, reason: "missing_requestId" });
+  test("returns inactive/disabled when COST_RECONCILER_TIER_B_ENABLED is unset/false, mutates no ledger row", async () => {
     process.env.COST_RECONCILER_TIER_B_ENABLED = "false";
+    process.env.BEDROCK_INVOCATION_LOG_GROUP = "/aws/bedrock/invocation-logs";
+    const result = await tierBReconcile({ startSec: 0, endSec: 3600 }, []);
+    expect(result).toEqual({ active: false, reason: "disabled" });
+    process.env.COST_RECONCILER_TIER_B_ENABLED = "false";
+  });
+
+  test("returns inactive/log_group_unconfigured when flag is true but BEDROCK_INVOCATION_LOG_GROUP is unset — never Scans/Filters", async () => {
+    process.env.COST_RECONCILER_TIER_B_ENABLED = "true";
+    const result = await tierBReconcile({ startSec: 0, endSec: 3600 }, [
+      ledgerRow({ estimate: true, bedrockRequestId: "req-1" }),
+    ]);
+    expect(result).toEqual({
+      active: false,
+      reason: "log_group_unconfigured",
+    });
+    expect(cwlMock.calls()).toHaveLength(0);
+    process.env.COST_RECONCILER_TIER_B_ENABLED = "false";
+  });
+
+  test("matched estimate row is upgraded: conditional UpdateItem sets estimate=false, actual tokens/cost, reconciledAt", async () => {
+    process.env.COST_RECONCILER_TIER_B_ENABLED = "true";
+    process.env.BEDROCK_INVOCATION_LOG_GROUP = "/aws/bedrock/invocation-logs";
+
+    cwlMock.on(FilterLogEventsCommand).resolves({
+      events: [
+        {
+          message: JSON.stringify({
+            requestId: "req-1",
+            input: { inputTokenCount: 90 },
+            output: { outputTokenCount: 45 },
+          }),
+        },
+      ],
+    });
+    ddbMock.on(GetCommand).resolves({
+      Item: { inputPer1kTokens: 3, outputPer1kTokens: 15, currency: "USD" },
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    const result = await tierBReconcile({ startSec: 0, endSec: 3600 }, [
+      ledgerRow({
+        estimate: true,
+        bedrockRequestId: "req-1",
+        modelKey: "anthropic-claude-sonnet-5",
+        modelId: "anthropic.claude-sonnet-5",
+      }),
+    ]);
+
+    expect(result).toEqual({
+      active: true,
+      rowsMatched: 1,
+      rowsUnmatched: 0,
+      rowsUpgraded: 1,
+    });
+
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    const upgrade = updateCalls.find(
+      (c) => c.args[0].input.Key?.SK === ledgerRow().SK,
+    );
+    expect(upgrade).toBeDefined();
+    expect(String(upgrade!.args[0].input.ConditionExpression)).toContain(
+      "attribute_exists(PK)",
+    );
+    expect(String(upgrade!.args[0].input.ConditionExpression)).toContain(
+      "estimate",
+    );
+    const values = upgrade!.args[0].input.ExpressionAttributeValues!;
+    expect(values[":inputTokens"]).toBe(90);
+    expect(values[":outputTokens"]).toBe(45);
+    expect(values[":estimate"]).toBe(false);
+    expect(values[":reconciledAt"]).toBeDefined();
+  });
+
+  test("idempotent re-run: conditional UpdateItem CCF on an already-upgraded row is a no-op, not an error", async () => {
+    process.env.COST_RECONCILER_TIER_B_ENABLED = "true";
+    process.env.BEDROCK_INVOCATION_LOG_GROUP = "/aws/bedrock/invocation-logs";
+
+    cwlMock.on(FilterLogEventsCommand).resolves({
+      events: [
+        {
+          message: JSON.stringify({
+            requestId: "req-1",
+            input: { inputTokenCount: 90 },
+            output: { outputTokenCount: 45 },
+          }),
+        },
+      ],
+    });
+    ddbMock.on(GetCommand).resolves({
+      Item: { inputPer1kTokens: 3, outputPer1kTokens: 15, currency: "USD" },
+    });
+    ddbMock.on(UpdateCommand).callsFake(() => {
+      const err = new Error("ConditionalCheckFailedException");
+      err.name = "ConditionalCheckFailedException";
+      throw err;
+    });
+
+    const result = await tierBReconcile({ startSec: 0, endSec: 3600 }, [
+      ledgerRow({ estimate: true, bedrockRequestId: "req-1" }),
+    ]);
+
+    expect(result.active).toBe(true);
+    if (result.active) {
+      expect(result.rowsUpgraded).toBe(0);
+    }
+  });
+
+  test("unmatched estimate rows (no log line for their bedrockRequestId) stay counted, no UpdateItem attempted", async () => {
+    process.env.COST_RECONCILER_TIER_B_ENABLED = "true";
+    process.env.BEDROCK_INVOCATION_LOG_GROUP = "/aws/bedrock/invocation-logs";
+
+    cwlMock.on(FilterLogEventsCommand).resolves({ events: [] });
+
+    const result = await tierBReconcile({ startSec: 0, endSec: 3600 }, [
+      ledgerRow({ estimate: true, bedrockRequestId: "req-nomatch" }),
+    ]);
+
+    expect(result).toEqual({
+      active: true,
+      rowsMatched: 0,
+      rowsUnmatched: 1,
+      rowsUpgraded: 0,
+    });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test("rows without a bedrockRequestId or already estimate:false are excluded from the candidate set entirely", async () => {
+    process.env.COST_RECONCILER_TIER_B_ENABLED = "true";
+    process.env.BEDROCK_INVOCATION_LOG_GROUP = "/aws/bedrock/invocation-logs";
+
+    cwlMock.on(FilterLogEventsCommand).resolves({ events: [] });
+
+    const result = await tierBReconcile({ startSec: 0, endSec: 3600 }, [
+      ledgerRow({ estimate: true }), // no bedrockRequestId
+      ledgerRow({ estimate: false, bedrockRequestId: "req-already-actual" }),
+    ]);
+
+    expect(result).toEqual({
+      active: true,
+      rowsMatched: 0,
+      rowsUnmatched: 0,
+      rowsUpgraded: 0,
+    });
+  });
+
+  test("unpriced actual (catalog miss) still upgrades estimate=false with tokenCost:null, never fabricates a price", async () => {
+    process.env.COST_RECONCILER_TIER_B_ENABLED = "true";
+    process.env.BEDROCK_INVOCATION_LOG_GROUP = "/aws/bedrock/invocation-logs";
+
+    cwlMock.on(FilterLogEventsCommand).resolves({
+      events: [
+        {
+          message: JSON.stringify({
+            requestId: "req-1",
+            input: { inputTokenCount: 10 },
+            output: { outputTokenCount: 5 },
+          }),
+        },
+      ],
+    });
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    const result = await tierBReconcile({ startSec: 0, endSec: 3600 }, [
+      ledgerRow({ estimate: true, bedrockRequestId: "req-1" }),
+    ]);
+
+    expect(result.active).toBe(true);
+    if (result.active) expect(result.rowsUpgraded).toBe(1);
+
+    const upgrade = ddbMock
+      .commandCalls(UpdateCommand)
+      .find((c) => c.args[0].input.Key?.SK === ledgerRow().SK)!;
+    const values = upgrade.args[0].input.ExpressionAttributeValues!;
+    expect(values[":estimate"]).toBe(false);
+    expect(values[":tokenCost"]).toBeNull();
+  });
+
+  test("a FilterLogEvents failure degrades to inactive rather than throwing", async () => {
+    process.env.COST_RECONCILER_TIER_B_ENABLED = "true";
+    process.env.BEDROCK_INVOCATION_LOG_GROUP = "/aws/bedrock/invocation-logs";
+    cwlMock.on(FilterLogEventsCommand).rejects(new Error("access denied"));
+
+    const result = await tierBReconcile({ startSec: 0, endSec: 3600 }, [
+      ledgerRow({ estimate: true, bedrockRequestId: "req-1" }),
+    ]);
+
+    // fetchInvocationTokenActuals degrades to an empty map on failure, so
+    // this row is simply unmatched — never throws.
+    expect(result).toEqual({
+      active: true,
+      rowsMatched: 0,
+      rowsUnmatched: 1,
+      rowsUpgraded: 0,
+    });
   });
 });
