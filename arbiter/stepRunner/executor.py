@@ -14,6 +14,14 @@ import logging
 import os
 from datetime import datetime, timezone
 
+# Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
+# import BEFORE any boto3 client this module (or its `events` sibling)
+# constructs, so patch_all() instruments botocore ahead of client creation.
+# Hard import — arbiter/common/ is already a required dependency of this
+# module (see the `from common import workflow_contract` hard import below),
+# so no deferred-bundling fallback is needed here.
+import common.tracing # noqa: F401 — import activates tracing as a side effect
+
 import events
 from dag import (
     find_root_nodes,

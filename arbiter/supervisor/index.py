@@ -10,6 +10,16 @@ from typing import Any
 import boto3
 import os
 
+# Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
+# activate X-Ray patching of botocore BEFORE any boto3 client below is
+# constructed (sqs/dynamodb/bedrock-runtime/events at module scope just
+# below). Import path mirrors the sys.path insertion immediately following
+# this block — arbiter/conftest.py adds arbiter/supervisor/ to sys.path for
+# pytest; the Lambda asset layout needs the sys.path insert below for
+# `from common.tracing import configure` to resolve `common` as a sibling
+# of `supervisor/` (arbiter/common/), so the import is placed AFTER that
+# insertion rather than before.
+
 # Ensure this file's own directory is on sys.path before the flat
 # same-directory imports below. In the repo/pytest layout,
 # arbiter/conftest.py already inserts arbiter/supervisor/ onto sys.path, so
@@ -79,6 +89,13 @@ from model_config_loader import load_model_id
 # today — unlike workerWrapper's deferred-bundling situation for
 # ``tools_config``/``workflow_contract``.
 from common.usage import build_usage_record, extract_converse_usage, extract_request_id
+
+# Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
+# import BEFORE the sqs/dynamodb/bedrock-runtime/events boto3 clients are
+# constructed below so patch_all() instruments botocore ahead of client
+# creation. Ships alongside the supervisor Lambda asset the same way
+# common.usage does (see comment above); hard import, no defensive fallback.
+import common.tracing  # noqa: F401 — import activates tracing as a side effect
 
 
 def _load_governance_package():

@@ -3,6 +3,7 @@ import "source-map-support/register";
 import * as cdk from "aws-cdk-lib";
 // (Aspects accessed via cdk.Aspects)
 import { AwsSolutionsChecks, NagSuppressions } from "cdk-nag";
+import { EnableLambdaTracing } from "../lib/tracing-aspect";
 import { ServicesStack } from "../lib/services-stack";
 import { BackendStack } from "../lib/backend-stack";
 import { ArbiterStack } from "../lib/arbiter-stack";
@@ -271,6 +272,28 @@ backendStack.addPublishHandlerResolvers(publishHandlerArn);
 
 // Note: Backend stack will be updated after services stack to get the gateway ID
 // This creates a circular dependency that CDK will handle by deploying in two phases
+
+// Tracing foundation — EnableLambdaTracing Aspect (architect task
+// 5459301e-1e7b-4bfd-bccb-b106aba2748c). Orchestrator scope amendment: apply
+// to every Lambda-bearing stack, not just backend+arbiter as the original
+// design proposed — the acceptance path's chat resolvers live in
+// citadel-projects post-split, so projects/registry/services/governance/
+// telemetry/gateway all need coverage too. FrontendStack is intentionally
+// excluded: its one Lambda (UpdateEmailTemplatesFunction) already sets
+// `tracing: Tracing.ACTIVE` directly and is a one-shot custom-resource
+// trigger, not on any traced request path.
+for (const lambdaBearingStack of [
+  backendStack,
+  projectsStack,
+  registryStack,
+  servicesStack,
+  governanceStack,
+  arbiterStack,
+  telemetryStack,
+  gatewayStack,
+]) {
+  cdk.Aspects.of(lambdaBearingStack).add(new EnableLambdaTracing());
+}
 
 // O-06: Tagging strategy — apply consistent tags across all stacks
 cdk.Tags.of(app).add("Project", "Citadel");

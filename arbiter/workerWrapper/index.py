@@ -5,6 +5,17 @@ import subprocess
 import sys
 import boto3
 
+# Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
+# import BEFORE any boto3 client is constructed below so patch_all()
+# instruments botocore ahead of client creation. Same deferred-bundling
+# situation as workflow_contract/common.usage below — the worker Lambda
+# bundle currently ships only arbiter/workerWrapper/. A missing import
+# must NOT break dispatch: tracing is best-effort, never required.
+try:
+    import common.tracing # noqa: F401,E402 — import activates tracing as a side effect
+except ImportError: # pragma: no cover — Lambda bundle path before follow-up
+    pass
+
 from worker_governance import (
     apply_step_constraints,
     apply_tool_restrictions,
