@@ -39,6 +39,26 @@ export interface TelemetryStackProps extends cdk.StackProps {
    * below is scoped to exactly this one log group's ARN.
    */
   bedrockInvocationLogGroupName?: string;
+  /**
+   * Executions table (from BackendStack/ArbiterStack) — read-only
+   * ownership resolution for GET /traces/by-execution/{executionId}
+   * (design §1: executions.orgId is the direct ownership check).
+   */
+  executionsTable: dynamodb.ITable;
+  /**
+   * Conversations table (from ProjectsStack) — threaded for
+   * completeness/future use; the current ownership check for
+   * GET /traces/by-conversation/{conversationId} resolves directly via
+   * projectsTable (conversations are keyed by projectId, no separate
+   * conversationId indirection to look up).
+   */
+  conversationsTable: dynamodb.ITable;
+  /**
+   * Projects table (from ProjectsStack) — read-only ownership resolution
+   * for GET /traces/by-conversation/{conversationId} (design §1:
+   * conversation -> projectId -> projects.orgId).
+   */
+  projectsTable: dynamodb.ITable;
 }
 
 /**
@@ -56,6 +76,7 @@ export class TelemetryStack extends cdk.Stack {
   public readonly costQueryHandlerFunction: lambda.Function;
   public readonly costBudgetHandlerFunction: lambda.Function;
   public readonly costBudgetEvaluatorFunction: lambda.Function;
+  public readonly traceQueryHandlerFunction: lambda.Function;
   public readonly costHttpApi: apigatewayv2.HttpApi;
   /** HttpApi endpoint URL — threaded into FrontendStack (pass 2) as `aws_cost_api_url`. */
   public readonly costApiUrl: string;
@@ -434,6 +455,76 @@ export class TelemetryStack extends cdk.Stack {
       }),
     );
 
+    // --- Trace query API (waterfall trace viewer, pass 1) -----------------
+    // Reuses the SAME costHttpApi/JWT authorizer (design §4 "CONFIG
+    // DECISION" — zero new frontend/CDK config, invariant 7). Read-only
+    // role: dynamodb:GetItem/BatchGetItem on the 3 ownership tables +
+    // xray:GetTraceSummaries/BatchGetTraces — NEVER a write action, NEVER
+    // xray:Put* (invariant 3). Ownership (execution/conversation -> org)
+    // is checked in-Lambda BEFORE any X-Ray call (invariant 1); the raw
+    // /traces/{traceId} route is admin-only (invariant 2) — see
+    // trace-query-handler.ts.
+    this.traceQueryHandlerFunction = new lambda.Function(
+      this,
+      "TraceQueryHandler",
+      {
+        functionName: `citadel-trace-query-handler-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "trace-query-handler.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(30),
+        environment: {
+          EXECUTIONS_TABLE: props.executionsTable.tableName,
+          CONVERSATIONS_TABLE: props.conversationsTable.tableName,
+          PROJECTS_TABLE: props.projectsTable.tableName,
+          ENVIRONMENT: props.environment,
+        },
+        logGroup: new logs.LogGroup(this, "TraceQueryHandlerLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    // Read-only ownership lookups — GetItem only, on exactly the 3 tables
+    // the design's ownership resolution needs. grantReadData (not a
+    // broader grantReadWriteData) so this role can never mutate any of
+    // them.
+    props.executionsTable.grantReadData(this.traceQueryHandlerFunction);
+    props.conversationsTable.grantReadData(this.traceQueryHandlerFunction);
+    props.projectsTable.grantReadData(this.traceQueryHandlerFunction);
+
+    // X-Ray read APIs have no resource-level IAM scoping — AWS requires
+    // Resource:* for GetTraceSummaries/BatchGetTraces (design §1
+    // "Justification"). This is the ONLY Resource:* on this role; it
+    // carries zero write actions and zero xray:Put* (invariant 3).
+    this.traceQueryHandlerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["xray:GetTraceSummaries", "xray:BatchGetTraces"],
+        resources: ["*"],
+      }),
+    );
+
+    NagSuppressions.addResourceSuppressions(
+      this.traceQueryHandlerFunction.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "X-Ray read APIs (xray:GetTraceSummaries, xray:BatchGetTraces) " +
+            "have no resource-level IAM scoping — AWS requires Resource:* " +
+            "for these actions. The trace handler's IAM role carries no " +
+            "other Resource:* grant and zero write/xray:Put* actions; " +
+            "authorization is enforced in-Lambda via entry-key ownership " +
+            "(execution/conversation -> org) checked BEFORE any X-Ray call, " +
+            "plus an admin-only gate on the raw trace-id route.",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+      true,
+    );
+
     // AwsSolutions-APIG1: the default (auto-created) HttpApi stage needs its
     // own access-log destination — reuses the same
     // ONE_WEEK-retention/DESTROY-on-delete LogGroup convention as every other
@@ -534,6 +625,36 @@ export class TelemetryStack extends cdk.Stack {
       path: "/budgets/{scope}",
       methods: [apigatewayv2.HttpMethod.PUT],
       integration: costBudgetIntegration,
+      authorizer: costJwtAuthorizer,
+    });
+
+    // Waterfall trace viewer routes (pass 1) — same costHttpApi, same JWT
+    // authorizer, new TraceQueryHandler integration. All 3 routes are
+    // GET-only; the handler itself enforces ownership/admin gating
+    // in-Lambda (design §1) — the authorizer only proves WHO is calling,
+    // not WHAT org/trace they may see.
+    const traceQueryIntegration =
+      new apigatewayv2Integrations.HttpLambdaIntegration(
+        "TraceQueryIntegration",
+        this.traceQueryHandlerFunction,
+      );
+
+    this.costHttpApi.addRoutes({
+      path: "/traces/by-execution/{executionId}",
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration: traceQueryIntegration,
+      authorizer: costJwtAuthorizer,
+    });
+    this.costHttpApi.addRoutes({
+      path: "/traces/by-conversation/{conversationId}",
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration: traceQueryIntegration,
+      authorizer: costJwtAuthorizer,
+    });
+    this.costHttpApi.addRoutes({
+      path: "/traces/{traceId}",
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration: traceQueryIntegration,
       authorizer: costJwtAuthorizer,
     });
 

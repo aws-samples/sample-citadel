@@ -20,6 +20,48 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import { TelemetryStack } from "../telemetry-stack";
 
+function buildSupportTables(supportStack: cdk.Stack): {
+  modelCatalogTable: dynamodb.Table;
+  executionsTable: dynamodb.Table;
+  conversationsTable: dynamodb.Table;
+  projectsTable: dynamodb.Table;
+} {
+  const modelCatalogTable = new dynamodb.Table(
+    supportStack,
+    "TestModelCatalogTable",
+    {
+      partitionKey: { name: "modelKey", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const executionsTable = new dynamodb.Table(
+    supportStack,
+    "TestExecutionsTable",
+    {
+      partitionKey: {
+        name: "executionId",
+        type: dynamodb.AttributeType.STRING,
+      },
+    },
+  );
+  const conversationsTable = new dynamodb.Table(
+    supportStack,
+    "TestConversationsTable",
+    {
+      partitionKey: { name: "projectId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const projectsTable = new dynamodb.Table(supportStack, "TestProjectsTable", {
+    partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
+  });
+  return {
+    modelCatalogTable,
+    executionsTable,
+    conversationsTable,
+    projectsTable,
+  };
+}
+
 function buildStack(): { template: Template; stack: TelemetryStack } {
   const app = new cdk.App();
   const supportStack = new cdk.Stack(app, "SupportStack", {
@@ -29,13 +71,12 @@ function buildStack(): { template: Template; stack: TelemetryStack } {
   const userPool = new cognito.UserPool(supportStack, "TestUserPool");
   const userPoolClient = userPool.addClient("TestUserPoolClient");
   const agentEventBus = new events.EventBus(supportStack, "TestEventBus");
-  const modelCatalogTable = new dynamodb.Table(
-    supportStack,
-    "TestModelCatalogTable",
-    {
-      partitionKey: { name: "modelKey", type: dynamodb.AttributeType.STRING },
-    },
-  );
+  const {
+    modelCatalogTable,
+    executionsTable,
+    conversationsTable,
+    projectsTable,
+  } = buildSupportTables(supportStack);
 
   const stack = new TelemetryStack(app, "TestTelemetryStack", {
     environment: "test",
@@ -46,6 +87,9 @@ function buildStack(): { template: Template; stack: TelemetryStack } {
     userPoolClient,
     frontendOrigin: "https://example.test",
     bedrockInvocationLogGroupName: "/aws/bedrock/invocation-logs",
+    executionsTable,
+    conversationsTable,
+    projectsTable,
   });
 
   return { template: Template.fromStack(stack), stack };
@@ -267,13 +311,12 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
     const userPool = new cognito.UserPool(supportStack, "TestUserPool");
     const userPoolClient = userPool.addClient("TestUserPoolClient");
     const agentEventBus = new events.EventBus(supportStack, "TestEventBus");
-    const modelCatalogTable = new dynamodb.Table(
-      supportStack,
-      "TestModelCatalogTable",
-      {
-        partitionKey: { name: "modelKey", type: dynamodb.AttributeType.STRING },
-      },
-    );
+    const {
+      modelCatalogTable,
+      executionsTable,
+      conversationsTable,
+      projectsTable,
+    } = buildSupportTables(supportStack);
     const stack = new TelemetryStack(app, "TestTelemetryStackUnconfigured", {
       environment: "test",
       env: { account: "123456789012", region: "us-east-1" },
@@ -283,6 +326,9 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       userPoolClient,
       frontendOrigin: "https://example.test",
       // bedrockInvocationLogGroupName intentionally omitted
+      executionsTable,
+      conversationsTable,
+      projectsTable,
     });
     const template = Template.fromStack(stack);
 
@@ -348,5 +394,184 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
         }),
       },
     });
+  });
+});
+
+describe("TelemetryStack — TraceQueryHandler (waterfall trace viewer, pass 1)", () => {
+  test("declares a TraceQueryHandler Lambda", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "trace-query-handler.handler",
+    });
+  });
+
+  test("TraceQueryHandler role grants xray:GetTraceSummaries and xray:BatchGetTraces with Resource:* (nag-suppressed)", () => {
+    const { template } = buildStack();
+    const allPolicies = template.findResources("AWS::IAM::Policy");
+    let sawSummaries = false;
+    let sawBatchGet = false;
+    for (const [, resource] of Object.entries(allPolicies)) {
+      const roles = resource.Properties?.Roles ?? [];
+      const roleRefs = JSON.stringify(roles);
+      if (!roleRefs.includes("TraceQueryHandler")) continue;
+      const statements = resource.Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of statements) {
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        if (actions.includes("xray:GetTraceSummaries")) {
+          sawSummaries = true;
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          expect(resources).toContain("*");
+        }
+        if (actions.includes("xray:BatchGetTraces")) {
+          sawBatchGet = true;
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          expect(resources).toContain("*");
+        }
+      }
+    }
+    expect(sawSummaries).toBe(true);
+    expect(sawBatchGet).toBe(true);
+  });
+
+  test("TraceQueryHandler role holds ZERO write actions and ZERO xray:Put* (invariant 3)", () => {
+    const { template } = buildStack();
+    const allPolicies = template.findResources("AWS::IAM::Policy");
+    const writeActionPrefixes = [
+      "PutItem",
+      "UpdateItem",
+      "DeleteItem",
+      "BatchWriteItem",
+    ];
+    let sawTraceQueryRole = false;
+    for (const [, resource] of Object.entries(allPolicies)) {
+      const roles = resource.Properties?.Roles ?? [];
+      const roleRefs = JSON.stringify(roles);
+      if (!roleRefs.includes("TraceQueryHandler")) continue;
+      sawTraceQueryRole = true;
+      const statements = resource.Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of statements) {
+        const actions: string[] = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        for (const action of actions) {
+          expect(action.startsWith("xray:Put")).toBe(false);
+          expect(writeActionPrefixes.some((w) => action.endsWith(w))).toBe(
+            false,
+          );
+        }
+      }
+    }
+    expect(sawTraceQueryRole).toBe(true);
+  });
+
+  test("TraceQueryHandler role has read-only grants on executions, conversations, and projects tables", () => {
+    const { template } = buildStack();
+    const allPolicies = template.findResources("AWS::IAM::Policy");
+    const readActions = new Set<string>();
+    for (const [, resource] of Object.entries(allPolicies)) {
+      const roles = resource.Properties?.Roles ?? [];
+      const roleRefs = JSON.stringify(roles);
+      if (!roleRefs.includes("TraceQueryHandler")) continue;
+      const statements = resource.Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of statements) {
+        const actions: string[] = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        actions.forEach((a) => readActions.add(a));
+      }
+    }
+    expect(
+      [...readActions].some(
+        (a) => a === "dynamodb:GetItem" || a === "dynamodb:BatchGetItem",
+      ),
+    ).toBe(true);
+  });
+
+  test("a NagSuppressions IAM5 entry exists for the TraceQueryHandler's X-Ray Resource:* actions", () => {
+    const { stack } = buildStack();
+    const role = stack.traceQueryHandlerFunction.role!;
+    const cfn = role.node.defaultChild as {
+      cfnOptions?: { metadata?: unknown };
+    };
+    const metadata = cfn?.cfnOptions?.metadata as
+      | { cdk_nag?: { rules_to_suppress?: Array<Record<string, unknown>> } }
+      | undefined;
+    const rules = metadata?.cdk_nag?.rules_to_suppress ?? [];
+    // cdk-nag base64-encodes long suppression reasons (is_reason_encoded:
+    // true) — decode before asserting on content so this test is robust
+    // to reason length, not just short reasons.
+    const decodedReasons = rules.map((r) => {
+      const reason = String(r.reason ?? "");
+      return r.is_reason_encoded
+        ? Buffer.from(reason, "base64").toString("utf-8")
+        : reason;
+    });
+    const iam5Rule = rules.find((r) => r.id === "AwsSolutions-IAM5");
+    expect(iam5Rule).toBeDefined();
+    expect((iam5Rule?.applies_to as string[]) ?? []).toContain("Resource::*");
+    expect(decodedReasons.join(" ").toLowerCase()).toContain("x-ray");
+  });
+
+  test("3 trace routes are wired on the existing costHttpApi, all with the JWT authorizer", () => {
+    const { template } = buildStack();
+    const routes = template.findResources("AWS::ApiGatewayV2::Route");
+    const routeKeys = Object.values(routes).map((r) => r.Properties?.RouteKey);
+    expect(routeKeys).toEqual(
+      expect.arrayContaining([
+        "GET /traces/by-execution/{executionId}",
+        "GET /traces/by-conversation/{conversationId}",
+        "GET /traces/{traceId}",
+      ]),
+    );
+
+    const traceRoutes = Object.values(routes).filter((r) =>
+      String(r.Properties?.RouteKey ?? "").startsWith("GET /traces"),
+    );
+    for (const route of traceRoutes) {
+      expect(route.Properties?.AuthorizationType).toBe("JWT");
+      expect(route.Properties?.AuthorizerId).toBeDefined();
+    }
+
+    // Exactly one HttpApi in this stack — the design's zero-new-config
+    // invariant (7): trace routes reuse costHttpApi, no second API.
+    const apis = template.findResources("AWS::ApiGatewayV2::Api");
+    expect(Object.keys(apis)).toHaveLength(1);
+  });
+
+  test("trace routes integrate with the TraceQueryHandler Lambda, not the cost Lambdas", () => {
+    const { template } = buildStack();
+    const routes = template.findResources("AWS::ApiGatewayV2::Route");
+    const integrations = template.findResources(
+      "AWS::ApiGatewayV2::Integration",
+    );
+
+    function targetForRoute(routeKey: string): string {
+      const entry = Object.values(routes).find(
+        (r) => r.Properties?.RouteKey === routeKey,
+      );
+      return JSON.stringify(entry?.Properties?.Target ?? "");
+    }
+
+    const byExecTarget = targetForRoute(
+      "GET /traces/by-execution/{executionId}",
+    );
+    const byConvTarget = targetForRoute(
+      "GET /traces/by-conversation/{conversationId}",
+    );
+    const rawTraceTarget = targetForRoute("GET /traces/{traceId}");
+    const summaryTarget = targetForRoute("GET /cost/summary");
+
+    // All 3 trace routes share one integration target (the TraceQueryHandler).
+    expect(byExecTarget).toBe(byConvTarget);
+    expect(byExecTarget).toBe(rawTraceTarget);
+    // And that target differs from the cost query integration.
+    expect(byExecTarget).not.toBe(summaryTarget);
+    void integrations;
   });
 });

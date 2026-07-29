@@ -221,6 +221,14 @@ const telemetryStack = new TelemetryStack(
     userPoolClient: backendStack.userPoolClient,
     frontendOrigin,
     bedrockInvocationLogGroupName,
+    // Waterfall trace viewer (pass 1) — ownership resolution reads.
+    // executionsTable/conversationsTable/projectsTable all live on
+    // BackendStack (confirmed: backend-stack.ts declares all 3 as public
+    // readonly dynamodb.Table fields), so no additional stack dependency
+    // is introduced beyond the existing backendStack dependency below.
+    executionsTable: backendStack.executionsTable,
+    conversationsTable: backendStack.conversationsTable,
+    projectsTable: backendStack.projectsTable,
   },
 );
 telemetryStack.addStackDependency(backendStack);

@@ -25,7 +25,7 @@ describe("TelemetryStack — cost query surface (pass 1: API + authorizer + budg
     });
   });
 
-  test("declares all 4 cost-query routes", () => {
+  test("declares all 7 costHttpApi routes (4 cost-query + 3 waterfall trace viewer, pass 1)", () => {
     const routes = template.findResources("AWS::ApiGatewayV2::Route");
     const routeKeys = Object.values(routes)
       .map((r: any) => r.Properties.RouteKey)
@@ -36,6 +36,9 @@ describe("TelemetryStack — cost query surface (pass 1: API + authorizer + budg
         "GET /cost/series",
         "GET /cost/summary",
         "PUT /budgets/{scope}",
+        "GET /traces/by-execution/{executionId}",
+        "GET /traces/by-conversation/{conversationId}",
+        "GET /traces/{traceId}",
       ].sort(),
     );
   });
@@ -224,6 +227,30 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
   const userPool = new cognito.UserPool(helperStack, "UserPool");
   const userPoolClient = userPool.addClient("UserPoolClient");
 
+  const executionsTable = new dynamodb.Table(helperStack, "ExecutionsTable", {
+    tableName: "citadel-executions-test",
+    partitionKey: { name: "executionId", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+  });
+  const conversationsTable = new dynamodb.Table(
+    helperStack,
+    "ConversationsTable",
+    {
+      tableName: "citadel-conversations-test",
+      partitionKey: { name: "projectId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "timestamp", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  const projectsTable = new dynamodb.Table(helperStack, "ProjectsTable", {
+    tableName: "citadel-projects-test",
+    partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+  });
+
   const stack = new TelemetryStack(app, "TestTelemetryStack", {
     environment: "test",
     env: { account: "123456789012", region: "us-east-1" },
@@ -233,6 +260,9 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
     userPoolClient,
     frontendOrigin: "https://app.example.com",
     bedrockInvocationLogGroupName: "/aws/bedrock/invocation-logs",
+    executionsTable,
+    conversationsTable,
+    projectsTable,
   });
 
   const template = Template.fromStack(stack);
