@@ -11,17 +11,70 @@ import {
   EventBridgeClient,
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 import { v4 as uuidv4 } from "uuid";
 import { getUserId } from "../utils/appsync";
 import { extractOrgFromEvent } from "../utils/auth-event";
+import {
+  METRIC_NAMESPACE,
+  METRIC_NODE_COLD_START,
+  UNIT_COUNT,
+} from "../utils/metrics-constants";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 const eventBridgeClient = new EventBridgeClient({});
+const cloudWatchClient = new CloudWatchClient({});
 
 const EXECUTIONS_TABLE = process.env.EXECUTIONS_TABLE!;
 const WORKFLOWS_TABLE = process.env.WORKFLOWS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
+
+// Cold-start detection (module-scope flag): a Lambda execution environment
+// reuses this module across invocations, so a plain module-level boolean —
+// flipped to false the first time the handler runs in this container — is
+// the cheapest possible signal. `true` (the import-time default) only on the
+// FIRST invocation in a fresh container; every subsequent invocation in the
+// same (warm) container observes `false`.
+let isColdStart = true;
+
+/**
+ * Emit NodeColdStart exactly once per container lifetime, best-effort.
+ * Reads-then-flips `isColdStart` so a re-entrant/duplicate call within the
+ * same container never double-emits. Wrapped so a CloudWatch failure
+ * (throttling, missing PutMetricData permission, network) can never break
+ * the resolver — mirrors the step runner's `_emit_metric` best-effort
+ * contract (arbiter/stepRunner/executor.py) and this repo's emf.ts
+ * "never throws" convention.
+ */
+async function emitColdStartMetricIfApplicable(): Promise<void> {
+  if (!isColdStart) return;
+  isColdStart = false;
+  try {
+    await cloudWatchClient.send(
+      new PutMetricDataCommand({
+        Namespace: METRIC_NAMESPACE,
+        MetricData: [
+          {
+            MetricName: METRIC_NODE_COLD_START,
+            Value: 1,
+            Unit: UNIT_COUNT,
+          },
+        ],
+      }),
+    );
+  } catch (err) {
+    console.error("execution-resolver: cold-start metric emit failed", err);
+  }
+}
+
+/** Test-only: reset the cold-start flag to its fresh-container default. */
+export function __resetColdStartForTest(): void {
+  isColdStart = true;
+}
 
 /**
  * Merged view of every argument shape this resolver's fields receive.
@@ -184,6 +237,10 @@ export const handler: AppSyncResolverHandler<
   unknown
 > = async (event) => {
   console.log("Execution resolver event:", JSON.stringify(event, null, 2));
+  // Best-effort: awaited (not fire-and-forget) so the metric call completes
+  // before the Lambda execution environment is frozen post-return. Wrapped
+  // internally so a CloudWatch failure can never fail the resolver.
+  await emitColdStartMetricIfApplicable();
 
   const { info, arguments: args, identity } = event;
   const fieldName = info.fieldName;

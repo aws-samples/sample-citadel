@@ -177,10 +177,80 @@ class TestNodeDurationMetric:
 
 
 # ---------------------------------------------------------------------------
-# NodeFailure on terminal failure
+# NodeQueueWaitMs on completion (dispatch -> worker-start delta)
 # ---------------------------------------------------------------------------
 
-class TestNodeFailureMetric:
+class TestNodeQueueWaitMetric:
+    def test_completion_emits_queue_wait_from_dispatch_and_worker_start(self, mock_exec, monkeypatch):
+        import executor
+
+        monkeypatch.delenv('WORKER_QUEUE_URL', raising=False)
+        mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SINGLE_WF)}
+        mock_exec['executions_table'].get_item.return_value = {'Item': _single_exec()}
+
+        executor.handle_node_completion(
+            'exec-single', 'n0', {'ok': True},
+            dispatched_at='2026-01-01T00:00:00.000000+00:00',
+            worker_started_at='2026-01-01T00:00:00.750000+00:00',
+        )
+
+        calls = _metric_calls(mock_exec['cw'], 'NodeQueueWaitMs')
+        assert len(calls) == 1
+        assert calls[0]['Namespace'] == METRIC_NAMESPACE
+        datum = calls[0]['MetricData'][0]
+        assert datum['Unit'] == 'Milliseconds'
+        assert datum['Value'] == pytest.approx(750.0)
+
+    def test_completion_without_dispatch_timestamps_skips_queue_wait(self, mock_exec, monkeypatch):
+        import executor
+
+        monkeypatch.delenv('WORKER_QUEUE_URL', raising=False)
+        mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SINGLE_WF)}
+        mock_exec['executions_table'].get_item.return_value = {'Item': _single_exec()}
+
+        # Pre-feature caller: neither dispatched_at nor worker_started_at
+        # supplied. Best-effort — no metric, workflow still completes.
+        executor.handle_node_completion('exec-single', 'n0', {'ok': True})
+
+        assert _metric_calls(mock_exec['cw'], 'NodeQueueWaitMs') == []
+        mock_exec['events'].publish_workflow_completed.assert_called_once()
+
+    def test_completion_with_only_one_timestamp_skips_queue_wait(self, mock_exec, monkeypatch):
+        import executor
+
+        monkeypatch.delenv('WORKER_QUEUE_URL', raising=False)
+        mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SINGLE_WF)}
+        mock_exec['executions_table'].get_item.return_value = {'Item': _single_exec()}
+
+        # Only dispatched_at present (e.g. worker on an older deploy that
+        # doesn't echo workerStartedAt yet) — never fabricate the other side.
+        executor.handle_node_completion(
+            'exec-single', 'n0', {'ok': True},
+            dispatched_at='2026-01-01T00:00:00.000000+00:00',
+        )
+
+        assert _metric_calls(mock_exec['cw'], 'NodeQueueWaitMs') == []
+
+    def test_queue_wait_metric_failure_does_not_break_completion(self, mock_exec, monkeypatch):
+        import executor
+
+        monkeypatch.delenv('WORKER_QUEUE_URL', raising=False)
+        mock_exec['cw'].put_metric_data.side_effect = RuntimeError('cloudwatch down')
+        mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SINGLE_WF)}
+        mock_exec['executions_table'].get_item.return_value = {'Item': _single_exec()}
+
+        executor.handle_node_completion(
+            'exec-single', 'n0', {'ok': True},
+            dispatched_at='2026-01-01T00:00:00+00:00',
+            worker_started_at='2026-01-01T00:00:01+00:00',
+        )
+
+        mock_exec['events'].publish_workflow_completed.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# NodeFailure on terminal failure
+# ---------------------------------------------------------------------------
     def test_terminal_failure_emits_nodefailure_count(self, mock_exec):
         import executor
 

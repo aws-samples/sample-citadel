@@ -1721,6 +1721,33 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    // The resolver emits a best-effort NodeColdStart metric (once per
+    // container lifetime) into the Citadel/Workflows namespace — the same
+    // namespace/metric-emission shape as the arbiter worker's node-level
+    // metrics. PutMetricData has no resource-level scoping; the call is
+    // narrowed to that namespace in code.
+    executionResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
+    NagSuppressions.addResourceSuppressions(
+      executionResolverFunction.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "resolver narrows the call to the Citadel/Workflows namespace " +
+            "(NodeColdStart cold-start metric).",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+      true,
+    );
+
     // AppSync GraphQL API — schema deferred to the L1 escape hatch below so
     // the schema is uploaded to S3 (definitionS3Location) instead of
     // inlined into the CFN template. Inline Definition has a Unicode

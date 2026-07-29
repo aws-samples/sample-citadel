@@ -102,6 +102,180 @@ class TestWorkerNodeCorrelationLogging:
 
 
 # ---------------------------------------------------------------------------
+# Cold-start metric: module-scope flag flipped on first invocation, emitted
+# exactly once per (simulated) container lifetime via CloudWatch PutMetricData.
+# ---------------------------------------------------------------------------
+
+def _cw_calls(mock_cw, metric_name):
+    calls = []
+    for call in mock_cw.put_metric_data.call_args_list:
+        data = call.kwargs.get('MetricData', [])
+        if data and data[0].get('MetricName') == metric_name:
+            calls.append(call.kwargs)
+    return calls
+
+
+class TestWorkerColdStartMetric:
+    def test_first_invocation_in_fresh_container_emits_cold_start(self):
+        mock_result = MagicMock(returncode=0, stdout=json.dumps({'response': 'done'}), stderr='')
+        mock_events = MagicMock()
+        mock_events.put_events.return_value = {'FailedEntryCount': 0}
+        mock_cw = MagicMock()
+
+        def _client(name, *a, **kw):
+            return mock_cw if name == 'cloudwatch' else mock_events
+
+        with patch.dict('os.environ', _NODE_ENV):
+            with patch('boto3.resource'), patch('boto3.client', side_effect=_client):
+                index = _fresh_index()
+                getattr(index, '__reset_cold_start_for_test')()
+                with patch.object(index, 'load_config_from_dynamodb',
+                                  return_value={'config': {'filename': 'agent.py'}}), \
+                     patch.object(index, 'get_scoped_credentials', return_value=None), \
+                     patch.object(index, 'load_file_from_s3_into_tmp'), \
+                     patch('subprocess.run', return_value=mock_result):
+                    index.process_event(dict(NODE_MESSAGE), {})
+
+        calls = _cw_calls(mock_cw, 'NodeColdStart')
+        assert len(calls) == 1
+        assert calls[0]['Namespace'] == 'Citadel/Workflows'
+        datum = calls[0]['MetricData'][0]
+        assert datum['Unit'] == 'Count'
+        assert datum['Value'] == 1
+        assert datum['Dimensions'] == [{'Name': 'AgentId', 'Value': 'agent-A'}]
+
+    def test_second_invocation_in_same_container_does_not_re_emit(self):
+        mock_result = MagicMock(returncode=0, stdout=json.dumps({'response': 'done'}), stderr='')
+        mock_events = MagicMock()
+        mock_events.put_events.return_value = {'FailedEntryCount': 0}
+        mock_cw = MagicMock()
+
+        def _client(name, *a, **kw):
+            return mock_cw if name == 'cloudwatch' else mock_events
+
+        with patch.dict('os.environ', _NODE_ENV):
+            with patch('boto3.resource'), patch('boto3.client', side_effect=_client):
+                index = _fresh_index()
+                getattr(index, '__reset_cold_start_for_test')()
+                with patch.object(index, 'load_config_from_dynamodb',
+                                  return_value={'config': {'filename': 'agent.py'}}), \
+                     patch.object(index, 'get_scoped_credentials', return_value=None), \
+                     patch.object(index, 'load_file_from_s3_into_tmp'), \
+                     patch('subprocess.run', return_value=mock_result):
+                    # Two invocations in the same (never-reset) module state,
+                    # simulating a warm container serving a second node.
+                    index.process_event(dict(NODE_MESSAGE), {})
+                    index.process_event(dict(NODE_MESSAGE), {})
+
+        assert len(_cw_calls(mock_cw, 'NodeColdStart')) == 1
+
+    def test_cold_start_metric_failure_does_not_break_dispatch(self):
+        mock_result = MagicMock(returncode=0, stdout=json.dumps({'response': 'done'}), stderr='')
+        mock_events = MagicMock()
+        mock_events.put_events.return_value = {'FailedEntryCount': 0}
+        mock_cw = MagicMock()
+        mock_cw.put_metric_data.side_effect = RuntimeError('cloudwatch down')
+
+        def _client(name, *a, **kw):
+            return mock_cw if name == 'cloudwatch' else mock_events
+
+        with patch.dict('os.environ', _NODE_ENV):
+            with patch('boto3.resource'), patch('boto3.client', side_effect=_client):
+                index = _fresh_index()
+                getattr(index, '__reset_cold_start_for_test')()
+                with patch.object(index, 'load_config_from_dynamodb',
+                                  return_value={'config': {'filename': 'agent.py'}}), \
+                     patch.object(index, 'get_scoped_credentials', return_value=None), \
+                     patch.object(index, 'load_file_from_s3_into_tmp'), \
+                     patch('subprocess.run', return_value=mock_result):
+                    # Must not raise despite the metric backend failing.
+                    index.process_event(dict(NODE_MESSAGE), {})
+
+        mock_events.put_events.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Queue-wait timestamp forwarding: dispatchedAt (from the parsed dispatch
+# message) and workerStartedAt (captured at the top of _process_workflow_node)
+# both ride the node-result event Detail, regardless of success/failure.
+# ---------------------------------------------------------------------------
+
+class TestWorkerQueueWaitTimestampForwarding:
+    def test_success_result_carries_dispatched_at_and_worker_started_at(self):
+        mock_result = MagicMock(returncode=0, stdout=json.dumps({'response': 'done'}), stderr='')
+        mock_events = MagicMock()
+        mock_events.put_events.return_value = {'FailedEntryCount': 0}
+        message = dict(NODE_MESSAGE)
+        message['dispatchedAt'] = '2026-01-01T00:00:00+00:00'
+
+        with patch.dict('os.environ', _NODE_ENV):
+            with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
+                index = _fresh_index()
+                getattr(index, '__reset_cold_start_for_test')()
+                with patch.object(index, 'load_config_from_dynamodb',
+                                  return_value={'config': {'filename': 'agent.py'}}), \
+                     patch.object(index, 'get_scoped_credentials', return_value=None), \
+                     patch.object(index, 'load_file_from_s3_into_tmp'), \
+                     patch('subprocess.run', return_value=mock_result):
+                    index.process_event(message, {})
+
+        call_args = mock_events.put_events.call_args
+        entry = call_args[1]['Entries'][0] if 'Entries' in call_args[1] else call_args[0][0]['Entries'][0]
+        detail = json.loads(entry['Detail'])
+        assert detail['dispatchedAt'] == '2026-01-01T00:00:00+00:00'
+        assert isinstance(detail.get('workerStartedAt'), str) and detail['workerStartedAt']
+
+    def test_failure_result_also_carries_dispatched_at_and_worker_started_at(self):
+        mock_result = MagicMock(returncode=1, stdout='', stderr='boom')
+        mock_events = MagicMock()
+        mock_events.put_events.return_value = {'FailedEntryCount': 0}
+        message = dict(NODE_MESSAGE)
+        message['dispatchedAt'] = '2026-01-01T00:00:00+00:00'
+
+        with patch.dict('os.environ', _NODE_ENV):
+            with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
+                index = _fresh_index()
+                getattr(index, '__reset_cold_start_for_test')()
+                with patch.object(index, 'load_config_from_dynamodb',
+                                  return_value={'config': {'filename': 'agent.py'}}), \
+                     patch.object(index, 'get_scoped_credentials', return_value=None), \
+                     patch.object(index, 'load_file_from_s3_into_tmp'), \
+                     patch('subprocess.run', return_value=mock_result):
+                    index.process_event(message, {})
+
+        call_args = mock_events.put_events.call_args
+        entry = call_args[1]['Entries'][0] if 'Entries' in call_args[1] else call_args[0][0]['Entries'][0]
+        detail = json.loads(entry['Detail'])
+        assert detail['dispatchedAt'] == '2026-01-01T00:00:00+00:00'
+        assert isinstance(detail.get('workerStartedAt'), str) and detail['workerStartedAt']
+
+    def test_absent_dispatched_at_omits_the_key_rather_than_fabricating(self):
+        """Pre-feature dispatcher: no dispatchedAt on the message. The result
+        detail must not carry a fabricated dispatchedAt — only the worker's
+        own workerStartedAt (which the worker CAN measure) is present."""
+        mock_result = MagicMock(returncode=0, stdout=json.dumps({'response': 'done'}), stderr='')
+        mock_events = MagicMock()
+        mock_events.put_events.return_value = {'FailedEntryCount': 0}
+
+        with patch.dict('os.environ', _NODE_ENV):
+            with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
+                index = _fresh_index()
+                getattr(index, '__reset_cold_start_for_test')()
+                with patch.object(index, 'load_config_from_dynamodb',
+                                  return_value={'config': {'filename': 'agent.py'}}), \
+                     patch.object(index, 'get_scoped_credentials', return_value=None), \
+                     patch.object(index, 'load_file_from_s3_into_tmp'), \
+                     patch('subprocess.run', return_value=mock_result):
+                    index.process_event(dict(NODE_MESSAGE), {})
+
+        call_args = mock_events.put_events.call_args
+        entry = call_args[1]['Entries'][0] if 'Entries' in call_args[1] else call_args[0][0]['Entries'][0]
+        detail = json.loads(entry['Detail'])
+        assert 'dispatchedAt' not in detail
+        assert isinstance(detail.get('workerStartedAt'), str) and detail['workerStartedAt']
+
+
+# ---------------------------------------------------------------------------
 # Usage capture is additive on both the supervisor-task and workflow-node
 # paths: task.completion Detail gains a 'usage' key without disturbing any
 # existing key, and workflow node completed output gains 'usage' alongside

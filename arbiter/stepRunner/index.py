@@ -26,7 +26,14 @@ def handler(event, context):
         usage = detail.get('usage')
         if usage is None:
             usage = output.get('usage', [])
-        handle_node_completion(detail['executionId'], detail['nodeId'], output, usage)
+        # Queue-wait metric: dispatchedAt/workerStartedAt are additive and
+        # optional on the detail (absent on any pre-feature worker/dispatch);
+        # handle_node_completion treats missing values as best-effort skips.
+        handle_node_completion(
+            detail['executionId'], detail['nodeId'], output, usage,
+            dispatched_at=detail.get('dispatchedAt'),
+            worker_started_at=detail.get('workerStartedAt'),
+        )
     elif detail_type == 'workflow.node.failed':
         handle_node_failure(detail['executionId'], detail['nodeId'], detail.get('error', ''))
     elif detail_type == 'execution.cancel.requested':

@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 import boto3
 
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
@@ -54,6 +55,23 @@ except ImportError: # pragma: no cover — Lambda bundle path before follow-up
         except Exception: # noqa: BLE001 — boundary sanitizer must never raise
             return []
 
+# Shared CloudWatch metric constants (same deferred-bundling situation as
+# workflow_contract/common.usage above). A missing import must NOT break
+# dispatch: fall back to inline literals matching the shared contract module
+# exactly — kept in lockstep by common/__tests__/test_metrics_constants.py.
+try:
+    from common.metrics_constants import ( # noqa: E402
+        METRIC_NAMESPACE,
+        METRIC_NODE_COLD_START,
+        UNIT_COUNT,
+        DIMENSION_AGENT_ID,
+    )
+except ImportError: # pragma: no cover — Lambda bundle path before follow-up
+    METRIC_NAMESPACE = 'Citadel/Workflows' # type: ignore[assignment]
+    METRIC_NODE_COLD_START = 'NodeColdStart' # type: ignore[assignment]
+    UNIT_COUNT = 'Count' # type: ignore[assignment]
+    DIMENSION_AGENT_ID = 'AgentId' # type: ignore[assignment]
+
 # QT3-6: dispatch-time defence-in-depth for the code-generating
 # tool / ExecutionSpecification binding rule. We depend on the rule predicate
 # ``is_code_generating`` and the status checker ``assert_spec_approved`` from
@@ -91,6 +109,61 @@ AGENT_RUNNER_PATH = os.path.join(os.path.dirname(__file__), 'agent_runner.py')
 # with expired credentials.
 _dynamodb = None
 _lambda_client = None
+_cloudwatch_client = None
+
+# Cold-start detection (module-scope flag): a Lambda execution environment
+# reuses this module across invocations, so a plain module-level boolean —
+# flipped to False the first time a workflow node is processed in this
+# container — is the cheapest possible signal. True (the import-time
+# default) on the FIRST invocation in a fresh container only; every
+# subsequent invocation in the same (warm) container observes False. This is
+# a Lambda-tier-only signal: the AgentCore Runtime intake container has no
+# equivalent module-scope entry point (see service/agent_intake_single/tools/
+# emf.py — EMF there is a per-turn emitter, not a per-container-lifecycle
+# one), so cold-start is intentionally NOT emitted for that runtime.
+_is_cold_start = True
+
+def _get_cloudwatch_client():
+    """Lazily construct the boto3 CloudWatch client. Cached per process."""
+    global _cloudwatch_client
+    if _cloudwatch_client is None:
+        _cloudwatch_client = boto3.client('cloudwatch')
+    return _cloudwatch_client
+
+def _now_iso() -> str:
+    """Return current UTC time as ISO 8601 string. Mirrors the step
+    runner's identical helper (arbiter/stepRunner/executor.py)."""
+    return datetime.now(timezone.utc).isoformat()
+
+def _emit_cold_start_metric_if_applicable(agent_id: str) -> None:
+    """Emit NodeColdStart exactly once per container lifetime, best-effort.
+
+    Reads-then-flips the module-scope ``_is_cold_start`` flag: the check and
+    the flip happen together so a re-entrant/duplicate call within the same
+    container never double-emits. Wrapped so a CloudWatch failure (throttling,
+    missing PutMetricData permission, network) can never break node
+    execution — mirrors the step runner's ``_emit_metric`` best-effort
+    contract (arbiter/stepRunner/executor.py).
+    """
+    global _is_cold_start
+    if not _is_cold_start:
+        return
+    _is_cold_start = False
+    try:
+        datum = {'MetricName': METRIC_NODE_COLD_START, 'Value': 1, 'Unit': UNIT_COUNT}
+        if agent_id:
+            datum['Dimensions'] = [{'Name': DIMENSION_AGENT_ID, 'Value': agent_id}]
+        _get_cloudwatch_client().put_metric_data(
+            Namespace=METRIC_NAMESPACE,
+            MetricData=[datum],
+        )
+    except Exception as exc: # noqa: BLE001 — telemetry must never raise
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'WorkerWrapper',
+            'action': 'cold_start_metric_emit_failed',
+            'error': str(exc),
+        }))
 
 def _get_dynamodb():
     """Lazily construct the boto3 DynamoDB resource. Cached per process."""
@@ -108,9 +181,15 @@ def _get_lambda_client():
 
 def __reset_boto3_clients_for_test() -> None:
     """Test-only: clear cached boto3 clients so mocks can bind fresh."""
-    global _dynamodb, _lambda_client
+    global _dynamodb, _lambda_client, _cloudwatch_client
     _dynamodb = None
     _lambda_client = None
+    _cloudwatch_client = None
+
+def __reset_cold_start_for_test() -> None:
+    """Test-only: reset the cold-start flag to its fresh-container default."""
+    global _is_cold_start
+    _is_cold_start = True
 
 class SpecificationNotBoundError(Exception):
     """Raised at worker dispatch when a code-generating tool is invoked without
@@ -461,7 +540,10 @@ def post_task_complete(response, agent_use_id, agent_name, orchestration_id, *, 
     print(f"event posted: {response}")
     return f"event posted: {event}"
 
-def _emit_node_result(msg, *, status, output=None, error=None, usage=None, trace_context=None):
+def _emit_node_result(
+    msg, *, status, output=None, error=None, usage=None, trace_context=None,
+    worker_started_at=None,
+):
     """Emit a workflow node-result event (completed/failed) to the agent event
     bus the step runner consumes.
 
@@ -483,6 +565,13 @@ def _emit_node_result(msg, *, status, output=None, error=None, usage=None, trace
     carries a top-level ``traceContext`` key when available, regardless of
     ``status``. Omitted entirely when None, keeping the Detail
     byte-identical to pre-feature callers.
+
+    ``worker_started_at`` is additive and optional (queue-wait metric): this
+    invocation's start timestamp, forwarded alongside ``msg.dispatched_at``
+    (the step runner's dispatch timestamp, carried on the parsed dispatch
+    message) so the step runner can compute a queue-wait duration without a
+    second round trip. Regardless of ``status`` — a failed node still had a
+    queue wait worth measuring.
     """
     detail = workflow_contract.build_node_result_detail(
         execution_id=msg.execution_id,
@@ -494,6 +583,8 @@ def _emit_node_result(msg, *, status, output=None, error=None, usage=None, trace
         error=error,
         usage=usage,
         trace_context=trace_context,
+        dispatched_at=getattr(msg, 'dispatched_at', None),
+        worker_started_at=worker_started_at,
     )
     detail_type = (
         workflow_contract.NODE_COMPLETED_DETAIL_TYPE
@@ -602,6 +693,12 @@ def _process_workflow_node(event, message_attributes=None):
     floor) when the attribute is absent. Neither present → no-op (R16).
     """
     msg = workflow_contract.parse_node_dispatch_message(event)
+    # Queue-wait metric: this invocation's start timestamp, captured as early
+    # as possible (right after parsing) so it best approximates worker-start.
+    # Cold-start metric: module-scope flag check/emit, also as early as
+    # possible in this container's first workflow-node invocation.
+    worker_started_at = _now_iso()
+    _emit_cold_start_metric_if_applicable(msg.agent_id)
     carried_ctx = _extract_worker_trace_context(event, message_attributes)
     annotate_from_carried(carried_ctx)
     print(json.dumps({
@@ -678,6 +775,7 @@ def _process_workflow_node(event, message_attributes=None):
             status=workflow_contract.STATUS_FAILED,
             error=str(exc) or 'agent execution failed',
             trace_context=carried_ctx,
+            worker_started_at=worker_started_at,
         )
         return
 
@@ -696,6 +794,7 @@ def _process_workflow_node(event, message_attributes=None):
         output={'response': response, 'usage': usage_sink},
         usage=usage_sink,
         trace_context=carried_ctx,
+        worker_started_at=worker_started_at,
     )
 
 def process_event(event, context, message_attributes=None):

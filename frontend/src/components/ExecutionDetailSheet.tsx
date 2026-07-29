@@ -192,6 +192,58 @@ function computeDuration(startedAt?: string | null, completedAt?: string | null)
   }
 }
 
+/** Raw duration in ms for a node (startedAt -> completedAt), or null when
+ * either bound is missing/unparseable. Only completed durations are used
+ * for percentiles — an in-flight node's "duration so far" would skew p50/p95
+ * toward the current wall-clock moment rather than reflecting real latency. */
+function nodeDurationMs(node: ExecutionNodeResult): number | null {
+  if (!node.startedAt || !node.completedAt) return null;
+  try {
+    const start = new Date(node.startedAt).getTime();
+    const end = new Date(node.completedAt).getTime();
+    if (Number.isNaN(start) || Number.isNaN(end)) return null;
+    return Math.max(0, end - start);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Percentile surfacing decision: computed CLIENT-SIDE from the execution
+ * row's per-node durations (already present in nodeResults — no new API).
+ * This needs no backend change because the durations are already on the
+ * row this sheet already fetches; a CloudWatch metrics-query API would add
+ * a network round trip and a new resolver for numbers this component can
+ * derive in-memory from data it already has. The CloudWatch percentiles
+ * (fed by the emitted NodeDurationMs metric) are for the cross-execution
+ * dashboards story, a different question (trend across many runs) than this
+ * sheet's question (how did THIS run's nodes distribute).
+ *
+ * Nearest-rank method (ceil-based index into the ascending-sorted array) —
+ * simple, deterministic, no interpolation. Returns null when fewer than 2
+ * completed-duration samples exist (a percentile over 0-1 points isn't
+ * informative).
+ */
+function computeDurationPercentiles(nodes: ExecutionNodeResult[]): { p50: number; p95: number; count: number } | null {
+  const durations = nodes
+    .map(nodeDurationMs)
+    .filter((d): d is number => d !== null)
+    .sort((a, b) => a - b);
+  if (durations.length < 2) return null;
+  const rank = (p: number) => {
+    const idx = Math.ceil((p / 100) * durations.length) - 1;
+    return durations[Math.min(Math.max(idx, 0), durations.length - 1)];
+  };
+  return { p50: rank(50), p95: rank(95), count: durations.length };
+}
+
+/** Format a raw ms value using the same thresholds as computeDuration. */
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+  return `${Math.round(ms / 60000)}m`;
+}
+
 const PRE_CLASSES =
   'rounded-md border border-border/50 bg-background p-3 text-xs text-foreground font-mono max-h-80 overflow-auto whitespace-pre-wrap';
 
@@ -210,6 +262,10 @@ export function ExecutionDetailSheet({ execution, open, onClose, onViewTrace }: 
   const nodeSteps = useMemo(
     () => parseNodeResults(execution?.nodeResults),
     [execution?.nodeResults],
+  );
+  const durationPercentiles = useMemo(
+    () => computeDurationPercentiles(nodeSteps),
+    [nodeSteps],
   );
   const prettyOutput = useMemo(() => prettyJson(execution?.output), [execution?.output]);
   const prettyInput = useMemo(() => prettyJson(execution?.input), [execution?.input]);
@@ -276,6 +332,11 @@ export function ExecutionDetailSheet({ execution, open, onClose, onViewTrace }: 
             )}
             {executionUsageTotals && executionUsageTotals.totalTokens > 0 && (
               <span>Total tokens {executionUsageTotals.totalTokens.toLocaleString()}</span>
+            )}
+            {durationPercentiles && (
+              <span title={`Across ${durationPercentiles.count} completed nodes`}>
+                Node duration p50 {formatMs(durationPercentiles.p50)} · p95 {formatMs(durationPercentiles.p95)}
+              </span>
             )}
           </div>
         </SheetHeader>

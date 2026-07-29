@@ -33,6 +33,15 @@ from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
 from common.usage import aggregate_usage, parse_usage_array
+from common.metrics_constants import (
+    METRIC_NAMESPACE,
+    METRIC_NODE_DURATION_MS,
+    METRIC_NODE_FAILURE,
+    METRIC_NODE_QUEUE_WAIT_MS,
+    UNIT_MILLISECONDS,
+    UNIT_COUNT,
+    DIMENSION_WORKFLOW_ID,
+)
 
 # DynamoDB table names from environment
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'citadel-workflows-dev')
@@ -45,9 +54,9 @@ _executions_table = _dynamodb.Table(EXECUTIONS_TABLE)
 
 _logger = logging.getLogger(__name__)
 
-# CloudWatch custom-metric namespace. Shared convention with the workflow
-# infrastructure (fan-out error metric + alarms live in the same namespace).
-METRIC_NAMESPACE = 'Citadel/Workflows'
+# METRIC_NAMESPACE is imported from common.metrics_constants (the shared
+# contract module) rather than defined locally — see that module's docstring
+# for the namespace-reuse rationale.
 
 # Lazy SQS client for dispatching workflow nodes to the worker. Constructed on
 # first use (not at import) so module import never resolves credentials — the
@@ -130,7 +139,7 @@ def _emit_metric(metric_name: str, value: float, unit: str, *, workflow_id: str 
     try:
         datum = {'MetricName': metric_name, 'Value': float(value), 'Unit': unit}
         if workflow_id:
-            datum['Dimensions'] = [{'Name': 'WorkflowId', 'Value': workflow_id}]
+            datum['Dimensions'] = [{'Name': DIMENSION_WORKFLOW_ID, 'Value': workflow_id}]
         _get_cloudwatch_client().put_metric_data(
             Namespace=METRIC_NAMESPACE,
             MetricData=[datum],
@@ -300,6 +309,11 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
         input=input_data,
         configuration=configuration,
         trace_context=tracing.active_trace_context(),
+        # Queue-wait metric: reuse the timestamp already computed above for
+        # the node.started event/state update rather than taking a second
+        # "now" reading — dispatch and node.started are the same instant for
+        # this purpose.
+        dispatched_at=now,
     )
 
     # H3 trace-context propagation (architect task f4f4bab3-7a07-4acf-ba43-
@@ -322,7 +336,10 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
     _get_sqs_client().send_message(**send_kwargs)
 
 
-def handle_node_completion(execution_id: str, node_id: str, output: dict, usage: list | None = None) -> None:
+def handle_node_completion(
+    execution_id: str, node_id: str, output: dict, usage: list | None = None,
+    *, dispatched_at: str | None = None, worker_started_at: str | None = None,
+) -> None:
     """Handle a completed node and advance the workflow.
 
     1. Update node status → completed in DynamoDB (same call also persists
@@ -344,6 +361,15 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict, usage:
     ADD) in the SAME update_item call that marks the node completed, so a
     duplicate delivery guarded by the status check below writes it at most
     once, and even an unguarded re-write is byte-identical (last-write-wins).
+
+    ``dispatched_at`` / ``worker_started_at`` are additive and optional
+    (queue-wait metric): the step runner's dispatch timestamp and the
+    worker's invocation-start timestamp, both echoed back on the node-result
+    event (see ``workflow_contract.NodeResultDetail``). When both are
+    present and parseable, a ``NodeQueueWaitMs`` metric is emitted — the
+    delta between dispatch and worker start. Missing/unparseable values
+    simply skip the metric (best-effort, never fabricated), matching the
+    existing ``NodeDurationMs`` convention.
     """
     execution = _load_execution(execution_id)
     if not execution:
@@ -422,7 +448,15 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict, usage:
     )
     duration = _duration_ms(node_data.get('startedAt'), now)
     if duration is not None:
-        _emit_metric('NodeDurationMs', duration, 'Milliseconds', workflow_id=workflow_id)
+        _emit_metric(METRIC_NODE_DURATION_MS, duration, UNIT_MILLISECONDS, workflow_id=workflow_id)
+
+    # Queue-wait metric (dispatch -> worker-start delta). Both timestamps are
+    # additive and best-effort: absent on any pre-feature dispatch/worker, or
+    # if either is unparseable, the metric is simply skipped — never
+    # fabricated. Reuses the same _duration_ms helper as NodeDurationMs.
+    queue_wait = _duration_ms(dispatched_at, worker_started_at)
+    if queue_wait is not None:
+        _emit_metric(METRIC_NODE_QUEUE_WAIT_MS, queue_wait, UNIT_MILLISECONDS, workflow_id=workflow_id)
 
     # NOTE: workflow.node.completed is NOT re-emitted here. This handler is
     # triggered BY that event (the worker is its sole producer), and the step
@@ -611,7 +645,7 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             agentId=agent_id or None,
             error=error,
         )
-        _emit_metric('NodeFailure', 1, 'Count', workflow_id=workflow_id)
+        _emit_metric(METRIC_NODE_FAILURE, 1, UNIT_COUNT, workflow_id=workflow_id)
 
         events.publish_workflow_failed(
             execution_id=execution_id,
