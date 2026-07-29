@@ -258,6 +258,25 @@ describe('ExecutionDetailSheet', () => {
     expect(screen.queryByText('Result')).not.toBeInTheDocument();
   });
 
+  // ─── View trace deep-link (design task 60ba09e4, pass 2) ───
+
+  it('renders a "View trace" button and calls onViewTrace with the executionId when clicked', () => {
+    const onViewTrace = jest.fn();
+    render(
+      <ExecutionDetailSheet execution={baseExecution} open onClose={jest.fn()} onViewTrace={onViewTrace} />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /view trace/i }));
+
+    expect(onViewTrace).toHaveBeenCalledWith('exec-abc123def456');
+  });
+
+  it('omits the "View trace" button when onViewTrace is not provided', () => {
+    render(<ExecutionDetailSheet execution={baseExecution} open onClose={jest.fn()} />);
+
+    expect(screen.queryByRole('button', { name: /view trace/i })).not.toBeInTheDocument();
+  });
+
   // ─── Usage rollup (additive: per-node tokens + execution total) ───
 
   describe('usage rollup', () => {

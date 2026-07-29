@@ -5,7 +5,7 @@
  * All JSON parsing is defensive — invalid payloads render as raw strings.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Copy } from 'lucide-react';
+import { ChevronDown, ChevronRight, Copy, Waypoints } from 'lucide-react';
 import {
   Sheet,
   SheetContent,
@@ -62,6 +62,10 @@ interface ExecutionDetailSheetProps {
   execution: ExecutionDetail | null;
   open: boolean;
   onClose: () => void;
+  /** Deep-link callback to the waterfall trace viewer (design task 60ba09e4).
+   * The sheet has no router access itself, so the owner (AppDetailView) wires
+   * this to `navigate('/observability/trace/execution/<executionId>')`. */
+  onViewTrace?: (executionId: string) => void;
 }
 
 // ---- Style maps (reuse the execution status color idiom) ----
@@ -193,7 +197,7 @@ const PRE_CLASSES =
 
 // ---- Component ----
 
-export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDetailSheetProps) {
+export function ExecutionDetailSheet({ execution, open, onClose, onViewTrace }: ExecutionDetailSheetProps) {
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
   const [inputExpanded, setInputExpanded] = useState(false);
 
@@ -252,6 +256,16 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
             <span className="text-xs text-muted-foreground">
               Duration {computeDuration(execution.startedAt, execution.completedAt)}
             </span>
+            {onViewTrace && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground cursor-pointer ml-auto mr-6"
+                onClick={() => onViewTrace(execution.executionId)}
+              >
+                <Waypoints className="size-3 mr-1" /> View trace
+              </Button>
+            )}
           </div>
           <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
             <span>Started {formatDate(execution.startedAt)}</span>

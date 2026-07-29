@@ -2054,6 +2054,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
         execution={selectedExecution}
         open={detailSheetOpen}
         onClose={() => setDetailSheetOpen(false)}
+        onViewTrace={(executionId) => onNavigate?.(`observability-trace:execution:${executionId}`)}
       />
 
       {/* Unpublish dialog */}

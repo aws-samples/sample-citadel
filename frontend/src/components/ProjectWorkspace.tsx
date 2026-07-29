@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ArrowLeft, Send, Upload, FileText, X, Download, History, GitCompare, RefreshCw, PanelRightOpen, PanelRightClose } from 'lucide-react';
+import { ArrowLeft, Send, Upload, FileText, X, Download, History, GitCompare, RefreshCw, PanelRightOpen, PanelRightClose, Waypoints } from 'lucide-react';
 import { toast } from 'sonner';
+import { useNavigate } from 'react-router-dom';
 import { Button } from './ui/button';
 import { Card } from './ui/card';
 import { Input } from './ui/input';
@@ -313,6 +314,7 @@ interface ProjectWorkspaceProps {
 }
 
 export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
+  const navigate = useNavigate();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -653,6 +655,13 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
                 <p className="text-foreground text-sm font-medium truncate">{project.name}</p>
                 <p className="text-muted-foreground text-xs">{project.status}</p>
               </div>
+              <Button
+                variant="ghost" size="icon" className="size-7"
+                onClick={() => navigate(`/observability/trace/conversation/${encodeURIComponent(project.id)}`)}
+                title="View trace"
+              >
+                <Waypoints className="size-4" />
+              </Button>
               <Button
                 variant="ghost" size="icon" className="size-7"
                 onClick={() => {

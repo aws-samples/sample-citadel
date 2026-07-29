@@ -141,3 +141,106 @@ producer), `arbiter/common/workflow_contract.py` (additive kwarg
 plumbing), `service/agent_intake_single/tools/tracing.py` (self-contained
 copy — see H6 caveat above for why it's not `arbiter/common/tracing`),
 `service/agent_intake_single/tools/state.py` (producer).
+
+## Waterfall viewer API + authorization posture
+
+> **Applies to:** architect task `60ba09e4-d859-42f2-9e47-6e6c9ccd2a83`
+> ("Waterfall Trace Viewer" design). Pass 1 (backend query surface) landed in
+> `2c89844`; pass 2 (frontend viewer + deep-links) is this change.
+
+The waterfall viewer surfaces the annotation contract above through three
+read-only HTTP routes added to the **existing** `costHttpApi` (same Cognito
+JWT authorizer, same CORS/access-log stage as the cost API — see
+`docs/OBSERVABILITY.md` for the `aws_cost_api_url` reuse rationale):
+
+```
+GET /traces/by-execution/{executionId}       # ownership-gated
+GET /traces/by-conversation/{conversationId} # ownership-gated (→ project → org)
+GET /traces/{traceId}                        # admin-only
+```
+
+### Authorization matrix
+
+| Route | Non-admin, own org | Non-admin, other org | Admin |
+|---|---|---|---|
+| `GET /traces/by-execution/{id}` | 200 (org == execution.orgId) | 403 | 200 (any) |
+| `GET /traces/by-conversation/{id}` | 200 (org == project.orgId) | 403 | 200 (any) |
+| `GET /traces/{traceId}` | **403** | **403** | 200 |
+| unknown execution/conversation id | 404 | 404 | 404 |
+| missing `custom:organization` claim | 403 | 403 | (admin still 403 on by-* if no claim; 200 on traceId) |
+
+An `executionId` or `conversationId` resolves to an owning org in our own
+DynamoDB (executions row carries `orgId` directly; conversations resolve via
+`projectId` → the projects table) and that org is checked **before any X-Ray
+call is issued** — mirroring the cost API's `resolveScopedOrg` /
+`isAdminFromHttpEvent` discipline. A raw trace id has no such org entry key,
+so `/traces/{traceId}` is admin-only, matching the governance
+counterfactual/decision-trace precedent for account-wide reads.
+
+### RESIDUAL-RISK STATEMENT
+
+Even after the entry key is org-checked, the trace **data** returned by
+`BatchGetTraces` is account-wide segment content. Concretely:
+- **What is returned:** every segment/subsegment sharing the org-checked
+  `correlation_id`. By construction (`correlation_id == executionId`, a v4
+  UUID; or a per-session UUID) these belong to **one flow / one org** — UUID
+  collision across orgs is negligible, so cross-org bleed via the filter is
+  effectively nil.
+- **What segment content exposes:** AWS **infrastructure identifiers** —
+  Lambda function names, DynamoDB table names, Bedrock model/inference-profile
+  ARNs, SQS/EventBridge names, HTTP status codes, durations, and our own
+  annotations (`correlation_id`, `source_trace_id`, `execution_id`,
+  `node_id`, `session_id`) + `trace_context` metadata. These are **shared-infra
+  operational identifiers, not per-row customer data** — the same function/
+  table serves every org, so a name/timing is not org-sensitive.
+- **The genuine residual leak** is narrow: (a) if a future code path ever put
+  **customer payload into a subsegment name, annotation, or metadata** it would
+  become viewable by any owner of the entry key — so the design mandates a docs
+  guardrail: *never put request/response bodies or PII into X-Ray annotations/
+  metadata/subsegment names* (the current contract only stamps IDs, which is
+  safe); and (b) a shared-infra subsegment created by an unrelated concurrent
+  flow could in principle carry the same correlation_id only if we mis-stamped
+  it — prevented by the CIT-021 contract stamping correlation_id from the
+  carried context, not a shared constant.
+- **Mitigations baked into the design:** (1) server-side filter is pinned to
+  the single org-checked correlation id — we never return "all recent traces";
+  (2) the waterfall shaper **allowlists** fields onto the response (id, name,
+  times, http.status, error/fault/throttle, namespace, our annotation keys) and
+  **drops raw `metadata`/`sql`/`aws.*` bags** by default so an accidental
+  payload in metadata is not surfaced; (3) admin-only raw trace-id keeps the
+  unscoped lookup behind the highest gate.
+
+Security posture summary (one line for docs/PR): *Entry-key ownership check
+(execution/conversation → org) for all users; account-wide raw trace-id
+admin-only; X-Ray IAM is unavoidably `Resource:*` (nag-suppressed with
+justification); trace bodies are infra-level identifiers, field-allowlisted on
+egress, and the tracing contract forbids customer data in annotations/metadata.*
+
+### `status` freshness semantics (X-Ray eventual availability)
+
+- `GetTraceSummaries` filter returns ≥1 → `ready`.
+- 0 summaries AND the entry (execution/conversation) `completedAt`/last
+  activity is within the freshness window (~90s) → `indexing` (UI: "trace
+  still indexing, retry" + auto-retry). This avoids a false "no trace".
+- 0 summaries AND entry is older than the window → `empty` (UI: "no trace
+  recorded" — e.g. sampling miss, or H6 intake not yet stitching per the
+  hop matrix above).
+
+### Guardrail (binding on all future annotation/metadata producers)
+
+**Never put request/response bodies or PII into X-Ray annotations, metadata,
+or subsegment names.** The current contract only stamps IDs
+(`correlation_id`, `source_trace_id`, `execution_id`, `node_id`,
+`session_id`) — this is what keeps the ownership-gated, account-wide-segment
+read model in this section safe. Any change that adds richer data to
+`traceContext`/`metadata` must be reviewed against the residual-risk
+statement above before merging.
+
+### Frontend
+
+`frontend/src/services/traceService.ts` calls these routes (Bearer idToken,
+reuses `aws_cost_api_url` — see `docs/OBSERVABILITY.md`). The viewer page
+(`frontend/src/pages/Observability.tsx`) is reached via "View trace" deep
+links from an execution detail sheet or a project conversation, or — for
+admins only — a raw trace-id lookup input, consistent with the
+admin-only gate on `/traces/{traceId}` above.
