@@ -88,7 +88,7 @@ describe("tracing foundation — Aspect stack coverage (orchestrator scope amend
       // at least one Lambda so the loop is a meaningful check.
       expect(lambdaEntries.length).toBeGreaterThan(0);
 
-      for (const [id, resource] of lambdaEntries) {
+      for (const [, resource] of lambdaEntries) {
         expect(resource.Properties?.TracingConfig).toEqual({ Mode: "Active" });
       }
     },
