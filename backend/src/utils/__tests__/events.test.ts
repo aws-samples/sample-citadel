@@ -95,4 +95,24 @@ describe("events.ts traceContext propagation (additive)", () => {
       ),
     );
   });
+
+  // Pinned counterexample from R7b (fast-check discovered): a format-specifier
+  // eventType ("%i ") on a null-prototype event object. The pre-fix success log
+  // passed `Event published: ${eventType}` as the console format string, so
+  // "%i" coerced the event object via parseInt -> String(nullProtoObj), which
+  // throws TypeError: Cannot convert object to primitive value mid-publish.
+  it('R7b_example: format-specifier eventType "%i " on null-prototype event does not throw', async () => {
+    (AWSXRay.getSegment as jest.Mock).mockReturnValue(undefined);
+
+    const nullProtoEvent = Object.create(null);
+    nullProtoEvent.eventType = "%i ";
+    nullProtoEvent.projectId = "p1";
+    nullProtoEvent.payload = {};
+    nullProtoEvent.timestamp = "2026-01-01T00:00:00.000Z";
+
+    await publishEvent(nullProtoEvent);
+    const detail = lastPublishedDetail();
+    expect("traceContext" in detail).toBe(false);
+    expect(detail.eventType).toBeUndefined();
+  });
 });

@@ -75,7 +75,7 @@ export const handler = async (event: ProgressUpdateEvent) => {
       const projectsTable = process.env.PROJECTS_TABLE!;
 
       if (!VALID_FIELDS.has(phase)) {
-        console.log(`Unknown phase: ${phase}, skipping`);
+        console.log("Unknown phase, skipping:", { phase });
         return;
       }
 

@@ -211,7 +211,7 @@ export async function getAgentConfig(
   const now = Date.now();
   const cached = _agentConfigCache[agentId];
   if (cached && now - cached.cachedAt < SSM_CACHE_TTL) {
-    console.log(`SSM cache hit for agent ${agentId}`);
+    console.log("SSM cache hit for agent", { agentId });
     return cached.config;
   }
 
@@ -243,7 +243,7 @@ export async function getAgentConfig(
 
     return config;
   } catch (error) {
-    console.error(`Failed to get agent config for ${agentId}:`, error);
+    console.error("Failed to get agent config:", { agentId, error });
     throw error;
   }
 }
@@ -900,7 +900,7 @@ export const handler = async (
           { handlerStartMs },
         );
 
-        console.log(`Successfully received response from agent ${agentId}`);
+        console.log("Successfully received response from agent", { agentId });
 
         // Store agent response in DynamoDB
         const responseRecord = await storeAgentResponse(

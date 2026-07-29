@@ -5,6 +5,7 @@ import {
 import * as AWSXRay from "aws-xray-sdk-core";
 import { AgentEvent } from "../types";
 import { getActiveTraceContext } from "./trace-context";
+import { logger } from "./logger";
 
 // Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c,
 // design §1(a)/§6 item 3): this is the acceptance-critical PutEvents
@@ -43,7 +44,12 @@ export async function publishEvent(event: AgentEvent): Promise<void> {
     });
 
     await eventBridgeClient.send(command);
-    console.log(`Event published: ${event.eventType}`, event);
+    logger.info("Event published", {
+      eventType: event.eventType,
+      projectId: event.projectId,
+      agentId: event.agentId,
+      timestamp: event.timestamp,
+    });
   } catch (error) {
     console.error("Failed to publish event:", error);
     throw error;

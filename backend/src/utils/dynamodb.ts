@@ -47,7 +47,7 @@ export async function getItem<T extends Record<string, unknown>>(
     const result = await docClient.send(command);
     return (result.Item as T) || null;
   } catch (error) {
-    console.error(`Failed to get item from ${tableName}:`, error);
+    console.error("Failed to get item from table:", { tableName, error });
     throw error;
   }
 }
@@ -64,7 +64,7 @@ export async function putItem<T extends Record<string, unknown>>(
 
     await docClient.send(command);
   } catch (error) {
-    console.error(`Failed to put item to ${tableName}:`, error);
+    console.error("Failed to put item to table:", { tableName, error });
     throw error;
   }
 }
@@ -89,7 +89,7 @@ export async function updateItem<T extends Record<string, unknown>>(
     const result = await docClient.send(command);
     return result.Attributes as T;
   } catch (error) {
-    console.error(`Failed to update item in ${tableName}:`, error);
+    console.error("Failed to update item in table:", { tableName, error });
     throw error;
   }
 }
@@ -106,7 +106,7 @@ export async function deleteItem(
 
     await docClient.send(command);
   } catch (error) {
-    console.error(`Failed to delete item from ${tableName}:`, error);
+    console.error("Failed to delete item from table:", { tableName, error });
     throw error;
   }
 }
@@ -148,7 +148,7 @@ export async function queryItems<T extends Record<string, unknown>>(
         : undefined,
     };
   } catch (error) {
-    console.error(`Failed to query items from ${tableName}:`, error);
+    console.error("Failed to query items from table:", { tableName, error });
     throw error;
   }
 }
@@ -184,7 +184,7 @@ export async function scanItems<T extends Record<string, unknown>>(
         : undefined,
     };
   } catch (error) {
-    console.error(`Failed to scan items from ${tableName}:`, error);
+    console.error("Failed to scan items from table:", { tableName, error });
     throw error;
   }
 }

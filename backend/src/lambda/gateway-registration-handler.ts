@@ -629,7 +629,10 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
               }),
             );
           } catch (error) {
-            console.warn(`Failed to delete SSM parameter ${paramName}:`, error);
+            console.warn("Failed to delete SSM parameter:", {
+              paramName,
+              error,
+            });
           }
         }
       }
