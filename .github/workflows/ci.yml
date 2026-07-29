@@ -222,7 +222,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest hypothesis boto3 strands-agents strands-agents-tools
+          pip install boto3 strands-agents strands-agents-tools
+          pip install -r arbiter/requirements.txt
+          pip install -r arbiter/requirements-dev.txt
 
       - name: Run tests
         run: pytest arbiter/ -v --tb=short
