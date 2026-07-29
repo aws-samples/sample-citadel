@@ -191,6 +191,7 @@ import { Template, Match } from "aws-cdk-lib/assertions";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as cognito from "aws-cdk-lib/aws-cognito";
+import * as sns from "aws-cdk-lib/aws-sns";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -263,6 +264,10 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
     executionsTable,
     conversationsTable,
     projectsTable,
+    alarmTopic: new sns.Topic(helperStack, "TestAlarmTopic", {
+      topicName: "citadel-alarms-test",
+    }),
+    appSyncApiId: "test-appsync-api-id",
   });
 
   const template = Template.fromStack(stack);

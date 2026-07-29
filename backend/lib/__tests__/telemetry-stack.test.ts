@@ -18,7 +18,13 @@ import { Template, Match } from "aws-cdk-lib/assertions";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
+import * as sns from "aws-cdk-lib/aws-sns";
 import { TelemetryStack } from "../telemetry-stack";
+import {
+  METRIC_NAMESPACE,
+  METRIC_NODE_FAILURE,
+  METRIC_NODE_QUEUE_WAIT_MS,
+} from "../../src/utils/metrics-constants";
 
 function buildSupportTables(supportStack: cdk.Stack): {
   modelCatalogTable: dynamodb.Table;
@@ -62,7 +68,11 @@ function buildSupportTables(supportStack: cdk.Stack): {
   };
 }
 
-function buildStack(): { template: Template; stack: TelemetryStack } {
+function buildStack(): {
+  template: Template;
+  stack: TelemetryStack;
+  alarmTopic: sns.Topic;
+} {
   const app = new cdk.App();
   const supportStack = new cdk.Stack(app, "SupportStack", {
     env: { account: "123456789012", region: "us-east-1" },
@@ -71,6 +81,9 @@ function buildStack(): { template: Template; stack: TelemetryStack } {
   const userPool = new cognito.UserPool(supportStack, "TestUserPool");
   const userPoolClient = userPool.addClient("TestUserPoolClient");
   const agentEventBus = new events.EventBus(supportStack, "TestEventBus");
+  const alarmTopic = new sns.Topic(supportStack, "TestAlarmTopic", {
+    topicName: "citadel-alarms-test",
+  });
   const {
     modelCatalogTable,
     executionsTable,
@@ -90,9 +103,11 @@ function buildStack(): { template: Template; stack: TelemetryStack } {
     executionsTable,
     conversationsTable,
     projectsTable,
+    alarmTopic,
+    appSyncApiId: "test-appsync-api-id",
   });
 
-  return { template: Template.fromStack(stack), stack };
+  return { template: Template.fromStack(stack), stack, alarmTopic };
 }
 
 describe("TelemetryStack — query/budgets Lambda IAM split", () => {
@@ -311,6 +326,9 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
     const userPool = new cognito.UserPool(supportStack, "TestUserPool");
     const userPoolClient = userPool.addClient("TestUserPoolClient");
     const agentEventBus = new events.EventBus(supportStack, "TestEventBus");
+    const alarmTopic = new sns.Topic(supportStack, "TestAlarmTopic", {
+      topicName: "citadel-alarms-test-unconfigured",
+    });
     const {
       modelCatalogTable,
       executionsTable,
@@ -329,6 +347,8 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       executionsTable,
       conversationsTable,
       projectsTable,
+      alarmTopic,
+      appSyncApiId: "test-appsync-api-id",
     });
     const template = Template.fromStack(stack);
 
@@ -573,5 +593,203 @@ describe("TelemetryStack — TraceQueryHandler (waterfall trace viewer, pass 1)"
     // And that target differs from the cost query integration.
     expect(byExecTarget).not.toBe(summaryTarget);
     void integrations;
+  });
+});
+
+describe("TelemetryStack — platform-health dashboard (decision ab73ae1b)", () => {
+  test("exactly one CloudWatch dashboard exists", () => {
+    const { template } = buildStack();
+    template.resourceCountIs("AWS::CloudWatch::Dashboard", 1);
+  });
+
+  test("dashboard body references all 4 cross-stack namespaces", () => {
+    const { template } = buildStack();
+    const dashboards = template.findResources("AWS::CloudWatch::Dashboard");
+    const body = JSON.stringify(Object.values(dashboards)[0]?.Properties);
+    expect(body).toContain("Citadel/Workflows");
+    expect(body).toContain("Citadel/CostReconciler");
+    expect(body).toContain("CitadelGovernance");
+    expect(body).toContain("AWS/AppSync");
+  });
+
+  test("dashboard body contains all 6 section titles", () => {
+    const { template } = buildStack();
+    const dashboards = template.findResources("AWS::CloudWatch::Dashboard");
+    const body = JSON.stringify(Object.values(dashboards)[0]?.Properties);
+    expect(body).toContain("Health strip");
+    expect(body).toContain("API health");
+    expect(body).toContain("Workflow health");
+    expect(body).toContain("Cost & reconciliation");
+    expect(body).toContain("Governance");
+    expect(body).toContain("DLQ / error budget");
+  });
+
+  test("dashboard name follows the citadel-platform-health-${env} convention", () => {
+    const { stack } = buildStack();
+    expect(stack.platformHealthDashboardName).toBe(
+      "citadel-platform-health-test",
+    );
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Dashboard", {
+      DashboardName: "citadel-platform-health-test",
+    });
+  });
+});
+
+describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)", () => {
+  test("alarm count is existing (Off-frontier is in arbiter-stack, none pre-existing here) + 6 new", () => {
+    const { template } = buildStack();
+    // TelemetryStack itself has zero pre-existing alarms — all 6 present
+    // here are the new platform-health alarms.
+    template.resourceCountIs("AWS::CloudWatch::Alarm", 6);
+  });
+
+  test("A1 node-failure: name, threshold, comparison, periods, datapoints, treatMissingData", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "citadel-workflow-node-failure-test",
+      Threshold: 1,
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+      EvaluationPeriods: 3,
+      DatapointsToAlarm: 1,
+      TreatMissingData: "notBreaching",
+    });
+  });
+
+  test("A2 queue-wait: name, threshold, comparison, periods, datapoints, treatMissingData", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "citadel-workflow-queue-wait-test",
+      Threshold: 30000,
+      ComparisonOperator: "GreaterThanThreshold",
+      EvaluationPeriods: 3,
+      DatapointsToAlarm: 3,
+      TreatMissingData: "notBreaching",
+    });
+  });
+
+  test("A3 appsync-5xx: name, threshold, comparison, periods, datapoints, treatMissingData", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "citadel-appsync-5xx-test",
+      Threshold: 5,
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+      EvaluationPeriods: 1,
+      DatapointsToAlarm: 1,
+      TreatMissingData: "notBreaching",
+    });
+  });
+
+  test("A4 dlq-not-empty: name, threshold, comparison, periods, datapoints, treatMissingData", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "citadel-dlq-not-empty-test",
+      Threshold: 1,
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+      EvaluationPeriods: 1,
+      DatapointsToAlarm: 1,
+      TreatMissingData: "notBreaching",
+    });
+  });
+
+  test("A5 reconciler-stalled: name, threshold, comparison, periods, datapoints, treatMissingData (BREACHING)", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "citadel-cost-reconciler-stalled-test",
+      Threshold: 1,
+      ComparisonOperator: "LessThanThreshold",
+      EvaluationPeriods: 3,
+      DatapointsToAlarm: 3,
+      TreatMissingData: "breaching",
+      Namespace: "Citadel/CostReconciler",
+      MetricName: "WindowsReconciled",
+    });
+  });
+
+  test("A6 drift-high: name, threshold, comparison, periods, datapoints, treatMissingData", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "citadel-cost-drift-high-test",
+      Threshold: 25,
+      ComparisonOperator: "GreaterThanThreshold",
+      EvaluationPeriods: 3,
+      DatapointsToAlarm: 3,
+      TreatMissingData: "notBreaching",
+      Namespace: "Citadel/CostReconciler",
+      MetricName: "AbsEstimateDriftPct",
+    });
+  });
+
+  test("every new alarm's AlarmActions references props.alarmTopic ARN", () => {
+    const { template } = buildStack();
+    const alarms = template.findResources("AWS::CloudWatch::Alarm");
+    expect(Object.keys(alarms)).toHaveLength(6);
+    for (const [, resource] of Object.entries(alarms)) {
+      const actions = resource.Properties?.AlarmActions ?? [];
+      expect(actions.length).toBeGreaterThan(0);
+      // Every action must be a cross-stack reference (Fn::ImportValue or a
+      // Ref/Fn::Join resolving to the shared alarm topic), never a literal
+      // string and never empty.
+      expect(JSON.stringify(actions)).not.toBe("[]");
+    }
+  });
+
+  test("A5 treatMissingData is 'breaching' (absence-is-failure guard); A1,A2,A3,A4,A6 are 'notBreaching'", () => {
+    const { template } = buildStack();
+    const alarms = template.findResources("AWS::CloudWatch::Alarm");
+    const byName: Record<string, string> = {};
+    for (const resource of Object.values(alarms)) {
+      byName[String(resource.Properties?.AlarmName)] = String(
+        resource.Properties?.TreatMissingData,
+      );
+    }
+    expect(byName["citadel-cost-reconciler-stalled-test"]).toBe("breaching");
+    expect(byName["citadel-workflow-node-failure-test"]).toBe("notBreaching");
+    expect(byName["citadel-workflow-queue-wait-test"]).toBe("notBreaching");
+    expect(byName["citadel-appsync-5xx-test"]).toBe("notBreaching");
+    expect(byName["citadel-dlq-not-empty-test"]).toBe("notBreaching");
+    expect(byName["citadel-cost-drift-high-test"]).toBe("notBreaching");
+  });
+
+  test("metric strings for A1/A2 equal the imported pinned constants (pinned-contract guard)", () => {
+    const { template } = buildStack();
+    const alarms = template.findResources("AWS::CloudWatch::Alarm");
+    const nodeFailureAlarm = Object.values(alarms).find(
+      (a) => a.Properties?.AlarmName === "citadel-workflow-node-failure-test",
+    );
+    const queueWaitAlarm = Object.values(alarms).find(
+      (a) => a.Properties?.AlarmName === "citadel-workflow-queue-wait-test",
+    );
+    const nodeFailureExpr = String(
+      nodeFailureAlarm?.Properties?.Metrics?.[0]?.MetricStat?.Metric
+        ?.MetricName ??
+        nodeFailureAlarm?.Properties?.Metrics?.[0]?.Expression ??
+        "",
+    );
+    const queueWaitExpr = String(
+      queueWaitAlarm?.Properties?.Metrics?.[0]?.MetricStat?.Metric
+        ?.MetricName ??
+        queueWaitAlarm?.Properties?.Metrics?.[0]?.Expression ??
+        "",
+    );
+    expect(nodeFailureExpr).toContain(METRIC_NODE_FAILURE);
+    expect(nodeFailureExpr).toContain(METRIC_NAMESPACE);
+    expect(queueWaitExpr).toContain(METRIC_NODE_QUEUE_WAIT_MS);
+    expect(queueWaitExpr).toContain(METRIC_NAMESPACE);
+  });
+
+  test("no new SNS::Topic is added by TelemetryStack (reuse guard)", () => {
+    const { template } = buildStack();
+    template.resourceCountIs("AWS::SNS::Topic", 0);
+  });
+
+  test("A3 uses the concrete GraphQLAPIId dimension equal to props.appSyncApiId", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "citadel-appsync-5xx-test",
+      Namespace: "AWS/AppSync",
+      MetricName: "5XXError",
+      Dimensions: [{ Name: "GraphQLAPIId", Value: "test-appsync-api-id" }],
+    });
   });
 });

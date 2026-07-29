@@ -80,3 +80,115 @@ as unavailable with zero network calls.
 This means `aws_cost_api_url` is a slight misnomer now that it also serves
 tracing — a documented tradeoff, with an optional future rename to
 `aws_telemetry_api_url` tracked as tech debt, not addressed in this change.
+
+
+---
+
+# Platform-Health Dashboard + SLO Alarms
+
+Owned by **TelemetryStack** (decision `ab73ae1b`: dashboards + alarms are a
+telemetry-stack responsibility, kept out of `backend-stack.ts` to preserve
+its resource headroom). One dashboard; per-stack detail dashboards are
+deliberately **deferred** — CloudWatch's own drill-down (click a widget →
+Metrics console → filter by dimension) already covers that need at the
+current traffic scale.
+
+## Dashboard: `citadel-platform-health-${env}`
+
+Six sections, top to bottom (on-call reads the health strip first):
+
+| # | Section | Widgets |
+|---|---------|---------|
+| 0 | Health strip | 1h SingleValue: workflow failures, AppSync 5XX, max DLQ depth, cost-reconciler windows-reconciled, escalations |
+| 1 | API health | AppSync errors/latency/requests; cost + gateway HttpApi 5xx/4xx; published-app APIs via `SEARCH()` |
+| 2 | Workflow health | `NodeDurationMs`/`NodeQueueWaitMs` p50/p90 (`SEARCH()`), `NodeFailure` breakdown, `NodeColdStart`, worker/supervisor/fabricator Lambda Errors/Throttles/Duration |
+| 3 | Cost & reconciliation | `AbsEstimateDriftPct` (with a 25% SLO annotation), `WindowsReconciled`, `UnmatchedLedgerModels`, `LedgerTokens` vs `MetricTokens`, `TierBActive` |
+| 4 | Governance | `OffFrontierEscalations` + an `AlarmStatusWidget` referencing the existing (arbiter-stack-owned) escalation alarm |
+| 5 | DLQ / error budget | DLQ depth + oldest-message age (`SEARCH()`, `citadel-*dlq*`), DynamoDB throttles/errors, and the platform-health `AlarmStatusWidget` (all 6 new alarms) |
+
+All `Citadel/Workflows` metric-name/namespace/dimension strings are imported
+from `backend/src/utils/metrics-constants.ts` — never retyped. That module
+was extended for this story to add `METRIC_NODE_DURATION_MS`,
+`METRIC_NODE_FAILURE`, and `METRIC_NODE_QUEUE_WAIT_MS`, mirroring the
+values already pinned in the Python arbiter tier's
+`arbiter/common/metrics_constants.py` (same namespace, both languages write
+into it; the TS side just didn't have these three yet). Cross-dimension
+**widgets** use `SEARCH()`; cross-dimension **alarms** use CloudWatch
+Metrics Insights, because `SEARCH()` results are not alarmable.
+
+## Alarms (6 new — all → the existing `citadel-alarms-${env}` topic)
+
+No new SNS topic was created. `BackendStack.alarmTopic` (previously a local
+`const`) was promoted to `public readonly` and threaded into
+`TelemetryStackProps`, alongside `appSyncApiId` (for the concrete
+`GraphQLAPIId` dimension on A3). TelemetryStack already depends on
+BackendStack, so this added zero new stack edges.
+
+| # | Alarm name | Metric / expression | Threshold | Period × Eval (datapoints) | `treatMissingData` | Action |
+|---|---|---|---|---|---|---|
+| A1 | `citadel-workflow-node-failure-${env}` | Metrics Insights `SUM(NodeFailure)` across `WorkflowId`/`AgentId` | ≥ 1 | 5m × 3 (1) | `notBreaching` | Trace viewer + DLQ check |
+| A2 | `citadel-workflow-queue-wait-${env}` | Metrics Insights `MAX(NodeQueueWaitMs)` | > 30000 ms | 5m × 3 (3) | `notBreaching` | Worker concurrency/throttles |
+| A3 | `citadel-appsync-5xx-${env}` | `AWS/AppSync 5XXError` (dim `GraphQLAPIId`) | ≥ 5 | 5m × 1 (1) | `notBreaching` | Resolver logs / X-Ray |
+| A4 | `citadel-dlq-not-empty-${env}` | Metrics Insights `MAX(ApproximateNumberOfMessagesVisible)` WHERE `QueueName LIKE 'citadel-%dlq%'` | ≥ 1 | 5m × 1 (1) | `notBreaching` | Identify queue, redrive |
+| A5 | `citadel-cost-reconciler-stalled-${env}` | `Citadel/CostReconciler WindowsReconciled` (dim `Environment`) | < 1 | 1h × 3 (3) | **`breaching`** — absence IS the failure | Check reconciler Lambda/schedule |
+| A6 | `citadel-cost-drift-high-${env}` | `Citadel/CostReconciler AbsEstimateDriftPct` (dim `Environment`) | > 25% | 1h × 3 (3) | `notBreaching` | Pricing catalog freshness |
+
+Every alarm carries an in-code comment marking its threshold as a
+**dev-calibrated starting point**. The existing `OffFrontierEscalations`
+alarm (arbiter-stack) and the backend-stack Lambda error/throttle alarms are
+retained unchanged — they are surfaced on the dashboard, not re-created here.
+
+## Tuning path (binding procedure, not a one-time calibration)
+
+1. Run for **2 weeks** against real (or representative staging) traffic.
+2. Pull p90/p99 of `NodeDurationMs`, `NodeQueueWaitMs`, and the AppSync 5XX
+   rate from CloudWatch for that window.
+3. Set each threshold to `baseline × agreed-multiplier` (multiplier decided
+   per-alarm, not a single global constant — e.g. queue-wait tolerates less
+   headroom than cost-drift).
+4. Record the change as an ADR referencing the baseline data pulled in step 2.
+
+No threshold shipped in this change is final; treat the numbers in the table
+above as placeholders that unblock dev/staging sign-off.
+
+## Fault-injection acceptance procedure
+
+**Unit level** (`backend/lib/__tests__/telemetry-stack.test.ts`): `Template`
+assertions per alarm — name, threshold, comparison operator, evaluation
+periods, datapoints-to-alarm, `treatMissingData`, and that `AlarmActions`
+resolves to the shared alarm topic — plus dashboard-body assertions for the
+four cross-stack namespaces and all six section titles. These are the
+primary, CI-enforced proof that each alarm is wired correctly.
+
+**Operational** (manual, one-time-per-environment sign-off — supplements,
+does not replace, the unit assertions above):
+
+Datapoint alarms (A1–A4, A6) — publish a synthetic datapoint and confirm the
+alarm actually fires:
+
+```bash
+aws cloudwatch put-metric-data --namespace Citadel/Workflows \
+  --metric-name NodeFailure --unit Count --value 1 \
+  --dimensions WorkflowId=inject-test,AgentId=inject-test --region "$REGION"
+# wait ~5-15 min for the eval window, then:
+aws cloudwatch describe-alarms --alarm-names "citadel-workflow-node-failure-${ENV}" \
+  --query 'MetricAlarms[0].StateValue' --output text   # expect: ALARM
+```
+
+Absence-based alarm (A5) cannot be forced by adding data — either wait 3h
+with the reconciler schedule disabled, or (faster, and this also proves the
+SNS wiring for every alarm including the datapoint ones) force the state
+directly:
+
+```bash
+aws cloudwatch set-alarm-state --alarm-name "citadel-cost-reconciler-stalled-${ENV}" \
+  --state-value ALARM --state-reason "fault-injection wiring test" --region "$REGION"
+# confirm the on-call subscriber (email/chatbot) received the notification, then:
+aws cloudwatch set-alarm-state --alarm-name "citadel-cost-reconciler-stalled-${ENV}" \
+  --state-value OK --state-reason "reset" --region "$REGION"
+```
+
+`put-metric-data` proves the metric → threshold path for datapoint alarms;
+`set-alarm-state` proves the alarm → SNS → notifier path for every alarm,
+including the absence-based one. Both are required before signing off a new
+environment's alarm wiring.

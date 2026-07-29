@@ -229,6 +229,11 @@ const telemetryStack = new TelemetryStack(
     executionsTable: backendStack.executionsTable,
     conversationsTable: backendStack.conversationsTable,
     projectsTable: backendStack.projectsTable,
+    // Platform-health dashboard + alarms (decision ab73ae1b): reuse the
+    // existing backend alarm topic (no new SNS topic) and the AppSync
+    // API id for the A3 5XX alarm + dashboard API-health widgets.
+    alarmTopic: backendStack.alarmTopic,
+    appSyncApiId: backendStack.appSyncApi.apiId,
   },
 );
 telemetryStack.addStackDependency(backendStack);

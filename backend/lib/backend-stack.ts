@@ -54,6 +54,12 @@ export class BackendStack extends cdk.Stack {
   // unmoved agentMessageHandlerFunction, so it stays in BackendStack and is
   // passed to ProjectsStack as a prop rather than moving.
   public readonly agentStatusTable: dynamodb.Table;
+  // Exposed for TelemetryStack (dashboards + alarms story, decision
+  // ab73ae1b): the platform-health alarms reuse this existing topic rather
+  // than provisioning a second one — on-call is already subscribed here
+  // for the Lambda error/throttle alarms below. Was a local `const`;
+  // promoted to a public readonly field, zero new resources.
+  public readonly alarmTopic: sns.Topic;
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props);
@@ -2872,7 +2878,7 @@ export class BackendStack extends cdk.Stack {
     });
 
     // O-01: CloudWatch alarms for operational visibility
-    const alarmTopic = new sns.Topic(this, "AlarmTopic", {
+    this.alarmTopic = new sns.Topic(this, "AlarmTopic", {
       topicName: `citadel-alarms-${props.environment}`,
       displayName: "Citadel Alarms",
       enforceSSL: true,

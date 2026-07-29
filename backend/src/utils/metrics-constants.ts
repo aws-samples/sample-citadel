@@ -23,6 +23,28 @@ export const METRIC_NAMESPACE = "Citadel/Workflows";
  * module-scope flag flipped on first invocation. */
 export const METRIC_NODE_COLD_START = "NodeColdStart";
 
+/**
+ * Node duration (Milliseconds), emitted on node completion. Mirrors the
+ * Python arbiter tier's `METRIC_NODE_DURATION_MS` in
+ * `arbiter/common/metrics_constants.py` — added here for the dashboards
+ * story (decision ab73ae1b), which needs it from the TS/CDK side.
+ */
+export const METRIC_NODE_DURATION_MS = "NodeDurationMs";
+
+/**
+ * Terminal (non-retryable) node failure (Count). Mirrors the Python
+ * arbiter tier's `METRIC_NODE_FAILURE`. Added here for the dashboards
+ * story (decision ab73ae1b).
+ */
+export const METRIC_NODE_FAILURE = "NodeFailure";
+
+/**
+ * Dispatch -> worker-start queue wait (Milliseconds). Mirrors the Python
+ * arbiter tier's `METRIC_NODE_QUEUE_WAIT_MS`. Added here for the
+ * dashboards story (decision ab73ae1b).
+ */
+export const METRIC_NODE_QUEUE_WAIT_MS = "NodeQueueWaitMs";
+
 export const UNIT_MILLISECONDS = "Milliseconds";
 export const UNIT_COUNT = "Count";
 

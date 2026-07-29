@@ -9,8 +9,43 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
+import * as sns from "aws-cdk-lib/aws-sns";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
+import {
+  METRIC_NAMESPACE,
+  METRIC_NODE_COLD_START,
+  METRIC_NODE_DURATION_MS,
+  METRIC_NODE_FAILURE,
+  METRIC_NODE_QUEUE_WAIT_MS,
+  DIMENSION_WORKFLOW_ID,
+  DIMENSION_AGENT_ID,
+} from "../src/utils/metrics-constants";
+
+// --- Cost-reconciler metric contract (pinned literals; see
+// cost-ledger-reconciler.ts `emitMetrics`). Not exported from
+// metrics-constants.ts because that module is the TS-mirror of the
+// Python arbiter tier's Citadel/Workflows contract specifically; the
+// cost-reconciler metrics are TS-only and namespaced separately
+// (Citadel/CostReconciler), so they are pinned locally here instead of
+// being retyped ad hoc below.
+const COST_RECONCILER_NAMESPACE = "Citadel/CostReconciler";
+const METRIC_ABS_ESTIMATE_DRIFT_PCT = "AbsEstimateDriftPct";
+const METRIC_WINDOWS_RECONCILED = "WindowsReconciled";
+const METRIC_UNMATCHED_LEDGER_MODELS = "UnmatchedLedgerModels";
+const METRIC_LEDGER_TOKENS = "LedgerTokens";
+const METRIC_METRIC_TOKENS = "MetricTokens";
+const METRIC_TIER_B_ACTIVE = "TierBActive";
+const DIMENSION_ENVIRONMENT = "Environment";
+
+// --- Governance escalation metric contract (pinned literal; see
+// arbiter/workerWrapper/tools/escalate.py). Already alarmed by
+// arbiter-stack's OffFrontierEscalationAlarm — surfaced on the dashboard
+// only, never re-alarmed here.
+const GOVERNANCE_NAMESPACE = "CitadelGovernance";
+const METRIC_OFF_FRONTIER_ESCALATIONS = "OffFrontierEscalations";
 
 export interface TelemetryStackProps extends cdk.StackProps {
   environment: string;
@@ -59,6 +94,18 @@ export interface TelemetryStackProps extends cdk.StackProps {
    * conversation -> projectId -> projects.orgId).
    */
   projectsTable: dynamodb.ITable;
+  /**
+   * Reused platform alarm topic (from BackendStack, decision ab73ae1b's
+   * notifier-reuse call) — every new platform-health alarm below attaches
+   * here. No new SNS topic is created by this stack.
+   */
+  alarmTopic: sns.ITopic;
+  /**
+   * The single AppSync API's id (from BackendStack) — the concrete
+   * `GraphQLAPIId` dimension for the AppSync 5XX alarm and dashboard
+   * widgets (design §2 API health / §3 alarm A3).
+   */
+  appSyncApiId: string;
 }
 
 /**
@@ -80,6 +127,8 @@ export class TelemetryStack extends cdk.Stack {
   public readonly costHttpApi: apigatewayv2.HttpApi;
   /** HttpApi endpoint URL — threaded into FrontendStack (pass 2) as `aws_cost_api_url`. */
   public readonly costApiUrl: string;
+  /** Platform-health dashboard name (design §2; decision ab73ae1b). */
+  public readonly platformHealthDashboardName: string;
 
   constructor(scope: Construct, id: string, props: TelemetryStackProps) {
     super(scope, id, props);
@@ -720,6 +769,642 @@ export class TelemetryStack extends cdk.Stack {
     );
     costBudgetEvaluatorScheduleRule.addTarget(
       new targets.LambdaFunction(this.costBudgetEvaluatorFunction),
+    );
+
+    // ========================================================================
+    // Platform-health dashboard + SLO alarms (dashboards + alarms story,
+    // decision ab73ae1b: TelemetryStack owns them). ONE dashboard;
+    // per-stack dashboards deliberately DEFERRED (architect design §1).
+    // All 6 new alarms reuse props.alarmTopic — no new SNS topic (§5).
+    // ========================================================================
+
+    this.platformHealthDashboardName = `citadel-platform-health-${props.environment}`;
+
+    // --- Section 0: health strip (SingleValue widgets, 1h) -----------------
+    const workflowFailuresStripWidget = new cloudwatch.TextWidget({
+      markdown: "## Section 0 — Health strip (1h)",
+      width: 24,
+      height: 1,
+    });
+
+    const nodeFailureInsightsQuery = `SELECT SUM("${METRIC_NODE_FAILURE}") FROM SCHEMA("${METRIC_NAMESPACE}", ${DIMENSION_WORKFLOW_ID}, ${DIMENSION_AGENT_ID})`;
+    const dlqDepthInsightsQuery = `SELECT MAX("ApproximateNumberOfMessagesVisible") FROM SCHEMA("AWS/SQS", QueueName) WHERE QueueName LIKE 'citadel-%dlq%'`;
+
+    const healthStripWidgets = [
+      new cloudwatch.SingleValueWidget({
+        title: "Workflow failures (1h)",
+        metrics: [
+          new cloudwatch.MathExpression({
+            expression: nodeFailureInsightsQuery,
+            usingMetrics: {},
+            label: "NodeFailure (Sum)",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        width: 5,
+        height: 4,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: "AppSync 5XX (1h)",
+        metrics: [
+          new cloudwatch.Metric({
+            namespace: "AWS/AppSync",
+            metricName: "5XXError",
+            dimensionsMap: { GraphQLAPIId: props.appSyncApiId },
+            statistic: "Sum",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        width: 5,
+        height: 4,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: "Max DLQ depth",
+        metrics: [
+          new cloudwatch.MathExpression({
+            expression: dlqDepthInsightsQuery,
+            usingMetrics: {},
+            label: "Max DLQ ApproxMessagesVisible",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        width: 5,
+        height: 4,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: "Cost-reconciler windows reconciled (1h)",
+        metrics: [
+          new cloudwatch.Metric({
+            namespace: COST_RECONCILER_NAMESPACE,
+            metricName: METRIC_WINDOWS_RECONCILED,
+            dimensionsMap: { [DIMENSION_ENVIRONMENT]: props.environment },
+            statistic: "Sum",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        setPeriodToTimeRange: true,
+        width: 5,
+        height: 4,
+      }),
+      new cloudwatch.SingleValueWidget({
+        title: "Escalations (1h)",
+        metrics: [
+          new cloudwatch.Metric({
+            namespace: GOVERNANCE_NAMESPACE,
+            metricName: METRIC_OFF_FRONTIER_ESCALATIONS,
+            statistic: "Sum",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        width: 4,
+        height: 4,
+      }),
+    ];
+
+    // --- Section 1: API health ---------------------------------------------
+    const apiHealthWidgets = [
+      new cloudwatch.TextWidget({
+        markdown: "## Section 1 — API health",
+        width: 24,
+        height: 1,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "AppSync errors (4XX/5XX)",
+        left: [
+          new cloudwatch.Metric({
+            namespace: "AWS/AppSync",
+            metricName: "4XXError",
+            dimensionsMap: { GraphQLAPIId: props.appSyncApiId },
+            statistic: "Sum",
+            period: cdk.Duration.minutes(5),
+          }),
+          new cloudwatch.Metric({
+            namespace: "AWS/AppSync",
+            metricName: "5XXError",
+            dimensionsMap: { GraphQLAPIId: props.appSyncApiId },
+            statistic: "Sum",
+            period: cdk.Duration.minutes(5),
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "AppSync latency (p50/p90) & requests",
+        left: [
+          new cloudwatch.Metric({
+            namespace: "AWS/AppSync",
+            metricName: "Latency",
+            dimensionsMap: { GraphQLAPIId: props.appSyncApiId },
+            statistic: "p50",
+            period: cdk.Duration.minutes(5),
+          }),
+          new cloudwatch.Metric({
+            namespace: "AWS/AppSync",
+            metricName: "Latency",
+            dimensionsMap: { GraphQLAPIId: props.appSyncApiId },
+            statistic: "p90",
+            period: cdk.Duration.minutes(5),
+          }),
+        ],
+        right: [
+          new cloudwatch.Metric({
+            namespace: "AWS/AppSync",
+            metricName: "Requests",
+            dimensionsMap: { GraphQLAPIId: props.appSyncApiId },
+            statistic: "Sum",
+            period: cdk.Duration.minutes(5),
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "HTTP APIs (cost + gateway) — 5xx/4xx",
+        left: [
+          new cloudwatch.Metric({
+            namespace: "AWS/ApiGatewayV2",
+            metricName: "5xx",
+            dimensionsMap: { ApiId: this.costHttpApi.apiId },
+            statistic: "Sum",
+            period: cdk.Duration.minutes(5),
+          }),
+          new cloudwatch.Metric({
+            namespace: "AWS/ApiGatewayV2",
+            metricName: "4xx",
+            dimensionsMap: { ApiId: this.costHttpApi.apiId },
+            statistic: "Sum",
+            period: cdk.Duration.minutes(5),
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title:
+          "Published apps HTTP APIs — 5xx (SEARCH, auto-includes new apps)",
+        left: [
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{AWS/ApiGateway,ApiId} MetricName="5XXError"', 'Sum', 300)`,
+            usingMetrics: {},
+            label: "Published app APIs 5XXError",
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+    ];
+
+    // --- Section 2: workflow health (new metrics) ---------------------------
+    const workflowHealthWidgets = [
+      new cloudwatch.TextWidget({
+        markdown: "## Section 2 — Workflow health",
+        width: 24,
+        height: 1,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Node duration (p50/p90, ms) — SEARCH across WorkflowId/AgentId",
+        left: [
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{${METRIC_NAMESPACE},${DIMENSION_WORKFLOW_ID},${DIMENSION_AGENT_ID}} MetricName="${METRIC_NODE_DURATION_MS}"', 'p50', 300)`,
+            usingMetrics: {},
+            label: "NodeDurationMs p50",
+          }),
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{${METRIC_NAMESPACE},${DIMENSION_WORKFLOW_ID},${DIMENSION_AGENT_ID}} MetricName="${METRIC_NODE_DURATION_MS}"', 'p90', 300)`,
+            usingMetrics: {},
+            label: "NodeDurationMs p90",
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Queue wait (p90, ms) — SEARCH across WorkflowId/AgentId",
+        left: [
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{${METRIC_NAMESPACE},${DIMENSION_WORKFLOW_ID},${DIMENSION_AGENT_ID}} MetricName="${METRIC_NODE_QUEUE_WAIT_MS}"', 'p90', 300)`,
+            usingMetrics: {},
+            label: "NodeQueueWaitMs p90",
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title:
+          "Node failures — per-WorkflowId breakdown (SEARCH) + total (Insights)",
+        left: [
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{${METRIC_NAMESPACE},${DIMENSION_WORKFLOW_ID},${DIMENSION_AGENT_ID}} MetricName="${METRIC_NODE_FAILURE}"', 'Sum', 300)`,
+            usingMetrics: {},
+            label: "NodeFailure by WorkflowId",
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Cold starts (Sum) — SEARCH across WorkflowId/AgentId",
+        left: [
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{${METRIC_NAMESPACE},${DIMENSION_WORKFLOW_ID},${DIMENSION_AGENT_ID}} MetricName="${METRIC_NODE_COLD_START}"', 'Sum', 300)`,
+            usingMetrics: {},
+            label: "NodeColdStart",
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title:
+          "Worker/Supervisor/Fabricator Lambdas — Errors/Throttles/Concurrency/Duration p90",
+        left: [
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{AWS/Lambda,FunctionName} MetricName="Errors" FunctionName="citadel-worker-agent-wrapper-${props.environment}" OR FunctionName="citadel-supervisor-agent-${props.environment}" OR FunctionName="citadel-fabricator-agent-${props.environment}"', 'Sum', 300)`,
+            usingMetrics: {},
+            label: "Errors",
+          }),
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{AWS/Lambda,FunctionName} MetricName="Throttles" FunctionName="citadel-worker-agent-wrapper-${props.environment}" OR FunctionName="citadel-supervisor-agent-${props.environment}" OR FunctionName="citadel-fabricator-agent-${props.environment}"', 'Sum', 300)`,
+            usingMetrics: {},
+            label: "Throttles",
+          }),
+        ],
+        right: [
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{AWS/Lambda,FunctionName} MetricName="Duration" FunctionName="citadel-worker-agent-wrapper-${props.environment}" OR FunctionName="citadel-supervisor-agent-${props.environment}" OR FunctionName="citadel-fabricator-agent-${props.environment}"', 'p90', 300)`,
+            usingMetrics: {},
+            label: "Duration p90",
+          }),
+        ],
+        width: 24,
+        height: 6,
+      }),
+    ];
+
+    // --- Section 3: cost & reconciliation ------------------------------------
+    const costReconciliationWidgets = [
+      new cloudwatch.TextWidget({
+        markdown: "## Section 3 — Cost & reconciliation",
+        width: 24,
+        height: 1,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Abs estimate drift % (Max) — 25% SLO annotation",
+        left: [
+          new cloudwatch.Metric({
+            namespace: COST_RECONCILER_NAMESPACE,
+            metricName: METRIC_ABS_ESTIMATE_DRIFT_PCT,
+            dimensionsMap: { [DIMENSION_ENVIRONMENT]: props.environment },
+            statistic: "Maximum",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        leftAnnotations: [
+          {
+            value: 25,
+            label: "25% dev-calibrated SLO threshold",
+            color: cloudwatch.Color.RED,
+          },
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Windows reconciled (Sum, liveness) & unmatched ledger models",
+        left: [
+          new cloudwatch.Metric({
+            namespace: COST_RECONCILER_NAMESPACE,
+            metricName: METRIC_WINDOWS_RECONCILED,
+            dimensionsMap: { [DIMENSION_ENVIRONMENT]: props.environment },
+            statistic: "Sum",
+            period: cdk.Duration.hours(1),
+          }),
+          new cloudwatch.Metric({
+            namespace: COST_RECONCILER_NAMESPACE,
+            metricName: METRIC_UNMATCHED_LEDGER_MODELS,
+            dimensionsMap: { [DIMENSION_ENVIRONMENT]: props.environment },
+            statistic: "Sum",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Ledger tokens vs metric tokens (drift context) & Tier B active",
+        left: [
+          new cloudwatch.Metric({
+            namespace: COST_RECONCILER_NAMESPACE,
+            metricName: METRIC_LEDGER_TOKENS,
+            dimensionsMap: { [DIMENSION_ENVIRONMENT]: props.environment },
+            statistic: "Sum",
+            period: cdk.Duration.hours(1),
+          }),
+          new cloudwatch.Metric({
+            namespace: COST_RECONCILER_NAMESPACE,
+            metricName: METRIC_METRIC_TOKENS,
+            dimensionsMap: { [DIMENSION_ENVIRONMENT]: props.environment },
+            statistic: "Sum",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        right: [
+          new cloudwatch.Metric({
+            namespace: COST_RECONCILER_NAMESPACE,
+            metricName: METRIC_TIER_B_ACTIVE,
+            dimensionsMap: { [DIMENSION_ENVIRONMENT]: props.environment },
+            statistic: "Maximum",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        width: 24,
+        height: 6,
+      }),
+    ];
+
+    // --- Section 4: governance -----------------------------------------------
+    const governanceWidgets = [
+      new cloudwatch.TextWidget({
+        markdown: "## Section 4 — Governance",
+        width: 24,
+        height: 1,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Off-frontier escalations (Sum, 1h) — by ProjectId",
+        left: [
+          new cloudwatch.Metric({
+            namespace: GOVERNANCE_NAMESPACE,
+            metricName: METRIC_OFF_FRONTIER_ESCALATIONS,
+            statistic: "Sum",
+            period: cdk.Duration.hours(1),
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.AlarmStatusWidget({
+        title: "Existing escalation alarm status",
+        alarms: [
+          cloudwatch.Alarm.fromAlarmArn(
+            this,
+            "OffFrontierEscalationAlarmRef",
+            cdk.Arn.format(
+              {
+                service: "cloudwatch",
+                resource: "alarm",
+                resourceName: `citadel-offfrontier-escalations-${props.environment}`,
+                arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+              },
+              this,
+            ),
+          ),
+        ],
+        width: 12,
+        height: 6,
+      }),
+    ];
+
+    // --- Section 5: DLQ / error budget ---------------------------------------
+    const dlqAndErrorBudgetWidgets = [
+      new cloudwatch.TextWidget({
+        markdown: "## Section 5 — DLQ / error budget",
+        width: 24,
+        height: 1,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "DLQ depth & oldest-message age (SEARCH, citadel-*dlq*)",
+        left: [
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{AWS/SQS,QueueName} MetricName="ApproximateNumberOfMessagesVisible" QueueName="citadel-*dlq*"', 'Maximum', 300)`,
+            usingMetrics: {},
+            label: "DLQ depth",
+          }),
+        ],
+        right: [
+          new cloudwatch.MathExpression({
+            expression: `SEARCH('{AWS/SQS,QueueName} MetricName="ApproximateAgeOfOldestMessage" QueueName="citadel-*dlq*"', 'Maximum', 300)`,
+            usingMetrics: {},
+            label: "Oldest message age",
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "DynamoDB throttles/errors — cost ledger + key tables",
+        left: [
+          this.costLedgerTable.metricThrottledRequestsForOperation("Query", {
+            period: cdk.Duration.minutes(5),
+          }),
+          this.costLedgerTable.metricSystemErrorsForOperations({
+            operations: [dynamodb.Operation.QUERY, dynamodb.Operation.PUT_ITEM],
+            period: cdk.Duration.minutes(5),
+          }),
+        ],
+        width: 12,
+        height: 6,
+      }),
+    ];
+
+    const allPlatformHealthAlarmNames = [
+      `citadel-workflow-node-failure-${props.environment}`,
+      `citadel-workflow-queue-wait-${props.environment}`,
+      `citadel-appsync-5xx-${props.environment}`,
+      `citadel-dlq-not-empty-${props.environment}`,
+      `citadel-cost-reconciler-stalled-${props.environment}`,
+      `citadel-cost-drift-high-${props.environment}`,
+    ];
+    const alarmStatusWidget = new cloudwatch.AlarmStatusWidget({
+      title: "Platform-health alarms — traffic light",
+      alarms: allPlatformHealthAlarmNames.map(
+        (name, i) =>
+          cloudwatch.Alarm.fromAlarmArn(
+            this,
+            `PlatformHealthAlarmRef${i}`,
+            cdk.Arn.format(
+              {
+                service: "cloudwatch",
+                resource: "alarm",
+                resourceName: name,
+                arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+              },
+              this,
+            ),
+          ) as cloudwatch.IAlarm,
+      ),
+      width: 24,
+      height: 6,
+    });
+
+    new cloudwatch.Dashboard(this, "PlatformHealthDashboard", {
+      dashboardName: this.platformHealthDashboardName,
+      widgets: [
+        [workflowFailuresStripWidget],
+        healthStripWidgets,
+        apiHealthWidgets,
+        workflowHealthWidgets,
+        costReconciliationWidgets,
+        governanceWidgets,
+        [...dlqAndErrorBudgetWidgets, alarmStatusWidget],
+      ],
+    });
+
+    // --- Alarms (6 new; all -> props.alarmTopic; §3) -------------------------
+    // Thresholds below are DEV-CALIBRATED STARTING POINTS, not final SLOs.
+    // Tuning path (docs/OBSERVABILITY.md): after 2 weeks of real traffic,
+    // pull p90/p99 of NodeDurationMs/NodeQueueWaitMs and the AppSync 5XX
+    // rate from CloudWatch, set thresholds to baseline x agreed-multiplier,
+    // and record the change as an ADR. No threshold here is final.
+
+    // A1 — node-failure: any terminal node failure in 15m is actionable at
+    // dev scale. dev-calibrated; TUNE with prod baseline.
+    const nodeFailureAlarm = new cloudwatch.Alarm(this, "NodeFailureAlarm", {
+      alarmName: `citadel-workflow-node-failure-${props.environment}`,
+      metric: new cloudwatch.MathExpression({
+        expression: nodeFailureInsightsQuery,
+        usingMetrics: {},
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 1, // dev-calibrated; TUNE with prod baseline
+      evaluationPeriods: 3,
+      datapointsToAlarm: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        "Terminal workflow node failure detected. Runbook: open the failing " +
+        "execution in the trace viewer (/traces/by-execution), check " +
+        "citadel-*-dlq-* depth, inspect WorkerAgentWrapper logs.",
+    });
+    nodeFailureAlarm.addAlarmAction(new cw_actions.SnsAction(props.alarmTopic));
+
+    // A2 — queue-wait: sustained 30s dispatch->worker-start wait indicates
+    // concurrency starvation/throttling. dev-calibrated; TUNE with prod baseline.
+    const queueWaitAlarm = new cloudwatch.Alarm(this, "QueueWaitAlarm", {
+      alarmName: `citadel-workflow-queue-wait-${props.environment}`,
+      metric: new cloudwatch.MathExpression({
+        expression: `SELECT MAX("${METRIC_NODE_QUEUE_WAIT_MS}") FROM SCHEMA("${METRIC_NAMESPACE}", ${DIMENSION_WORKFLOW_ID}, ${DIMENSION_AGENT_ID})`,
+        usingMetrics: {},
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 30000, // ms; dev-calibrated; TUNE with prod baseline
+      evaluationPeriods: 3,
+      datapointsToAlarm: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        "Sustained worker dispatch queue wait. Runbook: check " +
+        "WorkerAgentWrapper Throttles/ConcurrentExecutions + SQS backlog; " +
+        "raise reserved concurrency.",
+    });
+    queueWaitAlarm.addAlarmAction(new cw_actions.SnsAction(props.alarmTopic));
+
+    // A3 — AppSync 5xx: a burst of server errors on the single control-plane
+    // API breaks the acceptance-path chat/resolvers. dev-calibrated; TUNE with prod baseline.
+    const appSync5xxAlarm = new cloudwatch.Alarm(this, "AppSync5xxAlarm", {
+      alarmName: `citadel-appsync-5xx-${props.environment}`,
+      metric: new cloudwatch.Metric({
+        namespace: "AWS/AppSync",
+        metricName: "5XXError",
+        dimensionsMap: { GraphQLAPIId: props.appSyncApiId },
+        statistic: "Sum",
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 5, // dev-calibrated; TUNE with prod baseline
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        "AppSync 5XX burst. Runbook: check resolver CloudWatch logs + " +
+        "X-Ray for the failing field; check for a recent deploy.",
+    });
+    appSync5xxAlarm.addAlarmAction(new cw_actions.SnsAction(props.alarmTopic));
+
+    // A4 — dlq-not-empty: any message in any DLQ means an async handler
+    // exhausted retries. dev-calibrated; TUNE with prod baseline.
+    const dlqNotEmptyAlarm = new cloudwatch.Alarm(this, "DlqNotEmptyAlarm", {
+      alarmName: `citadel-dlq-not-empty-${props.environment}`,
+      metric: new cloudwatch.MathExpression({
+        expression: dlqDepthInsightsQuery,
+        usingMetrics: {},
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 1, // dev-calibrated; TUNE with prod baseline
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        "A message landed in a citadel-*-dlq-*. Runbook: identify the " +
+        "queue, read the message, fix the handler, redrive.",
+    });
+    dlqNotEmptyAlarm.addAlarmAction(new cw_actions.SnsAction(props.alarmTopic));
+
+    // A5 — reconciler-stalled: the hourly reconciler emits 1 datapoint per
+    // run; 3 empty hours means it's broken. Absence IS the failure here, so
+    // treatMissingData is BREACHING (the one deliberate exception to the
+    // notBreaching default above). dev-calibrated; TUNE with prod baseline.
+    const reconcilerStalledAlarm = new cloudwatch.Alarm(
+      this,
+      "ReconcilerStalledAlarm",
+      {
+        alarmName: `citadel-cost-reconciler-stalled-${props.environment}`,
+        metric: new cloudwatch.Metric({
+          namespace: COST_RECONCILER_NAMESPACE,
+          metricName: METRIC_WINDOWS_RECONCILED,
+          dimensionsMap: { [DIMENSION_ENVIRONMENT]: props.environment },
+          statistic: "Sum",
+          period: cdk.Duration.hours(1),
+        }),
+        threshold: 1, // dev-calibrated; TUNE with prod baseline
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+        alarmDescription:
+          "Cost-ledger reconciler has not run in 3h — absence IS the " +
+          "failure. Runbook: check citadel-cost-ledger-reconciler Lambda " +
+          "errors/logs and confirm the hourly schedule rule is enabled.",
+      },
+    );
+    reconcilerStalledAlarm.addAlarmAction(
+      new cw_actions.SnsAction(props.alarmTopic),
+    );
+
+    // A6 — drift-high: ledger estimate vs Bedrock actual diverging >25%
+    // over 3h signals stale pricing catalog / model-key mismatch.
+    // dev-calibrated; TUNE with prod baseline (loose 25% to avoid noise on
+    // small dev-scale token counts).
+    const costDriftHighAlarm = new cloudwatch.Alarm(
+      this,
+      "CostDriftHighAlarm",
+      {
+        alarmName: `citadel-cost-drift-high-${props.environment}`,
+        metric: new cloudwatch.Metric({
+          namespace: COST_RECONCILER_NAMESPACE,
+          metricName: METRIC_ABS_ESTIMATE_DRIFT_PCT,
+          dimensionsMap: { [DIMENSION_ENVIRONMENT]: props.environment },
+          statistic: "Maximum",
+          period: cdk.Duration.hours(1),
+        }),
+        threshold: 25, // percent; dev-calibrated; TUNE with prod baseline
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription:
+          "Cost-ledger estimate vs Bedrock actual diverging >25% over 3h. " +
+          "Runbook: verify model-catalog pricing freshness + UnmatchedLedgerModels.",
+      },
+    );
+    costDriftHighAlarm.addAlarmAction(
+      new cw_actions.SnsAction(props.alarmTopic),
     );
   }
 }

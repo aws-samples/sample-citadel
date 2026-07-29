@@ -8,6 +8,9 @@
 import {
   METRIC_NAMESPACE,
   METRIC_NODE_COLD_START,
+  METRIC_NODE_DURATION_MS,
+  METRIC_NODE_FAILURE,
+  METRIC_NODE_QUEUE_WAIT_MS,
   UNIT_MILLISECONDS,
   UNIT_COUNT,
   DIMENSION_WORKFLOW_ID,
@@ -21,6 +24,12 @@ describe("metrics-constants — literal contract", () => {
 
   test("metric names are pinned", () => {
     expect(METRIC_NODE_COLD_START).toBe("NodeColdStart");
+  });
+
+  test("node duration/failure/queue-wait metric names match the Python arbiter tier's pinned values (arbiter/common/metrics_constants.py)", () => {
+    expect(METRIC_NODE_DURATION_MS).toBe("NodeDurationMs");
+    expect(METRIC_NODE_FAILURE).toBe("NodeFailure");
+    expect(METRIC_NODE_QUEUE_WAIT_MS).toBe("NodeQueueWaitMs");
   });
 
   test("units are pinned", () => {
