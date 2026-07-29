@@ -36,7 +36,7 @@ from botocore.exceptions import ClientError
 # client(s) below and before `import events` (which constructs its own
 # EventBridge client at module scope) so patch_all() instruments botocore
 # ahead of any client creation.
-import common.tracing # noqa: F401 — import activates tracing as a side effect
+import common.tracing as tracing  # import activates tracing as a side effect
 
 import events
 

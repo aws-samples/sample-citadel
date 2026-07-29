@@ -12,16 +12,12 @@ import boto3
 # bundle currently ships only arbiter/workerWrapper/. A missing import
 # must NOT break dispatch: tracing is best-effort, never required.
 try:
-    import common.tracing # noqa: F401,E402 — import activates tracing as a side effect
-    from common.tracing import annotate_from_carried, extract_carried, render_xray_header
+    from common.tracing import annotate_from_carried, extract_carried  # noqa: E402 — import activates tracing as a side effect
 except ImportError: # pragma: no cover — Lambda bundle path before follow-up
     def annotate_from_carried(carried): # type: ignore[no-redef]
         pass
 
     def extract_carried(detail): # type: ignore[no-redef]
-        return None
-
-    def render_xray_header(trace_id, parent_id, sampled): # type: ignore[no-redef]
         return None
 
 from worker_governance import (

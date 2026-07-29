@@ -20,8 +20,7 @@ from datetime import datetime, timezone
 # Hard import — arbiter/common/ is already a required dependency of this
 # module (see the `from common import workflow_contract` hard import below),
 # so no deferred-bundling fallback is needed here.
-import common.tracing # noqa: F401 — import activates tracing as a side effect
-import common.tracing as tracing
+import common.tracing as tracing  # import activates tracing as a side effect
 
 import events
 from dag import (

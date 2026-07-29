@@ -16,9 +16,11 @@ import pytest
 def _reset_tracing_module():
     """Reload common.tracing fresh for each test so the module-level
     `_configured` guard doesn't leak state between tests."""
-    sys.modules.pop("common.tracing", None)
+    original = sys.modules.pop("common.tracing", None)
     yield
     sys.modules.pop("common.tracing", None)
+    if original is not None:
+        sys.modules["common.tracing"] = original
 
 
 def test_configure_calls_patch_all_exactly_once(monkeypatch):

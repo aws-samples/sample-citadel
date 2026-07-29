@@ -95,7 +95,7 @@ from common.usage import build_usage_record, extract_converse_usage, extract_req
 # constructed below so patch_all() instruments botocore ahead of client
 # creation. Ships alongside the supervisor Lambda asset the same way
 # common.usage does (see comment above); hard import, no defensive fallback.
-import common.tracing  # noqa: F401 — import activates tracing as a side effect
+import common.tracing as tracing  # import activates tracing as a side effect
 
 
 def _load_governance_package():
