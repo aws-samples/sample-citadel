@@ -29,6 +29,7 @@ beforeEach(() => {
   process.env.MODEL_CONFIG_TABLE = "model-config-test";
   process.env.GOVERNANCE_LEDGER_TABLE = "governance-ledger-test";
   process.env.COST_LEDGER_TABLE = "cost-ledger-test";
+  process.env.CONVERSATIONS_TABLE = "conversations-test";
   process.env.COMMIT_SHA = "abc1234";
 });
 
@@ -182,5 +183,256 @@ describe("assembleReplayPackage — output is gate-clean", () => {
 
     const result = await assembleReplayPackage("org-1", "execution", "exec-1");
     expect(scanForSecrets(JSON.stringify(result))).toEqual([]);
+  });
+});
+// --- conversation-kind assembly (closes the ReplayNotFoundError gap) ---
+//
+// Feasibility (see docs/REPLAY_PACKAGE.md "Conversation-kind" section):
+// conversationId == projectId (resolveConversationOwnership resolves via
+// PROJECTS_TABLE Key={id: conversationId}). Messages are queryable by
+// projectId (CONVERSATIONS_TABLE partition key). Usage/cost is queryable
+// via COST_LEDGER_TABLE's GSI1 (GSI1PK = PROJECT#<projectId>), since
+// state.py's publish_usage_event stamps projectId = sessionId. Governance
+// findings key on workflowId/orchestrationId — NOT conversationId/projectId
+// — so findings are honestly modelled as an explicit partial section with
+// provenance, never invented, never joined by guesswork.
+function conversationMessageItem(
+  projectId: string,
+  timestamp: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    projectId,
+    timestamp,
+    id: `msg-${timestamp}`,
+    agentId: "agent-1",
+    message: "hello",
+    messageType: "USER_INPUT",
+    userId: "user-1",
+    ...overrides,
+  };
+}
+
+describe("assembleReplayPackage — conversation kind", () => {
+  test("builds a versioned envelope for a conversation id (no longer throws ReplayNotFoundError)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.TableName === "conversations-test") {
+        return {
+          Items: [
+            conversationMessageItem("conv-1", "2026-07-01T00:00:00.000Z"),
+            conversationMessageItem("conv-1", "2026-07-01T00:01:00.000Z", {
+              messageType: "AGENT_RESPONSE",
+            }),
+          ],
+        };
+      }
+      if (
+        input.TableName === "cost-ledger-test" &&
+        input.IndexName === "ProjectIndex"
+      ) {
+        return { Items: [] };
+      }
+      return { Items: [] };
+    });
+
+    const result = await assembleReplayPackage(
+      "org-1",
+      "conversation",
+      "conv-1",
+    );
+
+    expect(result.kind).toBe("conversation");
+    expect(result.correlationId).toBe("conv-1");
+    expect(result.orgId).toBe("org-1");
+    expect(result.sanitisation.gate).toBe("passed");
+  });
+
+  test("messages section is populated from CONVERSATIONS_TABLE, ordered chronologically", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.TableName === "conversations-test") {
+        return {
+          Items: [
+            conversationMessageItem("conv-1", "2026-07-01T00:01:00.000Z", {
+              messageType: "AGENT_RESPONSE",
+              message: "second",
+            }),
+            conversationMessageItem("conv-1", "2026-07-01T00:00:00.000Z", {
+              message: "first",
+            }),
+          ],
+        };
+      }
+      return { Items: [] };
+    });
+
+    const result = await assembleReplayPackage(
+      "org-1",
+      "conversation",
+      "conv-1",
+    );
+
+    expect(result.sections.messages).toBeDefined();
+    const messages = result.sections.messages as Array<{
+      message: string;
+      timestamp: string;
+    }>;
+    expect(messages.map((m) => m.message)).toEqual(["first", "second"]);
+  });
+
+  test("usageTotals for a conversation are aggregated from COST_LEDGER_TABLE GSI1 (PROJECT#<conversationId>)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.TableName === "conversations-test") return { Items: [] };
+      if (
+        input.TableName === "cost-ledger-test" &&
+        input.IndexName === "ProjectIndex"
+      ) {
+        expect(input.ExpressionAttributeValues[":pk"]).toBe("PROJECT#conv-1");
+        return {
+          Items: [
+            {
+              orgId: "org-1",
+              projectId: "conv-1",
+              inputTokens: 5,
+              outputTokens: 7,
+              totalTokens: 12,
+            },
+            {
+              orgId: "org-1",
+              projectId: "conv-1",
+              inputTokens: 3,
+              outputTokens: 1,
+              totalTokens: 4,
+            },
+          ],
+        };
+      }
+      return { Items: [] };
+    });
+
+    const result = await assembleReplayPackage(
+      "org-1",
+      "conversation",
+      "conv-1",
+    );
+
+    expect(result.sections.usageTotals).toEqual({
+      inputTokens: 8,
+      outputTokens: 8,
+      totalTokens: 16,
+      callCount: 2,
+    });
+  });
+
+  test("findings section is explicitly partial for conversation kind — no join key exists (honest gap)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    const result = await assembleReplayPackage(
+      "org-1",
+      "conversation",
+      "conv-1",
+    );
+
+    expect(result.sections.findings).toEqual({
+      partial: true,
+      results: [],
+      provenance: expect.stringMatching(/orchestrationId|workflowId/i),
+    });
+  });
+
+  test("cross-org refusal: a conversation message row belonging to a different org is refused", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.TableName === "conversations-test") {
+        return {
+          Items: [
+            conversationMessageItem("conv-1", "2026-07-01T00:00:00.000Z", {
+              orgId: "org-OTHER",
+            }),
+          ],
+        };
+      }
+      return { Items: [] };
+    });
+
+    await expect(
+      assembleReplayPackage("org-1", "conversation", "conv-1"),
+    ).rejects.toThrow(CrossOrgRowError);
+  });
+
+  test("cross-org refusal: a cost-ledger usage row belonging to a different org is refused", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.TableName === "conversations-test") return { Items: [] };
+      if (
+        input.TableName === "cost-ledger-test" &&
+        input.IndexName === "ProjectIndex"
+      ) {
+        return {
+          Items: [{ orgId: "org-OTHER", projectId: "conv-1" }],
+        };
+      }
+      return { Items: [] };
+    });
+
+    await expect(
+      assembleReplayPackage("org-1", "conversation", "conv-1"),
+    ).rejects.toThrow(CrossOrgRowError);
+  });
+
+  test("toolResults is partial/honest for conversation kind too", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    const result = await assembleReplayPackage(
+      "org-1",
+      "conversation",
+      "conv-1",
+    );
+
+    expect(result.sections.toolResults.partial).toBe(true);
+    expect(result.sections.toolResults.provenance).toMatch(/CIT-121/);
+  });
+
+  test("conversation-kind output is gate-clean (no secret-pattern hits after sanitisation)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.TableName === "conversations-test") {
+        return {
+          Items: [
+            conversationMessageItem("conv-1", "2026-07-01T00:00:00.000Z", {
+              message: "leaked token=supersecretvalue123",
+            }),
+          ],
+        };
+      }
+      return { Items: [] };
+    });
+
+    const result = await assembleReplayPackage(
+      "org-1",
+      "conversation",
+      "conv-1",
+    );
+    expect(scanForSecrets(JSON.stringify(result))).toEqual([]);
+  });
+
+  test("agentConfig/workflow/execSpec/modelConfig sections are null for conversation kind (no execution row to derive them from)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    const result = await assembleReplayPackage(
+      "org-1",
+      "conversation",
+      "conv-1",
+    );
+
+    expect(result.sections.agentConfig).toBeNull();
+    expect(result.sections.workflow).toBeNull();
+    expect(result.sections.execSpec).toBeNull();
+    expect(result.sections.modelConfig).toBeNull();
   });
 });

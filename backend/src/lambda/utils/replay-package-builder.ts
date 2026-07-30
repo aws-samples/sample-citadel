@@ -1,30 +1,55 @@
 /**
  * Replay package builder (CIT-026 design §4/§5).
  *
- * `assembleReplayPackage(orgId, kind, id)` reads the execution (or, for a
- * conversation, the transcript path — not yet wired; conversation kind is
- * accepted by the type but execution is the only source read in this pass)
- * and every related table, builds the versioned envelope, filters every
- * sourced row by the CALLER-RESOLVED orgId (defence in depth beyond the
- * handler's own ownership check), and runs the bundle through
+ * `assembleReplayPackage(orgId, kind, id)` reads the execution (execution
+ * kind) or the conversation transcript + cost-ledger rollup (conversation
+ * kind), and every related table, builds the versioned envelope, filters
+ * every sourced row by the CALLER-RESOLVED orgId (defence in depth beyond
+ * the handler's own ownership check), and runs the bundle through
  * sanitizeBundle + assertBundleSecretFree before returning it. The gate
  * throwing propagates straight out of this function — the handler
  * (replay-package-handler.ts) is what turns that into a fail-closed
  * "refuse to publish" HTTP response.
  *
- * HONEST GAP (design §4, carried into the envelope's toolResults section):
- * raw per-node-per-tool-call result payloads are NOT persisted in a
- * queryable store today. What we have is (a) the node's final output
- * (which may embed tool output) and (b) governance-ledger findings that a
- * tool ran + its governance decision. The dedicated tool-execution ledger
- * that would hold `key -> result` is CIT-121 (E12), not yet built. This
- * function NEVER reads CloudWatch logs to backfill that gap — logs are not
- * a reproducible artifact and would pull unredacted data into scope
- * outside this pipeline's sanitisation guarantee. `sections.toolResults`
- * is therefore always `{ partial: true, results: [], provenance: "..." }`
- * in this pass; a future CIT-121-backed pass replaces `results` with real
- * per-call data without touching this shape's `partial`/`provenance`
- * fields (additive-safe schema evolution, design §5).
+ * CONVERSATION-KIND FEASIBILITY (read directly, not inferred):
+ *   - conversationId == projectId: `resolveConversationOwnership` in
+ *     trace-http-shared.ts resolves ownership via
+ *     `PROJECTS_TABLE.GetItem(Key={id: conversationId})`.
+ *   - Messages ARE queryable: `CONVERSATIONS_TABLE` (backend-stack.ts
+ *     `conversationsTable`) is keyed `projectId` (partition) / `timestamp`
+ *     (sort) — the same shape `conversation-resolver.ts`'s
+ *     `getConversationHistory` already queries.
+ *   - Usage/cost IS queryable: `service/agent_intake_single/tools/state.py`
+ *     `publish_usage_event` stamps `projectId: session_id` on every
+ *     `agent_intake.usage`/`intake.usage.captured` event; `cost-ledger-writer.ts`
+ *     persists those rows with `GSI1PK = PROJECT#<projectId>` /
+ *     `GSI1SK = <capturedAt>#<ledgerId>` (its `handleIntakeUsage` path) —
+ *     a real, queryable, org-scoped join from conversationId to usage.
+ *   - Governance findings do NOT join: the governance ledger
+ *     (`arbiter/governance/ledger.py`) keys findings on `workflowId`
+ *     (== `orchestrationId`, see `arbiter/supervisor/index.py`), and
+ *     nothing ties a conversationId/projectId to an orchestrationId.
+ *     `sections.findings` is therefore an explicit partial section with
+ *     provenance for conversation kind — never invented, never guessed.
+ *   - agentConfig/workflow/execSpec/modelConfig are execution-scoped
+ *     concepts with no conversation-side equivalent row to read; they are
+ *     `null` for conversation kind (not partial — genuinely absent, no
+ *     placeholder to model).
+ *
+ * HONEST GAP (design §4, carried into the envelope's toolResults section,
+ * applies to BOTH kinds): raw per-node-per-tool-call result payloads are
+ * NOT persisted in a queryable store today. What we have is (a) the node's
+ * final output (which may embed tool output) and (b) governance-ledger
+ * findings that a tool ran + its governance decision. The dedicated
+ * tool-execution ledger that would hold `key -> result` is CIT-121 (E12),
+ * not yet built. This function NEVER reads CloudWatch logs to backfill
+ * that gap — logs are not a reproducible artifact and would pull
+ * unredacted data into scope outside this pipeline's sanitisation
+ * guarantee. `sections.toolResults` is therefore always
+ * `{ partial: true, results: [], provenance: "..." }` in this pass; a
+ * future CIT-121-backed pass replaces `results` with real per-call data
+ * without touching this shape's `partial`/`provenance` fields
+ * (additive-safe schema evolution, design §5).
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
@@ -93,6 +118,12 @@ interface ToolResultsSection {
   provenance: string;
 }
 
+interface FindingsSection {
+  partial: true;
+  results: unknown[];
+  provenance: string;
+}
+
 /** Always partial in this pass — see the module-level HONEST GAP comment. */
 function buildToolResultsSection(): ToolResultsSection {
   return {
@@ -103,6 +134,23 @@ function buildToolResultsSection(): ToolResultsSection {
       "(CIT-121, E12, not yet built). This section is derived from " +
       "tool-call governance findings and node final outputs only; it is " +
       "never backfilled from CloudWatch logs.",
+  };
+}
+
+/** Conversation kind only: governance findings key on workflowId
+ * (== orchestrationId) and nothing ties a conversationId/projectId to an
+ * orchestrationId — there is no join key. Modelled as an explicit partial
+ * section with provenance rather than an invented/empty findings array
+ * that could be mistaken for "confirmed: no findings". */
+function buildUnjoinableFindingsSection(): FindingsSection {
+  return {
+    partial: true,
+    results: [],
+    provenance:
+      "Governance findings key on workflowId (== orchestrationId); no " +
+      "table ties a conversationId/projectId to an orchestrationId, so " +
+      "this section cannot be joined for conversation-kind packages. " +
+      "Never invented, never guessed from unrelated rows.",
   };
 }
 
@@ -198,6 +246,47 @@ async function readCostLedgerUsage(executionId: string) {
   };
 }
 
+/** Conversation kind: `CONVERSATIONS_TABLE` is keyed `projectId` (partition)
+ * / `timestamp` (sort) — the exact shape conversation-resolver.ts's
+ * `getConversationHistory` already queries. conversationId == projectId
+ * (see resolveConversationOwnership in trace-http-shared.ts). */
+async function readConversationMessages(projectId: string) {
+  const tableName = process.env.CONVERSATIONS_TABLE!;
+  const result = await docClient.send(
+    new QueryCommand({
+      TableName: tableName,
+      KeyConditionExpression: "projectId = :pid",
+      ExpressionAttributeValues: { ":pid": projectId },
+    }),
+  );
+  return {
+    tableName,
+    items: (result.Items ?? []) as Record<string, unknown>[],
+  };
+}
+
+/** Conversation kind: usage/cost rows are joined via COST_LEDGER_TABLE's
+ * ProjectIndex GSI (GSI1PK = PROJECT#<projectId>), populated by
+ * cost-ledger-writer.ts's handleIntakeUsage path from state.py's
+ * publish_usage_event, which stamps `projectId: session_id` (session_id ==
+ * projectId per the existing session/project convention documented in
+ * state.py). */
+async function readCostLedgerUsageByProject(projectId: string) {
+  const tableName = process.env.COST_LEDGER_TABLE!;
+  const result = await docClient.send(
+    new QueryCommand({
+      TableName: tableName,
+      IndexName: "ProjectIndex",
+      KeyConditionExpression: "GSI1PK = :pk",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${projectId}` },
+    }),
+  );
+  return {
+    tableName,
+    items: (result.Items ?? []) as Record<string, unknown>[],
+  };
+}
+
 export interface ReplayPackageEnvelope {
   schemaVersion: string;
   generatedAt: string;
@@ -225,7 +314,15 @@ export interface ReplayPackageEnvelope {
       usage: unknown;
     }>;
     toolResults: ToolResultsSection;
-    findings: unknown[];
+    /** Execution kind: an array of governance-ledger finding rows.
+     * Conversation kind: an explicit FindingsSection partial marker — no
+     * join key exists from conversationId/projectId to orchestrationId. */
+    findings: unknown[] | FindingsSection;
+    /** Conversation kind only: transcript rows from CONVERSATIONS_TABLE,
+     * queried by projectId (== conversationId), chronological order.
+     * Absent (undefined) for execution kind — there is no per-execution
+     * conversation transcript to attach. */
+    messages?: Array<Record<string, unknown>>;
     usageTotals: unknown;
     traceIds: { correlationId: string };
   };
@@ -245,11 +342,7 @@ export async function assembleReplayPackage(
   id: string,
 ): Promise<ReplayPackageEnvelope> {
   if (kind === "conversation") {
-    // Conversation-path transcript assembly is out of scope for this pass
-    // (design §4 lists transcripts as a source but the execution path is
-    // what the handler/tests in this pass exercise end-to-end). Fail
-    // loudly rather than silently returning an empty/misleading envelope.
-    throw new ReplayNotFoundError(kind, id);
+    return assembleConversationReplayPackage(orgId, id);
   }
 
   const { tableName: executionsTable, item: execution } =
@@ -339,4 +432,105 @@ export async function assembleReplayPackage(
   const sanitised = sanitizeBundle(envelope) as ReplayPackageEnvelope;
   assertBundleSecretFree(sanitised);
   return sanitised;
+}
+
+/**
+ * Conversation-kind assembly. conversationId == projectId (see the
+ * module-level CONVERSATION-KIND FEASIBILITY comment). Reuses the SAME
+ * envelope shape, SAME per-row org filter, SAME toolResults honest-gap
+ * modelling, and SAME sanitizeBundle + assertBundleSecretFree gate as the
+ * execution path — only the section SOURCES differ.
+ */
+async function assembleConversationReplayPackage(
+  orgId: string,
+  conversationId: string,
+): Promise<ReplayPackageEnvelope> {
+  const [messages, costUsage] = await Promise.all([
+    readConversationMessages(conversationId),
+    readCostLedgerUsageByProject(conversationId),
+  ]);
+
+  for (const messageRow of messages.items) {
+    assertRowOrg(messages.tableName, messageRow, orgId);
+  }
+  for (const usageRow of costUsage.items) {
+    assertRowOrg(costUsage.tableName, usageRow, orgId);
+  }
+
+  // Chronological order — CONVERSATIONS_TABLE's sort key is `timestamp`
+  // (ISO-8601 string), so a lexicographic sort is a correct chronological
+  // sort, mirroring conversation-resolver.ts's getConversationHistory
+  // (which queries ScanIndexForward:false then .reverse()s to chronological).
+  const orderedMessages = [...messages.items].sort((a, b) => {
+    const ta = typeof a.timestamp === "string" ? a.timestamp : "";
+    const tb = typeof b.timestamp === "string" ? b.timestamp : "";
+    return ta < tb ? -1 : ta > tb ? 1 : 0;
+  });
+
+  interface UsageTotalsAcc {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    callCount: number;
+  }
+
+  const usageTotals = costUsage.items.reduce<UsageTotalsAcc>(
+    (acc, row) => {
+      acc.inputTokens += coerceNonNegativeNumber(row.inputTokens);
+      acc.outputTokens += coerceNonNegativeNumber(row.outputTokens);
+      acc.totalTokens += coerceNonNegativeNumber(row.totalTokens);
+      acc.callCount += 1;
+      return acc;
+    },
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0, callCount: 0 },
+  );
+
+  const envelope: ReplayPackageEnvelope = {
+    schemaVersion: REPLAY_SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    producerCommit: process.env.COMMIT_SHA || null,
+    kind: "conversation",
+    correlationId: conversationId,
+    orgId,
+    sanitisation: {
+      redactPiiVersion: "1",
+      secretPatternsVersion: "1",
+      gate: "passed",
+    },
+    sections: {
+      // No conversation-side equivalent row exists for these
+      // execution-scoped concepts — genuinely absent, not partial.
+      agentConfig: null,
+      workflow: null,
+      execSpec: null,
+      modelConfig: null,
+      governanceMode: null,
+      nodes: [],
+      toolResults: buildToolResultsSection(),
+      findings: buildUnjoinableFindingsSection(),
+      messages: orderedMessages,
+      usageTotals,
+      traceIds: { correlationId: conversationId },
+    },
+  };
+
+  const sanitised = sanitizeBundle(envelope) as ReplayPackageEnvelope;
+  assertBundleSecretFree(sanitised);
+  return sanitised;
+}
+
+/** Defensive numeric coercion for cost-ledger rows crossing a table-read
+ * boundary — mirrors cost-ledger-writer.ts's coerceNonNegativeInt intent
+ * without importing that Lambda's module (kept dependency-free here). */
+function coerceNonNegativeNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, value);
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    if (!Number.isNaN(parsed) && Number.isFinite(parsed)) {
+      return Math.max(0, parsed);
+    }
+  }
+  return 0;
 }

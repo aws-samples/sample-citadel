@@ -213,6 +213,14 @@ describe("presigned URL TTL", () => {
 });
 
 describe("GET /replay/by-conversation/{conversationId}", () => {
+  function projectItem(orgId: string) {
+    return {
+      id: "conv-1",
+      orgId,
+      updatedAt: "2026-07-01T00:05:00.000Z",
+    };
+  }
+
   test("unresolvable conversation -> 404, no S3 write", async () => {
     ddbMock.on(GetCommand).resolves({ Item: undefined });
 
@@ -225,6 +233,74 @@ describe("GET /replay/by-conversation/{conversationId}", () => {
     const res = await handler(event);
     expect(res.statusCode).toBe(404);
     expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+  });
+
+  test("same-org conversation -> 200 with a presigned url (ReplayNotFoundError gap closed)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(GetCommand, { TableName: "projects-test" }).resolves({
+      Item: projectItem("org-1"),
+    });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    s3Mock.on(PutObjectCommand).resolves({});
+
+    const event = makeEvent(
+      "GET /replay/by-conversation/{conversationId}",
+      { conversationId: "conv-1" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.url).toBeDefined();
+    expect(body.query.kind).toBe("conversation");
+    expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(1);
+  });
+
+  test("ownership refusal happens BEFORE any read/write: cross-org conversation -> 404, zero table reads beyond the ownership GetItem, zero S3 calls", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(GetCommand, { TableName: "projects-test" }).resolves({
+      Item: projectItem("org-OTHER"),
+    });
+
+    const event = makeEvent(
+      "GET /replay/by-conversation/{conversationId}",
+      { conversationId: "conv-1" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(404);
+    expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+    // Only the ownership GetItem against projects-test happened — no
+    // Query against conversations-test/cost-ledger-test was ever issued,
+    // proving ownership resolution gates the build entirely.
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+
+  test("fail-closed gate applies identically on the conversation path: gate refusal -> 5xx, no S3 write, no URL", async () => {
+    const spy = jest
+      .spyOn(replayPackageBuilder, "assembleReplayPackage")
+      .mockRejectedValue(new ReplaySecretLeakError(["jwt"]));
+
+    try {
+      ddbMock.on(GetCommand).resolves({ Item: undefined });
+      ddbMock.on(GetCommand, { TableName: "projects-test" }).resolves({
+        Item: projectItem("org-1"),
+      });
+
+      const event = makeEvent(
+        "GET /replay/by-conversation/{conversationId}",
+        { conversationId: "conv-1" },
+        { "custom:organization": "org-1" },
+      );
+
+      const res = await handler(event);
+      expect(res.statusCode).toBeGreaterThanOrEqual(500);
+      expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
