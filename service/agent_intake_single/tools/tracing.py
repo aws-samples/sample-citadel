@@ -15,19 +15,25 @@ happens to have ``arbiter/`` on `sys.path`) but ImportError in the actual
 deployed container — a latent prod-only break. Duplicating the small,
 no-op-safe subset needed here avoids that trap entirely.
 
-Why no new dependency: ``aws-xray-sdk`` is NOT in this service's
-``requirements.txt`` (the service's own tracing story is OpenTelemetry via
-``strands-agents[otel]`` / Langfuse, not X-Ray) and is out of scope to add
-here per the "no new deps" convention. ``active_trace_context()`` therefore
-imports ``aws_xray_sdk`` lazily inside a try/except and returns ``None``
-whenever it is unavailable — which is the case for every current
-deployment of this service. This makes the helper a genuine, honest no-op
-today: ``publish_usage_event``/``_publish_event`` never carry a
-``traceContext`` in the real deployed container right now, and the
-byte-identical-when-absent guarantee holds unconditionally. If
-``aws-xray-sdk`` is later added to this service's requirements (an
-infra-level follow-up, not a code change), tracing activates automatically
-with no further edits here.
+No X-Ray segment source exists in this container, and none is needed:
+there is no X-Ray daemon, no ``_X_AMZN_TRACE_ID`` in the environment, and
+``aws-xray-sdk`` is deliberately NOT in this service's ``requirements.txt``.
+The container's Dockerfile runs ``opentelemetry-instrument python
+agent.py`` (ADOT auto-instrumentation) together with ``strands-agents
+[otel]``, so the live trace source is the current OpenTelemetry span
+context, not an X-Ray (sub)segment. ``active_trace_context()`` reads that
+OTel span context and renders it into the X-Ray form
+(``1-<8 hex>-<24 hex>`` traceId, 16-hex parentId, sampled from
+``trace_flags``) that ADOT's own X-Ray propagator produces, so ids stay
+compatible with the platform's trace search — no new dependency is
+required for this to work. The X-Ray branch is kept as a harmless fallback
+for the (currently nonexistent) case where ``aws-xray-sdk`` is added and an
+X-Ray segment is actually open. Both branches import their respective
+packages lazily inside a try/except and degrade to ``None`` when
+unavailable or when the context is invalid — never raising — so
+``publish_usage_event``/``_publish_event`` omit ``traceContext`` entirely
+(not null/empty) whenever neither source yields a valid context, keeping
+the byte-identical-when-absent guarantee.
 """
 from __future__ import annotations
 
@@ -62,6 +68,58 @@ def to_traceparent(xray_trace_id: str, parent_id: str, sampled: bool) -> Optiona
 
 
 def active_trace_context() -> Optional[dict]:
+    """Read the active trace context and render it into the additive
+    ``traceContext`` shape.
+
+    Source priority:
+    1. OpenTelemetry current span context — the LIVE source in this
+       container (ADOT auto-instrumentation via ``opentelemetry-instrument``
+       + ``strands-agents[otel]``). Rendered into X-Ray form so ids stay
+       compatible with the platform's trace search, matching what ADOT's
+       own X-Ray propagator produces.
+    2. X-Ray (sub)segment — kept as a harmless fallback for a future
+       environment where ``aws-xray-sdk`` is added and a segment is open.
+       Not expected to ever fire in this container today (no daemon, no
+       ``_X_AMZN_TRACE_ID``).
+
+    Returns None when neither source yields a valid context, or when the
+    relevant package is not installed — never raises.
+    """
+    otel_context = _active_otel_trace_context()
+    if otel_context:
+        return otel_context
+    return _active_xray_trace_context()
+
+
+def _active_otel_trace_context() -> Optional[dict]:
+    """Render the current OpenTelemetry span context (if valid) into the
+    carried ``traceContext`` shape, X-Ray-form ids. Returns None when
+    ``opentelemetry`` is not installed or there is no valid current span —
+    never raises."""
+    try:
+        from opentelemetry import trace as otel_trace  # type: ignore
+
+        span_context = otel_trace.get_current_span().get_span_context()
+        if not span_context or not span_context.is_valid:
+            return None
+        trace_id_hex = format(span_context.trace_id, "032x")
+        span_id_hex = format(span_context.span_id, "016x")
+        sampled = bool(span_context.trace_flags.sampled)
+        trace_id = f"1-{trace_id_hex[:8]}-{trace_id_hex[8:]}"
+        parent_id = span_id_hex
+        xray_trace_header = render_xray_header(trace_id, parent_id, sampled)
+        traceparent = to_traceparent(trace_id, parent_id, sampled)
+        result: dict = {"traceId": trace_id, "parentId": parent_id}
+        if xray_trace_header:
+            result["xrayTraceHeader"] = xray_trace_header
+        if traceparent:
+            result["traceparent"] = traceparent
+        return result
+    except Exception:  # noqa: BLE001 — no-op-safe (incl. ImportError when opentelemetry absent)
+        return None
+
+
+def _active_xray_trace_context() -> Optional[dict]:
     """Read the active X-Ray (sub)segment, if any, and render it into the
     additive ``traceContext`` shape. Returns None when no segment is active
     OR when ``aws_xray_sdk`` is not installed (the current, real state of

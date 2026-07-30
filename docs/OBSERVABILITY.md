@@ -5,6 +5,19 @@ User-facing guide to the waterfall trace viewer added in architect task
 underlying trace-propagation contract, authorization matrix, and residual-risk
 statement, see `docs/TRACING_RUNBOOK.md`.
 
+**Account-setting caution — CloudWatch Transaction Search.** AgentCore
+Observability (the managed GenAI views for AgentCore-hosted agents, e.g. the
+intake runtime) requires enabling CloudWatch Transaction Search — and that
+account-wide switch redirects X-Ray traces to CloudWatch Logs, after which
+the X-Ray APIs this viewer is built on return nothing, for every Lambda in
+every stack. Before touching that account setting (or planning any AgentCore
+agent tracing), read "Account tracing settings — Transaction Search" at the
+top of `docs/TRACING_RUNBOOK.md`: it states the constraint, the two coherent
+choices (port the viewer to Transaction Search span queries vs. stay on the
+X-Ray APIs and accept that AgentCore agents remain invisible to tracing),
+and what the intake container is still missing before it emits telemetry at
+all.
+
 ## What it is
 
 A one-click waterfall view of the X-Ray spans behind a workflow execution or

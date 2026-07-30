@@ -7,7 +7,116 @@ on.
 
 > **Applies to:** `feat/runtime-tracing` (architect task `f4f4bab3-7a07-4acf-
 > ba43-ba43bb488444`, "Trace-Context Propagation" design).
-> **Last updated:** 2026-07-28.
+> **Last updated:** 2026-07-30.
+
+## Account tracing settings — Transaction Search (read BEFORE enabling AgentCore Observability)
+
+> Platform constraint, discovered 2026-07-30 while researching AgentCore
+> Observability for the intake runtime. Binding on anyone about to change
+> ACCOUNT-level tracing settings. Everything below this section assumes the
+> account's X-Ray trace destination is still the default (the X-Ray
+> service).
+
+### The constraint: Transaction Search blinds the waterfall viewer
+
+AgentCore Observability (the managed GenAI views for AgentCore
+Runtime-hosted agents — our intake container, and any fabricated agents
+hosted there) **requires CloudWatch Transaction Search**. Enabling
+Transaction Search is an **account-wide** switch: it changes the account's
+X-Ray trace destination to CloudWatch Logs (spans land in the `aws/spans`
+log group). After that switch the classic X-Ray query APIs return nothing —
+AWS's own API reference notes that traces **cannot be found through
+`GetTraceSummaries` / `BatchGetTraces` when Transaction Search is
+enabled**.
+
+Those two APIs are exactly what this platform's trace query surface uses:
+`backend/src/lambda/trace-query-handler.ts` issues
+`GetTraceSummariesCommand` + `BatchGetTracesCommand` behind all three
+`/traces/*` routes. **Enabling Transaction Search makes the waterfall
+viewer blind for every Lambda in all stacks** — workflows, cost,
+governance, intake consumers, everything in the hop matrix below — not just
+the AgentCore side. And it fails silently: zero summaries past the
+freshness window renders as `empty` ("no trace recorded"), not as an error.
+
+References:
+
+- AgentCore Observability (Transaction Search prerequisite):
+  <https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability.html>
+- Enabling it — what the setup actually toggles:
+  <https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-get-started.html>
+- The X-Ray API note ("You cannot find traces through this API if
+  Transaction Search is enabled"), on both operations:
+  <https://docs.aws.amazon.com/xray/latest/api/API_GetTraceSummaries.html>
+  and
+  <https://docs.aws.amazon.com/xray/latest/api/API_BatchGetTraces.html>
+
+### The two coherent choices
+
+There is **no no-cost third option**: AgentCore Observability and the
+current X-Ray-API-backed viewer cannot coexist in one account. Decide (a)
+or (b) explicitly; any plan that assumes "AgentCore agents in the viewer"
+without funding the port in (a) is wrong.
+
+**(a) Port the trace query surface to Transaction Search — recommended
+long term.** Rework `trace-query-handler.ts` (and the `xray-filter.ts` /
+`xray-waterfall.ts` shaping behind it) from `GetTraceSummaries` /
+`BatchGetTraces` to Transaction Search / CloudWatch Logs span queries over
+`aws/spans`. This unifies Lambda traces with AgentCore agent spans in one
+query surface and unlocks the managed GenAI Observability views
+(Sessions → Traces → Spans). It is a real port — filter expressions,
+pagination, and the segment-document shaping all change — so treat it as a
+scoped story, not a toggle.
+
+**(b) Keep the X-Ray APIs and do NOT enable Transaction Search.** The
+waterfall viewer keeps working exactly as documented in this runbook, and
+AgentCore-hosted agents stay **invisible** to tracing (their spans have
+nowhere to go that we query). This is the current state; acceptable
+short-term, permanent blind spot if never revisited.
+
+### What the intake container needs before its telemetry appears at all
+
+Independent of the account-level choice, the intake runtime
+(`AgentIntakeSingleRuntime` in `backend/lib/services-stack.ts`) emits
+nothing usable today. All of the following are currently missing:
+
+1. **Execution-role permissions** — none of these are granted in
+   `services-stack.ts` today:
+   - `xray:PutTraceSegments`, `xray:PutTelemetryRecords`,
+     `xray:GetSamplingRules`, `xray:GetSamplingTargets`
+   - `cloudwatch:PutMetricData`, condition-scoped to the
+     `bedrock-agentcore` namespace
+   - CloudWatch Logs write/describe on `/aws/bedrock-agentcore/runtimes/*`
+2. **The runtime tracing toggle** — nothing in the
+   `AgentIntakeSingleRuntime` definition enables observability/tracing on
+   the runtime resource.
+3. **ADOT disable semantics** — the runtime env pins `LANGFUSE_SECRET_KEY`
+   / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_BASE_URL` to `""`. That starves the
+   Langfuse exporter path but is **not** the sanctioned way to disable
+   ADOT — `DISABLE_ADOT_OBSERVABILITY=true` is. If the intent is
+   "observability off", set that variable explicitly; if the intent is
+   "observability on", do not assume the empty Langfuse pins are a
+   sanctioned lever either way.
+
+### AgentCore identifier semantics (Sessions → Traces → Spans)
+
+Worth knowing before joining ids across the two worlds:
+
+- AgentCore models telemetry as **Sessions → Traces → Spans**, keyed on
+  the runtime session id header, which ADOT propagates as the `session.id`
+  span attribute.
+- AgentCore trace ids are **X-Ray-compatible**. The X-Ray-form rendering
+  the intake helper now performs
+  (`service/agent_intake_single/tools/tracing.py::active_trace_context()`,
+  OTel span context → `1-<8 hex>-<24 hex>` trace id + 16-hex parent) is
+  correct and joinable with every id in this runbook.
+- Two improvements NOT yet made (follow-ups — do not assume they exist):
+  1. **Trace context is not propagated INTO the agent on invoke** — the
+     container starts a new root instead of parenting our hop. Carrying
+     the trace context (e.g. `traceparent`) on `InvokeAgentRuntime` would
+     fix the split.
+  2. **The run identifier is not carried as the runtime session id** — so
+     runs do not appear in the GenAI Observability Sessions view. Passing
+     `runId` as the session id would make runs first-class there.
 
 ## Root-segment framing (read this first)
 
