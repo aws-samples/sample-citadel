@@ -621,6 +621,82 @@ describe("TelemetryStack — TraceQueryHandler (waterfall trace viewer, pass 1)"
     expect(decodedReasons.join(" ").toLowerCase()).toContain("x-ray");
   });
 
+  test("TraceQueryHandler role grants logs:StartQuery scoped to the aws/spans log-group ARN, plus GetQueryResults/StopQuery, nag-suppressed (design §4 dual-backend port)", () => {
+    const { template } = buildStack();
+    const allPolicies = template.findResources("AWS::IAM::Policy");
+    let sawStartQuery = false;
+    let sawGetQueryResults = false;
+    let sawStopQuery = false;
+    for (const [, resource] of Object.entries(allPolicies)) {
+      const roles = resource.Properties?.Roles ?? [];
+      const roleRefs = JSON.stringify(roles);
+      if (!roleRefs.includes("TraceQueryHandler")) continue;
+      const statements = resource.Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of statements) {
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        if (actions.includes("logs:StartQuery")) {
+          sawStartQuery = true;
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          // Scoped to the aws/spans log-group ARN, NOT Resource:* — the
+          // StartQuery API supports resource-level scoping (design §4),
+          // unlike GetQueryResults/StopQuery below.
+          const resourceStr = JSON.stringify(resources);
+          expect(resourceStr).toContain("log-group:aws/spans");
+          expect(resources).not.toContain("*");
+        }
+        if (actions.includes("logs:GetQueryResults")) {
+          sawGetQueryResults = true;
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          expect(resources).toContain("*");
+        }
+        if (actions.includes("logs:StopQuery")) {
+          sawStopQuery = true;
+        }
+      }
+    }
+    expect(sawStartQuery).toBe(true);
+    expect(sawGetQueryResults).toBe(true);
+    expect(sawStopQuery).toBe(true);
+  });
+
+  test("a NagSuppressions IAM5 entry exists for the TraceQueryHandler's logs:GetQueryResults/StopQuery Resource:* actions", () => {
+    const { stack } = buildStack();
+    const role = stack.traceQueryHandlerFunction.role!;
+    const cfn = role.node.defaultChild as {
+      cfnOptions?: { metadata?: unknown };
+    };
+    const metadata = cfn?.cfnOptions?.metadata as
+      | { cdk_nag?: { rules_to_suppress?: Array<Record<string, unknown>> } }
+      | undefined;
+    const rules = metadata?.cdk_nag?.rules_to_suppress ?? [];
+    const decodedReasons = rules.map((r) => {
+      const reason = String(r.reason ?? "");
+      return r.is_reason_encoded
+        ? Buffer.from(reason, "base64").toString("utf-8")
+        : reason;
+    });
+    const joined = decodedReasons.join(" ").toLowerCase();
+    expect(joined).toContain("logs:getqueryresults");
+  });
+
+  test("TraceQueryHandler Lambda has a TRACE_BACKEND environment variable defaulting to xray", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "trace-query-handler.handler",
+      Environment: {
+        Variables: Match.objectLike({
+          TRACE_BACKEND: "xray",
+        }),
+      },
+    });
+  });
+
   test("3 trace routes are wired on the existing costHttpApi, all with the JWT authorizer", () => {
     const { template } = buildStack();
     const routes = template.findResources("AWS::ApiGatewayV2::Route");

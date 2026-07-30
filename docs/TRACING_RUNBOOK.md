@@ -57,45 +57,121 @@ current X-Ray-API-backed viewer cannot coexist in one account. Decide (a)
 or (b) explicitly; any plan that assumes "AgentCore agents in the viewer"
 without funding the port in (a) is wrong.
 
-**(a) Port the trace query surface to Transaction Search — recommended
-long term.** Rework `trace-query-handler.ts` (and the `xray-filter.ts` /
-`xray-waterfall.ts` shaping behind it) from `GetTraceSummaries` /
-`BatchGetTraces` to Transaction Search / CloudWatch Logs span queries over
-`aws/spans`. This unifies Lambda traces with AgentCore agent spans in one
-query surface and unlocks the managed GenAI Observability views
-(Sessions → Traces → Spans). It is a real port — filter expressions,
-pagination, and the segment-document shaping all change — so treat it as a
-scoped story, not a toggle.
+**(a) Port the trace query surface to Transaction Search — IMPLEMENTED
+(design task `c7a4bf52`).** `trace-query-handler.ts` now dispatches on a
+`TRACE_BACKEND` env var (`xray` | `spans`, **default `xray`**) — the
+handler ships with NO behavior change until an operator flips it. The
+`spans` path queries CloudWatch Logs Insights over `aws/spans`
+(`utils/spans-query.ts`: `StartQuery` → bounded poll (~20s cap, `500ms`
+interval, `StopQuery` on early exit) → `GetQueryResults`) and shapes rows
+into the SAME `TraceEntry`/`TraceSpan` types the X-Ray path emits
+(`utils/spans-waterfall.ts`) — the frontend cannot tell which backend
+produced a response. `utils/trace-span-query.ts` builds the Logs Insights
+filter clauses (`annotation.correlation_id`/`annotation.run_id`) with the
+same allowlist/reject-first discipline as `xray-filter.ts`.
+
+> ⚠️ **`utils/spans-waterfall.ts` carries an unverified-schema warning at
+> every field-name assumption** (`spanId`, `parentSpanId`, `traceId`,
+> `startTimeUnixNano`/`endTimeUnixNano`, the `attributes.*`/`annotation.*`
+> attribute-key shapes). These are design-time assumptions, not values
+> confirmed against a real Transaction Search span. See "Cutover
+> procedure" below — do not flip `TRACE_BACKEND=spans` in any real account
+> before completing the schema-verification step.
+
+### Cutover procedure (flipping `TRACE_BACKEND` from `xray` to `spans`)
+
+Both IAM permission sets (X-Ray read + Logs Insights StartQuery/
+GetQueryResults/StopQuery) are granted on the `TraceQueryHandler` role
+regardless of the env value (`telemetry-stack.ts`), so this cutover is an
+**env-only** change — no IAM/CDK-permission deploy is needed at flip time.
+
+1. **Verify the aws/spans schema with a real sample** (blocking,
+   pre-requisite — do this BEFORE step 2). In a dev account with
+   Transaction Search already enabled, run a Logs Insights query against
+   `aws/spans` for a recent span (console or
+   `aws logs start-query`/`get-query-results`) and diff the actual result
+   column names against every field-name assumption listed in
+   `utils/spans-waterfall.ts`'s module header (`spanId`, `parentSpanId`,
+   `traceId`, `startTimeUnixNano`/`endTimeUnixNano`, the
+   `attributes.http.response.status_code` / `attributes.exception.*` /
+   `annotation.*` attribute keys, `statusCode`). Update the constants in
+   `spans-waterfall.ts` (and the query text in `trace-span-query.ts` if the
+   annotation attribute key differs) to match reality; add/adjust the Red
+   fixture in `spans-waterfall.test.ts` to the verified shape before
+   changing the implementation (strict TDD, not a silent hand-edit).
+2. **Enable Transaction Search account-wide** — manual/deploy step, never
+   executed by an agent (binding constraint, see the section above). This
+   redirects the account's X-Ray trace destination to CloudWatch Logs; the
+   `xray` backend goes blind for every Lambda in every stack the moment
+   this is done.
+3. **Flip `TRACE_BACKEND=spans`** — a tiny CDK env-only deploy of
+   `telemetry-stack.ts` (`TRACE_BACKEND` Lambda environment variable). No
+   other resource changes.
+4. **Verify** the waterfall viewer against a live execution/conversation
+   trace and the admin raw-trace-id route; confirm `status`/`linkedBy`
+   behave as documented below and that AgentCore agent spans (once the
+   runtime grants + ADOT wiring below are live) appear in the same viewer.
+5. **Reversible**: flip `TRACE_BACKEND` back to `xray` instantly if the
+   ported path misbehaves — this works right up until the account-wide
+   Transaction Search switch itself is reverted (which is the actually
+   hard-to-reverse step, not the env flag).
+6. **Deferred cleanup (do NOT do this until `spans` is confirmed stable in
+   all environments)**: remove the `xray:GetTraceSummaries`/
+   `BatchGetTraces` grant + its NagSuppression from `telemetry-stack.ts`,
+   and consider removing the X-Ray fetch/parse path (`xray-filter.ts`,
+   `xray-waterfall.ts`, the X-Ray branches in `trace-query-handler.ts`)
+   entirely.
 
 **(b) Keep the X-Ray APIs and do NOT enable Transaction Search.** The
 waterfall viewer keeps working exactly as documented in this runbook, and
 AgentCore-hosted agents stay **invisible** to tracing (their spans have
-nowhere to go that we query). This is the current state; acceptable
-short-term, permanent blind spot if never revisited.
+nowhere to go that we query). This is the pre-port default state
+(`TRACE_BACKEND` unset/`xray`) — safe indefinitely, but a permanent blind
+spot for AgentCore agents if the cutover above is never run.
 
 ### What the intake container needs before its telemetry appears at all
 
 Independent of the account-level choice, the intake runtime
-(`AgentIntakeSingleRuntime` in `backend/lib/services-stack.ts`) emits
-nothing usable today. All of the following are currently missing:
+(`AgentIntakeSingleRuntime` in `backend/lib/services-stack.ts`) previously
+emitted nothing usable. Status as of the port (design task `c7a4bf52`):
 
-1. **Execution-role permissions** — none of these are granted in
-   `services-stack.ts` today:
-   - `xray:PutTraceSegments`, `xray:PutTelemetryRecords`,
-     `xray:GetSamplingRules`, `xray:GetSamplingTargets`
-   - `cloudwatch:PutMetricData`, condition-scoped to the
-     `bedrock-agentcore` namespace
-   - CloudWatch Logs write/describe on `/aws/bedrock-agentcore/runtimes/*`
-2. **The runtime tracing toggle** — nothing in the
-   `AgentIntakeSingleRuntime` definition enables observability/tracing on
-   the runtime resource.
-3. **ADOT disable semantics** — the runtime env pins `LANGFUSE_SECRET_KEY`
-   / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_BASE_URL` to `""`. That starves the
-   Langfuse exporter path but is **not** the sanctioned way to disable
-   ADOT — `DISABLE_ADOT_OBSERVABILITY=true` is. If the intent is
-   "observability off", set that variable explicitly; if the intent is
-   "observability on", do not assume the empty Langfuse pins are a
-   sanctioned lever either way.
+1. **Execution-role permissions — RESOLVED.** `services-stack.ts` now
+   grants: `xray:PutTraceSegments`, `xray:PutTelemetryRecords`,
+   `xray:GetSamplingRules`, `xray:GetSamplingTargets` (Resource:*,
+   un-scopable, covered by the existing
+   `AgentIntakeSingleRuntime/ExecutionRole/DefaultPolicy/Resource`
+   NagSuppression in `bin/app.ts`); `cloudwatch:PutMetricData`
+   conditioned on `cloudwatch:namespace == bedrock-agentcore`; CloudWatch
+   Logs create/put/describe scoped to
+   `arn:aws:logs:<region>:<account>:log-group:/aws/bedrock-agentcore/runtimes/*`.
+2. **The runtime tracing toggle — UNRESOLVED, documented no-op.** At
+   implementation time the alpha `agentcore.Runtime` construct exposed no
+   observability/tracing field, and the underlying L1
+   `AWS::BedrockAgentCore::Runtime` CFN schema could not be verified
+   (`node_modules` not installed in that checkout — see design task
+   `c7a4bf52`'s recon). No `addPropertyOverride` escape hatch was added
+   speculatively. **Before relying on AgentCore spans in production**,
+   re-check whether the installed `aws-cdk-lib`/alpha package version
+   exposes an observability/tracing property on `CfnRuntime`; if so, wire
+   it via `(runtime.node.defaultChild as CfnRuntime).addPropertyOverride(...)`
+   (the same L1-escape-hatch pattern `tracing-aspect.ts` uses for
+   `CfnFunction.tracingConfig`) and cover it with a
+   `services-stack.test.ts` assertion — do not assert its presence from
+   memory. Absent an explicit toggle, observability is expected to follow
+   from (a) the account-level Transaction Search switch, (b) the
+   exec-role permissions above, and (c) ADOT auto-instrumentation not
+   being disabled (item 3).
+3. **ADOT disable semantics — RESOLVED.** The 3 empty
+   `LANGFUSE_SECRET_KEY`/`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_BASE_URL` env pins
+   have been REMOVED from `services-stack.ts` (verified via
+   `service/agent_intake_single/agent.py`'s Langfuse-exporter gate,
+   `if _lf_pk and _lf_sk` — both keys are falsy whether pinned to `""` or
+   fully absent, so removing the pins changes nothing about that gate;
+   the Langfuse OTLP exporter stays un-wired either way). `services-stack.ts`
+   does **NOT** set `DISABLE_ADOT_OBSERVABILITY` — the intent (design §6,
+   decision `dc270923`) is ADOT observability ON, unifying Lambda +
+   AgentCore spans in one Transaction Search-backed viewer.
+
 
 ### AgentCore identifier semantics (Sessions → Traces → Spans)
 
@@ -184,7 +260,7 @@ silently breaking the waterfall-viewer story.
 
 ## Operator query: "show me every trace for one flow"
 
-**X-Ray / CloudWatch (trace side):**
+**X-Ray / CloudWatch (trace side, `TRACE_BACKEND=xray` — default):**
 
 **GUARANTEED (runId present — Pass 2):**
 ```
@@ -210,6 +286,20 @@ the response — the fallback path is unconditionally exercised in this
 case, not a degraded/partial result). This fallback stays in place
 permanently for any row that predates the runId feature; there is no
 backfill (write-once/immutable data, see design §5).
+
+**CloudWatch Logs Insights span query (trace side, `TRACE_BACKEND=spans`
+— post-cutover):** the equivalent filter clauses over the `aws/spans` log
+group (`utils/trace-span-query.ts`), same runId-primary/correlation_id-
+fallback split, same `linkedBy` reporting:
+```
+filter `annotation.run_id` = "<runId>"
+```
+```
+filter `annotation.correlation_id` = "<executionId-or-sessionId>"
+```
+Field names (`annotation.run_id`/`annotation.correlation_id` as Logs
+Insights attribute keys) are the SAME unverified-schema assumption flagged
+in `utils/spans-waterfall.ts` — see "Cutover procedure" above.
 
 **Deferred:** a *global* "given only a runId, find everything across
 findings + cost-ledger with no other key" lookup requires two new GSIs
@@ -316,20 +406,26 @@ counterfactual/decision-trace precedent for account-wide reads.
 ### RESIDUAL-RISK STATEMENT
 
 Even after the entry key is org-checked, the trace **data** returned by
-`BatchGetTraces` is account-wide segment content. Concretely:
-- **What is returned:** every segment/subsegment sharing the org-checked
-  `correlation_id`. By construction (`correlation_id == executionId`, a v4
-  UUID; or a per-session UUID) these belong to **one flow / one org** — UUID
-  collision across orgs is negligible, so cross-org bleed via the filter is
-  effectively nil.
-- **What segment content exposes:** AWS **infrastructure identifiers** —
-  Lambda function names, DynamoDB table names, Bedrock model/inference-profile
-  ARNs, SQS/EventBridge names, HTTP status codes, durations, and our own
-  annotations (`correlation_id`, `source_trace_id`, `execution_id`,
-  `node_id`, `session_id`, `run_id`) + `trace_context` metadata. These are
-  **shared-infra operational identifiers, not per-row customer data** — the
-  same function/table serves every org, so a name/timing is not
-  org-sensitive.
+`BatchGetTraces` (or, under `TRACE_BACKEND=spans`, the equivalent Logs
+Insights span query over `aws/spans`) is account-wide segment/span
+content. Concretely:
+- **What is returned:** every segment/subsegment (or, under `spans`,
+  every span) sharing the org-checked `correlation_id`. By construction
+  (`correlation_id == executionId`, a v4 UUID; or a per-session UUID)
+  these belong to **one flow / one org** — UUID collision across orgs is
+  negligible, so cross-org bleed via the filter is effectively nil. The
+  ownership-before-query posture and the filter's pinned target
+  (`correlation_id`/`run_id`) are identical under both backends — only
+  the query syntax (X-Ray `FilterExpression` vs. Logs Insights `filter`
+  clause) differs.
+- **What segment/span content exposes:** AWS **infrastructure
+  identifiers** — Lambda function names, DynamoDB table names, Bedrock
+  model/inference-profile ARNs, SQS/EventBridge names, HTTP status codes,
+  durations, and our own annotations (`correlation_id`, `source_trace_id`,
+  `execution_id`, `node_id`, `session_id`, `run_id`) + `trace_context`
+  metadata. These are **shared-infra operational identifiers, not
+  per-row customer data** — the same function/table serves every org, so
+  a name/timing is not org-sensitive.
 - **The genuine residual leak** is narrow: (a) if a future code path ever put
   **customer payload into a subsegment name, annotation, or metadata** it would
   become viewable by any owner of the entry key — so the design mandates a docs
@@ -339,9 +435,11 @@ Even after the entry key is org-checked, the trace **data** returned by
   flow could in principle carry the same correlation_id only if we mis-stamped
   it — prevented by the CIT-021 contract stamping correlation_id from the
   carried context, not a shared constant.
-- **Mitigations baked into the design:** (1) server-side filter is pinned to
-  the single org-checked correlation id — we never return "all recent traces";
-  (2) the waterfall shaper **allowlists** fields onto the response (id, name,
+- **Mitigations baked into the design:** (1) server-side filter (an X-Ray
+  `FilterExpression` under `xray`, a Logs Insights `filter` clause under
+  `spans`) is pinned to the single org-checked correlation id — we never
+  return "all recent traces"; (2) the waterfall shaper (`xray-waterfall.ts`
+  / `spans-waterfall.ts`) **allowlists** fields onto the response (id, name,
   times, http.status, error/fault/throttle, namespace, our annotation keys) and
   **drops raw `metadata`/`sql`/`aws.*` bags** by default so an accidental
   payload in metadata is not surfaced; (3) admin-only raw trace-id keeps the
@@ -350,18 +448,34 @@ Even after the entry key is org-checked, the trace **data** returned by
 Security posture summary (one line for docs/PR): *Entry-key ownership check
 (execution/conversation → org) for all users; account-wide raw trace-id
 admin-only; X-Ray IAM is unavoidably `Resource:*` (nag-suppressed with
-justification); trace bodies are infra-level identifiers, field-allowlisted on
-egress, and the tracing contract forbids customer data in annotations/metadata.*
+justification), and the `spans` backend's `logs:GetQueryResults`/`StopQuery`
+carry the same unavoidable `Resource:*` posture (its `logs:StartQuery` IS
+scoped to the `aws/spans` log-group ARN); trace/span bodies are infra-level
+identifiers, field-allowlisted on egress, and the tracing contract forbids
+customer data in annotations/metadata.*
 
-### `status` freshness semantics (X-Ray eventual availability)
+### `status` freshness semantics (X-Ray / Transaction Search eventual availability)
 
-- `GetTraceSummaries` filter returns ≥1 → `ready`.
-- 0 summaries AND the entry (execution/conversation) `completedAt`/last
-  activity is within the freshness window (~90s) → `indexing` (UI: "trace
-  still indexing, retry" + auto-retry). This avoids a false "no trace".
-- 0 summaries AND entry is older than the window → `empty` (UI: "no trace
-  recorded" — e.g. sampling miss, or H6 intake not yet stitching per the
-  hop matrix above).
+- `GetTraceSummaries` filter (`xray` backend) or a Complete Logs Insights
+  query with rows (`spans` backend) returns ≥1 → `ready`.
+- 0 summaries/rows AND the entry (execution/conversation) `completedAt`/
+  last activity is within the freshness window (~90s) → `indexing` (UI:
+  "trace still indexing, retry" + auto-retry). This avoids a false "no
+  trace". The window matters MORE under the `spans` backend — Transaction
+  Search ingestion lag can exceed a single Lambda invocation.
+- 0 summaries/rows AND entry is older than the window → `empty` (UI: "no
+  trace recorded" — e.g. sampling miss, or H6 intake not yet stitching per
+  the hop matrix above).
+- **`spans` backend only — poll-budget-exhausted:** if the bounded Logs
+  Insights poll (`utils/spans-query.ts`, ~20s cap) exhausts its attempts
+  while the query is still `Running`/`Scheduled`, the response maps this
+  to `indexing` unconditionally — **never** `empty` and **never** a 5xx —
+  regardless of how old the entry is. This is a retryable "still working"
+  signal, not evidence of absence; it reuses the existing `indexing`
+  status so the frontend needs zero changes for this case. A genuine query
+  `Failed`/`Cancelled`/`Timeout` terminal status falls back to the
+  freshness-window mapping above instead (logged, not surfaced as an
+  error to the caller).
 
 ### Guardrail (binding on all future annotation/metadata producers)
 

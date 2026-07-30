@@ -577,6 +577,13 @@ export class TelemetryStack extends cdk.Stack {
           CONVERSATIONS_TABLE: props.conversationsTable.tableName,
           PROJECTS_TABLE: props.projectsTable.tableName,
           ENVIRONMENT: props.environment,
+          // Dual-backend dispatch (design §3 "SIMPLEST safe option"):
+          // defaults to `xray` (today's behavior, unchanged) until an
+          // operator flips this to `spans` post-cutover, once
+          // Transaction Search is enabled account-wide. See
+          // docs/TRACING_RUNBOOK.md cutover procedure.
+          TRACE_BACKEND:
+            process.env.TRACE_BACKEND === "spans" ? "spans" : "xray",
         },
         logGroup: new logs.LogGroup(this, "TraceQueryHandlerLogs", {
           retention: logs.RetentionDays.ONE_WEEK,
@@ -618,6 +625,67 @@ export class TelemetryStack extends cdk.Stack {
             "authorization is enforced in-Lambda via entry-key ownership " +
             "(execution/conversation -> org) checked BEFORE any X-Ray call, " +
             "plus an admin-only gate on the raw trace-id route.",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+      true,
+    );
+
+    // --- Transaction Search span-query port (design §3 dual-backend,
+    // §4 "Least-privilege IAM") ---------------------------------------
+    // Added ALONGSIDE the xray:Get* grant above, not instead of it — the
+    // default backend is still `xray` during the transition (TRACE_BACKEND
+    // env, default `xray`), so removing xray:Get* now would blind the
+    // default path. Both permission sets are granted so flipping
+    // TRACE_BACKEND=spans post-cutover requires no IAM change (design §3
+    // "Reversible ... needs no IAM change").
+    //
+    // logs:StartQuery DOES support resource-level scoping (unlike
+    // GetQueryResults/StopQuery, which operate on an opaque queryId with
+    // no ARN to scope to) — scoped to the aws/spans log-group ARN Transaction
+    // Search writes spans into.
+    const spansLogGroupArn = `arn:aws:logs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:log-group:aws/spans:*`;
+
+    this.traceQueryHandlerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["logs:StartQuery"],
+        resources: [spansLogGroupArn],
+      }),
+    );
+
+    // logs:GetQueryResults / logs:StopQuery operate on a queryId returned
+    // by StartQuery, not a log-group ARN — AWS provides no resource-level
+    // scoping for either action, so Resource:* is unavoidable here (design
+    // §4). This is a SECOND Resource:* grant on this role (the first being
+    // the xray:Get* one above) — both are justified the same way:
+    // authorization is enforced in-Lambda before any query is issued, not
+    // by IAM resource scoping.
+    this.traceQueryHandlerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["logs:GetQueryResults", "logs:StopQuery"],
+        resources: ["*"],
+      }),
+    );
+
+    NagSuppressions.addResourceSuppressions(
+      this.traceQueryHandlerFunction.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "logs:GetQueryResults and logs:StopQuery operate on an opaque " +
+            "Logs Insights queryId returned by StartQuery, not a log-group " +
+            "or other ARN-addressable resource — AWS provides no " +
+            "resource-level IAM scoping for either action, so Resource:* " +
+            "is unavoidable. logs:StartQuery (the action that DOES support " +
+            "scoping) is separately scoped to the aws/spans log-group ARN. " +
+            "Authorization for this handler is enforced in-Lambda via " +
+            "entry-key ownership (execution/conversation -> org) checked " +
+            "BEFORE any query is issued, plus an admin-only gate on the " +
+            "raw trace-id route — identical posture to the xray:Get* " +
+            "Resource:* justification above.",
           appliesTo: ["Resource::*"],
         },
       ],

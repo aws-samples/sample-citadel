@@ -19,18 +19,36 @@ import {
   GetTraceSummariesCommand,
   BatchGetTracesCommand,
 } from "@aws-sdk/client-xray";
+import {
+  CloudWatchLogsClient,
+  StartQueryCommand,
+  GetQueryResultsCommand,
+} from "@aws-sdk/client-cloudwatch-logs";
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from "aws-lambda";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const xrayMock = mockClient(XRayClient);
+const logsMock = mockClient(CloudWatchLogsClient);
 
 beforeEach(() => {
   ddbMock.reset();
   xrayMock.reset();
+  logsMock.reset();
   process.env.EXECUTIONS_TABLE = "executions-test";
   process.env.CONVERSATIONS_TABLE = "conversations-test";
   process.env.PROJECTS_TABLE = "projects-test";
   process.env.ENVIRONMENT = "test";
+  // TRACE_BACKEND intentionally left unset in the base beforeEach — the
+  // default-xray dispatch (design §3 "SIMPLEST safe option") must hold for
+  // every pre-existing test above without them opting in. Tests in the
+  // new "TRACE_BACKEND=spans dispatch" describe block below set it
+  // explicitly per-test.
+  delete process.env.TRACE_BACKEND;
+  // Keeps the poll-budget-exhausted test (below) fast and deterministic —
+  // spans-query.ts's runSpanQuery reads these as overridable poll tuning,
+  // defaulting to 500ms/40 attempts (~20s) in production.
+  process.env.SPANS_QUERY_POLL_INTERVAL_MS = "0";
+  process.env.SPANS_QUERY_MAX_POLL_ATTEMPTS = "3";
 });
 
 import { handler } from "../trace-query-handler";
@@ -420,5 +438,301 @@ describe("unhandled X-Ray error", () => {
     const res = await handler(event);
     expect(res.statusCode).toBe(500);
     expect(res.body).not.toContain("xray unavailable");
+  });
+});
+
+describe("TRACE_BACKEND=spans dispatch (design §3 dual-backend, §1 query mechanism)", () => {
+  test("TRACE_BACKEND unset -> defaults to xray path (zero CloudWatch Logs calls)", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-default",
+        orgId: "org-1",
+        completedAt: recentIso(5),
+      },
+    });
+    xrayMock.on(GetTraceSummariesCommand).resolves({ TraceSummaries: [] });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-default" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    expect(xrayMock.calls().length).toBeGreaterThan(0);
+    expect(logsMock.calls()).toHaveLength(0);
+  });
+
+  test("TRACE_BACKEND=spans -> ownership gate still runs BEFORE any Logs Insights call (cross-org 403, zero logs calls)", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-x",
+        orgId: "org-OTHER",
+        completedAt: recentIso(5),
+      },
+    });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-x" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(403);
+    expect(logsMock.calls()).toHaveLength(0);
+    expect(xrayMock.calls()).toHaveLength(0);
+  });
+
+  test("TRACE_BACKEND=spans, same-org -> 200, StartQuery/GetQueryResults called, zero X-Ray calls", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-spans-1",
+        orgId: "org-1",
+        completedAt: recentIso(5),
+      },
+    });
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-h1" });
+    logsMock
+      .on(GetQueryResultsCommand)
+      .resolves({ status: "Complete", results: [] });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-spans-1" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    expect(logsMock.calls().length).toBeGreaterThan(0);
+    expect(xrayMock.calls()).toHaveLength(0);
+  });
+
+  test("TRACE_BACKEND=spans, query Complete with rows -> status:ready, response shape unchanged", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-spans-ready",
+        orgId: "org-1",
+        completedAt: recentIso(5),
+      },
+    });
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-h2" });
+    logsMock.on(GetQueryResultsCommand).resolves({
+      status: "Complete",
+      results: [
+        [
+          { field: "traceId", value: "1-5f84c7c1-000000000000000000000001" },
+          { field: "spanId", value: "root-1" },
+          { field: "name", value: "root-op" },
+          { field: "startTimeUnixNano", value: "1000000000000" },
+          { field: "endTimeUnixNano", value: "1001000000000" },
+        ],
+      ],
+    });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-spans-ready" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.status).toBe("ready");
+    expect(body).toHaveProperty("query");
+    expect(body).toHaveProperty("linkedBy");
+    expect(body).toHaveProperty("traces");
+    expect(body).toHaveProperty("truncated");
+    expect(body).toHaveProperty("meta");
+    expect(body.traces).toHaveLength(1);
+    expect(body.traces[0].traceId).toBe("1-5f84c7c1-000000000000000000000001");
+  });
+
+  test("TRACE_BACKEND=spans, query Complete with zero rows + entry fresh -> status:indexing", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-spans-fresh",
+        orgId: "org-1",
+        completedAt: recentIso(10),
+      },
+    });
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-h3" });
+    logsMock
+      .on(GetQueryResultsCommand)
+      .resolves({ status: "Complete", results: [] });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-spans-fresh" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    const body = JSON.parse(res.body!);
+    expect(body.status).toBe("indexing");
+  });
+
+  test("TRACE_BACKEND=spans, query Complete with zero rows + entry stale -> status:empty", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-spans-stale",
+        orgId: "org-1",
+        completedAt: recentIso(600),
+      },
+    });
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-h4" });
+    logsMock
+      .on(GetQueryResultsCommand)
+      .resolves({ status: "Complete", results: [] });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-spans-stale" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    const body = JSON.parse(res.body!);
+    expect(body.status).toBe("empty");
+  });
+
+  test("TRACE_BACKEND=spans, query still Running when poll budget exhausted -> status:indexing (NOT empty, NOT 5xx) — design §1 new case", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    ddbMock.on(GetCommand).resolves({
+      // Entry is OLD (outside freshness window) — proves the mapping is
+      // driven by query-incomplete, not by the freshness-window fallback.
+      Item: {
+        executionId: "exec-spans-incomplete",
+        orgId: "org-1",
+        completedAt: recentIso(600),
+      },
+    });
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-h5" });
+    logsMock
+      .on(GetQueryResultsCommand)
+      .resolves({ status: "Running", results: [] });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-spans-incomplete" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.status).toBe("indexing");
+  }, 15000);
+
+  test("TRACE_BACKEND=spans, GetQueryResults throws -> 500, never leaks the raw error", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-spans-boom",
+        orgId: "org-1",
+        completedAt: recentIso(5),
+      },
+    });
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-h6" });
+    logsMock
+      .on(GetQueryResultsCommand)
+      .rejects(new Error("LimitExceededException"));
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-spans-boom" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(500);
+    expect(res.body).not.toContain("LimitExceededException");
+  });
+
+  test("TRACE_BACKEND=spans, runId present on ownership row -> Logs Insights query targets annotation.run_id, linkedBy:run_id", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-spans-runid",
+        orgId: "org-1",
+        completedAt: recentIso(5),
+        runId: "run-22222222-2222-2222-2222-222222222222",
+      },
+    });
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-h7" });
+    logsMock
+      .on(GetQueryResultsCommand)
+      .resolves({ status: "Complete", results: [] });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-spans-runid" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    const body = JSON.parse(res.body!);
+    expect(body.linkedBy).toBe("run_id");
+
+    const startCall = logsMock
+      .calls()
+      .find((c) => c.args[0] instanceof StartQueryCommand);
+    expect(startCall).toBeDefined();
+    const input = (startCall!.args[0] as StartQueryCommand).input;
+    expect(input.queryString).toContain(
+      'filter `annotation.run_id` = "run-22222222-2222-2222-2222-222222222222"',
+    );
+  });
+
+  test("TRACE_BACKEND=spans, admin raw traceId route queries aws/spans by traceId, response shape unchanged", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-h8" });
+    logsMock.on(GetQueryResultsCommand).resolves({
+      status: "Complete",
+      results: [
+        [
+          { field: "traceId", value: "1-5f84c7c1-000000000000000000000002" },
+          { field: "spanId", value: "root-2" },
+          { field: "name", value: "root-op-2" },
+          { field: "startTimeUnixNano", value: "1000000000000" },
+          { field: "endTimeUnixNano", value: "1001000000000" },
+        ],
+      ],
+    });
+
+    const event = makeEvent(
+      "GET /traces/{traceId}",
+      { traceId: "1-5f84c7c1-000000000000000000000002" },
+      { "custom:organization": "org-1", "custom:role": "admin" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.status).toBe("ready");
+    expect(body.traces).toHaveLength(1);
+    expect(xrayMock.calls()).toHaveLength(0);
+  });
+
+  test("TRACE_BACKEND=spans, non-admin raw traceId route -> still 403, zero Logs Insights calls (invariant 2 unchanged)", async () => {
+    process.env.TRACE_BACKEND = "spans";
+
+    const event = makeEvent(
+      "GET /traces/{traceId}",
+      { traceId: "1-5f84c7c1-000000000000000000000003" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(403);
+    expect(logsMock.calls()).toHaveLength(0);
   });
 });
