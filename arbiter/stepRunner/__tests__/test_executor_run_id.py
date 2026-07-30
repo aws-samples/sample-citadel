@@ -81,14 +81,14 @@ def mock_executor(monkeypatch):
 
 class TestStartExecutionThreadsRunId:
     def test_run_id_reaches_sqs_dispatch_message_when_present_on_execution(self, mock_executor):
-        from executor import start_execution
+        import executor
 
         mock_executor['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SAMPLE_WORKFLOW)}
         mock_executor['executions_table'].get_item.return_value = {
             'Item': copy.deepcopy(SAMPLE_EXECUTION_WITH_RUN_ID),
         }
 
-        start_execution('exec-001', 'wf-001')
+        executor.start_execution('exec-001', 'wf-001')
 
         send_call = mock_executor['sqs'].send_message.call_args
         message = json.loads(send_call.kwargs['MessageBody'])
@@ -97,28 +97,28 @@ class TestStartExecutionThreadsRunId:
     def test_run_id_absent_from_dispatch_message_when_execution_has_none(self, mock_executor):
         """Byte-identical to the pre-runId dispatch: an execution row with
         no runId key produces a dispatch message with no runId key."""
-        from executor import start_execution
+        import executor
 
         mock_executor['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SAMPLE_WORKFLOW)}
         mock_executor['executions_table'].get_item.return_value = {
             'Item': copy.deepcopy(SAMPLE_EXECUTION_WITHOUT_RUN_ID),
         }
 
-        start_execution('exec-002', 'wf-001')
+        executor.start_execution('exec-002', 'wf-001')
 
         send_call = mock_executor['sqs'].send_message.call_args
         message = json.loads(send_call.kwargs['MessageBody'])
         assert 'runId' not in message
 
     def test_workflow_started_event_also_carries_run_id(self, mock_executor):
-        from executor import start_execution
+        import executor
 
         mock_executor['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SAMPLE_WORKFLOW)}
         mock_executor['executions_table'].get_item.return_value = {
             'Item': copy.deepcopy(SAMPLE_EXECUTION_WITH_RUN_ID),
         }
 
-        start_execution('exec-001', 'wf-001')
+        executor.start_execution('exec-001', 'wf-001')
 
         mock_executor['events'].publish_workflow_started.assert_called_once()
         kwargs = mock_executor['events'].publish_workflow_started.call_args.kwargs

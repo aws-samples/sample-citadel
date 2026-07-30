@@ -21,7 +21,7 @@ independently re-run the real `patch_all()` side effect and leak process-
 global X-Ray recorder state into unrelated tests.
 """
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

@@ -82,14 +82,14 @@ def mock_executor(monkeypatch):
 
 class TestUnstampedDispatchMetric:
     def test_emits_unstamped_dispatch_when_run_id_absent(self, mock_executor):
-        from executor import start_execution
+        import executor
 
         mock_executor['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SAMPLE_WORKFLOW)}
         mock_executor['executions_table'].get_item.return_value = {
             'Item': copy.deepcopy(SAMPLE_EXECUTION_WITHOUT_RUN_ID),
         }
 
-        start_execution('exec-002', 'wf-001')
+        executor.start_execution('exec-002', 'wf-001')
 
         put_calls = mock_executor['cloudwatch'].put_metric_data.call_args_list
         metric_names = [
@@ -100,14 +100,14 @@ class TestUnstampedDispatchMetric:
         assert 'UnstampedDispatch' in metric_names
 
     def test_does_not_emit_unstamped_dispatch_when_run_id_present(self, mock_executor):
-        from executor import start_execution
+        import executor
 
         mock_executor['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SAMPLE_WORKFLOW)}
         mock_executor['executions_table'].get_item.return_value = {
             'Item': copy.deepcopy(SAMPLE_EXECUTION_WITH_RUN_ID),
         }
 
-        start_execution('exec-001', 'wf-001')
+        executor.start_execution('exec-001', 'wf-001')
 
         put_calls = mock_executor['cloudwatch'].put_metric_data.call_args_list
         metric_names = [
@@ -120,7 +120,7 @@ class TestUnstampedDispatchMetric:
     def test_unstamped_dispatch_metric_never_gates_dispatch_on_cloudwatch_failure(self, mock_executor):
         """Best-effort discipline: a CloudWatch failure must never prevent
         the SQS dispatch from happening."""
-        from executor import start_execution
+        import executor
 
         mock_executor['cloudwatch'].put_metric_data.side_effect = RuntimeError('throttled')
         mock_executor['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SAMPLE_WORKFLOW)}
@@ -129,14 +129,14 @@ class TestUnstampedDispatchMetric:
         }
 
         # Must not raise, and SQS dispatch must still happen.
-        start_execution('exec-002', 'wf-001')
+        executor.start_execution('exec-002', 'wf-001')
         mock_executor['sqs'].send_message.assert_called_once()
 
     def test_metric_uses_pinned_constant_not_a_retyped_literal(self, mock_executor):
         """Guards the 'do NOT retype metric names' lesson: the emitted
         metric name must equal the pinned constant, verified by importing
         it directly rather than hardcoding the string a second time."""
-        from executor import start_execution
+        import executor
         from common.metrics_constants import METRIC_UNSTAMPED_DISPATCH
 
         mock_executor['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SAMPLE_WORKFLOW)}
@@ -144,7 +144,7 @@ class TestUnstampedDispatchMetric:
             'Item': copy.deepcopy(SAMPLE_EXECUTION_WITHOUT_RUN_ID),
         }
 
-        start_execution('exec-002', 'wf-001')
+        executor.start_execution('exec-002', 'wf-001')
 
         put_calls = mock_executor['cloudwatch'].put_metric_data.call_args_list
         metric_names = [
