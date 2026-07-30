@@ -77,6 +77,48 @@ const baseExecution = {
 };
 
 const prettyOf = (raw: string) => JSON.stringify(JSON.parse(raw), null, 2);
+
+describe('ExecutionDetailSheet — replay package download (CIT-026 deep link)', () => {
+  test('renders a "Download replay package" button when onDownloadReplay is provided', () => {
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: baseExecution,
+        open: true,
+        onClose: jest.fn(),
+        onDownloadReplay: jest.fn(),
+      }),
+    );
+    expect(screen.getByRole('button', { name: /download replay package/i })).toBeInTheDocument();
+  });
+
+  test('does not render the button when onDownloadReplay is not provided (graceful, no crash)', () => {
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: baseExecution,
+        open: true,
+        onClose: jest.fn(),
+      }),
+    );
+    expect(
+      screen.queryByRole('button', { name: /download replay package/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  test('clicking the button invokes onDownloadReplay with the executionId', () => {
+    const onDownloadReplay = jest.fn();
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: baseExecution,
+        open: true,
+        onClose: jest.fn(),
+        onDownloadReplay,
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /download replay package/i }));
+    expect(onDownloadReplay).toHaveBeenCalledWith(baseExecution.executionId);
+  });
+});
+
 const preWithText = (expected: string) => (_: string, el: Element | null) =>
   el?.tagName === 'PRE' && el.textContent === expected;
 

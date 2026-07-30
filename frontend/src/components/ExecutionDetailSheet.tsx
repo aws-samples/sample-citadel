@@ -5,7 +5,7 @@
  * All JSON parsing is defensive — invalid payloads render as raw strings.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Copy, Waypoints } from 'lucide-react';
+import { ChevronDown, ChevronRight, Copy, Download, Waypoints } from 'lucide-react';
 import {
   Sheet,
   SheetContent,
@@ -66,6 +66,16 @@ interface ExecutionDetailSheetProps {
    * The sheet has no router access itself, so the owner (AppDetailView) wires
    * this to `navigate('/observability/trace/execution/<executionId>')`. */
   onViewTrace?: (executionId: string) => void;
+  /**
+   * Deep-link callback for the CIT-026 execution replay package download.
+   * Ownership is enforced server-side (resolveExecutionOwnership) — every
+   * org member sees this button (design §2a: ownership-gated for ALL org
+   * members, not admin-only); the API itself returns 403/404 for a
+   * non-owning org, and the caller (AppDetailView) surfaces that via
+   * replayService's typed unauthorized/gateRefused results. When absent,
+   * the button is omitted entirely (graceful, no crash).
+   */
+  onDownloadReplay?: (executionId: string) => void;
 }
 
 // ---- Style maps (reuse the execution status color idiom) ----
@@ -249,7 +259,13 @@ const PRE_CLASSES =
 
 // ---- Component ----
 
-export function ExecutionDetailSheet({ execution, open, onClose, onViewTrace }: ExecutionDetailSheetProps) {
+export function ExecutionDetailSheet({
+  execution,
+  open,
+  onClose,
+  onViewTrace,
+  onDownloadReplay,
+}: ExecutionDetailSheetProps) {
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
   const [inputExpanded, setInputExpanded] = useState(false);
 
@@ -320,6 +336,19 @@ export function ExecutionDetailSheet({ execution, open, onClose, onViewTrace }: 
                 onClick={() => onViewTrace(execution.executionId)}
               >
                 <Waypoints className="size-3 mr-1" /> View trace
+              </Button>
+            )}
+            {onDownloadReplay && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  'h-6 px-2 text-xs text-muted-foreground hover:text-foreground cursor-pointer',
+                  onViewTrace ? '' : 'ml-auto mr-6',
+                )}
+                onClick={() => onDownloadReplay(execution.executionId)}
+              >
+                <Download className="size-3 mr-1" /> Download replay package
               </Button>
             )}
           </div>

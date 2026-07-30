@@ -36,6 +36,13 @@ export class BackendStack extends cdk.Stack {
   public readonly accessLogsBucket: Bucket;
   public readonly workflowsTable: dynamodb.Table;
   public readonly appsTable: dynamodb.Table;
+  /**
+   * Model-config table — exposed publicly (CIT-026 replay package,
+   * design §4) so TelemetryStack can grant read-only access for the
+   * replay envelope's `modelConfig` section. Previously a local `const`
+   * with no cross-stack consumer.
+   */
+  public readonly modelConfigTable: dynamodb.Table;
   public readonly executionsTable: dynamodb.Table;
   public readonly adrsTable: dynamodb.Table;
   public readonly agentDesignAssessmentsTable: dynamodb.Table;
@@ -217,15 +224,21 @@ export class BackendStack extends cdk.Stack {
       },
     ));
 
-    // Model Config Table — resolved model-selection defaults/overrides. Additive and
-    // not yet wired into any runtime/Lambda env.
-    const modelConfigTable = new dynamodb.Table(this, "ModelConfigTable", {
-      tableName: `citadel-model-config-${props.environment}`,
-      partitionKey: { name: "scope", type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    // Model Config Table — resolved model-selection defaults/overrides.
+    // Exposed via the public readonly `modelConfigTable` field (see class
+    // declaration) so TelemetryStack can read it for the CIT-026 replay
+    // package's `modelConfig` section.
+    const modelConfigTable = (this.modelConfigTable = new dynamodb.Table(
+      this,
+      "ModelConfigTable",
+      {
+        tableName: `citadel-model-config-${props.environment}`,
+        partitionKey: { name: "scope", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    ));
 
     // Integrations Table
     const integrationsTable = new dynamodb.Table(this, "IntegrationsTable", {

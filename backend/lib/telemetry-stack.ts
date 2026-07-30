@@ -12,6 +12,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
 import {
@@ -106,6 +107,47 @@ export interface TelemetryStackProps extends cdk.StackProps {
    * widgets (design §2 API health / §3 alarm A3).
    */
   appSyncApiId: string;
+  /**
+   * Workflows table (from BackendStack) — read-only source for the
+   * replay package's `workflow` section (CIT-026 design §4).
+   */
+  workflowsTable: dynamodb.ITable;
+  /**
+   * Agent-config table (from BackendStack) — read-only source for the
+   * replay package's `agentConfig` section.
+   */
+  agentConfigTable: dynamodb.ITable;
+  /**
+   * Execution-specifications table (from BackendStack via ProjectsStack) —
+   * read-only source for the replay package's `execSpec` section.
+   */
+  executionSpecificationsTable: dynamodb.ITable;
+  /**
+   * Model-config table (from BackendStack) — read-only source for the
+   * replay package's `modelConfig` section.
+   */
+  modelConfigTable: dynamodb.ITable;
+  /**
+   * Governance ledger table (from ArbiterStack) — read-only source for
+   * the replay package's `findings` section, queried via its
+   * `workflow-index` GSI.
+   */
+  governanceLedgerTable: dynamodb.ITable;
+  /**
+   * Shared access-logs bucket (from BackendStack) — the ReplayPackageBucket
+   * writes its S3 server access logs here under a dedicated prefix,
+   * mirroring the documentBucket/codeBucket convention
+   * (backend-stack.ts's `serverAccessLogsBucket`/`serverAccessLogsPrefix`)
+   * rather than creating a second logs bucket.
+   */
+  accessLogsBucket: s3.Bucket;
+  /**
+   * Git commit SHA at build/deploy time, threaded into the replay
+   * package's `producerCommit` envelope field (CIT-026 design §4 gap:
+   * "producerCommit needs COMMIT_SHA"). Left unset in local/dev synths —
+   * the envelope honestly reports `null` rather than a fabricated value.
+   */
+  commitSha?: string;
 }
 
 /**
@@ -124,6 +166,14 @@ export class TelemetryStack extends cdk.Stack {
   public readonly costBudgetHandlerFunction: lambda.Function;
   public readonly costBudgetEvaluatorFunction: lambda.Function;
   public readonly traceQueryHandlerFunction: lambda.Function;
+  /**
+   * Execution replay package bucket (CIT-026 design §2b) — dedicated,
+   * NOT the shared backend document bucket (which has permissive
+   * upload CORS for a different purpose). BPA on, SSE on, ~7-day
+   * lifecycle.
+   */
+  public readonly replayPackageBucket: s3.Bucket;
+  public readonly replayPackageHandlerFunction: lambda.Function;
   public readonly costHttpApi: apigatewayv2.HttpApi;
   /** HttpApi endpoint URL — threaded into FrontendStack (pass 2) as `aws_cost_api_url`. */
   public readonly costApiUrl: string;
@@ -704,6 +754,105 @@ export class TelemetryStack extends cdk.Stack {
       path: "/traces/{traceId}",
       methods: [apigatewayv2.HttpMethod.GET],
       integration: traceQueryIntegration,
+      authorizer: costJwtAuthorizer,
+    });
+
+    // --- Execution replay package (CIT-026, pass 1) ------------------------
+    // Dedicated bucket (design §2b) — NOT the shared backend document
+    // bucket, which has permissive upload CORS for a different purpose
+    // (user document uploads) and a different lifecycle. Block Public
+    // Access = all on; SSE (S3-managed now, KMS hook left for CIT-151);
+    // lifecycle expiration ~7 days (long enough to download + debug +
+    // promote to an eval fixture, short enough to bound at-rest exposure
+    // of a sanitised-but-still-sensitive-shaped reproduction).
+    this.replayPackageBucket = new s3.Bucket(this, "ReplayPackageBucket", {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      // AwsSolutions-S1: reuse the shared access-logs bucket under a
+      // dedicated prefix — same convention as documentBucket/codeBucket
+      // in backend-stack.ts, no second logs bucket created here.
+      serverAccessLogsBucket: props.accessLogsBucket,
+      serverAccessLogsPrefix: "replay-packages/",
+      lifecycleRules: [
+        {
+          expiration: cdk.Duration.days(7),
+          id: "expire-replay-packages-after-7-days",
+        },
+      ],
+    });
+
+    this.replayPackageHandlerFunction = new lambda.Function(
+      this,
+      "ReplayPackageHandler",
+      {
+        functionName: `citadel-replay-package-handler-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "replay-package-handler.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(30),
+        environment: {
+          EXECUTIONS_TABLE: props.executionsTable.tableName,
+          CONVERSATIONS_TABLE: props.conversationsTable.tableName,
+          PROJECTS_TABLE: props.projectsTable.tableName,
+          WORKFLOWS_TABLE: props.workflowsTable.tableName,
+          AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+          EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
+          MODEL_CONFIG_TABLE: props.modelConfigTable.tableName,
+          GOVERNANCE_LEDGER_TABLE: props.governanceLedgerTable.tableName,
+          COST_LEDGER_TABLE: this.costLedgerTable.tableName,
+          REPLAY_BUCKET: this.replayPackageBucket.bucketName,
+          // Hard ceiling enforced again in the handler regardless of this
+          // value (design invariant: presigned TTL <= 5 min).
+          REPLAY_PRESIGN_TTL_SECONDS: "300",
+          ENVIRONMENT: props.environment,
+          ...(props.commitSha ? { COMMIT_SHA: props.commitSha } : {}),
+        },
+        logGroup: new logs.LogGroup(this, "ReplayPackageHandlerLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    // Read-only grants on every source table (design invariant: handler
+    // role is read-only on source tables, zero write, zero xray:Put*).
+    props.executionsTable.grantReadData(this.replayPackageHandlerFunction);
+    props.conversationsTable.grantReadData(this.replayPackageHandlerFunction);
+    props.projectsTable.grantReadData(this.replayPackageHandlerFunction);
+    props.workflowsTable.grantReadData(this.replayPackageHandlerFunction);
+    props.agentConfigTable.grantReadData(this.replayPackageHandlerFunction);
+    props.executionSpecificationsTable.grantReadData(
+      this.replayPackageHandlerFunction,
+    );
+    props.modelConfigTable.grantReadData(this.replayPackageHandlerFunction);
+    props.governanceLedgerTable.grantReadData(
+      this.replayPackageHandlerFunction,
+    );
+    this.costLedgerTable.grantReadData(this.replayPackageHandlerFunction);
+
+    // S3 write ONLY to the new replay bucket — the handler builds the
+    // package, PutObjects it, then presigns a GET. No other bucket, no
+    // xray:Put* (this role has no X-Ray grant at all).
+    this.replayPackageBucket.grantReadWrite(this.replayPackageHandlerFunction);
+
+    const replayPackageIntegration =
+      new apigatewayv2Integrations.HttpLambdaIntegration(
+        "ReplayPackageIntegration",
+        this.replayPackageHandlerFunction,
+      );
+
+    this.costHttpApi.addRoutes({
+      path: "/replay/by-execution/{executionId}",
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration: replayPackageIntegration,
+      authorizer: costJwtAuthorizer,
+    });
+    this.costHttpApi.addRoutes({
+      path: "/replay/by-conversation/{conversationId}",
+      methods: [apigatewayv2.HttpMethod.GET],
+      integration: replayPackageIntegration,
       authorizer: costJwtAuthorizer,
     });
 

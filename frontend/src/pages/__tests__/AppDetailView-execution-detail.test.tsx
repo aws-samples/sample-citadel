@@ -130,12 +130,26 @@ jest.mock('sonner', () => ({
   },
 }));
 
+jest.mock('@/services/replayService', () => ({
+  __esModule: true,
+  default: {
+    getByExecution: jest.fn(),
+    downloadReplayPackage: jest.fn(),
+  },
+  replayService: {
+    getByExecution: jest.fn(),
+    downloadReplayPackage: jest.fn(),
+  },
+}));
+
 // Import after mocks
 import { AppDetailView } from '../AppDetailView';
 import { appApiService } from '../../services/appApiService';
 import { workflowApiService } from '../../services/workflowApiService';
 import { executionApiService } from '../../services/executionApiService';
 import serverService from '../../services/server';
+import { replayService } from '../../services/replayService';
+import { toast } from 'sonner';
 
 const mockApp = {
   appId: 'app-123',
@@ -272,5 +286,98 @@ describe('AppDetailView — execution detail sheet', () => {
       expect(screen.getByText('No executions recorded yet.')).toBeInTheDocument();
     });
     expect(screen.getByRole('button', { name: 'Go to Workflows' })).toBeInTheDocument();
+  });
+});
+
+describe('AppDetailView — replay package download wiring (CIT-026 deep link)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    tabsOnValueChange = null;
+    (appApiService.getApp as jest.Mock).mockResolvedValue(mockApp);
+    (workflowApiService.getWorkflow as jest.Mock).mockResolvedValue(publishedWorkflow);
+    (executionApiService.listExecutions as jest.Mock).mockResolvedValue({
+      items: [executionItem],
+    });
+    (serverService.subscribe as jest.Mock).mockReturnValue(jest.fn());
+  });
+
+  const openExecutionDetail = async () => {
+    render(<AppDetailView {...defaultProps} />);
+    await waitFor(() => expect(screen.getByText('Test App')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Executions'));
+    await waitFor(() => expect(screen.getByText(/exec-abcdef1/)).toBeInTheDocument());
+    const row = screen.getByRole('button', { name: /view execution exec-abcdef123456/i });
+    fireEvent.click(row);
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /download replay package/i })).toBeInTheDocument();
+    });
+  };
+
+  it('on success, calls replayService.getByExecution then downloadReplayPackage with the presigned url', async () => {
+    (replayService.getByExecution as jest.Mock).mockResolvedValue({
+      available: true,
+      data: { url: 'https://signed-url.example.com/package.json' },
+    });
+
+    await openExecutionDetail();
+    fireEvent.click(screen.getByRole('button', { name: /download replay package/i }));
+
+    await waitFor(() => {
+      expect(replayService.getByExecution).toHaveBeenCalledWith('exec-abcdef123456');
+    });
+    await waitFor(() => {
+      expect(replayService.downloadReplayPackage).toHaveBeenCalledWith(
+        'https://signed-url.example.com/package.json',
+      );
+    });
+  });
+
+  it('on gate refusal (5xx), shows an honest toast error and never crashes', async () => {
+    (replayService.getByExecution as jest.Mock).mockResolvedValue({
+      available: true,
+      gateRefused: true,
+      reason: 'Replay package could not be produced: sanitisation gate refused publication.',
+    });
+
+    await openExecutionDetail();
+    fireEvent.click(screen.getByRole('button', { name: /download replay package/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'Replay package could not be produced: sanitisation gate refused publication.',
+      );
+    });
+    expect(replayService.downloadReplayPackage).not.toHaveBeenCalled();
+  });
+
+  it('on unauthorized (403), shows an honest toast error and never crashes', async () => {
+    (replayService.getByExecution as jest.Mock).mockResolvedValue({
+      available: true,
+      unauthorized: true,
+      reason: 'Forbidden',
+    });
+
+    await openExecutionDetail();
+    fireEvent.click(screen.getByRole('button', { name: /download replay package/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Forbidden');
+    });
+    expect(replayService.downloadReplayPackage).not.toHaveBeenCalled();
+  });
+
+  it('on unconfigured, shows an honest toast error and never crashes', async () => {
+    (replayService.getByExecution as jest.Mock).mockResolvedValue({
+      available: false,
+      reason: 'unconfigured',
+    });
+
+    await openExecutionDetail();
+    fireEvent.click(screen.getByRole('button', { name: /download replay package/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalled();
+    });
+    expect(replayService.downloadReplayPackage).not.toHaveBeenCalled();
   });
 });

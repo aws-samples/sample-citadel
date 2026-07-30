@@ -209,6 +209,14 @@ const bedrockInvocationLogGroupName: string | undefined =
   (app.node.tryGetContext("bedrockInvocationLogGroupName") as
     string | undefined);
 
+// Git commit SHA at deploy time (design §4/§5 gap: "producerCommit needs
+// COMMIT_SHA") — sourced from CI env (buildspec) or CDK context; left
+// unset for local synth, which the replay envelope honestly reports as
+// `producerCommit: null` rather than fabricating a value.
+const commitSha: string | undefined =
+  process.env.COMMIT_SHA ||
+  (app.node.tryGetContext("commitSha") as string | undefined);
+
 const telemetryStack = new TelemetryStack(
   app,
   `citadel-telemetry-${environment}`,
@@ -234,9 +242,26 @@ const telemetryStack = new TelemetryStack(
     // API id for the A3 5XX alarm + dashboard API-health widgets.
     alarmTopic: backendStack.alarmTopic,
     appSyncApiId: backendStack.appSyncApi.apiId,
+    // Execution replay package (CIT-026, pass 1) — additional read-only
+    // source tables. workflowsTable/agentConfigTable/modelCatalogTable
+    // live on BackendStack; executionSpecificationsTable lives on
+    // BackendStack too (confirmed public readonly field, threaded into
+    // ProjectsStack/GovernanceStack the same way above); governanceLedgerTable
+    // lives on ArbiterStack. TelemetryStack already depends on
+    // BackendStack (below); it gains no NEW stack dependency on
+    // ArbiterStack from this since arbiterStack is declared after this
+    // point in the file — see the addStackDependency call added below.
+    workflowsTable: backendStack.workflowsTable,
+    agentConfigTable: backendStack.agentConfigTable,
+    executionSpecificationsTable: backendStack.executionSpecificationsTable,
+    modelConfigTable: backendStack.modelConfigTable,
+    governanceLedgerTable: arbiterStack.governanceLedgerTable,
+    accessLogsBucket: backendStack.accessLogsBucket,
+    commitSha,
   },
 );
 telemetryStack.addStackDependency(backendStack);
+telemetryStack.addStackDependency(arbiterStack);
 
 // Frontend hosting stack
 const frontendStack = new FrontendStack(

@@ -19,6 +19,7 @@ import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import { TelemetryStack } from "../telemetry-stack";
 import {
   METRIC_NAMESPACE,
@@ -31,6 +32,11 @@ function buildSupportTables(supportStack: cdk.Stack): {
   executionsTable: dynamodb.Table;
   conversationsTable: dynamodb.Table;
   projectsTable: dynamodb.Table;
+  workflowsTable: dynamodb.Table;
+  agentConfigTable: dynamodb.Table;
+  executionSpecificationsTable: dynamodb.Table;
+  modelConfigTable: dynamodb.Table;
+  governanceLedgerTable: dynamodb.Table;
 } {
   const modelCatalogTable = new dynamodb.Table(
     supportStack,
@@ -60,11 +66,56 @@ function buildSupportTables(supportStack: cdk.Stack): {
   const projectsTable = new dynamodb.Table(supportStack, "TestProjectsTable", {
     partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
   });
+  const workflowsTable = new dynamodb.Table(
+    supportStack,
+    "TestWorkflowsTable",
+    {
+      partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const agentConfigTable = new dynamodb.Table(
+    supportStack,
+    "TestAgentConfigTable",
+    {
+      partitionKey: { name: "agentId", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const executionSpecificationsTable = new dynamodb.Table(
+    supportStack,
+    "TestExecutionSpecificationsTable",
+    {
+      partitionKey: { name: "specId", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const modelConfigTable = new dynamodb.Table(
+    supportStack,
+    "TestModelConfigTable",
+    {
+      partitionKey: { name: "scope", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const governanceLedgerTable = new dynamodb.Table(
+    supportStack,
+    "TestGovernanceLedgerTable",
+    {
+      partitionKey: { name: "findingId", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  governanceLedgerTable.addGlobalSecondaryIndex({
+    indexName: "workflow-index",
+    partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "timestamp", type: dynamodb.AttributeType.NUMBER },
+  });
   return {
     modelCatalogTable,
     executionsTable,
     conversationsTable,
     projectsTable,
+    workflowsTable,
+    agentConfigTable,
+    executionSpecificationsTable,
+    modelConfigTable,
+    governanceLedgerTable,
   };
 }
 
@@ -89,6 +140,11 @@ function buildStack(): {
     executionsTable,
     conversationsTable,
     projectsTable,
+    workflowsTable,
+    agentConfigTable,
+    executionSpecificationsTable,
+    modelConfigTable,
+    governanceLedgerTable,
   } = buildSupportTables(supportStack);
 
   const stack = new TelemetryStack(app, "TestTelemetryStack", {
@@ -105,6 +161,15 @@ function buildStack(): {
     projectsTable,
     alarmTopic,
     appSyncApiId: "test-appsync-api-id",
+    workflowsTable,
+    agentConfigTable,
+    executionSpecificationsTable,
+    modelConfigTable,
+    governanceLedgerTable,
+    accessLogsBucket: new s3.Bucket(supportStack, "TestAccessLogsBucket", {
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    }),
   });
 
   return { template: Template.fromStack(stack), stack, alarmTopic };
@@ -334,6 +399,11 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       executionsTable,
       conversationsTable,
       projectsTable,
+      workflowsTable,
+      agentConfigTable,
+      executionSpecificationsTable,
+      modelConfigTable,
+      governanceLedgerTable,
     } = buildSupportTables(supportStack);
     const stack = new TelemetryStack(app, "TestTelemetryStackUnconfigured", {
       environment: "test",
@@ -348,6 +418,19 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       conversationsTable,
       projectsTable,
       alarmTopic,
+      workflowsTable,
+      agentConfigTable,
+      executionSpecificationsTable,
+      modelConfigTable,
+      governanceLedgerTable,
+      accessLogsBucket: new s3.Bucket(
+        supportStack,
+        "TestAccessLogsBucketUnconfigured",
+        {
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+          autoDeleteObjects: true,
+        },
+      ),
       appSyncApiId: "test-appsync-api-id",
     });
     const template = Template.fromStack(stack);

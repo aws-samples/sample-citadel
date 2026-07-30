@@ -64,6 +64,18 @@ checked against (unlike an execution or conversation id), so looking one up
 directly is restricted to admins — this is the same reasoning used for other
 account-wide reads in the governance UI.
 
+## Execution replay package (CIT-026)
+
+A "Download replay package" button appears next to "View trace" on
+execution inspection, and above the waterfall for execution/conversation
+deep links (never for the raw trace-id kind — a replay package always needs
+an ownership entry key). Unlike the raw trace-id lookup above, replay
+package download is **not** admin-only — every member of the owning org can
+download it, since ownership is resolved the same way as
+`by-execution`/`by-conversation`. See `docs/REPLAY_PACKAGE.md` for the full
+envelope contract, the sanitisation/fail-closed-gate guarantee, and the
+eval-ingestion contract.
+
 ## Configuration note: `aws_cost_api_url` reuse
 
 The trace query routes (`/traces/by-execution/{id}`, `/traces/by-conversation/{id}`,

@@ -5,12 +5,14 @@
  * non-admins even as a UI affordance).
  */
 import '@testing-library/jest-dom';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { Observability } from '../Observability';
 import { traceService } from '../../services/traceService';
+import { replayService } from '../../services/replayService';
 import { governanceService } from '../../services/governanceService';
 import { useOrganization } from '../../contexts/OrganizationContext';
+import { toast } from 'sonner';
 
 jest.mock('../../services/traceService', () => ({
   traceService: {
@@ -18,6 +20,14 @@ jest.mock('../../services/traceService', () => ({
     getByExecution: jest.fn(),
     getByConversation: jest.fn(),
     getByTraceId: jest.fn(),
+  },
+}));
+
+jest.mock('../../services/replayService', () => ({
+  replayService: {
+    getByExecution: jest.fn(),
+    getByConversation: jest.fn(),
+    downloadReplayPackage: jest.fn(),
   },
 }));
 
@@ -29,6 +39,10 @@ jest.mock('../../services/governanceService', () => ({
 
 jest.mock('../../contexts/OrganizationContext', () => ({
   useOrganization: jest.fn(),
+}));
+
+jest.mock('sonner', () => ({
+  toast: { success: jest.fn(), error: jest.fn() },
 }));
 
 function renderAt(path: string) {
@@ -251,5 +265,120 @@ describe('Observability page — governance decisions panel', () => {
 
     expect(await screen.findByTestId('governance-decisions-error')).toBeInTheDocument();
     expect(screen.getByTestId('trace-waterfall')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Replay package deep link (CIT-026) — "Download replay package" button on
+// the ready waterfall view, for both execution and conversation kinds.
+// Owner-only enforcement happens server-side; the button itself is always
+// rendered when the waterfall is ready, and gate-refusal/unauthorized
+// responses degrade gracefully to a toast (never a crash).
+// ---------------------------------------------------------------------------
+
+describe('Observability page — replay package download button', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (useOrganization as jest.Mock).mockReturnValue({ isAdmin: false });
+    (traceService.isAvailable as jest.Mock).mockReturnValue(true);
+    (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue({
+      items: [],
+      nextCursor: null,
+    });
+    (traceService.getByExecution as jest.Mock).mockResolvedValue({
+      available: true,
+      data: {
+        query: { kind: 'execution', id: 'exec-1' },
+        status: 'ready',
+        traces: [
+          {
+            traceId: '1-a-b',
+            rootName: 'root',
+            startTime: 0,
+            endTime: 1,
+            durationMs: 100,
+            hasError: false,
+            hasFault: false,
+            hasThrottle: false,
+            annotations: {},
+            spans: [],
+          },
+        ],
+      },
+    });
+  });
+
+  it('renders a "Download replay package" button on the ready waterfall for an execution deep link', async () => {
+    renderAt('/observability/trace/execution/exec-1');
+    expect(await screen.findByRole('button', { name: /download replay package/i })).toBeInTheDocument();
+  });
+
+  it('on click, calls replayService.getByExecution and triggers the download on success', async () => {
+    (replayService.getByExecution as jest.Mock).mockResolvedValue({
+      available: true,
+      data: { url: 'https://signed-url.example.com/package.json' },
+    });
+
+    renderAt('/observability/trace/execution/exec-1');
+    const button = await screen.findByRole('button', { name: /download replay package/i });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(replayService.getByExecution).toHaveBeenCalledWith('exec-1'));
+    await waitFor(() =>
+      expect(replayService.downloadReplayPackage).toHaveBeenCalledWith(
+        'https://signed-url.example.com/package.json',
+      ),
+    );
+  });
+
+  it('on gate refusal, shows an honest toast and never crashes', async () => {
+    (replayService.getByExecution as jest.Mock).mockResolvedValue({
+      available: true,
+      gateRefused: true,
+      reason: 'Replay package could not be produced: sanitisation gate refused publication.',
+    });
+
+    renderAt('/observability/trace/execution/exec-1');
+    const button = await screen.findByRole('button', { name: /download replay package/i });
+    fireEvent.click(button);
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        'Replay package could not be produced: sanitisation gate refused publication.',
+      ),
+    );
+    expect(replayService.downloadReplayPackage).not.toHaveBeenCalled();
+  });
+
+  it('on unauthorized, shows an honest toast and never crashes', async () => {
+    (replayService.getByExecution as jest.Mock).mockResolvedValue({
+      available: true,
+      unauthorized: true,
+      reason: 'Forbidden',
+    });
+
+    renderAt('/observability/trace/execution/exec-1');
+    const button = await screen.findByRole('button', { name: /download replay package/i });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Forbidden'));
+    expect(replayService.downloadReplayPackage).not.toHaveBeenCalled();
+  });
+
+  it('calls replayService.getByConversation for a conversation deep link', async () => {
+    (traceService.getByConversation as jest.Mock).mockResolvedValue({
+      available: true,
+      data: { query: { kind: 'conversation', id: 'proj-1' }, status: 'ready', traces: [] },
+    });
+    (replayService.getByConversation as jest.Mock).mockResolvedValue({
+      available: true,
+      data: { url: 'https://signed-url.example.com/package.json' },
+    });
+
+    renderAt('/observability/trace/conversation/proj-1');
+    // A 0-trace ready response renders the empty state, not the waterfall —
+    // the button lives alongside the waterfall render only when traces
+    // exist, matching this page's existing ready-with-traces gating.
+    await waitFor(() => expect(traceService.getByConversation).toHaveBeenCalledWith('proj-1'));
   });
 });

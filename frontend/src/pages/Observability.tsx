@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { PageContainer } from '../components/PageContainer';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
@@ -21,6 +22,7 @@ import { Badge } from '../components/ui/badge';
 import { Card } from '../components/ui/card';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { traceService, type TraceQueryKind, type TraceWaterfallResponse } from '../services/traceService';
+import { replayService } from '../services/replayService';
 import { governanceService, type GovernanceFinding } from '../services/governanceService';
 import { TraceWaterfall } from '../components/trace/TraceWaterfall';
 import {
@@ -54,6 +56,18 @@ function fetchByKind(kind: TraceQueryKind, id: string) {
     default:
       return traceService.getByExecution(id);
   }
+}
+
+/**
+ * Replay-package fetch dispatch — mirrors fetchByKind, but there is no
+ * replay route for the raw traceId kind (design §2: the replay package is
+ * always keyed by executionId/conversationId, never a raw trace id, since
+ * there is no ownership entry-key for a raw trace). 'traceId' therefore
+ * has no replay affordance at all — the download button is simply never
+ * rendered for that kind (see the render logic below).
+ */
+function fetchReplayByKind(kind: 'execution' | 'conversation', id: string) {
+  return kind === 'execution' ? replayService.getByExecution(id) : replayService.getByConversation(id);
 }
 
 function isValidKind(value: string | undefined): value is TraceQueryKind {
@@ -169,6 +183,7 @@ export function Observability() {
             {state.kind === 'ready' && state.data.traces.length === 0 && <TraceEmptyState />}
             {state.kind === 'ready' && state.data.traces.length > 0 && (
               <>
+                {kind && kind !== 'traceId' && <ReplayDownloadButton kind={kind} id={id} />}
                 <TraceWaterfall traces={state.data.traces} />
                 <GovernanceDecisionsPanel traces={state.data.traces} />
               </>
@@ -201,6 +216,41 @@ type DecisionsPanelState =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
   | { kind: 'loaded'; findings: GovernanceFinding[] };
+
+// ---------------------------------------------------------------------------
+// Replay package download button (CIT-026 deep link from the waterfall).
+// Ownership is enforced server-side (design §2a: ownership-gated for ALL
+// org members) — this button is always rendered for execution/conversation
+// kinds; a non-owning org's click surfaces the server's 403/5xx as an
+// honest toast (never a crash) via replayService's typed result.
+// ---------------------------------------------------------------------------
+
+function ReplayDownloadButton({ kind, id }: { kind: 'execution' | 'conversation'; id: string }) {
+  const handleDownload = async () => {
+    const result = await fetchReplayByKind(kind, id);
+    if (!result.available) {
+      toast.error('Replay package download is not available in this environment.');
+      return;
+    }
+    if (result.unauthorized) {
+      toast.error(result.reason);
+      return;
+    }
+    if (result.gateRefused) {
+      toast.error(result.reason);
+      return;
+    }
+    replayService.downloadReplayPackage(result.data.url);
+  };
+
+  return (
+    <div className="flex justify-end">
+      <Button variant="outline" size="sm" onClick={handleDownload}>
+        Download replay package
+      </Button>
+    </div>
+  );
+}
 
 function GovernanceDecisionsPanel({ traces }: { traces: TraceWaterfallResponse['traces'] }) {
   const navigate = useNavigate();

@@ -25,7 +25,7 @@ describe("TelemetryStack — cost query surface (pass 1: API + authorizer + budg
     });
   });
 
-  test("declares all 7 costHttpApi routes (4 cost-query + 3 waterfall trace viewer, pass 1)", () => {
+  test("declares all 9 costHttpApi routes (4 cost-query + 3 waterfall trace viewer + 2 replay package)", () => {
     const routes = template.findResources("AWS::ApiGatewayV2::Route");
     const routeKeys = Object.values(routes)
       .map((r: any) => r.Properties.RouteKey)
@@ -39,6 +39,8 @@ describe("TelemetryStack — cost query surface (pass 1: API + authorizer + budg
         "GET /traces/by-execution/{executionId}",
         "GET /traces/by-conversation/{conversationId}",
         "GET /traces/{traceId}",
+        "GET /replay/by-execution/{executionId}",
+        "GET /replay/by-conversation/{conversationId}",
       ].sort(),
     );
   });
@@ -192,6 +194,7 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -252,6 +255,51 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
     removalPolicy: cdk.RemovalPolicy.DESTROY,
   });
 
+  const workflowsTable = new dynamodb.Table(helperStack, "WorkflowsTable", {
+    tableName: "citadel-workflows-test",
+    partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+  });
+  const agentConfigTable = new dynamodb.Table(helperStack, "AgentConfigTable", {
+    tableName: "citadel-agents-test",
+    partitionKey: { name: "agentId", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+  });
+  const executionSpecificationsTable = new dynamodb.Table(
+    helperStack,
+    "ExecutionSpecificationsTable",
+    {
+      tableName: "citadel-execution-specifications-test",
+      partitionKey: { name: "specId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  const modelConfigTable = new dynamodb.Table(helperStack, "ModelConfigTable", {
+    tableName: "citadel-model-config-test",
+    partitionKey: { name: "scope", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+  });
+  const governanceLedgerTable = new dynamodb.Table(
+    helperStack,
+    "GovernanceLedgerTable",
+    {
+      tableName: "citadel-governance-ledger-test",
+      partitionKey: { name: "findingId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  governanceLedgerTable.addGlobalSecondaryIndex({
+    indexName: "workflow-index",
+    partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "timestamp", type: dynamodb.AttributeType.NUMBER },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+
   const stack = new TelemetryStack(app, "TestTelemetryStack", {
     environment: "test",
     env: { account: "123456789012", region: "us-east-1" },
@@ -268,6 +316,16 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
       topicName: "citadel-alarms-test",
     }),
     appSyncApiId: "test-appsync-api-id",
+    workflowsTable,
+    agentConfigTable,
+    executionSpecificationsTable,
+    modelConfigTable,
+    governanceLedgerTable,
+    accessLogsBucket: new s3.Bucket(helperStack, "TestAccessLogsBucket", {
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    }),
+    commitSha: "test-commit-sha",
   });
 
   const template = Template.fromStack(stack);
@@ -609,5 +667,173 @@ describe("TelemetryStack — cost ledger reconciler (Tier A + Tier B skeleton)",
       DeletionPolicy: "Retain",
       UpdateReplacePolicy: "Retain",
     });
+  });
+});
+describe("TelemetryStack — execution replay package (CIT-026, pass 1)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("replay bucket has Block Public Access all-on, SSE, and a ~7-day lifecycle expiration", () => {
+    template.hasResourceProperties("AWS::S3::Bucket", {
+      PublicAccessBlockConfiguration: {
+        BlockPublicAcls: true,
+        BlockPublicPolicy: true,
+        IgnorePublicAcls: true,
+        RestrictPublicBuckets: true,
+      },
+      BucketEncryption: Match.objectLike({
+        ServerSideEncryptionConfiguration: Match.arrayWith([
+          Match.objectLike({
+            ServerSideEncryptionByDefault: Match.objectLike({
+              SSEAlgorithm: "AES256",
+            }),
+          }),
+        ]),
+      }),
+      LifecycleConfiguration: Match.objectLike({
+        Rules: Match.arrayWith([
+          Match.objectLike({
+            ExpirationInDays: 7,
+            Status: "Enabled",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  test("replay bucket is NOT the shared backend document bucket (a dedicated bucket resource exists)", () => {
+    const buckets = template.findResources("AWS::S3::Bucket");
+    // At least one S3 bucket declared directly in this stack (the replay
+    // bucket) — TelemetryStack previously declared zero buckets.
+    expect(Object.keys(buckets).length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("replay-package-handler Lambda: nodejs24.x, 30s timeout, all source table env vars + bucket + TTL", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "replay-package-handler.handler",
+      Runtime: "nodejs24.x",
+      Timeout: 30,
+      Environment: {
+        Variables: Match.objectLike({
+          EXECUTIONS_TABLE: Match.anyValue(),
+          CONVERSATIONS_TABLE: Match.anyValue(),
+          PROJECTS_TABLE: Match.anyValue(),
+          WORKFLOWS_TABLE: Match.anyValue(),
+          AGENT_CONFIG_TABLE: Match.anyValue(),
+          EXECUTION_SPECS_TABLE: Match.anyValue(),
+          MODEL_CONFIG_TABLE: Match.anyValue(),
+          GOVERNANCE_LEDGER_TABLE: Match.anyValue(),
+          COST_LEDGER_TABLE: Match.anyValue(),
+          REPLAY_BUCKET: Match.anyValue(),
+          REPLAY_PRESIGN_TTL_SECONDS: "300",
+          COMMIT_SHA: "test-commit-sha",
+        }),
+      },
+    });
+  });
+
+  test("replay-package-handler role is read-only on every source table: grants GetItem/Query, zero write actions, zero xray:Put*", () => {
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "replay-package-handler.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+    expect(fnLogicalId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("ReplayPackageHandler"),
+      );
+    });
+    expect(ownPolicies.length).toBeGreaterThan(0);
+
+    const allStatements = ownPolicies.flatMap(
+      (p: any) => p.Properties?.PolicyDocument?.Statement || [],
+    );
+    const allActions = allStatements.flatMap((s: any) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+
+    // Read-only on source tables: GetItem/Query present, but no write verb
+    // on ANY source-table-scoped statement (S3 write is scoped separately
+    // to the replay bucket only — see the next test).
+    expect(allActions).toEqual(expect.arrayContaining(["dynamodb:GetItem"]));
+    const writeVerbs = [
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+    ];
+    const dynamoWriteActions = allActions.filter((a: string) =>
+      writeVerbs.includes(a),
+    );
+    expect(dynamoWriteActions).toHaveLength(0);
+
+    // Zero xray:Put* — this role has no X-Ray grant of any kind.
+    const xrayActions = allActions.filter((a: string) => a.startsWith("xray:"));
+    expect(xrayActions).toHaveLength(0);
+  });
+
+  test("replay-package-handler role's S3 grant is scoped to the replay bucket only (not a bare Resource::* or another bucket)", () => {
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "replay-package-handler.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+    expect(fnLogicalId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const ownPolicies = Object.values(policies).filter((p: any) => {
+      const roles = p.Properties?.Roles || [];
+      return roles.some((r: any) =>
+        (r?.Ref || "").includes("ReplayPackageHandler"),
+      );
+    });
+
+    const s3Statements = ownPolicies.flatMap((p: any) => {
+      const statements = p.Properties?.PolicyDocument?.Statement || [];
+      return statements.filter((s: any) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.some((a: string) => a.startsWith("s3:"));
+      });
+    });
+    expect(s3Statements.length).toBeGreaterThan(0);
+
+    for (const stmt of s3Statements) {
+      const resources = Array.isArray(stmt.Resource)
+        ? stmt.Resource
+        : [stmt.Resource];
+      for (const r of resources) {
+        expect(r).not.toBe("*");
+        // Must reference the ReplayPackageBucket construct, never a bare
+        // wildcard nor (by construction, since there's only one S3 grant
+        // target in this stack) any other bucket.
+        expect(JSON.stringify(r)).toMatch(/ReplayPackageBucket/);
+      }
+    }
+  });
+
+  test("both replay routes are declared on the existing costHttpApi with the same JWT authorizer (zero new API/authorizer config)", () => {
+    const routes = template.findResources("AWS::ApiGatewayV2::Route", {
+      Properties: {
+        RouteKey: Match.stringLikeRegexp("^GET /replay/"),
+      },
+    });
+    const routeIds = Object.keys(routes);
+    expect(routeIds).toHaveLength(2);
+    for (const routeId of routeIds) {
+      expect(routes[routeId].Properties.AuthorizationType).not.toBe("NONE");
+      expect(
+        routes[routeId].Properties.AuthorizerId ??
+          routes[routeId].Properties.AuthorizationType,
+      ).toBeDefined();
+    }
+
+    // Only one ApiGatewayV2::Api exists in the stack — confirms the
+    // replay routes did not create a second HTTP API.
+    const apis = template.findResources("AWS::ApiGatewayV2::Api");
+    expect(Object.keys(apis)).toHaveLength(1);
   });
 });
