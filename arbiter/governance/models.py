@@ -218,6 +218,11 @@ class GovernanceFinding:
     contract_evaluated: str | None = None        # contract_id
     escalation_target: str | None = None
     residual_authority_denial: bool = False
+    trace_id: str | None = None                  # active X-Ray trace id, stamped
+                                                   # best-effort at write time (see
+                                                   # supervisor/index.py governed_
+                                                   # process_agent_call); None when
+                                                   # no trace context was active.
 
     @classmethod
     def create(

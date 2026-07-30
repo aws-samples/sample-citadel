@@ -128,6 +128,49 @@ describe('governanceService.listGovernanceFindings', () => {
 
     await expect(governanceService.listGovernanceFindings({})).rejects.toThrow('bad input');
   });
+
+  // P2 test 9 (design task 9b3f4f78, runtime -> decision direction): the
+  // workflowId arg must reach the GSI-backed query variable, and the
+  // request must ask for the new traceId field so callers can render the
+  // decision->runtime link on results returned via this path too.
+  it('sends workflowId in variables (GSI-backed query path) and requests traceId', async () => {
+    (serverService.query as jest.Mock).mockResolvedValue({
+      listGovernanceFindings: { items: [], nextCursor: null },
+    });
+
+    await governanceService.listGovernanceFindings({ workflowId: 'exec-123' });
+
+    const [queryString, variables] = (serverService.query as jest.Mock).mock.calls[0];
+    expect(variables.workflowId).toBe('exec-123');
+    expect(queryString).toContain('traceId');
+  });
+
+  it('projects traceId through to the returned items when present', async () => {
+    (serverService.query as jest.Mock).mockResolvedValue({
+      listGovernanceFindings: {
+        items: [
+          {
+            findingId: 'f-1',
+            workflowId: 'exec-123',
+            decision: 'permit',
+            reason: 'unit_match',
+            requestingAgent: 'a',
+            targetAgent: 'b',
+            scopeEvaluated: null,
+            contractEvaluated: null,
+            escalationTarget: null,
+            residualAuthorityDenial: false,
+            timestamp: 1700000000.5,
+            traceId: '1-5f2f0000-abcdef0123456789abcdef01',
+          },
+        ],
+        nextCursor: null,
+      },
+    });
+
+    const result = await governanceService.listGovernanceFindings({ workflowId: 'exec-123' });
+    expect(result.items[0].traceId).toBe('1-5f2f0000-abcdef0123456789abcdef01');
+  });
 });
 
 describe('governanceService.getGovernanceFinding', () => {

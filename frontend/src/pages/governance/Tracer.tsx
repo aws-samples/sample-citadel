@@ -47,6 +47,7 @@ import {
 import { useGovernanceFindingStream } from '../../hooks/useGovernanceFindingStream';
 import { useGovernanceEngine } from '../../hooks/useGovernanceEngine';
 import { useOrganization } from '../../contexts/OrganizationContext';
+import { traceService } from '../../services/traceService';
 import {
   CounterfactualPanel,
   type CounterfactualCommit,
@@ -659,6 +660,7 @@ function TerminalDecisionCard({
             {pinned ? 'Pinned' : 'Pin'}
           </Button>
         )}
+        <RuntimeTraceLink finding={finding} />
         <Button
           variant="outline"
           size="sm"
@@ -670,6 +672,113 @@ function TerminalDecisionCard({
         </Button>
       </div>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Decision -> runtime trace link (design task 9b3f4f78, §4/§5).
+//
+// Primary: finding.traceId (stamped X-Ray trace id) -> admin-only
+//   /observability/trace/traceId/<id>. Post-deploy findings only — the
+//   ledger is write-once, so a pre-stamp finding has traceId===null forever.
+// Fallback: finding.workflowId -> /observability/trace/execution/<id>
+//   (ownership-gated by-execution route). NOTE (join-key deviation, see
+//   docs/OBSERVABILITY.md Known-limitation section): workflowId is the
+//   supervisor's own orchestrationId, which is NOT guaranteed to equal a
+//   StepRunner executionId for supervisor-dispatched findings — this
+//   fallback is offered but may legitimately resolve to "not found".
+// ---------------------------------------------------------------------------
+
+function RuntimeTraceLink({ finding }: { finding: GovernanceFinding }) {
+  const { isAdmin } = useOrganization();
+  const navigate = useNavigate();
+  const traceConfigured = traceService.isAvailable();
+
+  if (!traceConfigured) {
+    // Unconfigured trace API: hide the link entirely (design §5).
+    return null;
+  }
+
+  const hasTraceId = Boolean(finding.traceId);
+  const hasWorkflowId = Boolean(finding.workflowId);
+
+  if (!hasTraceId && !hasWorkflowId) {
+    return null;
+  }
+
+  if (hasTraceId && isAdmin) {
+    return (
+      <Button
+        variant="outline"
+        size="sm"
+        data-testid="tracer-view-runtime-trace"
+        onClick={() =>
+          navigate(`/observability/trace/traceId/${encodeURIComponent(finding.traceId as string)}`)
+        }
+      >
+        <ExternalLink className="size-3" />
+        View runtime trace
+      </Button>
+    );
+  }
+
+  if (hasTraceId && !isAdmin) {
+    // Non-admin: traceId exists but /traces/{traceId} is admin-only (no org
+    // entry key for a raw trace id). Offer a copyable id plus the
+    // ownership-gated by-execution fallback when available.
+    return (
+      <div className="flex items-center gap-2" data-testid="tracer-runtime-trace-nonadmin">
+        <span
+          className="font-mono text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
+          title="Full runtime trace view requires admin (trace data is account-wide)."
+          data-testid="tracer-runtime-trace-id-copyable"
+        >
+          {finding.traceId}
+        </span>
+        {hasWorkflowId && (
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="tracer-view-execution-trace-fallback"
+            onClick={() =>
+              navigate(`/observability/trace/execution/${encodeURIComponent(finding.workflowId)}`)
+            }
+          >
+            View execution trace
+          </Button>
+        )}
+      </div>
+    );
+  }
+
+  // No traceId: finding predates linking deployment. Disabled primary
+  // button with explanatory tooltip, plus the workflowId fallback when
+  // present (design §5 — honest degradation, not a broken link).
+  return (
+    <div className="flex items-center gap-2" data-testid="tracer-runtime-trace-predates-stamping">
+      <Button
+        variant="outline"
+        size="sm"
+        disabled
+        title="Recorded before runtime-trace linking was deployed — no trace id on this finding."
+        data-testid="tracer-view-runtime-trace-disabled"
+      >
+        <ExternalLink className="size-3" />
+        View runtime trace
+      </Button>
+      {hasWorkflowId && (
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="tracer-view-execution-trace-fallback"
+          onClick={() =>
+            navigate(`/observability/trace/execution/${encodeURIComponent(finding.workflowId)}`)
+          }
+        >
+          View execution trace
+        </Button>
+      )}
+    </div>
   );
 }
 

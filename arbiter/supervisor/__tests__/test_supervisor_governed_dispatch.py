@@ -487,6 +487,178 @@ def test_app_id_is_forwarded_to_load_governance_state(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 7. Decision<->runtime trace linking (architect task 9b3f4f78) — trace-id
+#    stamping between engine evaluation and write_finding.
+# ---------------------------------------------------------------------------
+
+
+class TestTraceIdStamping:
+    def test_stamps_trace_id_from_active_trace_context(self, monkeypatch):
+        """P1 test 4 (populate half): a mocked active_trace_context
+        returning a known traceId ends up on the finding passed to
+        write_finding."""
+        monkeypatch.setattr(supervisor_mod, "_GOVERNANCE_AVAILABLE", True)
+        finding = _make_finding(ArbitrationDecision.PERMIT, scope_evaluated="u-1")
+        captured = {}
+
+        def _capture_write(f):
+            captured["trace_id"] = f.trace_id
+
+        with patch.object(supervisor_mod, "load_governance_state",
+                          return_value=_make_state("shadow")), \
+             patch.object(supervisor_mod, "GovernanceEngine") as MockEngine, \
+             patch.object(supervisor_mod.tracing, "active_trace_context",
+                          return_value={"traceId": "1-5f2f0000-abcdef0123456789abcdef01"}), \
+             patch.object(supervisor_mod, "write_finding", side_effect=_capture_write), \
+             patch.object(supervisor_mod, "process_agent_call", return_value=None):
+            MockEngine.return_value.evaluate.return_value = finding
+
+            supervisor_mod.governed_process_agent_call(
+                _AGENTS_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
+            )
+
+        assert captured["trace_id"] == "1-5f2f0000-abcdef0123456789abcdef01"
+        assert finding.trace_id == "1-5f2f0000-abcdef0123456789abcdef01"
+
+    def test_stamp_ordering_write_finding_still_before_mode_branch(self, monkeypatch):
+        """P1 test 4 (ordering half): write_finding is still invoked BEFORE
+        process_agent_call (the enforcement-mode branch), unaffected by the
+        stamp step being inserted ahead of it."""
+        monkeypatch.setattr(supervisor_mod, "_GOVERNANCE_AVAILABLE", True)
+        finding = _make_finding(ArbitrationDecision.PERMIT, scope_evaluated="u-1")
+        call_order = []
+
+        def _write(_f):
+            call_order.append("write")
+
+        def _dispatch(*a, **kw):
+            call_order.append("dispatch")
+            return {"ok": True}
+
+        with patch.object(supervisor_mod, "load_governance_state",
+                          return_value=_make_state("strict")), \
+             patch.object(supervisor_mod, "GovernanceEngine") as MockEngine, \
+             patch.object(supervisor_mod.tracing, "active_trace_context",
+                          return_value={"traceId": "1-5f2f0000-abcdef0123456789abcdef01"}), \
+             patch.object(supervisor_mod, "write_finding", side_effect=_write), \
+             patch.object(supervisor_mod, "process_agent_call", side_effect=_dispatch):
+            MockEngine.return_value.evaluate.return_value = finding
+
+            supervisor_mod.governed_process_agent_call(
+                _AGENTS_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
+            )
+
+        assert call_order == ["write", "dispatch"]
+
+    @pytest.mark.parametrize("mode", ["permissive", "shadow", "strict"])
+    def test_trace_context_returns_none_never_denies_dispatch(self, monkeypatch, mode):
+        """[FAIL-CLOSED NON-REGRESSION] active_trace_context() returning
+        None must not deny dispatch or alter the decision, in any
+        enforcement mode: write_finding is still called exactly once with
+        trace_id left None, and PERMIT still dispatches / DENY still
+        denies for the SAME reason as before this feature existed."""
+        monkeypatch.setattr(supervisor_mod, "_GOVERNANCE_AVAILABLE", True)
+        finding = _make_finding(ArbitrationDecision.PERMIT, scope_evaluated="u-1")
+
+        with patch.object(supervisor_mod, "load_governance_state",
+                          return_value=_make_state(mode)), \
+             patch.object(supervisor_mod, "GovernanceEngine") as MockEngine, \
+             patch.object(supervisor_mod.tracing, "active_trace_context",
+                          return_value=None), \
+             patch.object(supervisor_mod, "write_finding") as mock_write, \
+             patch.object(supervisor_mod, "process_agent_call",
+                          return_value={"dispatched": True}) as mock_dispatch:
+            MockEngine.return_value.evaluate.return_value = finding
+
+            result = supervisor_mod.governed_process_agent_call(
+                _AGENTS_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
+            )
+
+        mock_write.assert_called_once_with(finding)
+        mock_dispatch.assert_called_once()
+        assert finding.trace_id is None
+        assert result == {"dispatched": True}
+
+    @pytest.mark.parametrize("mode", ["permissive", "shadow", "strict"])
+    def test_trace_context_raises_never_denies_dispatch(self, monkeypatch, mode):
+        """[FAIL-CLOSED NON-REGRESSION] active_trace_context() raising must
+        not propagate, must not deny dispatch, and must not alter the
+        decision: write_finding is still called exactly once with
+        trace_id left None."""
+        monkeypatch.setattr(supervisor_mod, "_GOVERNANCE_AVAILABLE", True)
+        finding = _make_finding(ArbitrationDecision.PERMIT, scope_evaluated="u-1")
+
+        with patch.object(supervisor_mod, "load_governance_state",
+                          return_value=_make_state(mode)), \
+             patch.object(supervisor_mod, "GovernanceEngine") as MockEngine, \
+             patch.object(supervisor_mod.tracing, "active_trace_context",
+                          side_effect=RuntimeError("xray boom")), \
+             patch.object(supervisor_mod, "write_finding") as mock_write, \
+             patch.object(supervisor_mod, "process_agent_call",
+                          return_value={"dispatched": True}) as mock_dispatch:
+            MockEngine.return_value.evaluate.return_value = finding
+
+            result = supervisor_mod.governed_process_agent_call(
+                _AGENTS_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
+            )
+
+        mock_write.assert_called_once_with(finding)
+        mock_dispatch.assert_called_once()
+        assert finding.trace_id is None
+        assert result == {"dispatched": True}
+
+    def test_trace_context_raises_strict_deny_still_denies_same_reason(self, monkeypatch):
+        """Confirms the exception path does not silently flip a DENY into a
+        PERMIT or otherwise change the returned denial payload."""
+        monkeypatch.setattr(supervisor_mod, "_GOVERNANCE_AVAILABLE", True)
+        finding = _make_finding(
+            ArbitrationDecision.DENY, scope_evaluated="u-1", reason="no-coverage",
+        )
+
+        with patch.object(supervisor_mod, "load_governance_state",
+                          return_value=_make_state("strict")), \
+             patch.object(supervisor_mod, "GovernanceEngine") as MockEngine, \
+             patch.object(supervisor_mod.tracing, "active_trace_context",
+                          side_effect=RuntimeError("xray boom")), \
+             patch.object(supervisor_mod, "write_finding") as mock_write, \
+             patch.object(supervisor_mod, "process_agent_call") as mock_dispatch:
+            MockEngine.return_value.evaluate.return_value = finding
+
+            result = supervisor_mod.governed_process_agent_call(
+                _AGENTS_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
+            )
+
+        mock_write.assert_called_once_with(finding)
+        mock_dispatch.assert_not_called()
+        assert result == {
+            "denied": True,
+            "finding_id": finding.finding_id,
+            "reason": "no-coverage",
+        }
+
+    def test_empty_dict_trace_context_without_trace_id_key_leaves_none(self, monkeypatch):
+        """A malformed/partial context dict (no 'traceId' key, or falsy
+        value) must not stamp a bogus trace_id."""
+        monkeypatch.setattr(supervisor_mod, "_GOVERNANCE_AVAILABLE", True)
+        finding = _make_finding(ArbitrationDecision.PERMIT, scope_evaluated="u-1")
+
+        with patch.object(supervisor_mod, "load_governance_state",
+                          return_value=_make_state("shadow")), \
+             patch.object(supervisor_mod, "GovernanceEngine") as MockEngine, \
+             patch.object(supervisor_mod.tracing, "active_trace_context",
+                          return_value={}), \
+             patch.object(supervisor_mod, "write_finding"), \
+             patch.object(supervisor_mod, "process_agent_call", return_value=None):
+            MockEngine.return_value.evaluate.return_value = finding
+
+            supervisor_mod.governed_process_agent_call(
+                _AGENTS_CONFIG, _ORCH, "agent-a", {"x": 1}, "use-1",
+            )
+
+        assert finding.trace_id is None
+
+
+# ---------------------------------------------------------------------------
 # Per-agent modelOverride forwarding in process_agent_call (real dispatch,
 # unaffected by governance wrapper changes above).
 # ---------------------------------------------------------------------------

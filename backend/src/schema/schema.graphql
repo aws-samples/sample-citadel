@@ -2093,6 +2093,7 @@ type GovernanceFinding @aws_iam @aws_cognito_user_pools {
   escalationTarget: String
   residualAuthorityDenial: Boolean
   timestamp: Float!
+  traceId: String
 }
 
 type GovernanceFindingConnection {

@@ -9,6 +9,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { Observability } from '../Observability';
 import { traceService } from '../../services/traceService';
+import { governanceService } from '../../services/governanceService';
 import { useOrganization } from '../../contexts/OrganizationContext';
 
 jest.mock('../../services/traceService', () => ({
@@ -17,6 +18,12 @@ jest.mock('../../services/traceService', () => ({
     getByExecution: jest.fn(),
     getByConversation: jest.fn(),
     getByTraceId: jest.fn(),
+  },
+}));
+
+jest.mock('../../services/governanceService', () => ({
+  governanceService: {
+    listGovernanceFindings: jest.fn(),
   },
 }));
 
@@ -39,6 +46,10 @@ describe('Observability page', () => {
     jest.clearAllMocks();
     (useOrganization as jest.Mock).mockReturnValue({ isAdmin: false });
     (traceService.isAvailable as jest.Mock).mockReturnValue(true);
+    (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue({
+      items: [],
+      nextCursor: null,
+    });
   });
 
   it('renders the ready waterfall from execution deep-link params', async () => {
@@ -125,5 +136,120 @@ describe('Observability page', () => {
 
     expect(await screen.findByText(/trace viewer unavailable/i)).toBeInTheDocument();
     expect(traceService.getByExecution).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Governance decisions panel (design task 9b3f4f78, §4/§5) — P2 test 8.
+// ---------------------------------------------------------------------------
+
+describe('Observability page — governance decisions panel', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (useOrganization as jest.Mock).mockReturnValue({ isAdmin: false });
+    (traceService.isAvailable as jest.Mock).mockReturnValue(true);
+  });
+
+  function mockReadyTraceWithAnnotations(annotations: Record<string, string>) {
+    (traceService.getByExecution as jest.Mock).mockResolvedValue({
+      available: true,
+      data: {
+        query: { kind: 'execution', id: 'exec-1' },
+        status: 'ready',
+        traces: [
+          {
+            traceId: '1-a-b',
+            rootName: 'root',
+            startTime: 0,
+            endTime: 1,
+            durationMs: 100,
+            hasError: false,
+            hasFault: false,
+            hasThrottle: false,
+            annotations,
+            spans: [],
+          },
+        ],
+      },
+    });
+  }
+
+  it('calls listGovernanceFindings(workflowId=execution_id) and renders "Governance decisions (N)"', async () => {
+    mockReadyTraceWithAnnotations({ execution_id: 'exec-1' });
+    (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue({
+      items: [
+        {
+          findingId: 'f-1',
+          workflowId: 'exec-1',
+          decision: 'permit',
+          reason: 'scope_match:unit-1',
+          requestingAgent: 'a',
+          targetAgent: 'b',
+          scopeEvaluated: 'unit-1',
+          contractEvaluated: null,
+          escalationTarget: null,
+          residualAuthorityDenial: false,
+          timestamp: 1,
+          traceId: null,
+        },
+      ],
+      nextCursor: null,
+    });
+
+    renderAt('/observability/trace/execution/exec-1');
+
+    await waitFor(() =>
+      expect(governanceService.listGovernanceFindings).toHaveBeenCalledWith({ workflowId: 'exec-1' }),
+    );
+    expect(await screen.findByText('Governance decisions (1)')).toBeInTheDocument();
+    expect(screen.getByTestId('governance-decisions-row')).toBeInTheDocument();
+  });
+
+  it('falls back to correlation_id when execution_id annotation is absent', async () => {
+    mockReadyTraceWithAnnotations({ correlation_id: 'corr-1' });
+    (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue({
+      items: [],
+      nextCursor: null,
+    });
+
+    renderAt('/observability/trace/execution/exec-1');
+
+    await waitFor(() =>
+      expect(governanceService.listGovernanceFindings).toHaveBeenCalledWith({ workflowId: 'corr-1' }),
+    );
+  });
+
+  it('renders the empty state when N=0', async () => {
+    mockReadyTraceWithAnnotations({ execution_id: 'exec-1' });
+    (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue({
+      items: [],
+      nextCursor: null,
+    });
+
+    renderAt('/observability/trace/execution/exec-1');
+
+    expect(await screen.findByTestId('governance-decisions-empty')).toBeInTheDocument();
+    expect(screen.getByText(/no governance decisions recorded for this execution/i)).toBeInTheDocument();
+  });
+
+  it('renders the missing-execution_id state when no annotation is present', async () => {
+    mockReadyTraceWithAnnotations({});
+
+    renderAt('/observability/trace/execution/exec-1');
+
+    expect(
+      await screen.findByTestId('governance-decisions-no-execution-id'),
+    ).toBeInTheDocument();
+    expect(governanceService.listGovernanceFindings).not.toHaveBeenCalled();
+  });
+
+  it('renders an inline error without breaking the waterfall render on listGovernanceFindings failure', async () => {
+    mockReadyTraceWithAnnotations({ execution_id: 'exec-1' });
+    (governanceService.listGovernanceFindings as jest.Mock).mockRejectedValue(new Error('GSI down'));
+
+    renderAt('/observability/trace/execution/exec-1');
+
+    expect(await screen.findByTestId('governance-decisions-error')).toBeInTheDocument();
+    expect(screen.getByTestId('trace-waterfall')).toBeInTheDocument();
   });
 });

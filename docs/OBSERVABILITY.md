@@ -81,6 +81,51 @@ This means `aws_cost_api_url` is a slight misnomer now that it also serves
 tracing — a documented tradeoff, with an optional future rename to
 `aws_telemetry_api_url` tracked as tech debt, not addressed in this change.
 
+## Decision <-> runtime trace linking
+
+Two one-click links between a governance decision and the runtime trace it
+was made inside of (architect task `9b3f4f78`). Full contract in
+`.kiro/specs/governance-ui/graphql-contract.md`; this section is the
+user-facing summary.
+
+**From a governance finding -> "what actually ran"** (Governance ->
+Tracer): the finding header shows a **View runtime trace** action.
+
+- If the finding carries a stamped `traceId` (X-Ray trace id captured at
+  the moment the finding was written) and you're an admin, it deep-links
+  straight to `/observability/trace/traceId/<id>` — the same admin-only raw
+  trace-id route described above.
+- If you're not an admin, the `traceId` is shown as a copyable string
+  instead (trace data is account-wide, so the raw-id route can't be
+  ownership-checked for anyone) with a note explaining why, plus a
+  **View execution trace** fallback using the finding's `workflowId`
+  through the ownership-gated by-execution route.
+- If the finding predates this feature (the ledger is write-once — old
+  rows can never be retro-stamped), the primary button is disabled with a
+  tooltip saying so, and the same `workflowId` fallback is offered.
+- If the trace API isn't configured for this deployment, the link is
+  hidden entirely rather than shown broken.
+
+**From a runtime trace -> "why was this allowed?"** (Tracer ->
+Governance): the waterfall page shows a **Governance decisions (N)** panel
+below the trace, populated from the loaded trace's `execution_id`
+annotation (falling back to `correlation_id`). N=0 renders as "No
+governance decisions recorded for this execution" — true whether none were
+written or the execution ran ungoverned. A missing annotation renders
+"Execution id unavailable on this trace — cannot look up governance
+decisions" instead of attempting a lookup. A query failure renders inline
+without breaking the waterfall.
+
+**Known limitation (read before treating the fallback/panel as
+authoritative):** the fallback/panel above both key off `workflowId` /
+`execution_id`, which for supervisor-dispatched governance findings today is
+the supervisor's own `orchestrationId` — a separate identifier from the
+StepRunner `executionId` used by runtime traces. They are not guaranteed to
+be the same value. The `traceId` primary link does not have this problem
+(it's the trace the finding was actually written inside), but the
+`workflowId`-keyed fallback and the runtime→decision panel may legitimately
+come back empty/not-found even for a governed execution. Treat a hit as
+signal, not an absence of a hit as proof nothing was governed.
 
 ---
 

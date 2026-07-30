@@ -146,6 +146,15 @@ def _serialize_finding(finding: GovernanceFinding) -> dict[str, Any]:
     item["findingId"] = finding.finding_id
     item["workflowId"] = finding.workflow_id
     item["timestamp"] = float(finding.timestamp)
+
+    # Optional camelCase alias for the stamped X-Ray trace id (decision<->
+    # runtime trace linking). Emitted ONLY when present so an unstamped
+    # write (trace_id is None — no active trace context at write time) is
+    # byte-identical to the pre-linking serialization: the top-level loop
+    # above already stripped the None-valued `trace_id` dataclass field,
+    # and we do not add `traceId` in that case either.
+    if finding.trace_id is not None:
+        item["traceId"] = finding.trace_id
     return item
 
 

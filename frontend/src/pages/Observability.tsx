@@ -17,8 +17,11 @@ import { PageContainer } from '../components/PageContainer';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
 import { Label } from '../components/ui/label';
+import { Badge } from '../components/ui/badge';
+import { Card } from '../components/ui/card';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { traceService, type TraceQueryKind, type TraceWaterfallResponse } from '../services/traceService';
+import { governanceService, type GovernanceFinding } from '../services/governanceService';
 import { TraceWaterfall } from '../components/trace/TraceWaterfall';
 import {
   TraceLoadingState,
@@ -165,12 +168,131 @@ export function Observability() {
             {state.kind === 'indexing' && <TraceIndexingState onRetry={load} />}
             {state.kind === 'ready' && state.data.traces.length === 0 && <TraceEmptyState />}
             {state.kind === 'ready' && state.data.traces.length > 0 && (
-              <TraceWaterfall traces={state.data.traces} />
+              <>
+                <TraceWaterfall traces={state.data.traces} />
+                <GovernanceDecisionsPanel traces={state.data.traces} />
+              </>
             )}
           </>
         )}
       </div>
     </PageContainer>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Governance decisions panel (design task 9b3f4f78, §4/§5 — runtime ->
+// decision direction).
+//
+// Reads the execution_id annotation (fallback correlation_id) off the
+// loaded waterfall traces, then queries
+// listGovernanceFindings(workflowId=execution_id) via the EXISTING
+// any-authenticated workflow-index GSI read (design §3 direction (b)).
+//
+// Join-key note (see docs/OBSERVABILITY.md Known-limitation section): this
+// direction assumes finding.workflowId (== supervisor orchestrationId)
+// equals the runtime execution_id. That equivalence does NOT hold in
+// general for supervisor-dispatched findings today — a zero-result panel
+// here is expected/honest for many executions, not necessarily a bug.
+// ---------------------------------------------------------------------------
+
+type DecisionsPanelState =
+  | { kind: 'no-execution-id' }
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'loaded'; findings: GovernanceFinding[] };
+
+function GovernanceDecisionsPanel({ traces }: { traces: TraceWaterfallResponse['traces'] }) {
+  const navigate = useNavigate();
+  const [panelState, setPanelState] = useState<DecisionsPanelState>({ kind: 'loading' });
+
+  // Every trace in a waterfall response shares the same correlation id
+  // (design: they're all hops of the same execution/conversation), so the
+  // first trace's annotations are representative.
+  const executionId = traces[0]?.annotations?.execution_id ?? traces[0]?.annotations?.correlation_id;
+
+  useEffect(() => {
+    if (!executionId) {
+      setPanelState({ kind: 'no-execution-id' });
+      return;
+    }
+    let cancelled = false;
+    setPanelState({ kind: 'loading' });
+    governanceService
+      .listGovernanceFindings({ workflowId: executionId })
+      .then((conn) => {
+        if (!cancelled) setPanelState({ kind: 'loaded', findings: conn.items });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setPanelState({
+            kind: 'error',
+            message: err instanceof Error ? err.message : 'Failed to load governance decisions',
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [executionId]);
+
+  if (panelState.kind === 'no-execution-id') {
+    return (
+      <Card className="p-4 text-sm text-muted-foreground" data-testid="governance-decisions-no-execution-id">
+        Execution id unavailable on this trace — cannot look up governance decisions.
+      </Card>
+    );
+  }
+
+  if (panelState.kind === 'loading') {
+    return (
+      <Card className="p-4 text-sm text-muted-foreground" data-testid="governance-decisions-loading">
+        Loading governance decisions…
+      </Card>
+    );
+  }
+
+  if (panelState.kind === 'error') {
+    // Inline error only — must not break the waterfall render (design §5).
+    return (
+      <Card className="p-4 text-sm text-destructive" data-testid="governance-decisions-error">
+        Failed to load governance decisions: {panelState.message}
+      </Card>
+    );
+  }
+
+  const { findings } = panelState;
+
+  return (
+    <Card className="p-4 flex flex-col gap-3" data-testid="governance-decisions-panel">
+      <p className="text-sm font-medium text-foreground">
+        Governance decisions ({findings.length})
+      </p>
+      {findings.length === 0 && (
+        <p className="text-sm text-muted-foreground" data-testid="governance-decisions-empty">
+          No governance decisions recorded for this execution.
+        </p>
+      )}
+      {findings.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {findings.map((f) => (
+            <Button
+              key={f.findingId}
+              type="button"
+              variant="ghost"
+              className="flex items-center justify-start gap-2 h-auto py-1 px-2"
+              data-testid="governance-decisions-row"
+              onClick={() => navigate(`/governance/ledger?findingId=${f.findingId}`)}
+            >
+              <Badge variant="secondary" className="capitalize">
+                {f.decision}
+              </Badge>
+              <span className="text-muted-foreground truncate">{f.reason}</span>
+            </Button>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }
 

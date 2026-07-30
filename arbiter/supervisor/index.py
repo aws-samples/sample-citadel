@@ -479,8 +479,23 @@ def governed_process_agent_call(
     if not finding.scope_evaluated:
         finding.scope_evaluated = 'supervisor-dispatch'
 
+    # 4b. Stamp the active X-Ray trace id (decision<->runtime trace
+    # linking, architect task 9b3f4f78). Best-effort only: a missing trace
+    # context or any exception from active_trace_context() must NEVER deny
+    # dispatch or alter the finding's decision — it only leaves
+    # finding.trace_id as None, which write_finding/ledger already
+    # serialize as a byte-identical (untraced) item. Write order is
+    # unchanged: this stamp happens strictly before write_finding, and
+    # write_finding's call site/position below is untouched.
+    try:
+        _ctx = tracing.active_trace_context()
+        if _ctx and _ctx.get("traceId"):
+            finding.trace_id = _ctx["traceId"]
+    except Exception:
+        logger.debug("trace-id stamp failed; finding written untraced", exc_info=True)
+
     # 5. Write finding (fail-closed per D9). Any exception halts dispatch,
-    #    in every mode.
+    # in every mode.
     write_finding(finding)
 
     # 6. Branch on mode + decision.

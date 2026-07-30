@@ -223,6 +223,11 @@ interface GovernanceFindingProjected {
   escalationTarget: string | null;
   residualAuthorityDenial: boolean | null;
   timestamp: number;
+  // Decision<->runtime trace linking (architect task 9b3f4f78). Optional:
+  // null for findings written before this field was deployed (write-once
+  // ledger — cannot be retro-stamped) or when no X-Ray trace context was
+  // active at write time.
+  traceId: string | null;
 }
 
 interface ReconcilerClassification {
@@ -331,6 +336,7 @@ export function projectFinding(row: DdbRow): GovernanceFindingProjected {
     escalationTarget: asStringOrNull(row.escalation_target),
     residualAuthorityDenial: asBoolOrNull(row.residual_authority_denial),
     timestamp,
+    traceId: asStringOrNull(row.traceId),
   };
 }
 
@@ -1648,8 +1654,7 @@ async function countLedgerRows(
     const result = await dynamodb.send(cmd);
     count += result.Count ?? 0;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   return count;
@@ -2278,8 +2283,7 @@ async function scanMismatchItems(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   return { items, truncated };
@@ -3391,8 +3395,7 @@ async function listAuthorityUnits(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -3455,8 +3458,7 @@ async function listCompositionContracts(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -3577,8 +3579,7 @@ async function scanRevokeImpactItems(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   return { items, truncated };
@@ -3960,8 +3961,7 @@ async function listConstitutionalLayers(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -4047,8 +4047,7 @@ async function scanConstitutionalReviewItems(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   return { items, truncated };
@@ -4420,8 +4419,7 @@ async function listCaseLaw(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -5864,8 +5862,7 @@ async function listAuthorityGraphSnapshots(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -6202,8 +6199,7 @@ async function getD4RetrospectiveReport(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
