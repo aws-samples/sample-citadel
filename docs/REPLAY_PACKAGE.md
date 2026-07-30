@@ -3,7 +3,7 @@
 Sibling doc to [`TRACING_RUNBOOK.md`](./TRACING_RUNBOOK.md) and
 [`OBSERVABILITY.md`](./OBSERVABILITY.md). Documents the replay package
 envelope contract, the sanitisation guarantee, and the ingestion contract
-for E10's eval-fixture promotion story (CIT-100).
+for E10's eval-fixture promotion story (CIT-101).
 
 ## What it is
 
@@ -104,7 +104,7 @@ publishing.
 
 `schemaVersion` is semver and additive-safe: new optional fields never
 require a bump. A breaking change to an existing section's shape forces a
-**major** version bump, so downstream consumers (CIT-100/104/126/143) can
+**major** version bump, so downstream consumers (CIT-101/105/126/143) can
 pin to a major and upgrade deliberately.
 
 ## Honest gap — `toolResults` (CIT-121)
@@ -221,9 +221,9 @@ the existing "Download replay package" button now succeeds for
 conversation-kind deep links.
 
 
-## Eval ingestion contract (E10 / CIT-100)
+## Eval ingestion contract (E10 / CIT-101)
 
-A replay package must be ingestible by CIT-100 ("promote a production
+A replay package must be ingestible by CIT-101 ("promote a production
 execution to an eval case") **unchanged** — no transformation step between
 "download replay package" and "eval fixture." Consumers should:
 
