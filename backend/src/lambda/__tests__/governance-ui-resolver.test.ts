@@ -19,6 +19,7 @@ process.env.DATASTORES_TABLE = "citadel-datastores-test";
 process.env.INTEGRATIONS_TABLE = "citadel-integrations-test";
 process.env.LAMBDA_EXEC_ROLE_ARN =
   "arn:aws:iam::123456789012:role/citadel-governance-ui-resolver-test";
+process.env.EXECUTIONS_TABLE = "citadel-executions-test";
 
 import { mockClient } from "aws-sdk-client-mock";
 import {
@@ -309,6 +310,29 @@ describe("projectFinding", () => {
     const row = makeDdbRow({ traceId: "" });
     const projected = projectFinding(row);
     expect(projected.traceId).toBeNull();
+  });
+
+  // Pass 2 (design §4, decision f1cbd5ef) — projectFinding/getDecisionTrace
+  // expose runId; additive/nullable, mirroring the traceId precedent above.
+  test("maps runId when present on the DDB row", () => {
+    const row = makeDdbRow({
+      runId: "run-11111111-1111-1111-1111-111111111111",
+    });
+    const projected = projectFinding(row);
+    expect(projected.runId).toBe("run-11111111-1111-1111-1111-111111111111");
+  });
+
+  test("coerces missing runId (pre-runId finding) to null", () => {
+    const row = makeDdbRow();
+    delete (row as Record<string, unknown>).runId;
+    const projected = projectFinding(row);
+    expect(projected.runId).toBeNull();
+  });
+
+  test("coerces empty-string runId to null", () => {
+    const row = makeDdbRow({ runId: "" });
+    const projected = projectFinding(row);
+    expect(projected.runId).toBeNull();
   });
 });
 
@@ -3187,6 +3211,185 @@ describe("getDecisionTrace", () => {
     };
 
     expect(result.finding.traceId).toBeNull();
+  });
+
+  // Pass 2 (design §4, decision f1cbd5ef): findings->execution pivot by
+  // runId. Additive/nullable — mirrors the traceId tests directly above.
+  describe("findings->execution pivot by runId (Pass 2)", () => {
+    test("finding.runId set + a matching execution row -> linkedExecutionId is populated", async () => {
+      ddbMock
+        .on(GetCommand, { TableName: "citadel-governance-ledger-test" })
+        .resolves({
+          Item: ledgerRow({
+            findingId: "f-80",
+            decision: "permit",
+            reason: "scope_match:unit-1",
+            runId: "run-33333333-3333-3333-3333-333333333333",
+          }),
+        });
+      ddbMock.on(ScanCommand).resolves({
+        Items: [
+          {
+            executionId: "exec-run-80",
+            orgId: "org-1",
+            runId: "run-33333333-3333-3333-3333-333333333333",
+          },
+        ],
+      });
+
+      const result = (await handler(
+        makeEvent({
+          fieldName: "getDecisionTrace",
+          args: { findingId: "f-80" },
+        }),
+      )) as {
+        finding: { runId: string | null };
+        linkedExecutionId: string | null;
+      };
+
+      expect(result.finding.runId).toBe(
+        "run-33333333-3333-3333-3333-333333333333",
+      );
+      expect(result.linkedExecutionId).toBe("exec-run-80");
+    });
+
+    test("finding.runId absent (pre-runId finding) -> linkedExecutionId is null, no execution lookup issued", async () => {
+      ddbMock
+        .on(GetCommand, { TableName: "citadel-governance-ledger-test" })
+        .resolves({
+          Item: ledgerRow({
+            findingId: "f-81",
+            decision: "permit",
+            reason: "scope_match:unit-1",
+          }),
+        });
+
+      const result = (await handler(
+        makeEvent({
+          fieldName: "getDecisionTrace",
+          args: { findingId: "f-81" },
+        }),
+      )) as { linkedExecutionId: string | null };
+
+      expect(result.linkedExecutionId).toBeNull();
+      expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
+    });
+
+    test("finding.runId set but NO matching execution row -> linkedExecutionId is null, never throws", async () => {
+      ddbMock
+        .on(GetCommand, { TableName: "citadel-governance-ledger-test" })
+        .resolves({
+          Item: ledgerRow({
+            findingId: "f-82",
+            decision: "permit",
+            reason: "scope_match:unit-1",
+            runId: "run-44444444-4444-4444-4444-444444444444",
+          }),
+        });
+      ddbMock.on(ScanCommand).resolves({ Items: [] });
+
+      const result = (await handler(
+        makeEvent({
+          fieldName: "getDecisionTrace",
+          args: { findingId: "f-82" },
+        }),
+      )) as { linkedExecutionId: string | null };
+
+      expect(result.linkedExecutionId).toBeNull();
+    });
+
+    test("matching execution row exists on a LATER page (beyond a Limit:1 first page) -> still FOUND", async () => {
+      // Regression test for the DynamoDB Limit-before-Filter bug: DDB
+      // applies `Limit` BEFORE the `FilterExpression`, so a naive
+      // `Limit: 1` scan reads exactly one (non-matching) item, filters it
+      // out, and returns zero results even though a matching row exists
+      // later in the table. This test asserts the FIXED behaviour: the
+      // resolver must page through the table and find the match on a
+      // subsequent page.
+      //
+      // Confirmed against the old code: with the old
+      // `Limit: 1, FilterExpression: "runId = :rid"` implementation, the
+      // mocked first page below (a single non-matching item plus a
+      // LastEvaluatedKey) is exactly what DynamoDB would have returned for
+      // a real `Limit: 1` scan whose sole scanned item didn't match the
+      // filter — `result.Items` would be `[]` and `(result.Items ?? [])[0]`
+      // would be `undefined`, so `findExecutionIdByRunId` returned `null`
+      // and this test's `toBe("exec-run-90")` assertion failed.
+      ddbMock
+        .on(GetCommand, { TableName: "citadel-governance-ledger-test" })
+        .resolves({
+          Item: ledgerRow({
+            findingId: "f-90",
+            decision: "permit",
+            reason: "scope_match:unit-1",
+            runId: "run-90909090-9090-9090-9090-909090909090",
+          }),
+        });
+      ddbMock
+        .on(ScanCommand)
+        .resolvesOnce({
+          // First page: no matching items, but more pages remain.
+          Items: [],
+          LastEvaluatedKey: { executionId: "exec-page-1-cursor" },
+        })
+        .resolvesOnce({
+          // Second page: the matching row, same org as the finding.
+          Items: [
+            {
+              executionId: "exec-run-90",
+              orgId: "org-1",
+              runId: "run-90909090-9090-9090-9090-909090909090",
+            },
+          ],
+        });
+
+      const result = (await handler(
+        makeEvent({
+          fieldName: "getDecisionTrace",
+          args: { findingId: "f-90" },
+        }),
+      )) as { linkedExecutionId: string | null };
+
+      expect(result.linkedExecutionId).toBe("exec-run-90");
+      // Two pages were scanned (ExclusiveStartKey carried forward).
+      const scanCalls = ddbMock.commandCalls(ScanCommand);
+      expect(scanCalls).toHaveLength(2);
+      expect(scanCalls[1].args[0].input.ExclusiveStartKey).toEqual({
+        executionId: "exec-page-1-cursor",
+      });
+    });
+
+    test("matching execution row belongs to a DIFFERENT org -> linkedExecutionId is null (cross-org row never surfaced)", async () => {
+      ddbMock
+        .on(GetCommand, { TableName: "citadel-governance-ledger-test" })
+        .resolves({
+          Item: ledgerRow({
+            findingId: "f-91",
+            decision: "permit",
+            reason: "scope_match:unit-1",
+            runId: "run-91919191-9191-9191-9191-919191919191",
+            orgId: "org-1",
+          }),
+        });
+      ddbMock.on(ScanCommand).resolves({
+        Items: [
+          {
+            executionId: "exec-run-91",
+            orgId: "org-2",
+            runId: "run-91919191-9191-9191-9191-919191919191",
+          },
+        ],
+      });
+
+      const result = (await handler(
+        makeEvent({
+          fieldName: "getDecisionTrace",
+          args: { findingId: "f-91" },
+        }),
+      )) as { linkedExecutionId: string | null };
+
+      expect(result.linkedExecutionId).toBeNull();
+    });
   });
 
   test("unrecognised reason format degrades gracefully (pass-through, arbitrationPattern null)", async () => {

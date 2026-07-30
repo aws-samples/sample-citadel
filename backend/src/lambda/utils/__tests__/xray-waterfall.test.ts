@@ -204,6 +204,34 @@ describe("shapeTraces — response field-allowlist (invariant 5)", () => {
     expect(result.traces[0].annotations).toEqual({ correlation_id: "exec-1" });
   });
 
+  test("run_id annotation surfaces on the shaped trace's annotations map when present (Pass 2, design §4 — additive, never gates the response)", () => {
+    const s = seg({
+      id: "1111111111111119",
+      annotations: {
+        correlation_id: "exec-1",
+        run_id: "run-11111111-1111-1111-1111-111111111111",
+      },
+    });
+    const result = shapeTraces([trace("1-n2", [s])], {
+      includeMetadata: false,
+    });
+    expect(result.traces[0].annotations.run_id).toBe(
+      "run-11111111-1111-1111-1111-111111111111",
+    );
+  });
+
+  test("run_id annotation absent (pre-runId trace) -> annotations map omits the key, never throws, never fabricates a value", () => {
+    const s = seg({
+      id: "111111111111111b",
+      annotations: { correlation_id: "exec-1" },
+    });
+    const result = shapeTraces([trace("1-n3", [s])], {
+      includeMetadata: false,
+    });
+    expect(result.traces[0].annotations.run_id).toBeUndefined();
+    expect(result.traces[0].annotations).toEqual({ correlation_id: "exec-1" });
+  });
+
   test("includeMetadata:true (admin opt-in) surfaces the raw metadata bag on the span", () => {
     const s = seg({
       id: "111111111111111a",

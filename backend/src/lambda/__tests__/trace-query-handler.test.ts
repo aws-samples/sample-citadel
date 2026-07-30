@@ -309,6 +309,95 @@ describe("unknown route", () => {
   });
 });
 
+describe("runId-primary correlation (Pass 2, design §4)", () => {
+  test("execution row WITH runId -> filters by annotation.run_id, linkedBy:run_id", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-runid",
+        orgId: "org-1",
+        completedAt: recentIso(5),
+        runId: "run-11111111-1111-1111-1111-111111111111",
+      },
+    });
+    xrayMock.on(GetTraceSummariesCommand).resolves({ TraceSummaries: [] });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-runid" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.linkedBy).toBe("run_id");
+    expect(body.query.runId).toBe("run-11111111-1111-1111-1111-111111111111");
+
+    const summariesCall = xrayMock
+      .calls()
+      .find((c) => c.args[0] instanceof GetTraceSummariesCommand);
+    expect(summariesCall).toBeDefined();
+    const input = (summariesCall!.args[0] as GetTraceSummariesCommand).input;
+    expect(input.FilterExpression).toBe(
+      'annotation.run_id = "run-11111111-1111-1111-1111-111111111111"',
+    );
+  });
+
+  test("execution row WITHOUT runId (pre-runId data) -> falls back to annotation.correlation_id, linkedBy:correlation_id, response never breaks", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        executionId: "exec-legacy",
+        orgId: "org-1",
+        completedAt: recentIso(5),
+        // no runId field at all — pre-runId row.
+      },
+    });
+    xrayMock.on(GetTraceSummariesCommand).resolves({ TraceSummaries: [] });
+
+    const event = makeEvent(
+      "GET /traces/by-execution/{executionId}",
+      { executionId: "exec-legacy" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.linkedBy).toBe("correlation_id");
+    expect(body.query.runId).toBeNull();
+
+    const summariesCall = xrayMock
+      .calls()
+      .find((c) => c.args[0] instanceof GetTraceSummariesCommand);
+    expect(summariesCall).toBeDefined();
+    const input = (summariesCall!.args[0] as GetTraceSummariesCommand).input;
+    expect(input.FilterExpression).toBe(
+      'annotation.correlation_id = "exec-legacy"',
+    );
+  });
+
+  test("conversation row WITH runId on the project record is absent (projects table has no runId) -> falls back cleanly, no throw", async () => {
+    // Conversations resolve ownership via the PROJECTS table (no runId
+    // column there); this asserts the fallback path never breaks the
+    // response shape when runId is simply not present on the ownership row.
+    ddbMock.on(GetCommand).resolves({
+      Item: { id: "proj-runid", orgId: "org-1", updatedAt: recentIso(5) },
+    });
+    xrayMock.on(GetTraceSummariesCommand).resolves({ TraceSummaries: [] });
+
+    const event = makeEvent(
+      "GET /traces/by-conversation/{conversationId}",
+      { conversationId: "proj-runid" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.linkedBy).toBe("correlation_id");
+  });
+});
+
 describe("unhandled X-Ray error", () => {
   test("500 on X-Ray throw, never leaks the raw error to the client", async () => {
     ddbMock.on(GetCommand).resolves({

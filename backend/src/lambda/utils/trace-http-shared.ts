@@ -52,7 +52,17 @@ export function notFound(): HttpResponse {
 }
 
 export type OwnershipResult =
-  | { ok: true; orgId: string; correlationId: string; entryTimestamp?: string }
+  | {
+      ok: true;
+      orgId: string;
+      correlationId: string;
+      entryTimestamp?: string;
+      /** Additive, nullable (Pass 2, decision f1cbd5ef): server-minted
+       * runId read off the ownership row when present. Absent on rows
+       * written before the runId stamp landed (Pass 1) — callers MUST
+       * treat this as optional and fall back to `correlationId`. */
+      runId?: string;
+    }
   | { ok: false; status: 404 };
 
 /**
@@ -77,7 +87,7 @@ export async function resolveExecutionOwnership(
   );
 
   const item = result.Item as
-    { orgId?: string; completedAt?: string } | undefined;
+    { orgId?: string; completedAt?: string; runId?: string } | undefined;
   if (!item || typeof item.orgId !== "string" || item.orgId.length === 0) {
     return { ok: false, status: 404 };
   }
@@ -88,6 +98,7 @@ export async function resolveExecutionOwnership(
     correlationId: executionId,
     entryTimestamp:
       typeof item.completedAt === "string" ? item.completedAt : undefined,
+    runId: typeof item.runId === "string" ? item.runId : undefined,
   };
 }
 

@@ -139,6 +139,37 @@ be the same value. The `traceId` primary link does not have this problem
 come back empty/not-found even for a governed execution. Treat a hit as
 signal, not an absence of a hit as proof nothing was governed.
 
+**BOUNDED SCAN as of Pass 2 (design §4, decision f1cbd5ef) — runId pivot:**
+`getDecisionTrace` additionally surfaces `finding.runId` and a
+`linkedExecutionId` pivoted from it: when the finding carries a
+server-minted `runId` (Pass 1), the resolver runs a bounded, paginated Scan
+of the executions table (capped at 1000 items examined) looking for a row
+whose own `runId` matches AND whose `orgId` matches the finding's org (a
+cross-org match is skipped, never surfaced) — unlike the
+`workflowId`/`orchestrationId` fallback above, `runId` is minted once per
+dispatch and does not suffer the orchestrationId/executionId identifier
+mismatch. `linkedExecutionId` is `null`, never an error, when: the finding
+predates runId stamping (write-once ledger, no backfill), no execution row's
+`runId` matches within the scan cap, or the only matching row belongs to a
+different org. A `null` here means "not found within the bounded scan," not
+a guarantee that no matching execution exists — it does **not** distinguish
+"confirmed absent" from "cap-truncated" in the API response itself (the
+`String` return type has no field for that); a cap-truncation is instead
+logged at `warn` in the resolver so operators can tell the two apart in
+CloudWatch. This pivot becomes a true guarantee only once a dedicated GSI on
+`runId` (deferred per design — "+1 GSI findings" is future work) replaces
+the capped Scan with an exact Query. The `workflowId` fallback remains
+available as a secondary signal regardless of `linkedExecutionId`'s value.
+
+**Still best-effort (pre-runId findings/executions, or no GSI-backed global
+lookup):** the runId pivot above is a bounded, capped Scan (no runId GSI
+exists on either the governance ledger or the executions table — see
+`docs/TRACING_RUNBOOK.md`'s "Deferred" note); it degrades to `null` on any
+lookup failure rather than propagating an error. Two GSIs (governance
+ledger `runId` index; cost-ledger `runId` index) are the deferred follow-up
+that would make a *global* "given only a runId, find everything" query
+possible without a Scan — not implemented in this pass.
+
 ---
 
 # Platform-Health Dashboard + SLO Alarms

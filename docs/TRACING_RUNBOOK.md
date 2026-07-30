@@ -56,6 +56,7 @@ X-Ray annotations (searchable, `[A-Za-z0-9_]` keys):
 | `execution_id` | workflow executionId, when applicable |
 | `node_id` | workflow node id, when applicable |
 | `session_id` | intake sessionId, when applicable |
+| `run_id` | server-minted shared correlation id (Pass 1, decision f1cbd5ef) — additive, absent on pre-runId hops. When present, this is the PRIMARY key the query surfaces (`docs/OBSERVABILITY.md`, `docs/TRACING_RUNBOOK.md#operator-query`) use — see the Pass 2 GUARANTEED/best-effort split below. |
 
 X-Ray metadata (non-searchable, full fidelity): namespace `trace_context` →
 the raw carried `traceContext` object.
@@ -75,12 +76,38 @@ silently breaking the waterfall-viewer story.
 ## Operator query: "show me every trace for one flow"
 
 **X-Ray / CloudWatch (trace side):**
+
+**GUARANTEED (runId present — Pass 2):**
+```
+annotation.run_id = "<runId>"
+```
+`/traces/by-execution/{executionId}` and `/traces/by-conversation/{conversationId}`
+now query by `annotation.run_id` FIRST whenever the resolved execution/
+conversation row carries a server-minted `runId` (Pass 1, decision f1cbd5ef).
+This is the runId-PRIMARY correlation path (design §4): it covers the
+execution path that `workflowId == orchestrationId` never reached, since
+that equality only ever held on the chat/task path. The response's
+`linkedBy` field reports which key was actually used
+(`"run_id"` vs `"correlation_id"`), so callers never have to guess.
+
+**STILL BEST-EFFORT (pre-runId data):**
 ```
 annotation.correlation_id = "<executionId-or-sessionId>"
 ```
-Returns every per-Lambda/per-worker trace annotated with that
-correlation id — the full stitched set for one workflow execution or
-intake session.
+Rows/traces written before this change carry no `runId` — the query
+surface falls back to the original `correlation_id` filter automatically
+(additive/nullable; a missing `runId` on the ownership row never breaks
+the response — the fallback path is unconditionally exercised in this
+case, not a degraded/partial result). This fallback stays in place
+permanently for any row that predates the runId feature; there is no
+backfill (write-once/immutable data, see design §5).
+
+**Deferred:** a *global* "given only a runId, find everything across
+findings + cost-ledger with no other key" lookup requires two new GSIs
+(governance-findings `runId` index, cost-ledger `runId` index — GSI5).
+Both are explicitly deferred per the design; this pass adds runId-primary
+correlation on the EXISTING entry-key routes only (execution/conversation
+by-id), not a standalone `by-runId` route.
 
 **CloudWatch Logs Insights (log side):**
 ```
@@ -190,9 +217,10 @@ Even after the entry key is org-checked, the trace **data** returned by
   Lambda function names, DynamoDB table names, Bedrock model/inference-profile
   ARNs, SQS/EventBridge names, HTTP status codes, durations, and our own
   annotations (`correlation_id`, `source_trace_id`, `execution_id`,
-  `node_id`, `session_id`) + `trace_context` metadata. These are **shared-infra
-  operational identifiers, not per-row customer data** — the same function/
-  table serves every org, so a name/timing is not org-sensitive.
+  `node_id`, `session_id`, `run_id`) + `trace_context` metadata. These are
+  **shared-infra operational identifiers, not per-row customer data** — the
+  same function/table serves every org, so a name/timing is not
+  org-sensitive.
 - **The genuine residual leak** is narrow: (a) if a future code path ever put
   **customer payload into a subsegment name, annotation, or metadata** it would
   become viewable by any owner of the entry key — so the design mandates a docs
@@ -231,10 +259,10 @@ egress, and the tracing contract forbids customer data in annotations/metadata.*
 **Never put request/response bodies or PII into X-Ray annotations, metadata,
 or subsegment names.** The current contract only stamps IDs
 (`correlation_id`, `source_trace_id`, `execution_id`, `node_id`,
-`session_id`) — this is what keeps the ownership-gated, account-wide-segment
-read model in this section safe. Any change that adds richer data to
-`traceContext`/`metadata` must be reviewed against the residual-risk
-statement above before merging.
+`session_id`, `run_id`) — this is what keeps the ownership-gated,
+account-wide-segment read model in this section safe. Any change that adds
+richer data to `traceContext`/`metadata` must be reviewed against the
+residual-risk statement above before merging.
 
 ### Frontend
 

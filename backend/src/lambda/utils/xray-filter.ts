@@ -40,3 +40,18 @@ export function buildCorrelationFilter(id: string): CorrelationFilterResult {
   }
   return { ok: true, expression: `annotation.correlation_id = "${id}"` };
 }
+
+/**
+ * Builds the exact `annotation.run_id = "<id>"` filter expression — the
+ * runId-primary counterpart to `buildCorrelationFilter` (Pass 2, decision
+ * f1cbd5ef, design §4 "trace-viewer workflowId fallback -> runId-PRIMARY
+ * correlation where runId is present"). Same allowlist/reject-first
+ * discipline: `run-<uuidv4>` is already `[A-Za-z0-9\-:_.]+`-shaped, so no
+ * new allowlist regex is needed.
+ */
+export function buildRunIdFilter(id: string): CorrelationFilterResult {
+  if (!isAllowlistedId(id)) {
+    return { ok: false };
+  }
+  return { ok: true, expression: `annotation.run_id = "${id}"` };
+}

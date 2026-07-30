@@ -2094,6 +2094,7 @@ type GovernanceFinding @aws_iam @aws_cognito_user_pools {
   residualAuthorityDenial: Boolean
   timestamp: Float!
   traceId: String
+  runId: String
 }
 
 type GovernanceFindingConnection {
@@ -2239,6 +2240,7 @@ type DecisionTrace {
   constitutionalOverride: Boolean!
   arbitrationPattern: String
   scopeReduction: String
+  linkedExecutionId: String
 }
 # Governance UI — Wave 3.C (live tail subscription)
 #

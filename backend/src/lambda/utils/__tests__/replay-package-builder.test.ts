@@ -10,6 +10,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
+  ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import * as fs from "fs";
 import {
@@ -341,6 +342,106 @@ describe("assembleReplayPackage — conversation kind", () => {
       results: [],
       provenance: expect.stringMatching(/orchestrationId|workflowId/i),
     });
+  });
+
+  test("Pass 2 (design §4): runId-confirmed findings JOIN properly and move OUT of the unjoinable section when a runId is present on both conversation messages and a ledger finding", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.TableName === "conversations-test") {
+        return {
+          Items: [
+            conversationMessageItem("conv-1", "2026-07-01T00:00:00.000Z", {
+              runId: "run-11111111-1111-1111-1111-111111111111",
+            }),
+          ],
+        };
+      }
+      return { Items: [] };
+    });
+    ddbMock.on(ScanCommand).resolves({
+      Items: [
+        {
+          findingId: "f-runid-1",
+          workflowId: "wf-unrelated",
+          orgId: "org-1",
+          decision: "PERMIT",
+          runId: "run-11111111-1111-1111-1111-111111111111",
+        },
+      ],
+    });
+
+    const result = await assembleReplayPackage(
+      "org-1",
+      "conversation",
+      "conv-1",
+    );
+
+    // runId-confirmed finding is now a real, joined array entry — not
+    // wrapped in the partial/unjoinable shape.
+    expect(Array.isArray(result.sections.findings)).toBe(true);
+    const findings = result.sections.findings as Array<Record<string, unknown>>;
+    expect(findings).toHaveLength(1);
+    expect(findings[0].findingId).toBe("f-runid-1");
+  });
+
+  test("Pass 2: NO runId on any conversation message -> findings section stays the honest partial shape (unchanged pre-runId behavior)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.TableName === "conversations-test") {
+        return {
+          Items: [
+            conversationMessageItem("conv-1", "2026-07-01T00:00:00.000Z"),
+          ],
+        };
+      }
+      return { Items: [] };
+    });
+
+    const result = await assembleReplayPackage(
+      "org-1",
+      "conversation",
+      "conv-1",
+    );
+
+    expect(result.sections.findings).toEqual({
+      partial: true,
+      results: [],
+      provenance: expect.stringMatching(/orchestrationId|workflowId/i),
+    });
+    // No runId present anywhere -> the ledger must never be scanned by
+    // runId (would be a wasted, unbounded-cost Scan for no possible match).
+    expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
+  });
+
+  test("Pass 2: cross-org refusal still applies to a runId-confirmed finding row from another org", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.TableName === "conversations-test") {
+        return {
+          Items: [
+            conversationMessageItem("conv-1", "2026-07-01T00:00:00.000Z", {
+              runId: "run-22222222-2222-2222-2222-222222222222",
+            }),
+          ],
+        };
+      }
+      return { Items: [] };
+    });
+    ddbMock.on(ScanCommand).resolves({
+      Items: [
+        {
+          findingId: "f-runid-2",
+          workflowId: "wf-x",
+          orgId: "org-OTHER",
+          decision: "PERMIT",
+          runId: "run-22222222-2222-2222-2222-222222222222",
+        },
+      ],
+    });
+
+    await expect(
+      assembleReplayPackage("org-1", "conversation", "conv-1"),
+    ).rejects.toThrow(CrossOrgRowError);
   });
 
   test("cross-org refusal: a conversation message row belonging to a different org is refused", async () => {

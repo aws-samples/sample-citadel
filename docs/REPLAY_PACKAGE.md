@@ -148,11 +148,25 @@ Only the section *sources* differ.
   `agent_intake.usage` event; `cost-ledger-writer.ts`'s `handleIntakeUsage`
   path persists those rows with `GSI1PK = PROJECT#<projectId>` on the cost
   ledger's `ProjectIndex` GSI — a real, queryable, org-scoped join.
-- Governance findings do **not** join: the governance ledger keys findings
-  on `workflowId` (== `orchestrationId`), and nothing ties a
+- Governance findings do **not** join by default: the governance ledger keys
+  findings on `workflowId` (== `orchestrationId`), and nothing ties a
   conversationId/projectId to an orchestrationId. `sections.findings` is
   therefore an explicit partial section for conversation kind — never
-  invented, never guessed from an unrelated row.
+  invented, never guessed from an unrelated row — **for conversations where
+  every message predates the runId feature.**
+- **GUARANTEED as of Pass 2 (design §4, decision f1cbd5ef):** when at least
+  one message on the conversation carries a server-minted `runId` (Pass 1),
+  the builder attempts a runId join against the governance ledger (a
+  bounded, capped Scan — no dedicated runId GSI exists yet, see
+  `docs/TRACING_RUNBOOK.md`'s "Deferred" note). Any finding whose `runId`
+  matches one of the conversation's runIds moves OUT of the partial section
+  into a real, joined `findings` array — including the case where the join
+  legitimately finds zero matches (`findings: []` is then the honest
+  "joined, found nothing," distinct from the partial "couldn't even
+  attempt to join" marker). **Still best-effort**: a conversation whose
+  messages entirely predate the runId feature still gets the honest
+  partial/provenance shape unchanged — there is nothing to join on, and no
+  Scan is even issued in that case.
 - `agentConfig`/`workflow`/`execSpec`/`modelConfig` are execution-scoped
   concepts with no conversation-side row to read — they are `null` for
   conversation kind (genuinely absent, not partial).
@@ -163,7 +177,7 @@ Only the section *sources* differ.
 |---|---|
 | `sections.messages` | Transcript rows from `CONVERSATIONS_TABLE`, queried by `projectId`, in chronological order. |
 | `sections.usageTotals` | Aggregated `{inputTokens, outputTokens, totalTokens, callCount}` from the cost ledger's `ProjectIndex` GSI. |
-| `sections.findings` | `{ partial: true, results: [], provenance: "..." }` — no join key from conversationId to orchestrationId. |
+| `sections.findings` | **GUARANTEED (runId present):** a real, joined array — findings whose `runId` matches one of the conversation's message-stamped runIds. **Still best-effort (pre-runId):** `{ partial: true, results: [], provenance: "..." }` when no message on the conversation carries a runId. |
 | `sections.toolResults` | `{ partial: true, results: [], provenance: "..." }` — same CIT-121 gap as execution kind. |
 | `sections.agentConfig` / `workflow` / `execSpec` / `modelConfig` | `null` — no conversation-side equivalent. |
 | `sections.nodes` | `[]` — nodes are an execution-kind concept. |
@@ -172,13 +186,29 @@ Only the section *sources* differ.
 
 - Per-node execution detail (nodes are execution-scoped; a conversation may
   span zero or many executions with no join recorded).
-- Governance findings (no join key exists — see above).
+- Governance findings **for a conversation whose messages entirely predate
+  the runId feature** (no join key exists — see above; Pass 2 closes this
+  gap whenever at least one message carries a runId).
 - Raw per-tool-call results (CIT-121, same gap as execution kind).
 
 Cross-org protection, sanitisation, and the fail-closed gate apply
 **identically** to this path: every message row and every cost-ledger row
 is filtered by the caller-resolved `orgId` (`CrossOrgRowError` on mismatch),
 and the assembled bundle is sanitised and gate-checked before any S3 write.
+
+### Deferred: global runId lookup (two GSIs, not implemented in this pass)
+
+The runId join above is deliberately a bounded, filtered Scan of the
+governance ledger — there is no dedicated runId GSI on either the
+governance-findings table or the cost-ledger table. A future *global*
+"given only a runId, find every related row with no other key" capability
+would need two additive GSIs (governance-findings `runId` index; cost-ledger
+`runId` index, GSI5) — both explicitly deferred by the architect design
+(they only pay off once historical write-once rows without a runId have
+expired via the ledger's 90-day TTL; see `docs/TRACING_RUNBOOK.md`'s
+"Deferred" note for the full rationale). This pass's Scan-based join is
+correct and complete for the replay-package use case (a handful of runIds
+per conversation), just not the basis for a general-purpose runId index.
 
 ### Frontend
 

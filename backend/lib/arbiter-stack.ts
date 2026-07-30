@@ -1553,6 +1553,20 @@ export class ArbiterStack extends cdk.Stack {
       "INTEGRATIONS_TABLE",
       `citadel-integrations-${props.environment}`,
     );
+    // Pass 2 (design §4, decision f1cbd5ef): getDecisionTrace's
+    // findings->execution pivot by runId needs read access to the
+    // executions table. Optional wiring mirrors the existing
+    // `props.executionsTable &&` guard pattern used elsewhere in this
+    // stack (e.g. stepRunnerFunction) — the resolver itself already
+    // degrades to `linkedExecutionId: null` when EXECUTIONS_TABLE is
+    // unset, so this is additive, not a hard dependency.
+    if (props.executionsTable) {
+      governanceUiResolverFn.addEnvironment(
+        "EXECUTIONS_TABLE",
+        props.executionsTable.tableName,
+      );
+      props.executionsTable.grantReadData(governanceUiResolverFn);
+    }
 
     this.governanceLedgerTable.grantReadData(governanceUiResolverFn);
     // Wave 2.A: data-1 readiness check scans the authority units table.

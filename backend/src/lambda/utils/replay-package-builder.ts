@@ -25,12 +25,15 @@
  *     persists those rows with `GSI1PK = PROJECT#<projectId>` /
  *     `GSI1SK = <capturedAt>#<ledgerId>` (its `handleIntakeUsage` path) —
  *     a real, queryable, org-scoped join from conversationId to usage.
- *   - Governance findings do NOT join: the governance ledger
- *     (`arbiter/governance/ledger.py`) keys findings on `workflowId`
- *     (== `orchestrationId`, see `arbiter/supervisor/index.py`), and
- *     nothing ties a conversationId/projectId to an orchestrationId.
- *     `sections.findings` is therefore an explicit partial section with
- *     provenance for conversation kind — never invented, never guessed.
+ *   - Governance findings JOIN when a runId is available: findings key on
+ *     `workflowId` (== `orchestrationId`) by default, and nothing ties a
+ *     conversationId/projectId to an orchestrationId directly — BUT Pass 2
+ *     (design §4) adds a runId-primary join: when a conversation's message
+ *     rows carry a server-minted `runId` (Pass 1), a bounded Scan of the
+ *     governance ledger by `runId` confirms/joins matching findings into a
+ *     real array. `sections.findings` stays the explicit partial/provenance
+ *     shape ONLY when every message on the conversation predates the runId
+ *     feature (no runId to join on at all) — never invented, never guessed.
  *   - agentConfig/workflow/execSpec/modelConfig are execution-scoped
  *     concepts with no conversation-side equivalent row to read; they are
  *     `null` for conversation kind (not partial — genuinely absent, no
@@ -56,6 +59,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
+  ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { sanitizeBundle, assertBundleSecretFree } from "./replay-sanitize";
 
@@ -141,7 +145,15 @@ function buildToolResultsSection(): ToolResultsSection {
  * (== orchestrationId) and nothing ties a conversationId/projectId to an
  * orchestrationId — there is no join key. Modelled as an explicit partial
  * section with provenance rather than an invented/empty findings array
- * that could be mistaken for "confirmed: no findings". */
+ * that could be mistaken for "confirmed: no findings".
+ *
+ * Pass 2 (design §4 "replay unjoinable-findings section: ... runId
+ * CONFIRMS/filters those, so runId-matched findings move OUT of
+ * buildUnjoinableFindingsSection"): this remains the fallback shape used
+ * when no runId is available to attempt a join at all. When at least one
+ * conversation message carries a runId, the caller instead attempts
+ * `readGovernanceFindingsByRunIds` and only falls back to this partial
+ * shape for the (possibly empty) set of runId-less messages. */
 function buildUnjoinableFindingsSection(): FindingsSection {
   return {
     partial: true,
@@ -152,6 +164,80 @@ function buildUnjoinableFindingsSection(): FindingsSection {
       "this section cannot be joined for conversation-kind packages. " +
       "Never invented, never guessed from unrelated rows.",
   };
+}
+
+/** Hard cap on the ledger Scan below — bounds worst-case cost since no
+ * runId GSI exists yet (design §4 "DEFER global lookup: +1 GSI findings").
+ * A conversation realistically carries a handful of distinct runIds (one
+ * per chat turn); this cap is generous headroom, not a expected ceiling. */
+const RUN_ID_FINDINGS_SCAN_CAP = 1000;
+
+/**
+ * Pass 2 runId-primary join for conversation-kind replay packages: given
+ * the distinct runIds stamped on a conversation's message rows, Scan the
+ * governance ledger for findings whose `runId` matches one of them. No
+ * GSI exists for runId (deferred per design), so this is a filtered Scan
+ * — bounded by RUN_ID_FINDINGS_SCAN_CAP — rather than a Query. Returns an
+ * empty array when `runIds` is empty (never issues a wasted Scan for a
+ * conversation with no runId-bearing messages, i.e. every message
+ * predates the runId feature).
+ *
+ * NOT switched to a single unfiltered pass keyed on a JS Set: the outer
+ * loop here chunks on DynamoDB's `IN (...)` operator's hard 100-value
+ * limit per FilterExpression — each chunk still does its own *filtered*
+ * Scan (server-side FilterExpression, only matching rows cross the wire),
+ * not a full unfiltered table re-read. Replacing it with one unfiltered
+ * Scan + client-side Set lookup would read every row in the ledger table
+ * exactly once regardless of chunk count today (since runId cardinality
+ * per conversation is expected to be tiny, the multi-chunk case barely
+ * ever triggers) — strictly worse: it drops server-side filter pushdown
+ * and pulls the full ledger across the wire on every call. Left as-is.
+ */
+async function readGovernanceFindingsByRunIds(
+  runIds: string[],
+): Promise<{ tableName: string; items: Record<string, unknown>[] }> {
+  const tableName = process.env.GOVERNANCE_LEDGER_TABLE!;
+  if (runIds.length === 0) {
+    return { tableName, items: [] };
+  }
+
+  // DynamoDB IN() supports at most 100 values per expression; conversation
+  // runId cardinality is expected to be tiny, but chunk defensively.
+  const uniqueRunIds = Array.from(new Set(runIds));
+  const items: Record<string, unknown>[] = [];
+  const CHUNK_SIZE = 100;
+
+  for (let i = 0; i < uniqueRunIds.length; i += CHUNK_SIZE) {
+    const chunk = uniqueRunIds.slice(i, i + CHUNK_SIZE);
+    const placeholders = chunk.map((_, idx) => `:r${idx}`);
+    const expressionAttributeValues: Record<string, unknown> = {};
+    chunk.forEach((id, idx) => {
+      expressionAttributeValues[`:r${idx}`] = id;
+    });
+
+    let lastEvaluatedKey: Record<string, unknown> | undefined;
+    do {
+      const result = await docClient.send(
+        new ScanCommand({
+          TableName: tableName,
+          FilterExpression: `runId IN (${placeholders.join(", ")})`,
+          ExpressionAttributeValues: expressionAttributeValues,
+          ...(lastEvaluatedKey ? { ExclusiveStartKey: lastEvaluatedKey } : {}),
+        }),
+      );
+      for (const item of (result.Items ?? []) as Record<string, unknown>[]) {
+        if (items.length >= RUN_ID_FINDINGS_SCAN_CAP) break;
+        items.push(item);
+      }
+      if (items.length >= RUN_ID_FINDINGS_SCAN_CAP) break;
+      lastEvaluatedKey = result.LastEvaluatedKey as
+        Record<string, unknown> | undefined;
+    } while (lastEvaluatedKey);
+
+    if (items.length >= RUN_ID_FINDINGS_SCAN_CAP) break;
+  }
+
+  return { tableName, items };
 }
 
 async function readExecution(executionId: string) {
@@ -457,6 +543,33 @@ async function assembleConversationReplayPackage(
     assertRowOrg(costUsage.tableName, usageRow, orgId);
   }
 
+  // Pass 2 (design §4): collect the distinct runIds stamped on this
+  // conversation's message rows (additive/nullable — a message written
+  // before Pass 1 simply has no `runId` field) and attempt a runId join
+  // against the governance ledger. Only when at least one runId is
+  // present is the ledger read at all — a conversation with zero
+  // runId-bearing messages (entirely pre-runId) never issues the Scan and
+  // keeps the honest partial section unchanged.
+  const runIds = messages.items
+    .map((row) => row.runId)
+    .filter((v): v is string => typeof v === "string" && v.length > 0);
+
+  let findings: unknown[] | FindingsSection;
+  if (runIds.length > 0) {
+    const runIdFindings = await readGovernanceFindingsByRunIds(runIds);
+    for (const finding of runIdFindings.items) {
+      assertRowOrg(runIdFindings.tableName, finding, orgId);
+    }
+    // runId-confirmed findings join properly — no longer the honest
+    // partial/unjoinable shape for this conversation. An empty match set
+    // (runIds present but nothing found) still yields the real empty
+    // array `[]`, which is honestly distinct from the partial marker: it
+    // means "we could join, and found zero," not "we couldn't join."
+    findings = runIdFindings.items;
+  } else {
+    findings = buildUnjoinableFindingsSection();
+  }
+
   // Chronological order — CONVERSATIONS_TABLE's sort key is `timestamp`
   // (ISO-8601 string), so a lexicographic sort is a correct chronological
   // sort, mirroring conversation-resolver.ts's getConversationHistory
@@ -507,7 +620,7 @@ async function assembleConversationReplayPackage(
       governanceMode: null,
       nodes: [],
       toolResults: buildToolResultsSection(),
-      findings: buildUnjoinableFindingsSection(),
+      findings,
       messages: orderedMessages,
       usageTotals,
       traceIds: { correlationId: conversationId },

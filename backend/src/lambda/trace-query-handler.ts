@@ -43,7 +43,7 @@ import {
   type HttpResponse,
   type OwnershipResult,
 } from "./utils/trace-http-shared";
-import { buildCorrelationFilter } from "./utils/xray-filter";
+import { buildCorrelationFilter, buildRunIdFilter } from "./utils/xray-filter";
 import { shapeTraces, type XRayTraceLike } from "./utils/xray-waterfall";
 
 const xrayClient = new XRayClient({});
@@ -81,19 +81,38 @@ function resolveWindow(params: Record<string, string | undefined>): {
  * the caller has already passed the ownership/admin gate (invariant 1) —
  * this function itself performs no authorization, by design, so that
  * check is visibly separate at each call site below.
+ *
+ * PASS 2 (design §4 "trace-viewer workflowId fallback -> runId-PRIMARY
+ * correlation where runId is present"): when the ownership row carried a
+ * runId, filter by `annotation.run_id` instead of `annotation.correlation_id`
+ * — additive/nullable, never breaking: a pre-runId row (no `runId` on the
+ * ownership result) falls back to the existing `correlation_id` filter
+ * unchanged.
  */
 async function fetchTracesByCorrelationId(
   correlationId: string,
+  runId: string | undefined,
   fromIso: string,
   toIso: string,
-): Promise<{ traces: XRayTraceLike[]; summaryCount: number }> {
-  const filter = buildCorrelationFilter(correlationId);
+): Promise<{
+  traces: XRayTraceLike[];
+  summaryCount: number;
+  linkedBy: "run_id" | "correlation_id";
+}> {
+  const preferRunId = typeof runId === "string" && runId.length > 0;
+  const filter = preferRunId
+    ? buildRunIdFilter(runId!)
+    : buildCorrelationFilter(correlationId);
+  const linkedBy: "run_id" | "correlation_id" = preferRunId
+    ? "run_id"
+    : "correlation_id";
+
   if (!filter.ok) {
     // Should be unreachable: correlationId is always our own
-    // executionId/projectId, which is allowlist-shaped by construction.
-    // Defensive: treat as "no traces" rather than building an unsafe
-    // expression.
-    return { traces: [], summaryCount: 0 };
+    // executionId/projectId (allowlist-shaped by construction) and runId
+    // is always our own `run-<uuidv4>` (also allowlist-shaped). Defensive:
+    // treat as "no traces" rather than building an unsafe expression.
+    return { traces: [], summaryCount: 0, linkedBy };
   }
 
   const summariesResult = await xrayClient.send(
@@ -109,7 +128,7 @@ async function fetchTracesByCorrelationId(
     .filter((id): id is string => typeof id === "string");
 
   if (traceIds.length === 0) {
-    return { traces: [], summaryCount: 0 };
+    return { traces: [], summaryCount: 0, linkedBy };
   }
 
   const traces: XRayTraceLike[] = [];
@@ -123,7 +142,7 @@ async function fetchTracesByCorrelationId(
     }
   }
 
-  return { traces, summaryCount: traceIds.length };
+  return { traces, summaryCount: traceIds.length, linkedBy };
 }
 
 function freshnessStatus(
@@ -159,8 +178,9 @@ async function handleEntryKeyRoute(
   const isAdmin = isAdminFromHttpEvent(event);
   const includeMetadata = isAdmin && params.includeMetadata === "1";
 
-  const { traces, summaryCount } = await fetchTracesByCorrelationId(
+  const { traces, summaryCount, linkedBy } = await fetchTracesByCorrelationId(
     ownership.correlationId,
+    ownership.runId,
     fromIso,
     toIso,
   );
@@ -169,9 +189,14 @@ async function handleEntryKeyRoute(
   const status = freshnessStatus(summaryCount, entryTimestampIso);
 
   return json(200, {
-    query: { kind, id, correlationId: ownership.correlationId },
+    query: {
+      kind,
+      id,
+      correlationId: ownership.correlationId,
+      runId: ownership.runId ?? null,
+    },
     status,
-    linkedBy: "correlation_id",
+    linkedBy,
     traces: shaped.traces,
     truncated: shaped.truncated,
     meta: shaped.meta,
