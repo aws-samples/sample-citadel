@@ -45,6 +45,17 @@ export const METRIC_NODE_FAILURE = "NodeFailure";
  */
 export const METRIC_NODE_QUEUE_WAIT_MS = "NodeQueueWaitMs";
 
+/**
+ * Runtime backstop metric (Count) for the runId silent-regression guard
+ * (Pass 1, decision f1cbd5ef): emitted WARN-level whenever a finding or
+ * dispatch is written runId-absent. Observability only — never gates
+ * dispatch or a fail-closed write. Mirrors the Python arbiter tier's
+ * `METRIC_UNSTAMPED_DISPATCH` in `arbiter/common/metrics_constants.py`.
+ * Pinned per the "do NOT retype metric names" lesson — always import this
+ * constant at the emission call site, never hand-type the string literal.
+ */
+export const METRIC_UNSTAMPED_DISPATCH = "UnstampedDispatch";
+
 export const UNIT_MILLISECONDS = "Milliseconds";
 export const UNIT_COUNT = "Count";
 

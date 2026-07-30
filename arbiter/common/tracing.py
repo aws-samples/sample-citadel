@@ -194,6 +194,12 @@ def annotate_from_carried(carried: Optional[dict]) -> None:
             segment.put_annotation("node_id", carried["nodeId"])
         if carried.get("sessionId"):
             segment.put_annotation("session_id", carried["sessionId"])
+        # Additive, nullable (Pass 1, decision f1cbd5ef, design §2 "Carried
+        # trace context" row): stamp the server-minted run_id when the
+        # carried context happens to include one. Absent ⇒ no annotation,
+        # same discipline as every other key above.
+        if carried.get("runId"):
+            segment.put_annotation("run_id", carried["runId"])
         segment.put_metadata("trace_context", carried)
     except Exception:  # noqa: BLE001 — annotation failure must never break the consumer
         logger.debug("annotate_from_carried failed; continuing untraced.", exc_info=True)

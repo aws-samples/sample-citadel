@@ -38,6 +38,7 @@ from common.metrics_constants import (
     METRIC_NODE_DURATION_MS,
     METRIC_NODE_FAILURE,
     METRIC_NODE_QUEUE_WAIT_MS,
+    METRIC_UNSTAMPED_DISPATCH,
     UNIT_MILLISECONDS,
     UNIT_COUNT,
     DIMENSION_WORKFLOW_ID,
@@ -202,12 +203,18 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
         ExpressionAttributeValues={':status': 'running', ':startedAt': now},
     )
 
-    # Publish workflow.started event
+    # Publish workflow.started event. run_id kwarg is omitted entirely
+    # (not passed as None) when the execution row carries no runId, so a
+    # pre-runId execution produces a byte-identical call signature to the
+    # pre-feature code path (mirrors the omit-when-absent Detail contract).
+    _run_id = execution.get('runId')
+    _run_id_kwargs = {'run_id': _run_id} if _run_id else {}
     events.publish_workflow_started(
         execution_id=execution_id,
         workflow_id=workflow_id,
         app_id=execution.get('appId', ''),
         started_at=now,
+        **_run_id_kwargs,
     )
     _log_event('execution_start', executionId=execution_id, workflowId=workflow_id)
 
@@ -224,10 +231,14 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
             # (decision 59376546). No node configuration → workflow config
             # unchanged, byte-identical to the pre-feature dispatch.
             invoke_node(execution_id, workflow_id, node, {},
-                        merge_node_configuration(configuration, node))
+                        merge_node_configuration(configuration, node),
+                        run_id=_run_id)
 
 
-def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict) -> None:
+def invoke_node(
+    execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict,
+    *, run_id: str | None = None,
+) -> None:
     """Invoke a single workflow node.
 
     1. Emit supervisor.chatter event for cross-system correlation (US-ARB-016)
@@ -235,15 +246,42 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
     3. Publish workflow.node.started event
     4. Dispatch the node to the worker by sending a discriminated message to
        the worker SQS queue (WORKER_QUEUE_URL)
+
+    ``run_id`` is additive, optional, and nullable (Pass 1, decision
+    f1cbd5ef): the server-minted correlation id read off the execution row
+    by callers, threaded through to the outbound chatter/node-started
+    events and the SQS dispatch message. Never fabricated — a caller that
+    passes ``None`` (a pre-runId execution row) produces byte-identical
+    events/messages to the pre-runId code path.
     """
     # US-ARB-016: fire-and-forget chatter event for cross-system correlation.
     # The returned correlationId is currently a local only; it becomes the
     # hook for US-ARB-008's governed dispatch to link findings back to the
     # stepRunner node that triggered them.
+    #
+    # run_id kwarg is omitted entirely (not passed as None) at each of the
+    # three call sites below when absent, so a pre-runId caller's call
+    # signature stays byte-identical to the pre-feature code path.
+    _run_id_kwargs = {'run_id': run_id} if run_id else {}
+
+    # Runtime backstop (Pass 1, decision f1cbd5ef, silent-regression guard
+    # layer 3): a node dispatched with no run_id emits a WARN-level
+    # CloudWatch count metric using the pinned metrics_constants module —
+    # never a hand-typed string literal. Best-effort and observability
+    # only: a CloudWatch failure here can never gate or delay dispatch
+    # (see _emit_metric's own try/except).
+    if not run_id:
+        _logger.warning(
+            'unstamped dispatch: node %s of execution %s dispatched with no runId',
+            node.get('id', 'unknown'), execution_id,
+        )
+        _emit_metric(METRIC_UNSTAMPED_DISPATCH, 1, UNIT_COUNT, workflow_id=workflow_id)
+
     correlation_id = events.publish_supervisor_chatter(  # noqa: F841
         execution_id=execution_id,
         workflow_id=workflow_id,
         node_id=node.get('id', 'unknown'),
+        **_run_id_kwargs,
     )
 
     node_id = node['id']
@@ -286,6 +324,7 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
         node_id=node_id,
         agent_id=agent_id,
         started_at=now,
+        **_run_id_kwargs,
     )
 
     # Dispatch the node to the worker over the shared SQS queue. The message
@@ -314,6 +353,7 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
         # "now" reading — dispatch and node.started are the same instant for
         # this purpose.
         dispatched_at=now,
+        **_run_id_kwargs,
     )
 
     # H3 trace-context propagation (architect task f4f4bab3-7a07-4acf-ba43-
@@ -506,7 +546,8 @@ def handle_node_completion(
             # Per-node configuration overrides workflow-level per-key
             # (decision 59376546) — same merge as the root-dispatch site.
             invoke_node(execution_id, execution.get('workflowId', ''), node, output,
-                        merge_node_configuration(configuration, node))
+                        merge_node_configuration(configuration, node),
+                        run_id=execution.get('runId'))
 
     # Check if all nodes are terminal (completed, skipped, or failed)
     all_terminal = all(

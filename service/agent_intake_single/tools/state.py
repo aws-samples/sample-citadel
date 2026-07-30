@@ -24,7 +24,7 @@ def _table():
     return dynamodb.Table(TABLE_NAME)
 
 
-def _publish_event(phase: str, session_id: str, progress: int, summary: str):
+def _publish_event(phase: str, session_id: str, progress: int, summary: str, run_id: str | None = None):
     if not EVENT_BUS_NAME:
         return
     try:
@@ -45,6 +45,13 @@ def _publish_event(phase: str, session_id: str, progress: int, summary: str):
         trace_context = tracing.active_trace_context()
         if trace_context:
             detail['traceContext'] = trace_context
+        # Additive, optional, nullable runId (Pass 1, decision f1cbd5ef):
+        # server-minted per intake turn by the caller (agent.py's invoke),
+        # threaded down here best-effort. Included only when a non-empty
+        # string is supplied — absent/None/malformed omits the key entirely,
+        # keeping the Detail byte-identical to pre-runId callers.
+        if isinstance(run_id, str) and run_id:
+            detail['runId'] = run_id
         events_client.put_events(Entries=[{
             'Source': f'agent_intake.{phase}',
             'DetailType': 'intake.progress.updated',
@@ -55,7 +62,7 @@ def _publish_event(phase: str, session_id: str, progress: int, summary: str):
         print(f"Failed to publish event: {e}")
 
 
-def publish_usage_event(session_id: str, usage_record: dict) -> None:
+def publish_usage_event(session_id: str, usage_record: dict, run_id: str | None = None) -> None:
     """Publish one model-invocation usage record onto the
     ``agent_intake.usage`` EventBridge namespace, additive to the existing
     ``agent_intake.<phase>`` progress namespaces.
@@ -68,6 +75,11 @@ def publish_usage_event(session_id: str, usage_record: dict) -> None:
     to ``agent_intake.<phase>`` sees this event). Best-effort: usage capture
     must never break a conversation turn, so failures are logged and
     swallowed, never raised.
+
+    ``run_id`` is additive, optional, and nullable (Pass 1, decision
+    f1cbd5ef): included as ``runId`` only when a non-empty string is
+    supplied. A missing/None/malformed value never gates this publish and
+    omits the key entirely — byte-identical to the pre-runId Detail shape.
     """
     if not EVENT_BUS_NAME:
         return
@@ -85,6 +97,8 @@ def publish_usage_event(session_id: str, usage_record: dict) -> None:
         trace_context = tracing.active_trace_context()
         if trace_context:
             detail['traceContext'] = trace_context
+        if isinstance(run_id, str) and run_id:
+            detail['runId'] = run_id
         events_client.put_events(Entries=[{
             'Source': 'agent_intake.usage',
             'DetailType': 'intake.usage.captured',
@@ -132,7 +146,7 @@ def get_intake_state(session_id: str) -> str:
     })
 
 
-def _internal_update_progress(session_id: str, phase: str, progress: int, change_summary: str) -> str:
+def _internal_update_progress(session_id: str, phase: str, progress: int, change_summary: str, run_id: str | None = None) -> str:
     """Plain function for internal tool-to-tool calls (bypasses @tool decorator).
 
     Hot path (~30 ticks during design generation): writes the intake state
@@ -143,6 +157,9 @@ def _internal_update_progress(session_id: str, phase: str, progress: int, change
     sets sessionId == projectId, so the event targets the right row. The
     former synchronous write ran a full paginated Scan of the conversations
     table on EVERY tick and was removed.
+
+    ``run_id`` is additive/optional (Pass 1, decision f1cbd5ef) and threaded
+    straight through to ``_publish_event``'s best-effort stamp.
     """
     if phase not in PHASES:
         return f"Invalid phase: {phase}. Must be one of: {', '.join(PHASES)}"
@@ -157,7 +174,7 @@ def _internal_update_progress(session_id: str, phase: str, progress: int, change
         )
     except Exception as e:
         print(f"Error updating progress: {e}")
-    _publish_event(phase, session_id, progress, change_summary)
+    _publish_event(phase, session_id, progress, change_summary, run_id=run_id)
     return f"{phase} progress: {progress}%"
 
 

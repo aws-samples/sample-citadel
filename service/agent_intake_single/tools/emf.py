@@ -156,7 +156,7 @@ def emit_turn_metrics(session_id, turn_duration_ms, agent_result=None):
             pass
 
 
-def capture_turn_usage(session_id, turn_duration_ms, agent_result=None):
+def capture_turn_usage(session_id, turn_duration_ms, agent_result=None, run_id=None):
     """Capture per-turn model usage from the strands ``AgentResult`` and
     publish it as a ``source="intake"`` usage record.
 
@@ -169,6 +169,12 @@ def capture_turn_usage(session_id, turn_duration_ms, agent_result=None):
     always 0 for this source's per-turn granularity) rather than per
     underlying model round trip. Defensive: never raises, so a malformed
     result or a publish failure can never break the conversation turn.
+
+    ``run_id`` is additive and optional (Pass 1, decision f1cbd5ef):
+    forwarded to ``publish_usage_event`` only when supplied. Existing
+    2-positional-arg callers (``publish_usage_event(sid, rec)``) are
+    unaffected — omitted entirely rather than passed as ``None`` — via
+    ``**kwargs``-based forwarding below.
     """
     try:
         extracted, _tool_durations = _extract_result_metrics(agent_result)
@@ -201,6 +207,9 @@ def capture_turn_usage(session_id, turn_duration_ms, agent_result=None):
             bedrock_request_id=None,
         )
         from tools.state import publish_usage_event
-        publish_usage_event(session_id, record)
+        extra_kwargs = {}
+        if isinstance(run_id, str) and run_id:
+            extra_kwargs["run_id"] = run_id
+        publish_usage_event(session_id, record, **extra_kwargs)
     except Exception as exc:  # noqa: BLE001 — usage capture must never break the turn
         logger.warning("emf: turn usage capture failed: %s", exc)

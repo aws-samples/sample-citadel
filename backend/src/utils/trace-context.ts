@@ -34,6 +34,13 @@ export interface TraceContext {
   traceparent?: string;
   /** Correlation id (== executionId for workflows; per-event uuid for intake usage). */
   correlationId?: string;
+  /**
+   * Server-minted shared correlation id (Pass 1, decision f1cbd5ef,
+   * design §2 "Carried trace context" row). Additive, optional — absent on
+   * pre-runId hops; never fabricated here, only carried when the producer
+   * supplied one.
+   */
+  runId?: string;
 }
 
 const XRAY_ROOT_RE = /^1-([0-9a-f]{8})-([0-9a-f]{24})$/i;
@@ -189,6 +196,13 @@ export function annotateFromCarried(
     }
     if (carried?.sessionId) {
       segment.addAnnotation("session_id", carried.sessionId);
+    }
+    // Additive, nullable (Pass 1, decision f1cbd5ef, design §2 "Carried
+    // trace context" row): stamp the server-minted runId when the carried
+    // context happens to include one. Absent ⇒ no annotation, same
+    // discipline as every other field above.
+    if (carried?.runId) {
+      segment.addAnnotation("run_id", carried.runId);
     }
     if (carried) {
       segment.addMetadata("trace_context", carried);

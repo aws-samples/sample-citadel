@@ -155,6 +155,15 @@ def _serialize_finding(finding: GovernanceFinding) -> dict[str, Any]:
     # and we do not add `traceId` in that case either.
     if finding.trace_id is not None:
         item["traceId"] = finding.trace_id
+
+    # Optional camelCase alias for the server-minted run_id (Pass 1,
+    # decision f1cbd5ef). Same byte-identical-when-absent discipline as
+    # traceId immediately above: emitted ONLY when finding.run_id is not
+    # None. The best-effort stamp in governed_process_agent_call can NEVER
+    # gate this fail-closed write — an absent run_id here simply means the
+    # stamp found nothing on the orchestration dict, not a write failure.
+    if finding.run_id is not None:
+        item["runId"] = finding.run_id
     return item
 
 

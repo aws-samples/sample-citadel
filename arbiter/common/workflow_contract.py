@@ -84,6 +84,11 @@ class NodeDispatchMessage:
     # for any pre-feature dispatcher or a malformed wire value — the queue-
     # wait metric is best-effort and must never be fabricated.
     dispatched_at: Optional[str] = None
+    # Additive (Pass 1, decision f1cbd5ef): the server-minted correlation id
+    # carried from the execution row through dispatch to the worker. None
+    # for any pre-runId dispatcher, a pre-runId execution row, or a
+    # malformed wire value — best-effort, never fabricated.
+    run_id: Optional[str] = None
 
 
 @dataclass
@@ -149,6 +154,7 @@ def build_node_dispatch_message(
     correlation_id: Optional[str] = None,
     trace_context: Optional[dict[str, Any]] = None,
     dispatched_at: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> dict:
     """Build a JSON-serializable node-dispatch message for the worker queue.
 
@@ -166,6 +172,13 @@ def build_node_dispatch_message(
     8601 timestamp of this dispatch call, promoted to a top-level
     ``dispatchedAt`` key when supplied. Omitted entirely when not passed, so
     the message stays byte-identical to pre-feature callers.
+
+    ``run_id`` is additive, optional, and nullable (Pass 1, decision
+    f1cbd5ef): the server-minted correlation id, promoted to a top-level
+    ``runId`` key ONLY when a non-empty string is supplied. Never read from
+    anywhere except this explicit kwarg — there is no path from an inbound
+    dict to the emitted ``runId``, honoring the server-minted-only invariant
+    at this layer too.
     """
     input_data = {} if input is None else input
     config = {} if configuration is None else configuration
@@ -189,6 +202,10 @@ def build_node_dispatch_message(
         raise ValueError(
             "node-dispatch message: 'dispatched_at' must be a string when present"
         )
+    if run_id is not None and not isinstance(run_id, str):
+        raise ValueError(
+            "node-dispatch message: 'run_id' must be a string when present"
+        )
 
     message: dict[str, Any] = {
         'message_type': MESSAGE_TYPE_WORKFLOW_NODE,
@@ -205,6 +222,8 @@ def build_node_dispatch_message(
         message['traceContext'] = trace_context
     if dispatched_at is not None:
         message['dispatchedAt'] = dispatched_at
+    if isinstance(run_id, str) and run_id:
+        message['runId'] = run_id
     return message
 
 
@@ -253,6 +272,12 @@ def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:
     if dispatched_at is not None and not isinstance(dispatched_at, str):
         dispatched_at = None
 
+    run_id = body.get('runId')
+    if run_id is not None and not isinstance(run_id, str):
+        # Best-effort, never gates parsing (Pass 1, decision f1cbd5ef) —
+        # mirrors dispatched_at's malformed-wire-value degradation above.
+        run_id = None
+
     return NodeDispatchMessage(
         execution_id=execution_id,
         node_id=node_id,
@@ -262,6 +287,7 @@ def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:
         configuration=configuration,
         correlation_id=correlation_id,
         dispatched_at=dispatched_at,
+        run_id=run_id,
     )
 
 
@@ -282,6 +308,7 @@ def build_node_result_detail(
     trace_context: Optional[dict[str, Any]] = None,
     dispatched_at: Optional[str] = None,
     worker_started_at: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> dict:
     """Build the EventBridge detail body for a node-result event.
 
@@ -311,6 +338,11 @@ def build_node_result_detail(
     compute queue-wait without re-fetching state. Each key is omitted
     individually when its value is ``None``, keeping the detail
     byte-identical to pre-feature callers when neither is supplied.
+
+    ``run_id`` is additive, optional, and nullable (Pass 1, decision
+    f1cbd5ef): promoted to a top-level ``runId`` key ONLY when a non-empty
+    string is supplied, regardless of ``status``. Omitted entirely
+    otherwise, keeping the detail byte-identical to pre-runId callers.
     """
     _validate_identity(
         'node-result event',
@@ -356,6 +388,8 @@ def build_node_result_detail(
         detail['error'] = error
     if trace_context is not None:
         detail['traceContext'] = trace_context
+    if isinstance(run_id, str) and run_id:
+        detail['runId'] = run_id
     return detail
 
 

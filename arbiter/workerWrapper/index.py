@@ -572,6 +572,13 @@ def _emit_node_result(
     message) so the step runner can compute a queue-wait duration without a
     second round trip. Regardless of ``status`` — a failed node still had a
     queue wait worth measuring.
+
+    ``run_id`` (Pass 1, decision f1cbd5ef) is read off ``msg.run_id`` — the
+    server-minted correlation id already carried on the parsed dispatch
+    message — and forwarded to ``build_node_result_detail`` regardless of
+    ``status``. Never fabricated: ``msg.run_id`` is ``None`` for any
+    pre-runId dispatch message, and the Detail is byte-identical in that
+    case.
     """
     detail = workflow_contract.build_node_result_detail(
         execution_id=msg.execution_id,
@@ -585,6 +592,7 @@ def _emit_node_result(
         trace_context=trace_context,
         dispatched_at=getattr(msg, 'dispatched_at', None),
         worker_started_at=worker_started_at,
+        run_id=getattr(msg, 'run_id', None),
     )
     detail_type = (
         workflow_contract.NODE_COMPLETED_DETAIL_TYPE

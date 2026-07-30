@@ -18,6 +18,7 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { getUserId } from "../utils/appsync";
 import { extractOrgFromEvent } from "../utils/auth-event";
+import { mintRunId, buildDispatchContext } from "../utils/run-id";
 import {
   METRIC_NAMESPACE,
   METRIC_NODE_COLD_START,
@@ -127,6 +128,8 @@ interface ExecutionRecord {
   error?: string | null;
   /** Additive: execution-level usage totals folded from nodeResults on read. */
   usageTotals?: UsageTotals | null;
+  /** Additive, nullable: server-minted correlation id (Pass 1, decision f1cbd5ef). Absent on pre-runId rows. */
+  runId?: string;
 }
 
 function _coerceNonNegativeInt(value: unknown): number {
@@ -365,6 +368,10 @@ async function startExecution(
   // 3. Create execution item
   const now = new Date().toISOString();
   const executionId = uuidv4();
+  // Server-minted only (Pass 1, decision f1cbd5ef) — no client input path
+  // exists for startExecution's arguments to carry a runId, so there is
+  // nothing to strip; this mint is the sole source.
+  const runId = mintRunId();
 
   const execution = {
     executionId,
@@ -381,6 +388,7 @@ async function startExecution(
     completedAt: null,
     triggeredBy: userId,
     error: null,
+    runId,
   };
 
   await docClient.send(
@@ -391,9 +399,20 @@ async function startExecution(
   );
 
   // 4. Publish execution.start.requested event
-  await emitEvent("execution.start.requested", {
+  //
+  // Build-time durability guard (Pass 1, decision f1cbd5ef, design §3
+  // layer 1): route the outbound envelope through buildDispatchContext,
+  // whose `runId` parameter is REQUIRED — a future refactor that drops
+  // `runId` here fails `tsc`, not just a runtime check.
+  const dispatchContext = buildDispatchContext({
+    runId,
     executionId,
     workflowId,
+  });
+  await emitEvent("execution.start.requested", {
+    executionId: dispatchContext.executionId,
+    workflowId: dispatchContext.workflowId,
+    runId: dispatchContext.runId,
   });
 
   return execution;

@@ -86,6 +86,7 @@ class TestHandlerExtractsAppId:
             initial_message="build report",
             callback=None,
             app_id="app-123",
+            run_id=None,
         )
 
     @patch.object(index, "orchestrate")
@@ -98,6 +99,7 @@ class TestHandlerExtractsAppId:
             initial_message="build report",
             callback=None,
             app_id=None,
+            run_id=None,
         )
 
     @patch.object(index, "orchestrate")
@@ -113,6 +115,7 @@ class TestHandlerExtractsAppId:
             initial_message="process order",
             callback=cb,
             app_id="app-456",
+            run_id=None,
         )
 
 

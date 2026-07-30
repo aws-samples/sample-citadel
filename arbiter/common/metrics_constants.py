@@ -43,6 +43,15 @@ METRIC_NODE_QUEUE_WAIT_MS = 'NodeQueueWaitMs'
 # time a workflow node is dispatched into a fresh execution environment.
 METRIC_NODE_COLD_START = 'NodeColdStart'
 
+# Runtime backstop metric (Count) for the runId silent-regression guard
+# (Pass 1, decision f1cbd5ef): emitted WARN-level whenever a finding or
+# dispatch is written runId-absent. Observability only — never gates
+# dispatch or a fail-closed write. Mirrors the TS backend tier's
+# METRIC_UNSTAMPED_DISPATCH in backend/src/utils/metrics-constants.ts.
+# Pinned per the "do NOT retype metric names" lesson — always import this
+# constant at the emission call site, never hand-type the string literal.
+METRIC_UNSTAMPED_DISPATCH = 'UnstampedDispatch'
+
 # --- Units ---------------------------------------------------------------
 
 UNIT_MILLISECONDS = 'Milliseconds'

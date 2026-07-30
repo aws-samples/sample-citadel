@@ -34,6 +34,7 @@ import {
 } from "@aws-sdk/client-eventbridge";
 import { IdempotencyGuard } from "../utils/idempotency";
 import { sanitizeUntrustedJson } from "../utils/sanitize-untrusted-json";
+import { mintRunId, buildDispatchContext } from "../utils/run-id";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -42,6 +43,13 @@ export interface AppInvokeEventDetail {
   workflowId?: string;
   /** Untrusted client payload forwarded to the execution's `input` field. */
   input?: Record<string, unknown>;
+  /**
+   * UNTRUSTED — any inbound `runId` on this boundary is STRIPPED and never
+   * used (Pass 1, decision f1cbd5ef: runId is server-minted only). Declared
+   * here only so the strip is a typed, visible no-op rather than relying on
+   * the index signature below.
+   */
+  runId?: unknown;
   [key: string]: unknown;
 }
 
@@ -351,9 +359,11 @@ async function processAppInvoke(
     };
   }
 
-  // 7. Strip workflowId out of the sanitized detail before persisting as
-  // execution input — the selector already consumed it.
-  const { workflowId: _omit, ...inputRest } = detail;
+  // 7. Strip workflowId (and any inbound runId — SERVER-MINTED ONLY, see
+  // step 8b) out of the sanitized detail before persisting as execution
+  // input — the selector already consumed workflowId, and runId must never
+  // be accepted from the client boundary.
+  const { workflowId: _omit, runId: _omitRunId, ...inputRest } = detail;
   const executionInput = Object.keys(inputRest).length > 0 ? inputRest : null;
 
   // 8. Write the execution record — byte-identical shape to
@@ -361,6 +371,11 @@ async function processAppInvoke(
   // triggeredBy/appId/orgId.
   const now = new Date().toISOString();
   const executionId = uuidv4();
+  // 8b. Mint a fresh runId server-side. Any `runId` present in the
+  // untrusted inbound `event.detail` was already stripped above (step 7)
+  // and is NEVER read here — this mint is the sole source, per the
+  // server-minted-only invariant.
+  const runId = mintRunId();
 
   const execution = {
     executionId,
@@ -377,6 +392,7 @@ async function processAppInvoke(
     completedAt: null,
     triggeredBy: `app-invoke:${appId}`,
     error: null,
+    runId,
   };
 
   await deps.docClient.send(
@@ -389,17 +405,24 @@ async function processAppInvoke(
   // 9. Emit execution.start.requested — Step Runner (StepRunnerStartRule)
   // matches on detail-type only, so this is picked up identically to the
   // AppSync startExecution mutation path.
+  //
+  // Build-time durability guard (Pass 1, decision f1cbd5ef, design §3
+  // layer 1): route the outbound envelope through buildDispatchContext,
+  // whose `runId` parameter is REQUIRED — a future refactor that drops
+  // `runId` here fails `tsc`, not just a runtime check.
+  const dispatchContext = buildDispatchContext({
+    runId,
+    executionId,
+    workflowId,
+    correlationId,
+  });
   await deps.eventBridgeClient.send(
     new PutEventsCommand({
       Entries: [
         {
           Source: "citadel.workflows",
           DetailType: "execution.start.requested",
-          Detail: JSON.stringify({
-            executionId,
-            workflowId,
-            correlationId,
-          }),
+          Detail: JSON.stringify(dispatchContext),
           EventBusName: deps.eventBusName,
         },
       ],

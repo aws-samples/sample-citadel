@@ -14,6 +14,7 @@ import {
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
 import { v4 as uuidv4 } from "uuid";
+import { mintRunId, buildDispatchContext } from "../utils/run-id";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -26,10 +27,7 @@ interface ConversationMessageInput {
   agentId: string;
   message: string;
   messageType:
-    | "USER_INPUT"
-    | "AGENT_RESPONSE"
-    | "SYSTEM_NOTIFICATION"
-    | "PROGRESS_UPDATE";
+    "USER_INPUT" | "AGENT_RESPONSE" | "SYSTEM_NOTIFICATION" | "PROGRESS_UPDATE";
   metadata?: string;
   correlationId?: string;
 }
@@ -64,6 +62,10 @@ async function sendMessage(event: AppSyncEvent) {
   // Create message record
   const messageId = uuidv4();
   const timestamp = new Date().toISOString();
+  // Server-minted only (Pass 1, decision f1cbd5ef) — ConversationMessageInput
+  // has no runId field, so there is nothing to strip; this mint is the sole
+  // source. Chat is one of the 4 canonical entry points.
+  const runId = mintRunId();
 
   const messageRecord = {
     projectId,
@@ -73,6 +75,7 @@ async function sendMessage(event: AppSyncEvent) {
     message: message.message,
     messageType: message.messageType,
     userId,
+    runId,
     ...(message.metadata && { metadata: message.metadata }),
     ...(message.correlationId && { correlationId: message.correlationId }),
   };
@@ -82,7 +85,7 @@ async function sendMessage(event: AppSyncEvent) {
     new PutCommand({
       TableName: CONVERSATIONS_TABLE,
       Item: messageRecord,
-    })
+    }),
   );
 
   console.log("Message stored in DynamoDB:", messageRecord.id);
@@ -93,18 +96,33 @@ async function sendMessage(event: AppSyncEvent) {
       // Check if metadata is already an object or a string
       let parsedMetadata;
       if (message.metadata) {
-        if (typeof message.metadata === 'string') {
+        if (typeof message.metadata === "string") {
           parsedMetadata = JSON.parse(message.metadata);
         } else {
           parsedMetadata = message.metadata;
         }
       }
-      
-      console.log('Publishing to EventBridge with metadata:', {
+
+      console.log("Publishing to EventBridge with metadata:", {
         metadataRaw: message.metadata,
         metadataType: typeof message.metadata,
         parsedMetadata,
         parsedType: typeof parsedMetadata,
+      });
+
+      // Build-time durability guard (Pass 1, decision f1cbd5ef, design §3
+      // layer 1): route the outbound envelope through buildDispatchContext,
+      // whose `runId` parameter is REQUIRED — a future refactor that drops
+      // `runId` here fails `tsc`, not just a runtime check.
+      const dispatchContext = buildDispatchContext({
+        runId,
+        projectId,
+        agentId: message.agentId,
+        message: message.message,
+        messageId: messageRecord.id,
+        userId,
+        timestamp: messageRecord.timestamp,
+        metadata: parsedMetadata,
       });
 
       await eventBridgeClient.send(
@@ -113,19 +131,11 @@ async function sendMessage(event: AppSyncEvent) {
             {
               Source: "citadel",
               DetailType: "message.sent_to_agent",
-              Detail: JSON.stringify({
-                projectId,
-                agentId: message.agentId,
-                message: message.message,
-                messageId: messageRecord.id,
-                userId,
-                timestamp: messageRecord.timestamp,
-                metadata: parsedMetadata,
-              }),
+              Detail: JSON.stringify(dispatchContext),
               EventBusName: EVENT_BUS_NAME,
             },
           ],
-        })
+        }),
       );
 
       console.log("Event published to EventBridge");
@@ -163,14 +173,16 @@ async function getConversationHistory(event: AppSyncEvent) {
       ScanIndexForward: false, // newest first for pagination
       Limit: effectiveLimit,
       ...(nextToken && {
-        ExclusiveStartKey: JSON.parse(Buffer.from(nextToken, 'base64').toString()),
+        ExclusiveStartKey: JSON.parse(
+          Buffer.from(nextToken, "base64").toString(),
+        ),
       }),
-    })
+    }),
   );
 
   const items = (result.Items || []).reverse(); // return in chronological order
   const responseNextToken = result.LastEvaluatedKey
-    ? Buffer.from(JSON.stringify(result.LastEvaluatedKey)).toString('base64')
+    ? Buffer.from(JSON.stringify(result.LastEvaluatedKey)).toString("base64")
     : null;
 
   return { items, nextToken: responseNextToken };
@@ -201,7 +213,7 @@ async function sendMessageToAgent(event: AppSyncEvent) {
     agentId: string;
     message: string;
   };
-  
+
   // Convert to sendMessage format
   const convertedEvent = {
     ...event,
@@ -214,7 +226,7 @@ async function sendMessageToAgent(event: AppSyncEvent) {
       },
     },
   };
-  
+
   return await sendMessage(convertedEvent as AppSyncEvent);
 }
 

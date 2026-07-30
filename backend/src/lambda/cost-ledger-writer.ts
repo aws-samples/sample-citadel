@@ -89,6 +89,8 @@ interface TaskCompletionDetail {
   workflowExecutionId?: string;
   nodeId?: string;
   usage?: UsageRecord[];
+  /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. */
+  runId?: string;
 }
 
 interface IntakeUsageDetail {
@@ -97,6 +99,8 @@ interface IntakeUsageDetail {
   appId?: string;
   agentId?: string;
   usage?: UsageRecord | UsageRecord[];
+  /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. */
+  runId?: string;
 }
 
 interface WorkflowNodeCompletedDetail {
@@ -107,6 +111,8 @@ interface WorkflowNodeCompletedDetail {
   workflowExecutionId?: string;
   nodeId?: string;
   usage?: UsageRecord[];
+  /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. */
+  runId?: string;
 }
 
 export type IncomingDetail =
@@ -148,6 +154,8 @@ interface Dimensions {
   agentId?: string;
   workflowExecutionId?: string;
   nodeId?: string;
+  /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. No new GSI this pass. */
+  runId?: string;
 }
 
 interface Decomposition {
@@ -182,6 +190,8 @@ interface LedgerRow {
   ingestedAt: string;
   /** Additive, nullable: only present when the usage record carried one. Enables Tier-B matching. */
   bedrockRequestId?: string;
+  /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id, copied from detail.runId when present. No new GSI this pass. */
+  runId?: string;
   // Pricing fields (pass 2): populated when the catalog row resolves to a
   // usable price; null + unpricedReason when it does not.
   currency: string | null;
@@ -291,6 +301,14 @@ async function buildLedgerRow(
     row.GSI4PK = `WORKFLOW#${dims.workflowExecutionId}`;
     row.GSI4SK = `${capturedAt}#${dims.nodeId || ""}#${ledgerId}`;
   }
+  // Additive, nullable (Pass 1, decision f1cbd5ef): server-minted
+  // correlation id, copied straight through from the incoming detail. No
+  // new GSI in this pass (deferred per design) — a plain top-level
+  // attribute only. Omitted entirely (not a null key) when absent, so a
+  // pre-runId event produces a byte-identical row.
+  if (dims.runId) {
+    row.runId = dims.runId;
+  }
 
   return row;
 }
@@ -346,6 +364,7 @@ async function handleTaskCompletion(
     projectId: detail.projectId,
     appId: detail.appId,
     agentId: detail.agentId,
+    runId: detail.runId,
   };
 
   return Promise.all(
@@ -373,6 +392,7 @@ async function handleIntakeUsage(
     projectId: detail.projectId,
     appId: detail.appId,
     agentId: detail.agentId,
+    runId: detail.runId,
   };
 
   return Promise.all(
@@ -402,6 +422,7 @@ async function handleWorkflowNodeCompleted(
     agentId: detail.agentId,
     workflowExecutionId: detail.workflowExecutionId,
     nodeId: detail.nodeId,
+    runId: detail.runId,
   };
 
   return Promise.all(
