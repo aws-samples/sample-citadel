@@ -175,6 +175,92 @@ function buildStack(): {
   return { template: Template.fromStack(stack), stack, alarmTopic };
 }
 
+/**
+ * Variant of buildStack() that accepts a custom frontendOrigin, for the
+ * CORS AllowOrigins assertion (finding d7d3dd61). Kept separate from
+ * buildStack() so the existing pinned tests above are untouched.
+ */
+function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
+  const app = new cdk.App();
+  const supportStack = new cdk.Stack(app, "SupportStackOrigin", {
+    env: { account: "123456789012", region: "us-east-1" },
+  });
+
+  const userPool = new cognito.UserPool(supportStack, "TestUserPool");
+  const userPoolClient = userPool.addClient("TestUserPoolClient");
+  const agentEventBus = new events.EventBus(supportStack, "TestEventBus");
+  const alarmTopic = new sns.Topic(supportStack, "TestAlarmTopic", {
+    topicName: "citadel-alarms-test-origin",
+  });
+  const {
+    modelCatalogTable,
+    executionsTable,
+    conversationsTable,
+    projectsTable,
+    workflowsTable,
+    agentConfigTable,
+    executionSpecificationsTable,
+    modelConfigTable,
+    governanceLedgerTable,
+  } = buildSupportTables(supportStack);
+
+  const stack = new TelemetryStack(app, "TestTelemetryStackOrigin", {
+    environment: "test",
+    env: { account: "123456789012", region: "us-east-1" },
+    agentEventBus,
+    modelCatalogTable,
+    userPool,
+    userPoolClient,
+    frontendOrigin,
+    bedrockInvocationLogGroupName: "/aws/bedrock/invocation-logs",
+    executionsTable,
+    conversationsTable,
+    projectsTable,
+    alarmTopic,
+    appSyncApiId: "test-appsync-api-id",
+    workflowsTable,
+    agentConfigTable,
+    executionSpecificationsTable,
+    modelConfigTable,
+    governanceLedgerTable,
+    accessLogsBucket: new s3.Bucket(
+      supportStack,
+      "TestAccessLogsBucketOrigin",
+      {
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        autoDeleteObjects: true,
+      },
+    ),
+  });
+
+  return { template: Template.fromStack(stack) };
+}
+
+describe("TelemetryStack — cost API CORS AllowOrigins (finding d7d3dd61)", () => {
+  test("AllowOrigins matches the provided frontendOrigin prop exactly", () => {
+    const { template } = buildStackWithOrigin("https://app.example.com");
+
+    template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
+      CorsConfiguration: Match.objectLike({
+        AllowOrigins: ["https://app.example.com"],
+      }),
+    });
+  });
+
+  test("AllowOrigins never falls back to the .invalid placeholder when a real origin is supplied", () => {
+    const { template } = buildStackWithOrigin("https://app.example.com");
+
+    const apis = template.findResources("AWS::ApiGatewayV2::Api");
+    const allOrigins = Object.values(apis).flatMap(
+      (r) => r.Properties?.CorsConfiguration?.AllowOrigins ?? [],
+    );
+    expect(allOrigins).not.toContain(
+      "https://frontend-origin-not-configured.invalid",
+    );
+    expect(allOrigins).toEqual(["https://app.example.com"]);
+  });
+});
+
 describe("TelemetryStack — query/budgets Lambda IAM split", () => {
   test("declares exactly one query-only Lambda and one budgets Lambda (distinct function resources)", () => {
     const { template } = buildStack();

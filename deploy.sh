@@ -100,7 +100,49 @@ validate_env() {
   ok "Region:      $CDK_DEFAULT_REGION"
 }
 
-# --- Capture git metadata ---
+# --- Resolve FRONTEND_ORIGIN if unset (auto-discovery from frontend stack) ---
+# TelemetryStack's cost API CORS policy needs the real frontend origin.
+# On a fresh account, telemetry deploys BEFORE frontend (see deploy_all_stacks
+# dependency comment below), so there may be no stack yet — that's expected,
+# not an error. We proceed with a loud warning rather than failing, since
+# bin/app.ts already has a non-throwing placeholder fallback for this exact
+# case (finding d7d3dd61).
+resolve_frontend_origin() {
+  if [ -n "${FRONTEND_ORIGIN:-}" ]; then
+    # Strip any trailing slash even when explicitly set, for consistency.
+    FRONTEND_ORIGIN="${FRONTEND_ORIGIN%/}"
+    export FRONTEND_ORIGIN
+    ok "FRONTEND_ORIGIN: $FRONTEND_ORIGIN (from environment)"
+    return 0
+  fi
+
+  local stack_name="citadel-frontend-${ENVIRONMENT}"
+  local profile_flag=""
+  [ -n "${AWS_PROFILE:-}" ] && profile_flag="--profile $AWS_PROFILE"
+
+  log "FRONTEND_ORIGIN not set — resolving from $stack_name stack output..."
+  local resolved
+  resolved=$(aws cloudformation describe-stacks \
+    --stack-name "$stack_name" \
+    --region "$CDK_DEFAULT_REGION" \
+    $profile_flag \
+    --query 'Stacks[0].Outputs[?OutputKey==`FrontendUrl`].OutputValue' \
+    --output text 2>/dev/null || echo "")
+
+  if [ -z "$resolved" ] || [ "$resolved" = "None" ]; then
+    warn "Could not resolve FRONTEND_ORIGIN from $stack_name (stack not deployed yet? fresh-account bootstrap: frontend deploys AFTER telemetry)."
+    warn "Proceeding WITHOUT a real frontend origin — browser CORS on the cost API will stay BLOCKED until telemetry is redeployed with FRONTEND_ORIGIN set."
+    warn "Once the frontend stack exists, redeploy telemetry with, e.g.:"
+    warn "  FRONTEND_ORIGIN=\$(aws cloudformation describe-stacks --stack-name $stack_name --region $CDK_DEFAULT_REGION $profile_flag --query 'Stacks[0].Outputs[?OutputKey==\`FrontendUrl\`].OutputValue' --output text) ./deploy.sh citadel-telemetry-${ENVIRONMENT}"
+    return 0
+  fi
+
+  resolved="${resolved%/}"
+  export FRONTEND_ORIGIN="$resolved"
+  ok "FRONTEND_ORIGIN resolved from $stack_name: $FRONTEND_ORIGIN"
+}
+
+
 capture_git_info() {
   GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
   GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
@@ -507,6 +549,10 @@ validate_env
 capture_git_info
 
 [ -n "${AWS_PROFILE:-}" ] && { export AWS_PROFILE; ok "AWS Profile: $AWS_PROFILE"; } || unset AWS_PROFILE
+
+# Resolve FRONTEND_ORIGIN (env override, else auto-discover from the
+# frontend stack's output) before CDK synth/deploy so it's exported for cdk.
+resolve_frontend_origin
 
 # Pre-flight: ensure container runtime is available (needed for PythonFunction bundling)
 DOCKER_CMD="${CDK_DOCKER:-docker}"

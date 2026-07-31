@@ -712,8 +712,11 @@ export class TelemetryStack extends cdk.Stack {
         // API, and pairing `Access-Control-Allow-Origin: *` with bearer
         // tokens is a broad-CORS anti-pattern regardless of token
         // validation happening server-side. `frontendOrigin` must be a
-        // concrete origin (enforced in bin/app.ts, which fails fast rather
-        // than silently defaulting to '*').
+        // concrete origin. bin/app.ts does NOT fail fast when it's
+        // unconfigured — a hard throw would brick a fresh-account bootstrap
+        // deploy, since FrontendStack deploys after this stack. Instead it
+        // falls back to a non-resolvable `.invalid` placeholder and emits a
+        // loud CDK Annotations warning (see lib/frontend-origin.ts).
         allowOrigins: [props.frontendOrigin],
         allowMethods: [
           apigatewayv2.CorsHttpMethod.GET,

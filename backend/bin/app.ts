@@ -13,6 +13,11 @@ import { GovernanceStack } from "../lib/governance-stack";
 import { TelemetryStack } from "../lib/telemetry-stack";
 import { ProjectsStack } from "../lib/projects-stack";
 import { RegistryStack } from "../lib/registry-stack";
+import {
+  remediationMessage,
+  resolveFrontendOrigin,
+  shouldWarnOnPlaceholder,
+} from "../lib/frontend-origin";
 
 const app = new cdk.App();
 
@@ -195,10 +200,27 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
 // "safe-to-synth, unsafe-to-actually-use" shape as `CDK_DEFAULT_ACCOUNT`
 // being undefined for local synth. Real deployments MUST set
 // FRONTEND_ORIGIN to the actual CloudFront/app origin.
-const frontendOrigin: string =
-  process.env.FRONTEND_ORIGIN ||
-  (app.node.tryGetContext("frontendOrigin") as string | undefined) ||
-  "https://frontend-origin-not-configured.invalid";
+//
+// Resolution itself lives in lib/frontend-origin.ts (unit-testable, no CDK
+// synth required). Placeholder use triggers a LOUD CDK Annotations warning
+// (not a throw) for every environment except local/test: a hard throw would
+// brick a fresh-account bootstrap deploy, since FrontendStack deploys AFTER
+// TelemetryStack (see deploy.sh's dependency-order comment below) and so
+// has no real origin to source on a first-ever deploy.
+const frontendOriginResolution = resolveFrontendOrigin(
+  process.env.FRONTEND_ORIGIN,
+  app.node.tryGetContext("frontendOrigin") as string | undefined,
+);
+const frontendOrigin: string = frontendOriginResolution.origin;
+if (
+  frontendOriginResolution.isPlaceholder &&
+  shouldWarnOnPlaceholder(environment)
+) {
+  cdk.Annotations.of(app).addWarningV2(
+    "citadel:frontend-origin-placeholder",
+    remediationMessage(environment),
+  );
+}
 
 // Bedrock model-invocation log group name (operator opt-in feature,
 // account-level, provisioned outside CDK). Left unset by default: the
