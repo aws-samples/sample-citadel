@@ -940,6 +940,69 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
     });
   });
 
+  test("A4 metric expression uses no CloudWatch Metrics Insights SELECT/LIKE syntax (Insights WHERE supports only =/!=, no LIKE)", () => {
+    const { template } = buildStack();
+    const alarms = template.findResources("AWS::CloudWatch::Alarm");
+    const dlqAlarm = Object.values(alarms).find(
+      (r) => r.Properties?.AlarmName === "citadel-dlq-not-empty-test",
+    );
+    expect(dlqAlarm).toBeDefined();
+    const expr = String(dlqAlarm!.Properties?.Metrics?.[0]?.Expression ?? "");
+    expect(expr).not.toMatch(/\bSELECT\b/i);
+    expect(expr).not.toMatch(/\bLIKE\b/i);
+  });
+
+  test("DRIFT GUARD: every known DLQ physical name is represented as a QueueName dimension in DlqNotEmptyAlarm's metric set", () => {
+    // Independently-sourced (not imported from telemetry-stack.ts) list of
+    // every `deadLetterQueue`-backed SQS queue's exact `queueName:` template
+    // string, per `git grep -ni deadLetterQueue backend/lib/` recon:
+    //   arbiter-stack.ts:291,491,2348,2764 · governance-stack.ts:376 ·
+    //   registry-stack.ts:194
+    // If a new DLQ is added anywhere and NOT added to telemetry-stack.ts's
+    // `allDlqQueueNames`, this test fails — a DLQ can no longer silently
+    // escape the not-empty alarm.
+    const environment = "test";
+    const expectedDlqQueueNames = [
+      `citadel-worker-agent-dlq-${environment}`,
+      `citadel-fabricator-dlq-${environment}`,
+      `citadel-governance-graph-snapshot-on-change-dlq-${environment}`,
+      `citadel-governance-finding-fanout-dlq-${environment}`,
+      `citadel-governance-notifier-dlq-${environment}`,
+      `citadel-registry-sync-dlq-${environment}`,
+    ];
+
+    const { template } = buildStack();
+    const alarms = template.findResources("AWS::CloudWatch::Alarm");
+    const dlqAlarm = Object.values(alarms).find(
+      (r) => r.Properties?.AlarmName === "citadel-dlq-not-empty-test",
+    );
+    expect(dlqAlarm).toBeDefined();
+
+    const metrics = dlqAlarm!.Properties?.Metrics ?? [];
+    // Every usingMetrics sub-metric contributes one MetricStat entry; the
+    // top-level expression entry has no MetricStat.
+    const referencedQueueNames = metrics
+      .map(
+        (m: {
+          MetricStat?: {
+            Metric?: { Dimensions?: Array<{ Name: string; Value: string }> };
+          };
+        }) =>
+          m.MetricStat?.Metric?.Dimensions?.find((d) => d.Name === "QueueName")
+            ?.Value,
+      )
+      .filter((v: string | undefined): v is string => Boolean(v));
+
+    for (const expectedName of expectedDlqQueueNames) {
+      expect(referencedQueueNames).toContain(expectedName);
+    }
+    // Also require no unexpected extras and no duplicate coverage gaps —
+    // the set must match exactly.
+    expect(new Set(referencedQueueNames)).toEqual(
+      new Set(expectedDlqQueueNames),
+    );
+  });
+
   test("A5 reconciler-stalled: name, threshold, comparison, periods, datapoints, treatMissingData (BREACHING)", () => {
     const { template } = buildStack();
     template.hasResourceProperties("AWS::CloudWatch::Alarm", {

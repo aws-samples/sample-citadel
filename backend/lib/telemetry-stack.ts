@@ -1014,7 +1014,37 @@ export class TelemetryStack extends cdk.Stack {
     });
 
     const nodeFailureInsightsQuery = `SELECT SUM("${METRIC_NODE_FAILURE}") FROM SCHEMA("${METRIC_NAMESPACE}", ${DIMENSION_WORKFLOW_ID}, ${DIMENSION_AGENT_ID})`;
-    const dlqDepthInsightsQuery = `SELECT MAX("ApproximateNumberOfMessagesVisible") FROM SCHEMA("AWS/SQS", QueueName) WHERE QueueName LIKE 'citadel-%dlq%'`;
+
+    // Every explicitly-named DLQ across the app (arbiter-stack x4,
+    // governance-stack x1, registry-stack x1). CloudWatch Metrics
+    // Insights WHERE only supports =/!= (no LIKE/wildcards), so a single
+    // `SELECT ... WHERE QueueName LIKE 'citadel-%dlq%'` is rejected by
+    // CloudWatch at alarm CREATE with a ValidationException. Sum each
+    // queue's ApproximateNumberOfMessagesVisible explicitly instead — a
+    // plain MathExpression composed from per-queue Metric objects, no
+    // Insights SELECT involved. DRIFT GUARD: this list is asserted
+    // exhaustive against every `deadLetterQueue` in the synthesized
+    // templates by the "every DLQ appears in DlqNotEmptyAlarm" test in
+    // telemetry-stack.test.ts — a new DLQ added anywhere else MUST be
+    // added here too, or that test fails.
+    const allDlqQueueNames = [
+      `citadel-worker-agent-dlq-${props.environment}`,
+      `citadel-fabricator-dlq-${props.environment}`,
+      `citadel-governance-graph-snapshot-on-change-dlq-${props.environment}`,
+      `citadel-governance-finding-fanout-dlq-${props.environment}`,
+      `citadel-governance-notifier-dlq-${props.environment}`,
+      `citadel-registry-sync-dlq-${props.environment}`,
+    ];
+    const dlqDepthMetrics: Record<string, cloudwatch.IMetric> = {};
+    allDlqQueueNames.forEach((queueName, i) => {
+      dlqDepthMetrics[`dlq${i}`] = new cloudwatch.Metric({
+        namespace: "AWS/SQS",
+        metricName: "ApproximateNumberOfMessagesVisible",
+        dimensionsMap: { QueueName: queueName },
+        statistic: "Maximum",
+      });
+    });
+    const dlqDepthSumExpression = Object.keys(dlqDepthMetrics).join(" + ");
 
     const healthStripWidgets = [
       new cloudwatch.SingleValueWidget({
@@ -1048,8 +1078,8 @@ export class TelemetryStack extends cdk.Stack {
         title: "Max DLQ depth",
         metrics: [
           new cloudwatch.MathExpression({
-            expression: dlqDepthInsightsQuery,
-            usingMetrics: {},
+            expression: dlqDepthSumExpression,
+            usingMetrics: dlqDepthMetrics,
             label: "Max DLQ ApproxMessagesVisible",
             period: cdk.Duration.hours(1),
           }),
@@ -1555,8 +1585,8 @@ export class TelemetryStack extends cdk.Stack {
     const dlqNotEmptyAlarm = new cloudwatch.Alarm(this, "DlqNotEmptyAlarm", {
       alarmName: `citadel-dlq-not-empty-${props.environment}`,
       metric: new cloudwatch.MathExpression({
-        expression: dlqDepthInsightsQuery,
-        usingMetrics: {},
+        expression: dlqDepthSumExpression,
+        usingMetrics: dlqDepthMetrics,
         period: cdk.Duration.minutes(5),
       }),
       threshold: 1, // dev-calibrated; TUNE with prod baseline
