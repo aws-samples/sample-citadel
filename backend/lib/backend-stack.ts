@@ -2971,22 +2971,17 @@ export class BackendStack extends cdk.Stack {
       alarmDescription: "AppSync 4xx error rate exceeded threshold",
     });
 
-    new cloudwatch.Alarm(this, "AppSync5xxAlarm", {
-      alarmName: `citadel-appsync-5xx-${props.environment}`,
-      metric: new cloudwatch.Metric({
-        namespace: "AWS/AppSync",
-        metricName: "5XXError",
-        dimensionsMap: { GraphQLAPIId: this.appSyncApi.apiId },
-        period: cdk.Duration.minutes(5),
-        statistic: "Sum",
-      }),
-      threshold: 10,
-      evaluationPeriods: 1,
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: "AppSync 5xx error rate exceeded threshold",
-    });
+    // AppSync 5xx alarm intentionally removed from here — TelemetryStack's
+    // "AppSync5xxAlarm" (platform-health SLO suite, decision ab73ae1b) owns
+    // the physical name `citadel-appsync-5xx-${env}` going forward. Both
+    // stacks defined the identical alarmName, which AWS::EarlyValidation::
+    // ResourceExistenceCheck rejects on whichever stack's changeset deploys
+    // second (see backend/test/duplicate-alarm-name-guard.test.ts). Deploy
+    // order is backend -> telemetry, so backend deletes its copy and
+    // telemetry recreates it within the same pipeline run; telemetry's
+    // definition is a strict superset (SNS alarm action via
+    // props.alarmTopic, tighter threshold/description) so no monitoring
+    // capability is lost, only a brief (single-deploy-run) alarm gap.
 
     new cdk.CfnOutput(this, "GraphQLApiId", {
       value: this.appSyncApi.apiId,
