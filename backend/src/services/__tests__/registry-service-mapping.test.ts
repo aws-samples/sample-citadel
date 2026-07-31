@@ -363,13 +363,13 @@ describe("RegistryService record mapping", () => {
       expect(service.mapToToolConfig(record).categories).toEqual([]);
     });
 
-    it("returns '{}' for config when description is undefined (AWSJSON contract)", () => {
+    it("returns config with injected record.name when description is undefined (AWSJSON contract)", () => {
       const record: RegistryRecord = {
         recordId: "t1",
         name: "T",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToToolConfig(record).config).toBe("{}");
+      expect(service.mapToToolConfig(record).config).toBe('{"name":"T"}');
     });
 
     it("returns undefined timestamps when dates are missing", () => {

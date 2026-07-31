@@ -68,11 +68,11 @@ describe("RegistryService — AWSJSON config field invariant", () => {
   // ── Case 1: plain-text description falls back to '{}' ──────────────────
 
   describe("case 1 — plain-text description never leaks into config", () => {
-    it("mapToToolConfig projects {} when description is plain text and meta.config is absent", () => {
+    it("mapToToolConfig injects record.name when description is plain text and meta.config is absent", () => {
       const record = toolRecord({ description: "Fetches weather data" });
       const result = service.mapToToolConfig(record);
-      expect(result.config).toBe("{}");
-      expect(JSON.parse(result.config)).toEqual({});
+      expect(result.config).toBe('{"name":"WeatherTool"}');
+      expect(JSON.parse(result.config)).toEqual({ name: "WeatherTool" });
     });
 
     it("mapToAgentConfig projects {} when description is plain text", () => {
@@ -106,7 +106,7 @@ describe("RegistryService — AWSJSON config field invariant", () => {
       expect(records[0].customDescriptorContent).toBeUndefined();
 
       const projected = service.mapToToolConfig(records[0]);
-      expect(projected.config).toBe("{}");
+      expect(projected.config).toBe('{"name":"WeatherTool"}');
       // Description is NOT lost — it stays out of config only.
       expect(records[0].description).toBe("Fetches weather data");
     });
@@ -151,14 +151,14 @@ describe("RegistryService — AWSJSON config field invariant", () => {
   // ── Case 4: ''/undefined description → '{}' ────────────────────────────
 
   describe("case 4 — ''/undefined description falls back to '{}'", () => {
-    it("mapToToolConfig projects {} when description is ''", () => {
+    it("mapToToolConfig injects record.name when description is ''", () => {
       const record = toolRecord({ description: "" });
-      expect(service.mapToToolConfig(record).config).toBe("{}");
+      expect(service.mapToToolConfig(record).config).toBe('{"name":"WeatherTool"}');
     });
 
-    it("mapToToolConfig projects {} when description is undefined", () => {
+    it("mapToToolConfig injects record.name when description is undefined", () => {
       const record = toolRecord({ description: undefined });
-      expect(service.mapToToolConfig(record).config).toBe("{}");
+      expect(service.mapToToolConfig(record).config).toBe('{"name":"WeatherTool"}');
     });
 
     it("mapToAgentConfig projects {} when description is ''", () => {

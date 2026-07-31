@@ -1560,6 +1560,32 @@ export class RegistryService {
   }
 
   /**
+   * Inject `name` into a config JSON string when it is missing or empty.
+   * This ensures the frontend ToolCard always has a human-readable name
+   * to display instead of falling back to the raw record GUID.
+   */
+  private static ensureConfigName(configJson: string, recordName: string): string {
+    if (!recordName) return configJson;
+    try {
+      const parsed = JSON.parse(configJson);
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        !Array.isArray(parsed)
+      ) {
+        if (!parsed.name || (typeof parsed.name === "string" && parsed.name.trim() === "")) {
+          parsed.name = recordName;
+          return JSON.stringify(parsed);
+        }
+      }
+    } catch {
+      // If configJson is unparseable, wrap the name in a minimal config.
+      return JSON.stringify({ name: recordName });
+    }
+    return configJson;
+  }
+
+  /**
    * Maps a Registry record to the AgentConfig GraphQL response shape.
    */
   mapToAgentConfig(record: RegistryRecord): AgentConfig {
@@ -1605,17 +1631,23 @@ export class RegistryService {
       RegistryService.TOOL_METADATA_DEFAULTS,
     );
 
+    // Ensure the config JSON always carries a human-readable `name`.
+    // Registry records store the tool name at the record level
+    // (record.name), but the frontend ToolCard reads it from
+    // `config.name`. When the persisted config payload lacks a name
+    // (legacy records, fabricator-created records whose
+    // customDescriptorContent.config was never populated), inject
+    // record.name so the UI never falls back to displaying the raw GUID.
+    const rawConfig = RegistryService.toValidConfigJson(
+      meta.config,
+      record.description,
+    );
+    const config = RegistryService.ensureConfigName(rawConfig, record.name);
+
     return {
       toolId: record.recordId,
       orgId: meta.orgId ?? "",
-      // New records: config comes from custom_metadata.config (see tool-config-resolver createToolConfigRegistry).
-      // Legacy records: fall back to record.description which previously carried the full JSON blob.
-      // AWSJSON contract: whichever candidate wins must be a JSON object —
-      // plain text or '' falls back to '{}' (see toValidConfigJson).
-      config: RegistryService.toValidConfigJson(
-        meta.config,
-        record.description,
-      ),
+      config,
       state: this.toInternalState(record.status),
       categories: meta.categories,
       integrationBindings: RegistryService.sanitizeIntegrationBindings(
