@@ -685,8 +685,14 @@ export class TelemetryStack extends cdk.Stack {
             "entry-key ownership (execution/conversation -> org) checked " +
             "BEFORE any query is issued, plus an admin-only gate on the " +
             "raw trace-id route — identical posture to the xray:Get* " +
-            "Resource:* justification above.",
-          appliesTo: ["Resource::*"],
+            "Resource:* justification above. The logs:StartQuery grant " +
+            "above is scoped to a single log-group ARN " +
+            "(aws/spans); the trailing ':*' in that ARN is the log-stream " +
+            "suffix inherent to CloudWatch Logs log-group ARN syntax, not " +
+            "a wildcard broadening beyond the aws/spans log group — listed " +
+            "here in appliesTo because cdk-nag raises a separate granular " +
+            "finding for it on this same role/policy.",
+          appliesTo: ["Resource::*", `Resource::${spansLogGroupArn}`],
         },
       ],
       true,

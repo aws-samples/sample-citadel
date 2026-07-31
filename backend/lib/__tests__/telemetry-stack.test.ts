@@ -26,6 +26,9 @@ import {
   METRIC_NODE_FAILURE,
   METRIC_NODE_QUEUE_WAIT_MS,
 } from "../../src/utils/metrics-constants";
+import { scaffoldBackendAssetDirs } from "../../test/helpers/scaffold-stub-assets";
+
+scaffoldBackendAssetDirs(["dist/lambda"]);
 
 function buildSupportTables(supportStack: cdk.Stack): {
   modelCatalogTable: dynamodb.Table;
