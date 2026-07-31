@@ -103,12 +103,16 @@ export AWS_PROFILE="your-profile-name"
 ./deploy.sh --profile your-profile-name
 ```
 
-**What gets deployed:**
+**What gets deployed** (in dependency order):
 - ✅ Backend Stack: AppSync API, Cognito, DynamoDB, Lambda functions
+- ✅ Projects Stack: Projects/conversations domain resolvers (split from backend)
+- ✅ Registry Stack: Agent registry and agent-import domain resolvers (split from backend)
 - ✅ Services Stack: Bedrock agents, AgentCore Gateway, Knowledge Base
-- ✅ Arbiter Stack: Agent orchestration system
-- ✅ Frontend Stack: React app on S3/CloudFront
 - ✅ Gateway Stack: AgentCore Gateway configuration
+- ✅ Governance Stack: Governance resolvers, KMS, and governance surfaces
+- ✅ Arbiter Stack: Agent orchestration system
+- ✅ Telemetry Stack: Invocation cost ledger plus cost/trace/replay APIs
+- ✅ Frontend Stack: React app on S3/CloudFront
 
 **Duration:** 15-20 minutes
 
@@ -140,18 +144,18 @@ The Gateway ID is automatically imported from the Services Stack and passed to t
 ### Specific Stack
 
 ```bash
-# Deploy specific stack
-./deploy.sh BackendStack --profile my-profile
+# Deploy specific stack (use the real stack name: citadel-<stack>-<env>)
+./deploy.sh citadel-backend-dev --profile my-profile
 ```
 
 ### Skip Builds
 
 ```bash
 # Skip frontend build
-./deploy.sh --skip-frontend BackendStack
+./deploy.sh --skip-frontend citadel-backend-dev
 
 # Skip backend build
-./deploy.sh --skip-backend FrontendStack
+./deploy.sh --skip-backend citadel-frontend-dev
 ```
 
 ## Deployment Script Options
@@ -159,11 +163,13 @@ The Gateway ID is automatically imported from the Services Stack and passed to t
 | Option | Description |
 |--------|-------------|
 | `--all` | Deploy all stacks (default) |
-| `--backend-only` | Deploy only backend stack |
+| `--backend-only` | Deploy all non-frontend stacks (backend + projects + registry + services + gateway + governance + arbiter + telemetry) |
 | `--frontend-only` | Deploy only frontend stack |
 | `--skip-frontend` | Skip frontend build |
 | `--skip-backend` | Skip backend build |
 | `--profile <name>` | Use specific AWS profile |
+| `--dry-run` | Preview changes only (`cdk diff`) — nothing is deployed |
+| `--no-verify` | Skip post-deploy health checks |
 | `--admin-email <addr>` | Admin email for initial user (overrides `ADMIN_EMAIL` env var) |
 | `--help` | Show help message |
 
@@ -179,11 +185,21 @@ The Gateway ID is automatically imported from the Services Stack and passed to t
 - **Secrets Manager**: Integration credentials storage
 - **SSM Parameter Store**: Integration configuration storage
 
+### Projects Stack
+- **Domain Resolvers**: Projects, conversations, documents, assessment, design-progress, planning (split from backend; attaches to the backend AppSync API)
+
+### Registry Stack
+- **Domain Resolvers**: Agent registry, agent import, fabricator requests/queue, app CRUD and API keys (split from backend; attaches to the backend AppSync API)
+
 ### Services Stack
 - **Bedrock AgentCore Agents**: 4 AI agents (Assessment, Design, Planning, Implementation)
 - **AgentCore Gateway**: MCP gateway for integrations
 - **Knowledge Base**: OpenSearch Serverless for document search
 - **ECR Repositories**: Container images for agents
+
+### Governance Stack
+- **Governance Resolvers**: ADRs, execution specifications, interrogation rounds, assessments, program reviews
+- **KMS + S3**: Encrypted transcript storage and governance surfaces
 
 ### Frontend Stack
 - **S3 Bucket**: Static website hosting
@@ -194,6 +210,10 @@ The Gateway ID is automatically imported from the Services Stack and passed to t
 - **Orchestration**: Agent coordination system
 - **Worker Agents**: Task execution agents
 - **Fabricator**: Dynamic agent creation
+
+### Telemetry Stack
+- **Cost Ledger**: Model invocation cost tracking with cost query API and budgets
+- **Observability APIs**: Trace query and replay-package endpoints, platform-health dashboard and SLO alarms
 
 ### Gateway Stack
 - **Gateway Configuration**: AgentCore Gateway setup
@@ -441,9 +461,13 @@ export AWS_PROFILE="your-profile"
 
 # Delete stacks in reverse order
 aws cloudformation delete-stack --stack-name citadel-frontend-${ENVIRONMENT}
-aws cloudformation delete-stack --stack-name citadel-gateway-${ENVIRONMENT}
+aws cloudformation delete-stack --stack-name citadel-telemetry-${ENVIRONMENT}
 aws cloudformation delete-stack --stack-name citadel-arbiter-${ENVIRONMENT}
+aws cloudformation delete-stack --stack-name citadel-governance-${ENVIRONMENT}
+aws cloudformation delete-stack --stack-name citadel-gateway-${ENVIRONMENT}
 aws cloudformation delete-stack --stack-name citadel-services-${ENVIRONMENT}
+aws cloudformation delete-stack --stack-name citadel-registry-${ENVIRONMENT}
+aws cloudformation delete-stack --stack-name citadel-projects-${ENVIRONMENT}
 aws cloudformation delete-stack --stack-name citadel-backend-${ENVIRONMENT}
 
 # Clean local artifacts
@@ -476,10 +500,14 @@ ENVIRONMENT=prod ./deploy.sh --profile prod-profile
 
 Stacks are named based on the `ENVIRONMENT` variable:
 - `citadel-backend-{ENVIRONMENT}`
-- `citadel-frontend-{ENVIRONMENT}`
+- `citadel-projects-{ENVIRONMENT}`
+- `citadel-registry-{ENVIRONMENT}`
 - `citadel-services-{ENVIRONMENT}`
-- `citadel-arbiter-{ENVIRONMENT}`
 - `citadel-gateway-{ENVIRONMENT}`
+- `citadel-governance-{ENVIRONMENT}`
+- `citadel-arbiter-{ENVIRONMENT}`
+- `citadel-telemetry-{ENVIRONMENT}`
+- `citadel-frontend-{ENVIRONMENT}`
 
 ### CI/CD Integration
 

@@ -315,3 +315,266 @@ describe("unknown route", () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Branch tests for the untested fail-closed refusal paths (finding 6de8908c).
+// Every test below asserts BEHAVIOR: status code, refusal payload shape, no
+// S3 write, no presigned URL issued — never implementation internals.
+// ---------------------------------------------------------------------------
+
+import {
+  CrossOrgRowError,
+  ReplayNotFoundError,
+} from "../utils/replay-package-builder";
+
+/** Same-org execution event whose ownership check passes, so the request
+ * reaches handleEntryKeyRoute and the builder outcome drives the branch. */
+function ownedExecutionEvent(): APIGatewayProxyEventV2WithJWTAuthorizer {
+  ddbMock.on(GetCommand).resolves({ Item: undefined });
+  ddbMock.on(GetCommand, { TableName: "executions-test" }).resolves({
+    Item: executionItem("org-1"),
+  });
+  return makeEvent(
+    "GET /replay/by-execution/{executionId}",
+    { executionId: "exec-1" },
+    { "custom:organization": "org-1" },
+  );
+}
+
+describe("fail-closed error translation — each builder throw maps to the refusal contract", () => {
+  test("ReplayNotFoundError from the builder -> 404, no S3 write, no presigned URL", async () => {
+    const getSignedUrlMock = getSignedUrl as jest.Mock;
+    getSignedUrlMock.mockClear();
+    const spy = jest
+      .spyOn(replayPackageBuilder, "assembleReplayPackage")
+      .mockRejectedValue(new ReplayNotFoundError("execution", "exec-1"));
+
+    try {
+      const res = await handler(ownedExecutionEvent());
+      expect(res.statusCode).toBe(404);
+      expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+      expect(getSignedUrlMock).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("CrossOrgRowError from the builder -> 403, no S3 write, no presigned URL (defence-in-depth layer)", async () => {
+    const getSignedUrlMock = getSignedUrl as jest.Mock;
+    getSignedUrlMock.mockClear();
+    const spy = jest
+      .spyOn(replayPackageBuilder, "assembleReplayPackage")
+      .mockRejectedValue(
+        new CrossOrgRowError("workflows-test", "org-OTHER", "org-1"),
+      );
+
+    try {
+      const res = await handler(ownedExecutionEvent());
+      expect(res.statusCode).toBe(403);
+      expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+      expect(getSignedUrlMock).not.toHaveBeenCalled();
+      // Refusal payload never echoes the mismatched org ids.
+      expect(res.body ?? "").not.toContain("org-OTHER");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("unexpected Error from the builder -> 500 generic body, no S3 write, no error-detail leak", async () => {
+    const getSignedUrlMock = getSignedUrl as jest.Mock;
+    getSignedUrlMock.mockClear();
+    const spy = jest
+      .spyOn(replayPackageBuilder, "assembleReplayPackage")
+      .mockRejectedValue(new Error("dynamo exploded: table arn secrets"));
+
+    try {
+      const res = await handler(ownedExecutionEvent());
+      expect(res.statusCode).toBe(500);
+      const body = JSON.parse(res.body!);
+      expect(body).toEqual({ error: "Internal server error" });
+      expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+      expect(getSignedUrlMock).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("non-Error thrown value from the builder -> 500 generic body (String(err) arm)", async () => {
+    const spy = jest
+      .spyOn(replayPackageBuilder, "assembleReplayPackage")
+      .mockRejectedValue("string-throw");
+
+    try {
+      const res = await handler(ownedExecutionEvent());
+      expect(res.statusCode).toBe(500);
+      expect(JSON.parse(res.body!)).toEqual({ error: "Internal server error" });
+      expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("secret gate refusal surfaces log-safe patternIds in the refusal payload and issues no presigned URL", async () => {
+    const getSignedUrlMock = getSignedUrl as jest.Mock;
+    getSignedUrlMock.mockClear();
+    const spy = jest
+      .spyOn(replayPackageBuilder, "assembleReplayPackage")
+      .mockRejectedValue(new ReplaySecretLeakError(["github-token", "jwt"]));
+
+    try {
+      const res = await handler(ownedExecutionEvent());
+      expect(res.statusCode).toBe(500);
+      const body = JSON.parse(res.body!);
+      // The refusal payload carries the pattern IDs (log-safe identifiers,
+      // never the matched secret text) and no url field at all.
+      expect(body.patternIds).toEqual(["github-token", "jwt"]);
+      expect(body.error).toMatch(/refused/i);
+      expect(body.url).toBeUndefined();
+      expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+      expect(getSignedUrlMock).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("S3 PutObject failure — fail closed after build, before presign", () => {
+  test("S3 send rejection -> 500 generic body, no presigned URL ever issued", async () => {
+    const getSignedUrlMock = getSignedUrl as jest.Mock;
+    getSignedUrlMock.mockClear();
+
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    s3Mock.on(PutObjectCommand).rejects(new Error("s3 unavailable"));
+
+    const res = await handler(ownedExecutionEvent());
+    expect(res.statusCode).toBe(500);
+    const body = JSON.parse(res.body!);
+    expect(body).toEqual({ error: "Internal server error" });
+    expect(body.url).toBeUndefined();
+    expect(getSignedUrlMock).not.toHaveBeenCalled();
+  });
+
+  test("S3 throwing a non-Error value -> 500 generic body (String(err) arm)", async () => {
+    const getSignedUrlMock = getSignedUrl as jest.Mock;
+    getSignedUrlMock.mockClear();
+
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    s3Mock.on(PutObjectCommand).callsFake(() => {
+      return Promise.reject({ notAnError: "s3-plain-object-rejection" });
+    });
+
+    const res = await handler(ownedExecutionEvent());
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body!)).toEqual({ error: "Internal server error" });
+    expect(getSignedUrlMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("presigned TTL clamp — env may only lower the 300s ceiling, never raise it", () => {
+  test.each<[string, string | undefined, number]>([
+    ["unset", undefined, 300],
+    ['"0"', "0", 300],
+    ['"-5"', "-5", 300],
+    ['"abc"', "abc", 300],
+    ['"600"', "600", 300],
+    ['"120"', "120", 120],
+  ])(
+    "REPLAY_PRESIGN_TTL_SECONDS %s -> expiresIn %i",
+    async (_label, envValue, expected) => {
+      if (envValue === undefined) {
+        delete process.env.REPLAY_PRESIGN_TTL_SECONDS;
+      } else {
+        process.env.REPLAY_PRESIGN_TTL_SECONDS = envValue;
+      }
+      const getSignedUrlMock = getSignedUrl as jest.Mock;
+      getSignedUrlMock.mockClear();
+
+      ddbMock.on(QueryCommand).resolves({ Items: [] });
+      s3Mock.on(PutObjectCommand).resolves({});
+
+      const res = await handler(ownedExecutionEvent());
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body!);
+      expect(body.expiresInSeconds).toBe(expected);
+      const options = getSignedUrlMock.mock.calls[0][2];
+      expect(options.expiresIn).toBe(expected);
+      expect(options.expiresIn).toBeLessThanOrEqual(300);
+    },
+  );
+});
+
+describe("bad request paths — missing path parameters", () => {
+  test("missing executionId (pathParameters absent) -> 400, nothing read or written", async () => {
+    const event = {
+      ...makeEvent(
+        "GET /replay/by-execution/{executionId}",
+        {},
+        { "custom:organization": "org-1" },
+      ),
+      pathParameters: undefined,
+    } as unknown as APIGatewayProxyEventV2WithJWTAuthorizer;
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(400);
+    expect(ddbMock.calls()).toHaveLength(0);
+    expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+  });
+
+  test("missing conversationId (empty pathParameters) -> 400, nothing read or written", async () => {
+    const event = makeEvent(
+      "GET /replay/by-conversation/{conversationId}",
+      {},
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(400);
+    expect(ddbMock.calls()).toHaveLength(0);
+    expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+  });
+
+  test("missing org claim on the conversation route -> 403 before any read", async () => {
+    const event = makeEvent(
+      "GET /replay/by-conversation/{conversationId}",
+      { conversationId: "conv-1" },
+      {},
+    );
+    const res = await handler(event);
+    expect(res.statusCode).toBe(403);
+    expect(ddbMock.calls()).toHaveLength(0);
+  });
+});
+
+describe("top-level unhandled error -> 500, never a partial success", () => {
+  test("ownership resolution rejecting (Error) -> 500 generic body, no S3 write", async () => {
+    ddbMock.on(GetCommand).rejects(new Error("dynamo down"));
+
+    const event = makeEvent(
+      "GET /replay/by-execution/{executionId}",
+      { executionId: "exec-1" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body!)).toEqual({ error: "Internal server error" });
+    expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+  });
+
+  test("ownership resolution throwing a non-Error value -> 500 generic body (String(err) arm)", async () => {
+    ddbMock.on(GetCommand).callsFake(() => {
+      return Promise.reject({ notAnError: "ddb-plain-object-rejection" });
+    });
+
+    const event = makeEvent(
+      "GET /replay/by-conversation/{conversationId}",
+      { conversationId: "conv-1" },
+      { "custom:organization": "org-1" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body!)).toEqual({ error: "Internal server error" });
+    expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+  });
+});
