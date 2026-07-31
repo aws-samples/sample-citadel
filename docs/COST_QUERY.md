@@ -28,6 +28,8 @@ is simply not yet a first-class dimension on this API.
 
 All routes require a valid Cognito JWT (the HttpApi's default authorizer). CORS is restricted to the deployed frontend origin (`FRONTEND_ORIGIN` env/context) — no wildcard origin, since this is a bearer-token-authorized API.
 
+**Troubleshooting note:** if `FRONTEND_ORIGIN` was not supplied at deploy time, `AllowOrigins` falls back to a blocking placeholder (`https://frontend-origin-not-configured.invalid`) rather than a wildcard — `curl`/server-to-server calls still succeed (CORS is a browser-enforced check), but every browser preflight from the real frontend fails as a network error. Fix: redeploy `TelemetryStack` with `FRONTEND_ORIGIN` set (after this branch's telemetry-stack is deployed).
+
 | Route | Lambda | IAM role grants |
 |---|---|---|
 | `GET /cost/summary` | `cost-query-handler.ts` | `dynamodb:Query` only |

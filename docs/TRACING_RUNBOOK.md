@@ -106,7 +106,12 @@ regardless of the env value (`telemetry-stack.ts`), so this cutover is an
    this is done.
 3. **Flip `TRACE_BACKEND=spans`** — a tiny CDK env-only deploy of
    `telemetry-stack.ts` (`TRACE_BACKEND` Lambda environment variable). No
-   other resource changes.
+   other resource changes (after this branch's telemetry-stack is
+   deployed) — both IAM permission sets are already granted on the
+   deployed `TraceQueryHandler` role only once the branch's stack update
+   has shipped; against an account still running a pre-port
+   `telemetry-stack.ts`, this step is a full stack deploy, not merely an
+   env-var flip.
 4. **Verify** the waterfall viewer against a live execution/conversation
    trace and the admin raw-trace-id route; confirm `status`/`linkedBy`
    behave as documented below and that AgentCore agent spans (once the
@@ -214,16 +219,22 @@ never a false merge of two root segments into one.
 | H3 | stepRunner → SQS → workerWrapper | native-linked (via `AWSTraceHeader` MessageAttribute) + annotation floor | HIGH (upgraded from MEDIUM) |
 | H2 | EventBridge fan-out (agent-message-handler, project-progress-updater, workflow-progress-fanout, governance-notifier, gateway-registration-handler, stepRunner, cost-ledger writer) | annotation-stitched | HIGH (annotation), LOW/unverified (native EB→Lambda link) |
 | H4 | worker → EventBridge `workflow.node.completed/failed` → stepRunner | same as H2 | HIGH (annotation) |
-| H6 | intake AgentCore Runtime → EventBridge `intake.progress.updated` / `intake.usage.captured` → consumers | producer subsegment native; downstream annotation-stitched | HIGH (annotation) — see caveat below |
+| H6 | intake AgentCore Runtime → EventBridge `intake.progress.updated` / `intake.usage.captured` → consumers | producer: live OTel span context (ADOT), rendered to X-Ray form; downstream annotation-stitched | HIGH (annotation) — see caveat below |
 
 **H6 caveat:** `service/agent_intake_single` runs OpenTelemetry (via
 `strands-agents[otel]`), not the X-Ray SDK — `aws-xray-sdk` is not a
 declared dependency of that service. `tools/tracing.active_trace_context()`
-degrades to a genuine no-op (`traceContext` never populated) in every
-current deployment. The Detail shape stays additive-safe either way; H6
-will start actually stitching the moment `aws-xray-sdk` is added to
-`service/agent_intake_single/requirements.txt` (an infra follow-up, no code
-change required beyond that).
+no longer degrades to a no-op: its source priority 1 is the live
+OpenTelemetry span context (ADOT auto-instrumentation via
+`opentelemetry-instrument` + `strands-agents[otel]`), rendered into the
+X-Ray form (`1-<8 hex>-<24 hex>` traceId, 16-hex parentId, sampled from
+`trace_flags`) so ids stay compatible with the platform's trace search — no
+new dependency is required for this to work (bb35989). The X-Ray
+(sub)segment branch (`aws-xray-sdk`) is kept only as a harmless fallback for
+the currently nonexistent case where that package is added and a segment is
+actually open; it is not a precondition for H6 to stitch. Both branches
+degrade to `None`/never raise, preserving the byte-identical-when-absent
+`traceContext` guarantee.
 
 **cost-ledger-reconciler is NOT a consumer hop.** It is `rate(1 hour)`
 schedule-triggered with no event argument — there is no Detail/traceContext
@@ -257,6 +268,34 @@ These key literals are pinned by dedicated tests in both languages —
 `arbiter/common/__tests__/test_tracing.py` (`put_annotation`/
 `put_metadata` call assertions) — so a silent rename fails CI rather than
 silently breaking the waterfall-viewer story.
+
+### Run identity (`runId`) minting contract
+
+`runId` (Pass 1, decision `f1cbd5ef`) is **server-minted only** —
+`backend/src/utils/run-id.ts`'s `mintRunId()` (format: `run-<uuidv4>`) is
+the sole TypeScript producer, invoked at every entry point (intake,
+conversation, execution, task-runner, and app-invoke resolvers per
+`8ebef1d`). Any client-supplied `runId` on an inbound request body is
+stripped/ignored, mirroring how the client-minted `orchestrationId` is
+already discarded in `task-runner-resolver.ts` — no code path may read a
+`runId` off external input.
+
+`DispatchContext` (same module) makes this a **compile-time** guard, not
+just a runtime convention: `runId` is a required field on the type and a
+required parameter on `buildDispatchContext()`, so an entry point that
+omits it fails `tsc` rather than silently shipping an unstamped dispatch.
+
+Absence of `runId` never fails a write — it is additive/nullable
+everywhere it is carried (cost-ledger rows, EventBridge Detail bodies,
+X-Ray annotations). To catch a *silent* regression where a call site
+should be stamping a `runId` but isn't, the platform emits a WARN-level
+backstop metric, `UnstampedDispatch` (`METRIC_UNSTAMPED_DISPATCH` in
+`backend/src/utils/metrics-constants.ts`, mirrored in the Python arbiter
+tier's `arbiter/common/metrics_constants.py`), whenever a finding or
+dispatch is written `runId`-absent. This metric is observability-only — it
+never gates dispatch or blocks a write, it exists purely so an operator can
+notice the regression on a dashboard instead of discovering it later as a
+missing correlation.
 
 ## Operator query: "show me every trace for one flow"
 
@@ -347,9 +386,9 @@ Run these in a dev account and update the hop-matrix confidence from
    as **Linked** to the stepRunner trace, and confirm the `correlation_id`
    annotation is present regardless of link status.
 3. **H4 probe** — same as H2, on the worker→stepRunner return leg.
-4. **H6 probe** — once `aws-xray-sdk` ships in
-   `service/agent_intake_single/requirements.txt`: emit a usage event, find
-   the consumer trace by `annotation.correlation_id`.
+4. **H6 probe** — runnable now: emit a usage event and confirm
+   `traceContext` is carried (live OTel span source, bb35989); find the
+   consumer trace by `annotation.correlation_id`.
 
 ## File map
 

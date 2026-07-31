@@ -77,6 +77,29 @@ The viewer never fakes data. If a trace can't be shown, you'll see one of:
   admin rights).
 - **Unavailable** — the trace API isn't configured for this deployment.
 
+**Troubleshooting a browser-only failure that `curl` doesn't reproduce:**
+if `FRONTEND_ORIGIN` was not supplied at deploy time, the `costHttpApi`'s
+CORS `AllowOrigins` falls back to a blocking placeholder origin
+(`https://frontend-origin-not-configured.invalid`). The API itself is
+healthy and answers a direct `curl` request normally, but every browser
+call — the trace routes above and the cost dashboards alike — fails
+preflight as a generic network error, not a typed state the UI can
+distinguish (it will not present as "Unavailable" or "Not authorized";
+the request never completes). Fix: redeploy `TelemetryStack` with
+`FRONTEND_ORIGIN` set to the actual deployed frontend origin (after this
+branch's telemetry-stack is deployed).
+
+## Per-node metrics in execution inspection
+
+Beyond the waterfall trace, opening an execution's detail view
+(`ExecutionDetailSheet`) surfaces per-node telemetry directly in the UI:
+duration, queue wait (dispatch → worker-start), cold start, and retry
+count for each node, sourced from `execution-resolver.ts` off the same
+`NodeDurationMs`/`NodeQueueWaitMs`/`NodeColdStart` values the platform
+health dashboard's widgets read (see "Platform-Health Dashboard + SLO
+Alarms" below) — one telemetry pipeline feeding both the aggregate
+dashboard and the per-execution inspection view.
+
 ## Admin: raw trace-id lookup
 
 Administrators additionally see an **Observability** entry in the sidebar

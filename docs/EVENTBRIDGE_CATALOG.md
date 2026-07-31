@@ -52,10 +52,43 @@ These events are published by Lambda resolvers via `backend/src/utils/events.ts`
     "agentId": "string (optional)",
     "payload": { },
     "timestamp": "ISO 8601",
-    "correlationId": "string (optional)"
+    "correlationId": "string (optional)",
+    "traceContext": { } ,
+    "runId": "string (optional, server-minted)"
   }
 }
 ```
+
+`traceContext` (optional, additive — see [TRACING_RUNBOOK.md](./TRACING_RUNBOOK.md#carried-context-format)
+for the field-by-field shape) and `runId` (optional, server-minted, see
+"Trace context & run identity fields" below) were added by `publishEvent()`
+in `backend/src/utils/events.ts` without changing any existing field; both
+are omitted entirely (not null) when no active trace context / `runId`
+exists for the call, so pre-feature callers see a byte-identical Detail
+body.
+
+### Trace context & run identity fields
+
+Two additive, optional fields ride the shared envelope above and the
+`workflow.*` schemas below:
+
+- **`traceContext`** — populated by `getActiveTraceContext()`
+  (`backend/src/utils/trace-context.ts`) only when an active X-Ray segment
+  exists at emit time; shape: `{ xrayTraceHeader?, traceId?, parentId?,
+  traceparent?, correlationId?, runId? }` (all fields optional). See
+  [TRACING_RUNBOOK.md](./TRACING_RUNBOOK.md#carried-context-format) for the
+  authoritative format and the annotation-key contract it feeds.
+- **`runId`** — the server-minted shared correlation id (Pass 1, decision
+  `f1cbd5ef`, `backend/src/utils/run-id.ts`). Carried when the producer's
+  dispatch context supplied one; absent on pre-`runId` hops — never
+  fabricated by a consumer. See
+  [TRACING_RUNBOOK.md](./TRACING_RUNBOOK.md#run-identity-runid-minting-contract)
+  for the minting contract (server-minted only, client values stripped,
+  `UnstampedDispatch` backstop metric).
+
+Absence of either field must never fail a consumer — both are
+property-tested no-op-safe in `backend/src/utils/__tests__/trace-context.test.ts`
+and `backend/src/utils/__tests__/events.test.ts`.
 
 ### Event Type Constants
 
@@ -79,7 +112,7 @@ export const EventTypes = {
 
 ## Workflow Events (source: `citadel.workflows`)
 
-These events are published by the Step Runner via `arbiter/stepRunner/events.py`. All workflow events include a `correlationId` set to the `executionId` for cross-service traceability.
+These events are published by the Step Runner via `arbiter/stepRunner/events.py`. All workflow events include a `correlationId` set to the `executionId` for cross-service traceability. As of `db0e88a`/`8ebef1d`, every `detail` below may additionally carry the same additive, optional `traceContext` and `runId` fields described in "Trace context & run identity fields" above (Python producer: `arbiter/common/tracing.py` + `arbiter/common/workflow_contract.py`) — omitted from the individual schemas below for brevity, but present on the wire whenever an active trace context / `runId` exists at emit time.
 
 ### Event Types
 

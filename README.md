@@ -49,6 +49,8 @@ State is event-driven and eventually consistent: EventBridge carries `citadel.*`
 
 **13 Integration Types.** Seven SaaS connectors (Confluence, Jira, ServiceNow, Slack, Microsoft, PagerDuty, Zendesk), three AgentCore types (AWS Lambda for custom logic, AWS Services via Smithy, external MCP servers), and three legacy connectors (SharePoint, Salesforce, GitHub — partially implemented). Credentials are vended through scoped, short-lived STS sessions and stored in Secrets Manager.
 
+**Runtime Observability.** A one-click waterfall trace viewer shows the nested X-Ray span tree behind any workflow execution or agent conversation, with per-span durations and fault/error/throttle badges, deep-linked from execution detail sheets and conversation views. The viewer never fakes data: honest, explicit states cover loading, X-Ray's eventual-availability indexing window, a genuinely empty trace, cross-org unauthorized access, and an unconfigured deployment. A platform-health CloudWatch dashboard and six SLO alarms (workflow node failure/queue-wait, AppSync 5xx, DLQ depth, cost-reconciler staleness, cost drift) surface on-call-ready signals, and governance decisions link bidirectionally to the runtime trace they were made inside of. A server-minted `runId` (never client-supplied) correlates a flow across every hop — dispatch, trace annotations, and the cost ledger — and downloadable, sanitised replay packages let an execution or conversation be re-examined offline. See [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+
 **AI-Accelerated Modernization Governance.** A first-class governance engine that makes the agent system *accountable*:
 - Architecture Decision Records with locking and controlled reopen attempts, execution specifications with an approval lifecycle, interrogation rounds (with encrypted transcripts), agent design assessments, and program reviews against a structured checklist.
 - A constitutional rule hierarchy, case law, authority units, and composition contracts that constrain what agents are permitted to do.
@@ -114,6 +116,10 @@ Prerequisites: AWS CLI, Node.js 24+, Python 3.14+, CDK 2.100+, and Finch (or Doc
 - **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Complete deployment guide
 - **[docs/QUICK_START.md](docs/QUICK_START.md)** - 5-minute quick start
 - **[docs/EVENTBRIDGE_CATALOG.md](docs/EVENTBRIDGE_CATALOG.md)** - EventBridge event catalog (all event types and schemas)
+- **[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)** - Waterfall trace viewer, platform-health dashboard + SLO alarms, decision↔trace linking
+- **[docs/TRACING_RUNBOOK.md](docs/TRACING_RUNBOOK.md)** - Cross-service trace propagation contract, Transaction Search constraint, and cutover procedure
+- **[docs/REPLAY_PACKAGE.md](docs/REPLAY_PACKAGE.md)** - Sanitised execution/conversation replay package envelope and eval-ingestion contract
+- **[docs/COST_QUERY.md](docs/COST_QUERY.md)** - Cost query API and budget alerts
 - **[docs/RESOLVER_GUIDE.md](docs/RESOLVER_GUIDE.md)** - Lambda resolver development guide
 - **[docs/ADAPTER_GUIDE.md](docs/ADAPTER_GUIDE.md)** - Adapter development guide (adding datastores/integrations)
 - **[docs/AGENT_APPS.md](docs/AGENT_APPS.md)** - Agent Apps platform architecture
