@@ -189,6 +189,66 @@ describe('computeMetrics', () => {
     expect(metrics.p50Latency).toBe(0);
     expect(metrics.p95Latency).toBe(0);
     expect(metrics.p99Latency).toBe(0);
+    expect(metrics.totalInputTokens).toBe(0);
+    expect(metrics.totalOutputTokens).toBe(0);
+    expect(metrics.totalCostMicroUsd).toBe(0);
+  });
+
+  test('aggregates token usage and attributed cost across entries', () => {
+    const entries: AccessLogEntry[] = [
+      makeLogEntry({
+        requestId: 'req-a',
+        status: 200,
+        model: 'anthropic.claude-3-5-sonnet',
+        inputTokens: 1000,
+        outputTokens: 500,
+      }),
+      makeLogEntry({
+        requestId: 'req-b',
+        status: 200,
+        model: 'anthropic.claude-3-5-sonnet',
+        inputTokens: 2000,
+        outputTokens: 0,
+      }),
+    ];
+
+    const metrics = computeMetrics(entries);
+
+    expect(metrics.totalInputTokens).toBe(3000);
+    expect(metrics.totalOutputTokens).toBe(500);
+    // sonnet: $3/1M in, $15/1M out
+    //   req-a: 1000*3 + 500*15 = 10500
+    //   req-b: 2000*3 + 0       =  6000
+    expect(metrics.totalCostMicroUsd).toBe(16500);
+  });
+
+  test('treats entries without token fields as zero tokens and zero cost', () => {
+    const entries: AccessLogEntry[] = [makeLogEntry({ status: 200 })];
+
+    const metrics = computeMetrics(entries);
+
+    expect(metrics.totalInputTokens).toBe(0);
+    expect(metrics.totalOutputTokens).toBe(0);
+    expect(metrics.totalCostMicroUsd).toBe(0);
+  });
+
+  test('parses token fields from structured log entries', () => {
+    const messages = [
+      JSON.stringify(
+        makeLogEntry({
+          requestId: 'req-1',
+          model: 'amazon.nova-lite',
+          inputTokens: 10,
+          outputTokens: 20,
+        }),
+      ),
+    ];
+
+    const parsed = parseAccessLogEntries(messages);
+
+    expect(parsed[0].model).toBe('amazon.nova-lite');
+    expect(parsed[0].inputTokens).toBe(10);
+    expect(parsed[0].outputTokens).toBe(20);
   });
 });
 
