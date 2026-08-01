@@ -547,3 +547,183 @@ def test_build_result_defaults_timestamp_when_omitted():
     )
     assert isinstance(detail['timestamp'], str) and detail['timestamp'] != ''
     assert parse_node_result_detail(detail).status == STATUS_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# R18: trace_context is an additive, optional kwarg on both builders.
+# Architect task f4f4bab3-7a07-4acf-ba43-ba43bb488444, design §"File-by-file
+# list" item 10 — omitted entirely when the kwarg is not passed, keeping the
+# detail/message byte-identical to pre-feature callers.
+# ---------------------------------------------------------------------------
+
+
+def test_r18_build_node_dispatch_message_omits_trace_context_key_when_not_passed():
+    message = build_node_dispatch_message(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+    )
+    assert 'traceContext' not in message
+
+
+def test_r18_build_node_dispatch_message_includes_trace_context_when_passed():
+    ctx = {'traceId': '1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb', 'parentId': 'cccccccccccccccc'}
+    message = build_node_dispatch_message(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        trace_context=ctx,
+    )
+    assert message['traceContext'] == ctx
+    # Round-trips through the contract's own parser without raising.
+    parsed = parse_node_dispatch_message(message)
+    assert parsed.node_id == 'n'
+
+
+def test_r18_build_node_result_detail_omits_trace_context_key_when_not_passed():
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'k': 'v'}, timestamp='t',
+    )
+    assert 'traceContext' not in detail
+
+
+def test_r18_build_node_result_detail_includes_trace_context_when_passed():
+    ctx = {'traceId': '1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb', 'parentId': 'cccccccccccccccc'}
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_COMPLETED, output={'k': 'v'}, timestamp='t',
+        trace_context=ctx,
+    )
+    assert detail['traceContext'] == ctx
+
+
+def test_r18_build_node_result_detail_failed_omits_trace_context_when_not_passed():
+    detail = build_node_result_detail(
+        execution_id='e', node_id='n', workflow_id='w', agent_id='a',
+        status=STATUS_FAILED, error='boom', timestamp='t',
+    )
+    assert 'traceContext' not in detail
+
+
+# ---------------------------------------------------------------------------
+# Queue-wait metric: additive dispatched_at (dispatch message) and
+# worker_started_at / dispatched_at echo (node-result detail).
+# ---------------------------------------------------------------------------
+
+class TestDispatchMessageDispatchedAtAdditive:
+    def test_omitted_dispatched_at_keeps_message_byte_identical(self):
+        """A pre-feature caller that never passes dispatched_at gets a
+        message with no 'dispatchedAt' key at all — not a null/empty one."""
+        message = build_node_dispatch_message(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+        )
+        assert 'dispatchedAt' not in message
+
+    def test_supplied_dispatched_at_is_promoted_to_top_level_key(self):
+        message = build_node_dispatch_message(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+            dispatched_at='2026-01-01T00:00:00+00:00',
+        )
+        assert message['dispatchedAt'] == '2026-01-01T00:00:00+00:00'
+
+    def test_non_string_dispatched_at_raises(self):
+        with pytest.raises(ValueError):
+            build_node_dispatch_message(
+                execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+                dispatched_at=12345,  # type: ignore[arg-type]
+            )
+
+    def test_parse_round_trips_dispatched_at(self):
+        message = build_node_dispatch_message(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+            dispatched_at='2026-01-01T00:00:00+00:00',
+        )
+        parsed = parse_node_dispatch_message(message)
+        assert parsed.dispatched_at == '2026-01-01T00:00:00+00:00'
+
+    def test_parse_defaults_dispatched_at_to_none_when_absent(self):
+        message = build_node_dispatch_message(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+        )
+        parsed = parse_node_dispatch_message(message)
+        assert parsed.dispatched_at is None
+
+    def test_parse_never_raises_on_malformed_dispatched_at_on_the_wire(self):
+        """A malformed dispatchedAt (wrong type) on the wire degrades to None
+        rather than raising — queue-wait is best-effort telemetry, not a
+        gate on node dispatch parsing."""
+        message = build_node_dispatch_message(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+        )
+        message['dispatchedAt'] = 12345
+        parsed = parse_node_dispatch_message(message)
+        assert parsed.dispatched_at is None
+
+
+class TestNodeResultDetailQueueWaitTimestampsAdditive:
+    def test_omitted_timestamps_keep_detail_byte_identical(self):
+        detail = build_node_result_detail(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+            status=STATUS_COMPLETED, output={'ok': True},
+        )
+        assert 'dispatchedAt' not in detail
+        assert 'workerStartedAt' not in detail
+
+    def test_supplied_timestamps_are_promoted_on_completed_result(self):
+        detail = build_node_result_detail(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+            status=STATUS_COMPLETED, output={'ok': True},
+            dispatched_at='2026-01-01T00:00:00+00:00',
+            worker_started_at='2026-01-01T00:00:01+00:00',
+        )
+        assert detail['dispatchedAt'] == '2026-01-01T00:00:00+00:00'
+        assert detail['workerStartedAt'] == '2026-01-01T00:00:01+00:00'
+
+    def test_supplied_timestamps_are_promoted_on_failed_result_too(self):
+        """Queue-wait is measurable even for a node that ultimately failed —
+        the timestamps are not gated on status."""
+        detail = build_node_result_detail(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+            status=STATUS_FAILED, error='boom',
+            dispatched_at='2026-01-01T00:00:00+00:00',
+            worker_started_at='2026-01-01T00:00:01+00:00',
+        )
+        assert detail['dispatchedAt'] == '2026-01-01T00:00:00+00:00'
+        assert detail['workerStartedAt'] == '2026-01-01T00:00:01+00:00'
+
+    def test_only_one_timestamp_supplied_omits_the_other(self):
+        detail = build_node_result_detail(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+            status=STATUS_COMPLETED, output={'ok': True},
+            worker_started_at='2026-01-01T00:00:01+00:00',
+        )
+        assert 'dispatchedAt' not in detail
+        assert detail['workerStartedAt'] == '2026-01-01T00:00:01+00:00'
+
+    def test_parse_round_trips_both_timestamps(self):
+        detail = build_node_result_detail(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+            status=STATUS_COMPLETED, output={'ok': True},
+            dispatched_at='2026-01-01T00:00:00+00:00',
+            worker_started_at='2026-01-01T00:00:01+00:00',
+        )
+        parsed = parse_node_result_detail(detail)
+        assert parsed.dispatched_at == '2026-01-01T00:00:00+00:00'
+        assert parsed.worker_started_at == '2026-01-01T00:00:01+00:00'
+
+    def test_parse_defaults_both_timestamps_to_none_when_absent(self):
+        detail = build_node_result_detail(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+            status=STATUS_COMPLETED, output={'ok': True},
+        )
+        parsed = parse_node_result_detail(detail)
+        assert parsed.dispatched_at is None
+        assert parsed.worker_started_at is None
+
+    def test_parse_never_raises_on_malformed_timestamps_on_the_wire(self):
+        detail = build_node_result_detail(
+            execution_id='exec-1', node_id='n0', workflow_id='wf-1', agent_id='agent-A',
+            status=STATUS_COMPLETED, output={'ok': True},
+        )
+        detail['dispatchedAt'] = 12345
+        detail['workerStartedAt'] = {}
+        parsed = parse_node_result_detail(detail)
+        assert parsed.dispatched_at is None
+        assert parsed.worker_started_at is None

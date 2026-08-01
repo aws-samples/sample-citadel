@@ -5,7 +5,7 @@
  * All JSON parsing is defensive — invalid payloads render as raw strings.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Copy } from 'lucide-react';
+import { ChevronDown, ChevronRight, Copy, Download, Waypoints } from 'lucide-react';
 import {
   Sheet,
   SheetContent,
@@ -62,6 +62,20 @@ interface ExecutionDetailSheetProps {
   execution: ExecutionDetail | null;
   open: boolean;
   onClose: () => void;
+  /** Deep-link callback to the waterfall trace viewer (design task 60ba09e4).
+   * The sheet has no router access itself, so the owner (AppDetailView) wires
+   * this to `navigate('/observability/trace/execution/<executionId>')`. */
+  onViewTrace?: (executionId: string) => void;
+  /**
+   * Deep-link callback for the CIT-026 execution replay package download.
+   * Ownership is enforced server-side (resolveExecutionOwnership) — every
+   * org member sees this button (design §2a: ownership-gated for ALL org
+   * members, not admin-only); the API itself returns 403/404 for a
+   * non-owning org, and the caller (AppDetailView) surfaces that via
+   * replayService's typed unauthorized/gateRefused results. When absent,
+   * the button is omitted entirely (graceful, no crash).
+   */
+  onDownloadReplay?: (executionId: string) => void;
 }
 
 // ---- Style maps (reuse the execution status color idiom) ----
@@ -188,12 +202,70 @@ function computeDuration(startedAt?: string | null, completedAt?: string | null)
   }
 }
 
+/** Raw duration in ms for a node (startedAt -> completedAt), or null when
+ * either bound is missing/unparseable. Only completed durations are used
+ * for percentiles — an in-flight node's "duration so far" would skew p50/p95
+ * toward the current wall-clock moment rather than reflecting real latency. */
+function nodeDurationMs(node: ExecutionNodeResult): number | null {
+  if (!node.startedAt || !node.completedAt) return null;
+  try {
+    const start = new Date(node.startedAt).getTime();
+    const end = new Date(node.completedAt).getTime();
+    if (Number.isNaN(start) || Number.isNaN(end)) return null;
+    return Math.max(0, end - start);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Percentile surfacing decision: computed CLIENT-SIDE from the execution
+ * row's per-node durations (already present in nodeResults — no new API).
+ * This needs no backend change because the durations are already on the
+ * row this sheet already fetches; a CloudWatch metrics-query API would add
+ * a network round trip and a new resolver for numbers this component can
+ * derive in-memory from data it already has. The CloudWatch percentiles
+ * (fed by the emitted NodeDurationMs metric) are for the cross-execution
+ * dashboards story, a different question (trend across many runs) than this
+ * sheet's question (how did THIS run's nodes distribute).
+ *
+ * Nearest-rank method (ceil-based index into the ascending-sorted array) —
+ * simple, deterministic, no interpolation. Returns null when fewer than 2
+ * completed-duration samples exist (a percentile over 0-1 points isn't
+ * informative).
+ */
+function computeDurationPercentiles(nodes: ExecutionNodeResult[]): { p50: number; p95: number; count: number } | null {
+  const durations = nodes
+    .map(nodeDurationMs)
+    .filter((d): d is number => d !== null)
+    .sort((a, b) => a - b);
+  if (durations.length < 2) return null;
+  const rank = (p: number) => {
+    const idx = Math.ceil((p / 100) * durations.length) - 1;
+    return durations[Math.min(Math.max(idx, 0), durations.length - 1)];
+  };
+  return { p50: rank(50), p95: rank(95), count: durations.length };
+}
+
+/** Format a raw ms value using the same thresholds as computeDuration. */
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+  return `${Math.round(ms / 60000)}m`;
+}
+
 const PRE_CLASSES =
   'rounded-md border border-border/50 bg-background p-3 text-xs text-foreground font-mono max-h-80 overflow-auto whitespace-pre-wrap';
 
 // ---- Component ----
 
-export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDetailSheetProps) {
+export function ExecutionDetailSheet({
+  execution,
+  open,
+  onClose,
+  onViewTrace,
+  onDownloadReplay,
+}: ExecutionDetailSheetProps) {
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
   const [inputExpanded, setInputExpanded] = useState(false);
 
@@ -206,6 +278,10 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
   const nodeSteps = useMemo(
     () => parseNodeResults(execution?.nodeResults),
     [execution?.nodeResults],
+  );
+  const durationPercentiles = useMemo(
+    () => computeDurationPercentiles(nodeSteps),
+    [nodeSteps],
   );
   const prettyOutput = useMemo(() => prettyJson(execution?.output), [execution?.output]);
   const prettyInput = useMemo(() => prettyJson(execution?.input), [execution?.input]);
@@ -252,6 +328,29 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
             <span className="text-xs text-muted-foreground">
               Duration {computeDuration(execution.startedAt, execution.completedAt)}
             </span>
+            {onViewTrace && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground cursor-pointer ml-auto mr-6"
+                onClick={() => onViewTrace(execution.executionId)}
+              >
+                <Waypoints className="size-3 mr-1" /> View trace
+              </Button>
+            )}
+            {onDownloadReplay && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  'h-6 px-2 text-xs text-muted-foreground hover:text-foreground cursor-pointer',
+                  onViewTrace ? '' : 'ml-auto mr-6',
+                )}
+                onClick={() => onDownloadReplay(execution.executionId)}
+              >
+                <Download className="size-3 mr-1" /> Download replay package
+              </Button>
+            )}
           </div>
           <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
             <span>Started {formatDate(execution.startedAt)}</span>
@@ -262,6 +361,11 @@ export function ExecutionDetailSheet({ execution, open, onClose }: ExecutionDeta
             )}
             {executionUsageTotals && executionUsageTotals.totalTokens > 0 && (
               <span>Total tokens {executionUsageTotals.totalTokens.toLocaleString()}</span>
+            )}
+            {durationPercentiles && (
+              <span title={`Across ${durationPercentiles.count} completed nodes`}>
+                Node duration p50 {formatMs(durationPercentiles.p50)} · p95 {formatMs(durationPercentiles.p95)}
+              </span>
             )}
           </div>
         </SheetHeader>

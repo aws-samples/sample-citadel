@@ -1112,9 +1112,17 @@ def handler(event, context):
           EXTRACTION_MODEL:
             process.env.EXTRACTION_MODEL ||
             `${crossRegionPrefix(this.region)}.anthropic.claude-haiku-4-5-20251001-v1:0`,
-          LANGFUSE_SECRET_KEY: "",
-          LANGFUSE_PUBLIC_KEY: "",
-          LANGFUSE_BASE_URL: "",
+          // LANGFUSE_SECRET_KEY / LANGFUSE_PUBLIC_KEY / LANGFUSE_BASE_URL
+          // empty-string pins REMOVED (design §6, decision dc270923):
+          // intent is ADOT observability ON (unifying Lambda + AgentCore
+          // spans in the Transaction Search-backed viewer), so the
+          // runtime-injected ADOT defaults must apply — do NOT set
+          // DISABLE_ADOT_OBSERVABILITY either. Verified before removal:
+          // `service/agent_intake_single/agent.py`'s Langfuse exporter
+          // gate is `if _lf_pk and _lf_sk` — both keys are falsy whether
+          // pinned to "" or fully absent from the environment, so
+          // absent==empty holds for the gate that matters; the exporter
+          // stays un-wired either way (grepped, not assumed).
         },
       },
     );
@@ -1173,6 +1181,62 @@ def handler(event, context):
       new iam.PolicyStatement({
         actions: ["bedrock:Retrieve", "bedrock:RetrieveAndGenerate"],
         resources: [sessionKb.attrKnowledgeBaseArn],
+      }),
+    );
+
+    // --- AgentCore Runtime observability grants (design §5, §6; runbook
+    // "What the intake container needs before its telemetry appears at
+    // all") ------------------------------------------------------------
+    // The `EnableLambdaTracing` aspect (tracing-aspect.ts) only visits
+    // `lambda.Function` — it does NOT touch this AgentCore Runtime
+    // construct, so none of the following were granted before this
+    // change. xray:Put*/GetSampling* have no resource-level IAM scoping
+    // (same posture as every other un-scopable xray:Put* grant in this
+    // stack); covered by the EXISTING
+    // "AgentIntakeSingleRuntime/ExecutionRole/DefaultPolicy/Resource"
+    // NagSuppression already registered in bin/app.ts (whose comment
+    // already anticipates "un-scopable xray:Put* ... + cloudwatch:
+    // PutMetricData (namespace-conditioned)" on this exact role) — no new
+    // suppression needed here.
+    agentIntakeSingleRuntime.grantPrincipal.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets",
+        ],
+        resources: ["*"],
+      }),
+    );
+
+    // cloudwatch:PutMetricData has no resource-level ARN to scope to —
+    // least privilege is enforced via the namespace condition instead
+    // (mirrors the DocumentIngestion PutMetricData pattern at L888).
+    agentIntakeSingleRuntime.grantPrincipal.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: { "cloudwatch:namespace": "bedrock-agentcore" },
+        },
+      }),
+    );
+
+    // CloudWatch Logs write/describe scoped to the AgentCore-managed log
+    // group prefix for this runtime — NOT Resource:* (unlike the two
+    // grants above, this API DOES support resource-level scoping).
+    agentIntakeSingleRuntime.grantPrincipal.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams",
+        ],
+        resources: [
+          `arn:aws:logs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:log-group:/aws/bedrock-agentcore/runtimes/*`,
+        ],
       }),
     );
 

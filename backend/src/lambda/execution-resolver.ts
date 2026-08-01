@@ -11,17 +11,71 @@ import {
   EventBridgeClient,
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 import { v4 as uuidv4 } from "uuid";
 import { getUserId } from "../utils/appsync";
 import { extractOrgFromEvent } from "../utils/auth-event";
+import { mintRunId, buildDispatchContext } from "../utils/run-id";
+import {
+  METRIC_NAMESPACE,
+  METRIC_NODE_COLD_START,
+  UNIT_COUNT,
+} from "../utils/metrics-constants";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 const eventBridgeClient = new EventBridgeClient({});
+const cloudWatchClient = new CloudWatchClient({});
 
 const EXECUTIONS_TABLE = process.env.EXECUTIONS_TABLE!;
 const WORKFLOWS_TABLE = process.env.WORKFLOWS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
+
+// Cold-start detection (module-scope flag): a Lambda execution environment
+// reuses this module across invocations, so a plain module-level boolean —
+// flipped to false the first time the handler runs in this container — is
+// the cheapest possible signal. `true` (the import-time default) only on the
+// FIRST invocation in a fresh container; every subsequent invocation in the
+// same (warm) container observes `false`.
+let isColdStart = true;
+
+/**
+ * Emit NodeColdStart exactly once per container lifetime, best-effort.
+ * Reads-then-flips `isColdStart` so a re-entrant/duplicate call within the
+ * same container never double-emits. Wrapped so a CloudWatch failure
+ * (throttling, missing PutMetricData permission, network) can never break
+ * the resolver — mirrors the step runner's `_emit_metric` best-effort
+ * contract (arbiter/stepRunner/executor.py) and this repo's emf.ts
+ * "never throws" convention.
+ */
+async function emitColdStartMetricIfApplicable(): Promise<void> {
+  if (!isColdStart) return;
+  isColdStart = false;
+  try {
+    await cloudWatchClient.send(
+      new PutMetricDataCommand({
+        Namespace: METRIC_NAMESPACE,
+        MetricData: [
+          {
+            MetricName: METRIC_NODE_COLD_START,
+            Value: 1,
+            Unit: UNIT_COUNT,
+          },
+        ],
+      }),
+    );
+  } catch (err) {
+    console.error("execution-resolver: cold-start metric emit failed", err);
+  }
+}
+
+/** Test-only: reset the cold-start flag to its fresh-container default. */
+export function __resetColdStartForTest(): void {
+  isColdStart = true;
+}
 
 /**
  * Merged view of every argument shape this resolver's fields receive.
@@ -74,6 +128,8 @@ interface ExecutionRecord {
   error?: string | null;
   /** Additive: execution-level usage totals folded from nodeResults on read. */
   usageTotals?: UsageTotals | null;
+  /** Additive, nullable: server-minted correlation id (Pass 1, decision f1cbd5ef). Absent on pre-runId rows. */
+  runId?: string;
 }
 
 function _coerceNonNegativeInt(value: unknown): number {
@@ -184,6 +240,10 @@ export const handler: AppSyncResolverHandler<
   unknown
 > = async (event) => {
   console.log("Execution resolver event:", JSON.stringify(event, null, 2));
+  // Best-effort: awaited (not fire-and-forget) so the metric call completes
+  // before the Lambda execution environment is frozen post-return. Wrapped
+  // internally so a CloudWatch failure can never fail the resolver.
+  await emitColdStartMetricIfApplicable();
 
   const { info, arguments: args, identity } = event;
   const fieldName = info.fieldName;
@@ -308,6 +368,10 @@ async function startExecution(
   // 3. Create execution item
   const now = new Date().toISOString();
   const executionId = uuidv4();
+  // Server-minted only (Pass 1, decision f1cbd5ef) — no client input path
+  // exists for startExecution's arguments to carry a runId, so there is
+  // nothing to strip; this mint is the sole source.
+  const runId = mintRunId();
 
   const execution = {
     executionId,
@@ -324,6 +388,7 @@ async function startExecution(
     completedAt: null,
     triggeredBy: userId,
     error: null,
+    runId,
   };
 
   await docClient.send(
@@ -334,9 +399,20 @@ async function startExecution(
   );
 
   // 4. Publish execution.start.requested event
-  await emitEvent("execution.start.requested", {
+  //
+  // Build-time durability guard (Pass 1, decision f1cbd5ef, design §3
+  // layer 1): route the outbound envelope through buildDispatchContext,
+  // whose `runId` parameter is REQUIRED — a future refactor that drops
+  // `runId` here fails `tsc`, not just a runtime check.
+  const dispatchContext = buildDispatchContext({
+    runId,
     executionId,
     workflowId,
+  });
+  await emitEvent("execution.start.requested", {
+    executionId: dispatchContext.executionId,
+    workflowId: dispatchContext.workflowId,
+    runId: dispatchContext.runId,
   });
 
   return execution;

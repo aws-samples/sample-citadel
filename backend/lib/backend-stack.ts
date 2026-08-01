@@ -36,6 +36,13 @@ export class BackendStack extends cdk.Stack {
   public readonly accessLogsBucket: Bucket;
   public readonly workflowsTable: dynamodb.Table;
   public readonly appsTable: dynamodb.Table;
+  /**
+   * Model-config table — exposed publicly (CIT-026 replay package,
+   * design §4) so TelemetryStack can grant read-only access for the
+   * replay envelope's `modelConfig` section. Previously a local `const`
+   * with no cross-stack consumer.
+   */
+  public readonly modelConfigTable: dynamodb.Table;
   public readonly executionsTable: dynamodb.Table;
   public readonly adrsTable: dynamodb.Table;
   public readonly agentDesignAssessmentsTable: dynamodb.Table;
@@ -54,6 +61,12 @@ export class BackendStack extends cdk.Stack {
   // unmoved agentMessageHandlerFunction, so it stays in BackendStack and is
   // passed to ProjectsStack as a prop rather than moving.
   public readonly agentStatusTable: dynamodb.Table;
+  // Exposed for TelemetryStack (dashboards + alarms story, decision
+  // ab73ae1b): the platform-health alarms reuse this existing topic rather
+  // than provisioning a second one — on-call is already subscribed here
+  // for the Lambda error/throttle alarms below. Was a local `const`;
+  // promoted to a public readonly field, zero new resources.
+  public readonly alarmTopic: sns.Topic;
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props);
@@ -211,15 +224,21 @@ export class BackendStack extends cdk.Stack {
       },
     ));
 
-    // Model Config Table — resolved model-selection defaults/overrides. Additive and
-    // not yet wired into any runtime/Lambda env.
-    const modelConfigTable = new dynamodb.Table(this, "ModelConfigTable", {
-      tableName: `citadel-model-config-${props.environment}`,
-      partitionKey: { name: "scope", type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    // Model Config Table — resolved model-selection defaults/overrides.
+    // Exposed via the public readonly `modelConfigTable` field (see class
+    // declaration) so TelemetryStack can read it for the CIT-026 replay
+    // package's `modelConfig` section.
+    const modelConfigTable = (this.modelConfigTable = new dynamodb.Table(
+      this,
+      "ModelConfigTable",
+      {
+        tableName: `citadel-model-config-${props.environment}`,
+        partitionKey: { name: "scope", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    ));
 
     // Integrations Table
     const integrationsTable = new dynamodb.Table(this, "IntegrationsTable", {
@@ -1721,6 +1740,33 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    // The resolver emits a best-effort NodeColdStart metric (once per
+    // container lifetime) into the Citadel/Workflows namespace — the same
+    // namespace/metric-emission shape as the arbiter worker's node-level
+    // metrics. PutMetricData has no resource-level scoping; the call is
+    // narrowed to that namespace in code.
+    executionResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
+    NagSuppressions.addResourceSuppressions(
+      executionResolverFunction.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "resolver narrows the call to the Citadel/Workflows namespace " +
+            "(NodeColdStart cold-start metric).",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+      true,
+    );
+
     // AppSync GraphQL API — schema deferred to the L1 escape hatch below so
     // the schema is uploaded to S3 (definitionS3Location) instead of
     // inlined into the CFN template. Inline Definition has a Unicode
@@ -2845,7 +2891,7 @@ export class BackendStack extends cdk.Stack {
     });
 
     // O-01: CloudWatch alarms for operational visibility
-    const alarmTopic = new sns.Topic(this, "AlarmTopic", {
+    this.alarmTopic = new sns.Topic(this, "AlarmTopic", {
       topicName: `citadel-alarms-${props.environment}`,
       displayName: "Citadel Alarms",
       enforceSSL: true,
@@ -2925,22 +2971,17 @@ export class BackendStack extends cdk.Stack {
       alarmDescription: "AppSync 4xx error rate exceeded threshold",
     });
 
-    new cloudwatch.Alarm(this, "AppSync5xxAlarm", {
-      alarmName: `citadel-appsync-5xx-${props.environment}`,
-      metric: new cloudwatch.Metric({
-        namespace: "AWS/AppSync",
-        metricName: "5XXError",
-        dimensionsMap: { GraphQLAPIId: this.appSyncApi.apiId },
-        period: cdk.Duration.minutes(5),
-        statistic: "Sum",
-      }),
-      threshold: 10,
-      evaluationPeriods: 1,
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: "AppSync 5xx error rate exceeded threshold",
-    });
+    // AppSync 5xx alarm intentionally removed from here — TelemetryStack's
+    // "AppSync5xxAlarm" (platform-health SLO suite, decision ab73ae1b) owns
+    // the physical name `citadel-appsync-5xx-${env}` going forward. Both
+    // stacks defined the identical alarmName, which AWS::EarlyValidation::
+    // ResourceExistenceCheck rejects on whichever stack's changeset deploys
+    // second (see backend/test/duplicate-alarm-name-guard.test.ts). Deploy
+    // order is backend -> telemetry, so backend deletes its copy and
+    // telemetry recreates it within the same pipeline run; telemetry's
+    // definition is a strict superset (SNS alarm action via
+    // props.alarmTopic, tighter threshold/description) so no monitoring
+    // capability is lost, only a brief (single-deploy-run) alarm gap.
 
     new cdk.CfnOutput(this, "GraphQLApiId", {
       value: this.appSyncApi.apiId,

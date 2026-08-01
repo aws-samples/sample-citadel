@@ -29,6 +29,11 @@ export interface GovernanceFinding {
   escalationTarget: string | null;
   residualAuthorityDenial: boolean | null;
   timestamp: number;
+  // Decision<->runtime trace linking (design task 9b3f4f78). Null for
+  // findings written before this field was deployed (write-once ledger —
+  // cannot be retro-stamped) or when no X-Ray trace context was active at
+  // write time.
+  traceId: string | null;
 }
 
 export interface GovernanceFindingConnection {
@@ -673,6 +678,7 @@ const listGovernanceFindingsQuery = `
         escalationTarget
         residualAuthorityDenial
         timestamp
+        traceId
       }
       nextCursor
     }
@@ -693,6 +699,7 @@ const getGovernanceFindingQuery = `
       escalationTarget
       residualAuthorityDenial
       timestamp
+      traceId
     }
   }
 `;
@@ -820,6 +827,7 @@ const getDecisionTraceQuery = `
         escalationTarget
         residualAuthorityDenial
         timestamp
+        traceId
       }
       steps {
         stepNumber
@@ -1967,6 +1975,7 @@ const onGovernanceFindingSubscription = `
       escalationTarget
       residualAuthorityDenial
       timestamp
+      traceId
     }
   }
 `;

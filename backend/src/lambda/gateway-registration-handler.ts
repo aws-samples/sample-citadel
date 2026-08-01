@@ -23,38 +23,43 @@
  * `authorizationData.oauth2.authorizationUrl` once Phase 3 ships.
  */
 
-import { EventBridgeEvent } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { EventBridgeEvent } from "aws-lambda";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   DeleteCommand,
   QueryCommand,
   UpdateCommand,
-} from '@aws-sdk/lib-dynamodb';
+} from "@aws-sdk/lib-dynamodb";
 import {
   BedrockAgentCoreControlClient,
   CreateGatewayTargetCommand,
   type CreateGatewayTargetCommandInput,
   DeleteGatewayTargetCommand,
-} from '@aws-sdk/client-bedrock-agentcore-control';
+} from "@aws-sdk/client-bedrock-agentcore-control";
 import {
   SSMClient,
   GetParameterCommand,
   DeleteParameterCommand,
-} from '@aws-sdk/client-ssm';
+} from "@aws-sdk/client-ssm";
 import {
   SecretsManagerClient,
   DeleteSecretCommand,
   GetSecretValueCommand,
-} from '@aws-sdk/client-secrets-manager';
-import { IdempotencyGuard } from '../utils/idempotency';
-import { getConnectorSpec } from '../utils/connector-registry';
+} from "@aws-sdk/client-secrets-manager";
+import { IdempotencyGuard } from "../utils/idempotency";
+import { getConnectorSpec } from "../utils/connector-registry";
 import {
   buildLambdaTargetPayload,
   buildSmithyTargetPayload,
   buildMCPServerTargetPayload,
   deprovisionCredentialProvider,
-} from '../utils/gateway-target-manager';
+} from "../utils/gateway-target-manager";
+import {
+  annotateFromCarried,
+  extractCarried,
+  logFields,
+} from "../utils/trace-context";
 
 const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const bedrockAgentCore = new BedrockAgentCoreControlClient({});
@@ -62,18 +67,20 @@ const ssm = new SSMClient({});
 const secretsManager = new SecretsManagerClient({});
 const idempotencyGuard = new IdempotencyGuard(process.env.IDEMPOTENCY_TABLE!);
 
-const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
-const REGION = process.env.AWS_REGION || 'us-west-2';
-const ACCOUNT_ID = process.env.ACCOUNT_ID || '';
-const INTEGRATIONS_TABLE = process.env.INTEGRATIONS_TABLE || '';
-const GATEWAY_ID_PARAM = process.env.GATEWAY_ID_PARAM || '';
+const ENVIRONMENT = process.env.ENVIRONMENT || "dev";
+const REGION = process.env.AWS_REGION || "us-west-2";
+const ACCOUNT_ID = process.env.ACCOUNT_ID || "";
+const INTEGRATIONS_TABLE = process.env.INTEGRATIONS_TABLE || "";
+const GATEWAY_ID_PARAM = process.env.GATEWAY_ID_PARAM || "";
 
 let cachedGatewayId: string | undefined;
 
 async function getGatewayId(): Promise<string> {
   if (cachedGatewayId) return cachedGatewayId;
-  const resp = await ssm.send(new GetParameterCommand({ Name: GATEWAY_ID_PARAM }));
-  cachedGatewayId = resp.Parameter?.Value || '';
+  const resp = await ssm.send(
+    new GetParameterCommand({ Name: GATEWAY_ID_PARAM }),
+  );
+  cachedGatewayId = resp.Parameter?.Value || "";
   return cachedGatewayId;
 }
 
@@ -94,7 +101,7 @@ interface IntegrationEvent {
   ssmParameterPrefix?: string;
   /** P3.A: real AgentCore Identity provider ARN (NOT the Secrets Manager ARN). */
   credentialProviderArn?: string;
-  credentialProviderType?: 'API_KEY' | 'OAUTH2';
+  credentialProviderType?: "API_KEY" | "OAUTH2";
   /** P3.A: gateway target id, present on disconnect events. */
   gatewayTargetId?: string;
   /**
@@ -105,29 +112,48 @@ interface IntegrationEvent {
   keepResources?: boolean;
 }
 
-export async function handler(event: EventBridgeEvent<string, IntegrationEvent>) {
-  console.log('Gateway registration event:', JSON.stringify(event, null, 2));
+export async function handler(
+  event: EventBridgeEvent<string, IntegrationEvent>,
+) {
+  console.log("Gateway registration event:", JSON.stringify(event, null, 2));
 
-  const { detail, 'detail-type': detailType } = event;
+  const { detail, "detail-type": detailType } = event;
+
+  // Consumer parse+annotate (design §"Annotation-key contract"): no-op-safe
+  // when detail carries no traceContext (property-tested).
+  const carried = extractCarried(detail);
+  annotateFromCarried({ ...carried, correlationId: detail?.integrationId });
+  console.log(
+    JSON.stringify({
+      level: "info",
+      message: "gateway-registration-handler received event",
+      detailType,
+      integrationId: detail?.integrationId,
+      ...logFields(carried),
+    }),
+  );
 
   // D-03: Use integrationId as idempotency key (not event.id) to handle race conditions
   const idempotencyKey = `${detailType}:${detail.integrationId}`;
-  const { executed } = await idempotencyGuard.withIdempotency(idempotencyKey, async () => {
-    try {
-      if (detailType === 'integration.connect.requested') {
-        await handleConnect(detail);
-      } else if (detailType === 'integration.disconnect.requested') {
-        await handleDisconnect(detail);
+  const { executed } = await idempotencyGuard.withIdempotency(
+    idempotencyKey,
+    async () => {
+      try {
+        if (detailType === "integration.connect.requested") {
+          await handleConnect(detail);
+        } else if (detailType === "integration.disconnect.requested") {
+          await handleDisconnect(detail);
+        }
+      } catch (error: unknown) {
+        console.error("Gateway registration error:", error);
+        throw error;
       }
-    } catch (error: unknown) {
-      console.error('Gateway registration error:', error);
-      throw error;
-    }
-  });
+    },
+  );
 
   if (!executed) {
     console.log(
-      'Skipping duplicate gateway registration event for integration:',
+      "Skipping duplicate gateway registration event for integration:",
       detail.integrationId,
     );
   }
@@ -138,23 +164,25 @@ export async function handler(event: EventBridgeEvent<string, IntegrationEvent>)
 // ────────────────────────────────────────────────────────────────────────
 
 async function handleConnect(detail: IntegrationEvent): Promise<void> {
-  console.log('Registering integration with AgentCore:', detail.integrationId);
+  console.log("Registering integration with AgentCore:", detail.integrationId);
 
   switch (detail.integrationType) {
-    case 'CONFLUENCE':
+    case "CONFLUENCE":
       await registerConfluence(detail);
       break;
-    case 'AWS_LAMBDA':
+    case "AWS_LAMBDA":
       await registerLambda(detail);
       break;
-    case 'AWS_SMITHY':
+    case "AWS_SMITHY":
       await registerSmithy(detail);
       break;
-    case 'MCP_SERVER':
+    case "MCP_SERVER":
       await registerMcpServer(detail);
       break;
     default:
-      console.warn(`Gateway registration not implemented for ${detail.integrationType}`);
+      console.warn(
+        `Gateway registration not implemented for ${detail.integrationType}`,
+      );
   }
 }
 
@@ -168,19 +196,21 @@ async function handleConnect(detail: IntegrationEvent): Promise<void> {
 async function registerConfluence(detail: IntegrationEvent): Promise<void> {
   const integration = await getIntegration(detail.integrationId);
   if (!integration) {
-    throw new Error(`Integration not found for connect: ${detail.integrationId}`);
+    throw new Error(
+      `Integration not found for connect: ${detail.integrationId}`,
+    );
   }
 
   const credentialProviderArn =
     detail.credentialProviderArn ?? integration.credentialProviderArn;
   if (!credentialProviderArn) {
     const msg =
-      'CONFLUENCE registration missing credentialProviderArn; resolver must call ' +
+      "CONFLUENCE registration missing credentialProviderArn; resolver must call " +
       'provisionCredentialProvider("API_KEY", ...) at create time';
     console.error(msg, { integrationId: detail.integrationId });
     await updateIntegrationStatus(
       detail.integrationId,
-      'CONNECTION_FAILED',
+      "CONNECTION_FAILED",
       false,
       undefined,
       msg,
@@ -189,8 +219,7 @@ async function registerConfluence(detail: IntegrationEvent): Promise<void> {
   }
 
   // Persisted at deploy time by the schema-publishing pipeline.
-  const schemaUri =
-    `s3://citadel-schemas-${ENVIRONMENT}-${ACCOUNT_ID}-${REGION}/confluence-openapi.json`;
+  const schemaUri = `s3://citadel-schemas-${ENVIRONMENT}-${ACCOUNT_ID}-${REGION}/confluence-openapi.json`;
 
   try {
     const response = await bedrockAgentCore.send(
@@ -207,60 +236,60 @@ async function registerConfluence(detail: IntegrationEvent): Promise<void> {
               },
             },
           },
-        } as CreateGatewayTargetCommandInput['targetConfiguration'],
+        } as CreateGatewayTargetCommandInput["targetConfiguration"],
         credentialProviderConfigurations: [
           {
-            credentialProviderType: 'API_KEY',
+            credentialProviderType: "API_KEY",
             credentialProvider: {
               apiKeyCredentialProvider: {
                 providerArn: credentialProviderArn,
-                credentialLocation: 'HEADER',
-                credentialParameterName: 'Authorization',
-                credentialPrefix: 'Basic',
+                credentialLocation: "HEADER",
+                credentialParameterName: "Authorization",
+                credentialPrefix: "Basic",
               },
             },
           },
-        ] as CreateGatewayTargetCommandInput['credentialProviderConfigurations'],
+        ] as CreateGatewayTargetCommandInput["credentialProviderConfigurations"],
       }),
     );
 
-    console.log('CONFLUENCE gateway target created:', {
+    console.log("CONFLUENCE gateway target created:", {
       integrationId: detail.integrationId,
       targetId: response.targetId,
     });
     await updateIntegrationStatus(
       detail.integrationId,
-      'CONNECTED',
+      "CONNECTED",
       true,
       response.targetId,
     );
   } catch (error: unknown) {
-    if (error instanceof Error && error.name === 'ConflictException') {
-      console.log('CONFLUENCE target already exists, reconciling state');
+    if (error instanceof Error && error.name === "ConflictException") {
+      console.log("CONFLUENCE target already exists, reconciling state");
       const existing = await getIntegration(detail.integrationId);
       if (existing?.gatewayTargetId) {
         await updateIntegrationStatus(
           detail.integrationId,
-          'CONNECTED',
+          "CONNECTED",
           true,
           existing.gatewayTargetId,
         );
       } else {
-        const msg = 'Gateway target exists but ID not found in DynamoDB';
+        const msg = "Gateway target exists but ID not found in DynamoDB";
         console.error(msg, { integrationId: detail.integrationId });
         await updateIntegrationStatus(
           detail.integrationId,
-          'CONNECTION_FAILED',
+          "CONNECTION_FAILED",
           false,
           undefined,
           msg,
         );
       }
     } else {
-      console.error('Failed to create CONFLUENCE gateway target:', error);
+      console.error("Failed to create CONFLUENCE gateway target:", error);
       await updateIntegrationStatus(
         detail.integrationId,
-        'CONNECTION_FAILED',
+        "CONNECTION_FAILED",
         false,
         undefined,
         error instanceof Error ? error.message : String(error),
@@ -273,7 +302,9 @@ async function registerConfluence(detail: IntegrationEvent): Promise<void> {
 async function registerLambda(detail: IntegrationEvent): Promise<void> {
   const integration = await getIntegration(detail.integrationId);
   if (!integration) {
-    throw new Error(`Integration not found for connect: ${detail.integrationId}`);
+    throw new Error(
+      `Integration not found for connect: ${detail.integrationId}`,
+    );
   }
 
   // Lambda + Smithy use GATEWAY_IAM_ROLE — credential provider not required.
@@ -288,7 +319,9 @@ async function registerLambda(detail: IntegrationEvent): Promise<void> {
 async function registerSmithy(detail: IntegrationEvent): Promise<void> {
   const integration = await getIntegration(detail.integrationId);
   if (!integration) {
-    throw new Error(`Integration not found for connect: ${detail.integrationId}`);
+    throw new Error(
+      `Integration not found for connect: ${detail.integrationId}`,
+    );
   }
 
   const cmdInput = buildSmithyTargetPayload({
@@ -302,19 +335,18 @@ async function registerSmithy(detail: IntegrationEvent): Promise<void> {
 async function registerMcpServer(detail: IntegrationEvent): Promise<void> {
   const integration = await getIntegration(detail.integrationId);
   if (!integration) {
-    throw new Error(`Integration not found for connect: ${detail.integrationId}`);
+    throw new Error(
+      `Integration not found for connect: ${detail.integrationId}`,
+    );
   }
 
   const credentialProviderArn =
     detail.credentialProviderArn ?? integration.credentialProviderArn;
-  const credentialProviderType =
-    (detail.credentialProviderType ?? integration.credentialProviderType) as
-      | 'API_KEY'
-      | 'OAUTH2'
-      | undefined;
+  const credentialProviderType = (detail.credentialProviderType ??
+    integration.credentialProviderType) as "API_KEY" | "OAUTH2" | undefined;
 
   let cmdInput;
-  if (credentialProviderType === 'OAUTH2') {
+  if (credentialProviderType === "OAUTH2") {
     if (!credentialProviderArn) {
       throw new Error(
         `MCP_SERVER + OAUTH2 missing credentialProviderArn (integration ${detail.integrationId})`,
@@ -323,12 +355,15 @@ async function registerMcpServer(detail: IntegrationEvent): Promise<void> {
     // Read OAuth target-level settings from the integration's stored
     // credentials (Secrets Manager). The credential provider ARN is the
     // pre-provisioned one; the gateway target receives scopes / grantType.
-    const credentials = await retrieveOauthCredentialsFromSecret(integration.secretArn);
-    const grantType = (credentials.grantType ?? 'CLIENT_CREDENTIALS') as NonNullable<
-      Parameters<typeof buildMCPServerTargetPayload>[0]['oauthSettings']
-    >['grantType'];
+    const credentials = await retrieveOauthCredentialsFromSecret(
+      integration.secretArn,
+    );
+    const grantType = (credentials.grantType ??
+      "CLIENT_CREDENTIALS") as NonNullable<
+      Parameters<typeof buildMCPServerTargetPayload>[0]["oauthSettings"]
+    >["grantType"];
     const oauthSettings: NonNullable<
-      Parameters<typeof buildMCPServerTargetPayload>[0]['oauthSettings']
+      Parameters<typeof buildMCPServerTargetPayload>[0]["oauthSettings"]
     > = {
       scopes: Array.isArray(credentials.scopes) ? [...credentials.scopes] : [],
       grantType,
@@ -341,10 +376,10 @@ async function registerMcpServer(detail: IntegrationEvent): Promise<void> {
       integrationId: detail.integrationId,
       config: integration.config,
       credentialProviderArn,
-      credentialProviderType: 'OAUTH2',
+      credentialProviderType: "OAUTH2",
       oauthSettings,
     });
-  } else if (credentialProviderType === 'API_KEY') {
+  } else if (credentialProviderType === "API_KEY") {
     if (!credentialProviderArn) {
       throw new Error(
         `MCP_SERVER + API_KEY missing credentialProviderArn (integration ${detail.integrationId})`,
@@ -354,7 +389,7 @@ async function registerMcpServer(detail: IntegrationEvent): Promise<void> {
       integrationId: detail.integrationId,
       config: integration.config,
       credentialProviderArn,
-      credentialProviderType: 'API_KEY',
+      credentialProviderType: "API_KEY",
     });
   } else {
     // CUSTOM auth — no credential provider configurations on the target.
@@ -392,19 +427,19 @@ async function sendCreateGatewayTargetAndPersist(
     const authorizationUrl: string | undefined =
       response?.authorizationData?.oauth2?.authorizationUrl;
 
-    console.log('Gateway target created:', {
+    console.log("Gateway target created:", {
       integrationId: detail.integrationId,
       targetId: response.targetId,
-      targetStatus: targetStatus || 'READY',
+      targetStatus: targetStatus || "READY",
       hasAuthorizationUrl: Boolean(authorizationUrl),
     });
 
     // 3LO: target is in CREATE_PENDING_AUTH until the user completes the
     // IdP flow. Surface that to DDB so the resolver can return the
     // authorizationUrl on the next connectIntegration call.
-    if (targetStatus === 'CREATE_PENDING_AUTH') {
+    if (targetStatus === "CREATE_PENDING_AUTH") {
       await updateIntegrationAfterCreate(detail.integrationId, {
-        status: 'CONNECTING',
+        status: "CONNECTING",
         agentCoreRegistered: false,
         gatewayTargetId: response.targetId,
         targetStatus,
@@ -412,39 +447,39 @@ async function sendCreateGatewayTargetAndPersist(
       });
     } else {
       await updateIntegrationAfterCreate(detail.integrationId, {
-        status: 'CONNECTED',
+        status: "CONNECTED",
         agentCoreRegistered: true,
         gatewayTargetId: response.targetId,
-        targetStatus: targetStatus ?? 'READY',
+        targetStatus: targetStatus ?? "READY",
       });
     }
   } catch (error: unknown) {
-    if (error instanceof Error && error.name === 'ConflictException') {
-      console.log('Gateway target already exists, reconciling state');
+    if (error instanceof Error && error.name === "ConflictException") {
+      console.log("Gateway target already exists, reconciling state");
       const existing = await getIntegration(detail.integrationId);
       if (existing?.gatewayTargetId) {
         await updateIntegrationStatus(
           detail.integrationId,
-          'CONNECTED',
+          "CONNECTED",
           true,
           existing.gatewayTargetId,
         );
       } else {
-        const msg = 'Gateway target exists but ID not found in DynamoDB';
+        const msg = "Gateway target exists but ID not found in DynamoDB";
         console.error(msg, { integrationId: detail.integrationId });
         await updateIntegrationStatus(
           detail.integrationId,
-          'CONNECTION_FAILED',
+          "CONNECTION_FAILED",
           false,
           undefined,
           msg,
         );
       }
     } else {
-      console.error('Failed to create gateway target:', error);
+      console.error("Failed to create gateway target:", error);
       await updateIntegrationStatus(
         detail.integrationId,
-        'CONNECTION_FAILED',
+        "CONNECTION_FAILED",
         false,
         undefined,
         error instanceof Error ? error.message : String(error),
@@ -477,12 +512,15 @@ async function sendCreateGatewayTargetAndPersist(
  * `disconnectIntegration`), only steps 1 and the DDB status update run.
  */
 async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
-  console.log('Unregistering integration from AgentCore:', detail.integrationId);
+  console.log(
+    "Unregistering integration from AgentCore:",
+    detail.integrationId,
+  );
 
   const integration = await getIntegration(detail.integrationId);
   const targetId = detail.gatewayTargetId ?? integration?.gatewayTargetId;
   const credentialProviderType = (detail.credentialProviderType ??
-    integration?.credentialProviderType) as 'API_KEY' | 'OAUTH2' | undefined;
+    integration?.credentialProviderType) as "API_KEY" | "OAUTH2" | undefined;
 
   // 1. Delete the gateway target FIRST.
   if (targetId) {
@@ -493,15 +531,21 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
           targetId,
         }),
       );
-      console.log('Gateway target deleted:', { integrationId: detail.integrationId, targetId });
+      console.log("Gateway target deleted:", {
+        integrationId: detail.integrationId,
+        targetId,
+      });
     } catch (error: unknown) {
-      if (error instanceof Error && error.name === 'ResourceNotFoundException') {
-        console.info('Gateway target already absent — idempotent delete', {
+      if (
+        error instanceof Error &&
+        error.name === "ResourceNotFoundException"
+      ) {
+        console.info("Gateway target already absent — idempotent delete", {
           integrationId: detail.integrationId,
           targetId,
         });
       } else {
-        console.error('Failed to delete gateway target — aborting cleanup', {
+        console.error("Failed to delete gateway target — aborting cleanup", {
           integrationId: detail.integrationId,
           targetId,
           error: error instanceof Error ? error.message : String(error),
@@ -513,7 +557,10 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
 
   if (detail.keepResources) {
     // Disconnect-only: target removed, integration record stays.
-    console.log('Disconnect (keepResources=true) complete:', detail.integrationId);
+    console.log(
+      "Disconnect (keepResources=true) complete:",
+      detail.integrationId,
+    );
     return;
   }
 
@@ -522,8 +569,11 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
     detail.credentialProviderArn ?? integration?.credentialProviderArn;
   if (integrationProviderArn && credentialProviderType) {
     try {
-      await deprovisionCredentialProvider(detail.integrationId, credentialProviderType);
-      console.log('Credential provider deprovisioned:', {
+      await deprovisionCredentialProvider(
+        detail.integrationId,
+        credentialProviderType,
+      );
+      console.log("Credential provider deprovisioned:", {
         integrationId: detail.integrationId,
         credentialProviderType,
       });
@@ -531,14 +581,17 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
       // Provider delete failure: log + emit metric; do NOT abort, secret
       // and DDB cleanup still need to run so the user isn't stuck with a
       // half-deleted record. Ops can retry provider deletion separately.
-      console.error('Failed to deprovision credential provider — continuing teardown', {
-        integrationId: detail.integrationId,
-        credentialProviderType,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      console.error(
+        "Failed to deprovision credential provider — continuing teardown",
+        {
+          integrationId: detail.integrationId,
+          credentialProviderType,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
       console.log(
         JSON.stringify({
-          metric: 'integration.disconnect.provider_delete_failed',
+          metric: "integration.disconnect.provider_delete_failed",
           integrationId: detail.integrationId,
           credentialProviderType,
         }),
@@ -557,7 +610,7 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
         }),
       );
     } catch (error) {
-      console.warn('Failed to delete secret:', error);
+      console.warn("Failed to delete secret:", error);
     }
   }
 
@@ -576,12 +629,15 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
               }),
             );
           } catch (error) {
-            console.warn(`Failed to delete SSM parameter ${paramName}:`, error);
+            console.warn("Failed to delete SSM parameter:", {
+              paramName,
+              error,
+            });
           }
         }
       }
     } catch (error) {
-      console.warn('Failed to delete SSM parameters:', error);
+      console.warn("Failed to delete SSM parameters:", error);
     }
   }
 
@@ -594,9 +650,9 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
           Key: { PK: integration.PK, SK: integration.SK },
         }),
       );
-      console.log('Integration row deleted:', detail.integrationId);
+      console.log("Integration row deleted:", detail.integrationId);
     } catch (error) {
-      console.warn('Failed to delete DDB row:', error);
+      console.warn("Failed to delete DDB row:", error);
     }
   }
 }
@@ -605,8 +661,12 @@ async function handleDisconnect(detail: IntegrationEvent): Promise<void> {
 // Helpers
 // ────────────────────────────────────────────────────────────────────────
 
-async function retrieveOauthCredentialsFromSecret(secretArn: string): Promise<Record<string, unknown>> {
-  const resp = await secretsManager.send(new GetSecretValueCommand({ SecretId: secretArn }));
+async function retrieveOauthCredentialsFromSecret(
+  secretArn: string,
+): Promise<Record<string, unknown>> {
+  const resp = await secretsManager.send(
+    new GetSecretValueCommand({ SecretId: secretArn }),
+  );
   if (!resp.SecretString) return {};
   try {
     return JSON.parse(resp.SecretString);
@@ -619,10 +679,10 @@ async function getIntegration(integrationId: string) {
   const response = await dynamodb.send(
     new QueryCommand({
       TableName: INTEGRATIONS_TABLE,
-      IndexName: 'IntegrationIdIndex',
-      KeyConditionExpression: 'integrationId = :id',
+      IndexName: "IntegrationIdIndex",
+      KeyConditionExpression: "integrationId = :id",
       ExpressionAttributeValues: {
-        ':id': integrationId,
+        ":id": integrationId,
       },
     }),
   );
@@ -653,49 +713,49 @@ async function updateIntegrationAfterCreate(
 
   const now = new Date().toISOString();
   const setParts = [
-    '#status = :status',
-    '#agentCoreRegistered = :agentCoreRegistered',
-    '#updatedAt = :updatedAt',
+    "#status = :status",
+    "#agentCoreRegistered = :agentCoreRegistered",
+    "#updatedAt = :updatedAt",
   ];
   const exprNames: Record<string, string> = {
-    '#status': 'status',
-    '#agentCoreRegistered': 'agentCoreRegistered',
-    '#updatedAt': 'updatedAt',
+    "#status": "status",
+    "#agentCoreRegistered": "agentCoreRegistered",
+    "#updatedAt": "updatedAt",
   };
   const exprValues: Record<string, unknown> = {
-    ':status': input.status,
-    ':agentCoreRegistered': input.agentCoreRegistered,
-    ':updatedAt': now,
+    ":status": input.status,
+    ":agentCoreRegistered": input.agentCoreRegistered,
+    ":updatedAt": now,
   };
 
   if (input.gatewayTargetId) {
-    setParts.push('#gatewayTargetId = :gatewayTargetId');
-    exprNames['#gatewayTargetId'] = 'gatewayTargetId';
-    exprValues[':gatewayTargetId'] = input.gatewayTargetId;
+    setParts.push("#gatewayTargetId = :gatewayTargetId");
+    exprNames["#gatewayTargetId"] = "gatewayTargetId";
+    exprValues[":gatewayTargetId"] = input.gatewayTargetId;
   }
   if (input.targetStatus) {
-    setParts.push('#targetStatus = :targetStatus');
-    exprNames['#targetStatus'] = 'targetStatus';
-    exprValues[':targetStatus'] = input.targetStatus;
+    setParts.push("#targetStatus = :targetStatus");
+    exprNames["#targetStatus"] = "targetStatus";
+    exprValues[":targetStatus"] = input.targetStatus;
   }
   if (input.authorizationUrl) {
-    setParts.push('#authorizationUrl = :authorizationUrl');
-    exprNames['#authorizationUrl'] = 'authorizationUrl';
-    exprValues[':authorizationUrl'] = input.authorizationUrl;
+    setParts.push("#authorizationUrl = :authorizationUrl");
+    exprNames["#authorizationUrl"] = "authorizationUrl";
+    exprValues[":authorizationUrl"] = input.authorizationUrl;
   }
 
   const removeParts: string[] = [];
-  if (input.status === 'CONNECTED') {
-    removeParts.push('#errorMessage');
-    exprNames['#errorMessage'] = 'errorMessage';
-    setParts.push('#lastSyncAt = :lastSyncAt');
-    exprNames['#lastSyncAt'] = 'lastSyncAt';
-    exprValues[':lastSyncAt'] = now;
+  if (input.status === "CONNECTED") {
+    removeParts.push("#errorMessage");
+    exprNames["#errorMessage"] = "errorMessage";
+    setParts.push("#lastSyncAt = :lastSyncAt");
+    exprNames["#lastSyncAt"] = "lastSyncAt";
+    exprValues[":lastSyncAt"] = now;
   }
 
-  let updateExpression = `SET ${setParts.join(', ')}`;
+  let updateExpression = `SET ${setParts.join(", ")}`;
   if (removeParts.length > 0) {
-    updateExpression += ` REMOVE ${removeParts.join(', ')}`;
+    updateExpression += ` REMOVE ${removeParts.join(", ")}`;
   }
 
   await dynamodb.send(
@@ -725,48 +785,48 @@ async function updateIntegrationStatus(
 
   const now = new Date().toISOString();
   const updateExprParts = [
-    '#status = :status',
-    '#agentCoreRegistered = :agentCoreRegistered',
-    '#updatedAt = :updatedAt',
+    "#status = :status",
+    "#agentCoreRegistered = :agentCoreRegistered",
+    "#updatedAt = :updatedAt",
   ];
   const exprNames: Record<string, string> = {
-    '#status': 'status',
-    '#agentCoreRegistered': 'agentCoreRegistered',
-    '#updatedAt': 'updatedAt',
+    "#status": "status",
+    "#agentCoreRegistered": "agentCoreRegistered",
+    "#updatedAt": "updatedAt",
   };
   const exprValues: Record<string, unknown> = {
-    ':status': status,
-    ':agentCoreRegistered': agentCoreRegistered,
-    ':updatedAt': now,
+    ":status": status,
+    ":agentCoreRegistered": agentCoreRegistered,
+    ":updatedAt": now,
   };
 
   if (gatewayTargetId) {
-    updateExprParts.push('#gatewayTargetId = :gatewayTargetId');
-    exprNames['#gatewayTargetId'] = 'gatewayTargetId';
-    exprValues[':gatewayTargetId'] = gatewayTargetId;
+    updateExprParts.push("#gatewayTargetId = :gatewayTargetId");
+    exprNames["#gatewayTargetId"] = "gatewayTargetId";
+    exprValues[":gatewayTargetId"] = gatewayTargetId;
   }
 
-  if (status === 'CONNECTED') {
-    updateExprParts.push('#lastSyncAt = :lastSyncAt');
-    exprNames['#lastSyncAt'] = 'lastSyncAt';
-    exprValues[':lastSyncAt'] = now;
+  if (status === "CONNECTED") {
+    updateExprParts.push("#lastSyncAt = :lastSyncAt");
+    exprNames["#lastSyncAt"] = "lastSyncAt";
+    exprValues[":lastSyncAt"] = now;
   }
 
   if (errorMessage) {
-    updateExprParts.push('#errorMessage = :errorMessage');
-    exprNames['#errorMessage'] = 'errorMessage';
-    exprValues[':errorMessage'] = errorMessage;
+    updateExprParts.push("#errorMessage = :errorMessage");
+    exprNames["#errorMessage"] = "errorMessage";
+    exprValues[":errorMessage"] = errorMessage;
   }
 
   const removeExprParts: string[] = [];
-  if (status === 'CONNECTED') {
-    removeExprParts.push('#errorMessage');
-    exprNames['#errorMessage'] = 'errorMessage';
+  if (status === "CONNECTED") {
+    removeExprParts.push("#errorMessage");
+    exprNames["#errorMessage"] = "errorMessage";
   }
 
-  let updateExpression = `SET ${updateExprParts.join(', ')}`;
+  let updateExpression = `SET ${updateExprParts.join(", ")}`;
   if (removeExprParts.length > 0 && !errorMessage) {
-    updateExpression += ` REMOVE ${removeExprParts.join(', ')}`;
+    updateExpression += ` REMOVE ${removeExprParts.join(", ")}`;
   }
 
   await dynamodb.send(

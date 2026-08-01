@@ -4,13 +4,31 @@ Citadel tracks estimated model-invocation spend per organization and exposes it 
 
 ## Overview
 
-- **Ledger**: `citadel-cost-ledger-{env}` (DynamoDB). Rows are written by `cost-ledger-writer.ts` from three EventBridge sources (`task.completion`, `agent_intake.usage`, workflow node completion). Every row carries `estimate: true` — costs are derived from token usage and catalog pricing, never a billing invoice. Rows may additionally carry a `bedrockRequestId` (additive, nullable — present only when the originating SDK call reported one) used by Tier B reconciliation below.
+- **Ledger**: `citadel-cost-ledger-{env}` (DynamoDB). Rows are written by `cost-ledger-writer.ts` from three EventBridge sources (`task.completion`, `agent_intake.usage`, workflow node completion). Every row carries `estimate: true` — costs are derived from token usage and catalog pricing, never a billing invoice. Rows may additionally carry a `bedrockRequestId` (additive, nullable — present only when the originating SDK call reported one) used by Tier B reconciliation below. Rows may also carry a `runId` (additive, nullable — Pass 1, decision f1cbd5ef; server-minted correlation id copied from the originating event's `detail.runId` when present, omitted on pre-runId events).
 - **Query surface**: a Cognito-JWT-authorized HTTP API (`citadel-cost-api-{env}`), split across two Lambdas by IAM role: `cost-query-handler.ts` (read-only — `GET /cost/summary`, `GET /cost/series`; role carries `dynamodb:Query` only, never `UpdateItem`) and `cost-budget-handler.ts` (`GET /budgets`, `PUT /budgets/{scope}`; role carries `dynamodb:Query` + `dynamodb:UpdateItem`, since it owns the whole `BUDGET#` SK domain). The route paths and response shapes are unchanged by the split — only the backing Lambda/IAM role differs per route.
 - **Budgets**: stored in the same ledger table under a disjoint `SK` namespace, evaluated hourly by a separate Lambda, with alerts published to the shared EventBridge bus.
+
+### runId on cost-ledger rows — current state (best-effort, no query-surface change this pass)
+
+`runId` is stamped on cost-ledger rows (Pass 1) additively — an absent
+`runId` never breaks a row write, and it carries no dedicated GSI. Pass 2
+(decision f1cbd5ef) upgrades the trace-viewer and replay-package query
+surfaces to be runId-primary (see `docs/TRACING_RUNBOOK.md` and
+`docs/REPLAY_PACKAGE.md`); it deliberately does **not** add a `runId`
+filter/groupBy to `GET /cost/summary` or `GET /cost/series` — that would
+require the deferred cost-ledger `runId` GSI (GSI5) to avoid an unbounded
+Scan across every org's rows (the existing per-dimension GSIs are not
+org-keyed either, for the same reason the org-scoping section below reads
+the base table). Until that GSI lands, "sum the cost for one runId" is not
+exposed as a query — the ledger row itself still carries `runId` for
+downstream joins (e.g. the replay-package builder's Scan-based join), it
+is simply not yet a first-class dimension on this API.
 
 ## Routes
 
 All routes require a valid Cognito JWT (the HttpApi's default authorizer). CORS is restricted to the deployed frontend origin (`FRONTEND_ORIGIN` env/context) — no wildcard origin, since this is a bearer-token-authorized API.
+
+**Troubleshooting note:** if `FRONTEND_ORIGIN` was not supplied at deploy time, `AllowOrigins` falls back to a blocking placeholder (`https://frontend-origin-not-configured.invalid`) rather than a wildcard — `curl`/server-to-server calls still succeed (CORS is a browser-enforced check), but every browser preflight from the real frontend fails as a network error. Fix: redeploy `TelemetryStack` with `FRONTEND_ORIGIN` set (after this branch's telemetry-stack is deployed).
 
 | Route | Lambda | IAM role grants |
 |---|---|---|

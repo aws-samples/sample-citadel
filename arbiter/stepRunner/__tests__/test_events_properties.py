@@ -43,9 +43,9 @@ class TestPublishWorkflowStartedEvent:
     """
 
     def test_publish_workflow_started_event_has_correct_structure(self, mock_eb_client):
-        from events import publish_workflow_started
+        import events
 
-        publish_workflow_started(
+        events.publish_workflow_started(
             execution_id='exec-001',
             workflow_id='wf-001',
             app_id='app-001',
@@ -87,9 +87,9 @@ class TestPublishNodeCompletedEvent:
     """
 
     def test_publish_workflow_node_completed_event_has_correct_structure(self, mock_eb_client):
-        from events import publish_node_completed
+        import events
 
-        publish_node_completed(
+        events.publish_node_completed(
             execution_id='exec-002',
             workflow_id='wf-002',
             node_id='node-A',
@@ -124,10 +124,10 @@ class TestPublishNodeCompletedEvent:
     def test_publish_node_completed_with_usage_adds_top_level_usage_key(self, mock_eb_client):
         """Usage rollup hop (additive): passing usage=[...] adds a top-level
         'usage' key to the detail, mirroring the worker's producer shape."""
-        from events import publish_node_completed
+        import events
 
         usage = [{'inputTokens': 3, 'outputTokens': 4}]
-        publish_node_completed(
+        events.publish_node_completed(
             execution_id='exec-003',
             workflow_id='wf-003',
             node_id='node-B',
@@ -155,24 +155,16 @@ class TestAllEventsIncludeTimestampAndCorrelationId:
     """
 
     def test_all_events_include_timestamp_and_correlation_id(self, mock_eb_client):
-        from events import (
-            publish_workflow_started,
-            publish_node_started,
-            publish_node_completed,
-            publish_node_failed,
-            publish_node_retrying,
-            publish_workflow_completed,
-            publish_workflow_failed,
-        )
+        import events
 
         calls = [
-            lambda: publish_workflow_started('e1', 'w1', 'a1', '2025-01-01T00:00:00Z'),
-            lambda: publish_node_started('e2', 'w2', 'n1', 'ag1', '2025-01-01T00:00:00Z'),
-            lambda: publish_node_completed('e3', 'w3', 'n2', 'ag2', '2025-01-01T00:01:00Z', {}),
-            lambda: publish_node_failed('e4', 'w4', 'n3', 'ag3', 'some error', 0),
-            lambda: publish_node_retrying('e5', 'w5', 'n4', 'ag4', 1, 2.0),
-            lambda: publish_workflow_completed('e6', 'w6', '2025-01-01T00:10:00Z', {}),
-            lambda: publish_workflow_failed('e7', 'w7', 'n5', 'some failure', '2025-01-01T00:10:00Z'),
+            lambda: events.publish_workflow_started('e1', 'w1', 'a1', '2025-01-01T00:00:00Z'),
+            lambda: events.publish_node_started('e2', 'w2', 'n1', 'ag1', '2025-01-01T00:00:00Z'),
+            lambda: events.publish_node_completed('e3', 'w3', 'n2', 'ag2', '2025-01-01T00:01:00Z', {}),
+            lambda: events.publish_node_failed('e4', 'w4', 'n3', 'ag3', 'some error', 0),
+            lambda: events.publish_node_retrying('e5', 'w5', 'n4', 'ag4', 1, 2.0),
+            lambda: events.publish_workflow_completed('e6', 'w6', '2025-01-01T00:10:00Z', {}),
+            lambda: events.publish_workflow_failed('e7', 'w7', 'n5', 'some failure', '2025-01-01T00:10:00Z'),
         ]
 
         for i, call_fn in enumerate(calls):
@@ -186,3 +178,43 @@ class TestAllEventsIncludeTimestampAndCorrelationId:
 
             assert 'timestamp' in detail, f"Event {i} missing timestamp"
             assert 'correlationId' in detail, f"Event {i} missing correlationId"
+
+
+# ---------------------------------------------------------------------------
+# Trace-context propagation (architect task f4f4bab3-7a07-4acf-ba43-
+# ba43bb488444): publish_event merges an additive `traceContext` into the
+# detail when common.tracing.active_trace_context() returns one, and is
+# byte-identical to pre-feature callers when it returns None (as it always
+# does under pytest with no active X-Ray segment — R14 property).
+# ---------------------------------------------------------------------------
+
+class TestPublishEventTraceContextPropagation:
+    def test_publish_event_omits_trace_context_key_with_no_active_segment(self, mock_eb_client):
+        """R14: no active segment under pytest -> detail has no traceContext
+        key at all, byte-identical to the pre-feature shape."""
+        import events
+
+        events.publish_event('workflow.started', {'executionId': 'e1', 'correlationId': 'e1'})
+
+        call_args = mock_eb_client.put_events.call_args
+        entries = call_args[1].get('Entries') or call_args.kwargs.get('Entries')
+        detail = json.loads(entries[0]['Detail'])
+        assert 'traceContext' not in detail
+
+    def test_publish_event_merges_trace_context_when_active_segment_present(self, mock_eb_client):
+        """R13/R14 counterpart: when common.tracing reports an active trace
+        context, publish_event merges it into the detail additively."""
+        import events
+
+        fake_ctx = {
+            'xrayTraceHeader': 'Root=1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb;Parent=cccccccccccccccc;Sampled=1',
+            'traceId': '1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb',
+            'parentId': 'cccccccccccccccc',
+        }
+        with patch('common.tracing.active_trace_context', return_value=fake_ctx):
+            events.publish_event('workflow.started', {'executionId': 'e2', 'correlationId': 'e2'})
+
+        call_args = mock_eb_client.put_events.call_args
+        entries = call_args[1].get('Entries') or call_args.kwargs.get('Entries')
+        detail = json.loads(entries[0]['Detail'])
+        assert detail['traceContext'] == fake_ctx

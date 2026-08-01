@@ -233,8 +233,7 @@ describe("ServicesStack", () => {
         const statements: Array<Record<string, unknown>> =
           ((
             policy.Properties as
-              | { PolicyDocument?: { Statement?: unknown[] } }
-              | undefined
+              { PolicyDocument?: { Statement?: unknown[] } } | undefined
           )?.PolicyDocument?.Statement as Array<Record<string, unknown>>) ?? [];
         return statements.some((stmt) => {
           const rawAction = stmt.Action;
@@ -347,14 +346,155 @@ describe("AgentIntakeSingle runtime model identifiers (us-west-2 dev stack)", ()
       const env =
         (
           runtime.Properties as
-            | { EnvironmentVariables?: Record<string, unknown> }
-            | undefined
+            { EnvironmentVariables?: Record<string, unknown> } | undefined
         )?.EnvironmentVariables ?? {};
       for (const value of Object.values(env)) {
         if (typeof value === "string") {
           expect(value.startsWith("au.")).toBe(false);
         }
       }
+    }
+  });
+});
+
+describe("AgentIntakeSingleRuntime — observability grants + Langfuse pin removal (design §5, §6)", () => {
+  let template: cdk.assertions.Template;
+
+  beforeAll(() => {
+    const app = new cdk.App();
+    const prereqStack = new cdk.Stack(app, "ObservabilityPrereqStack", {
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+    const agentEventBus = new events.EventBus(
+      prereqStack,
+      "ObservabilityTestEventBus",
+      { eventBusName: "observability-test-bus" },
+    );
+    const documentBucket = new s3.Bucket(
+      prereqStack,
+      "ObservabilityTestDocBucket",
+    );
+
+    const stack = new ServicesStack(app, "ObservabilityTestServicesStack", {
+      environment: "test",
+      agentEventBus,
+      documentBucket,
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+
+    template = cdk.assertions.Template.fromStack(stack);
+  });
+
+  function findRuntimeExecutionRolePolicies(): Array<Record<string, unknown>> {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    const runtimeLogicalIds = Object.keys(runtimes);
+    expect(runtimeLogicalIds.length).toBeGreaterThan(0);
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const matches: Array<Record<string, unknown>> = [];
+    for (const [, policy] of Object.entries(policies)) {
+      const roles = JSON.stringify(policy.Properties?.Roles ?? []);
+      if (roles.includes("AgentIntakeSingleRuntime")) {
+        matches.push(policy.Properties?.PolicyDocument ?? {});
+      }
+    }
+    return matches;
+  }
+
+  function allActions(policyDocs: Array<Record<string, unknown>>): string[] {
+    const actions: string[] = [];
+    for (const doc of policyDocs) {
+      const statements =
+        (doc as { Statement?: Array<Record<string, unknown>> }).Statement ?? [];
+      for (const stmt of statements) {
+        const stmtActions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        actions.push(...(stmtActions as string[]));
+      }
+    }
+    return actions;
+  }
+
+  test("runtime exec role grants xray:PutTraceSegments/PutTelemetryRecords/GetSamplingRules/GetSamplingTargets", () => {
+    const actions = allActions(findRuntimeExecutionRolePolicies());
+    expect(actions).toContain("xray:PutTraceSegments");
+    expect(actions).toContain("xray:PutTelemetryRecords");
+    expect(actions).toContain("xray:GetSamplingRules");
+    expect(actions).toContain("xray:GetSamplingTargets");
+  });
+
+  test("runtime exec role grants cloudwatch:PutMetricData conditioned on the bedrock-agentcore namespace", () => {
+    const policyDocs = findRuntimeExecutionRolePolicies();
+    let sawPutMetricData = false;
+    for (const doc of policyDocs) {
+      const statements =
+        (doc as { Statement?: Array<Record<string, unknown>> }).Statement ?? [];
+      for (const stmt of statements) {
+        const stmtActions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        if (stmtActions.includes("cloudwatch:PutMetricData")) {
+          sawPutMetricData = true;
+          const condition = stmt.Condition as
+            { StringEquals?: Record<string, unknown> } | undefined;
+          expect(condition?.StringEquals?.["cloudwatch:namespace"]).toBe(
+            "bedrock-agentcore",
+          );
+        }
+      }
+    }
+    expect(sawPutMetricData).toBe(true);
+  });
+
+  test("runtime exec role grants logs create/put/describe scoped to /aws/bedrock-agentcore/runtimes/*", () => {
+    const policyDocs = findRuntimeExecutionRolePolicies();
+    let sawLogsGrant = false;
+    for (const doc of policyDocs) {
+      const statements =
+        (doc as { Statement?: Array<Record<string, unknown>> }).Statement ?? [];
+      for (const stmt of statements) {
+        const stmtActions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        if (stmtActions.includes("logs:PutLogEvents")) {
+          sawLogsGrant = true;
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          const resourceStr = JSON.stringify(resources);
+          expect(resourceStr).toContain(
+            "log-group:/aws/bedrock-agentcore/runtimes/*",
+          );
+        }
+      }
+    }
+    expect(sawLogsGrant).toBe(true);
+  });
+
+  test("the 3 empty LANGFUSE_* env pins are removed from the runtime's EnvironmentVariables", () => {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    for (const runtime of Object.values(runtimes)) {
+      const env =
+        (
+          runtime.Properties as
+            { EnvironmentVariables?: Record<string, unknown> } | undefined
+        )?.EnvironmentVariables ?? {};
+      expect(env).not.toHaveProperty("LANGFUSE_SECRET_KEY");
+      expect(env).not.toHaveProperty("LANGFUSE_PUBLIC_KEY");
+      expect(env).not.toHaveProperty("LANGFUSE_BASE_URL");
+    }
+  });
+
+  test("DISABLE_ADOT_OBSERVABILITY is NOT set — intent is ADOT observability ON (design §6)", () => {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    for (const runtime of Object.values(runtimes)) {
+      const env =
+        (
+          runtime.Properties as
+            { EnvironmentVariables?: Record<string, unknown> } | undefined
+        )?.EnvironmentVariables ?? {};
+      expect(env).not.toHaveProperty("DISABLE_ADOT_OBSERVABILITY");
     }
   });
 });

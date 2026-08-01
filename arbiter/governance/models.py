@@ -218,6 +218,18 @@ class GovernanceFinding:
     contract_evaluated: str | None = None        # contract_id
     escalation_target: str | None = None
     residual_authority_denial: bool = False
+    trace_id: str | None = None                  # active X-Ray trace id, stamped
+                                                   # best-effort at write time (see
+                                                   # supervisor/index.py governed_
+                                                   # process_agent_call); None when
+                                                   # no trace context was active.
+    run_id: str | None = None                     # server-minted correlation id
+                                                   # (Pass 1, decision f1cbd5ef),
+                                                   # read from orchestration['runId']
+                                                   # and stamped best-effort at write
+                                                   # time, same try/except discipline
+                                                   # as trace_id above; None when the
+                                                   # orchestration carries no runId.
 
     @classmethod
     def create(

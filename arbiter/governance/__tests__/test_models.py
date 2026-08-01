@@ -335,6 +335,74 @@ def test_governance_finding_create_passes_optional_kwargs() -> None:
 
 
 # ---------------------------------------------------------------------------
+# GovernanceFinding.trace_id (architect task 9b3f4f78: decision<->runtime
+# trace linking) — P1 test 5.
+# ---------------------------------------------------------------------------
+
+
+def test_governance_finding_trace_id_defaults_to_none() -> None:
+    finding = GovernanceFinding(
+        workflow_id="wf-1",
+        decision=ArbitrationDecision.PERMIT,
+        requesting_agent="arbiter",
+        target_agent="agent-1",
+        reason="within scope",
+    )
+    assert finding.trace_id is None
+
+
+def test_governance_finding_create_defaults_trace_id_to_none() -> None:
+    finding = GovernanceFinding.create(
+        workflow_id="wf-1",
+        decision=ArbitrationDecision.PERMIT,
+        requesting_agent="arbiter",
+        target_agent="agent-1",
+        reason="within scope",
+    )
+    assert finding.trace_id is None
+
+
+def test_governance_finding_trace_id_explicit_kwarg_round_trips() -> None:
+    finding = GovernanceFinding(
+        workflow_id="wf-1",
+        decision=ArbitrationDecision.PERMIT,
+        requesting_agent="arbiter",
+        target_agent="agent-1",
+        reason="within scope",
+        trace_id="1-5f2f0000-abcdef0123456789abcdef01",
+    )
+    assert finding.trace_id == "1-5f2f0000-abcdef0123456789abcdef01"
+
+
+def test_governance_finding_create_trace_id_kwarg_round_trips() -> None:
+    finding = GovernanceFinding.create(
+        workflow_id="wf-1",
+        decision=ArbitrationDecision.PERMIT,
+        requesting_agent="arbiter",
+        target_agent="agent-1",
+        reason="within scope",
+        trace_id="1-5f2f0000-abcdef0123456789abcdef01",
+    )
+    assert finding.trace_id == "1-5f2f0000-abcdef0123456789abcdef01"
+
+
+def test_governance_finding_trace_id_mutable_post_construction() -> None:
+    """The supervisor stamps trace_id AFTER construction (between engine
+    evaluation and write_finding), so the field must be plain mutable
+    attribute assignment, not frozen."""
+    finding = GovernanceFinding.create(
+        workflow_id="wf-1",
+        decision=ArbitrationDecision.PERMIT,
+        requesting_agent="arbiter",
+        target_agent="agent-1",
+        reason="within scope",
+    )
+    assert finding.trace_id is None
+    finding.trace_id = "1-5f2f0000-abcdef0123456789abcdef01"
+    assert finding.trace_id == "1-5f2f0000-abcdef0123456789abcdef01"
+
+
+# ---------------------------------------------------------------------------
 # Dataclass construction smoke tests for remaining exports
 # ---------------------------------------------------------------------------
 

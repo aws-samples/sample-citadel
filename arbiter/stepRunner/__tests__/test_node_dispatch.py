@@ -384,3 +384,48 @@ class TestDagAdvanceCarriesMergedConfiguration:
         assert len(bodies) == 1
         assert bodies[0]['node_id'] == 'n1'
         assert bodies[0]['configuration'] == WF_CONFIG
+
+
+# ---------------------------------------------------------------------------
+# Trace-context propagation at the H3 SQS hop (architect task
+# f4f4bab3-7a07-4acf-ba43-ba43bb488444): invoke_node's send_message adds the
+# standard AWSTraceHeader MessageAttribute + body traceContext ONLY when an
+# active X-Ray (sub)segment exists (R13); with no active segment (the pytest
+# default), the message is byte-identical to the pre-feature shape — no
+# MessageAttributes key at all, no traceContext in the body (R14).
+# ---------------------------------------------------------------------------
+
+class TestSqsDispatchTraceContext:
+    def test_r14_no_active_segment_dispatch_is_byte_identical_to_pre_feature(self, mock_exec, monkeypatch):
+        import executor
+
+        monkeypatch.setenv('WORKER_QUEUE_URL', 'https://sqs.fake/worker-queue')
+        node = {'id': 'n0', 'type': 'agent', 'agentId': 'agent-A', 'data': {}}
+
+        executor.invoke_node('exec-1', 'wf-1', node, {'k': 'v'}, {'cfg': 1})
+
+        kwargs = mock_exec['sqs'].send_message.call_args.kwargs
+        assert 'MessageAttributes' not in kwargs
+        body = json.loads(kwargs['MessageBody'])
+        assert 'traceContext' not in body
+
+    def test_r13_active_segment_adds_aws_trace_header_and_body_trace_context(self, mock_exec, monkeypatch):
+        import executor
+
+        monkeypatch.setenv('WORKER_QUEUE_URL', 'https://sqs.fake/worker-queue')
+        node = {'id': 'n0', 'type': 'agent', 'agentId': 'agent-A', 'data': {}}
+
+        fake_ctx = {
+            'xrayTraceHeader': 'Root=1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb;Parent=cccccccccccccccc;Sampled=1',
+            'traceId': '1-aaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbb',
+            'parentId': 'cccccccccccccccc',
+        }
+        with patch.object(executor.tracing, 'active_trace_context', return_value=fake_ctx):
+            executor.invoke_node('exec-1', 'wf-1', node, {'k': 'v'}, {'cfg': 1})
+
+        kwargs = mock_exec['sqs'].send_message.call_args.kwargs
+        assert kwargs['MessageAttributes'] == {
+            'AWSTraceHeader': {'DataType': 'String', 'StringValue': fake_ctx['xrayTraceHeader']}
+        }
+        body = json.loads(kwargs['MessageBody'])
+        assert body['traceContext'] == fake_ctx

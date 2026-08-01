@@ -44,6 +44,7 @@ function f(
     escalationTarget: null,
     residualAuthorityDenial: false,
     timestamp,
+    traceId: null,
     ...overrides,
   };
 }

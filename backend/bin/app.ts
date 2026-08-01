@@ -3,6 +3,7 @@ import "source-map-support/register";
 import * as cdk from "aws-cdk-lib";
 // (Aspects accessed via cdk.Aspects)
 import { AwsSolutionsChecks, NagSuppressions } from "cdk-nag";
+import { EnableLambdaTracing } from "../lib/tracing-aspect";
 import { ServicesStack } from "../lib/services-stack";
 import { BackendStack } from "../lib/backend-stack";
 import { ArbiterStack } from "../lib/arbiter-stack";
@@ -12,6 +13,11 @@ import { GovernanceStack } from "../lib/governance-stack";
 import { TelemetryStack } from "../lib/telemetry-stack";
 import { ProjectsStack } from "../lib/projects-stack";
 import { RegistryStack } from "../lib/registry-stack";
+import {
+  remediationMessage,
+  resolveFrontendOrigin,
+  shouldWarnOnPlaceholder,
+} from "../lib/frontend-origin";
 
 const app = new cdk.App();
 
@@ -194,10 +200,27 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
 // "safe-to-synth, unsafe-to-actually-use" shape as `CDK_DEFAULT_ACCOUNT`
 // being undefined for local synth. Real deployments MUST set
 // FRONTEND_ORIGIN to the actual CloudFront/app origin.
-const frontendOrigin: string =
-  process.env.FRONTEND_ORIGIN ||
-  (app.node.tryGetContext("frontendOrigin") as string | undefined) ||
-  "https://frontend-origin-not-configured.invalid";
+//
+// Resolution itself lives in lib/frontend-origin.ts (unit-testable, no CDK
+// synth required). Placeholder use triggers a LOUD CDK Annotations warning
+// (not a throw) for every environment except local/test: a hard throw would
+// brick a fresh-account bootstrap deploy, since FrontendStack deploys AFTER
+// TelemetryStack (see deploy.sh's dependency-order comment below) and so
+// has no real origin to source on a first-ever deploy.
+const frontendOriginResolution = resolveFrontendOrigin(
+  process.env.FRONTEND_ORIGIN,
+  app.node.tryGetContext("frontendOrigin") as string | undefined,
+);
+const frontendOrigin: string = frontendOriginResolution.origin;
+if (
+  frontendOriginResolution.isPlaceholder &&
+  shouldWarnOnPlaceholder(environment)
+) {
+  cdk.Annotations.of(app).addWarningV2(
+    "citadel:frontend-origin-placeholder",
+    remediationMessage(environment),
+  );
+}
 
 // Bedrock model-invocation log group name (operator opt-in feature,
 // account-level, provisioned outside CDK). Left unset by default: the
@@ -207,6 +230,14 @@ const bedrockInvocationLogGroupName: string | undefined =
   process.env.BEDROCK_INVOCATION_LOG_GROUP ||
   (app.node.tryGetContext("bedrockInvocationLogGroupName") as
     string | undefined);
+
+// Git commit SHA at deploy time (design §4/§5 gap: "producerCommit needs
+// COMMIT_SHA") — sourced from CI env (buildspec) or CDK context; left
+// unset for local synth, which the replay envelope honestly reports as
+// `producerCommit: null` rather than fabricating a value.
+const commitSha: string | undefined =
+  process.env.COMMIT_SHA ||
+  (app.node.tryGetContext("commitSha") as string | undefined);
 
 const telemetryStack = new TelemetryStack(
   app,
@@ -220,9 +251,39 @@ const telemetryStack = new TelemetryStack(
     userPoolClient: backendStack.userPoolClient,
     frontendOrigin,
     bedrockInvocationLogGroupName,
+    // Waterfall trace viewer (pass 1) — ownership resolution reads.
+    // executionsTable/conversationsTable/projectsTable all live on
+    // BackendStack (confirmed: backend-stack.ts declares all 3 as public
+    // readonly dynamodb.Table fields), so no additional stack dependency
+    // is introduced beyond the existing backendStack dependency below.
+    executionsTable: backendStack.executionsTable,
+    conversationsTable: backendStack.conversationsTable,
+    projectsTable: backendStack.projectsTable,
+    // Platform-health dashboard + alarms (decision ab73ae1b): reuse the
+    // existing backend alarm topic (no new SNS topic) and the AppSync
+    // API id for the A3 5XX alarm + dashboard API-health widgets.
+    alarmTopic: backendStack.alarmTopic,
+    appSyncApiId: backendStack.appSyncApi.apiId,
+    // Execution replay package (CIT-026, pass 1) — additional read-only
+    // source tables. workflowsTable/agentConfigTable/modelCatalogTable
+    // live on BackendStack; executionSpecificationsTable lives on
+    // BackendStack too (confirmed public readonly field, threaded into
+    // ProjectsStack/GovernanceStack the same way above); governanceLedgerTable
+    // lives on ArbiterStack. TelemetryStack already depends on
+    // BackendStack (below); it gains no NEW stack dependency on
+    // ArbiterStack from this since arbiterStack is declared after this
+    // point in the file — see the addStackDependency call added below.
+    workflowsTable: backendStack.workflowsTable,
+    agentConfigTable: backendStack.agentConfigTable,
+    executionSpecificationsTable: backendStack.executionSpecificationsTable,
+    modelConfigTable: backendStack.modelConfigTable,
+    governanceLedgerTable: arbiterStack.governanceLedgerTable,
+    accessLogsBucket: backendStack.accessLogsBucket,
+    commitSha,
   },
 );
 telemetryStack.addStackDependency(backendStack);
+telemetryStack.addStackDependency(arbiterStack);
 
 // Frontend hosting stack
 const frontendStack = new FrontendStack(
@@ -271,6 +332,28 @@ backendStack.addPublishHandlerResolvers(publishHandlerArn);
 
 // Note: Backend stack will be updated after services stack to get the gateway ID
 // This creates a circular dependency that CDK will handle by deploying in two phases
+
+// Tracing foundation — EnableLambdaTracing Aspect (architect task
+// 5459301e-1e7b-4bfd-bccb-b106aba2748c). Orchestrator scope amendment: apply
+// to every Lambda-bearing stack, not just backend+arbiter as the original
+// design proposed — the acceptance path's chat resolvers live in
+// citadel-projects post-split, so projects/registry/services/governance/
+// telemetry/gateway all need coverage too. FrontendStack is intentionally
+// excluded: its one Lambda (UpdateEmailTemplatesFunction) already sets
+// `tracing: Tracing.ACTIVE` directly and is a one-shot custom-resource
+// trigger, not on any traced request path.
+for (const lambdaBearingStack of [
+  backendStack,
+  projectsStack,
+  registryStack,
+  servicesStack,
+  governanceStack,
+  arbiterStack,
+  telemetryStack,
+  gatewayStack,
+]) {
+  cdk.Aspects.of(lambdaBearingStack).add(new EnableLambdaTracing());
+}
 
 // O-06: Tagging strategy — apply consistent tags across all stacks
 cdk.Tags.of(app).add("Project", "Citadel");

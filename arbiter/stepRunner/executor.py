@@ -14,6 +14,14 @@ import logging
 import os
 from datetime import datetime, timezone
 
+# Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
+# import BEFORE any boto3 client this module (or its `events` sibling)
+# constructs, so patch_all() instruments botocore ahead of client creation.
+# Hard import — arbiter/common/ is already a required dependency of this
+# module (see the `from common import workflow_contract` hard import below),
+# so no deferred-bundling fallback is needed here.
+import common.tracing as tracing  # import activates tracing as a side effect
+
 import events
 from dag import (
     find_root_nodes,
@@ -25,6 +33,16 @@ from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
 from common.usage import aggregate_usage, parse_usage_array
+from common.metrics_constants import (
+    METRIC_NAMESPACE,
+    METRIC_NODE_DURATION_MS,
+    METRIC_NODE_FAILURE,
+    METRIC_NODE_QUEUE_WAIT_MS,
+    METRIC_UNSTAMPED_DISPATCH,
+    UNIT_MILLISECONDS,
+    UNIT_COUNT,
+    DIMENSION_WORKFLOW_ID,
+)
 
 # DynamoDB table names from environment
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'citadel-workflows-dev')
@@ -37,9 +55,9 @@ _executions_table = _dynamodb.Table(EXECUTIONS_TABLE)
 
 _logger = logging.getLogger(__name__)
 
-# CloudWatch custom-metric namespace. Shared convention with the workflow
-# infrastructure (fan-out error metric + alarms live in the same namespace).
-METRIC_NAMESPACE = 'Citadel/Workflows'
+# METRIC_NAMESPACE is imported from common.metrics_constants (the shared
+# contract module) rather than defined locally — see that module's docstring
+# for the namespace-reuse rationale.
 
 # Lazy SQS client for dispatching workflow nodes to the worker. Constructed on
 # first use (not at import) so module import never resolves credentials — the
@@ -80,9 +98,18 @@ def _log_event(action: str, **fields) -> None:
     the step runner and the worker. Emitted via stdout (Lambda ships stdout to
     CloudWatch Logs), matching the worker's structured-logging convention.
     None-valued fields are dropped to keep lines terse.
+
+    Additive, no-op-safe ``trace_id`` injection (design §"Structured-log
+    trace-id inclusion at the cited logger seams both languages"): read via
+    ``common.tracing.active_trace_context()``, omitted entirely with no
+    active X-Ray segment (the default under pytest / local dev) so the line
+    is byte-identical to the pre-feature shape.
     """
     payload = {'component': 'StepRunner', 'action': action}
     payload.update({k: v for k, v in fields.items() if v is not None})
+    trace_context = tracing.active_trace_context()
+    if trace_context and trace_context.get('traceId'):
+        payload['trace_id'] = trace_context['traceId']
     print(json.dumps(payload))
 
 
@@ -113,7 +140,7 @@ def _emit_metric(metric_name: str, value: float, unit: str, *, workflow_id: str 
     try:
         datum = {'MetricName': metric_name, 'Value': float(value), 'Unit': unit}
         if workflow_id:
-            datum['Dimensions'] = [{'Name': 'WorkflowId', 'Value': workflow_id}]
+            datum['Dimensions'] = [{'Name': DIMENSION_WORKFLOW_ID, 'Value': workflow_id}]
         _get_cloudwatch_client().put_metric_data(
             Namespace=METRIC_NAMESPACE,
             MetricData=[datum],
@@ -176,12 +203,18 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
         ExpressionAttributeValues={':status': 'running', ':startedAt': now},
     )
 
-    # Publish workflow.started event
+    # Publish workflow.started event. run_id kwarg is omitted entirely
+    # (not passed as None) when the execution row carries no runId, so a
+    # pre-runId execution produces a byte-identical call signature to the
+    # pre-feature code path (mirrors the omit-when-absent Detail contract).
+    _run_id = execution.get('runId')
+    _run_id_kwargs = {'run_id': _run_id} if _run_id else {}
     events.publish_workflow_started(
         execution_id=execution_id,
         workflow_id=workflow_id,
         app_id=execution.get('appId', ''),
         started_at=now,
+        **_run_id_kwargs,
     )
     _log_event('execution_start', executionId=execution_id, workflowId=workflow_id)
 
@@ -198,10 +231,14 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
             # (decision 59376546). No node configuration → workflow config
             # unchanged, byte-identical to the pre-feature dispatch.
             invoke_node(execution_id, workflow_id, node, {},
-                        merge_node_configuration(configuration, node))
+                        merge_node_configuration(configuration, node),
+                        run_id=_run_id)
 
 
-def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict) -> None:
+def invoke_node(
+    execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict,
+    *, run_id: str | None = None,
+) -> None:
     """Invoke a single workflow node.
 
     1. Emit supervisor.chatter event for cross-system correlation (US-ARB-016)
@@ -209,15 +246,42 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
     3. Publish workflow.node.started event
     4. Dispatch the node to the worker by sending a discriminated message to
        the worker SQS queue (WORKER_QUEUE_URL)
+
+    ``run_id`` is additive, optional, and nullable (Pass 1, decision
+    f1cbd5ef): the server-minted correlation id read off the execution row
+    by callers, threaded through to the outbound chatter/node-started
+    events and the SQS dispatch message. Never fabricated — a caller that
+    passes ``None`` (a pre-runId execution row) produces byte-identical
+    events/messages to the pre-runId code path.
     """
     # US-ARB-016: fire-and-forget chatter event for cross-system correlation.
     # The returned correlationId is currently a local only; it becomes the
     # hook for US-ARB-008's governed dispatch to link findings back to the
     # stepRunner node that triggered them.
+    #
+    # run_id kwarg is omitted entirely (not passed as None) at each of the
+    # three call sites below when absent, so a pre-runId caller's call
+    # signature stays byte-identical to the pre-feature code path.
+    _run_id_kwargs = {'run_id': run_id} if run_id else {}
+
+    # Runtime backstop (Pass 1, decision f1cbd5ef, silent-regression guard
+    # layer 3): a node dispatched with no run_id emits a WARN-level
+    # CloudWatch count metric using the pinned metrics_constants module —
+    # never a hand-typed string literal. Best-effort and observability
+    # only: a CloudWatch failure here can never gate or delay dispatch
+    # (see _emit_metric's own try/except).
+    if not run_id:
+        _logger.warning(
+            'unstamped dispatch: node %s of execution %s dispatched with no runId',
+            node.get('id', 'unknown'), execution_id,
+        )
+        _emit_metric(METRIC_UNSTAMPED_DISPATCH, 1, UNIT_COUNT, workflow_id=workflow_id)
+
     correlation_id = events.publish_supervisor_chatter(  # noqa: F841
         execution_id=execution_id,
         workflow_id=workflow_id,
         node_id=node.get('id', 'unknown'),
+        **_run_id_kwargs,
     )
 
     node_id = node['id']
@@ -260,6 +324,7 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
         node_id=node_id,
         agent_id=agent_id,
         started_at=now,
+        **_run_id_kwargs,
     )
 
     # Dispatch the node to the worker over the shared SQS queue. The message
@@ -282,14 +347,39 @@ def invoke_node(execution_id: str, workflow_id: str, node: dict, input_data: dic
         agent_id=agent_id,
         input=input_data,
         configuration=configuration,
-    )
-    _get_sqs_client().send_message(
-        QueueUrl=queue_url,
-        MessageBody=json.dumps(message),
+        trace_context=tracing.active_trace_context(),
+        # Queue-wait metric: reuse the timestamp already computed above for
+        # the node.started event/state update rather than taking a second
+        # "now" reading — dispatch and node.started are the same instant for
+        # this purpose.
+        dispatched_at=now,
+        **_run_id_kwargs,
     )
 
+    # H3 trace-context propagation (architect task f4f4bab3-7a07-4acf-ba43-
+    # ba43bb488444): add the standard AWSTraceHeader MessageAttribute (the
+    # exact attribute name X-Ray/Lambda natively recognize for SQS linking)
+    # ONLY when an active X-Ray segment exists. The body traceContext above
+    # is already additive via the contract builder's kwarg. With no active
+    # segment (the default in tests / local dev), neither is added — the
+    # dispatch stays byte-identical to the pre-feature message
+    # (property-tested).
+    send_kwargs = {'QueueUrl': queue_url, 'MessageBody': json.dumps(message)}
+    trace_context = message.get('traceContext')
+    if trace_context and trace_context.get('xrayTraceHeader'):
+        send_kwargs['MessageAttributes'] = {
+            'AWSTraceHeader': {
+                'DataType': 'String',
+                'StringValue': trace_context['xrayTraceHeader'],
+            },
+        }
+    _get_sqs_client().send_message(**send_kwargs)
 
-def handle_node_completion(execution_id: str, node_id: str, output: dict, usage: list | None = None) -> None:
+
+def handle_node_completion(
+    execution_id: str, node_id: str, output: dict, usage: list | None = None,
+    *, dispatched_at: str | None = None, worker_started_at: str | None = None,
+) -> None:
     """Handle a completed node and advance the workflow.
 
     1. Update node status → completed in DynamoDB (same call also persists
@@ -311,6 +401,15 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict, usage:
     ADD) in the SAME update_item call that marks the node completed, so a
     duplicate delivery guarded by the status check below writes it at most
     once, and even an unguarded re-write is byte-identical (last-write-wins).
+
+    ``dispatched_at`` / ``worker_started_at`` are additive and optional
+    (queue-wait metric): the step runner's dispatch timestamp and the
+    worker's invocation-start timestamp, both echoed back on the node-result
+    event (see ``workflow_contract.NodeResultDetail``). When both are
+    present and parseable, a ``NodeQueueWaitMs`` metric is emitted — the
+    delta between dispatch and worker start. Missing/unparseable values
+    simply skip the metric (best-effort, never fabricated), matching the
+    existing ``NodeDurationMs`` convention.
     """
     execution = _load_execution(execution_id)
     if not execution:
@@ -389,7 +488,15 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict, usage:
     )
     duration = _duration_ms(node_data.get('startedAt'), now)
     if duration is not None:
-        _emit_metric('NodeDurationMs', duration, 'Milliseconds', workflow_id=workflow_id)
+        _emit_metric(METRIC_NODE_DURATION_MS, duration, UNIT_MILLISECONDS, workflow_id=workflow_id)
+
+    # Queue-wait metric (dispatch -> worker-start delta). Both timestamps are
+    # additive and best-effort: absent on any pre-feature dispatch/worker, or
+    # if either is unparseable, the metric is simply skipped — never
+    # fabricated. Reuses the same _duration_ms helper as NodeDurationMs.
+    queue_wait = _duration_ms(dispatched_at, worker_started_at)
+    if queue_wait is not None:
+        _emit_metric(METRIC_NODE_QUEUE_WAIT_MS, queue_wait, UNIT_MILLISECONDS, workflow_id=workflow_id)
 
     # NOTE: workflow.node.completed is NOT re-emitted here. This handler is
     # triggered BY that event (the worker is its sole producer), and the step
@@ -439,7 +546,8 @@ def handle_node_completion(execution_id: str, node_id: str, output: dict, usage:
             # Per-node configuration overrides workflow-level per-key
             # (decision 59376546) — same merge as the root-dispatch site.
             invoke_node(execution_id, execution.get('workflowId', ''), node, output,
-                        merge_node_configuration(configuration, node))
+                        merge_node_configuration(configuration, node),
+                        run_id=execution.get('runId'))
 
     # Check if all nodes are terminal (completed, skipped, or failed)
     all_terminal = all(
@@ -578,7 +686,7 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             agentId=agent_id or None,
             error=error,
         )
-        _emit_metric('NodeFailure', 1, 'Count', workflow_id=workflow_id)
+        _emit_metric(METRIC_NODE_FAILURE, 1, UNIT_COUNT, workflow_id=workflow_id)
 
         events.publish_workflow_failed(
             execution_id=execution_id,

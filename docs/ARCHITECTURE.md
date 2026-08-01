@@ -178,7 +178,8 @@ BackendStack (core infra — no dependencies)
   ├── GatewayStack (depends on: BackendStack.appsTable, BackendStack.eventBus,
   │                              BackendStack.idempotencyTable)
   ├── TelemetryStack (depends on: BackendStack.agentEventBus, BackendStack.modelCatalogTable,
-  │                                BackendStack.userPool, BackendStack.userPoolClient)
+  │                                BackendStack.userPool, BackendStack.userPoolClient,
+  │                                BackendStack.alarmTopic, BackendStack.appSyncApiId)
   └── FrontendStack (depends on: BackendStack.appSyncApi, BackendStack.userPool,
                                    TelemetryStack.costApiUrl)
 
@@ -188,12 +189,15 @@ PipelineStack — standalone (CI/CD CodePipeline, self-mutating, multi-env)
 
 ### TelemetryStack — invocation cost ledger, cost query API, and budget alerts
 
-`TelemetryStack` owns the invocation cost ledger (`citadel-cost-ledger-{env}`, populated by `cost-ledger-writer` from `task.completion` / `intake.usage.captured` / `workflow.node.completed` events) plus two additions layered on the same single-table design:
+`TelemetryStack` owns the invocation cost ledger (`citadel-cost-ledger-{env}`, populated by `cost-ledger-writer` from `task.completion` / `intake.usage.captured` / `workflow.node.completed` events) plus several additions layered on the same single-table design and the same HTTP API surface:
 
 - **Cost query HttpApi** (`citadel-cost-api-{env}`) — a Cognito-JWT-authorized HTTP API (`GET /cost/summary`, `GET /cost/series`, `GET`/`PUT /budgets`) fronting a single `cost-query-handler` Lambda. Every non-admin read is a base-table `Query` keyed on `PK=ORG#<verified JWT claim>` — never a Scan, never a dimension GSI — so org isolation lives in the DynamoDB key condition itself. The stack exposes `costApiUrl` (the HttpApi endpoint), threaded into `FrontendStack` as `aws_cost_api_url` in `aws-exports.json` (see [COST_QUERY.md](./COST_QUERY.md)).
 - **Budget alerts** — budget rows share the ledger table under `SK=BUDGET#ORG` / `BUDGET#APP#<appId>` (disjoint from the ISO-timestamped cost rows), enumerated via a sparse `BudgetIndex` GSI. A separate hourly-scheduled `cost-budget-evaluator` Lambda computes period-to-date spend and publishes `cost.budget.threshold.crossed` / `cost.budget.breached` to the shared event bus — making `TelemetryStack` an EventBridge **publisher** for the first time (it was consume-only before). See [EVENTBRIDGE_CATALOG.md](./EVENTBRIDGE_CATALOG.md#cost-budget-events).
+- **Trace query API** — three read-only routes (`GET /traces/by-execution/{executionId}`, `GET /traces/by-conversation/{conversationId}`, `GET /traces/{traceId}`) added to the **same** `costHttpApi`, behind the same Cognito JWT authorizer and CORS/access-log stage. `trace-query-handler.ts` dispatches on a `TRACE_BACKEND` env var (`xray` | `spans`, default `xray`) — the `xray` path queries the X-Ray `GetTraceSummaries`/`BatchGetTraces` APIs; the `spans` path (post Transaction Search cutover) queries CloudWatch Logs Insights over `aws/spans` and shapes results into the same response types, so the frontend cannot tell which backend answered. See [TRACING_RUNBOOK.md](./TRACING_RUNBOOK.md) for the propagation contract, the account-level Transaction Search constraint, and the cutover procedure.
+- **Replay package handler** — a dedicated route + a dedicated S3 bucket (`ReplayPackageBucket`) backing downloadable, sanitised execution/conversation replay packages (fail-closed sanitisation gate, ≤300s presigned-URL TTL). See [REPLAY_PACKAGE.md](./REPLAY_PACKAGE.md).
+- **Platform-health dashboard + SLO alarms** — the `citadel-platform-health-${env}` CloudWatch dashboard (six sections: health strip, API health, workflow health, cost & reconciliation, governance, DLQ/error budget) and six new CloudWatch alarms, all wired to the existing `citadel-alarms-${env}` SNS topic (no new topic — `BackendStack.alarmTopic` was promoted to `public readonly` and threaded into `TelemetryStackProps`, alongside `appSyncApiId` for the AppSync 5XX alarm's `GraphQLAPIId` dimension). See [OBSERVABILITY.md](./OBSERVABILITY.md#platform-health-dashboard--slo-alarms).
 
-This keeps the TelemetryStack itself at a fixed surface (BackendStack, ServicesStack, ArbiterStack, GatewayStack, TelemetryStack, FrontendStack, GovernanceStack, ProjectsStack, RegistryStack — **9 stacks** total) — the cost query/budget surface is additive to the existing TelemetryStack rather than a new stack. `ProjectsStack` (`citadel-projects-{env}`) and `RegistryStack` (`citadel-registry-{env}`) are backend-stack-split satellites (decision 30e6d067): ProjectsStack (phase 1) owns the projects/conversations/documents/assessment/design-progress/planning/chatter domain resolvers; RegistryStack (phase 2) owns the registry/agent-import/fabricator-request/fabricator-queue/fabrication-event/app-CRUD-and-api-key domain resolvers. Both attach to BackendStack's AppSync API via the same L1 cross-stack pattern GovernanceStack uses.
+This keeps the TelemetryStack itself at a fixed surface (BackendStack, ServicesStack, ArbiterStack, GatewayStack, TelemetryStack, FrontendStack, GovernanceStack, ProjectsStack, RegistryStack — **9 stacks** total) — the cost query/budget/trace/replay/dashboard surface above is additive to the existing TelemetryStack rather than a new stack. `ProjectsStack` (`citadel-projects-{env}`) and `RegistryStack` (`citadel-registry-{env}`) are backend-stack-split satellites (decision 30e6d067): ProjectsStack (phase 1) owns the projects/conversations/documents/assessment/design-progress/planning/chatter domain resolvers; RegistryStack (phase 2) owns the registry/agent-import/fabricator-request/fabricator-queue/fabrication-event/app-CRUD-and-api-key domain resolvers. Both attach to BackendStack's AppSync API via the same L1 cross-stack pattern GovernanceStack uses.
 
 ## Key Architectural Patterns
 
@@ -208,6 +212,27 @@ Worker agents run user-uploaded Python code in an isolated subprocess (`subproce
 ### Circuit Breaker
 
 The Supervisor uses a circuit breaker for Bedrock API calls with three states: CLOSED (normal), OPEN (rejecting — after 3 failures), HALF_OPEN (probe after 30s recovery timeout). Retries use exponential backoff with full jitter. This prevents cascading failures when Bedrock is throttled or unavailable.
+
+### Active Tracing (X-Ray)
+
+Every Lambda across every stack has active X-Ray tracing enabled via a CDK
+Aspect (`backend/lib/tracing-aspect.ts`) that visits each `CfnFunction` and
+sets `tracingConfig` to `Active` — rather than repeating the same construct
+prop at every call site, the aspect applies it uniformly and is asserted by
+per-stack coverage tests (`backend/test/tracing-*-stack.test.ts`). The
+AWS SDK v3 clients used in shared utility modules (`dynamodb.ts`,
+`events.ts`) are wrapped with `AWSXRay.captureAWSv3Client(...)` so
+DynamoDB/EventBridge calls appear as native subsegments on the invoking
+Lambda's trace without per-call-site instrumentation. A no-daemon
+integration test (`backend/src/utils/__tests__/xray-no-daemon.integration.test.ts`)
+confirms every wrapped client still degrades safely (no throw) when no
+X-Ray daemon/segment context is present, e.g. under Jest. A dedicated CI
+script, `backend/scripts/split-gates/tracing-only-diff.ts`
+(`split-gates.sh`), classifies a diff as tracing-only so tracing-focused
+PRs can take a lighter gate than a full application-logic review. See
+[docs/TRACING_RUNBOOK.md](./TRACING_RUNBOOK.md) for the propagation
+contract this substrate feeds (annotation keys, hop matrix, and the
+account-level Transaction Search constraint).
 
 ### Idempotent Event Processing
 

@@ -46,6 +46,7 @@ from tools.postfab import (
 )
 from tools.state import get_intake_state, update_intake_progress, get_postfab_marker
 from tools.emf import emit_turn_metrics, capture_turn_usage
+from tools.run_id import mint_run_id
 from tools.kb import kb_query as _kb_query
 from strands.tools import tool
 
@@ -303,6 +304,10 @@ async def invoke(payload, context: RequestContext):
     turn_start = time.monotonic()
     session_id = payload.get("session_id", "")
     user_message = payload.get("prompt", "Hello!")
+    # Server-minted only (Pass 1, decision f1cbd5ef): `payload` is untrusted
+    # request input and is NEVER read for a runId — this mint is the sole
+    # source for the intake entry point, one fresh runId per turn.
+    run_id = mint_run_id()
 
     agent = get_agent(session_id)
 
@@ -329,11 +334,13 @@ async def invoke(payload, context: RequestContext):
         agent_result=agent_result,
     )
 
-    # Per-turn usage capture (source="intake"); never raises.
+    # Per-turn usage capture (source="intake"); never raises. run_id is
+    # additive/best-effort — threaded through to publish_usage_event.
     capture_turn_usage(
         session_id=session_id,
         turn_duration_ms=(time.monotonic() - turn_start) * 1000.0,
         agent_result=agent_result,
+        run_id=run_id,
     )
 
 

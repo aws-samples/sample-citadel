@@ -14,6 +14,10 @@ import {
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
 import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
+import {
   CognitoIdentityProviderClient,
   AdminGetUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
@@ -21,13 +25,14 @@ import { mockClient } from "aws-sdk-client-mock";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const ebMock = mockClient(EventBridgeClient);
+const cwMock = mockClient(CloudWatchClient);
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
 
 jest.mock("../../utils/appsync", () => ({
   getUserId: jest.fn().mockReturnValue("user-123"),
 }));
 
-import { handler } from "../execution-resolver";
+import { handler, __resetColdStartForTest } from "../execution-resolver";
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
@@ -76,9 +81,12 @@ describe("execution-resolver", () => {
   beforeEach(() => {
     ddbMock.reset();
     ebMock.reset();
+    cwMock.reset();
     cognitoMock.reset();
     mockCognitoOrg("org-1");
     ebMock.on(PutEventsCommand).resolves({});
+    cwMock.on(PutMetricDataCommand).resolves({});
+    __resetColdStartForTest();
   });
 
   afterAll(() => {
@@ -477,6 +485,43 @@ describe("execution-resolver", () => {
       await expect(
         invoke(makeEvent("publishWorkflowProgress", { input: progressInput })),
       ).resolves.toBeDefined();
+    });
+  });
+
+  // ─── Cold-start metric ──────────────────────────────────────────
+
+  describe("cold-start metric", () => {
+    test("first invocation in a fresh container emits NodeColdStart", async () => {
+      ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+      await invoke(makeEvent("listExecutions", { workflowId: "wf-1" }));
+
+      const calls = cwMock.commandCalls(PutMetricDataCommand);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].args[0].input.Namespace).toBe("Citadel/Workflows");
+      expect(calls[0].args[0].input.MetricData?.[0]).toMatchObject({
+        MetricName: "NodeColdStart",
+        Value: 1,
+        Unit: "Count",
+      });
+    });
+
+    test("second invocation in the same (warm) container does not re-emit", async () => {
+      ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+      await invoke(makeEvent("listExecutions", { workflowId: "wf-1" }));
+      await invoke(makeEvent("listExecutions", { workflowId: "wf-1" }));
+
+      expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
+    });
+
+    test("a CloudWatch failure never fails the resolver", async () => {
+      ddbMock.on(QueryCommand).resolves({ Items: [] });
+      cwMock.on(PutMetricDataCommand).rejects(new Error("cloudwatch down"));
+
+      await expect(
+        invoke(makeEvent("listExecutions", { workflowId: "wf-1" })),
+      ).resolves.toEqual({ items: [], nextToken: undefined });
     });
   });
 });

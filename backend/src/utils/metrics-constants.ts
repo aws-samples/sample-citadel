@@ -1,0 +1,63 @@
+/**
+ * Shared CloudWatch metric constants for the TypeScript backend tier.
+ *
+ * Single source of truth for metric names, units, and dimension keys that
+ * TypeScript Lambda resolvers emit for per-node/per-invocation telemetry. A
+ * downstream dashboards story consumes these names/dimensions directly, so
+ * they are a CONTRACT — changing a literal value here is a breaking change
+ * for that story. Pinned by literal-value tests in
+ * `backend/src/utils/__tests__/metrics-constants.test.ts`.
+ *
+ * Namespace: `Citadel/Workflows`, mirroring the Python arbiter tier's
+ * `arbiter/common/metrics_constants.py` (same namespace both languages
+ * write into — a downstream dashboard/alarm should not care which runtime
+ * emitted a given `NodeColdStart` datapoint).
+ *
+ * Dimensions are intentionally low-cardinality (WorkflowId, AgentId) —
+ * never executionId/nodeId, matching the Python tier's convention.
+ */
+
+export const METRIC_NAMESPACE = "Citadel/Workflows";
+
+/** Agent/Lambda cold start: emitted once per container lifetime via a
+ * module-scope flag flipped on first invocation. */
+export const METRIC_NODE_COLD_START = "NodeColdStart";
+
+/**
+ * Node duration (Milliseconds), emitted on node completion. Mirrors the
+ * Python arbiter tier's `METRIC_NODE_DURATION_MS` in
+ * `arbiter/common/metrics_constants.py` — added here for the dashboards
+ * story (decision ab73ae1b), which needs it from the TS/CDK side.
+ */
+export const METRIC_NODE_DURATION_MS = "NodeDurationMs";
+
+/**
+ * Terminal (non-retryable) node failure (Count). Mirrors the Python
+ * arbiter tier's `METRIC_NODE_FAILURE`. Added here for the dashboards
+ * story (decision ab73ae1b).
+ */
+export const METRIC_NODE_FAILURE = "NodeFailure";
+
+/**
+ * Dispatch -> worker-start queue wait (Milliseconds). Mirrors the Python
+ * arbiter tier's `METRIC_NODE_QUEUE_WAIT_MS`. Added here for the
+ * dashboards story (decision ab73ae1b).
+ */
+export const METRIC_NODE_QUEUE_WAIT_MS = "NodeQueueWaitMs";
+
+/**
+ * Runtime backstop metric (Count) for the runId silent-regression guard
+ * (Pass 1, decision f1cbd5ef): emitted WARN-level whenever a finding or
+ * dispatch is written runId-absent. Observability only — never gates
+ * dispatch or a fail-closed write. Mirrors the Python arbiter tier's
+ * `METRIC_UNSTAMPED_DISPATCH` in `arbiter/common/metrics_constants.py`.
+ * Pinned per the "do NOT retype metric names" lesson — always import this
+ * constant at the emission call site, never hand-type the string literal.
+ */
+export const METRIC_UNSTAMPED_DISPATCH = "UnstampedDispatch";
+
+export const UNIT_MILLISECONDS = "Milliseconds";
+export const UNIT_COUNT = "Count";
+
+export const DIMENSION_WORKFLOW_ID = "WorkflowId";
+export const DIMENSION_AGENT_ID = "AgentId";

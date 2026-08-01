@@ -32,26 +32,34 @@
  *    argument payloads are ever logged, so credentials cannot leak by
  *    construction.
  */
-import type { AppSyncResolverEvent } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { getUserId } from '../utils/appsync';
-import { lookupUserOrganization } from '../utils/auth-event';
-import { ValidationError, sanitizeString } from '../utils/validation';
+import type { AppSyncResolverEvent } from "aws-lambda";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { getUserId } from "../utils/appsync";
+import { lookupUserOrganization } from "../utils/auth-event";
+import { ValidationError, sanitizeString } from "../utils/validation";
 import {
   activateProjectAgents,
   type ActivateAgentsResult,
-} from './agent-config-resolver';
+} from "./agent-config-resolver";
 import {
   createApp,
   ensureAppAgentBindings,
   findAppBySourceProjectId,
-} from './registry-agent-record-resolver';
-import { createWorkflow, publishWorkflow, importBlueprint } from './workflow-resolver';
+} from "./registry-agent-record-resolver";
+import {
+  createWorkflow,
+  publishWorkflow,
+  importBlueprint,
+} from "./workflow-resolver";
 import {
   ensureAgentConfigRows,
   extractAgentIdsFromDefinition,
-} from './ensure-agent-config-rows';
+} from "./ensure-agent-config-rows";
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -59,16 +67,16 @@ const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 // environment at call time and the module can be imported in tests before
 // the env is prepared.
 function projectsTable(): string {
-  return process.env.PROJECTS_TABLE ?? '';
+  return process.env.PROJECTS_TABLE ?? "";
 }
 function conversationsTable(): string {
-  return process.env.CONVERSATIONS_TABLE ?? '';
+  return process.env.CONVERSATIONS_TABLE ?? "";
 }
 function appsTable(): string {
-  return process.env.APPS_TABLE ?? '';
+  return process.env.APPS_TABLE ?? "";
 }
 function workflowsTable(): string {
-  return process.env.WORKFLOWS_TABLE ?? '';
+  return process.env.WORKFLOWS_TABLE ?? "";
 }
 
 /** Merged view of the arguments the 4 intake fields receive. */
@@ -81,17 +89,18 @@ interface IntakeOrchestrationArguments {
   appId?: unknown;
 }
 
-type IntakeOrchestrationEvent = AppSyncResolverEvent<IntakeOrchestrationArguments>;
+type IntakeOrchestrationEvent =
+  AppSyncResolverEvent<IntakeOrchestrationArguments>;
 
 /** ActivateAgentsResult extended with the explicit zero-activated signal. */
 interface IntakeActivateAgentsResult extends ActivateAgentsResult {
-  matchedBy: 'sessionId' | 'projectId' | null;
+  matchedBy: "sessionId" | "projectId" | null;
 }
 
 interface IntakeBlueprintResult {
   ok: boolean;
   blueprintId: string | null;
-  status: 'PUBLISHED' | 'AGENTS_SYNCING' | 'VALIDATION_FAILED';
+  status: "PUBLISHED" | "AGENTS_SYNCING" | "VALIDATION_FAILED";
   nodeCount: number | null;
   missing: string[];
   errors: string[];
@@ -104,16 +113,19 @@ interface IntakeBlueprintResult {
  * the `@aws_iam`-only directive should already have kept it out.
  */
 function isIamIdentity(identity: unknown): boolean {
-  if (!identity || typeof identity !== 'object') return false;
+  if (!identity || typeof identity !== "object") return false;
   const id = identity as Record<string, unknown>;
   if (id.claims !== undefined) return false;
-  if (typeof id.sub === 'string') return false;
-  return typeof id.accountId === 'string' && id.accountId.length > 0;
+  if (typeof id.sub === "string") return false;
+  return typeof id.accountId === "string" && id.accountId.length > 0;
 }
 
 function requireId(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new ValidationError(`${field} is required and must be a non-empty string`, field);
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ValidationError(
+      `${field} is required and must be a non-empty string`,
+      field,
+    );
   }
   if (value.length > 256) {
     throw new ValidationError(`${field} must be at most 256 characters`, field);
@@ -128,7 +140,7 @@ function requireId(value: unknown, field: string): string {
  */
 function toJsonString(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  if (typeof value === 'string') return value;
+  if (typeof value === "string") return value;
   return JSON.stringify(value);
 }
 
@@ -142,35 +154,59 @@ interface SessionContext {
   projectName: string | null;
   /** projects[projectId].owner — null when absent; drives the org fallback. */
   owner: string | null;
+  /**
+   * Server-minted correlation id CARRIED from the linked conversation row
+   * (Pass 1, decision f1cbd5ef). This resolver is NOT one of the 4
+   * server-mint entry points — the chat entry point (conversation-resolver
+   * sendMessage) already minted and stamped `runId` on the conversation
+   * row this session links to; this field only ever CARRIES that value
+   * through for log correlation, never mints one. Null when the row
+   * predates runId or no linked row was found.
+   */
+  runId: string | null;
 }
 
 /**
  * Finds the conversations row carrying `id = sessionId` and returns its
- * projectId. The table is keyed PK=projectId/SK=timestamp with no GSI on
- * `id` (backend-stack.ts ConversationsTable), so a Query cannot target the
- * session id — a filtered Scan is the only correct read. Scan `Limit` caps
- * items EVALUATED (pre-filter), so a single page routinely misses the row
- * once the table grows: follow LastEvaluatedKey to exhaustion, returning as
+ * projectId (and, additively, its runId when the row carries one — Pass 1,
+ * decision f1cbd5ef; this resolver only ever CARRIES a runId already
+ * minted at the chat entry point, never mints its own). The table is keyed
+ * PK=projectId/SK=timestamp with no GSI on `id` (backend-stack.ts
+ * ConversationsTable), so a Query cannot target the session id — a
+ * filtered Scan is the only correct read. Scan `Limit` caps items
+ * EVALUATED (pre-filter), so a single page routinely misses the row once
+ * the table grows: follow LastEvaluatedKey to exhaustion, returning as
  * soon as the linked row is found.
  */
-async function findLinkedProjectId(sessionId: string): Promise<string | null> {
+async function findLinkedProjectId(
+  sessionId: string,
+): Promise<{ projectId: string; runId: string | null } | null> {
   let exclusiveStartKey: Record<string, unknown> | undefined;
   do {
     const page = await docClient.send(
       new ScanCommand({
         TableName: conversationsTable(),
-        FilterExpression: '#cid = :cid',
-        ExpressionAttributeNames: { '#cid': 'id' },
-        ExpressionAttributeValues: { ':cid': sessionId },
-        ProjectionExpression: 'projectId',
+        FilterExpression: "#cid = :cid",
+        ExpressionAttributeNames: { "#cid": "id" },
+        ExpressionAttributeValues: { ":cid": sessionId },
+        ProjectionExpression: "projectId, runId",
         ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),
       }),
     );
-    const linked = page.Items?.find((item) => typeof item.projectId === 'string');
+    const linked = page.Items?.find(
+      (item) => typeof item.projectId === "string",
+    );
     if (linked) {
-      return linked.projectId as string;
+      return {
+        projectId: linked.projectId as string,
+        runId:
+          typeof linked.runId === "string" && linked.runId.length > 0
+            ? linked.runId
+            : null,
+      };
     }
-    exclusiveStartKey = page.LastEvaluatedKey as Record<string, unknown> | undefined;
+    exclusiveStartKey = page.LastEvaluatedKey as
+      Record<string, unknown> | undefined;
   } while (exclusiveStartKey);
   return null;
 }
@@ -182,23 +218,31 @@ async function findLinkedProjectId(sessionId: string): Promise<string | null> {
  * projectId falls back to the sessionId. The org comes from the project
  * record's `organization` attribute (project-resolver `createProject`).
  */
-async function deriveSessionContext(sessionId: string): Promise<SessionContext> {
-  const projectId = (await findLinkedProjectId(sessionId)) ?? sessionId;
+async function deriveSessionContext(
+  sessionId: string,
+): Promise<SessionContext> {
+  const linked = await findLinkedProjectId(sessionId);
+  const projectId = linked?.projectId ?? sessionId;
+  const runId = linked?.runId ?? null;
 
   const project = await docClient.send(
     new GetCommand({ TableName: projectsTable(), Key: { id: projectId } }),
   );
   const orgId =
-    typeof project.Item?.organization === 'string' && project.Item.organization.length > 0
+    typeof project.Item?.organization === "string" &&
+    project.Item.organization.length > 0
       ? (project.Item.organization as string)
       : null;
-  const projectName = typeof project.Item?.name === 'string' ? (project.Item.name as string) : null;
+  const projectName =
+    typeof project.Item?.name === "string"
+      ? (project.Item.name as string)
+      : null;
   const owner =
-    typeof project.Item?.owner === 'string' && project.Item.owner.length > 0
+    typeof project.Item?.owner === "string" && project.Item.owner.length > 0
       ? (project.Item.owner as string)
       : null;
 
-  return { sessionId, projectId, orgId, projectName, owner };
+  return { sessionId, projectId, orgId, projectName, owner, runId };
 }
 
 /**
@@ -211,7 +255,7 @@ async function deriveSessionContext(sessionId: string): Promise<SessionContext> 
  * apps on exactly the downstream semantics (OrgIndex visibility, org-scoped
  * listing) the UI path produces.
  */
-const ORGLESS_CALLER_ORG = 'default';
+const ORGLESS_CALLER_ORG = "default";
 
 /**
  * Org derivation fallback chain (self-healing — no data patch needed):
@@ -231,22 +275,33 @@ async function resolveOrgId(ctx: SessionContext): Promise<string> {
   if (ctx.owner) {
     const ownerOrg = await lookupUserOrganization(ctx.owner);
     if (ownerOrg) {
-      log('resolveOrgId', ctx.sessionId, { orgSource: 'ownerCognitoAttribute' });
+      log("resolveOrgId", ctx.sessionId, {
+        orgSource: "ownerCognitoAttribute",
+      });
       return ownerOrg;
     }
   }
-  log('resolveOrgId', ctx.sessionId, { orgSource: 'orglessCallerDefault' });
+  log("resolveOrgId", ctx.sessionId, { orgSource: "orglessCallerDefault" });
   return ORGLESS_CALLER_ORG;
 }
 
-function log(fieldName: string, correlationId: string, detail: Record<string, unknown>): void {
+function log(
+  fieldName: string,
+  correlationId: string,
+  detail: Record<string, unknown>,
+  runId?: string | null,
+): void {
   // Identifiers only — never argument payloads (credential sanitization by
   // construction at this boundary).
   console.log(
     JSON.stringify({
-      resolver: 'intake-orchestration-resolver',
+      resolver: "intake-orchestration-resolver",
       fieldName,
       correlationId,
+      // Additive, nullable (Pass 1, decision f1cbd5ef): carried from the
+      // linked conversation row when present; omitted (not null) when
+      // absent so pre-runId log shapes are unaffected.
+      ...(runId ? { runId } : {}),
       ...detail,
     }),
   );
@@ -273,21 +328,26 @@ async function intakeActivateProjectAgents(
 ): Promise<IntakeActivateAgentsResult> {
   const bySession = await activateProjectAgents(sessionId);
   if (!isEmptyActivation(bySession)) {
-    return { ...bySession, matchedBy: 'sessionId' };
+    return { ...bySession, matchedBy: "sessionId" };
   }
 
   const ctx = await deriveSessionContext(sessionId);
   if (ctx.projectId !== sessionId) {
     const byProject = await activateProjectAgents(ctx.projectId);
     if (!isEmptyActivation(byProject)) {
-      return { ...byProject, matchedBy: 'projectId' };
+      return { ...byProject, matchedBy: "projectId" };
     }
   }
 
-  log('intakeActivateProjectAgents', sessionId, {
-    zeroActivated: true,
-    triedProjectFallback: ctx.projectId !== sessionId,
-  });
+  log(
+    "intakeActivateProjectAgents",
+    sessionId,
+    {
+      zeroActivated: true,
+      triedProjectFallback: ctx.projectId !== sessionId,
+    },
+    ctx.runId,
+  );
   return { ...bySession, matchedBy: null };
 }
 
@@ -297,14 +357,14 @@ async function intakeCreateApp(
   rawDescription: unknown,
   userId: string,
 ): Promise<unknown> {
-  const name = sanitizeString(requireId(rawName, 'name'), 100);
+  const name = sanitizeString(requireId(rawName, "name"), 100);
   if (name.length === 0) {
-    throw new ValidationError('name must contain visible characters', 'name');
+    throw new ValidationError("name must contain visible characters", "name");
   }
   const description =
     rawDescription === null || rawDescription === undefined
       ? undefined
-      : sanitizeString(requireId(rawDescription, 'description'), 1000);
+      : sanitizeString(requireId(rawDescription, "description"), 1000);
 
   const ctx = await deriveSessionContext(sessionId);
   const orgId = await resolveOrgId(ctx);
@@ -318,7 +378,7 @@ async function intakeCreateApp(
   // app instead of creating a duplicate.
   const existing = await findAppBySourceProjectId(sessionId, orgId);
   if (existing) {
-    log('intakeCreateApp', sessionId, {
+    log("intakeCreateApp", sessionId, {
       alreadyCreated: true,
       appId: (existing as { appId?: unknown }).appId,
     });
@@ -364,10 +424,10 @@ function countNodes(definition: string): number | null {
     const parsed: unknown = JSON.parse(definition);
     if (
       parsed &&
-      typeof parsed === 'object' &&
+      typeof parsed === "object" &&
       Array.isArray((parsed as { nodes?: unknown }).nodes)
     ) {
-      return ((parsed as { nodes: unknown[] }).nodes).length;
+      return (parsed as { nodes: unknown[] }).nodes.length;
     }
   } catch {
     // Not parseable — node count simply unknown.
@@ -392,7 +452,7 @@ async function healAgentConfigRows(
   }
   const healed = await ensureAgentConfigRows(agentIds);
   log(fieldName, sessionId, {
-    stage: 'ensureAgentConfigRows',
+    stage: "ensureAgentConfigRows",
     ensured: healed.ensured.length,
     existing: healed.existing.length,
     failed: healed.failed.length,
@@ -406,13 +466,13 @@ async function intakeCreateBlueprint(
   userId: string,
   event: IntakeOrchestrationEvent,
 ): Promise<IntakeBlueprintResult> {
-  const name = sanitizeString(requireId(rawName, 'name'), 100);
+  const name = sanitizeString(requireId(rawName, "name"), 100);
   if (name.length === 0) {
-    throw new ValidationError('name must contain visible characters', 'name');
+    throw new ValidationError("name must contain visible characters", "name");
   }
   const definition = toJsonString(rawDefinition);
   if (!definition) {
-    throw new ValidationError('definition is required', 'definition');
+    throw new ValidationError("definition is required", "definition");
   }
 
   const ctx = await deriveSessionContext(sessionId);
@@ -428,11 +488,11 @@ async function intakeCreateBlueprint(
     workflowId = created.workflowId;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log('intakeCreateBlueprint', sessionId, { stage: 'create', failed: true });
+    log("intakeCreateBlueprint", sessionId, { stage: "create", failed: true });
     return {
       ok: false,
       blueprintId: null,
-      status: 'VALIDATION_FAILED',
+      status: "VALIDATION_FAILED",
       nodeCount,
       missing: [],
       errors: [message],
@@ -444,15 +504,17 @@ async function intakeCreateBlueprint(
   // gate's verifyAgentsExist BatchGet would report every node missing.
   // Materialize any absent rows from the live registry records BEFORE the
   // gate reads the table. Best-effort: the gate remains the authority.
-  await healAgentConfigRows('intakeCreateBlueprint', sessionId, definition);
+  await healAgentConfigRows("intakeCreateBlueprint", sessionId, definition);
 
   try {
     await publishWorkflow(workflowId, userId, event);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const missing = message.includes('do not exist') ? parseMissingAgentIds(message) : [];
-    log('intakeCreateBlueprint', sessionId, {
-      stage: 'publish',
+    const missing = message.includes("do not exist")
+      ? parseMissingAgentIds(message)
+      : [];
+    log("intakeCreateBlueprint", sessionId, {
+      stage: "publish",
       failed: true,
       blueprintId: workflowId,
       missingCount: missing.length,
@@ -460,7 +522,7 @@ async function intakeCreateBlueprint(
     return {
       ok: false,
       blueprintId: workflowId,
-      status: missing.length > 0 ? 'AGENTS_SYNCING' : 'VALIDATION_FAILED',
+      status: missing.length > 0 ? "AGENTS_SYNCING" : "VALIDATION_FAILED",
       nodeCount,
       missing,
       errors: [message],
@@ -470,7 +532,7 @@ async function intakeCreateBlueprint(
   return {
     ok: true,
     blueprintId: workflowId,
-    status: 'PUBLISHED',
+    status: "PUBLISHED",
     nodeCount,
     missing: [],
     errors: [],
@@ -483,14 +545,16 @@ async function intakeCreateBlueprint(
  * rewritten), so the id survives into the imported workflow — durable
  * provenance linking an app workflow back to its source blueprint.
  */
-function parseDefinitionId(definitionJson: string | null | undefined): string | null {
+function parseDefinitionId(
+  definitionJson: string | null | undefined,
+): string | null {
   if (!definitionJson) {
     return null;
   }
   try {
     const parsed: unknown = JSON.parse(definitionJson);
     const id = (parsed as { id?: unknown } | null)?.id;
-    return typeof id === 'string' && id.length > 0 ? id : null;
+    return typeof id === "string" && id.length > 0 ? id : null;
   } catch {
     return null;
   }
@@ -498,7 +562,7 @@ function parseDefinitionId(definitionJson: string | null | undefined): string | 
 
 /** Normalizes a workflow row's definition attribute to a JSON string. */
 function definitionString(item: Record<string, unknown>): string {
-  return typeof item.definition === 'string'
+  return typeof item.definition === "string"
     ? item.definition
     : JSON.stringify(item.definition ?? null);
 }
@@ -515,9 +579,11 @@ async function findExistingImportedWorkflow(
   if (!blueprintDefinitionId) {
     return null;
   }
-  const workflowIds = Array.isArray(appItem.workflowIds) ? appItem.workflowIds : [];
+  const workflowIds = Array.isArray(appItem.workflowIds)
+    ? appItem.workflowIds
+    : [];
   for (const workflowId of workflowIds) {
-    if (typeof workflowId !== 'string' || workflowId.length === 0) {
+    if (typeof workflowId !== "string" || workflowId.length === 0) {
       continue;
     }
     const row = await docClient.send(
@@ -526,7 +592,9 @@ async function findExistingImportedWorkflow(
     if (!row.Item) {
       continue;
     }
-    if (parseDefinitionId(definitionString(row.Item)) === blueprintDefinitionId) {
+    if (
+      parseDefinitionId(definitionString(row.Item)) === blueprintDefinitionId
+    ) {
       return row.Item;
     }
   }
@@ -552,7 +620,7 @@ async function ensureBindingsForDefinition(
   try {
     const outcome = await ensureAppAgentBindings(appId, agentIds, userId);
     log(fieldName, sessionId, {
-      stage: 'ensureAppAgentBindings',
+      stage: "ensureAppAgentBindings",
       bound: outcome.bound.length,
       alreadyBound: outcome.alreadyBound.length,
       failed: outcome.failed.length,
@@ -561,10 +629,10 @@ async function ensureBindingsForDefinition(
   } catch (error) {
     console.error(
       JSON.stringify({
-        resolver: 'intake-orchestration-resolver',
+        resolver: "intake-orchestration-resolver",
         fieldName,
         correlationId: sessionId,
-        stage: 'ensureAppAgentBindings',
+        stage: "ensureAppAgentBindings",
         error: error instanceof Error ? error.message : String(error),
       }),
     );
@@ -579,12 +647,12 @@ async function intakeImportBlueprintToApp(
   userId: string,
   event: IntakeOrchestrationEvent,
 ): Promise<unknown> {
-  const blueprintId = requireId(rawBlueprintId, 'blueprintId');
-  const appId = requireId(rawAppId, 'appId');
+  const blueprintId = requireId(rawBlueprintId, "blueprintId");
+  const appId = requireId(rawAppId, "appId");
   const name =
     rawName === null || rawName === undefined
       ? undefined
-      : sanitizeString(requireId(rawName, 'name'), 100);
+      : sanitizeString(requireId(rawName, "name"), 100);
 
   const ctx = await deriveSessionContext(sessionId);
   const orgId = await resolveOrgId(ctx);
@@ -595,27 +663,38 @@ async function intakeImportBlueprintToApp(
     new GetCommand({ TableName: appsTable(), Key: { appId } }),
   );
   if (!appRow.Item) {
-    throw new Error('App not found');
+    throw new Error("App not found");
   }
   if (appRow.Item.orgId !== orgId) {
-    throw new Error('Access denied: the app belongs to a different organization');
+    throw new Error(
+      "Access denied: the app belongs to a different organization",
+    );
   }
 
   const blueprintRow = await docClient.send(
-    new GetCommand({ TableName: workflowsTable(), Key: { workflowId: blueprintId } }),
+    new GetCommand({
+      TableName: workflowsTable(),
+      Key: { workflowId: blueprintId },
+    }),
   );
   if (!blueprintRow.Item) {
-    throw new Error('Blueprint not found');
+    throw new Error("Blueprint not found");
   }
   if (blueprintRow.Item.orgId !== orgId) {
-    throw new Error('Access denied: the blueprint belongs to a different organization');
+    throw new Error(
+      "Access denied: the blueprint belongs to a different organization",
+    );
   }
 
   // Dual-store self-healing for sessions resuming at the import step: the
   // app's later publish path BatchGets the same agents table, so ensure the
   // blueprint's referenced agents have rows now (best-effort).
   const bpDefinition = definitionString(blueprintRow.Item);
-  await healAgentConfigRows('intakeImportBlueprintToApp', sessionId, bpDefinition);
+  await healAgentConfigRows(
+    "intakeImportBlueprintToApp",
+    sessionId,
+    bpDefinition,
+  );
 
   // Idempotency: when the blueprint was already imported into this app
   // (conversational re-trigger), return the existing workflow instead of
@@ -626,12 +705,12 @@ async function intakeImportBlueprintToApp(
     parseDefinitionId(bpDefinition),
   );
   if (existing) {
-    log('intakeImportBlueprintToApp', sessionId, {
+    log("intakeImportBlueprintToApp", sessionId, {
       alreadyImported: true,
       workflowId: existing.workflowId,
     });
     await ensureBindingsForDefinition(
-      'intakeImportBlueprintToApp',
+      "intakeImportBlueprintToApp",
       sessionId,
       appId,
       definitionString(existing),
@@ -642,12 +721,19 @@ async function intakeImportBlueprintToApp(
 
   // agentMapping is the identity mapping — intake blueprints are composed
   // with REAL registry recordIds, never placeholders.
-  const imported = await importBlueprint(blueprintId, appId, name, {}, userId, event);
+  const imported = await importBlueprint(
+    blueprintId,
+    appId,
+    name,
+    {},
+    userId,
+    event,
+  );
 
   // Associate the workflow's agents with the app so the Agents tab and the
   // "All agents are READY" publish precondition see them (best-effort).
   await ensureBindingsForDefinition(
-    'intakeImportBlueprintToApp',
+    "intakeImportBlueprintToApp",
     sessionId,
     appId,
     bpDefinition,
@@ -658,13 +744,15 @@ async function intakeImportBlueprintToApp(
 }
 
 const KNOWN_FIELDS = new Set([
-  'intakeActivateProjectAgents',
-  'intakeCreateApp',
-  'intakeCreateBlueprint',
-  'intakeImportBlueprintToApp',
+  "intakeActivateProjectAgents",
+  "intakeCreateApp",
+  "intakeCreateBlueprint",
+  "intakeImportBlueprintToApp",
 ]);
 
-export const handler = async (event: IntakeOrchestrationEvent): Promise<unknown> => {
+export const handler = async (
+  event: IntakeOrchestrationEvent,
+): Promise<unknown> => {
   const fieldName = event.info.fieldName;
   const args = event.arguments ?? {};
 
@@ -676,17 +764,28 @@ export const handler = async (event: IntakeOrchestrationEvent): Promise<unknown>
   }
 
   const userId = getUserId(event.identity);
-  const sessionId = requireId(args.sessionId, 'sessionId');
+  const sessionId = requireId(args.sessionId, "sessionId");
   log(fieldName, sessionId, { argKeys: Object.keys(args) });
 
   try {
     switch (fieldName) {
-      case 'intakeActivateProjectAgents':
+      case "intakeActivateProjectAgents":
         return await intakeActivateProjectAgents(sessionId);
-      case 'intakeCreateApp':
-        return await intakeCreateApp(sessionId, args.name, args.description, userId);
-      case 'intakeCreateBlueprint':
-        return await intakeCreateBlueprint(sessionId, args.name, args.definition, userId, event);
+      case "intakeCreateApp":
+        return await intakeCreateApp(
+          sessionId,
+          args.name,
+          args.description,
+          userId,
+        );
+      case "intakeCreateBlueprint":
+        return await intakeCreateBlueprint(
+          sessionId,
+          args.name,
+          args.definition,
+          userId,
+          event,
+        );
       default:
         return await intakeImportBlueprintToApp(
           sessionId,
@@ -700,7 +799,7 @@ export const handler = async (event: IntakeOrchestrationEvent): Promise<unknown>
   } catch (error) {
     console.error(
       JSON.stringify({
-        resolver: 'intake-orchestration-resolver',
+        resolver: "intake-orchestration-resolver",
         fieldName,
         correlationId: sessionId,
         error: error instanceof Error ? error.message : String(error),

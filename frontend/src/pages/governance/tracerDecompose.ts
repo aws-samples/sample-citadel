@@ -195,6 +195,11 @@ function projectFindingToServiceShape(
     escalationTarget: finding.escalationTarget,
     residualAuthorityDenial: finding.residualAuthorityDenial,
     timestamp: finding.timestamp,
+    // Counterfactual/engine-side findings are never real ledger writes, so
+    // there is no X-Ray trace context to link to. Service-shape findings
+    // passed through here already carry their own traceId (or null); an
+    // engine-shape finding has none, so it always projects to null.
+    traceId: 'traceId' in finding ? finding.traceId : null,
   };
 }
 

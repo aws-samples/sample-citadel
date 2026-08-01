@@ -188,6 +188,12 @@ interface DecisionTraceProjected {
   constitutionalOverride: boolean;
   arbitrationPattern: string | null;
   scopeReduction: string | null;
+  /** Pass 2 (design §4, decision f1cbd5ef): findings->execution pivot by
+   * runId. Additive/nullable — null when the finding predates runId
+   * stamping (no runId to pivot on) OR when no execution row's runId
+   * matches (no GSI exists for this join yet; deferred per design). Never
+   * throws, never blocks the rest of the trace from rendering. */
+  linkedExecutionId: string | null;
 }
 
 const ARBITRATION_PATTERN_PREFIXES: ReadonlySet<string> = new Set([
@@ -223,6 +229,16 @@ interface GovernanceFindingProjected {
   escalationTarget: string | null;
   residualAuthorityDenial: boolean | null;
   timestamp: number;
+  // Decision<->runtime trace linking (architect task 9b3f4f78). Optional:
+  // null for findings written before this field was deployed (write-once
+  // ledger — cannot be retro-stamped) or when no X-Ray trace context was
+  // active at write time.
+  traceId: string | null;
+  // Pass 2 (design §4, decision f1cbd5ef): server-minted correlation id,
+  // additive/nullable — null for findings written before Pass 1 (write-once
+  // ledger — cannot be retro-stamped) or when the orchestration carried no
+  // runId at stamp time. Mirrors traceId's absent-case discipline exactly.
+  runId: string | null;
 }
 
 interface ReconcilerClassification {
@@ -331,6 +347,8 @@ export function projectFinding(row: DdbRow): GovernanceFindingProjected {
     escalationTarget: asStringOrNull(row.escalation_target),
     residualAuthorityDenial: asBoolOrNull(row.residual_authority_denial),
     timestamp,
+    traceId: asStringOrNull(row.traceId),
+    runId: asStringOrNull(row.runId),
   };
 }
 
@@ -493,6 +511,20 @@ async function getGovernanceFinding(
 async function loadFinding(
   findingId: string,
 ): Promise<GovernanceFindingProjected | null> {
+  const raw = await loadFindingRow(findingId);
+  return raw ? projectFinding(raw) : null;
+}
+
+/**
+ * Internal variant of `loadFinding` that returns the raw (unprojected)
+ * DDB row. `getDecisionTrace` needs the row's `orgId` — present on the
+ * ledger row but intentionally NOT part of the public
+ * `GovernanceFindingProjected` GraphQL shape — to org-check the
+ * findings->execution pivot (`findExecutionIdByRunId`). Kept private so
+ * the org attribute never leaks through `getGovernanceFinding`'s public
+ * projection.
+ */
+async function loadFindingRow(findingId: string): Promise<DdbRow | null> {
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
   if (!tableName) {
     throw new Error("GOVERNANCE_LEDGER_TABLE env var is not set");
@@ -505,7 +537,7 @@ async function loadFinding(
 
   const result = await dynamodb.send(cmd);
   if (!result.Item) return null;
-  return projectFinding(result.Item as DdbRow);
+  return result.Item as DdbRow;
 }
 
 // ---------------------------------------------------------------------------
@@ -786,11 +818,127 @@ export function mapDecisionToStatus(
   }
 }
 
+// Hard cap on the number of items scanned while pivoting a finding's runId
+// to an execution row. Mirrors the replay builder's RUN_ID_FINDINGS_SCAN_CAP
+// pattern (backend/src/lambda/utils/replay-package-builder.ts) — a bounded
+// filtered Scan rather than an unbounded one, since no GSI exists for this
+// join yet (deferred per design). Per-page size is kept well under the cap
+// so a match found early still exits after a handful of small pages rather
+// than one huge one.
+const RUN_ID_EXECUTION_SCAN_CAP = 1000;
+const RUN_ID_EXECUTION_SCAN_PAGE_SIZE = 100;
+
+/**
+ * Pass 2 findings->execution pivot by runId (design §4, decision f1cbd5ef):
+ * "findings -> execution: finding.runId == execution.runId — pivots a
+ * governance finding to the runtime execution that produced it." No GSI
+ * exists for this join yet (deferred per design — "+1 GSI findings, +1
+ * cost-ledger" is future work), so this is a bounded, paginated Scan
+ * rather than a Query.
+ *
+ * Pagination note: DynamoDB applies `Limit` BEFORE the `FilterExpression`
+ * is evaluated — a `Limit: 1` scan can read exactly one item, have it
+ * filtered out, and return zero matches even though a matching row exists
+ * later in the table. This helper instead pages through the table (capped
+ * at RUN_ID_EXECUTION_SCAN_CAP total items examined) and stops as soon as
+ * a matching, org-scoped row is found.
+ *
+ * Returns null (never throws) when: `runId` is falsy/absent (nothing to
+ * pivot on — the lookup is skipped entirely), `EXECUTIONS_TABLE` is
+ * unconfigured, no execution row's `runId` matches within the cap, or a
+ * matching row exists but belongs to a different org (see `expectedOrgId`
+ * below — a run in another org must never be surfaced).
+ *
+ * When the cap is hit without a match, the result degrades to null exactly
+ * like the "not found" case, but that is NOT the same as an authoritative
+ * "no execution exists for this runId" — the scan may simply not have
+ * reached the matching row yet. This is logged at `warn` so operators can
+ * distinguish the two in CloudWatch; the GraphQL response shape
+ * (`linkedExecutionId: String`, nullable) has no field to carry a
+ * separate "truncated" flag, so the distinction is log-only until a
+ * dedicated GSI removes the need for a capped scan entirely.
+ */
+async function findExecutionIdByRunId(
+  runId: string | null,
+  expectedOrgId: string | undefined,
+): Promise<string | null> {
+  if (!runId) return null;
+  const tableName = process.env.EXECUTIONS_TABLE;
+  if (!tableName) return null;
+
+  try {
+    let scanned = 0;
+    let lastEvaluatedKey: Record<string, unknown> | undefined;
+
+    do {
+      const result = await dynamodb.send(
+        new ScanCommand({
+          TableName: tableName,
+          FilterExpression: "runId = :rid",
+          ExpressionAttributeValues: { ":rid": runId },
+          Limit: RUN_ID_EXECUTION_SCAN_PAGE_SIZE,
+          ...(lastEvaluatedKey ? { ExclusiveStartKey: lastEvaluatedKey } : {}),
+        }),
+      );
+
+      const page = (result.Items ?? []) as DdbRow[];
+      for (const item of page) {
+        scanned++;
+        if (typeof item.executionId !== "string") continue;
+        const rowOrgId =
+          typeof item.orgId === "string" ? item.orgId : undefined;
+        if (
+          expectedOrgId !== undefined &&
+          rowOrgId !== undefined &&
+          rowOrgId !== expectedOrgId
+        ) {
+          // Defence-in-depth org check (mirrors assertRowOrg in
+          // replay-package-builder.ts): a run in another org must never
+          // be surfaced. Unlike the replay builder, this pivot is a
+          // best-effort nullable lookup rather than a hard gate, so we
+          // skip the row (never throw) and keep scanning for a same-org
+          // match.
+          console.warn(
+            "findExecutionIdByRunId: cross-org execution row skipped " +
+              `(executionId=${item.executionId}, rowOrgId=${rowOrgId}, ` +
+              `expectedOrgId=${expectedOrgId})`,
+          );
+          continue;
+        }
+        return item.executionId;
+      }
+
+      if (scanned >= RUN_ID_EXECUTION_SCAN_CAP) {
+        console.warn(
+          `findExecutionIdByRunId: scan cap ${RUN_ID_EXECUTION_SCAN_CAP} ` +
+            `reached for runId=${runId} without a match — degrading to ` +
+            "null. This is NOT authoritative; the matching row may exist " +
+            "beyond the scanned range. A dedicated GSI (deferred per " +
+            "design) would make this guaranteed instead of cap-truncated.",
+        );
+        return null;
+      }
+
+      lastEvaluatedKey = result.LastEvaluatedKey as
+        Record<string, unknown> | undefined;
+    } while (lastEvaluatedKey);
+
+    return null;
+  } catch (err) {
+    console.warn(
+      "findExecutionIdByRunId: executions table lookup failed, degrading to null",
+      err,
+    );
+    return null;
+  }
+}
+
 async function getDecisionTrace(
   args: GetDecisionTraceArgs,
 ): Promise<DecisionTraceProjected | null> {
-  const finding = await loadFinding(args.findingId);
-  if (!finding) return null;
+  const findingRow = await loadFindingRow(args.findingId);
+  if (!findingRow) return null;
+  const finding = projectFinding(findingRow);
 
   const tokens = parseReasonTokens(finding.reason);
   const arbitrationPattern = detectArbitrationPattern(tokens);
@@ -800,6 +948,12 @@ async function getDecisionTrace(
     tokens,
     arbitrationPattern,
     scopeReduction,
+  );
+  const findingOrgId =
+    typeof findingRow.orgId === "string" ? findingRow.orgId : undefined;
+  const linkedExecutionId = await findExecutionIdByRunId(
+    finding.runId,
+    findingOrgId,
   );
 
   return {
@@ -812,6 +966,7 @@ async function getDecisionTrace(
     constitutionalOverride,
     arbitrationPattern,
     scopeReduction,
+    linkedExecutionId,
   };
 }
 
@@ -1648,8 +1803,7 @@ async function countLedgerRows(
     const result = await dynamodb.send(cmd);
     count += result.Count ?? 0;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   return count;
@@ -2278,8 +2432,7 @@ async function scanMismatchItems(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   return { items, truncated };
@@ -3391,8 +3544,7 @@ async function listAuthorityUnits(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -3455,8 +3607,7 @@ async function listCompositionContracts(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -3577,8 +3728,7 @@ async function scanRevokeImpactItems(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   return { items, truncated };
@@ -3960,8 +4110,7 @@ async function listConstitutionalLayers(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -4047,8 +4196,7 @@ async function scanConstitutionalReviewItems(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   return { items, truncated };
@@ -4420,8 +4568,7 @@ async function listCaseLaw(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -5864,8 +6011,7 @@ async function listAuthorityGraphSnapshots(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {
@@ -6202,8 +6348,7 @@ async function getD4RetrospectiveReport(
     }
     if (truncated) break;
     lastEvaluatedKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (lastEvaluatedKey);
 
   if (truncated) {

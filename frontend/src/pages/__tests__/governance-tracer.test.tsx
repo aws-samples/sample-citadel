@@ -175,6 +175,15 @@ jest.mock('../../services/governanceService', () => ({
   },
 }));
 
+// traceService — decision<->runtime trace linking (design task 9b3f4f78).
+// Default mock: configured + available. Tests exercising the "unconfigured"
+// degradation state override `isAvailable` to return false.
+jest.mock('../../services/traceService', () => ({
+  traceService: {
+    isAvailable: jest.fn(() => true),
+  },
+}));
+
 // useOrganization (used for admin gating of the
 // "Edit and re-evaluate" button) and useGovernanceEngine (the
 // client-side engine that the counterfactual panel evaluates against).
@@ -251,6 +260,7 @@ jest.mock('../../components/CounterfactualPanel', () => {
 });
 
 import { governanceService } from '../../services/governanceService';
+import { traceService } from '../../services/traceService';
 import { GovernanceTracer } from '../../pages/governance/Tracer';
 
 function makeStep(stepNumber: number, status: string, overrides: any = {}) {
@@ -278,6 +288,7 @@ function makeFinding(overrides: any = {}) {
     escalationTarget: null,
     residualAuthorityDenial: false,
     timestamp: 1715000000,
+    traceId: null,
     ...overrides,
   };
 }
@@ -1225,5 +1236,110 @@ describe('GovernanceTracer — counterfactual', () => {
     });
 
     expect(screen.queryByTestId('tracer-counterfactual-button')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RuntimeTraceLink — decision->runtime trace link (design task 9b3f4f78,
+// §4/§5) — P2 test 7.
+// ---------------------------------------------------------------------------
+
+describe('GovernanceTracer — runtime trace link', () => {
+  beforeEach(() => {
+    setMockIsAdmin(false);
+    mockSearchParams = new URLSearchParams('findingId=f-1');
+    (traceService.isAvailable as jest.Mock).mockReturnValue(true);
+  });
+
+  it('enables "View runtime trace" linking by traceId when present and caller is admin', async () => {
+    setMockIsAdmin(true);
+    (governanceService.getDecisionTrace as jest.Mock).mockResolvedValue(
+      makeTrace({
+        finding: makeFinding({ traceId: '1-5f2f0000-abcdef0123456789abcdef01' }),
+      }),
+    );
+
+    await act(async () => {
+      render(React.createElement(GovernanceTracer));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('tracer-view-runtime-trace')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('tracer-view-runtime-trace'));
+    expect(mockNavigate).toHaveBeenCalledWith(
+      '/observability/trace/traceId/1-5f2f0000-abcdef0123456789abcdef01',
+    );
+  });
+
+  it('disables "View runtime trace" with predates-stamping copy when traceId is absent', async () => {
+    (governanceService.getDecisionTrace as jest.Mock).mockResolvedValue(
+      makeTrace({ finding: makeFinding({ traceId: null, workflowId: 'wf-1' }) }),
+    );
+
+    await act(async () => {
+      render(React.createElement(GovernanceTracer));
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByTestId('tracer-runtime-trace-predates-stamping'),
+      ).toBeInTheDocument();
+    });
+    const disabledButton = screen.getByTestId('tracer-view-runtime-trace-disabled');
+    expect(disabledButton).toBeDisabled();
+    expect(disabledButton).toHaveAttribute(
+      'title',
+      'Recorded before runtime-trace linking was deployed — no trace id on this finding.',
+    );
+    // workflowId fallback still offered.
+    expect(screen.getByTestId('tracer-view-execution-trace-fallback')).toBeInTheDocument();
+  });
+
+  it('shows a copyable id + admin note for a non-admin when traceId is present, plus the by-execution fallback', async () => {
+    setMockIsAdmin(false);
+    (governanceService.getDecisionTrace as jest.Mock).mockResolvedValue(
+      makeTrace({
+        finding: makeFinding({
+          traceId: '1-5f2f0000-abcdef0123456789abcdef01',
+          workflowId: 'wf-1',
+        }),
+      }),
+    );
+
+    await act(async () => {
+      render(React.createElement(GovernanceTracer));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('tracer-runtime-trace-nonadmin')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('tracer-runtime-trace-id-copyable')).toHaveTextContent(
+      '1-5f2f0000-abcdef0123456789abcdef01',
+    );
+    expect(screen.getByTestId('tracer-view-execution-trace-fallback')).toBeInTheDocument();
+    // Primary admin-only button must not render for a non-admin.
+    expect(screen.queryByTestId('tracer-view-runtime-trace')).toBeNull();
+  });
+
+  it('hides the runtime trace link entirely when traceService is unconfigured', async () => {
+    (traceService.isAvailable as jest.Mock).mockReturnValue(false);
+    (governanceService.getDecisionTrace as jest.Mock).mockResolvedValue(
+      makeTrace({
+        finding: makeFinding({ traceId: '1-5f2f0000-abcdef0123456789abcdef01' }),
+      }),
+    );
+
+    await act(async () => {
+      render(React.createElement(GovernanceTracer));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('tracer-terminal-card')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('tracer-view-runtime-trace')).toBeNull();
+    expect(screen.queryByTestId('tracer-runtime-trace-predates-stamping')).toBeNull();
+    expect(screen.queryByTestId('tracer-runtime-trace-nonadmin')).toBeNull();
   });
 });

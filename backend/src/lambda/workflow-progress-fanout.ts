@@ -1,12 +1,17 @@
-import { EventBridgeHandler } from 'aws-lambda';
-import { HttpRequest } from '@smithy/protocol-http';
-import { SignatureV4 } from '@smithy/signature-v4';
-import { Sha256 } from '@aws-crypto/sha256-js';
-import { defaultProvider } from '@aws-sdk/credential-provider-node';
+import { EventBridgeHandler } from "aws-lambda";
+import { HttpRequest } from "@smithy/protocol-http";
+import { SignatureV4 } from "@smithy/signature-v4";
+import { Sha256 } from "@aws-crypto/sha256-js";
+import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
   CloudWatchClient,
   PutMetricDataCommand,
-} from '@aws-sdk/client-cloudwatch';
+} from "@aws-sdk/client-cloudwatch";
+import {
+  annotateFromCarried,
+  extractCarried,
+  logFields,
+} from "../utils/trace-context";
 
 const MUTATION = `
   mutation PublishWorkflowProgress($input: WorkflowProgressInput!) {
@@ -26,8 +31,8 @@ const MUTATION = `
 // Shared workflow metric namespace + failure metric name. Kept in sync with the
 // arbiter step runner / worker emitters so all workflow telemetry lands in one
 // namespace.
-const METRIC_NAMESPACE = 'Citadel/Workflows';
-const FAILURE_METRIC_NAME = 'FanoutPublishFailure';
+const METRIC_NAMESPACE = "Citadel/Workflows";
+const FAILURE_METRIC_NAME = "FanoutPublishFailure";
 
 let _cw: CloudWatchClient | null = null;
 function cwClient(): CloudWatchClient {
@@ -49,15 +54,15 @@ async function emitPublishFailureMetric(eventType: string): Promise<void> {
           {
             MetricName: FAILURE_METRIC_NAME,
             Value: 1,
-            Unit: 'Count',
-            Dimensions: [{ Name: 'EventType', Value: eventType || 'unknown' }],
+            Unit: "Count",
+            Dimensions: [{ Name: "EventType", Value: eventType || "unknown" }],
             Timestamp: new Date(),
           },
         ],
       }),
     );
   } catch (err) {
-    console.error('workflow-progress-fanout: failure-metric emit failed', err);
+    console.error("workflow-progress-fanout: failure-metric emit failed", err);
   }
 }
 
@@ -72,9 +77,34 @@ interface WorkflowProgressDetail {
   timestamp?: string;
 }
 
-export const handler: EventBridgeHandler<string, WorkflowProgressDetail, void> = async (event) => {
+export const handler: EventBridgeHandler<
+  string,
+  WorkflowProgressDetail,
+  void
+> = async (event) => {
   const detail = event.detail;
-  const detailType = event['detail-type'];
+  const detailType = event["detail-type"];
+
+  // Consumer parse+annotate (design §"Annotation-key contract" / H2/H4 hop):
+  // additive-only — extractCarried/annotateFromCarried are no-op-safe for a
+  // detail with no traceContext (byte-identical behaviour, property-tested).
+  const carried = extractCarried(detail);
+  annotateFromCarried({
+    ...carried,
+    correlationId: detail.executionId,
+    executionId: detail.executionId,
+    nodeId: detail.nodeId ?? undefined,
+  });
+  console.log(
+    JSON.stringify({
+      level: "info",
+      message: "workflow-progress-fanout received event",
+      executionId: detail.executionId,
+      workflowId: detail.workflowId,
+      eventType: detailType,
+      ...logFields(carried),
+    }),
+  );
 
   const input = {
     executionId: detail.executionId,
@@ -95,11 +125,11 @@ export const handler: EventBridgeHandler<string, WorkflowProgressDetail, void> =
   });
 
   const request = new HttpRequest({
-    method: 'POST',
+    method: "POST",
     hostname: url.hostname,
     path: url.pathname,
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       host: url.hostname,
     },
     body,
@@ -107,15 +137,15 @@ export const handler: EventBridgeHandler<string, WorkflowProgressDetail, void> =
 
   const signer = new SignatureV4({
     credentials: defaultProvider(),
-    region: process.env.AWS_REGION || 'us-east-1',
-    service: 'appsync',
+    region: process.env.AWS_REGION || "us-east-1",
+    service: "appsync",
     sha256: Sha256,
   });
 
   const signedRequest = await signer.sign(request);
 
   const response = await fetch(`https://${url.hostname}${url.pathname}`, {
-    method: 'POST',
+    method: "POST",
     headers: signedRequest.headers as Record<string, string>,
     body,
   });
@@ -147,8 +177,8 @@ export const handler: EventBridgeHandler<string, WorkflowProgressDetail, void> =
     // correlation (matches the arbiter-side executionId log convention).
     console.error(
       JSON.stringify({
-        level: 'error',
-        message: 'workflow-progress-fanout publish failed',
+        level: "error",
+        message: "workflow-progress-fanout publish failed",
         executionId: input.executionId,
         workflowId: input.workflowId,
         eventType: input.eventType,

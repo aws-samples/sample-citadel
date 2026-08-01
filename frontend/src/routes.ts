@@ -16,6 +16,7 @@ export const ROUTE_PATHS = {
   'data-stores': '/data-stores',
   'model-config': '/model-config',
   team: '/team',
+  observability: '/observability',
 } as const;
 
 /** Map from sidebar nav item ID to route path */
@@ -29,6 +30,7 @@ export function pathToNavId(pathname: string): string {
   if (pathname.startsWith('/governance')) return 'governance';
   if (pathname.startsWith('/agent-apps/')) return 'agent-apps';
   if (pathname.startsWith('/implementation/')) return 'agentic-studio';
+  if (pathname.startsWith('/observability')) return 'observability';
 
   const entry = Object.entries(ROUTE_PATHS).find(([, path]) => path === pathname);
   return entry ? entry[0] : 'dashboard';

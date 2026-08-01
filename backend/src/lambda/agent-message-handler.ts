@@ -41,6 +41,11 @@ import {
   toInvokeCredentials,
 } from "../adapters/agent-source/invoke-support";
 import type { InvokeCredentials } from "../adapters/agent-source/invoke-support";
+import {
+  annotateFromCarried,
+  extractCarried,
+  logFields,
+} from "../utils/trace-context";
 
 const ssmClient = new SSMClient({});
 const dynamoClient = new DynamoDBClient({});
@@ -187,6 +192,8 @@ interface MessageSentToAgentEvent {
   userId: string;
   timestamp: string;
   metadata?: Record<string, unknown>;
+  /** Additive, optional (design §"Carried-context format decision"). */
+  traceContext?: unknown;
 }
 
 interface AgentCoreConfig {
@@ -204,7 +211,7 @@ export async function getAgentConfig(
   const now = Date.now();
   const cached = _agentConfigCache[agentId];
   if (cached && now - cached.cachedAt < SSM_CACHE_TTL) {
-    console.log(`SSM cache hit for agent ${agentId}`);
+    console.log("SSM cache hit for agent", { agentId });
     return cached.config;
   }
 
@@ -236,7 +243,7 @@ export async function getAgentConfig(
 
     return config;
   } catch (error) {
-    console.error(`Failed to get agent config for ${agentId}:`, error);
+    console.error("Failed to get agent config:", { agentId, error });
     throw error;
   }
 }
@@ -788,6 +795,24 @@ export const handler = async (
   const handlerStartMs = Date.now();
   console.log("Received event:", JSON.stringify(event, null, 2));
 
+  // Consumer parse+annotate (design §"Annotation-key contract"): no-op-safe
+  // when event.detail carries no traceContext (property-tested).
+  const carried = extractCarried(event.detail);
+  annotateFromCarried({
+    ...carried,
+    correlationId: event.detail?.messageId,
+  });
+  console.log(
+    JSON.stringify({
+      level: "info",
+      message: "agent-message-handler received event",
+      projectId: event.detail?.projectId,
+      agentId: event.detail?.agentId,
+      messageId: event.detail?.messageId,
+      ...logFields(carried),
+    }),
+  );
+
   // Idempotency key: prefer the logical message id (deterministic for the
   // document-indexed trigger, a unique uuid for every other producer) so that
   // duplicate emits of the same logical message collapse to one execution.
@@ -875,7 +900,7 @@ export const handler = async (
           { handlerStartMs },
         );
 
-        console.log(`Successfully received response from agent ${agentId}`);
+        console.log("Successfully received response from agent", { agentId });
 
         // Store agent response in DynamoDB
         const responseRecord = await storeAgentResponse(

@@ -69,6 +69,7 @@ import { agentConfigService } from '../services/agentConfigService';
 import { useExecutionSubscription } from '../hooks/useExecutionSubscription';
 import { toast } from 'sonner';
 import serverService from '../services/server';
+import { replayService } from '../services/replayService';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { cn } from '../components/ui/utils';
 import {
@@ -600,6 +601,34 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   const openExecutionDetail = (exec: Execution) => {
     setSelectedExecution(exec);
     setDetailSheetOpen(true);
+  };
+
+  /**
+   * Deep-link handler for the CIT-026 execution replay package (design's
+   * "Download replay package" button on execution inspection). Ownership
+   * is enforced server-side — this handler never pre-checks ownership
+   * client-side, it just surfaces whatever the API decides via
+   * replayService's typed result:
+   *   - success -> trigger the browser download of the presigned url
+   *   - unauthorized (403) / gateRefused (5xx) / unconfigured -> an honest
+   *     toast message, never a crash (design invariant: "graceful
+   *     handling when the gate refuses").
+   */
+  const handleDownloadReplayPackage = async (executionId: string) => {
+    const result = await replayService.getByExecution(executionId);
+    if (!result.available) {
+      toast.error('Replay package download is not available in this environment.');
+      return;
+    }
+    if (result.unauthorized) {
+      toast.error(result.reason);
+      return;
+    }
+    if (result.gateRefused) {
+      toast.error(result.reason);
+      return;
+    }
+    replayService.downloadReplayPackage(result.data.url);
   };
 
   const handleRunWorkflow = async (workflowId: string) => {
@@ -2054,6 +2083,8 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
         execution={selectedExecution}
         open={detailSheetOpen}
         onClose={() => setDetailSheetOpen(false)}
+        onViewTrace={(executionId) => onNavigate?.(`observability-trace:execution:${executionId}`)}
+        onDownloadReplay={handleDownloadReplayPackage}
       />
 
       {/* Unpublish dialog */}

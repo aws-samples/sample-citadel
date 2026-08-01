@@ -10,6 +10,16 @@ from typing import Any
 import boto3
 import os
 
+# Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
+# activate X-Ray patching of botocore BEFORE any boto3 client below is
+# constructed (sqs/dynamodb/bedrock-runtime/events at module scope just
+# below). Import path mirrors the sys.path insertion immediately following
+# this block — arbiter/conftest.py adds arbiter/supervisor/ to sys.path for
+# pytest; the Lambda asset layout needs the sys.path insert below for
+# `from common.tracing import configure` to resolve `common` as a sibling
+# of `supervisor/` (arbiter/common/), so the import is placed AFTER that
+# insertion rather than before.
+
 # Ensure this file's own directory is on sys.path before the flat
 # same-directory imports below. In the repo/pytest layout,
 # arbiter/conftest.py already inserts arbiter/supervisor/ onto sys.path, so
@@ -79,6 +89,13 @@ from model_config_loader import load_model_id
 # today — unlike workerWrapper's deferred-bundling situation for
 # ``tools_config``/``workflow_contract``.
 from common.usage import build_usage_record, extract_converse_usage, extract_request_id
+
+# Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
+# import BEFORE the sqs/dynamodb/bedrock-runtime/events boto3 clients are
+# constructed below so patch_all() instruments botocore ahead of client
+# creation. Ships alongside the supervisor Lambda asset the same way
+# common.usage does (see comment above); hard import, no defensive fallback.
+import common.tracing as tracing  # import activates tracing as a side effect
 
 
 def _load_governance_package():
@@ -278,7 +295,20 @@ def update_workflow_tracking(node: str, request_id: str, data: Any) -> bool:
     return all_completed, response
 
 
-def create_orchestration(conversation, callback=None):
+def create_orchestration(conversation, callback=None, run_id=None):
+    """Create a fresh orchestration row.
+
+    ``run_id`` is additive and optional (Pass 1, decision f1cbd5ef): the
+    durable carrier for the server-minted correlation id reaching the
+    arbiter (design §1 "Reaching the arbiter"). Persisted as ``runId`` on
+    the row ONLY when a non-empty string is supplied — omitted (not a null
+    key) otherwise, so a caller that never passes it produces a
+    byte-identical row to the pre-runId shape, mirroring the existing
+    ``callback`` omit-when-absent convention immediately below.
+    ``governed_process_agent_call`` later reads ``orchestration.get('runId')``
+    to stamp the finding, right where it already derives ``workflow_id``
+    from the same dict.
+    """
     instance = int(time.time())
 
     item = {
@@ -286,10 +316,13 @@ def create_orchestration(conversation, callback=None):
         'instance': instance,
         'conversation': conversation,
     }
-    
+
     if callback:
         item['callback'] = callback
-    
+
+    if isinstance(run_id, str) and run_id:
+        item['runId'] = run_id
+
     return item
 
 
@@ -462,8 +495,40 @@ def governed_process_agent_call(
     if not finding.scope_evaluated:
         finding.scope_evaluated = 'supervisor-dispatch'
 
+    # 4b. Stamp the active X-Ray trace id (decision<->runtime trace
+    # linking, architect task 9b3f4f78). Best-effort only: a missing trace
+    # context or any exception from active_trace_context() must NEVER deny
+    # dispatch or alter the finding's decision — it only leaves
+    # finding.trace_id as None, which write_finding/ledger already
+    # serialize as a byte-identical (untraced) item. Write order is
+    # unchanged: this stamp happens strictly before write_finding, and
+    # write_finding's call site/position below is untouched.
+    try:
+        _ctx = tracing.active_trace_context()
+        if _ctx and _ctx.get("traceId"):
+            finding.trace_id = _ctx["traceId"]
+    except Exception:
+        logger.debug("trace-id stamp failed; finding written untraced", exc_info=True)
+
+    # 4c. Stamp the server-minted run_id (Pass 1, decision f1cbd5ef), read
+    # from the orchestration row's 'runId' carrier (design §1 "Reaching the
+    # arbiter"). Best-effort only, same try/except discipline as the
+    # trace_id stamp immediately above: a missing runId or any exception
+    # from this read must NEVER deny dispatch or alter the finding's
+    # decision — it only leaves finding.run_id as None, which
+    # write_finding/ledger already serialize as a byte-identical
+    # (unstamped) item. Write order is unchanged: this stamp happens
+    # strictly before write_finding, and write_finding's call site/position
+    # below is untouched.
+    try:
+        _run_id = orchestration.get("runId")
+        if isinstance(_run_id, str) and _run_id:
+            finding.run_id = _run_id
+    except Exception:
+        logger.debug("run-id stamp failed; finding written without runId", exc_info=True)
+
     # 5. Write finding (fail-closed per D9). Any exception halts dispatch,
-    #    in every mode.
+    # in every mode.
     write_finding(finding)
 
     # 6. Branch on mode + decision.
@@ -699,14 +764,21 @@ def update_orchestration_with_results(results, orchestration):
     })
 
 
-def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=None):
+def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=None, run_id=None):
     if orchestration is None:
+        # Pass 1, decision f1cbd5ef: forward the server-minted run_id (read
+        # from the inbound task.request detail by handler(), or None for
+        # not-yet-updated callers/fallback paths) onto the orchestration
+        # row. Additive/nullable — create_orchestration already treats
+        # run_id=None as "omit the runId key", so this is byte-identical
+        # to the pre-runId shape when run_id is None.
         orchestration = create_orchestration(
             conversation=[{
                 "role": "user",
                 "content": [{"text": initial_message}],
             }],
-            callback=callback
+            callback=callback,
+            run_id=run_id,
         )
 
     if app_id is not None:
@@ -890,12 +962,20 @@ def handler(event, lambda_context):
         task_details = event['detail'].get('task', '')
         callback = event['detail'].get('callback')
         app_id = event['detail'].get('appId')
+        # Server-minted correlation id (Pass 1, decision f1cbd5ef): the
+        # runId already minted upstream (e.g. task-runner-resolver.ts
+        # submitTask) rides in on `detail.runId`. This is a READ of a
+        # value this same server tier minted moments earlier — not a
+        # trust boundary — so it is passed through as-is; additive/
+        # nullable, so its absence (pre-runId caller, or a fallback
+        # detail shape) must not raise or change behavior.
+        run_id = event['detail'].get('runId')
         
         if callback:
             print(f"Task request includes callback: {json.dumps(callback, default=str)}")
         
         if task_details:
-            orchestrate(initial_message=task_details, callback=callback, app_id=app_id)
+            orchestrate(initial_message=task_details, callback=callback, app_id=app_id, run_id=run_id)
         else:
             print("No task details found in event")
     

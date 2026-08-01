@@ -78,6 +78,17 @@ class NodeDispatchMessage:
     configuration: dict[str, Any] = field(default_factory=dict)
     correlation_id: Optional[str] = None
     message_type: str = MESSAGE_TYPE_WORKFLOW_NODE
+    # Additive (queue-wait metric): the step runner's dispatch-time ISO 8601
+    # timestamp, carried so the worker/step-runner can compute a queue-wait
+    # duration (dispatch -> worker-start) without a second round trip. None
+    # for any pre-feature dispatcher or a malformed wire value — the queue-
+    # wait metric is best-effort and must never be fabricated.
+    dispatched_at: Optional[str] = None
+    # Additive (Pass 1, decision f1cbd5ef): the server-minted correlation id
+    # carried from the execution row through dispatch to the worker. None
+    # for any pre-runId dispatcher, a pre-runId execution row, or a
+    # malformed wire value — best-effort, never fabricated.
+    run_id: Optional[str] = None
 
 
 @dataclass
@@ -88,6 +99,12 @@ class NodeResultDetail:
     carries ``error`` (and no ``output``). ``usage`` is additive: a sanitized
     list of worker usage records lifted to the top level for a completed
     result (``[]`` when absent or when the result is failed).
+
+    ``dispatched_at`` / ``worker_started_at`` are additive (queue-wait
+    metric): the step runner's dispatch timestamp and the worker's
+    invocation-start timestamp, both echoed back so the step runner can
+    compute a dispatch -> worker-start delta without a second round trip.
+    Both default to ``None`` — absent on any pre-feature producer.
     """
 
     execution_id: str
@@ -99,6 +116,8 @@ class NodeResultDetail:
     output: Optional[dict[str, Any]] = None
     error: Optional[str] = None
     usage: list[dict[str, Any]] = field(default_factory=list)
+    dispatched_at: Optional[str] = None
+    worker_started_at: Optional[str] = None
 
 
 # --- Internal validation helpers ---------------------------------------------
@@ -133,12 +152,33 @@ def build_node_dispatch_message(
     input: Optional[dict[str, Any]] = None,  # noqa: A002 — field name is part of the contract
     configuration: Optional[dict[str, Any]] = None,
     correlation_id: Optional[str] = None,
+    trace_context: Optional[dict[str, Any]] = None,
+    dispatched_at: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> dict:
     """Build a JSON-serializable node-dispatch message for the worker queue.
 
     Validates identifiers and field types up front so a producer cannot emit a
     message the consumer would later reject. ``correlation_id`` is omitted from
     the wire body when not supplied.
+
+    ``trace_context`` is additive and optional (architect task
+    f4f4bab3-7a07-4acf-ba43-ba43bb488444, H3 SQS hop): a carried traceContext
+    dict promoted to a top-level ``traceContext`` key when supplied. Omitted
+    entirely when not passed, keeping the message byte-identical to
+    pre-feature callers.
+
+    ``dispatched_at`` is additive and optional (queue-wait metric): the ISO
+    8601 timestamp of this dispatch call, promoted to a top-level
+    ``dispatchedAt`` key when supplied. Omitted entirely when not passed, so
+    the message stays byte-identical to pre-feature callers.
+
+    ``run_id`` is additive, optional, and nullable (Pass 1, decision
+    f1cbd5ef): the server-minted correlation id, promoted to a top-level
+    ``runId`` key ONLY when a non-empty string is supplied. Never read from
+    anywhere except this explicit kwarg — there is no path from an inbound
+    dict to the emitted ``runId``, honoring the server-minted-only invariant
+    at this layer too.
     """
     input_data = {} if input is None else input
     config = {} if configuration is None else configuration
@@ -158,6 +198,14 @@ def build_node_dispatch_message(
         raise ValueError(
             "node-dispatch message: 'correlation_id' must be a string when present"
         )
+    if dispatched_at is not None and not isinstance(dispatched_at, str):
+        raise ValueError(
+            "node-dispatch message: 'dispatched_at' must be a string when present"
+        )
+    if run_id is not None and not isinstance(run_id, str):
+        raise ValueError(
+            "node-dispatch message: 'run_id' must be a string when present"
+        )
 
     message: dict[str, Any] = {
         'message_type': MESSAGE_TYPE_WORKFLOW_NODE,
@@ -170,6 +218,12 @@ def build_node_dispatch_message(
     }
     if correlation_id is not None:
         message['correlation_id'] = correlation_id
+    if trace_context is not None:
+        message['traceContext'] = trace_context
+    if dispatched_at is not None:
+        message['dispatchedAt'] = dispatched_at
+    if isinstance(run_id, str) and run_id:
+        message['runId'] = run_id
     return message
 
 
@@ -214,6 +268,16 @@ def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:
             "node-dispatch message: 'correlation_id' must be a string when present"
         )
 
+    dispatched_at = body.get('dispatchedAt')
+    if dispatched_at is not None and not isinstance(dispatched_at, str):
+        dispatched_at = None
+
+    run_id = body.get('runId')
+    if run_id is not None and not isinstance(run_id, str):
+        # Best-effort, never gates parsing (Pass 1, decision f1cbd5ef) —
+        # mirrors dispatched_at's malformed-wire-value degradation above.
+        run_id = None
+
     return NodeDispatchMessage(
         execution_id=execution_id,
         node_id=node_id,
@@ -222,6 +286,8 @@ def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:
         input=input_data,
         configuration=configuration,
         correlation_id=correlation_id,
+        dispatched_at=dispatched_at,
+        run_id=run_id,
     )
 
 
@@ -239,6 +305,10 @@ def build_node_result_detail(
     error: Optional[str] = None,
     timestamp: Optional[str] = None,
     usage: Optional[list[dict[str, Any]]] = None,
+    trace_context: Optional[dict[str, Any]] = None,
+    dispatched_at: Optional[str] = None,
+    worker_started_at: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> dict:
     """Build the EventBridge detail body for a node-result event.
 
@@ -255,6 +325,24 @@ def build_node_result_detail(
     ``usage`` was supplied, so omitting it keeps the detail byte-identical to
     pre-feature callers. A failed result never carries a top-level ``usage``
     key, even if one is passed, since there is no output to attribute it to.
+
+    ``trace_context`` is additive and optional (architect task
+    f4f4bab3-7a07-4acf-ba43-ba43bb488444): a carried traceContext dict
+    promoted to a top-level ``traceContext`` key when supplied, regardless of
+    ``status``. Omitted entirely when not passed, keeping the detail
+    byte-identical to pre-feature callers.
+
+    ``dispatched_at`` / ``worker_started_at`` are additive and optional
+    (queue-wait metric): echoed back verbatim as top-level ``dispatchedAt`` /
+    ``workerStartedAt`` keys, regardless of ``status``, so the step runner can
+    compute queue-wait without re-fetching state. Each key is omitted
+    individually when its value is ``None``, keeping the detail
+    byte-identical to pre-feature callers when neither is supplied.
+
+    ``run_id`` is additive, optional, and nullable (Pass 1, decision
+    f1cbd5ef): promoted to a top-level ``runId`` key ONLY when a non-empty
+    string is supplied, regardless of ``status``. Omitted entirely
+    otherwise, keeping the detail byte-identical to pre-runId callers.
     """
     _validate_identity(
         'node-result event',
@@ -280,6 +368,10 @@ def build_node_result_detail(
         'status': status,
         'timestamp': ts,
     }
+    if dispatched_at is not None:
+        detail['dispatchedAt'] = dispatched_at
+    if worker_started_at is not None:
+        detail['workerStartedAt'] = worker_started_at
     if status == STATUS_COMPLETED:
         if not isinstance(output, dict):
             raise ValueError(
@@ -294,6 +386,10 @@ def build_node_result_detail(
                 "node-result event: a 'failed' result requires a non-empty 'error' string"
             )
         detail['error'] = error
+    if trace_context is not None:
+        detail['traceContext'] = trace_context
+    if isinstance(run_id, str) and run_id:
+        detail['runId'] = run_id
     return detail
 
 
@@ -334,6 +430,10 @@ def parse_node_result_detail(detail: Any) -> NodeResultDetail:
                 "node-result event: a 'failed' result requires a non-empty 'error' string"
             )
 
+    def _optional_str(key: str) -> Optional[str]:
+        value = detail.get(key)
+        return value if isinstance(value, str) and value else None
+
     return NodeResultDetail(
         execution_id=execution_id,
         node_id=node_id,
@@ -344,4 +444,6 @@ def parse_node_result_detail(detail: Any) -> NodeResultDetail:
         output=output,
         error=error,
         usage=parse_usage_array(detail.get('usage')),
+        dispatched_at=_optional_str('dispatchedAt'),
+        worker_started_at=_optional_str('workerStartedAt'),
     )

@@ -30,6 +30,14 @@ from datetime import datetime, timezone, timedelta
 
 from botocore.exceptions import ClientError
 
+# Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
+# this module is its own Lambda entry point (workflowTimeoutWatchdogFunction),
+# not reached via executor.py's import chain — import BEFORE the boto3
+# client(s) below and before `import events` (which constructs its own
+# EventBridge client at module scope) so patch_all() instruments botocore
+# ahead of any client creation.
+import common.tracing as tracing  # import activates tracing as a side effect
+
 import events
 
 # DynamoDB table name from environment (same convention as executor.py).

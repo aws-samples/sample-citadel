@@ -12,7 +12,7 @@ ENV UV_SYSTEM_PYTHON=1 \
 
 COPY requirements.txt requirements.txt
 # Install all dependencies in a single layer to avoid QEMU emulation hangs
-RUN uv pip install -r requirements.txt aws-opentelemetry-distro>=0.10.1
+RUN uv pip install -r requirements.txt "aws-opentelemetry-distro>=0.19.0"
 
 
 # Signal that this is running in Docker for host binding logic

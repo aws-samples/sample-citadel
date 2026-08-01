@@ -13,6 +13,7 @@ module.exports = {
     "<rootDir>/cdk.out/",
     "<rootDir>/dist/",
     "<rootDir>/src/lambda/__tests__/fixtures/",
+    "<rootDir>/src/utils/__tests__/.*-helper\\.ts$",
   ],
   modulePathIgnorePatterns: [
     "<rootDir>/cdk.out/",

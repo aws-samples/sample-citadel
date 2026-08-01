@@ -146,6 +146,24 @@ def _serialize_finding(finding: GovernanceFinding) -> dict[str, Any]:
     item["findingId"] = finding.finding_id
     item["workflowId"] = finding.workflow_id
     item["timestamp"] = float(finding.timestamp)
+
+    # Optional camelCase alias for the stamped X-Ray trace id (decision<->
+    # runtime trace linking). Emitted ONLY when present so an unstamped
+    # write (trace_id is None — no active trace context at write time) is
+    # byte-identical to the pre-linking serialization: the top-level loop
+    # above already stripped the None-valued `trace_id` dataclass field,
+    # and we do not add `traceId` in that case either.
+    if finding.trace_id is not None:
+        item["traceId"] = finding.trace_id
+
+    # Optional camelCase alias for the server-minted run_id (Pass 1,
+    # decision f1cbd5ef). Same byte-identical-when-absent discipline as
+    # traceId immediately above: emitted ONLY when finding.run_id is not
+    # None. The best-effort stamp in governed_process_agent_call can NEVER
+    # gate this fail-closed write — an absent run_id here simply means the
+    # stamp found nothing on the orchestration dict, not a write failure.
+    if finding.run_id is not None:
+        item["runId"] = finding.run_id
     return item
 
 

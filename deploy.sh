@@ -22,6 +22,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_LOG="${SCRIPT_DIR}/deploy-$(date +%Y%m%d-%H%M%S).log"
 REQUIRED_VARS=("ENVIRONMENT" "CDK_DEFAULT_REGION" "CDK_DEFAULT_ACCOUNT")
+# Every stack backend/bin/app.ts defines, in deploy (dependency) order,
+# WITHOUT the -$ENVIRONMENT suffix. verify_stack_coverage checks this list
+# against `npx cdk list` on every run and aborts on any mismatch, so a new
+# stack added to bin/app.ts cannot be silently skipped by this script.
+KNOWN_STACKS=(
+  "citadel-backend"
+  "citadel-projects"
+  "citadel-registry"
+  "citadel-services"
+  "citadel-gateway"
+  "citadel-governance"
+  "citadel-arbiter"
+  "citadel-telemetry"
+  "citadel-frontend"
+)
 
 # --- Colors ---
 GREEN='\033[0;32m'
@@ -100,7 +115,49 @@ validate_env() {
   ok "Region:      $CDK_DEFAULT_REGION"
 }
 
-# --- Capture git metadata ---
+# --- Resolve FRONTEND_ORIGIN if unset (auto-discovery from frontend stack) ---
+# TelemetryStack's cost API CORS policy needs the real frontend origin.
+# On a fresh account, telemetry deploys BEFORE frontend (see deploy_all_stacks
+# dependency comment below), so there may be no stack yet — that's expected,
+# not an error. We proceed with a loud warning rather than failing, since
+# bin/app.ts already has a non-throwing placeholder fallback for this exact
+# case (finding d7d3dd61).
+resolve_frontend_origin() {
+  if [ -n "${FRONTEND_ORIGIN:-}" ]; then
+    # Strip any trailing slash even when explicitly set, for consistency.
+    FRONTEND_ORIGIN="${FRONTEND_ORIGIN%/}"
+    export FRONTEND_ORIGIN
+    ok "FRONTEND_ORIGIN: $FRONTEND_ORIGIN (from environment)"
+    return 0
+  fi
+
+  local stack_name="citadel-frontend-${ENVIRONMENT}"
+  local profile_flag=""
+  [ -n "${AWS_PROFILE:-}" ] && profile_flag="--profile $AWS_PROFILE"
+
+  log "FRONTEND_ORIGIN not set — resolving from $stack_name stack output..."
+  local resolved
+  resolved=$(aws cloudformation describe-stacks \
+    --stack-name "$stack_name" \
+    --region "$CDK_DEFAULT_REGION" \
+    $profile_flag \
+    --query 'Stacks[0].Outputs[?OutputKey==`FrontendUrl`].OutputValue' \
+    --output text 2>/dev/null || echo "")
+
+  if [ -z "$resolved" ] || [ "$resolved" = "None" ]; then
+    warn "Could not resolve FRONTEND_ORIGIN from $stack_name (stack not deployed yet? fresh-account bootstrap: frontend deploys AFTER telemetry)."
+    warn "Proceeding WITHOUT a real frontend origin — browser CORS on the cost API will stay BLOCKED until telemetry is redeployed with FRONTEND_ORIGIN set."
+    warn "Once the frontend stack exists, redeploy telemetry with, e.g.:"
+    warn "  FRONTEND_ORIGIN=\$(aws cloudformation describe-stacks --stack-name $stack_name --region $CDK_DEFAULT_REGION $profile_flag --query 'Stacks[0].Outputs[?OutputKey==\`FrontendUrl\`].OutputValue' --output text) ./deploy.sh citadel-telemetry-${ENVIRONMENT}"
+    return 0
+  fi
+
+  resolved="${resolved%/}"
+  export FRONTEND_ORIGIN="$resolved"
+  ok "FRONTEND_ORIGIN resolved from $stack_name: $FRONTEND_ORIGIN"
+}
+
+
 capture_git_info() {
   GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
   GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
@@ -147,6 +204,57 @@ cdk_diff() {
   [ -n "$admin_email" ] && diff_cmd="$diff_cmd -c adminEmail=$admin_email"
   $diff_cmd --all 2>&1 | tee -a "$DEPLOY_LOG" || true
   popd > /dev/null
+}
+
+# --- Recurrence guard: script stack list vs `cdk list` ---
+# Compares KNOWN_STACKS (suffixed with -$ENVIRONMENT) against the stacks CDK
+# actually synthesizes from backend/bin/app.ts. Fails LOUDLY on any mismatch
+# in either direction, so a 10th stack added to bin/app.ts (or one removed)
+# cannot be silently skipped by this script's hardcoded deploy order.
+verify_stack_coverage() {
+  log "Verifying deploy.sh stack coverage against 'cdk list'..."
+  pushd backend > /dev/null
+  local list_cmd="npx cdk list"
+  [ -n "${AWS_PROFILE:-}" ] && list_cmd="$list_cmd --profile $AWS_PROFILE"
+  local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
+  [ -n "$admin_email" ] && list_cmd="$list_cmd -c adminEmail=$admin_email"
+
+  local cdk_stacks
+  if ! cdk_stacks=$($list_cmd 2>>"$DEPLOY_LOG"); then
+    popd > /dev/null
+    err "'npx cdk list' failed — cannot verify stack coverage. See $DEPLOY_LOG"
+    exit 1
+  fi
+  popd > /dev/null
+
+  local expected=()
+  local stack
+  for stack in "${KNOWN_STACKS[@]}"; do
+    expected+=("${stack}-${ENVIRONMENT}")
+  done
+
+  local mismatches=()
+  # Direction 1: stack in cdk app but not in this script → would be skipped
+  while IFS= read -r stack; do
+    [ -z "$stack" ] && continue
+    if [[ ! " ${expected[*]} " =~ " ${stack} " ]]; then
+      mismatches+=("'$stack' is defined in backend/bin/app.ts but MISSING from deploy.sh KNOWN_STACKS — it would be silently skipped")
+    fi
+  done <<< "$cdk_stacks"
+  # Direction 2: stack in this script but not in cdk app → stale entry
+  for stack in "${expected[@]}"; do
+    if ! grep -Fxq "$stack" <<< "$cdk_stacks"; then
+      mismatches+=("'$stack' is listed in deploy.sh KNOWN_STACKS but NOT defined in backend/bin/app.ts — stale entry")
+    fi
+  done
+
+  if [ ${#mismatches[@]} -ne 0 ]; then
+    err "Stack coverage mismatch between deploy.sh and 'cdk list':"
+    printf '   - %s\n' "${mismatches[@]}" | tee -a "$DEPLOY_LOG"
+    err "Update KNOWN_STACKS and deploy_all_stacks/--backend-only in deploy.sh to match backend/bin/app.ts"
+    exit 1
+  fi
+  ok "Stack coverage verified (${#expected[@]} stacks match 'cdk list')"
 }
 
 # --- Ensure the API-key HMAC pepper SSM parameter exists (idempotent) ---
@@ -297,11 +405,14 @@ deploy_all_stacks() {
 
   # Dependency graph (from backend/bin/app.ts):
   #   backend       ← root
+  #   projects      ← backend      (projects/conversations domain split from backend)
+  #   registry      ← backend      (registry/agent-import domain split from backend)
   #   services      ← backend
   #   gateway       ← backend
   #   governance    ← backend      (governance tables + resolvers split from backend)
   #   arbiter       ← services
-  #   frontend      ← arbiter
+  #   telemetry     ← backend, arbiter
+  #   frontend      ← arbiter, telemetry
   #
   # Stacks sharing a parent deploy sequentially here (rather than in parallel)
   # so a rollback in one doesn't disturb a sibling mid-deploy. The CDK tooling
@@ -310,13 +421,18 @@ deploy_all_stacks() {
   deploy_stack "citadel-backend-$env" || failed+=("backend")
 
   if [ ${#failed[@]} -eq 0 ]; then
-    # ServicesStack, GatewayStack, and GovernanceStack all depend on
-    # BackendStack only (no interdependency among the three).
+    # ProjectsStack, RegistryStack, ServicesStack, GatewayStack, and
+    # GovernanceStack all depend on BackendStack only (no interdependency
+    # among the five). Projects/registry are LEAF stacks — nothing else
+    # depends on them, so no other named deploy pulls them in transitively;
+    # they MUST be deployed explicitly here.
+    deploy_stack "citadel-projects-$env"   || failed+=("projects")
+    deploy_stack "citadel-registry-$env"   || failed+=("registry")
     deploy_stack "citadel-services-$env"   || failed+=("services")
     deploy_stack "citadel-gateway-$env"    || failed+=("gateway")
     deploy_stack "citadel-governance-$env" || failed+=("governance")
   else
-    warn "Skipping services/gateway/governance — backend failed"
+    warn "Skipping projects/registry/services/gateway/governance — backend failed"
   fi
 
   if [ ${#failed[@]} -eq 0 ] || [[ ! " ${failed[*]} " =~ " backend " && ! " ${failed[*]} " =~ " services " ]]; then
@@ -326,6 +442,12 @@ deploy_all_stacks() {
   fi
 
   if [ ${#failed[@]} -eq 0 ] || [[ ! " ${failed[*]} " =~ " backend " && ! " ${failed[*]} " =~ " arbiter " ]]; then
+    deploy_stack "citadel-telemetry-$env" || failed+=("telemetry")
+  else
+    warn "Skipping telemetry — dependency failed (${failed[*]})"
+  fi
+
+  if [ ${#failed[@]} -eq 0 ] || [[ ! " ${failed[*]} " =~ " backend " && ! " ${failed[*]} " =~ " arbiter " && ! " ${failed[*]} " =~ " telemetry " ]]; then
     deploy_stack "citadel-frontend-$env" || failed+=("frontend")
   else
     warn "Skipping frontend — dependency failed (${failed[*]})"
@@ -456,7 +578,7 @@ show_help() {
   echo ""
   echo "Options:"
   echo "  --all                Deploy all stacks (default)"
-  echo "  --backend-only       Deploy only backend stacks (backend + services + gateway + governance + arbiter)"
+  echo "  --backend-only       Deploy all non-frontend stacks (backend + projects + registry + services + gateway + governance + arbiter + telemetry)"
   echo "  --frontend-only      Deploy only frontend stack"
   echo "  --skip-frontend      Skip frontend build"
   echo "  --skip-backend       Skip backend build"
@@ -507,6 +629,10 @@ validate_env
 capture_git_info
 
 [ -n "${AWS_PROFILE:-}" ] && { export AWS_PROFILE; ok "AWS Profile: $AWS_PROFILE"; } || unset AWS_PROFILE
+
+# Resolve FRONTEND_ORIGIN (env override, else auto-discover from the
+# frontend stack's output) before CDK synth/deploy so it's exported for cdk.
+resolve_frontend_origin
 
 # Pre-flight: ensure container runtime is available (needed for PythonFunction bundling)
 DOCKER_CMD="${CDK_DOCKER:-docker}"
@@ -580,6 +706,9 @@ fi
 # Ensure the API-key HMAC pepper exists before any stack deploys (idempotent)
 ensure_api_key_pepper
 
+# Recurrence guard: abort if this script's stack list has drifted from bin/app.ts
+verify_stack_coverage
+
 # Diff / dry-run
 cdk_diff
 
@@ -596,10 +725,13 @@ case "$DEPLOY_MODE" in
   all)      deploy_all_stacks ;;
   backend)
     deploy_stack "citadel-backend-$ENVIRONMENT"
+    deploy_stack "citadel-projects-$ENVIRONMENT"
+    deploy_stack "citadel-registry-$ENVIRONMENT"
     deploy_stack "citadel-services-$ENVIRONMENT"
     deploy_stack "citadel-gateway-$ENVIRONMENT"
     deploy_stack "citadel-governance-$ENVIRONMENT"
     deploy_stack "citadel-arbiter-$ENVIRONMENT"
+    deploy_stack "citadel-telemetry-$ENVIRONMENT"
     ;;
   frontend) deploy_stack "citadel-frontend-$ENVIRONMENT" ;;
   single)   deploy_stack "$STACK_NAME" ;;

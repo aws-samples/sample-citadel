@@ -12,6 +12,8 @@ import {
   ChevronDown,
   Shield,
   SlidersHorizontal,
+  Waypoints,
+  KeyRound,
 } from 'lucide-react';
 import { useOrganization } from '../contexts/OrganizationContext';
 import {
@@ -24,6 +26,9 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
 } from './ui/sidebar';
 import {
   DropdownMenu,
@@ -46,6 +51,7 @@ export const navigationItems = [
   { id: 'agent-catalog', label: 'Agent Catalog', icon: Bot },
   { id: 'tools', label: 'Agent Tools', icon: Wrench },
   { id: 'model-config', label: 'Model Config', icon: SlidersHorizontal },
+  { id: 'observability', label: 'Observability', icon: Waypoints },
   { id: 'governance', label: 'Governance', icon: Shield },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'data-stores', label: 'Data Stores', icon: Database },
@@ -53,7 +59,7 @@ export const navigationItems = [
 ];
 
 export function AppSidebar({ activeItem = 'dashboard', onNavigate }: AppSidebarProps) {
-  const { selectedOrganization, setSelectedOrganization, organizations, loading } = useOrganization();
+  const { selectedOrganization, setSelectedOrganization, organizations, loading, isAdmin } = useOrganization();
 
   return (
     <Sidebar collapsible="icon">
@@ -112,6 +118,16 @@ export function AppSidebar({ activeItem = 'dashboard', onNavigate }: AppSidebarP
                       <Icon />
                       <span>{item.label}</span>
                     </SidebarMenuButton>
+                    {item.id === 'observability' && isAdmin && (
+                      <SidebarMenuSub>
+                        <SidebarMenuSubItem>
+                          <SidebarMenuSubButton onClick={() => onNavigate?.('observability')}>
+                            <KeyRound className="size-3" />
+                            <span>Raw trace ID (admin)</span>
+                          </SidebarMenuSubButton>
+                        </SidebarMenuSubItem>
+                      </SidebarMenuSub>
+                    )}
                   </SidebarMenuItem>
                 );
               })}

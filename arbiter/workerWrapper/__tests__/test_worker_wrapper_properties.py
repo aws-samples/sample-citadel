@@ -405,7 +405,7 @@ class TestLambdaHandlerProperties:
 
         call_count = [0]
 
-        def mock_process(event, context):
+        def mock_process(event, context, message_attributes=None):
             idx = call_count[0]
             call_count[0] += 1
             if idx in fail_indices:

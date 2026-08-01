@@ -77,6 +77,48 @@ const baseExecution = {
 };
 
 const prettyOf = (raw: string) => JSON.stringify(JSON.parse(raw), null, 2);
+
+describe('ExecutionDetailSheet — replay package download (CIT-026 deep link)', () => {
+  test('renders a "Download replay package" button when onDownloadReplay is provided', () => {
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: baseExecution,
+        open: true,
+        onClose: jest.fn(),
+        onDownloadReplay: jest.fn(),
+      }),
+    );
+    expect(screen.getByRole('button', { name: /download replay package/i })).toBeInTheDocument();
+  });
+
+  test('does not render the button when onDownloadReplay is not provided (graceful, no crash)', () => {
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: baseExecution,
+        open: true,
+        onClose: jest.fn(),
+      }),
+    );
+    expect(
+      screen.queryByRole('button', { name: /download replay package/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  test('clicking the button invokes onDownloadReplay with the executionId', () => {
+    const onDownloadReplay = jest.fn();
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: baseExecution,
+        open: true,
+        onClose: jest.fn(),
+        onDownloadReplay,
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /download replay package/i }));
+    expect(onDownloadReplay).toHaveBeenCalledWith(baseExecution.executionId);
+  });
+});
+
 const preWithText = (expected: string) => (_: string, el: Element | null) =>
   el?.tagName === 'PRE' && el.textContent === expected;
 
@@ -258,6 +300,25 @@ describe('ExecutionDetailSheet', () => {
     expect(screen.queryByText('Result')).not.toBeInTheDocument();
   });
 
+  // ─── View trace deep-link (design task 60ba09e4, pass 2) ───
+
+  it('renders a "View trace" button and calls onViewTrace with the executionId when clicked', () => {
+    const onViewTrace = jest.fn();
+    render(
+      <ExecutionDetailSheet execution={baseExecution} open onClose={jest.fn()} onViewTrace={onViewTrace} />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /view trace/i }));
+
+    expect(onViewTrace).toHaveBeenCalledWith('exec-abc123def456');
+  });
+
+  it('omits the "View trace" button when onViewTrace is not provided', () => {
+    render(<ExecutionDetailSheet execution={baseExecution} open onClose={jest.fn()} />);
+
+    expect(screen.queryByRole('button', { name: /view trace/i })).not.toBeInTheDocument();
+  });
+
   // ─── Usage rollup (additive: per-node tokens + execution total) ───
 
   describe('usage rollup', () => {
@@ -346,6 +407,73 @@ describe('ExecutionDetailSheet', () => {
         render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />),
       ).not.toThrow();
       expect(screen.queryByText(/Total tokens/)).not.toBeInTheDocument();
+    });
+  });
+
+  // ─── Per-node duration percentiles (client-side, no backend change) ───
+
+  describe('duration percentiles', () => {
+    it('shows p50/p95 computed client-side from completed node durations', () => {
+      // baseExecution: node-a runs 2m (12:00→12:02), node-b runs 3m (12:02→12:05).
+      // Nearest-rank over [120000, 180000]: p50 -> index ceil(0.5*2)-1=0 -> 120000ms (2m);
+      // p95 -> index ceil(0.95*2)-1=1 -> 180000ms (3m).
+      render(<ExecutionDetailSheet execution={baseExecution} open onClose={jest.fn()} />);
+
+      expect(screen.getByText(/Node duration p50 2m · p95 3m/)).toBeInTheDocument();
+    });
+
+    it('omits the percentile line when fewer than 2 completed-duration samples exist', () => {
+      const exec = {
+        ...baseExecution,
+        nodeResults: JSON.stringify({
+          'node-a': {
+            nodeId: 'node-a',
+            status: 'completed',
+            startedAt: '2024-03-01T12:00:00Z',
+            completedAt: '2024-03-01T12:02:00Z',
+          },
+        }),
+      };
+      render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+      expect(screen.queryByText(/Node duration p50/)).not.toBeInTheDocument();
+    });
+
+    it('ignores an in-flight (no completedAt) node when computing percentiles', () => {
+      const exec = {
+        ...baseExecution,
+        nodeResults: JSON.stringify({
+          'node-a': {
+            nodeId: 'node-a',
+            status: 'completed',
+            startedAt: '2024-03-01T12:00:00Z',
+            completedAt: '2024-03-01T12:02:00Z',
+          },
+          'node-b': {
+            nodeId: 'node-b',
+            status: 'completed',
+            startedAt: '2024-03-01T12:02:00Z',
+            completedAt: '2024-03-01T12:05:00Z',
+          },
+          'node-c': {
+            nodeId: 'node-c',
+            status: 'running',
+            startedAt: '2024-03-01T12:05:00Z',
+            completedAt: null,
+          },
+        }),
+      };
+      render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+      // Same two completed samples as baseExecution — node-c is excluded.
+      expect(screen.getByText(/Node duration p50 2m · p95 3m/)).toBeInTheDocument();
+    });
+
+    it('omits the percentile line when there are no node results', () => {
+      const exec = { ...baseExecution, nodeResults: null };
+      render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+      expect(screen.queryByText(/Node duration p50/)).not.toBeInTheDocument();
     });
   });
 });

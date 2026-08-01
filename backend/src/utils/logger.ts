@@ -1,9 +1,11 @@
 export enum LogLevel {
-  ERROR = 'ERROR',
-  WARN = 'WARN',
-  INFO = 'INFO',
-  DEBUG = 'DEBUG',
+  ERROR = "ERROR",
+  WARN = "WARN",
+  INFO = "INFO",
+  DEBUG = "DEBUG",
 }
+
+import * as AWSXRay from "aws-xray-sdk-core";
 
 interface LogContext {
   requestId?: string;
@@ -18,6 +20,7 @@ interface LogEntry extends LogContext {
   timestamp: string;
   level: LogLevel;
   message: string;
+  trace_id?: string;
   error?: {
     name: string;
     message: string;
@@ -29,18 +32,18 @@ class Logger {
   private logLevel: LogLevel;
 
   constructor() {
-    this.logLevel = this.parseLogLevel(process.env.LOG_LEVEL || 'INFO');
+    this.logLevel = this.parseLogLevel(process.env.LOG_LEVEL || "INFO");
   }
 
   private parseLogLevel(level: string): LogLevel {
     switch (level.toUpperCase()) {
-      case 'ERROR':
+      case "ERROR":
         return LogLevel.ERROR;
-      case 'WARN':
+      case "WARN":
         return LogLevel.WARN;
-      case 'INFO':
+      case "INFO":
         return LogLevel.INFO;
-      case 'DEBUG':
+      case "DEBUG":
         return LogLevel.DEBUG;
       default:
         return LogLevel.INFO;
@@ -48,15 +51,44 @@ class Logger {
   }
 
   private shouldLog(level: LogLevel): boolean {
-    const levels = [LogLevel.ERROR, LogLevel.WARN, LogLevel.INFO, LogLevel.DEBUG];
+    const levels = [
+      LogLevel.ERROR,
+      LogLevel.WARN,
+      LogLevel.INFO,
+      LogLevel.DEBUG,
+    ];
     return levels.indexOf(level) <= levels.indexOf(this.logLevel);
   }
 
-  private formatLog(level: LogLevel, message: string, context?: LogContext, error?: Error): string {
+  private formatLog(
+    level: LogLevel,
+    message: string,
+    context?: LogContext,
+    error?: Error,
+  ): string {
+    // Additive, no-op-safe trace_id injection (design §"Annotation-key
+    // contract" — every structured log line gets trace_id). Reading the
+    // active X-Ray segment is guarded so a missing segment (Jest, cold
+    // local invocation) never breaks logging.
+    let trace_id: string | undefined;
+    try {
+      const segment = AWSXRay.getSegment();
+      // A Subsegment carries the Root trace_id on its parent `.segment`,
+      // not on itself; a root Segment carries it directly.
+      const rootSegment = segment
+        ? ((segment as { segment?: AWSXRay.Segment }).segment ??
+          (segment as unknown as AWSXRay.Segment))
+        : undefined;
+      trace_id = rootSegment?.trace_id;
+    } catch {
+      trace_id = undefined;
+    }
+
     const logEntry: LogEntry = {
       timestamp: new Date().toISOString(),
       level,
       message,
+      ...(trace_id ? { trace_id } : {}),
       ...context,
     };
 
@@ -97,32 +129,47 @@ class Logger {
 
   // Convenience methods for common logging scenarios
   logRequest(method: string, path: string, context?: LogContext): void {
-    this.info(`${method} ${path}`, { ...context, type: 'request' });
+    this.info(`${method} ${path}`, { ...context, type: "request" });
   }
 
-  logResponse(method: string, path: string, statusCode: number, duration: number, context?: LogContext): void {
-    this.info(`${method} ${path} - ${statusCode}`, { 
-      ...context, 
-      type: 'response', 
-      statusCode, 
-      duration 
+  logResponse(
+    method: string,
+    path: string,
+    statusCode: number,
+    duration: number,
+    context?: LogContext,
+  ): void {
+    this.info(`${method} ${path} - ${statusCode}`, {
+      ...context,
+      type: "response",
+      statusCode,
+      duration,
     });
   }
 
-  logAgentEvent(eventType: string, agentId: string, projectId: string, context?: LogContext): void {
+  logAgentEvent(
+    eventType: string,
+    agentId: string,
+    projectId: string,
+    context?: LogContext,
+  ): void {
     this.info(`Agent event: ${eventType}`, {
       ...context,
-      type: 'agent_event',
+      type: "agent_event",
       eventType,
       agentId,
       projectId,
     });
   }
 
-  logDatabaseOperation(operation: string, tableName: string, context?: LogContext): void {
+  logDatabaseOperation(
+    operation: string,
+    tableName: string,
+    context?: LogContext,
+  ): void {
     this.debug(`Database ${operation}`, {
       ...context,
-      type: 'database',
+      type: "database",
       operation,
       tableName,
     });

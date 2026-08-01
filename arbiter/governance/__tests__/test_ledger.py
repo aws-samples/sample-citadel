@@ -18,6 +18,7 @@ use a lazy accessor for exactly this reason (QB-013-1).
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 import time
@@ -129,6 +130,7 @@ def _make_finding(**overrides: Any) -> GovernanceFinding:
         "contract_evaluated": None,
         "escalation_target": None,
         "residual_authority_denial": False,
+        "trace_id": None,
     }
     defaults.update(overrides)
     return GovernanceFinding(**defaults)
@@ -168,6 +170,8 @@ def test_happy_path_writes_expected_item_shape(
     # None-valued fields are stripped (DDB rejects None for S/N types).
     assert "contract_evaluated" not in item
     assert "escalation_target" not in item
+    assert "trace_id" not in item
+    assert "traceId" not in item
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +384,7 @@ def _finding_strategy(draw: st.DrawFn) -> GovernanceFinding:
         contract_evaluated=draw(_optional_str),
         escalation_target=draw(_optional_str),
         residual_authority_denial=draw(st.booleans()),
+        trace_id=None,
     )
 
 
@@ -411,3 +416,81 @@ def test_property_write_finding_always_emits_key_schema_attrs(
     assert item["timestamp"] == pytest.approx(float(finding.timestamp))
     # Decision always serialises to its enum .value, never repr.
     assert item["decision"] == finding.decision.value
+
+
+# ---------------------------------------------------------------------------
+# 8. Decision<->runtime trace linking (architect task 9b3f4f78) —
+#    P1 test 1: ledger byte-identity property for trace_id=None.
+# ---------------------------------------------------------------------------
+
+
+def _finding_strategy_with_trace_id() -> st.SearchStrategy[GovernanceFinding]:
+    """Same shape as ``_finding_strategy`` but with an explicit,
+    independently-drawn ``trace_id`` (None or a string) so the byte-identity
+    property below can be checked against the *same* random finding with
+    and without a trace id.
+    """
+
+    @st.composite
+    def _inner(draw: st.DrawFn) -> GovernanceFinding:
+        return GovernanceFinding(
+            workflow_id=draw(_required_str),
+            decision=draw(_decision_strategy),
+            requesting_agent=draw(_required_str),
+            target_agent=draw(_required_str),
+            reason=draw(_required_str),
+            finding_id=str(uuid.uuid4()),
+            timestamp=draw(st.floats(min_value=0.0, max_value=2e9)),
+            scope_evaluated=draw(_optional_str),
+            contract_evaluated=draw(_optional_str),
+            escalation_target=draw(_optional_str),
+            residual_authority_denial=draw(st.booleans()),
+            trace_id=None,
+        )
+
+    return _inner()
+
+
+@settings(
+    max_examples=100,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(finding=_finding_strategy_with_trace_id())
+def test_property_serialize_finding_byte_identical_when_trace_id_none(
+    finding: GovernanceFinding,
+) -> None:
+    """[FAIL-CLOSED NON-REGRESSION property] For an arbitrary finding with
+    ``trace_id=None`` (the default / absent-trace-context case), the
+    serialized ledger item is dict-equal to what a finding with NO
+    ``trace_id`` field at all would have produced, and it contains neither
+    ``trace_id`` nor ``traceId``. Absent trace context => byte-identical
+    write to the pre-linking serialization.
+    """
+    assert finding.trace_id is None
+    item = ledger._serialize_finding(finding)
+
+    assert "trace_id" not in item
+    assert "traceId" not in item
+
+    # Cross-check against dataclasses.asdict directly: the raw dataclass
+    # field is None and must never survive into the item under either name.
+    raw = dataclasses.asdict(finding)
+    assert raw["trace_id"] is None
+
+
+def test_serialize_finding_emits_camelcase_trace_id_when_present() -> None:
+    finding = _make_finding(trace_id="1-5f2f0000-abcdef0123456789abcdef01")
+    item = ledger._serialize_finding(finding)
+
+    assert item["traceId"] == "1-5f2f0000-abcdef0123456789abcdef01"
+    # snake_case raw field name is not separately duplicated on the item
+    # under its own key (the top-level loop already flattens dataclass
+    # fields under their dataclass names, so `trace_id` IS present too —
+    # this assertion documents that fact rather than hiding it).
+    assert item.get("trace_id") == "1-5f2f0000-abcdef0123456789abcdef01"
+
+    # TTL and the write-once condition target are untouched by trace-id
+    # stamping.
+    assert "ttl" not in item  # ttl is added by write_finding, not _serialize_finding
+    assert item["findingId"] == finding.finding_id
