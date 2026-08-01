@@ -114,45 +114,92 @@ def run_state():
 # ---------------------------------------------------------------------------
 
 class TestCreatingConflictRecoveryWiring:
+    def test_happy_path_approve_is_legal_two_step_sequence(self, run_state):
+        # Root-cause regression guard: approve must NEVER be a single
+        # DRAFT->APPROVED call (the live service rejects that with
+        # ValidationException) — it must always be the two-step
+        # DRAFT->PENDING_APPROVAL->APPROVED sequence, on the ordinary happy
+        # path (no CREATING conflict at all).
+        client = MagicMock()
+        client.create_registry_record.return_value = _arn("rec-1")
+
+        with patch.object(index, "_get_registry_client", return_value=client), \
+                patch.object(index, "publish_fabrication_event") as pub:
+            assert _call_store_tool() is True
+
+        calls = client.update_registry_record_status.call_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["status"] == "PENDING_APPROVAL"
+        assert calls[0].kwargs["recordId"] == "rec-1"
+        assert calls[1].kwargs["status"] == "APPROVED"
+        assert calls[1].kwargs["recordId"] == "rec-1"
+        pub.assert_not_called()
+
     def test_in_flight_creating_recovers_and_returns_true(self, run_state):
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
-        client.update_registry_record_status.side_effect = [_conflict(), None]
+        # First approve attempt: PENDING_APPROVAL step hits the CREATING
+        # conflict. Recovery polls to DRAFT, then approve-in-place runs the
+        # full two-step sequence (PENDING_APPROVAL, APPROVED) again.
+        client.update_registry_record_status.side_effect = [
+            _conflict(), None, None,
+        ]
         client.get_registry_record.side_effect = [{"status": "DRAFT"}]
 
         with patch.object(index, "_get_registry_client", return_value=client), \
                 patch.object(index, "publish_fabrication_event") as pub:
             assert _call_store_tool() is True
 
-        # Recovery approved the SAME record after CREATING settled.
-        assert client.update_registry_record_status.call_count == 2
+        # 1 failed PENDING_APPROVAL (conflict) + 2 recovered steps = 3 calls.
+        assert client.update_registry_record_status.call_count == 3
         client.delete_registry_record.assert_not_called()
+        client.create_registry_record.assert_called_once()
         # A recovered registration is a SUCCESS — no failure event.
         pub.assert_not_called()
 
-    def test_stuck_creating_deletes_recreates_and_returns_true(self, run_state):
+    def test_seeded_creating_orphan_yields_one_usable_record_zero_net_new(
+        self, run_state
+    ):
+        # Integration-style seed of a CREATING orphan: recovery must yield
+        # exactly one usable record and create/delete NOTHING in the
+        # process (structural zero-net-new-orphans invariant).
         client = MagicMock()
-        client.create_registry_record.side_effect = [_arn("rec-1"), _arn("rec-2")]
-        client.update_registry_record_status.side_effect = [_conflict(), None]
+        client.create_registry_record.return_value = _arn("rec-1")
+        client.update_registry_record_status.side_effect = [_conflict(), None, None]
         client.get_registry_record.side_effect = [
             {"status": "CREATING"},
-            {"status": "CREATING"},
-            _not_found(),
+            {"status": "DRAFT"},
         ]
 
         with patch.object(index, "_get_registry_client", return_value=client), \
                 patch.object(index, "publish_fabrication_event") as pub:
             assert _call_store_tool() is True
 
-        client.delete_registry_record.assert_called_once()
-        assert client.delete_registry_record.call_args.kwargs["recordId"] == "rec-1"
-        assert client.create_registry_record.call_count == 2
-        approved_ids = [
-            c.kwargs["recordId"]
-            for c in client.update_registry_record_status.call_args_list
-        ]
-        assert approved_ids == ["rec-1", "rec-2"]
+        # Exactly one create call (the original registration) — recovery
+        # never calls create_registry_record or delete_registry_record.
+        client.create_registry_record.assert_called_once()
+        client.delete_registry_record.assert_not_called()
         pub.assert_not_called()
+
+    def test_stuck_creating_beyond_budget_is_single_terminal_no_recreate(
+        self, run_state
+    ):
+        # Replaces the old delete-and-recreate scenario: past the poll
+        # budget, recovery raises ONE terminal error — no delete, no
+        # recreate, no second attempt.
+        client = MagicMock()
+        client.create_registry_record.return_value = _arn("rec-1")
+        client.update_registry_record_status.side_effect = _conflict()
+        client.get_registry_record.return_value = {"status": "CREATING"}
+
+        with patch.object(index, "_get_registry_client", return_value=client), \
+                patch.object(index, "publish_fabrication_event") as pub:
+            with pytest.raises(OrphanedRegistryRecordError):
+                _call_store_tool()
+
+        client.delete_registry_record.assert_not_called()
+        client.create_registry_record.assert_called_once()
+        assert pub.call_count == 1
 
     def test_non_creating_conflict_is_not_recovered(self, run_state):
         client = MagicMock()
@@ -297,7 +344,10 @@ class TestRegistrationDeadlineCheckpoints:
             with pytest.raises(FabricationDeadlineExceeded):
                 _call_store_tool()
         client.create_registry_record.assert_called_once()
-        client.update_registry_record_status.assert_called_once()
+        # Approve is now the legal two-step DRAFT->PENDING_APPROVAL->APPROVED
+        # sequence (root-cause fix), so a completed registration makes two
+        # update_registry_record_status calls, not one.
+        assert client.update_registry_record_status.call_count == 2
 
     def test_agent_registration_refuses_to_start_inside_margin(self):
         set_fabrication_deadline(FabricationDeadline(lambda: 10_000))
