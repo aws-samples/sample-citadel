@@ -9,48 +9,50 @@ renew the justification by the listed `revisitBy` date.
 
 **Affected instances:**
 - `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.7` (bundled; advisory range <=5.0.7)
-- `node_modules/@eslint/eslintrc/node_modules/brace-expansion@1.1.16` (transitive via eslint→minimatch@3.1.5→brace-expansion; audit flags all)
-- `node_modules/@humanwhocodes/config-array/node_modules/brace-expansion@1.1.16` (transitive via minimatch@3.1.5)
-- `node_modules/eslint/node_modules/brace-expansion@1.1.16` (transitive via minimatch@3.1.5)
-- `node_modules/glob/node_modules/brace-expansion@1.1.16` (transitive via minimatch@3.1.5)
-- `node_modules/test-exclude/node_modules/brace-expansion@1.1.16` (transitive via minimatch@3.1.5)
 
 **Resolved (2026-08-01):** the backend/root direct-edge copy (previously listed above as
 "backend direct copy", `backend/node_modules/brace-expansion@5.0.7`) is fixed — both root
 and backend `overrides.brace-expansion` floors were raised to `>=5.0.9 <6` and re-resolved
 via `npm update brace-expansion`. It now hoists to a single `node_modules/brace-expansion@5.0.9`
 satisfying both workspaces; no separate `backend/node_modules/brace-expansion` entry remains.
-Residual allowlist scope is now exactly the two categories below (bundled + minimatch@3.1.5
-chain) — both correctly labeled as *not* a direct dependency in this codebase.
+
+**Resolved (2026-08-02):** the five minimatch@3.1.5-chain 1.x copies (previously listed here as
+`@eslint/eslintrc`, `@humanwhocodes/config-array`, `eslint`, `glob`, `test-exclude` — all
+`brace-expansion@1.1.16`) are fixed. The prior blocker ("no fix without a major bump") is now
+false: brace-expansion **1.1.17** patched this GHSA within the 1.x line (registry latest on 1.x
+is 1.1.18), so minimatch@3.1.5's `^1.1.7` dependency range can be satisfied by a patched version
+without touching minimatch or eslint majors. Fix applied: the five nested overrides
+(`eslint.minimatch.brace-expansion`, `jest.minimatch.brace-expansion`, `glob.minimatch.brace-expansion`,
+`test-exclude.minimatch.brace-expansion` — `@eslint/eslintrc` and `@humanwhocodes/config-array` are
+covered transitively via the `eslint` override cascading through eslint's own subtree) were changed
+from `>=5.0.9 <6` (a floor that could never be satisfied by minimatch@3's 1.x-only requirement, so
+npm silently left 1.1.16 in place — confirmed via `npm ls` showing `invalid: ">=5.0.9 <6"` against all
+five) to `>=1.1.18 <2`, then re-resolved via `npm update brace-expansion`. All five now resolve to
+`brace-expansion@1.1.18` with zero invalid edges. `aws-cdk-lib`'s `minimatch.brace-expansion` override
+was deliberately left at `>=5.0.9 <6` (unaffected chain, untouched).
+
+Residual allowlist scope is now exactly the one category below (bundled aws-cdk-lib copy) — the only
+remaining instance not reachable by npm `overrides`.
 
 **Why remediation is blocked:**
 1. **aws-cdk-lib bundled copy**: npm `overrides` cannot rewrite `bundleDependencies` entries. Only an upstream `aws-cdk-lib` release bumping its bundled `brace-expansion` to >=5.0.8 will fix this.
-2. **eslint chain (1.1.16 instances via minimatch@3.1.5)**: These resolve via eslint→minimatch@3.1.5→brace-expansion@^1.1. Minimatch v3.1.5 *requires* brace-expansion@^1.1, not v5.x. To remediate, minimatch must be upgraded (which requires eslint major upgrade). No in-range npm overrides floor can force v5 without breaking minimatch.
 
 **Exposure & Risk Acceptance:**
-- All instances are in root devDependencies (build-time only, not deployed).
+- The bundled instance is in a root devDependency-adjacent package (aws-cdk-lib), build-time only, not deployed.
 - The DoS requires unbounded brace-expansion syntax: `{a,b,c,...}` with extremely large iteration counts. Production code and CI templates do not use such patterns.
-- Acceptance: risk is minimal in this context; no immediate remediation path exists.
+- Acceptance: risk is minimal in this context; no immediate remediation path exists for the bundled copy.
 
 **Recommended follow-ups (revisitBy: 2026-10-22):**
 1. Check for aws-cdk-lib releases >=2.263 with brace-expansion >=5.0.8
-2. Consider eslint@10.8.0+ upgrade if team accepts breaking changes
-3. Re-run `npm audit` to confirm no new unallowlisted advisories land
+2. Re-run `npm audit` to confirm no new unallowlisted advisories land
 
-**Retest (2026-07-27): confirmed genuinely incompatible, floor NOT applied to minimatch@3.x chain**
-
-Re-verified the compatibility assumption in a throwaway dir (`npm i minimatch@3.1.5 brace-expansion@5.0.8`, forced via a nested `overrides: {minimatch: {brace-expansion: "5.0.8"}}` since a direct dependency + top-level override on the same package is rejected by npm with `EOVERRIDE`).
-
-Result: hard runtime break, not just a version skew.
-```
-TypeError: expand is not a function
-    at Minimatch.braceExpand (minimatch.js:271:10)
-```
-Root cause: minimatch@3.1.5 does `var expand = require('brace-expansion')` and calls `expand(pattern)` directly, expecting brace-expansion's CJS default export to be a callable function (true for the 1.x line). brace-expansion@5.0.8 ships `"type": "module"` with a `dist/commonjs` shim that exports a named object `{ EXPANSION_MAX, EXPANSION_MAX_LENGTH, expand }`, not a callable default. This is an ESM-migration + API-shape change, not merely a semver-major bump — no override floor can bridge it.
-
-Confirmed in the live repo tree (`npm ls minimatch --all`, `find node_modules -path '*/node_modules/brace-expansion/package.json'`): the existing root/backend `"brace-expansion": ">=5.0.8"` override is currently **not** reaching the minimatch@3.1.5 chains (eslint, @eslint/eslintrc, @humanwhocodes/config-array, glob, test-exclude all still resolve brace-expansion@1.1.16 under their nested minimatch@3.1.5). Those chains are accidentally safe today — leave the override as-is; do **not** attempt to widen or force it onto these nested resolutions, as that reproduces the `TypeError` above. aws-cdk-lib's bundled copy is unaffected by any override (npm cannot rewrite `bundleDependencies`); reconfirmed bundled `aws-cdk-lib` version is 2.262.1 (current latest), still shipping brace-expansion@5.0.7 — upstream-blocked, unchanged from prior finding.
-
-Allowlist entry `GHSA-mh99-v99m-4gvg` stands unchanged. No package.json/override edits made as a result of this retest.
+**Historical note — do not repeat this mistake:** an earlier retest (2026-07-27) correctly found
+that *forcing 5.x* onto the minimatch@3.1.5 chain breaks it at runtime
+(`TypeError: expand is not a function` — minimatch@3.1.5 calls `require('brace-expansion')` expecting
+a callable CJS default, which the 5.x ESM line does not provide). That constraint is still true and
+is why `aws-cdk-lib`'s override stays at `>=5.0.9 <6`. It does **not** apply to the 2026-08-02 fix,
+which pins the same chains to a patched **1.x** version (`>=1.1.18 <2`) — same major line minimatch@3
+already expects, no API-shape change. Do not widen the minimatch@3 chains to 5.x.
 
 ## GHSA-qwww-vcr4-c8h2 — react-router (HIGH RSC Mode CSRF Bypass Allows Action Execution Before 400 Response)
 
