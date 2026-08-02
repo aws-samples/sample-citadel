@@ -63,11 +63,6 @@
       "minimatch": {
         "brace-expansion": ">=1.1.18 <2"
       }
-    },
-    "test-exclude": {
-      "minimatch": {
-        "brace-expansion": ">=1.1.18 <2"
-      }
     }
   },
   "peerDependencies": {
