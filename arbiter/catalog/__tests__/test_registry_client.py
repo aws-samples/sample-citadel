@@ -279,7 +279,10 @@ def test_get_source_project_id_parsed_non_dict_returns_none() -> None:
 def test_list_agent_records_single_page() -> None:
     fake = MagicMock()
     fake.list_registry_records.return_value = {
-        "records": [
+        # Live-oracle-verified key: ListRegistryRecords' real top-level key
+        # is `registryRecords` (confirmed 2026-08-02 against a 1,009-record
+        # live registry — `records` returned 0 hits over 21 pages).
+        "registryRecords": [
             {"recordId": "a", "name": "A", "status": "APPROVED", "updatedAt": "t1"},
             {"recordId": "b", "name": "B", "status": "APPROVED", "updatedAt": "t2"},
         ],
@@ -290,17 +293,31 @@ def test_list_agent_records_single_page() -> None:
     fake.list_registry_records.assert_called_once_with(registryId="reg-1")
 
 
+def test_list_agent_records_falls_back_to_legacy_records_key() -> None:
+    """Defensive fallback: older/local stubs using the legacy `records`
+    key must still work."""
+    fake = MagicMock()
+    fake.list_registry_records.return_value = {
+        "records": [
+            {"recordId": "a", "name": "A", "status": "APPROVED", "updatedAt": "t1"},
+        ],
+    }
+    with patch.object(registry_client, "_get_client", return_value=fake):
+        result = list_agent_records("reg-1")
+    assert [r["recordId"] for r in result] == ["a"]
+
+
 def test_list_agent_records_paginated_two_pages_returns_union() -> None:
     fake = MagicMock()
     fake.list_registry_records.side_effect = [
         {
-            "records": [
+            "registryRecords": [
                 {"recordId": "a", "name": "A", "status": "APPROVED", "updatedAt": "t1"},
             ],
             "nextToken": "tok-1",
         },
         {
-            "records": [
+            "registryRecords": [
                 {"recordId": "b", "name": "B", "status": "APPROVED", "updatedAt": "t2"},
             ],
         },
@@ -319,7 +336,7 @@ def test_list_agent_records_paginated_two_pages_returns_union() -> None:
 def test_list_agent_records_filter_status_excludes_other_statuses() -> None:
     fake = MagicMock()
     fake.list_registry_records.return_value = {
-        "records": [
+        "registryRecords": [
             {"recordId": "a", "name": "A", "status": "APPROVED", "updatedAt": "t1"},
             {"recordId": "b", "name": "B", "status": "DRAFT", "updatedAt": "t2"},
             {"recordId": "c", "name": "C", "status": "APPROVED", "updatedAt": "t3"},
@@ -334,7 +351,7 @@ def test_list_agent_records_filter_status_excludes_other_statuses() -> None:
 def test_list_agent_records_no_filter_includes_all_statuses() -> None:
     fake = MagicMock()
     fake.list_registry_records.return_value = {
-        "records": [
+        "registryRecords": [
             {"recordId": "a", "status": "APPROVED"},
             {"recordId": "b", "status": "DRAFT"},
         ],

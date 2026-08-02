@@ -114,6 +114,10 @@ def _make_registry_mock(record_id: str = "gen-record-id"):
         "recordId": record_id,
         "status": "APPROVED",
     }
+    client.submit_registry_record_for_approval.return_value = {
+        "recordId": record_id,
+        "status": "APPROVED",
+    }
     return client
 
 
@@ -453,9 +457,13 @@ class TestInitialStatusApproved:
                 tool_description="desc",
             )
 
-        assert client.update_registry_record_status.called
-        kwargs = client.update_registry_record_status.call_args.kwargs
-        assert kwargs["status"] == "APPROVED"
+        # Live-oracle-verified contract: approval is a SINGLE
+        # submit_registry_record_for_approval call, not
+        # UpdateRegistryRecordStatus (which the live service rejects for
+        # both PENDING_APPROVAL and direct APPROVED targets from DRAFT).
+        assert client.submit_registry_record_for_approval.called
+        client.update_registry_record_status.assert_not_called()
+        kwargs = client.submit_registry_record_for_approval.call_args.kwargs
         assert kwargs["registryId"] == os.environ["REGISTRY_ID"]
         # recordId is extracted from the create response ARN
         assert kwargs["recordId"] == "rec-789"
@@ -463,7 +471,7 @@ class TestInitialStatusApproved:
     @given(tool_id=tool_ids, schema=tool_schemas)
     @settings(max_examples=20)
     def test_status_is_in_valid_registry_enum(self, tool_id, schema):
-        """Pin the status to the UpdateRegistryRecordStatus enum so an
+        """Pin the submit response status to the valid registry enum so an
         invalid value (e.g. the old "PUBLISHED") can never ship again."""
         client = _make_registry_mock()
         with patch("index._get_registry_client", return_value=client):
@@ -474,8 +482,8 @@ class TestInitialStatusApproved:
                 tool_description="desc",
             )
 
-        kwargs = client.update_registry_record_status.call_args.kwargs
-        assert kwargs["status"] in VALID_REGISTRY_STATUSES
+        response = client.submit_registry_record_for_approval.return_value
+        assert response["status"] in VALID_REGISTRY_STATUSES
 
     @given(tool_id=tool_ids, schema=tool_schemas)
     @settings(max_examples=20)

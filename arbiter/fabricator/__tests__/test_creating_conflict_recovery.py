@@ -114,35 +114,86 @@ def run_state():
 # ---------------------------------------------------------------------------
 
 class TestCreatingConflictRecoveryWiring:
-    def test_happy_path_approve_is_legal_two_step_sequence(self, run_state):
-        # Root-cause regression guard: approve must NEVER be a single
-        # DRAFT->APPROVED call (the live service rejects that with
-        # ValidationException) — it must always be the two-step
-        # DRAFT->PENDING_APPROVAL->APPROVED sequence, on the ordinary happy
-        # path (no CREATING conflict at all).
+    def test_happy_path_approve_is_single_submit_call(self, run_state):
+        # Root-cause regression guard (2026-08-02 live-oracle finding): the
+        # two-step UpdateRegistryRecordStatus(DRAFT->PENDING_APPROVAL->
+        # APPROVED) sequence is REJECTED live with 'ValidationException:
+        # Invalid target status: PENDING_APPROVAL'. The proven legal path is
+        # ONE call to submit_registry_record_for_approval, which returns
+        # status=APPROVED synchronously.
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
+        client.submit_registry_record_for_approval.return_value = {
+            "recordId": "rec-1",
+            "status": "APPROVED",
+        }
 
         with patch.object(index, "_get_registry_client", return_value=client), \
                 patch.object(index, "publish_fabrication_event") as pub:
             assert _call_store_tool() is True
 
-        calls = client.update_registry_record_status.call_args_list
-        assert len(calls) == 2
-        assert calls[0].kwargs["status"] == "PENDING_APPROVAL"
+        client.update_registry_record_status.assert_not_called()
+        calls = client.submit_registry_record_for_approval.call_args_list
+        assert len(calls) == 1
+        assert calls[0].kwargs["registryId"] == os.environ["REGISTRY_ID"]
         assert calls[0].kwargs["recordId"] == "rec-1"
-        assert calls[1].kwargs["status"] == "APPROVED"
-        assert calls[1].kwargs["recordId"] == "rec-1"
+        client.get_registry_record.assert_not_called()
         pub.assert_not_called()
+
+    def test_approve_falls_back_to_get_when_submit_response_not_approved(
+        self, run_state
+    ):
+        # Defensive confirm-from-response fallback: if the submit response
+        # shape doesn't carry status=APPROVED, a get_registry_record read
+        # confirms before treating the approval as successful.
+        client = MagicMock()
+        client.create_registry_record.return_value = _arn("rec-1")
+        client.submit_registry_record_for_approval.return_value = {
+            "recordId": "rec-1",
+        }
+        client.get_registry_record.return_value = {
+            "recordId": "rec-1", "status": "APPROVED",
+        }
+
+        with patch.object(index, "_get_registry_client", return_value=client), \
+                patch.object(index, "publish_fabrication_event") as pub:
+            assert _call_store_tool() is True
+
+        client.get_registry_record.assert_called_once_with(
+            registryId=os.environ["REGISTRY_ID"], recordId="rec-1",
+        )
+        pub.assert_not_called()
+
+    def test_approve_raises_terminal_when_get_fallback_not_approved_either(
+        self, run_state
+    ):
+        client = MagicMock()
+        client.create_registry_record.return_value = _arn("rec-1")
+        client.submit_registry_record_for_approval.return_value = {
+            "recordId": "rec-1", "status": "PENDING_APPROVAL",
+        }
+        client.get_registry_record.return_value = {
+            "recordId": "rec-1", "status": "PENDING_APPROVAL",
+        }
+
+        with patch.object(index, "_get_registry_client", return_value=client), \
+                patch.object(index, "publish_fabrication_event") as pub:
+            with pytest.raises(RuntimeError, match="did not reach APPROVED"):
+                _call_store_tool()
+
+        # Errors propagate terminally as today (existing publish-on-failure
+        # behavior, unchanged).
+        assert pub.call_count == 1
 
     def test_in_flight_creating_recovers_and_returns_true(self, run_state):
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
-        # First approve attempt: PENDING_APPROVAL step hits the CREATING
-        # conflict. Recovery polls to DRAFT, then approve-in-place runs the
-        # full two-step sequence (PENDING_APPROVAL, APPROVED) again.
-        client.update_registry_record_status.side_effect = [
-            _conflict(), None, None,
+        # First approve attempt: submit_registry_record_for_approval hits the
+        # CREATING conflict. Recovery polls to DRAFT, then approve-in-place
+        # retries the single submit call.
+        client.submit_registry_record_for_approval.side_effect = [
+            _conflict(operation="SubmitRegistryRecordForApproval"),
+            {"recordId": "rec-1", "status": "APPROVED"},
         ]
         client.get_registry_record.side_effect = [{"status": "DRAFT"}]
 
@@ -150,8 +201,8 @@ class TestCreatingConflictRecoveryWiring:
                 patch.object(index, "publish_fabrication_event") as pub:
             assert _call_store_tool() is True
 
-        # 1 failed PENDING_APPROVAL (conflict) + 2 recovered steps = 3 calls.
-        assert client.update_registry_record_status.call_count == 3
+        # 1 failed submit (conflict) + 1 recovered submit = 2 calls.
+        assert client.submit_registry_record_for_approval.call_count == 2
         client.delete_registry_record.assert_not_called()
         client.create_registry_record.assert_called_once()
         # A recovered registration is a SUCCESS — no failure event.
@@ -165,7 +216,10 @@ class TestCreatingConflictRecoveryWiring:
         # process (structural zero-net-new-orphans invariant).
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
-        client.update_registry_record_status.side_effect = [_conflict(), None, None]
+        client.submit_registry_record_for_approval.side_effect = [
+            _conflict(operation="SubmitRegistryRecordForApproval"),
+            {"recordId": "rec-1", "status": "APPROVED"},
+        ]
         client.get_registry_record.side_effect = [
             {"status": "CREATING"},
             {"status": "DRAFT"},
@@ -189,7 +243,9 @@ class TestCreatingConflictRecoveryWiring:
         # recreate, no second attempt.
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
-        client.update_registry_record_status.side_effect = _conflict()
+        client.submit_registry_record_for_approval.side_effect = _conflict(
+            operation="SubmitRegistryRecordForApproval"
+        )
         client.get_registry_record.return_value = {"status": "CREATING"}
 
         with patch.object(index, "_get_registry_client", return_value=client), \
@@ -204,8 +260,9 @@ class TestCreatingConflictRecoveryWiring:
     def test_non_creating_conflict_is_not_recovered(self, run_state):
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
-        client.update_registry_record_status.side_effect = _conflict(
-            message="Record is being updated by another request"
+        client.submit_registry_record_for_approval.side_effect = _conflict(
+            operation="SubmitRegistryRecordForApproval",
+            message="Record is being updated by another request",
         )
 
         with patch.object(index, "_get_registry_client", return_value=client), \
@@ -216,6 +273,32 @@ class TestCreatingConflictRecoveryWiring:
         client.get_registry_record.assert_not_called()
         client.delete_registry_record.assert_not_called()
 
+    def test_recovery_arm_approve_in_place_uses_submit_primitive(self, run_state):
+        # Explicit end-to-end proof that registry_recovery.py's approve-in-
+        # place arm routes through the SAME fixed _approve closure as the
+        # happy path — no duplicated/stale two-step logic in the recovery
+        # module. Verified by inspecting the exact call registry_recovery
+        # makes when it settles a CREATING orphan: it must be the single
+        # submit_registry_record_for_approval call, not
+        # update_registry_record_status.
+        client = MagicMock()
+        client.create_registry_record.return_value = _arn("rec-1")
+        client.submit_registry_record_for_approval.side_effect = [
+            _conflict(operation="SubmitRegistryRecordForApproval"),
+            {"recordId": "rec-1", "status": "APPROVED"},
+        ]
+        client.get_registry_record.side_effect = [{"status": "DRAFT"}]
+
+        with patch.object(index, "_get_registry_client", return_value=client), \
+                patch.object(index, "publish_fabrication_event") as pub:
+            assert _call_store_tool() is True
+
+        # The recovery path's approve-in-place call is the second
+        # submit_registry_record_for_approval invocation.
+        assert client.submit_registry_record_for_approval.call_count == 2
+        client.update_registry_record_status.assert_not_called()
+        pub.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Terminal latch + failure-event burst bounding
@@ -225,7 +308,9 @@ class TestTerminalLatchAndPublishOnce:
     def _poisoned_client(self):
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
-        client.update_registry_record_status.side_effect = _conflict()
+        client.submit_registry_record_for_approval.side_effect = _conflict(
+            operation="SubmitRegistryRecordForApproval"
+        )
         client.get_registry_record.return_value = {"status": "CREATING"}
         client.delete_registry_record.side_effect = _conflict(
             "DeleteRegistryRecord",
@@ -258,13 +343,13 @@ class TestTerminalLatchAndPublishOnce:
             assert pub.call_args.kwargs["event_type"] == "tool.fabrication.failed"
 
             client.create_registry_record.reset_mock()
-            client.update_registry_record_status.reset_mock()
+            client.submit_registry_record_for_approval.reset_mock()
 
             with pytest.raises(OrphanedRegistryRecordError):
                 _call_store_tool()
 
             client.create_registry_record.assert_not_called()
-            client.update_registry_record_status.assert_not_called()
+            client.submit_registry_record_for_approval.assert_not_called()
             assert pub.call_count == 1
 
     def test_other_tools_are_not_latched(self, run_state):
@@ -276,6 +361,9 @@ class TestTerminalLatchAndPublishOnce:
 
             healthy = MagicMock()
             healthy.create_registry_record.return_value = _arn("rec-9")
+            healthy.submit_registry_record_for_approval.return_value = {
+                "recordId": "rec-9", "status": "APPROVED",
+            }
         with patch.object(index, "_get_registry_client", return_value=healthy), \
                 patch.object(index, "publish_fabrication_event") as pub:
             assert _call_store_tool("tool_b") is True
@@ -295,6 +383,9 @@ class TestTerminalLatchAndPublishOnce:
             index._begin_registration_run()
             healthy = MagicMock()
             healthy.create_registry_record.return_value = _arn("rec-9")
+            healthy.submit_registry_record_for_approval.return_value = {
+                "recordId": "rec-9", "status": "APPROVED",
+            }
             with patch.object(index, "_get_registry_client", return_value=healthy), \
                     patch.object(index, "publish_fabrication_event"):
                 assert _call_store_tool() is True
@@ -339,15 +430,18 @@ class TestRegistrationDeadlineCheckpoints:
         )
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
+        client.submit_registry_record_for_approval.return_value = {
+            "recordId": "rec-1", "status": "APPROVED",
+        }
         with patch.object(index, "_get_registry_client", return_value=client), \
                 patch.object(index, "publish_fabrication_event"):
             with pytest.raises(FabricationDeadlineExceeded):
                 _call_store_tool()
         client.create_registry_record.assert_called_once()
-        # Approve is now the legal two-step DRAFT->PENDING_APPROVAL->APPROVED
-        # sequence (root-cause fix), so a completed registration makes two
-        # update_registry_record_status calls, not one.
-        assert client.update_registry_record_status.call_count == 2
+        # Approve is now the live-proven single
+        # submit_registry_record_for_approval call (root-cause fix), so a
+        # completed registration makes exactly one call, not two.
+        assert client.submit_registry_record_for_approval.call_count == 1
 
     def test_agent_registration_refuses_to_start_inside_margin(self):
         set_fabrication_deadline(FabricationDeadline(lambda: 10_000))
@@ -375,6 +469,9 @@ class TestRegistrationDeadlineCheckpoints:
     def test_no_deadline_set_keeps_registration_working(self):
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
+        client.submit_registry_record_for_approval.return_value = {
+            "recordId": "rec-1", "status": "APPROVED",
+        }
         with patch.object(index, "_get_registry_client", return_value=client), \
                 patch.object(index, "publish_fabrication_event"):
             assert _call_store_tool() is True

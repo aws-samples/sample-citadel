@@ -126,7 +126,16 @@ def list_agent_records(registry_id: str, filter_status: str | None = None) -> li
         items: list[dict] = []
         while True:
             response = client.list_registry_records(**kwargs)
-            for summary in response.get("records", []):
+            # Live-oracle-verified (2026-08-02): ListRegistryRecords' real
+            # top-level key is `registryRecords`, not `records` (confirmed via
+            # a direct live call against a 1,009-record registry — the
+            # `records` key returned 0 hits over 21 pages). Mirrors
+            # service/agent_intake_single/tools/fabricate.py:340 and
+            # arbiter/fabricator/index.py's _find_existing_record_id.
+            summaries = response.get("registryRecords")
+            if summaries is None:
+                summaries = response.get("records", [])
+            for summary in summaries:
                 if filter_status is not None and summary.get("status") != filter_status:
                     continue
                 items.append({
