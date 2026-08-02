@@ -4,7 +4,6 @@
  * Covers: project list rendering, filter tabs, new project button,
  * loading/error states, subscription setup, polling, project card navigation.
  */
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 

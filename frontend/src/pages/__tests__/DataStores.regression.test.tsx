@@ -4,8 +4,7 @@
  * Covers: renders list, category filter tabs, search input, status icons,
  * create wizard trigger, loading/error/empty states.
  */
-import React from 'react';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 jest.mock('@/components/ui/card', () => ({
@@ -17,7 +16,7 @@ jest.mock('@/components/ui/button', () => ({
   ),
 }));
 jest.mock('@/components/ui/tabs', () => ({
-  Tabs: ({ children, value, onValueChange }: any) => <div data-value={value}>{children}</div>,
+  Tabs: ({ children, value, onValueChange: _onValueChange }: any) => <div data-value={value}>{children}</div>,
   TabsContent: ({ children, value }: any) => <div data-tabcontent={value}>{children}</div>,
   TabsList: ({ children }: any) => <div role="tablist">{children}</div>,
   TabsTrigger: ({ children, value, onClick }: any) => (

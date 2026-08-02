@@ -4,7 +4,6 @@
  * Covers: loading state, document rendering (markdown), error state with
  * retry, empty state, back button, refresh button.
  */
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
