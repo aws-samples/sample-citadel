@@ -90,6 +90,12 @@ def _make_registry_mock(record_id: str = "gen-record-id", status: str = "DRAFT")
         "recordId": record_id,
         "status": status,
     }
+    # Live-oracle-verified approval primitive: submit_registry_record_for_approval
+    # returns status=APPROVED synchronously.
+    client.submit_registry_record_for_approval.return_value = {
+        "recordId": record_id,
+        "status": "APPROVED",
+    }
     return client
 
 

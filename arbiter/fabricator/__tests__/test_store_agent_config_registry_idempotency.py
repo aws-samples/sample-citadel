@@ -53,8 +53,11 @@ def _make_registry_mock(existing_records=None, record_id="gen-record-id"):
         record_id: recordId surfaced in the create_registry_record response.
     """
     client = MagicMock()
+    # Live-oracle-verified key (2026-08-02): ListRegistryRecords' real
+    # top-level key is `registryRecords`, confirmed against a 1,009-record
+    # live registry (the `records` key returned 0 hits over 21 pages).
     client.list_registry_records.return_value = {
-        "records": existing_records or [],
+        "registryRecords": existing_records or [],
     }
     client.create_registry_record.return_value = {
         "recordArn": (
@@ -121,3 +124,53 @@ class TestIdempotentAgentCreation:
 
         assert result is True
         client.create_registry_record.assert_called_once()
+
+    def test_legacy_records_key_fallback_still_dedupes(self):
+        """Defensive fallback: a stub/older service response using the
+        legacy `records` key (instead of the live `registryRecords`) must
+        still be honored."""
+        agent_id = "legacy_key_agent"
+        client = MagicMock()
+        client.list_registry_records.return_value = {
+            "records": [{"name": agent_id, "recordId": "existing-rec-id"}],
+        }
+        client.create_registry_record.return_value = {
+            "recordArn": "arn:aws:bedrock-agentcore:us-west-2:1:registry/reg/record/x",
+            "recordId": "x",
+        }
+        with patch("index._get_registry_client", return_value=client):
+            result = store_agent_config_registry(
+                file_name=f"/tmp/{agent_id}.py",
+                agent_id=agent_id,
+                llm_tool_schema=SCHEMA,
+                agent_description="legacy",
+            )
+
+        assert result is True
+        client.create_registry_record.assert_not_called()
+
+    def test_live_response_key_bite_against_old_records_only_handling(self):
+        """Regression bite: reproduces the live 2026-08-02 finding (6ef1c2c8)
+        that _find_existing_record_id iterated `response.get("records", [])`
+        while the live service returns records under `registryRecords`.
+
+        Directly exercises the fixed _find_existing_record_id against a
+        mock shaped EXACTLY like the live response (registryRecords only,
+        no `records` key at all) and asserts the guard finds the match. If
+        the fix regressed to reading only the `records` key, this would
+        return None (the exact live bug: agents re-created on every
+        fabrication run despite identical names).
+        """
+        agent_id = "live_shape_agent"
+        client = MagicMock()
+        # Deliberately omit the `records` key entirely — this is the exact
+        # live wire shape; a `response.get("records", [])`-only reader
+        # returns [] here and the guard would return None (the live bug).
+        client.list_registry_records.return_value = {
+            "registryRecords": [{"name": agent_id, "recordId": "live-rec-id"}],
+            "nextToken": None,
+        }
+        with patch("index._get_registry_client", return_value=client):
+            found = index._find_existing_record_id("fake-registry-id", agent_id)
+
+        assert found == "live-rec-id"

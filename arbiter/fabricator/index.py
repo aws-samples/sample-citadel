@@ -154,7 +154,17 @@ def _find_existing_record_id(registry_id: str, agent_id: str) -> str | None:
         response = client.list_registry_records(**kwargs)
         if not isinstance(response, dict):
             return None
-        for summary in response.get("records", []):
+        # Live-oracle-verified (2026-08-02): ListRegistryRecords' real
+        # top-level key is `registryRecords` (confirmed via a direct live
+        # call — the first pass using `records` returned 0 hits over 21
+        # pages against a 1,009-record registry). Mirrors
+        # service/agent_intake_single/tools/fabricate.py:340's
+        # registryRecords-with-records-fallback for defensive parity with
+        # older/local stubs that may still use the legacy key.
+        summaries = response.get("registryRecords")
+        if summaries is None:
+            summaries = response.get("records", [])
+        for summary in summaries:
             if isinstance(summary, dict) and summary.get("name") == agent_id:
                 return summary.get("recordId")
         next_token = response.get("nextToken")
@@ -1725,28 +1735,46 @@ def store_tool_config_registry(
         # value both the intake catalog (_registry_state_from_status) and the
         # backend (toInternalState) map to "active".
         def _approve(rid: str) -> None:
-            # Legal two-step transition: the live bedrock-agentcore-control
-            # service rejects a direct DRAFT->APPROVED with ValidationException
-            # ("Invalid status transition from DRAFT to APPROVED. Valid
-            # transitions from DRAFT: PENDING_APPROVAL, DEPRECATED, DRAFT,
-            # UPDATING") — the legal path is DRAFT->PENDING_APPROVAL->APPROVED
-            # (two calls). This callable is shared by the happy path and both
-            # registry-recovery approve-in-place call sites, so fixing it
-            # here repairs approval everywhere at once. Status updates are
-            # synchronous (unlike create), so no inter-step wait is needed.
+            # Live-oracle-verified transition (2026-08-02 scratch-record probe
+            # on bedrock-agentcore-control, us-west-2): the two-step
+            # UpdateRegistryRecordStatus(DRAFT->PENDING_APPROVAL->APPROVED)
+            # sequence that used to live here is REJECTED by the live
+            # service — 'ValidationException: Invalid target status:
+            # PENDING_APPROVAL' (100% failure rate on the 2026-08-02 re-run,
+            # 6/6 tool registrations). The service self-contradicts on the
+            # direct path too (DRAFT->APPROVED raises 'Invalid status
+            # transition ... Valid transitions from DRAFT: PENDING_APPROVAL,
+            # DEPRECATED, DRAFT, UPDATING'), so UpdateRegistryRecordStatus
+            # can NEVER reach APPROVED from DRAFT by any path. The proven
+            # legal path is the dedicated SubmitRegistryRecordForApproval
+            # operation, which returns status=APPROVED SYNCHRONOUSLY in one
+            # call (PENDING_APPROVAL was never observed as an intermediate
+            # state on the live service). This callable is shared by the
+            # happy path and both registry-recovery approve-in-place call
+            # sites, so fixing it here repairs approval everywhere at once.
             client = _get_registry_client()
-            client.update_registry_record_status(
+            response = client.submit_registry_record_for_approval(
                 registryId=registry_id,
                 recordId=rid,
-                status="PENDING_APPROVAL",
-                statusReason="Fabricator submit for approval",
             )
-            client.update_registry_record_status(
-                registryId=registry_id,
-                recordId=rid,
-                status="APPROVED",
-                statusReason="Initial status set by Fabricator",
-            )
+            status = (response or {}).get("status")
+            if status != "APPROVED":
+                # Defensive fallback: confirm via a fresh read rather than
+                # trusting a response shape that didn't match the oracle.
+                # Any failure here (including a non-APPROVED status) is
+                # propagated so the caller's existing terminal error handling
+                # (registry_recovery's OrphanedRegistryRecordError path, or
+                # the bare re-raise on the happy path) is unchanged.
+                confirm = client.get_registry_record(
+                    registryId=registry_id, recordId=rid,
+                )
+                if (confirm or {}).get("status") != "APPROVED":
+                    raise RuntimeError(
+                        f"submit_registry_record_for_approval did not reach "
+                        f"APPROVED for recordId {rid} "
+                        f"(response status={status!r}, confirmed status="
+                        f"{(confirm or {}).get('status')!r})"
+                    )
 
         try:
             _approve(record_id)
