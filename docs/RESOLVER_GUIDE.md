@@ -496,7 +496,7 @@ Run tests:
 ```bash
 cd backend
 npm test                          # All tests
-npm test -- --testPathPattern=widget  # Specific resolver
+npm test -- --testPathPatterns=widget  # Specific resolver
 ```
 
 ## Error Handling Conventions

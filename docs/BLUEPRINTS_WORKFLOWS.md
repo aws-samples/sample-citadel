@@ -525,7 +525,7 @@ All implementation follows strict Test-Driven Development (TDD). Property-based 
 cd backend && npm test
 
 # Backend property tests only
-cd backend && npx jest --testPathPattern="workflow-definition|workflow-resolver|workflow-validation" --no-coverage
+cd backend && npx jest --testPathPatterns="workflow-definition|workflow-resolver|workflow-validation" --no-coverage
 
 # Step Runner property tests (Python)
 cd arbiter/stepRunner && python -m pytest __tests__/ -v
