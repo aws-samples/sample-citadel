@@ -87,6 +87,15 @@ class _RegistrationRunState:
     - ``published`` dedupes tool.fabrication.failed to ONE event per
       (tool_id, error type) per run — once per tool failure, never once per
       retry iteration.
+    - ``succeeded`` is the set of tool_ids that completed registration this
+      run — used to distinguish "all failed" from "partial" when the run
+      terminates.
+    - ``failed`` maps tool_id -> short error string for EVERY registration
+      failure this run (a superset of ``latched``, which only tracks the
+      NON-RETRYABLE orphaned-record case) — threaded into the job status
+      row as the additive ``registrationErrors`` attribute so a run that
+      completes with some or all tool registrations failing is never
+      reported as a bare, silent COMPLETED.
 
     Scoped to a run on purpose: process_event begins/ends it around each
     SQS record (Lambda containers are REUSED, so module state must never
@@ -97,6 +106,8 @@ class _RegistrationRunState:
     def __init__(self):
         self.latched = {}
         self.published = set()
+        self.succeeded = set()
+        self.failed = {}
 
 
 _registration_run_state = None
@@ -235,6 +246,7 @@ def _write_fabrication_status(
     agent_id: str | None = None,
     error_message: str | None = None,
     agent_name: str | None = None,
+    registration_errors: list | None = None,
 ) -> bool:
     """Upsert a per-agent fabrication status row in the durable jobs table.
 
@@ -242,6 +254,15 @@ def _write_fabrication_status(
     (``citadel-fabrication-jobs-${env}``) is keyed by orchestrationId (PK) /
     agentUseId (SK). process_event calls this at the START (PROCESSING), on
     SUCCESS (COMPLETED + agentId) and on EXCEPTION (FAILED + errorMessage).
+
+    ``registration_errors`` is an ADDITIVE attribute (no new status enum
+    value — the 4-value {PENDING, PROCESSING, COMPLETED, FAILED} contract is
+    a hard constraint of downstream consumers, see queue resolver / intake
+    terminal-status checks): a list of ``{"toolId": ..., "error": ...}``
+    dicts describing tool registrations that failed during the run. Written
+    whenever a run had any registration failures (partial COMPLETED or
+    all-failed FAILED); omitted (never a bare empty list) when there were
+    none, so existing bare-COMPLETED consumers see no shape change.
 
     Backward-compatible and best-effort: when ``FABRICATION_JOBS_TABLE`` is
     unset the write is skipped (logged); any failure is logged and swallowed
@@ -290,6 +311,20 @@ def _write_fabrication_status(
         set_parts.append("#errorMessage = :errorMessage")
         names["#errorMessage"] = "errorMessage"
         values[":errorMessage"] = {"S": error_message[:1000]}
+    if registration_errors:
+        set_parts.append("#registrationErrors = :registrationErrors")
+        names["#registrationErrors"] = "registrationErrors"
+        values[":registrationErrors"] = {
+            "L": [
+                {
+                    "M": {
+                        "toolId": {"S": str(item.get("toolId", ""))},
+                        "error": {"S": str(item.get("error", ""))[:500]},
+                    }
+                }
+                for item in registration_errors
+            ]
+        }
 
     try:
         boto3.client("dynamodb").update_item(
@@ -1655,9 +1690,7 @@ def store_tool_config_registry(
 
         # CreateRegistryRecord does NOT accept a recordId — the service generates
         # one. We use the toolId as the record name so records can be located
-        # by name in subsequent operations. The kwargs are shared with the
-        # CREATING-conflict recovery below, which may need to recreate the
-        # record with exactly the same shape.
+        # by name in subsequent operations.
         create_kwargs = {
             "registryId": registry_id,
             "name": tool_id,
@@ -1692,16 +1725,27 @@ def store_tool_config_registry(
         # value both the intake catalog (_registry_state_from_status) and the
         # backend (toInternalState) map to "active".
         def _approve(rid: str) -> None:
-            _get_registry_client().update_registry_record_status(
+            # Legal two-step transition: the live bedrock-agentcore-control
+            # service rejects a direct DRAFT->APPROVED with ValidationException
+            # ("Invalid status transition from DRAFT to APPROVED. Valid
+            # transitions from DRAFT: PENDING_APPROVAL, DEPRECATED, DRAFT,
+            # UPDATING") — the legal path is DRAFT->PENDING_APPROVAL->APPROVED
+            # (two calls). This callable is shared by the happy path and both
+            # registry-recovery approve-in-place call sites, so fixing it
+            # here repairs approval everywhere at once. Status updates are
+            # synchronous (unlike create), so no inter-step wait is needed.
+            client = _get_registry_client()
+            client.update_registry_record_status(
+                registryId=registry_id,
+                recordId=rid,
+                status="PENDING_APPROVAL",
+                statusReason="Fabricator submit for approval",
+            )
+            client.update_registry_record_status(
                 registryId=registry_id,
                 recordId=rid,
                 status="APPROVED",
                 statusReason="Initial status set by Fabricator",
-            )
-
-        def _recreate() -> str:
-            return _record_id_from(
-                _get_registry_client().create_registry_record(**create_kwargs)
             )
 
         try:
@@ -1717,22 +1761,21 @@ def store_tool_config_registry(
             # within this run — the record never leaves CREATING on its own —
             # so it must never be blindly retried (the LLM previously retried
             # it 92-110×, burning ~92% of the 900s Lambda budget). Run the
-            # bounded, SDK-documented recovery instead: poll briefly in case
-            # CREATING is genuinely in-flight, then delete-and-recreate the
-            # orphan (DeleteRegistryRecord is supported; deletion is async),
-            # else fail FAST with a terminal, user-actionable error. See
-            # registry_recovery.py for the full justification.
+            # bounded, SDK-documented recovery instead: poll briefly for the
+            # record to settle, then approve it IN PLACE, else fail FAST with
+            # a terminal, user-actionable error. Recovery never creates or
+            # deletes a Registry record — see registry_recovery.py for the
+            # full justification (zero-net-new-orphans is structural).
             print(
                 f"[store_tool_config_registry] ConflictException on CREATING "
                 f"for '{tool_id}' (recordId {record_id}) — entering bounded "
-                f"recovery (poll -> delete-and-recreate -> fail fast)"
+                f"recovery (poll -> approve in place -> fail fast)"
             )
             record_id = recover_creating_record(
                 _get_registry_client(),
                 registry_id,
                 record_id,
                 tool_id,
-                recreate=_recreate,
                 approve=_approve,
             )
 
@@ -1743,6 +1786,9 @@ def store_tool_config_registry(
         registration_checkpoint(f"after tool registration '{tool_id}'")
 
         print(f"[store_tool_config_registry] SUCCESS - Registry response: {response}")
+        run_state = _registration_run_state
+        if run_state is not None:
+            run_state.succeeded.add(tool_id)
         return True
 
     except Exception as e:
@@ -1762,6 +1808,8 @@ def store_tool_config_registry(
         # check at the top). Direct calls outside a run keep the legacy
         # one-event-per-call behavior.
         run_state = _registration_run_state
+        if run_state is not None:
+            run_state.failed[tool_id] = str(e)[:500]
         if run_state is not None and isinstance(e, OrphanedRegistryRecordError):
             run_state.latched.setdefault(tool_id, str(e))
         publish_key = (tool_id, type(e).__name__)
@@ -2224,11 +2272,45 @@ def process_event(event, context, request_type=None):
                 f"fabrication run"
             )
 
-        # Durable status: fabrication dispatch completed without raising — mark
-        # COMPLETED and stamp the agent name/recordId. Best-effort.
+        # Durable status: fabrication dispatch completed without raising.
+        # Branch on this run's registration bookkeeping (ADDITIVE signal
+        # only — the {PENDING, PROCESSING, COMPLETED, FAILED} enum contract
+        # is unchanged; see _RegistrationRunState / registrationErrors):
+        #   - no registration failures         -> bare COMPLETED (unchanged)
+        #   - some succeeded, some failed       -> COMPLETED + registrationErrors
+        #   - every registration failed         -> FAILED + errorMessage +
+        #     registrationErrors, then RETURN CLEANLY (no re-raise) so the
+        #     SQS message is consumed rather than redelivered into a run
+        #     that will fail identically (mirrors the deadline-guard
+        #     philosophy: durable FAILED row + clean return).
+        run_state = _registration_run_state
+        registration_errors = None
+        if run_state is not None and run_state.failed:
+            registration_errors = [
+                {"toolId": tool_id, "error": err}
+                for tool_id, err in run_state.failed.items()
+            ]
+
+        if run_state is not None and run_state.failed and not run_state.succeeded:
+            all_failed_message = (
+                "All tool registrations failed for this agent: "
+                + "; ".join(
+                    f"{tool_id}: {err}" for tool_id, err in run_state.failed.items()
+                )
+            )
+            print(f"All tool registrations failed: {all_failed_message}")
+            _write_fabrication_status(
+                orchestration_id, agent_use_id, "FAILED",
+                error_message=all_failed_message[:1000],
+                agent_name=agent_use_id,
+                registration_errors=registration_errors,
+            )
+            return
+
         _write_fabrication_status(
             orchestration_id, agent_use_id, "COMPLETED",
-            agent_id=agent_use_id, agent_name=agent_use_id
+            agent_id=agent_use_id, agent_name=agent_use_id,
+            registration_errors=registration_errors,
         )
 
     except FabricationDeadlineExceeded as deadline_exc:

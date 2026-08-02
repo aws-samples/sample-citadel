@@ -181,6 +181,94 @@ class TestFabricationStatusWrites:
         assert processing_kwargs.get("agent_name") == "MyAgent"
 
 
+class TestRegistrationErrorsJobStatusBranching:
+    """process_event's post-agent-loop terminal write branches on this run's
+    tool-registration bookkeeping (_registration_run_state), additive only
+    — no new status enum value:
+      - zero registration failures -> bare COMPLETED (no registrationErrors)
+      - some succeeded, some failed (partial) -> COMPLETED + registrationErrors
+      - every registration failed (none succeeded) -> FAILED + errorMessage +
+        registrationErrors, then a CLEAN RETURN (no raise / no redelivery).
+    """
+
+    def setup_method(self):
+        os.environ["FABRICATION_JOBS_TABLE"] = "citadel-fabrication-jobs-test"
+
+    def teardown_method(self):
+        os.environ.pop("FABRICATION_JOBS_TABLE", None)
+
+    def _run_tool_creation(self, agent_side_effect):
+        statuses = []
+
+        def record(orchestration_id, agent_use_id, status, **kwargs):
+            statuses.append((status, kwargs))
+
+        with patch.object(index, "_write_fabrication_status", side_effect=record), \
+                patch.object(index, "check_design_assessment"), \
+                patch.object(index, "create_tool_fabricator") as mk, \
+                patch.object(index, "publish_intake_progress"), \
+                patch.object(index, "publish_fabrication_event"):
+            mk.return_value = MagicMock(side_effect=agent_side_effect)
+            result = index.process_event(
+                _base_event(), {}, request_type="tool-creation"
+            )
+        return statuses, result
+
+    def test_zero_registration_failures_writes_bare_completed(self):
+        # No tool_fabricator call ever touches run_state.failed/succeeded ->
+        # registration_errors stays None -> bare COMPLETED, no attribute.
+        def fake_fabricator(task):
+            return "done"
+
+        statuses, result = self._run_tool_creation(fake_fabricator)
+
+        seq = [s for s, _ in statuses]
+        assert seq == ["PROCESSING", "COMPLETED"]
+        completed_kwargs = next(kw for s, kw in statuses if s == "COMPLETED")
+        assert completed_kwargs.get("registration_errors") is None
+        assert result is None
+
+    def test_partial_registration_failure_writes_completed_with_errors(self):
+        # One tool succeeded, one failed this run -> still COMPLETED (the
+        # agent has usable tools) but registrationErrors must be present.
+        def fake_fabricator(task):
+            run_state = index._registration_run_state
+            run_state.succeeded.add("tool_ok")
+            run_state.failed["tool_bad"] = "orphaned CREATING record"
+            return "done"
+
+        statuses, result = self._run_tool_creation(fake_fabricator)
+
+        seq = [s for s, _ in statuses]
+        assert seq == ["PROCESSING", "COMPLETED"]
+        completed_kwargs = next(kw for s, kw in statuses if s == "COMPLETED")
+        errors = completed_kwargs.get("registration_errors")
+        assert errors == [{"toolId": "tool_bad", "error": "orphaned CREATING record"}]
+        assert result is None
+
+    def test_all_registrations_failed_writes_failed_and_returns_cleanly(self):
+        # Every tool registration failed this run (succeeded stays empty) ->
+        # terminal FAILED + errorMessage + registrationErrors, and the
+        # handler returns cleanly (no raise -> no SQS redelivery).
+        def fake_fabricator(task):
+            run_state = index._registration_run_state
+            run_state.failed["tool_a"] = "orphaned CREATING record"
+            run_state.failed["tool_b"] = "orphaned CREATING record"
+            return "done"
+
+        statuses, result = self._run_tool_creation(fake_fabricator)
+
+        seq = [s for s, _ in statuses]
+        assert seq == ["PROCESSING", "FAILED"]
+        failed_kwargs = next(kw for s, kw in statuses if s == "FAILED")
+        assert failed_kwargs.get("error_message")
+        errors = failed_kwargs.get("registration_errors")
+        assert {"toolId": "tool_a", "error": "orphaned CREATING record"} in errors
+        assert {"toolId": "tool_b", "error": "orphaned CREATING record"} in errors
+        # Clean return: no exception propagates from process_event.
+        assert result is None
+
+
 def _transient_error(code: str = "internalServerException",
                      message: str = "Bedrock had an internal error"):
     return ClientError({"Error": {"Code": code, "Message": message}}, "ConverseStream")
