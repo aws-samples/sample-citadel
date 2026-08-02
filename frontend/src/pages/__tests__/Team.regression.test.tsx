@@ -4,7 +4,6 @@
  * Covers: user list rendering, role badges, invite user button/modal,
  * admin-only actions, organization management, loading/error states.
  */
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
@@ -36,7 +35,7 @@ jest.mock('@/components/ui/accordion', () => ({
   AccordionContent: ({ children }: any) => <div>{children}</div>,
 }));
 jest.mock('@/components/ui/select', () => ({
-  Select: ({ children, onValueChange }: any) => <div>{children}</div>,
+  Select: ({ children, onValueChange: _onValueChange }: any) => <div>{children}</div>,
   SelectContent: ({ children }: any) => <div>{children}</div>,
   SelectItem: ({ children, value }: any) => <option value={value}>{children}</option>,
   SelectTrigger: ({ children }: any) => <button>{children}</button>,

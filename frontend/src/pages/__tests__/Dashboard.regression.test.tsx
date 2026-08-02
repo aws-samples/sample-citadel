@@ -4,7 +4,6 @@
  * Covers: metric cards render, loading/error states, lazy sections,
  * chart data computation, weekly data display, growth data computation.
  */
-import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
@@ -21,7 +20,7 @@ jest.mock('@/components/PageContainer', () => ({
   PageContainer: ({ children, className }: any) => <div className={className}>{children}</div>,
 }));
 jest.mock('@/components/LazyLoadSection', () => ({
-  LazyLoadSection: ({ children, fallback }: any) => <div data-testid="lazy-section">{children}</div>,
+  LazyLoadSection: ({ children, fallback: _fallback }: any) => <div data-testid="lazy-section">{children}</div>,
 }));
 jest.mock('@/components/ErrorBoundary', () => ({
   ErrorBoundary: ({ children }: any) => <>{children}</>,

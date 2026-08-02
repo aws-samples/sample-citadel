@@ -4,7 +4,6 @@
  * Covers: step indicator rendering, step navigation (next/back), form inputs,
  * validation (name required), agent/workflow selection, review and submit.
  */
-import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 

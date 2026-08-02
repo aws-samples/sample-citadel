@@ -5,7 +5,7 @@
  * workflowId deep link behavior, error boundary wrapping.
  */
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 jest.mock('@/components/ui/tabs', () => ({
