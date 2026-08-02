@@ -703,16 +703,16 @@ All implementation follows strict Test-Driven Development (TDD). Property-based 
 
 ```bash
 # Backend property tests
-cd backend && npx jest --testPathPattern="\.property\.test" --no-coverage
+cd backend && npx jest --testPathPatterns="\.property\.test" --no-coverage
 
 # Frontend property tests
-cd frontend && npx jest --testPathPattern="\.property\.test" --no-coverage
+cd frontend && npx jest --testPathPatterns="\.property\.test" --no-coverage
 
 # Backend integration-related property tests
-cd backend && npx jest --testPathPattern="tool-config-resolver\.property" --no-coverage
+cd backend && npx jest --testPathPatterns="tool-config-resolver\.property" --no-coverage
 
 # Frontend integration picker tests
-cd frontend && npx jest --testPathPattern="integration-picker\.property" --no-coverage
+cd frontend && npx jest --testPathPatterns="integration-picker\.property" --no-coverage
 
 # Python binding aggregation tests
 cd arbiter/workerWrapper && python -m pytest __tests__/test_binding_aggregation_properties.py -v

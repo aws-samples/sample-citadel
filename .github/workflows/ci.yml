@@ -148,7 +148,7 @@ jobs:
         working-directory: ${{ github.workspace }}
 
       - name: Governance resolver tests
-        run: npm test -- --ci --testPathPattern governance
+        run: npm test -- --ci --testPathPatterns governance
 
       - name: Build Lambda bundles
         run: npm run build:lambda
