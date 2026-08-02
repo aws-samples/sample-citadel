@@ -59,22 +59,22 @@
     },
     "eslint": {
       "minimatch": {
-        "brace-expansion": ">=5.0.9 <6"
+        "brace-expansion": ">=1.1.18 <2"
       }
     },
     "jest": {
       "minimatch": {
-        "brace-expansion": ">=5.0.9 <6"
+        "brace-expansion": ">=1.1.18 <2"
       }
     },
     "glob": {
       "minimatch": {
-        "brace-expansion": ">=5.0.9 <6"
+        "brace-expansion": ">=1.1.18 <2"
       }
     },
     "test-exclude": {
       "minimatch": {
-        "brace-expansion": ">=5.0.9 <6"
+        "brace-expansion": ">=1.1.18 <2"
       }
     }
   },
