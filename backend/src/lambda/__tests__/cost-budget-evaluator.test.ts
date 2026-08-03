@@ -98,6 +98,58 @@ describe("evaluateBudgets", () => {
     );
   });
 
+  // CIT-102 §5 — eval-context cost exclusion (pinned both ways). A
+  // period-to-date spend sum must never count evalContext===true rows,
+  // so an eval run cannot trip an org's budget alarm.
+  test("PINNED (CIT-102): evalContext===true rows are excluded from period-to-date spend, never trip a threshold", async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName === "BudgetIndex") {
+        return { Items: [budgetIndexRow({ thresholds: [0.8] })] };
+      }
+      return {
+        Items: [
+          { costMicros: 100_000, priced: true },
+          // Eval-tagged row carries a huge cost that would otherwise cross
+          // the 0.8 threshold (100_000 + 900_000 = 1_000_000 / 1_000_000 = 1.0)
+          // but must be excluded entirely.
+          { costMicros: 900_000, priced: true, evalContext: true },
+        ],
+      };
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+    const emitSpy = jest
+      .spyOn(costNotifier, "emitBudgetEvent")
+      .mockResolvedValue();
+
+    await evaluateBudgets();
+
+    // Only the non-eval 100_000 counts -> 0.1 ratio -> below the 0.8
+    // threshold -> no notification.
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  test("PINNED (CIT-102): non-eval rows (evalContext absent or false) are unaffected by the exclusion", async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName === "BudgetIndex") {
+        return { Items: [budgetIndexRow({ thresholds: [0.8] })] };
+      }
+      return {
+        Items: [{ costMicros: 900_000, priced: true, evalContext: false }],
+      };
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+    const emitSpy = jest
+      .spyOn(costNotifier, "emitBudgetEvent")
+      .mockResolvedValue();
+
+    await evaluateBudgets();
+
+    expect(emitSpy).toHaveBeenCalledWith(
+      "cost.budget.threshold.crossed",
+      expect.objectContaining({ spentMicros: 900_000, threshold: 0.8 }),
+    );
+  });
+
   test("dedupe: a threshold already notified this period is not re-notified", async () => {
     ddbMock.on(QueryCommand).callsFake((input) => {
       if (input.IndexName === "BudgetIndex") {

@@ -567,6 +567,7 @@ def handle_node_completion(
             workflow_id=execution.get('workflowId', ''),
             completed_at=now,
             output=output,
+            eval_run_id=execution.get('evalRunId'),
         )
 
 
@@ -694,6 +695,7 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             failed_node_id=node_id,
             error=error,
             failed_at=now,
+            eval_run_id=execution.get('evalRunId'),
         )
 
 
@@ -736,4 +738,5 @@ def cancel_execution(execution_id: str) -> None:
         failed_node_id='',
         error='Execution cancelled',
         failed_at=now,
+        eval_run_id=execution.get('evalRunId'),
     )

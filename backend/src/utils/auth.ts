@@ -95,6 +95,9 @@ export function hasPermission(
       "eval:author",
       "eval:approve",
       "eval:read",
+      // CIT-102: architect may start/read eval runs (execute a frozen
+      // suite against an agent target).
+      "eval:run",
     ],
     developer: [
       "project:read",
@@ -105,6 +108,9 @@ export function hasPermission(
       "registry:read",
       // CIT-101: developer may read eval suites/cases but not author/approve.
       "eval:read",
+      // CIT-102: developer may also start/read eval runs (design §9 KEY
+      // REVERSIBLE DECISIONS #6).
+      "eval:run",
     ],
   };
 

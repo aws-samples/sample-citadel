@@ -239,6 +239,50 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
   return { template: Template.fromStack(stack) };
 }
 
+describe("TelemetryStack — F4 replay-package bucket SSM publication (design §6, DECISION d36fbbf7)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = buildStack());
+  });
+
+  test("publishes the replay-package bucket name to the exact SSM parameter naming convention", () => {
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Type: "String",
+      Name: "/citadel/eval-replay-bucket-test",
+      Value: Match.objectLike({
+        Ref: Match.stringLikeRegexp("ReplayPackageBucket"),
+      }),
+    });
+  });
+
+  test("the existing 7-day expiration lifecycle rule is scoped to the ORG# prefix, not bucket-wide (eval-runs/ artifacts must not expire)", () => {
+    template.hasResourceProperties("AWS::S3::Bucket", {
+      LifecycleConfiguration: {
+        Rules: Match.arrayWith([
+          Match.objectLike({
+            Id: "expire-replay-packages-after-7-days",
+            ExpirationInDays: 7,
+            Prefix: "ORG#",
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("exactly one lifecycle rule exists on the replay-package bucket (no separate/wider rule was added that would also expire eval-runs/)", () => {
+    const buckets = template.findResources("AWS::S3::Bucket");
+    const replayBucketEntries = Object.entries(buckets).filter(([id]) =>
+      id.startsWith("ReplayPackageBucket"),
+    );
+    expect(replayBucketEntries).toHaveLength(1);
+    const rules =
+      replayBucketEntries[0][1].Properties.LifecycleConfiguration.Rules;
+    expect(rules).toHaveLength(1);
+    expect(rules[0].Prefix).toBe("ORG#");
+  });
+});
+
 describe("TelemetryStack — cost API CORS AllowOrigins (finding d7d3dd61)", () => {
   test("AllowOrigins matches the provided frontendOrigin prop exactly", () => {
     const { template } = buildStackWithOrigin("https://app.example.com");
@@ -956,7 +1000,7 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
     // Independently-sourced (not imported from telemetry-stack.ts) list of
     // every `deadLetterQueue`-backed SQS queue's exact `queueName:` template
     // string, per `git grep -ni deadLetterQueue backend/lib/` recon:
-    //   arbiter-stack.ts:291,491,2348,2764 · governance-stack.ts:376 ·
+    //   arbiter-stack.ts:291,491,2348,2764 · governance-stack.ts:376,<EvalDispatchDLQ> ·
     //   registry-stack.ts:194
     // If a new DLQ is added anywhere and NOT added to telemetry-stack.ts's
     // `allDlqQueueNames`, this test fails — a DLQ can no longer silently
@@ -969,6 +1013,8 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
       `citadel-governance-finding-fanout-dlq-${environment}`,
       `citadel-governance-notifier-dlq-${environment}`,
       `citadel-registry-sync-dlq-${environment}`,
+      // CIT-102: eval-dispatch DLQ (governance-stack.ts EvalDispatchDLQ).
+      `citadel-eval-dispatch-dlq-${environment}`,
     ];
 
     const { template } = buildStack();

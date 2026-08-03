@@ -2,7 +2,7 @@
  * Governance event emitter (QB-005-1 resolution Option iii).
  *
  * Standalone helper for emitting governance.* EventBridge events with:
- * - A discriminated-union payload map across 11 detail-types (compile-time type safety per type).
+ * - A discriminated-union payload map across 17 detail-types (compile-time type safety per type).
  * - Fail-closed sanitisation: <script>, <iframe>, <object> tags are stripped from
  * string-valued payload fields before JSON-serialisation. Callers cannot bypass this.
  * - ISO-8601 timestamp + optional correlationId stamped into every Detail.
@@ -47,6 +47,12 @@ export const GOVERNANCE_DETAIL_TYPES = [
   // CIT-101: emitted by freezeEvalSuite on a successful freeze — the eval
   // resolver's parity with governance.specification.approved.
   "governance.eval.suite.frozen",
+  // CIT-102: emitted by the eval-runner driver on run start/completion.
+  // Execution-outcome counts only — no scores (CIT-103 owns verdicts).
+  // No consumers yet (CIT-105/111 wire consumers later); registered now
+  // to freeze the contract.
+  "governance.eval.run.started",
+  "governance.eval.run.completed",
 ] as const;
 
 export type GovernanceDetailType = (typeof GOVERNANCE_DETAIL_TYPES)[number];
@@ -159,6 +165,36 @@ export interface GovernancePayloadMap {
     suiteId: string;
     frozenBy: string;
     version: number;
+  };
+  // CIT-102: payload for governance.eval.run.started. Emitted by the
+  // eval-runner driver after the run row + per-case-result rows are
+  // durably written and fan-out has begun.
+  "governance.eval.run.started": {
+    evalRunId: string;
+    suiteId: string;
+    suiteVersion: string;
+    agentTargetId: string;
+    agentTargetVersion: string;
+    orgId: string;
+    caseCount: number;
+    startedAt: string;
+    startedBy: string;
+  };
+  // CIT-102: payload for governance.eval.run.completed. Emitted when the
+  // atomic pendingCases counter reaches zero. No scores — CIT-103 owns
+  // verdicts; this is execution-outcome counts only.
+  "governance.eval.run.completed": {
+    evalRunId: string;
+    suiteId: string;
+    orgId: string;
+    caseCounts: {
+      total: number;
+      completed: number;
+      failed: number;
+      timeout: number;
+    };
+    completedAt: string;
+    durationMs: number;
   };
 }
 

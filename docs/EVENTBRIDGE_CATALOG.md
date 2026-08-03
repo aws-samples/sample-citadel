@@ -276,6 +276,8 @@ Implements requirement §3.4 of the governance spec. The naming distinction from
 | `governance.archetype.classified` | agent-design-assessment-resolver.submitAgentDesignAssessment | Fabricator | Project archetype classified — payload: `{projectId, archetype, confidence}` |
 | `governance.offfrontier.escalated` | arbiter/workerWrapper/tools/escalate.py | SIEM / audit, PagerDuty | Agent invoked the explicit escalate tool (C12) |
 | `governance.grandfathered.bypass` | project-resolver phase-transition gates via `isGrandfathered(project)` | SIEM / audit, telemetry | A governance gate (C3/C7/C10) was bypassed for a pre-`effective_at` project — payload: `{projectId, bypassedGate, projectCreatedAt, effectiveAt}` where `bypassedGate ∈ {C3_assessment_required, C7_adr_required, C10_spec_required}` |
+| `governance.eval.run.started` | eval-runner driver Lambda (CIT-102) | SIEM / audit; CIT-105 reporting (future) | Eval run created + fan-out begun — payload: `{evalRunId, suiteId, suiteVersion, agentTargetId, agentTargetVersion, orgId, caseCount, startedAt, startedBy}` |
+| `governance.eval.run.completed` | eval-runner driver Lambda (CIT-102) | SIEM / audit; CIT-105 reporting (future) | Atomic pendingCases counter reached zero — execution-outcome counts only, no scores (CIT-103 owns verdicts) — payload: `{evalRunId, suiteId, orgId, caseCounts: {total, completed, failed, timeout}, completedAt, durationMs}` |
 
 Schemas are populated in individual emitter PRs per QT4-1 (same-PR catalog invariant). The list above is the reserved allocation; new types MUST NOT be added without updating this catalog in the same PR.
 

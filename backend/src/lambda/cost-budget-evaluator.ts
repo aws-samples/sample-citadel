@@ -89,8 +89,7 @@ async function listAllBudgets(): Promise<BudgetIndexRow[]> {
     );
     rows.push(...((result.Items ?? []) as BudgetIndexRow[]));
     exclusiveStartKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (exclusiveStartKey);
 
   return rows;
@@ -121,7 +120,15 @@ async function periodToDateSpend(
     );
 
     for (const item of result.Items ?? []) {
-      const row = item as { costMicros?: number | null; priced?: boolean };
+      const row = item as {
+        costMicros?: number | null;
+        priced?: boolean;
+        evalContext?: boolean;
+      };
+      // CIT-102 §5: eval-run rows never enter period-to-date spend — an
+      // eval run must not be able to trip an org budget alarm. Excluded
+      // rows are skipped entirely, not counted as unpriced either.
+      if (row.evalContext === true) continue;
       if (row.priced && typeof row.costMicros === "number") {
         spentMicros += row.costMicros;
       } else {
@@ -130,8 +137,7 @@ async function periodToDateSpend(
     }
 
     exclusiveStartKey = result.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (exclusiveStartKey);
 
   return { spentMicros, unpricedCount };

@@ -33,6 +33,10 @@ export interface CostLedgerRowForAggregation {
   tokenCost: number | null;
   currency: string | null;
   priced: boolean;
+  /** CIT-102 §5, additive/nullable: true on rows written by an eval-run
+   * dispatch. Rows carrying this flag are excluded from org rollups here —
+   * eval spend must never enter a customer-facing cost summary/series. */
+  evalContext?: boolean;
 }
 
 export interface SummaryBucket {
@@ -98,6 +102,10 @@ export function aggregateSummary(
   let unpricedRows = 0;
 
   for (const row of rows) {
+    // CIT-102 §5: eval-context rows never enter org rollups — skip before
+    // any bucketing/summing so they don't appear as unpriced either.
+    if (row.evalContext === true) continue;
+
     const key = dimensionKey(row, groupBy);
     let bucket = buckets.get(key);
     if (!bucket) {
@@ -162,6 +170,10 @@ export function aggregateSeries(
   let unpricedCount = 0;
 
   for (const row of rows) {
+    // CIT-102 §5: eval-context rows never enter org time series — skip
+    // before bucketing so they don't appear as unpriced either.
+    if (row.evalContext === true) continue;
+
     const t = keyFor(row.capturedAt);
     let point = points.get(t);
     if (!point) {

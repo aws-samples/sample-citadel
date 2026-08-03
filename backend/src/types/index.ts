@@ -500,6 +500,68 @@ export interface EvalCaseInput {
   maxCostUsd?: number;
 }
 
+// EvalRun / EvalRunCaseResult (CIT-102 — Eval Runner)
+//
+// FROZEN CROSS-LANGUAGE CONTRACT (Pass A -> Pass B), verbatim per architect
+// design §9: execution/dispatch detail additive keys `evalRunId: string`,
+// `evalContext: true`, `forbiddenTools: string[]`; governance finding field
+// `eval_run_id` (Python dataclass) <-> `evalRunId` (DDB/event alias).
+export type EvalRunStatusLiteral =
+  "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+
+export type EvalRunCaseStatusLiteral =
+  "PENDING" | "DISPATCHED" | "RUNNING" | "COMPLETED" | "FAILED" | "TIMEOUT";
+
+export interface EvalRun {
+  evalRunId: string;
+  orgId: string;
+  suiteId: string;
+  suiteVersion: number;
+  agentTargetId: string;
+  agentTargetVersion: string;
+  status: EvalRunStatusLiteral;
+  caseCount: number;
+  pendingCases: number;
+  startedAt: string;
+  startedBy: string;
+  completedAt?: string;
+  durationMs?: number;
+  idempotencyKey: string;
+  evalScopedRoleArn?: string;
+  error?: string;
+}
+
+export interface StartEvalRunInput {
+  suiteId: string;
+  agentTargetId: string;
+  agentTargetVersion: string;
+  idempotencyKey: string;
+}
+
+export interface EvalRunCaseResult {
+  evalRunId: string;
+  caseId: string;
+  orgId: string;
+  caseKind: EvalCaseKindLiteral;
+  targetAdapter: "execution" | "conversation";
+  status: EvalRunCaseStatusLiteral;
+  executionId?: string;
+  conversationId?: string;
+  /** Per-case minted correlation id (mintRunId()) — distinct from evalRunId. */
+  runId?: string;
+  dispatchedAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  deadlineAt?: string;
+  latencyMs?: number;
+  artifactKind?: "execution" | "conversation";
+  artifactRef?: string;
+  error?: string;
+  timedOut?: boolean;
+  /** Guards the atomic pendingCases decrement against duplicate completion events. */
+  completionRecorded?: boolean;
+}
+
 // InterrogationRound
 export type RoundStatusLiteral =
   "IN_PROGRESS" | "AWAITING_CONSTRAINTS" | "REVISED" | "STABILISED";

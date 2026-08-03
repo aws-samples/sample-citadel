@@ -78,6 +78,10 @@ type Query {
   getEvalSuite(suiteId: ID!): EvalSuite
   listEvalSuites(orgId: ID!, agentTargetId: ID): [EvalSuite!]!
   listEvalCases(suiteId: ID!): [EvalCase!]!
+  # EvalRun / EvalRunCaseResult (CIT-102)
+  getEvalRun(evalRunId: ID!): EvalRun
+  listEvalRuns(orgId: ID!, suiteId: ID): [EvalRun!]!
+  listEvalRunCaseResults(evalRunId: ID!): [EvalRunCaseResult!]!
   # InterrogationRound
   getInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound
   listInterrogationRounds(projectId: ID!): [InterrogationRound!]!
@@ -344,6 +348,9 @@ type Mutation {
   updateEvalCase(suiteId: ID!, caseId: ID!, input: EvalCaseInput!): EvalCase!
   deleteEvalCase(suiteId: ID!, caseId: ID!): DeleteResult!
   importReplayAsEvalCase(suiteId: ID!, package: AWSJSON!): EvalCase!
+  # EvalRun (CIT-102) — start is the only mutation; runs are immutable
+  # once created (outcome-only progression via the driver, not client edits).
+  startEvalRun(input: StartEvalRunInput!): EvalRun!
   # InterrogationRound
   startInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound!
   injectConstraints(projectId: ID!, roundN: Int!, constraints: [String!]!): InterrogationRound!
@@ -2209,6 +2216,73 @@ input EvalCaseInput {
   groundingRequirements: [GroundingRequirementInput!]
   maxLatencyMs: Int
   maxCostUsd: Float
+}
+
+# EvalRun / EvalRunCaseResult (CIT-102 — Eval Runner)
+# Release evidence, governed exactly like EvalSuites/EvalCases (RETAIN +
+# deletionProtection + PITR tables). A run may only be started against a
+# FROZEN suite. No scores here — CIT-103 owns verdicts; this is
+# execution-outcome/dispatch facts only.
+enum EvalRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum EvalRunCaseStatus {
+  PENDING
+  DISPATCHED
+  RUNNING
+  COMPLETED
+  FAILED
+  TIMEOUT
+}
+
+type EvalRun {
+  evalRunId: ID!
+  orgId: ID!
+  suiteId: ID!
+  suiteVersion: Int!
+  agentTargetId: String!
+  agentTargetVersion: String!
+  status: EvalRunStatus!
+  caseCount: Int!
+  pendingCases: Int!
+  startedAt: AWSDateTime!
+  startedBy: String!
+  completedAt: AWSDateTime
+  durationMs: Int
+  idempotencyKey: String!
+  evalScopedRoleArn: String
+  error: String
+}
+
+input StartEvalRunInput {
+  suiteId: ID!
+  agentTargetId: String!
+  agentTargetVersion: String!
+  idempotencyKey: String!
+}
+
+type EvalRunCaseResult {
+  evalRunId: ID!
+  caseId: ID!
+  orgId: ID!
+  caseKind: EvalCaseKind!
+  status: EvalRunCaseStatus!
+  executionId: ID
+  conversationId: ID
+  runId: String
+  dispatchedAt: AWSDateTime
+  startedAt: AWSDateTime
+  completedAt: AWSDateTime
+  latencyMs: Int
+  artifactKind: String
+  artifactRef: String
+  error: String
+  timedOut: Boolean
 }
 
 type DeleteResult {

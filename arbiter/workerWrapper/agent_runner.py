@@ -372,8 +372,17 @@ def _install_governed_tool_handler():
                 workflow_id=os.environ.get('CITADEL_WORKFLOW_ID', 'unknown-workflow'),
                 # ``denied_tools=None`` lets GovernedToolHandler read
                 # DENIED_TOOLS from env itself, keeping a single source of
-                # truth for env parsing semantics.
+                # truth for env parsing semantics. DENIED_TOOLS itself
+                # already carries the union of static deny-list entries
+                # and any per-run forbiddenTools (CIT-102 Pass B) — see
+                # worker_governance.build_subprocess_env, which merges
+                # them before setting the env var.
                 denied_tools=None,
+                # CIT-102 Pass B: per-run eval-context correlation id.
+                # None (the trigger is absent) for every non-eval
+                # invocation — GovernedToolHandler treats None
+                # byte-identically to its pre-CIT-102 behavior.
+                eval_run_id=os.environ.get('CITADEL_EVAL_RUN_ID') or None,
             )
         return original_init(self, *args, **kwargs)
 

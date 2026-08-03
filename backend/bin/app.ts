@@ -155,6 +155,10 @@ const governanceStack = new GovernanceStack(
     projectsTable: backendStack.projectsTable,
     evalSuitesTable: backendStack.evalSuitesTable,
     evalCasesTable: backendStack.evalCasesTable,
+    evalRunsTable: backendStack.evalRunsTable,
+    evalRunCaseResultsTable: backendStack.evalRunCaseResultsTable,
+    executionsTable: backendStack.executionsTable,
+    conversationsTable: backendStack.conversationsTable,
   },
 );
 

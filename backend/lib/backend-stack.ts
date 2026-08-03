@@ -52,6 +52,13 @@ export class BackendStack extends cdk.Stack {
   // dynamodb.ITable props into GovernanceStack, which owns the eval-resolver.
   public readonly evalSuitesTable: dynamodb.Table;
   public readonly evalCasesTable: dynamodb.Table;
+  // CIT-102: eval runs are E11 release evidence (an eval run is proof that
+  // agentVersion X was validated against suiteVersion Y) — same RETAIN +
+  // deletionProtection + PITR posture as EvalSuites/EvalCases, no TTL.
+  // Passed as dynamodb.ITable props into GovernanceStack, which owns the
+  // eval-run-resolver/eval-runner/eval-conversation-worker.
+  public readonly evalRunsTable: dynamodb.Table;
+  public readonly evalRunCaseResultsTable: dynamodb.Table;
   public readonly workflowProgressFanoutFunction: lambda.Function;
   public readonly idempotencyTable: dynamodb.Table;
   public readonly interrogationRoundsTable: dynamodb.Table;
@@ -3186,6 +3193,57 @@ export class BackendStack extends cdk.Stack {
 
     seedEvalSuitesResource.node.addDependency(this.evalSuitesTable);
     seedEvalSuitesResource.node.addDependency(this.evalCasesTable);
+
+    // EvalRuns (CIT-102) — release evidence that agentVersion X was
+    // validated against suiteVersion Y; consumed by E11 release gating
+    // (CIT-105/111). RETAIN + deletionProtection + PITR, NO TTL — same
+    // posture as EvalSuites/EvalCases (this is the OPPOSITE of
+    // FabricationJobsTable's ephemeral DESTROY+TTL working-doc posture).
+    // Simple PK (evalRunId). Two GSIs: org-index ("all runs for this org",
+    // mirrors EvalSuites' org-index) and suite-index ("all runs for this
+    // suite", E11/CIT-105).
+    this.evalRunsTable = new dynamodb.Table(this, "EvalRunsTable", {
+      tableName: `citadel-eval-runs-${props.environment}`,
+      partitionKey: { name: "evalRunId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+    this.evalRunsTable.addGlobalSecondaryIndex({
+      indexName: "org-index",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "startedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    this.evalRunsTable.addGlobalSecondaryIndex({
+      indexName: "suite-index",
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "startedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // EvalRunCaseResults (CIT-102) — composite PK (evalRunId) / SK (caseId)
+    // so every case-result of a run is a single Query (InterrogationRounds
+    // shape). Same RETAIN + deletionProtection + PITR posture. No GSI in
+    // v1 — always accessed via the parent evalRunId. Holds outcome/dispatch
+    // facts only (no scores — CIT-103 owns verdicts).
+    this.evalRunCaseResultsTable = new dynamodb.Table(
+      this,
+      "EvalRunCaseResultsTable",
+      {
+        tableName: `citadel-eval-run-case-results-${props.environment}`,
+        partitionKey: {
+          name: "evalRunId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
 
     // InterrogationRounds
     this.interrogationRoundsTable = new dynamodb.Table(

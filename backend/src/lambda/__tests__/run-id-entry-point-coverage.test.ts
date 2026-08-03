@@ -33,6 +33,17 @@ describe("runId entry-point coverage guard (Pass 1, decision f1cbd5ef)", () => {
     { name: "submitTask", file: "task-runner-resolver.ts" },
     { name: "startExecution", file: "execution-resolver.ts" },
     { name: "app-invoke (processAppInvoke)", file: "app-invoke-handler.ts" },
+    // CIT-102: eval-runner mints a per-case runId for Adapter A
+    // (dispatchExecutionCase) and threads it onto the execution row +
+    // execution.start.requested detail, exactly like startExecution.
+    { name: "eval-runner (dispatchExecutionCase)", file: "eval-runner.ts" },
+    // CIT-102: eval-conversation-worker mints a per-case sessionId (Adapter
+    // B) AND a runId for the conversation transcript row it writes,
+    // mirroring conversation-resolver's chat-message entry point.
+    {
+      name: "eval-conversation-worker (dispatchConversationCase)",
+      file: "eval-conversation-worker.ts",
+    },
   ];
 
   test.each(tsEntryPoints)(

@@ -119,6 +119,29 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     "EvalCases",
     "citadel-eval-cases-test",
   );
+  // CIT-102: GovernanceStackProps now also requires the eval-run tables +
+  // executions/conversations tables (eval-runner + eval-conversation-worker
+  // wiring). Additive to this CIT-101 test — not otherwise exercised here.
+  const evalRunsTable = mockTable(
+    backendStack,
+    "EvalRuns",
+    "citadel-eval-runs-test",
+  );
+  const evalRunCaseResultsTable = mockTable(
+    backendStack,
+    "EvalRunCaseResults",
+    "citadel-eval-run-case-results-test",
+  );
+  const executionsTable = mockTable(
+    backendStack,
+    "Executions",
+    "citadel-executions-test",
+  );
+  const conversationsTable = mockTable(
+    backendStack,
+    "Conversations",
+    "citadel-conversations-test",
+  );
 
   const stack = new GovernanceStack(app, "TestGovernanceStackEval", {
     env: { account: "123456789012", region: "us-east-1" },
@@ -135,6 +158,10 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     projectsTable,
     evalSuitesTable,
     evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
+    executionsTable,
+    conversationsTable,
   });
 
   const template = Template.fromStack(stack);

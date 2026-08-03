@@ -13,6 +13,7 @@ import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
 import {
@@ -854,10 +855,37 @@ export class TelemetryStack extends cdk.Stack {
       serverAccessLogsPrefix: "replay-packages/",
       lifecycleRules: [
         {
+          // Scoped to the on-demand-download prefix only (replay-package-handler.ts
+          // replayObjectKey: `ORG#{orgId}/{kind}-{id}/{packageId}.json`). The
+          // `eval-runs/` prefix (CIT-102 F4 — per-case artifacts materialized
+          // at eval-case completion, TelemetryStack ReplayPackageBucket name
+          // published to SSM, see below) is deliberately EXCLUDED from this
+          // rule: eval-run artifacts are E11 release evidence with the same
+          // RETAIN/no-TTL posture as the EvalRuns/EvalRunCaseResults tables
+          // (design §6/§2 — governance findings carry a 90-day TTL, but eval
+          // artifacts must outlive that window as release-audit provenance).
+          // Do not widen this rule to the whole bucket.
+          prefix: "ORG#",
           expiration: cdk.Duration.days(7),
           id: "expire-replay-packages-after-7-days",
         },
       ],
+    });
+
+    // ------------------------------------------------------------------
+    // CIT-102 F4 — publish the replay-package bucket name to SSM so eval
+    // Lambdas (owned by GovernanceStack, which instantiates BEFORE this
+    // TelemetryStack in bin/app.ts — see DECISION d36fbbf7) can resolve it
+    // at RUNTIME rather than via a synth-time cross-stack construct
+    // reference (which would require reordering stack instantiation, an
+    // architectural change out of scope here). Naming mirrors the existing
+    // SSM parameter convention (`/citadel/<name>-${environment}`, e.g.
+    // AuthorizerFunctionArnParam, SessionBucketNameParam in services-stack.ts).
+    new ssm.StringParameter(this, "ReplayPackageBucketNameParam", {
+      parameterName: `/citadel/eval-replay-bucket-${props.environment}`,
+      stringValue: this.replayPackageBucket.bucketName,
+      tier: ssm.ParameterTier.STANDARD,
+      dataType: ssm.ParameterDataType.TEXT,
     });
 
     this.replayPackageHandlerFunction = new lambda.Function(
@@ -1034,6 +1062,8 @@ export class TelemetryStack extends cdk.Stack {
       `citadel-governance-finding-fanout-dlq-${props.environment}`,
       `citadel-governance-notifier-dlq-${props.environment}`,
       `citadel-registry-sync-dlq-${props.environment}`,
+      // CIT-102: eval-dispatch DLQ (governance-stack.ts EvalDispatchDLQ).
+      `citadel-eval-dispatch-dlq-${props.environment}`,
     ];
     const dlqDepthMetrics: Record<string, cloudwatch.IMetric> = {};
     allDlqQueueNames.forEach((queueName, i) => {

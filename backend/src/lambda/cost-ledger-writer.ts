@@ -91,6 +91,9 @@ interface TaskCompletionDetail {
   usage?: UsageRecord[];
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag. */
+  evalRunId?: string;
+  evalContext?: boolean;
 }
 
 interface IntakeUsageDetail {
@@ -101,6 +104,9 @@ interface IntakeUsageDetail {
   usage?: UsageRecord | UsageRecord[];
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag. */
+  evalRunId?: string;
+  evalContext?: boolean;
 }
 
 interface WorkflowNodeCompletedDetail {
@@ -113,6 +119,9 @@ interface WorkflowNodeCompletedDetail {
   usage?: UsageRecord[];
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag. */
+  evalRunId?: string;
+  evalContext?: boolean;
 }
 
 export type IncomingDetail =
@@ -156,6 +165,9 @@ interface Dimensions {
   nodeId?: string;
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. No new GSI this pass. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag. No new GSI this pass. */
+  evalRunId?: string;
+  evalContext?: boolean;
 }
 
 interface Decomposition {
@@ -192,6 +204,12 @@ interface LedgerRow {
   bedrockRequestId?: string;
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id, copied from detail.runId when present. No new GSI this pass. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag,
+   * copied from detail.evalRunId/detail.evalContext when present. Consumed
+   * by cost-aggregate.ts/cost-budget-evaluator.ts to exclude eval-run spend
+   * from org rollups/budget sums. No new GSI this pass. */
+  evalRunId?: string;
+  evalContext?: boolean;
   // Pricing fields (pass 2): populated when the catalog row resolves to a
   // usable price; null + unpricedReason when it does not.
   currency: string | null;
@@ -309,6 +327,18 @@ async function buildLedgerRow(
   if (dims.runId) {
     row.runId = dims.runId;
   }
+  // Additive, nullable (CIT-102 §5): eval-run correlation id + context
+  // flag, copied straight through when present. evalContext is copied
+  // via an explicit `!== undefined` check (not truthiness) because
+  // `false` is a meaningful, intentional value here — a row explicitly
+  // NOT in eval context is distinct from a row that never mentions eval
+  // context at all (byte-identical omission for the latter).
+  if (dims.evalRunId) {
+    row.evalRunId = dims.evalRunId;
+  }
+  if (dims.evalContext !== undefined) {
+    row.evalContext = dims.evalContext;
+  }
 
   return row;
 }
@@ -365,6 +395,8 @@ async function handleTaskCompletion(
     appId: detail.appId,
     agentId: detail.agentId,
     runId: detail.runId,
+    evalRunId: detail.evalRunId,
+    evalContext: detail.evalContext,
   };
 
   return Promise.all(
@@ -393,6 +425,8 @@ async function handleIntakeUsage(
     appId: detail.appId,
     agentId: detail.agentId,
     runId: detail.runId,
+    evalRunId: detail.evalRunId,
+    evalContext: detail.evalContext,
   };
 
   return Promise.all(
@@ -423,6 +457,8 @@ async function handleWorkflowNodeCompleted(
     workflowExecutionId: detail.workflowExecutionId,
     nodeId: detail.nodeId,
     runId: detail.runId,
+    evalRunId: detail.evalRunId,
+    evalContext: detail.evalContext,
   };
 
   return Promise.all(

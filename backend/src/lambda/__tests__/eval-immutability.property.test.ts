@@ -238,7 +238,7 @@ describe("CIT-101 acceptance property: frozen-or-referenced suite rejects all mu
     // the frozen/referenced check itself never throws — exactly the bug
     // class ("guard-stripped") the acceptance property must catch.
     const guardBodyPattern =
-      /if \(suite\.status === 'FROZEN' \|\| \(suite\.references\?\.length \?\? 0\) > 0\) \{\s*throw new Error\(\s*`ValidationError: eval suite \$\{suiteId\} is frozen\/referenced and cannot be mutated`,\s*\);\s*\}/;
+      /if \(suite\.status === "FROZEN" \|\| \(suite\.references\?\.length \?\? 0\) > 0\) \{\s*throw new Error\(\s*`ValidationError: eval suite \$\{suiteId\} is frozen\/referenced and cannot be mutated`,\s*\);\s*\}/;
     if (!guardBodyPattern.test(source)) {
       throw new Error(
         "Mutant generation could not find the assertSuiteMutable guard body to neutralize — " +
@@ -254,7 +254,7 @@ describe("CIT-101 acceptance property: frozen-or-referenced suite rejects all mu
         // The mutant file lives one directory deeper (src/lambda/.mutant-scratch/)
         // than the original (src/lambda/), so every '../xyz' sibling import must
         // become '../../xyz' to resolve identically.
-        .replace(/from '\.\.\//g, "from '../../")
+        .replace(/from "\.\.\//g, 'from "../../')
     );
   }
 
@@ -300,5 +300,69 @@ describe("CIT-101 acceptance property: frozen-or-referenced suite rejects all mu
       // Always clean up the scratch mutant — it must never be committed.
       fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
     }
+  });
+
+  // ── Pinned regression example ──────────────────────────────────────────
+  //
+  // CIT-102 verify-a round: this file's mutant-bite proof (above) failed at
+  // its own line 243 at anchor 23d5839 — but root-caused as a TEST-HARNESS
+  // defect, not a real guard gap in eval-resolver's immutability check:
+  // `stripGuardCallSites`'s `guardBodyPattern` regex and its import-rewrite
+  // regex were both written expecting single-quoted source
+  // (`suite.status === 'FROZEN'`, `from '../xyz'`), but the actual
+  // eval-resolver.ts source (prettier default) uses double quotes
+  // (`suite.status === "FROZEN"`, `from "../xyz"`). The pattern never
+  // matched, so `stripGuardCallSites` threw before the mutant property
+  // assertion ever ran — independent of whether the guard itself was
+  // correct. The 100-iteration property test against the REAL
+  // implementation (the test directly above the mutant-bite proof) was
+  // passing the entire time, confirming the guard itself had no gap.
+  // Fixed by updating both regexes to double-quote source syntax.
+  //
+  // Concrete counterexample from the property space (frozen suite,
+  // updateEvalSuite — one arbitrary instantiation of
+  // frozenOrReferencedSuiteArb() x CASE_INPUT_ARB): a FROZEN suite with an
+  // empty `references` array. Pinned here as a fixed example so a future
+  // regression (e.g. someone re-introduces a stale-quote-style regex, or
+  // genuinely deletes an assertSuiteMutable call-site) is caught even if
+  // fast-check's random shrinking behavior ever changes.
+  test("pinned example: FROZEN suite with no references rejects updateEvalSuite with zero DDB writes", async () => {
+    const resolverModule = await import("../eval-resolver");
+
+    const frozenSuite: EvalSuite = {
+      suiteId: "11111111-1111-1111-1111-111111111111",
+      orgId: "org-1",
+      agentTargetId: "agent-1",
+      name: "pinned-frozen-suite",
+      description: "",
+      semver: "1.0.0",
+      status: "FROZEN",
+      version: 1,
+      references: [],
+      createdAt: "2026-04-29T00:00:00.000Z",
+      createdBy: "user-architect",
+      updatedAt: "2026-04-29T00:00:00.000Z",
+    };
+    const caseInput = {
+      name: "c",
+      description: "",
+      kind: "CONVERSATION" as const,
+      input: { prompt: "" },
+      expectedOutcome: { mode: "CONTAINS" as const, target: "" },
+      requiredTools: [] as string[],
+      forbiddenTools: [] as string[],
+    };
+
+    const violations = await runMutationsAgainst(
+      resolverModule,
+      frozenSuite,
+      caseInput as unknown as Record<string, unknown>,
+    );
+
+    // Pin must bite: verified this assertion FAILS (violations non-empty)
+    // against the guard-stripped mutant at src/lambda/.mutant-scratch/
+    // during development of this fix, and PASSES against the real,
+    // unmodified eval-resolver.ts.
+    expect(violations).toEqual([]);
   });
 });

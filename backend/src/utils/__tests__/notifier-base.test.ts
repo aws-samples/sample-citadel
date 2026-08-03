@@ -118,9 +118,9 @@ describe("notifier-base emitGovernanceEvent", () => {
     expect(detail.sizeBytes).toBe(5242880);
   });
 
-  test("GOVERNANCE_DETAIL_TYPES contains exactly 15 values", () => {
-    expect(GOVERNANCE_DETAIL_TYPES).toHaveLength(15);
-    expect(new Set(GOVERNANCE_DETAIL_TYPES).size).toBe(15);
+  test("GOVERNANCE_DETAIL_TYPES contains exactly 17 values", () => {
+    expect(GOVERNANCE_DETAIL_TYPES).toHaveLength(17);
+    expect(new Set(GOVERNANCE_DETAIL_TYPES).size).toBe(17);
   });
 
   test("GovernanceDetailType union matches GOVERNANCE_DETAIL_TYPES array", () => {
@@ -140,6 +140,8 @@ describe("notifier-base emitGovernanceEvent", () => {
       "governance.constitutional.rule.changed",
       "governance.caselaw.changed",
       "governance.eval.suite.frozen",
+      "governance.eval.run.started",
+      "governance.eval.run.completed",
     ];
     expect([...GOVERNANCE_DETAIL_TYPES].sort()).toEqual([...expected].sort());
   });

@@ -31,6 +31,7 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import * as logs from "aws-cdk-lib/aws-logs";
 import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3";
 import * as sqs from "aws-cdk-lib/aws-sqs";
@@ -60,6 +61,15 @@ export interface GovernanceStackProps extends cdk.StackProps {
   // ExecutionSpecifications).
   evalSuitesTable: dynamodb.ITable;
   evalCasesTable: dynamodb.ITable;
+  // CIT-102: eval runs — same governance posture, owned by BackendStack.
+  // Consumed by the eval-run-resolver/eval-runner/eval-conversation-worker,
+  // all homed here alongside the eval-resolver.
+  evalRunsTable: dynamodb.ITable;
+  evalRunCaseResultsTable: dynamodb.ITable;
+  /** Adapter A dispatch target — execution rows for EXECUTION-kind cases. */
+  executionsTable: dynamodb.ITable;
+  /** Adapter B dispatch target — conversation transcript rows for CONVERSATION-kind cases. */
+  conversationsTable: dynamodb.ITable;
 }
 
 export class GovernanceStack extends cdk.Stack {
@@ -888,6 +898,307 @@ exports.handler = async (event) => {
     }
 
     // ============================================================
+    // EvalRun / EvalRunCaseResult Resolver + eval-runner + worker (CIT-102)
+    // ============================================================
+    //
+    // Dedicated event-driven eval-run driver (design §1) — a SQS
+    // EvalDispatchQueue + DLQ (design's "remember the duplicate-alarm-name
+    // guard + DLQ drift-guard test will need the new DLQ added" note; this
+    // DLQ is threaded into telemetry-stack.ts's allDlqQueueNames list
+    // separately). visibilityTimeout matches the conversation worker's own
+    // 15-minute timeout (design §1 "eval-conversation-worker, timeout
+    // <=15min") so SQS cannot re-deliver mid-flight.
+
+    const evalDispatchDLQ = new sqs.Queue(this, "EvalDispatchDLQ", {
+      queueName: `citadel-eval-dispatch-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+    });
+    // This DLQ is itself the dead-letter target for EvalDispatchQueue's
+    // consumer; a DLQ for a DLQ would loop on its own failures (same
+    // pattern as governanceFindingFanoutDLQ / governanceGraphSnapshotOnChangeDLQ).
+    NagSuppressions.addResourceSuppressions(evalDispatchDLQ, [
+      {
+        id: "AwsSolutions-SQS3",
+        reason:
+          "EvalDispatchDLQ is itself a dead-letter queue for the eval-conversation-worker's event source mapping. Adding a DLQ to a DLQ would loop on its own failures.",
+      },
+    ]);
+
+    const evalDispatchQueue = new sqs.Queue(this, "EvalDispatchQueue", {
+      queueName: `citadel-eval-dispatch-${props.environment}`,
+      visibilityTimeout: cdk.Duration.minutes(15),
+      retentionPeriod: cdk.Duration.days(7),
+      enforceSSL: true,
+      deadLetterQueue: {
+        queue: evalDispatchDLQ,
+        maxReceiveCount: 3,
+      },
+    });
+
+    const evalRunResolverFunction = new lambda.Function(
+      this,
+      "EvalRunResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-run-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EVAL_SUITES_TABLE: props.evalSuitesTable.tableName,
+          EVAL_CASES_TABLE: props.evalCasesTable.tableName,
+          EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
+          EVAL_RUN_CASE_RESULTS_TABLE: props.evalRunCaseResultsTable.tableName,
+          EXECUTIONS_TABLE: props.executionsTable.tableName,
+          EVAL_DISPATCH_QUEUE_URL: evalDispatchQueue.queueUrl,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, "EvalRunResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    props.evalSuitesTable.grantReadData(evalRunResolverFunction);
+    props.evalCasesTable.grantReadData(evalRunResolverFunction);
+    props.evalRunsTable.grantReadWriteData(evalRunResolverFunction);
+    props.evalRunCaseResultsTable.grantReadWriteData(evalRunResolverFunction);
+    props.executionsTable.grantReadWriteData(evalRunResolverFunction);
+    props.agentEventBus.grantPutEventsTo(evalRunResolverFunction);
+    evalDispatchQueue.grantSendMessages(evalRunResolverFunction);
+
+    const evalRunDataSourceRole = new iam.Role(this, "EvalRunDataSourceRole", {
+      assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+    });
+    evalRunResolverFunction.grantInvoke(evalRunDataSourceRole);
+
+    const evalRunLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "EvalRunLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "EvalRunLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: evalRunDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: evalRunResolverFunction.functionArn,
+        },
+      },
+    );
+
+    const evalRunMutationFields = [
+      { id: "StartEvalRunResolver", fieldName: "startEvalRun" },
+    ];
+    for (const { id, fieldName } of evalRunMutationFields) {
+      const resolver = new appsyncCfn.CfnResolver(this, id, {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName,
+        dataSourceName: evalRunLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      });
+      resolver.addResourceDependency(evalRunLambdaDataSource);
+    }
+
+    const evalRunQueryFields = [
+      { id: "GetEvalRunResolver", fieldName: "getEvalRun" },
+      { id: "ListEvalRunsResolver", fieldName: "listEvalRuns" },
+      {
+        id: "ListEvalRunCaseResultsResolver",
+        fieldName: "listEvalRunCaseResults",
+      },
+    ];
+    for (const { id, fieldName } of evalRunQueryFields) {
+      const resolver = new appsyncCfn.CfnResolver(this, id, {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName,
+        dataSourceName: evalRunLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      });
+      resolver.addResourceDependency(evalRunLambdaDataSource);
+    }
+
+    // eval-conversation-worker — Adapter B (CONVERSATION-kind cases), SQS
+    // consumer of EvalDispatchQueue. 15-minute timeout bounds the inline
+    // InvokeAgentRuntimeCommand await (design §1/§3). batchSize=1 mirrors
+    // the worker-agent queue precedent (arbiter-stack.ts workerAgentQueue):
+    // one case per invocation, so a single slow/failing case never blocks
+    // a batch of others. reportBatchItemFailures is NOT enabled — a
+    // failure inside dispatchConversationCase is caught internally and
+    // recorded as a FAILED case rather than thrown, so the message is
+    // always acked (no redelivery loop for application-level failures);
+    // only a Lambda-runtime crash would redeliver, which the DLQ catches
+    // after maxReceiveCount.
+    const evalConversationWorkerFunction = new lambda.Function(
+      this,
+      "EvalConversationWorkerFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-conversation-worker.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          CONVERSATIONS_TABLE: props.conversationsTable.tableName,
+          EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
+          EVAL_RUN_CASE_RESULTS_TABLE: props.evalRunCaseResultsTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.minutes(15),
+        memorySize: 512,
+        logGroup: new logs.LogGroup(
+          this,
+          "EvalConversationWorkerFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    props.conversationsTable.grantReadWriteData(evalConversationWorkerFunction);
+    props.evalRunsTable.grantReadWriteData(evalConversationWorkerFunction);
+    props.evalRunCaseResultsTable.grantReadWriteData(
+      evalConversationWorkerFunction,
+    );
+    // Required so eval-run-completion.ts's best-effort
+    // governance.eval.run.completed emission (fired from this worker on the
+    // terminating case of a run) does not AccessDenied in prod — mirrors
+    // the identical grant on evalRunResolverFunction above.
+    props.agentEventBus.grantPutEventsTo(evalConversationWorkerFunction);
+    evalConversationWorkerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "bedrock-agentcore:InvokeAgentRuntime",
+          "bedrock-agentcore:InvokeAgent",
+        ],
+        resources: ["*"],
+      }),
+    );
+    evalConversationWorkerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/agents/*`,
+        ],
+      }),
+    );
+    // F4 (design §6) — resolve the replay-package bucket name (published by
+    // TelemetryStack, DECISION d36fbbf7) + write per-case artifacts under
+    // eval-runs/*. See EvalRunnerFunction's identical grant below for the
+    // shared rationale (this stack cannot reference TelemetryStack's bucket
+    // by construct — TelemetryStack instantiates AFTER GovernanceStack).
+    this.grantEvalArtifactAccess(
+      evalConversationWorkerFunction,
+      props.environment,
+    );
+
+    evalConversationWorkerFunction.addEventSource(
+      new SqsEventSource(evalDispatchQueue, {
+        batchSize: 1,
+        maxConcurrency: 10,
+      }),
+    );
+    // Resource::* is required here: an eval case's agentTargetId resolves
+    // to an AgentCore runtime ARN discovered at RUNTIME via SSM (mirrors
+    // AgentMessageHandlerFunction's identical InvokeAgentRuntime grant,
+    // backend-stack.ts).
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `/${this.stackName}/EvalConversationWorkerFunction/ServiceRole/DefaultPolicy/Resource`,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "InvokeAgentRuntime target ARN is resolved at runtime per eval " +
+            "case (agentTargetId -> SSM-stored AgentCore runtime ARN, " +
+            "potentially cross-region), not known at synth time. Mirrors " +
+            "AgentMessageHandlerFunction's identical grant.",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+    );
+
+    // eval-runner — Adapter A completion + timeout-sweep entry point
+    // (design §1/§3; F3 fix: this Lambda was previously defined only as
+    // exported functions with no provisioned handler, so
+    // handleWorkflowCompletion/sweepTimeouts were unreachable). Two
+    // EventBridge triggers:
+    //  - workflow.completed / workflow.failed (Source citadel.workflows,
+    //    emitted unchanged by arbiter/stepRunner for EVERY execution, eval
+    //    or not — handleWorkflowCompletion itself no-ops on a non-eval
+    //    execution by reading the execution row's evalRunId).
+    //  - a periodic schedule (5 min) invoking the same Lambda with no
+    //    detail-type, which eval-runner.ts's handler routes to
+    //    sweepTimeouts (the deadlineAt safety net, design §3).
+    const evalRunnerFunction = new lambda.Function(this, "EvalRunnerFunction", {
+      runtime: lambda.Runtime.NODEJS_24_X,
+      handler: "eval-runner.handler",
+      code: lambda.Code.fromAsset("dist/lambda"),
+      environment: {
+        EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
+        EVAL_RUN_CASE_RESULTS_TABLE: props.evalRunCaseResultsTable.tableName,
+        EVAL_CASES_TABLE: props.evalCasesTable.tableName,
+        EXECUTIONS_TABLE: props.executionsTable.tableName,
+        EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+        EVAL_DISPATCH_QUEUE_URL: evalDispatchQueue.queueUrl,
+        ENVIRONMENT: props.environment,
+      },
+      timeout: cdk.Duration.minutes(2),
+      memorySize: 512,
+      logGroup: new logs.LogGroup(this, "EvalRunnerFunctionLogs", {
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    });
+
+    props.evalRunsTable.grantReadWriteData(evalRunnerFunction);
+    props.evalRunCaseResultsTable.grantReadWriteData(evalRunnerFunction);
+    props.evalCasesTable.grantReadData(evalRunnerFunction);
+    props.executionsTable.grantReadData(evalRunnerFunction);
+    props.agentEventBus.grantPutEventsTo(evalRunnerFunction);
+    // F4: same rationale as evalConversationWorkerFunction's identical
+    // grant above — handleWorkflowCompletion (Adapter A completion path)
+    // also calls recordCaseCompletion, which materializes EXECUTION-kind
+    // case artifacts.
+    this.grantEvalArtifactAccess(evalRunnerFunction, props.environment);
+
+    new events.Rule(this, "EvalWorkflowCompletionRule", {
+      eventBus: props.agentEventBus,
+      ruleName: `citadel-eval-workflow-completion-${props.environment}`,
+      description:
+        "Routes workflow.completed/workflow.failed (Source citadel.workflows, " +
+        "emitted by arbiter/stepRunner for every execution) to eval-runner " +
+        "so EXECUTION-kind eval cases record completion. No-ops on " +
+        "non-eval executions inside the handler.",
+      eventPattern: {
+        source: ["citadel.workflows"],
+        detailType: ["workflow.completed", "workflow.failed"],
+      },
+      targets: [
+        new targets.LambdaFunction(evalRunnerFunction, {
+          retryAttempts: 2,
+        }),
+      ],
+    });
+
+    new events.Rule(this, "EvalTimeoutSweepRule", {
+      ruleName: `citadel-eval-timeout-sweep-${props.environment}`,
+      description:
+        "Periodic safety net (design §3): invokes eval-runner with no " +
+        "detail-type, which sweepTimeouts marks any DISPATCHED/RUNNING " +
+        "case past its deadlineAt as TIMEOUT.",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      targets: [new targets.LambdaFunction(evalRunnerFunction)],
+    });
+
+    // ============================================================
     // InterrogationRound Resolver
     // ============================================================
 
@@ -1278,6 +1589,101 @@ exports.handler = async (event) => {
     );
     listProgramReviewsForProjectResolver.addResourceDependency(
       programReviewLambdaDataSource,
+    );
+  }
+
+  /**
+   * F4 (CIT-102 design §6, DECISION d36fbbf7 binding): grants an eval
+   * Lambda `ssm:GetParameter` on the RUNTIME-published replay-package
+   * bucket-name parameter, plus S3 Put/Get scoped to that bucket's
+   * `eval-runs/*` prefix.
+   *
+   * Both resource ARNs are necessarily WILDCARD-shaped rather than exact
+   * matches, for two independent, narrowly-scoped reasons:
+   *
+   *  - The parameter ARN's NAME segment is fully known at synth time
+   *    (`/citadel/eval-replay-bucket-${environment}`, the exact literal
+   *    TelemetryStack publishes it under — see telemetry-stack.ts
+   *    ReplayPackageBucketNameParam) so this grant does NOT need
+   *    Resource:* for SSM; it is a single exact parameter ARN.
+   *  - The BUCKET ARN, by contrast, genuinely cannot be pinned exactly:
+   *    the bucket itself has no explicit `bucketName` in TelemetryStack
+   *    (see telemetry-stack.ts ReplayPackageBucket), so CloudFormation
+   *    appends a random unique suffix at stack-create time — precisely
+   *    BECAUSE TelemetryStack cannot be constructed before GovernanceStack
+   *    (the reason SSM publication was chosen at all). The stack-name and
+   *    logical-id prefix (`citadel-telemetry-${environment}-` +
+   *    `replaypackagebucket`, CloudFormation's own deterministic
+   *    auto-naming convention, confirmed against
+   *    cdk.out/citadel-telemetry-test.template.json) ARE synth-time
+   *    literals, so only the random suffix is wildcarded — the SAME
+   *    precedent as backend-stack.ts's `citadel-schemas-*` /
+   *    registry-stack.ts's `citadel-code-*` synth-time-composed bucket
+   *    ARNs, except here the composition happens at RUNTIME (inside
+   *    eval-artifact-store.ts, via the resolved SSM value) rather than at
+   *    synth time, so the IAM policy is the one place that must still
+   *    accept a suffix wildcard rather than a full literal. The S3 actions
+   *    are scoped to the `eval-runs/*` object prefix (not a bucket-wide
+   *    grant), and further scoped to Put/Get only (no Delete/List) —
+   *    narrowest permission set that satisfies "write one case artifact,
+   *    then optionally read it back" (design §6 does not require listing).
+   */
+  private grantEvalArtifactAccess(
+    fn: lambda.Function,
+    environment: string,
+  ): void {
+    const paramArn = `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/eval-replay-bucket-${environment}`;
+    // CloudFormation's own deterministic naming convention for an S3 bucket
+    // with no explicit `BucketName` (telemetry-stack.ts ReplayPackageBucket
+    // sets none, confirmed via cdk.out/citadel-telemetry-test.template.json):
+    // `{stack-name-lowercased}-{logical-id-lowercased}-{unique-suffix}`. The
+    // stack name (`citadel-telemetry-${environment}`, cdk.Stack's own naming
+    // convention — bin/app.ts `citadel-telemetry-${environment}`) and the
+    // logical id (`ReplayPackageBucket`) are BOTH synth-time literals, so
+    // the wildcard only needs to absorb the random CFN-generated suffix —
+    // it is not a bare `*`.
+    const bucketArnPattern = `arn:aws:s3:::citadel-telemetry-${environment}-replaypackagebucket*`;
+
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [paramArn],
+      }),
+    );
+    fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:PutObject", "s3:GetObject"],
+        resources: [`${bucketArnPattern}/eval-runs/*`],
+      }),
+    );
+
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `/${this.stackName}/${fn.node.id}/ServiceRole/DefaultPolicy/Resource`,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "S3 object ARN uses a bucket-name wildcard because the replay-" +
+            "package bucket (owned by TelemetryStack, which instantiates " +
+            "AFTER this stack in bin/app.ts) is not referenceable as a CDK " +
+            "construct here; its name is published to SSM and resolved at " +
+            "RUNTIME (DECISION d36fbbf7). The wildcard absorbs only " +
+            "CloudFormation's own random bucket-name suffix — the stack-" +
+            "name and logical-id prefix (citadel-telemetry-{env}-" +
+            "replaypackagebucket) are synth-time literals, and the pattern " +
+            "is further scoped to the eval-runs/* object prefix with just " +
+            "s3:PutObject/s3:GetObject (no Delete/List) — mirrors the " +
+            "existing synth-time-composed wildcard bucket ARN precedents " +
+            "(backend-stack.ts citadel-schemas-*, registry-stack.ts " +
+            "citadel-code-*), applied here at the IAM-resource-pattern " +
+            "level since the bucket's random suffix cannot be synth-time-" +
+            "literal for the stack-ordering reason above.",
+          appliesTo: [`Resource::${bucketArnPattern}/eval-runs/*`],
+        },
+      ],
     );
   }
 }
