@@ -47,6 +47,11 @@ export class BackendStack extends cdk.Stack {
   public readonly adrsTable: dynamodb.Table;
   public readonly agentDesignAssessmentsTable: dynamodb.Table;
   public readonly executionSpecificationsTable: dynamodb.Table;
+  // CIT-101: eval suites are release evidence, governed like
+  // ExecutionSpecifications (RETAIN + deletionProtection + PITR). Passed as
+  // dynamodb.ITable props into GovernanceStack, which owns the eval-resolver.
+  public readonly evalSuitesTable: dynamodb.Table;
+  public readonly evalCasesTable: dynamodb.Table;
   public readonly workflowProgressFanoutFunction: lambda.Function;
   public readonly idempotencyTable: dynamodb.Table;
   public readonly interrogationRoundsTable: dynamodb.Table;
@@ -3095,6 +3100,92 @@ export class BackendStack extends cdk.Stack {
       sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
+
+    // EvalSuites (CIT-101) — release evidence, governed like
+    // ExecutionSpecifications: RETAIN + deletionProtection + PITR. Simple
+    // PK (suiteId) mirrors ExecutionSpecificationsTable. Two GSIs:
+    // org-index (org-scoped listing, mirrors the org-scoped list
+    // convention in datastore-resolver/integration-resolver) and
+    // agent-target-index ("list suites for this agent/template target").
+    this.evalSuitesTable = new dynamodb.Table(this, "EvalSuitesTable", {
+      tableName: `citadel-eval-suites-${props.environment}`,
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+    this.evalSuitesTable.addGlobalSecondaryIndex({
+      indexName: "org-index",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "updatedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    this.evalSuitesTable.addGlobalSecondaryIndex({
+      indexName: "agent-target-index",
+      partitionKey: {
+        name: "agentTargetId",
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: { name: "updatedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // EvalCases (CIT-101) — composite PK (suiteId) / SK (caseId) so all
+    // cases of a suite are a single Query, and a case is addressable by
+    // {suiteId, caseId}. Same governance posture as EvalSuitesTable. No GSI
+    // in v1 — cases are always accessed via their parent suiteId.
+    this.evalCasesTable = new dynamodb.Table(this, "EvalCasesTable", {
+      tableName: `citadel-eval-cases-${props.environment}`,
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+
+    // Seed Eval Suites Custom Resource (CIT-101) — deploy-time demo data:
+    // Suite A (intake-agent) + Suite B (template:monolithic_db), each with
+    // >=1 expected-DENY case, landing DRAFT so the app can demo freeze.
+    // Placed here (rather than alongside SeedBlueprints earlier in the
+    // constructor) because it needs evalSuitesTable/evalCasesTable, which
+    // are defined immediately above.
+    const seedEvalSuitesLambda = new lambda.Function(
+      this,
+      "SeedEvalSuitesFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "seed-eval-suites/index.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(30),
+        environment: {
+          EVAL_SUITES_TABLE: this.evalSuitesTable.tableName,
+          EVAL_CASES_TABLE: this.evalCasesTable.tableName,
+        },
+        logGroup: new logs.LogGroup(this, "SeedEvalSuitesFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    this.evalSuitesTable.grantWriteData(seedEvalSuitesLambda);
+    this.evalCasesTable.grantWriteData(seedEvalSuitesLambda);
+
+    const seedEvalSuitesResource = new cdk.CustomResource(
+      this,
+      "SeedEvalSuitesResource",
+      {
+        serviceToken: seedEvalSuitesLambda.functionArn,
+        properties: {
+          Version: "v1.0.0",
+        },
+      },
+    );
+
+    seedEvalSuitesResource.node.addDependency(this.evalSuitesTable);
+    seedEvalSuitesResource.node.addDependency(this.evalCasesTable);
 
     // InterrogationRounds
     this.interrogationRoundsTable = new dynamodb.Table(

@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "1.0.0",
+  "generatedAt": "2026-07-30T03:00:00.000Z",
+  "producerCommit": "a8e5d90",
+  "kind": "execution",
+  "correlationId": "exec-fixture-0001",
+  "orgId": "org-fixture",
+  "sanitisation": {
+    "redactPiiVersion": "1",
+    "secretPatternsVersion": "1",
+    "gate": "passed"
+  },
+  "sections": {
+    "agentConfig": {
+      "agentId": "agent-fixture-1",
+      "name": "fixture-agent",
+      "version": 2
+    },
+    "workflow": {
+      "workflowId": "wf-fixture-1",
+      "name": "fixture-workflow",
+      "version": 3
+    },
+    "execSpec": {
+      "specId": "spec-fixture-1",
+      "status": "APPROVED"
+    },
+    "modelConfig": {
+      "scope": "wf-fixture-1",
+      "modelKey": "anthropic.claude-sonnet"
+    },
+    "governanceMode": "on",
+    "nodes": [
+      {
+        "nodeId": "node-1",
+        "inputs": null,
+        "outputs": "{\"answer\":42}",
+        "status": "completed",
+        "retries": 0,
+        "usage": {
+          "inputTokens": 120,
+          "outputTokens": 340,
+          "totalTokens": 460,
+          "callCount": 1
+        }
+      },
+      {
+        "nodeId": "node-2",
+        "inputs": null,
+        "outputs": "{\"summary\":\"done\"}",
+        "status": "completed",
+        "retries": 1,
+        "usage": {
+          "inputTokens": 80,
+          "outputTokens": 150,
+          "totalTokens": 230,
+          "callCount": 1
+        }
+      }
+    ],
+    "toolResults": {
+      "partial": true,
+      "results": [],
+      "provenance": "Raw per-tool-call results are not persisted in a queryable store (CIT-121, E12, not yet built). This section is derived from tool-call governance findings and node final outputs only; it is never backfilled from CloudWatch logs."
+    },
+    "findings": [
+      {
+        "findingId": "finding-fixture-1",
+        "workflowId": "wf-fixture-1",
+        "decision": "PERMIT",
+        "reason": "within policy frontier"
+      }
+    ],
+    "usageTotals": {
+      "inputTokens": 200,
+      "outputTokens": 490,
+      "totalTokens": 690,
+      "callCount": 2
+    },
+    "traceIds": {
+      "correlationId": "exec-fixture-0001"
+    }
+  }
+}

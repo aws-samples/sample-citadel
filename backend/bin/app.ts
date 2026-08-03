@@ -153,6 +153,8 @@ const governanceStack = new GovernanceStack(
     agentDesignAssessmentsTable: backendStack.agentDesignAssessmentsTable,
     programReviewsTable: backendStack.programReviewsTable,
     projectsTable: backendStack.projectsTable,
+    evalSuitesTable: backendStack.evalSuitesTable,
+    evalCasesTable: backendStack.evalCasesTable,
   },
 );
 

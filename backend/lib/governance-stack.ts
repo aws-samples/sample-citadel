@@ -54,6 +54,12 @@ export interface GovernanceStackProps extends cdk.StackProps {
   programReviewsTable: dynamodb.ITable;
   /** Core projects table — design-assessment resolver reads/writes project status. */
   projectsTable: dynamodb.ITable;
+  // CIT-101: eval suites/cases — owned by BackendStack, consumed here by
+  // the eval-resolver (this stack's home per the design's grounding: eval
+  // suites are release evidence, governance-grade like
+  // ExecutionSpecifications).
+  evalSuitesTable: dynamodb.ITable;
+  evalCasesTable: dynamodb.ITable;
 }
 
 export class GovernanceStack extends cdk.Stack {
@@ -786,6 +792,100 @@ exports.handler = async (event) => {
       },
     );
     listExecSpecsResolver.addResourceDependency(execSpecLambdaDataSource);
+
+    // ============================================================
+    // EvalSuite / EvalCase Resolver (CIT-101)
+    // ============================================================
+
+    const evalResolverFunction = new lambda.Function(
+      this,
+      "EvalResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EVAL_SUITES_TABLE: props.evalSuitesTable.tableName,
+          EVAL_CASES_TABLE: props.evalCasesTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, "EvalResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    props.evalSuitesTable.grantReadWriteData(evalResolverFunction);
+    props.evalCasesTable.grantReadWriteData(evalResolverFunction);
+    props.agentEventBus.grantPutEventsTo(evalResolverFunction);
+
+    const evalDataSourceRole = new iam.Role(this, "EvalDataSourceRole", {
+      assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+    });
+    evalResolverFunction.grantInvoke(evalDataSourceRole);
+
+    const evalLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "EvalLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "EvalLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: evalDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: evalResolverFunction.functionArn,
+        },
+      },
+    );
+
+    const evalMutationFields = [
+      { id: "CreateEvalSuiteResolver", fieldName: "createEvalSuite" },
+      { id: "UpdateEvalSuiteResolver", fieldName: "updateEvalSuite" },
+      { id: "FreezeEvalSuiteResolver", fieldName: "freezeEvalSuite" },
+      { id: "ArchiveEvalSuiteResolver", fieldName: "archiveEvalSuite" },
+      { id: "CloneEvalSuiteResolver", fieldName: "cloneEvalSuite" },
+      {
+        id: "MarkEvalSuiteReferencedResolver",
+        fieldName: "markEvalSuiteReferenced",
+      },
+      { id: "AddEvalCaseResolver", fieldName: "addEvalCase" },
+      { id: "UpdateEvalCaseResolver", fieldName: "updateEvalCase" },
+      { id: "DeleteEvalCaseResolver", fieldName: "deleteEvalCase" },
+      {
+        id: "ImportReplayAsEvalCaseResolver",
+        fieldName: "importReplayAsEvalCase",
+      },
+    ];
+    for (const { id, fieldName } of evalMutationFields) {
+      const resolver = new appsyncCfn.CfnResolver(this, id, {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName,
+        dataSourceName: evalLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      });
+      resolver.addResourceDependency(evalLambdaDataSource);
+    }
+
+    const evalQueryFields = [
+      { id: "GetEvalSuiteResolver", fieldName: "getEvalSuite" },
+      { id: "ListEvalSuitesResolver", fieldName: "listEvalSuites" },
+      { id: "ListEvalCasesResolver", fieldName: "listEvalCases" },
+    ];
+    for (const { id, fieldName } of evalQueryFields) {
+      const resolver = new appsyncCfn.CfnResolver(this, id, {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName,
+        dataSourceName: evalLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      });
+      resolver.addResourceDependency(evalLambdaDataSource);
+    }
 
     // ============================================================
     // InterrogationRound Resolver

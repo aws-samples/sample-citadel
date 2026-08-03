@@ -1,9 +1,14 @@
-import { CognitoIdentityProviderClient, GetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
-import { AuthContext } from '../types';
+import {
+  CognitoIdentityProviderClient,
+  GetUserCommand,
+} from "@aws-sdk/client-cognito-identity-provider";
+import { AuthContext } from "../types";
 
 const cognitoClient = new CognitoIdentityProviderClient({});
 
-export async function validateCognitoToken(accessToken: string): Promise<AuthContext | null> {
+export async function validateCognitoToken(
+  accessToken: string,
+): Promise<AuthContext | null> {
   try {
     const command = new GetUserCommand({
       AccessToken: accessToken,
@@ -19,7 +24,7 @@ export async function validateCognitoToken(accessToken: string): Promise<AuthCon
 
     // Extract custom attributes
     for (const attr of attributes) {
-      if (attr.Name === 'custom:role') {
+      if (attr.Name === "custom:role") {
         roles.push(attr.Value!);
       }
     }
@@ -31,66 +36,82 @@ export async function validateCognitoToken(accessToken: string): Promise<AuthCon
       roles,
     };
   } catch (error) {
-    console.error('Token validation failed:', error);
+    console.error("Token validation failed:", error);
     return null;
   }
 }
 
-export function hasPermission(authContext: AuthContext, permission: string): boolean {
+export function hasPermission(
+  authContext: AuthContext,
+  permission: string,
+): boolean {
   // Admin role has all permissions
-  if (authContext.roles?.includes('admin')) {
+  if (authContext.roles?.includes("admin")) {
     return true;
   }
 
   // Define role-based permissions
   const rolePermissions: Record<string, string[]> = {
     project_manager: [
-      'project:create',
-      'project:read',
-      'project:update',
-      'agent:monitor',
-      'conversation:read',
+      "project:create",
+      "project:read",
+      "project:update",
+      "agent:monitor",
+      "conversation:read",
       // (QT1-5): project_manager may reopen a LOCKED ADR. The
       // reopen path runs audit-before-auth (QT2A-7 + QT3-3) so denied
       // attempts by other roles still produce a durable audit row.
-      'adr:reopen',
+      "adr:reopen",
       // (QT1-5/QT2B-7): project_manager shares ownership of the
       // design phase and may submit the AgentDesignAssessment.
-      'assessment:submit',
+      "assessment:submit",
+      // CIT-101: project_manager may read eval suites/cases (mirrors
+      // project:read's role-set), but does not author or approve.
+      "eval:read",
     ],
     architect: [
-      'project:read',
-      'project:update',
-      'agent:interact',
-      'conversation:read',
-      'conversation:write',
-      'document:upload',
-      'adr:create',
+      "project:read",
+      "project:update",
+      "agent:interact",
+      "conversation:read",
+      "conversation:write",
+      "document:upload",
+      "adr:create",
       // (QT1-5): architect may reopen a LOCKED ADR.
-      'adr:reopen',
-      'spec:approve',
+      "adr:reopen",
+      "spec:approve",
       // (QT1-5/QT2B-7): architect owns the design phase and may
       // submit the AgentDesignAssessment.
-      'assessment:submit',
+      "assessment:submit",
       // Decision #7: registry permissions.
-      'registry:create',
-      'registry:update',
-      'registry:submit',
+      "registry:create",
+      "registry:update",
+      "registry:submit",
+      // CIT-101: architect authors eval suites/cases (create/update/delete/
+      // addCase/updateCase/import/clone) AND approves (freezes) them —
+      // author-can-freeze-their-own-suite keeps the immutability property
+      // test self-contained with one role; admin retains eval:approve via
+      // the bypass above regardless.
+      "eval:author",
+      "eval:approve",
+      "eval:read",
     ],
     developer: [
-      'project:read',
-      'agent:read',
-      'conversation:read',
-      'implementation:download',
+      "project:read",
+      "agent:read",
+      "conversation:read",
+      "implementation:download",
       // Decision #7: registry read for developer role.
-      'registry:read',
+      "registry:read",
+      // CIT-101: developer may read eval suites/cases but not author/approve.
+      "eval:read",
     ],
   };
 
   // Check if any of the user's roles have the required permission
   for (const role of authContext.roles || []) {
     const permissions = rolePermissions[role] || [];
-    if (permissions.includes(permission) || permissions.includes('*')) {
+    if (permissions.includes(permission) || permissions.includes("*")) {
       return true;
     }
   }
@@ -98,21 +119,24 @@ export function hasPermission(authContext: AuthContext, permission: string): boo
   return false;
 }
 
-type IdentityBag = Record<string, unknown> & { sub?: string; username?: string };
+type IdentityBag = Record<string, unknown> & {
+  sub?: string;
+  username?: string;
+};
 type EventWithIdentity = { identity?: IdentityBag | null };
 
 export function extractUserIdFromEvent(event: unknown): string {
   const e = event as EventWithIdentity;
-  return e.identity?.sub || e.identity?.username || 'anonymous';
+  return e.identity?.sub || e.identity?.username || "anonymous";
 }
 
 export function createAuthContext(event: unknown): AuthContext {
   const identity: IdentityBag = (event as EventWithIdentity).identity || {};
 
   return {
-    userId: identity.sub || identity.username || 'anonymous',
+    userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
-    groups: (identity['cognito:groups'] as string[] | undefined) || [],
-    roles: identity['custom:role'] ? [identity['custom:role'] as string] : [],
+    groups: (identity["cognito:groups"] as string[] | undefined) || [],
+    roles: identity["custom:role"] ? [identity["custom:role"] as string] : [],
   };
 }

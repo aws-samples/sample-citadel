@@ -74,6 +74,10 @@ type Query {
   # ExecutionSpecification
   getExecutionSpecification(specId: ID!): ExecutionSpecification
   listExecutionSpecifications(projectId: ID!): [ExecutionSpecification!]!
+  # EvalSuite / EvalCase (CIT-101)
+  getEvalSuite(suiteId: ID!): EvalSuite
+  listEvalSuites(orgId: ID!, agentTargetId: ID): [EvalSuite!]!
+  listEvalCases(suiteId: ID!): [EvalCase!]!
   # InterrogationRound
   getInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound
   listInterrogationRounds(projectId: ID!): [InterrogationRound!]!
@@ -328,6 +332,18 @@ type Mutation {
   approveExecutionSpecification(specId: ID!): ExecutionSpecification!
   rejectExecutionSpecification(specId: ID!, reason: String!): ExecutionSpecification!
   reviseExecutionSpecification(specId: ID!, input: ReviseExecutionSpecificationInput!): ExecutionSpecification!
+  # EvalSuite / EvalCase (CIT-101) — lifecycle verbs are separate mutations,
+  # never a generic update, per exec-spec doctrine.
+  createEvalSuite(input: EvalSuiteInput!): EvalSuite!
+  updateEvalSuite(suiteId: ID!, input: EvalSuiteInput!): EvalSuite!
+  freezeEvalSuite(suiteId: ID!): EvalSuite!
+  archiveEvalSuite(suiteId: ID!): EvalSuite!
+  cloneEvalSuite(suiteId: ID!, semver: String!): EvalSuite!
+  markEvalSuiteReferenced(suiteId: ID!, referenceId: String!): EvalSuite!
+  addEvalCase(suiteId: ID!, input: EvalCaseInput!): EvalCase!
+  updateEvalCase(suiteId: ID!, caseId: ID!, input: EvalCaseInput!): EvalCase!
+  deleteEvalCase(suiteId: ID!, caseId: ID!): DeleteResult!
+  importReplayAsEvalCase(suiteId: ID!, package: AWSJSON!): EvalCase!
   # InterrogationRound
   startInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound!
   injectConstraints(projectId: ID!, roundN: Int!, constraints: [String!]!): InterrogationRound!
@@ -2041,6 +2057,164 @@ input ReviseExecutionSpecificationInput {
   narrativeS3Uri: String!
 }
 
+# EvalSuite / EvalCase (CIT-101 — Evaluation Domain Model + Versioned Suites)
+# Eval suites are release evidence, governed exactly like
+# ExecutionSpecifications: RETAIN + deletionProtection tables, lifecycle-
+# gated, optimistically locked, architect-authors/admin-approves.
+enum EvalSuiteStatus {
+  DRAFT
+  FROZEN
+  ARCHIVED
+}
+
+type EvalSuite {
+  suiteId: ID!
+  orgId: ID!
+  agentTargetId: String!
+  name: String!
+  description: String!
+  semver: String!
+  status: EvalSuiteStatus!
+  version: Int!
+  references: [String!]!
+  parentSuiteId: ID
+  frozenAt: AWSDateTime
+  frozenBy: String
+  approvedAt: AWSDateTime
+  approvedBy: String
+  createdAt: AWSDateTime!
+  createdBy: String!
+  updatedAt: AWSDateTime!
+}
+
+input EvalSuiteInput {
+  orgId: ID!
+  agentTargetId: String!
+  name: String!
+  description: String!
+  semver: String!
+}
+
+enum EvalCaseKind {
+  CONVERSATION
+  EXECUTION
+}
+
+enum MatchSpecMode {
+  EXACT
+  CONTAINS
+  REGEX
+  JSON_SUBSET
+}
+
+type MatchSpec {
+  mode: MatchSpecMode!
+  target: AWSJSON!
+  path: String
+}
+
+input MatchSpecInput {
+  mode: MatchSpecMode!
+  target: AWSJSON!
+  path: String
+}
+
+enum PolicyDecision {
+  PERMIT
+  DENY
+  ESCALATE
+}
+
+type ExpectedPolicyOutcome {
+  decision: PolicyDecision!
+  findingTypes: [String!]!
+  minSeverity: String
+}
+
+input ExpectedPolicyOutcomeInput {
+  decision: PolicyDecision!
+  findingTypes: [String!]!
+  minSeverity: String
+}
+
+type GroundingRequirement {
+  sourceUri: String
+  mustCiteAnyOf: [String!]!
+  mustNotHallucinate: Boolean!
+}
+
+input GroundingRequirementInput {
+  sourceUri: String
+  mustCiteAnyOf: [String!]!
+  mustNotHallucinate: Boolean!
+}
+
+type EvalCaseInputPayload {
+  prompt: String
+  transcript: [TranscriptMessage!]
+  structuredInput: AWSJSON
+}
+
+input EvalCaseInputPayloadInput {
+  prompt: String
+  transcript: [TranscriptMessageInput!]
+  structuredInput: AWSJSON
+}
+
+enum EvalCaseProvenanceSource {
+  AUTHORED
+  IMPORTED_FROM_REPLAY
+}
+
+type EvalCaseProvenance {
+  source: EvalCaseProvenanceSource!
+  packageHash: String
+  producerCommit: String
+  correlationId: String
+  importedAt: AWSDateTime
+  toolResultsPartial: Boolean
+  note: String
+}
+
+type EvalCase {
+  suiteId: ID!
+  caseId: ID!
+  name: String!
+  description: String!
+  kind: EvalCaseKind!
+  input: EvalCaseInputPayload!
+  expectedOutcome: MatchSpec!
+  requiredTools: [String!]!
+  forbiddenTools: [String!]!
+  expectedPolicyOutcome: ExpectedPolicyOutcome
+  groundingRequirements: [GroundingRequirement!]
+  maxLatencyMs: Int
+  maxCostUsd: Float
+  provenance: EvalCaseProvenance!
+  version: Int!
+  createdAt: AWSDateTime!
+  createdBy: String!
+  updatedAt: AWSDateTime!
+}
+
+input EvalCaseInput {
+  name: String!
+  description: String!
+  kind: EvalCaseKind!
+  input: EvalCaseInputPayloadInput!
+  expectedOutcome: MatchSpecInput!
+  requiredTools: [String!]
+  forbiddenTools: [String!]
+  expectedPolicyOutcome: ExpectedPolicyOutcomeInput
+  groundingRequirements: [GroundingRequirementInput!]
+  maxLatencyMs: Int
+  maxCostUsd: Float
+}
+
+type DeleteResult {
+  success: Boolean!
+}
+
 # InterrogationRound
 enum RoundStatus {
   IN_PROGRESS
@@ -2062,6 +2236,14 @@ type InterrogationRound {
 }
 
 input TranscriptMessageInput {
+  role: String!
+  content: String!
+}
+
+# Output-type counterpart to TranscriptMessageInput. Did not previously
+# exist because no prior query returned raw transcript messages as a typed
+# list; EvalCase.input.transcript (CIT-101) is the first such field.
+type TranscriptMessage {
   role: String!
   content: String!
 }

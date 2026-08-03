@@ -127,42 +127,43 @@ export interface S3Object {
 }
 
 export enum ProjectStatus {
-  CREATED = 'CREATED',
-  IN_PROGRESS = 'IN_PROGRESS',
-  ASSESSMENT_COMPLETE = 'ASSESSMENT_COMPLETE',
-  DESIGN_COMPLETE = 'DESIGN_COMPLETE',
-  PLANNING_COMPLETE = 'PLANNING_COMPLETE',
-  IMPLEMENTATION_READY = 'IMPLEMENTATION_READY',
-  COMPLETED = 'COMPLETED',
-  ERROR = 'ERROR'
+  CREATED = "CREATED",
+  IN_PROGRESS = "IN_PROGRESS",
+  ASSESSMENT_COMPLETE = "ASSESSMENT_COMPLETE",
+  DESIGN_COMPLETE = "DESIGN_COMPLETE",
+  PLANNING_COMPLETE = "PLANNING_COMPLETE",
+  IMPLEMENTATION_READY = "IMPLEMENTATION_READY",
+  COMPLETED = "COMPLETED",
+  ERROR = "ERROR",
 }
 
 // governance archetype classification — frozen at three values
 // per QT2A-8 (no OTHER escape hatch; ambiguous projects use archetypeStatus
 // PENDING_ESCALATION instead).
 export enum GovernanceArchetype {
-  MONOLITHIC_DB = 'MONOLITHIC_DB',
-  ENTERPRISE_APP_SPRAWL = 'ENTERPRISE_APP_SPRAWL',
-  HYBRID_IT_OT = 'HYBRID_IT_OT',
+  MONOLITHIC_DB = "MONOLITHIC_DB",
+  ENTERPRISE_APP_SPRAWL = "ENTERPRISE_APP_SPRAWL",
+  HYBRID_IT_OT = "HYBRID_IT_OT",
 }
 
 export enum ProjectArchetypeStatus {
-  PENDING = 'PENDING',
-  CLASSIFIED = 'CLASSIFIED',
-  PENDING_ESCALATION = 'PENDING_ESCALATION',
+  PENDING = "PENDING",
+  CLASSIFIED = "CLASSIFIED",
+  PENDING_ESCALATION = "PENDING_ESCALATION",
 }
 
 // AgentDesignAssessment entity — four-dimension complexity
 // ranking per PLAN_GOV_FUTURE_STATE.md §3.1. dimensionRanking is always 4
 // entries with ranks forming exactly the set {1,2,3,4} (validated at the
 // resolver). FourDimension values frozen at four per QT2A-8 sibling rule.
-export type FourDimensionLiteral = 'CODE' | 'DATA' | 'INTEGRATION' | 'INFRASTRUCTURE';
+export type FourDimensionLiteral =
+  "CODE" | "DATA" | "INTEGRATION" | "INFRASTRUCTURE";
 
 export enum FourDimension {
-  CODE = 'CODE',
-  DATA = 'DATA',
-  INTEGRATION = 'INTEGRATION',
-  INFRASTRUCTURE = 'INFRASTRUCTURE',
+  CODE = "CODE",
+  DATA = "DATA",
+  INTEGRATION = "INTEGRATION",
+  INFRASTRUCTURE = "INFRASTRUCTURE",
 }
 
 export interface DimensionComplexity {
@@ -203,17 +204,17 @@ export interface SubmitAgentDesignAssessmentInput {
 // ADR (Architecture Decision Record) governance entity.
 // Matrix locked by QT3-5 in.kiro/planning/PLAN_GOV_DIFF.md §9.
 export enum ADRStatus {
-  PROPOSED = 'PROPOSED',
-  LOCKED = 'LOCKED',
-  SUPERSEDED = 'SUPERSEDED',
-  REOPENED = 'REOPENED',
+  PROPOSED = "PROPOSED",
+  LOCKED = "LOCKED",
+  SUPERSEDED = "SUPERSEDED",
+  REOPENED = "REOPENED",
 }
 
 export enum ADRSeverity {
-  LOW = 'LOW',
-  MEDIUM = 'MEDIUM',
-  HIGH = 'HIGH',
-  CRITICAL = 'CRITICAL',
+  LOW = "LOW",
+  MEDIUM = "MEDIUM",
+  HIGH = "HIGH",
+  CRITICAL = "CRITICAL",
 }
 
 export interface ADR {
@@ -256,7 +257,7 @@ export interface ADRInput {
 // permission check) → ALLOWED | DENIED (after the check). transitionError
 // is populated only when authResult=ALLOWED but LifecycleManager rejected
 // the LOCKED→REOPENED transition; on DENIED and on success it stays unset.
-export type AuthResultLiteral = 'PENDING' | 'ALLOWED' | 'DENIED';
+export type AuthResultLiteral = "PENDING" | "ALLOWED" | "DENIED";
 
 export interface ADRReopenAttempt {
   attemptId: string;
@@ -274,25 +275,25 @@ export interface ADRReopenAttempt {
 }
 
 export enum ModuleStatus {
-  PENDING = 'PENDING',
-  IN_PROGRESS = 'IN_PROGRESS',
-  COMPLETED = 'COMPLETED',
-  ERROR = 'ERROR'
+  PENDING = "PENDING",
+  IN_PROGRESS = "IN_PROGRESS",
+  COMPLETED = "COMPLETED",
+  ERROR = "ERROR",
 }
 
 export enum AgentStatusEnum {
-  IDLE = 'IDLE',
-  PROCESSING = 'PROCESSING',
-  WAITING_FOR_INPUT = 'WAITING_FOR_INPUT',
-  COMPLETED = 'COMPLETED',
-  ERROR = 'ERROR'
+  IDLE = "IDLE",
+  PROCESSING = "PROCESSING",
+  WAITING_FOR_INPUT = "WAITING_FOR_INPUT",
+  COMPLETED = "COMPLETED",
+  ERROR = "ERROR",
 }
 
 export enum MessageType {
-  USER_INPUT = 'USER_INPUT',
-  AGENT_RESPONSE = 'AGENT_RESPONSE',
-  SYSTEM_NOTIFICATION = 'SYSTEM_NOTIFICATION',
-  PROGRESS_UPDATE = 'PROGRESS_UPDATE'
+  USER_INPUT = "USER_INPUT",
+  AGENT_RESPONSE = "AGENT_RESPONSE",
+  SYSTEM_NOTIFICATION = "SYSTEM_NOTIFICATION",
+  PROGRESS_UPDATE = "PROGRESS_UPDATE",
 }
 
 // Event types for EventBridge integration
@@ -319,9 +320,9 @@ export interface AuthContext {
 export interface GovernanceEventIdentity {
   sub?: string;
   username?: string;
-  'custom:role'?: string;
-  'cognito:groups'?: string[];
-  claims?: { 'custom:role'?: string; [claim: string]: unknown };
+  "custom:role"?: string;
+  "cognito:groups"?: string[];
+  claims?: { "custom:role"?: string; [claim: string]: unknown };
 }
 
 // Minimal AppSync event shape shared by the governance resolvers (ADR,
@@ -350,7 +351,8 @@ export interface ServiceLayerResponse {
 }
 
 // ExecutionSpecification
-export type SpecStatusLiteral = 'DRAFT' | 'PENDING_REVIEW' | 'APPROVED' | 'REJECTED';
+export type SpecStatusLiteral =
+  "DRAFT" | "PENDING_REVIEW" | "APPROVED" | "REJECTED";
 
 export interface ExecutionSpecification {
   specId: string;
@@ -382,12 +384,125 @@ export interface ReviseExecutionSpecificationInput {
   narrativeS3Uri: string;
 }
 
+// EvalSuite / EvalCase (CIT-101 — Evaluation Domain Model + Versioned Suites)
+//
+// Eval suites are release evidence, governed exactly like
+// ExecutionSpecifications: RETAIN + deletionProtection tables, lifecycle-
+// gated, optimistically locked. See backend/src/adapters/lifecycle.ts
+// EVALSUITE_TRANSITIONS and backend/src/lambda/eval-resolver.ts.
+export type EvalSuiteStatusLiteral = "DRAFT" | "FROZEN" | "ARCHIVED";
+
+export interface EvalSuite {
+  suiteId: string;
+  orgId: string;
+  agentTargetId: string;
+  name: string;
+  description: string;
+  semver: string;
+  status: EvalSuiteStatusLiteral;
+  version: number;
+  references: string[];
+  parentSuiteId?: string | null;
+  frozenAt?: string;
+  frozenBy?: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+}
+
+export interface EvalSuiteInput {
+  orgId: string;
+  agentTargetId: string;
+  name: string;
+  description: string;
+  semver: string;
+}
+
+export type EvalCaseKindLiteral = "CONVERSATION" | "EXECUTION";
+
+export interface EvalCaseInputPayload {
+  prompt?: string | null;
+  transcript?: TranscriptMessage[] | null;
+  structuredInput?: string | null; // AWSJSON — string-encoded; null when unavailable (execution-kind honest limitation)
+}
+
+export type MatchSpecMode = "EXACT" | "CONTAINS" | "REGEX" | "JSON_SUBSET";
+
+export interface MatchSpec {
+  mode: MatchSpecMode;
+  target: string; // AWSJSON — string-encoded when target is structured
+  path?: string;
+}
+
+export type PolicyDecisionLiteral = "PERMIT" | "DENY" | "ESCALATE";
+
+export interface ExpectedPolicyOutcome {
+  decision: PolicyDecisionLiteral;
+  findingTypes: string[];
+  minSeverity?: string;
+}
+
+export interface GroundingRequirement {
+  sourceUri?: string;
+  mustCiteAnyOf: string[];
+  mustNotHallucinate: boolean;
+}
+
+export type EvalCaseProvenanceSourceLiteral =
+  "AUTHORED" | "IMPORTED_FROM_REPLAY";
+
+export interface EvalCaseProvenance {
+  source: EvalCaseProvenanceSourceLiteral;
+  packageHash?: string;
+  producerCommit: string | null;
+  correlationId?: string;
+  importedAt?: string;
+  /** Set true when the source replay package's toolResults.partial === true. */
+  toolResultsPartial?: boolean;
+  /** Honest v1 limitation note — set for execution-kind imports (nodes[].inputs unavailable). */
+  note?: string;
+}
+
+export interface EvalCase {
+  suiteId: string;
+  caseId: string;
+  name: string;
+  description: string;
+  kind: EvalCaseKindLiteral;
+  input: EvalCaseInputPayload;
+  expectedOutcome: MatchSpec;
+  requiredTools: string[];
+  forbiddenTools: string[];
+  expectedPolicyOutcome?: ExpectedPolicyOutcome;
+  groundingRequirements?: GroundingRequirement[];
+  maxLatencyMs?: number;
+  maxCostUsd?: number;
+  provenance: EvalCaseProvenance;
+  version: number;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+}
+
+export interface EvalCaseInput {
+  name: string;
+  description: string;
+  kind: EvalCaseKindLiteral;
+  input: EvalCaseInputPayload;
+  expectedOutcome: MatchSpec;
+  requiredTools?: string[];
+  forbiddenTools?: string[];
+  expectedPolicyOutcome?: ExpectedPolicyOutcome;
+  groundingRequirements?: GroundingRequirement[];
+  maxLatencyMs?: number;
+  maxCostUsd?: number;
+}
+
 // InterrogationRound
 export type RoundStatusLiteral =
-  | 'IN_PROGRESS'
-  | 'AWAITING_CONSTRAINTS'
-  | 'REVISED'
-  | 'STABILISED';
+  "IN_PROGRESS" | "AWAITING_CONSTRAINTS" | "REVISED" | "STABILISED";
 
 export interface TranscriptMessage {
   role: string;
@@ -412,13 +527,14 @@ export interface InterrogationRound {
 // backend/src/lambda/governance-checklist.md bundled next to the handler. Each
 // ChecklistResult.answer is one of ChecklistAnswer and represents the
 // evidence-based evaluation of one of the 20 checklist questions.
-export type ChecklistAnswerLiteral = 'PASS' | 'FAIL' | 'NOT_APPLICABLE' | 'PENDING_EVIDENCE';
+export type ChecklistAnswerLiteral =
+  "PASS" | "FAIL" | "NOT_APPLICABLE" | "PENDING_EVIDENCE";
 
 export enum ChecklistAnswer {
-  PASS = 'PASS',
-  FAIL = 'FAIL',
-  NOT_APPLICABLE = 'NOT_APPLICABLE',
-  PENDING_EVIDENCE = 'PENDING_EVIDENCE',
+  PASS = "PASS",
+  FAIL = "FAIL",
+  NOT_APPLICABLE = "NOT_APPLICABLE",
+  PENDING_EVIDENCE = "PENDING_EVIDENCE",
 }
 
 export interface ChecklistResult {

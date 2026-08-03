@@ -15,55 +15,92 @@
  * helper in Phase 1. Those files remain unchanged.
  */
 
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
 
 // Keep this list in lock-step with the docs/EVENTBRIDGE_CATALOG.md #Governance Events
 // section (added by commit 12844ba) and with the discriminated union below.
 export const GOVERNANCE_DETAIL_TYPES = [
-  'governance.adr.locked',
-  'governance.adr.reopen.attempted',
-  'governance.specification.created',
-  'governance.specification.approved',
-  'governance.specification.rejected',
-  'governance.round.started',
-  'governance.round.completed',
-  'governance.round.transcript.overflow',
-  'governance.archetype.classified',
-  'governance.offfrontier.escalated',
-  'governance.grandfathered.bypass',
+  "governance.adr.locked",
+  "governance.adr.reopen.attempted",
+  "governance.specification.created",
+  "governance.specification.approved",
+  "governance.specification.rejected",
+  "governance.round.started",
+  "governance.round.completed",
+  "governance.round.transcript.overflow",
+  "governance.archetype.classified",
+  "governance.offfrontier.escalated",
+  "governance.grandfathered.bypass",
   // Wave 2.E: emitted by setGovernanceMode resolver on a successful mode flip.
-  'governance.mode.transition',
+  "governance.mode.transition",
   // Wave 4.C.2: emitted by addConstitutionalRule / updateConstitutionalRule
   // / deleteConstitutionalRule on a successful rules write. Best-effort —
   // failure does not roll back the rule write.
-  'governance.constitutional.rule.changed',
+  "governance.constitutional.rule.changed",
   // Wave 4.D.2: emitted by revokeCaseLaw / unrevokeCaseLaw /
   // updateCaseLawPrecedence on a successful case-law row write.
   // Best-effort — failure does not roll back the primary write.
-  'governance.caselaw.changed',
+  "governance.caselaw.changed",
+  // CIT-101: emitted by freezeEvalSuite on a successful freeze — the eval
+  // resolver's parity with governance.specification.approved.
+  "governance.eval.suite.frozen",
 ] as const;
 
-export type GovernanceDetailType = typeof GOVERNANCE_DETAIL_TYPES[number];
+export type GovernanceDetailType = (typeof GOVERNANCE_DETAIL_TYPES)[number];
 
 // Per-detail-type typed payload map.
 export interface GovernancePayloadMap {
-  'governance.adr.locked': { projectId: string; adrId: string; title: string; sourceRoundIds: string[] };
-  'governance.adr.reopen.attempted': {
+  "governance.adr.locked": {
+    projectId: string;
+    adrId: string;
+    title: string;
+    sourceRoundIds: string[];
+  };
+  "governance.adr.reopen.attempted": {
     projectId: string;
     adrId: string;
     revisitConditionMatched: boolean;
     attemptedBy: string;
-    authResult: 'ALLOWED' | 'DENIED';
+    authResult: "ALLOWED" | "DENIED";
   };
-  'governance.specification.created': { projectId: string; specId: string; version: number };
-  'governance.specification.approved': { projectId: string; specId: string; approvedBy: string; version: number };
-  'governance.specification.rejected': { projectId: string; specId: string; reason: string; rejectedBy: string };
-  'governance.round.started': { projectId: string; roundN: number };
-  'governance.round.completed': { projectId: string; roundN: number };
-  'governance.round.transcript.overflow': { projectId: string; roundN: number; sizeBytes: number };
-  'governance.archetype.classified': { projectId: string; archetype: string; confidence: number };
-  'governance.offfrontier.escalated': { projectId: string; agentId: string; reason: string };
-  'governance.grandfathered.bypass': {
+  "governance.specification.created": {
+    projectId: string;
+    specId: string;
+    version: number;
+  };
+  "governance.specification.approved": {
+    projectId: string;
+    specId: string;
+    approvedBy: string;
+    version: number;
+  };
+  "governance.specification.rejected": {
+    projectId: string;
+    specId: string;
+    reason: string;
+    rejectedBy: string;
+  };
+  "governance.round.started": { projectId: string; roundN: number };
+  "governance.round.completed": { projectId: string; roundN: number };
+  "governance.round.transcript.overflow": {
+    projectId: string;
+    roundN: number;
+    sizeBytes: number;
+  };
+  "governance.archetype.classified": {
+    projectId: string;
+    archetype: string;
+    confidence: number;
+  };
+  "governance.offfrontier.escalated": {
+    projectId: string;
+    agentId: string;
+    reason: string;
+  };
+  "governance.grandfathered.bypass": {
     projectId: string;
     bypassedGate: string;
     projectCreatedAt: string;
@@ -74,7 +111,7 @@ export interface GovernancePayloadMap {
   // is the value read before the flip; newMode is the targetMode just
   // written. effectiveAtUpdated is true when the resolver also wrote the
   // companion effective_at parameter (first permissive→shadow/strict flip).
-  'governance.mode.transition': {
+  "governance.mode.transition": {
     previousMode: string;
     newMode: string;
     env: string;
@@ -91,9 +128,9 @@ export interface GovernancePayloadMap {
   // surface the projected wire shape (JSON-encoded value, or null for
   // exists/not_exists) so downstream consumers see the same shape the
   // frontend renders.
-  'governance.constitutional.rule.changed': {
+  "governance.constitutional.rule.changed": {
     layerId: string;
-    action: 'add' | 'update' | 'delete';
+    action: "add" | "update" | "delete";
     ruleIndex: number;
     oldRule: { field: string; operator: string; value: string | null } | null;
     newRule: { field: string; operator: string; value: string | null } | null;
@@ -106,18 +143,27 @@ export interface GovernancePayloadMap {
   // downstream consumers can reconstruct the change without an extra
   // DDB read. For revoke / unrevoke, both are {revoked: boolean}; for
   // update-precedence, both are {precedence: number}.
-  'governance.caselaw.changed': {
+  "governance.caselaw.changed": {
     caseId: string;
-    action: 'revoke' | 'unrevoke' | 'update-precedence';
+    action: "revoke" | "unrevoke" | "update-precedence";
     previousValue: Record<string, unknown>;
     newValue: Record<string, unknown>;
     reason: string | null;
     actorSub: string;
     timestamp: string;
   };
+  // CIT-101: payload for governance.eval.suite.frozen. Emitted by
+  // freezeEvalSuite after a successful DDB status write.
+  "governance.eval.suite.frozen": {
+    orgId: string;
+    suiteId: string;
+    frozenBy: string;
+    version: number;
+  };
 }
 
-export type DetailPayloadOf<D extends GovernanceDetailType> = GovernancePayloadMap[D];
+export type DetailPayloadOf<D extends GovernanceDetailType> =
+  GovernancePayloadMap[D];
 
 // Fail-closed sanitiser — strips tags (and their content) for the three most
 // dangerous HTML embed vectors. Applied recursively across string fields only.
@@ -140,18 +186,18 @@ export type DetailPayloadOf<D extends GovernanceDetailType> = GovernancePayloadM
 //     unterminated openers are removed, so a malformed tag cannot bypass the
 //     filter.
 //   * `[\s\S]` is used for tag bodies/content so newlines cannot hide a tag.
-const DANGEROUS_TAGS = 'script|iframe|object';
+const DANGEROUS_TAGS = "script|iframe|object";
 // Balanced <tag …> … </tag …> block (content included). Backreference keeps
 // the open/close tag names matched.
 const PAIRED_TAG_RE = new RegExp(
   `<\\s*(${DANGEROUS_TAGS})\\b[^>]*>[\\s\\S]*?<\\s*\\/\\s*\\1\\b[^>]*>`,
-  'gi'
+  "gi",
 );
 // Any leftover opening or closing tag for the dangerous set, including an
 // unterminated opener at end-of-input (trailing `>` optional).
 const STRAY_TAG_RE = new RegExp(
   `<\\s*\\/?\\s*(?:${DANGEROUS_TAGS})\\b[^>]*>?`,
-  'gi'
+  "gi",
 );
 
 function sanitizeString(s: string): string {
@@ -159,15 +205,16 @@ function sanitizeString(s: string): string {
   let previous: string;
   do {
     previous = out;
-    out = out.replace(PAIRED_TAG_RE, '').replace(STRAY_TAG_RE, '');
+    out = out.replace(PAIRED_TAG_RE, "").replace(STRAY_TAG_RE, "");
   } while (out !== previous);
   return out;
 }
 
 function sanitizeDeep<T>(value: T): T {
-  if (typeof value === 'string') return sanitizeString(value) as unknown as T;
-  if (Array.isArray(value)) return value.map((v) => sanitizeDeep(v)) as unknown as T;
-  if (value && typeof value === 'object') {
+  if (typeof value === "string") return sanitizeString(value) as unknown as T;
+  if (Array.isArray(value))
+    return value.map((v) => sanitizeDeep(v)) as unknown as T;
+  if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       out[k] = sanitizeDeep(v);
@@ -186,7 +233,7 @@ function ebClient(): EventBridgeClient {
 export async function emitGovernanceEvent<D extends GovernanceDetailType>(
   detailType: D,
   detail: DetailPayloadOf<D>,
-  correlationId?: string
+  correlationId?: string,
 ): Promise<void> {
   const sanitisedDetail = sanitizeDeep(detail);
   const envelope: Record<string, unknown> = {
@@ -198,10 +245,10 @@ export async function emitGovernanceEvent<D extends GovernanceDetailType>(
   const command = new PutEventsCommand({
     Entries: [
       {
-        Source: 'citadel.backend',
+        Source: "citadel.backend",
         DetailType: detailType,
         Detail: JSON.stringify(envelope),
-        EventBusName: process.env.EVENT_BUS_NAME || 'default',
+        EventBusName: process.env.EVENT_BUS_NAME || "default",
       },
     ],
   });
