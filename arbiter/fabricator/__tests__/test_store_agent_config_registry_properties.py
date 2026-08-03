@@ -620,6 +620,12 @@ class TestAppsTableMetaWrite:
                 agent_id="a",
                 llm_tool_schema={"type": "object", "properties": {}, "required": []},
                 agent_description="desc",
+                # org_id must be non-empty here: an empty org_id now makes
+                # _write_app_meta_row skip the write explicitly (finding
+                # 10a12ba4 — orgId is the OrgIndex GSI partition key, an
+                # empty value is a guaranteed ValidationException, not the
+                # transient DDB failure this test exercises).
+                org_id="org-1",
             )
 
         # Registry create + UpdateRegistryRecordStatus succeeded — return True.

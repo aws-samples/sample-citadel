@@ -183,7 +183,19 @@ def _write_app_meta_row(
     """Write the AppsTable #META row for a freshly-created Registry agent record.
 
     Mirrors backend/src/utils/apps-table-meta.ts upsertAppMeta. Eventually-consistent:
-    failures log and return False; the reconciler script catches drift.
+    failures log and return False. A separate scheduled reconciler
+    (backend/scripts/reconcile-apps-meta.ts, run every 6 hours per
+    backend-stack.ts) walks the Registry and mirrors any #META row it finds
+    missing via the SAME upsertAppMeta helper — but only when it can derive a
+    non-empty orgId from the Registry record. It cannot recover THIS
+    function's org_id-empty case: orgId is the partition key of AppsTable's
+    OrgIndex GSI (backend-stack.ts, `partitionKey: {name: "orgId", ...}`),
+    and DynamoDB unconditionally rejects an empty-string value for any GSI
+    key attribute with ValidationException — the reconciler's own
+    upsertAppMeta call would hit the identical rejection, since its orgId
+    projection is read from this same Registry record's stamped orgId
+    (custom_metadata['orgId'], also sourced from org_id). So an org_id-empty
+    write is skipped explicitly below rather than attempted and swallowed.
 
     Args:
         record_id: Registry recordId returned by create_registry_record (12-char alphanumeric).
@@ -193,11 +205,27 @@ def _write_app_meta_row(
         org_id: Caller's org from the JWT claim, or '' for transition window.
 
     Returns:
-        True on success, False on any failure (logged).
+        True on success, False when skipped (APPS_TABLE unset, or org_id
+        empty) or on any failure (logged).
     """
     apps_table = os.environ.get('APPS_TABLE')
     if not apps_table:
         logger.warning('_write_app_meta_row: APPS_TABLE env var not set; skipping')
+        return False
+    if not org_id:
+        # Guaranteed ValidationException, not a transient/eventually-
+        # consistent failure: orgId is the OrgIndex GSI partition key, and
+        # DynamoDB rejects an empty-string value for any GSI key attribute
+        # on every attempt — retrying or waiting for the reconciler cannot
+        # help (see docstring). Skip explicitly rather than swallow the
+        # guaranteed exception. Direct-SQS fabrication requests lack org_id
+        # today; the intake product path normally populates it.
+        logger.info(
+            '_write_app_meta_row: org_id empty for agent_id=%s; skipping '
+            '#META write (orgId is the OrgIndex GSI partition key and '
+            'cannot be an empty string — not reconciler-recoverable)',
+            agent_id,
+        )
         return False
     now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     try:
@@ -295,6 +323,7 @@ def _write_fabrication_status(
 
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     set_parts = ["#status = :status", "#updatedAt = :updatedAt", "#ttl = :ttl"]
+    remove_parts: list[str] = []
     names = {"#status": "status", "#updatedAt": "updatedAt", "#ttl": "ttl"}
     import time as _time
     values: dict[str, Any] = {
@@ -302,9 +331,15 @@ def _write_fabrication_status(
         ":updatedAt": {"S": now},
         ":ttl": {"N": str(int(_time.time()) + FABRICATION_JOBS_TTL_SECONDS)},
     }
-    # submittedAt: stamp the first write with a real submit time so the queue
-    # view never falls back to epoch-0 (1970). if_not_exists preserves a
-    # producer-set value (e.g. the PENDING row) on later writes.
+    # submittedAt semantics (kept minimal, no new attribute): if_not_exists
+    # means the FIRST write to a row (usually the PENDING/PROCESSING write)
+    # stamps the true original submit time, and every later write — including
+    # a later attempt's retry after a prior FAILED — preserves it rather than
+    # resetting it. That's correct: a retry re-attempts the same submitted
+    # request, it isn't a new submission. No separate attemptedAt is added
+    # here because no cited reader (fabricate.py's polling/staleness checks,
+    # the queue resolver, or postfab.py) distinguishes "first submitted" from
+    # "most recently attempted" — updatedAt already serves that purpose.
     set_parts.append("submittedAt = if_not_exists(submittedAt, :submittedAt)")
     values[":submittedAt"] = {"S": now}
     # agentName: thread the human-readable name (== agent_use_id for intake)
@@ -321,6 +356,16 @@ def _write_fabrication_status(
         set_parts.append("#errorMessage = :errorMessage")
         names["#errorMessage"] = "errorMessage"
         values[":errorMessage"] = {"S": error_message[:1000]}
+    else:
+        # Terminal write with a clean run: this attempt superseded any prior
+        # attempt's errorMessage (e.g. a FAILED 08-01 row later completing
+        # cleanly on 08-02). REMOVE rather than leave the stale value, or a
+        # consumer reading a COMPLETED row can mistake it for a partial
+        # failure that happened THIS run. Only meaningful on terminal
+        # statuses — remove is a no-op if the attribute was never set.
+        if status in ("COMPLETED", "FAILED"):
+            names["#errorMessage"] = "errorMessage"
+            remove_parts.append("#errorMessage")
     if registration_errors:
         set_parts.append("#registrationErrors = :registrationErrors")
         names["#registrationErrors"] = "registrationErrors"
@@ -335,6 +380,18 @@ def _write_fabrication_status(
                 for item in registration_errors
             ]
         }
+    elif status in ("COMPLETED", "FAILED"):
+        # Same rationale as errorMessage above: a terminal write with ZERO
+        # registration failures this run must clear any registrationErrors
+        # left by an earlier failed/partial attempt, or a bare success can
+        # be misread as a partial-failure completion (the ambiguity
+        # registrationErrors was added to eliminate).
+        names["#registrationErrors"] = "registrationErrors"
+        remove_parts.append("#registrationErrors")
+
+    update_expression = "SET " + ", ".join(set_parts)
+    if remove_parts:
+        update_expression += " REMOVE " + ", ".join(remove_parts)
 
     try:
         boto3.client("dynamodb").update_item(
@@ -343,7 +400,7 @@ def _write_fabrication_status(
                 "orchestrationId": {"S": orchestration_id},
                 "agentUseId": {"S": agent_use_id},
             },
-            UpdateExpression="SET " + ", ".join(set_parts),
+            UpdateExpression=update_expression,
             ExpressionAttributeNames=names,
             ExpressionAttributeValues=values,
         )

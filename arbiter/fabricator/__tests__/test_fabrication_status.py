@@ -269,6 +269,112 @@ class TestRegistrationErrorsJobStatusBranching:
         assert result is None
 
 
+class TestStaleRegistrationAttrsClearedOnCleanTerminalWrite:
+    """A terminal write with ZERO registration failures this run must REMOVE
+    any registrationErrors/errorMessage left by an earlier failed/partial
+    attempt on the same row — otherwise a bare success can be misread as a
+    partial-failure completion (finding 5672bc34)."""
+
+    def setup_method(self):
+        os.environ["FABRICATION_JOBS_TABLE"] = "citadel-fabrication-jobs-test"
+
+    def teardown_method(self):
+        os.environ.pop("FABRICATION_JOBS_TABLE", None)
+
+    def test_clean_completed_write_removes_stale_registration_attrs(self):
+        # Seed row (conceptually) carries stale registrationErrors +
+        # errorMessage from a prior FAILED attempt. A clean COMPLETED write
+        # (no error_message, no registration_errors passed) must emit a
+        # REMOVE clause for both attributes rather than leaving them.
+        mock_client = MagicMock()
+        with patch.object(index.boto3, "client", return_value=mock_client):
+            index._write_fabrication_status(
+                "sess-1", "MyAgent", "COMPLETED", agent_id="MyAgent",
+            )
+        kwargs = mock_client.update_item.call_args.kwargs
+        expr = kwargs["UpdateExpression"]
+        assert "REMOVE" in expr
+        assert "#registrationErrors" in expr.split("REMOVE", 1)[1]
+        assert "#errorMessage" in expr.split("REMOVE", 1)[1]
+        assert kwargs["ExpressionAttributeNames"]["#registrationErrors"] == "registrationErrors"
+        assert kwargs["ExpressionAttributeNames"]["#errorMessage"] == "errorMessage"
+        # Neither attribute may also appear in a SET clause (would conflict
+        # with the REMOVE and is redundant): check the SET portion only.
+        set_clause = expr.split("REMOVE", 1)[0]
+        assert ":registrationErrors" not in kwargs.get("ExpressionAttributeValues", {})
+        assert ":errorMessage" not in kwargs.get("ExpressionAttributeValues", {})
+        assert "#registrationErrors = " not in set_clause
+        assert "#errorMessage = " not in set_clause
+
+    def test_partial_failure_write_still_sets_registration_attrs_no_remove(self):
+        # A write WITH registration_errors/error_message present must SET
+        # them (existing behavior) and must NOT include them in REMOVE.
+        mock_client = MagicMock()
+        with patch.object(index.boto3, "client", return_value=mock_client):
+            index._write_fabrication_status(
+                "sess-1", "MyAgent", "COMPLETED", agent_id="MyAgent",
+                registration_errors=[{"toolId": "tool_bad", "error": "boom"}],
+            )
+        kwargs = mock_client.update_item.call_args.kwargs
+        expr = kwargs["UpdateExpression"]
+        assert "#registrationErrors = :registrationErrors" in expr
+        remove_clause = expr.split("REMOVE", 1)[1] if "REMOVE" in expr else ""
+        assert "#registrationErrors" not in remove_clause
+        assert kwargs["ExpressionAttributeValues"][":registrationErrors"]["L"][0]["M"]["toolId"] == {"S": "tool_bad"}
+
+    def test_failed_write_with_error_message_sets_it_no_remove(self):
+        mock_client = MagicMock()
+        with patch.object(index.boto3, "client", return_value=mock_client):
+            index._write_fabrication_status(
+                "sess-1", "MyAgent", "FAILED", error_message="boom",
+            )
+        kwargs = mock_client.update_item.call_args.kwargs
+        expr = kwargs["UpdateExpression"]
+        assert "#errorMessage = :errorMessage" in expr
+        remove_clause = expr.split("REMOVE", 1)[1] if "REMOVE" in expr else ""
+        assert "#errorMessage" not in remove_clause
+
+    def test_non_terminal_processing_write_neither_sets_nor_removes_error_attrs(self):
+        # PROCESSING is not terminal — must not add a REMOVE clause for
+        # attributes it has no opinion about (avoids a no-op REMOVE churn
+        # on every PROCESSING write).
+        mock_client = MagicMock()
+        with patch.object(index.boto3, "client", return_value=mock_client):
+            index._write_fabrication_status("sess-1", "MyAgent", "PROCESSING")
+        kwargs = mock_client.update_item.call_args.kwargs
+        expr = kwargs["UpdateExpression"]
+        assert "REMOVE" not in expr
+
+    def test_end_to_end_stale_attrs_absent_after_clean_rerun(self):
+        # Full simulation: seed a row's update_item call history to confirm
+        # a later clean COMPLETED call's REMOVE clause would clear both
+        # stale attributes a prior FAILED call had set via SET.
+        mock_client = MagicMock()
+        with patch.object(index.boto3, "client", return_value=mock_client):
+            # Attempt one (2026-08-01): FAILED with error attrs set.
+            index._write_fabrication_status(
+                "sess-1", "MyAgent", "FAILED",
+                error_message="registration failed",
+                registration_errors=[{"toolId": "t1", "error": "boom"}],
+            )
+            first_kwargs = mock_client.update_item.call_args.kwargs
+            assert "#errorMessage = :errorMessage" in first_kwargs["UpdateExpression"]
+            assert "#registrationErrors = :registrationErrors" in first_kwargs["UpdateExpression"]
+
+            # Attempt three (2026-08-02): clean COMPLETED re-run.
+            index._write_fabrication_status(
+                "sess-1", "MyAgent", "COMPLETED", agent_id="MyAgent",
+            )
+            second_kwargs = mock_client.update_item.call_args.kwargs
+        expr = second_kwargs["UpdateExpression"]
+        # Bite: reverting to a no-REMOVE implementation makes this fail,
+        # since the stale attrs would only ever be SET, never cleared.
+        assert "REMOVE" in expr
+        remove_clause = expr.split("REMOVE", 1)[1]
+        assert "#errorMessage" in remove_clause
+        assert "#registrationErrors" in remove_clause
+
+
 def _transient_error(code: str = "internalServerException",
                      message: str = "Bedrock had an internal error"):
     return ClientError({"Error": {"Code": code, "Message": message}}, "ConverseStream")
