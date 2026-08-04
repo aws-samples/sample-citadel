@@ -1,6 +1,7 @@
 /**
- * eval-scoring.ts (CIT-103 Pass A) — pure per-case multi-dimensional
- * scoring. Design §3 (7 dimensions v1) + §5 (determinism mechanics).
+ * eval-scoring.ts (CIT-103 Pass A + Phase 1 trajectory) — pure per-case
+ * multi-dimensional scoring. Design §3 (7 dimensions v1) + §5
+ * (determinism mechanics) + Phase 1 §1 (trajectory, 8th dimension).
  *
  * `scoreCase(caseRow, artifact, evalCase)` is a PURE function: no
  * `Date.now()`, no `Math.random()`, no I/O, no global/module-level mutable
@@ -37,6 +38,14 @@
 // Types
 // ─────────────────────────────────────────────────────────────────────────
 
+import {
+  scoreTrajectory,
+  type ObservedTrajectory,
+  type TrajectorySpecForScoring,
+} from "./eval-trajectory";
+
+export type { ObservedTrajectory, TrajectorySpecForScoring };
+
 export type DimensionName =
   | "task_success"
   | "policy_compliance"
@@ -44,7 +53,8 @@ export type DimensionName =
   | "latency"
   | "cost"
   | "groundedness_citation"
-  | "groundedness_faithfulness";
+  | "groundedness_faithfulness"
+  | "trajectory";
 
 export type DimensionStatus =
   "SCORED" | "UNKNOWN" | "NOT_APPLICABLE" | "PENDING";
@@ -80,7 +90,9 @@ export interface DimensionScore {
 export type ScoreVector = DimensionScore[];
 
 /** Fixed canonical dimension order — the source of truth for
- * canonicalScoreVector()'s output ordering. */
+ * canonicalScoreVector()'s output ordering. Position 8 ("trajectory") is
+ * appended, not inserted, so aggregation over old persisted vectors
+ * (which lack a trajectory entry) stays additive-safe (design §0.5). */
 export const DIMENSION_ORDER: readonly DimensionName[] = [
   "task_success",
   "policy_compliance",
@@ -89,6 +101,7 @@ export const DIMENSION_ORDER: readonly DimensionName[] = [
   "cost",
   "groundedness_citation",
   "groundedness_faithfulness",
+  "trajectory",
 ];
 
 const MAX_DETAIL_LENGTH = 1024;
@@ -148,6 +161,10 @@ export interface EvalCaseForScoring {
   groundingRequirements?: GroundingRequirementForScoring[];
   maxLatencyMs?: number;
   maxCostUsd?: number;
+  /** Design §1.2: optional per-case trajectory assertions (toolSequence,
+   * dagPath, maxSteps, noLoop, noRedundantCalls). Absent => trajectory
+   * dimension is NOT_APPLICABLE (case opted out entirely). */
+  trajectorySpec?: TrajectorySpecForScoring;
 }
 
 /** Narrow view of one governance-ledger finding row (see
@@ -180,6 +197,13 @@ export interface ScoringArtifact {
   executionNodeOutputs: ScoringExecutionNode[];
   findings: ScoringFinding[];
   costRows: ScoringCostRow[];
+  /** Design §1.3: reconstructed by the I/O layer (eval-scoring-io.ts)
+   * from `sections.nodes[]` + tool-signal findings. Optional so existing
+   * callers/fixtures that predate trajectory scoring keep compiling —
+   * absence is treated identically to an empty/unknown observation
+   * (trajectory dimension degrades to UNKNOWN/NOT_APPLICABLE, never a
+   * fabricated score). */
+  observedTrajectory?: ObservedTrajectory;
   /** Intentionally typed as unknown/never-read — see module doc. Present
    * only so tests can pin the "never read" invariant against a realistic
    * artifact shape; scorers must not access this field. */
@@ -674,6 +698,13 @@ function scoreGroundednessFaithfulness(
   };
 }
 
+function scoreTrajectoryDimension(
+  artifact: ScoringArtifact,
+  evalCase: EvalCaseForScoring,
+): DimensionScore {
+  return scoreTrajectory(artifact.observedTrajectory, evalCase.trajectorySpec);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────────
@@ -697,6 +728,7 @@ export function scoreCase(
     scoreCost(artifact, evalCase),
     scoreGroundednessCitation(caseRow, artifact, evalCase),
     scoreGroundednessFaithfulness(evalCase),
+    scoreTrajectoryDimension(artifact, evalCase),
   ];
   return canonicalScoreVector(vector);
 }

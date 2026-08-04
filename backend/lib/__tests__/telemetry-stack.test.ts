@@ -43,6 +43,9 @@ function buildSupportTables(supportStack: cdk.Stack): {
   evalCasesTable: dynamodb.Table;
   evalRunsTable: dynamodb.Table;
   evalRunCaseResultsTable: dynamodb.Table;
+  evalSamplingConfigTable: dynamodb.Table;
+  evalProdSamplesTable: dynamodb.Table;
+  idempotencyTable: dynamodb.Table;
 } {
   const modelCatalogTable = new dynamodb.Table(
     supportStack,
@@ -132,6 +135,36 @@ function buildSupportTables(supportStack: cdk.Stack): {
       sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
     },
   );
+  // Phase 2 (production sampling): admin-authored sampling config +
+  // captured/scored production-sample tables, plus the shared idempotency
+  // table (from BackendStack in the real app).
+  const evalSamplingConfigTable = new dynamodb.Table(
+    supportStack,
+    "TestEvalSamplingConfigTable",
+    {
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const evalProdSamplesTable = new dynamodb.Table(
+    supportStack,
+    "TestEvalProdSamplesTable",
+    {
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "SK", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  evalProdSamplesTable.addGlobalSecondaryIndex({
+    indexName: "AgentDimTimeIndex",
+    partitionKey: { name: "GSI1PK", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "GSI1SK", type: dynamodb.AttributeType.STRING },
+  });
+  const idempotencyTable = new dynamodb.Table(
+    supportStack,
+    "TestIdempotencyTable",
+    {
+      partitionKey: { name: "eventId", type: dynamodb.AttributeType.STRING },
+    },
+  );
   return {
     modelCatalogTable,
     executionsTable,
@@ -145,9 +178,9 @@ function buildSupportTables(supportStack: cdk.Stack): {
     evalCasesTable,
     evalRunsTable,
     evalRunCaseResultsTable,
-    evalCasesTable,
-    evalRunsTable,
-    evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
   };
 }
 
@@ -180,6 +213,9 @@ function buildStack(): {
     evalCasesTable,
     evalRunsTable,
     evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
   } = buildSupportTables(supportStack);
 
   const stack = new TelemetryStack(app, "TestTelemetryStack", {
@@ -204,6 +240,9 @@ function buildStack(): {
     evalCasesTable,
     evalRunsTable,
     evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
     accessLogsBucket: new s3.Bucket(supportStack, "TestAccessLogsBucket", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
@@ -243,6 +282,9 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
     evalCasesTable,
     evalRunsTable,
     evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
   } = buildSupportTables(supportStack);
 
   const stack = new TelemetryStack(app, "TestTelemetryStackOrigin", {
@@ -267,6 +309,9 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
     evalCasesTable,
     evalRunsTable,
     evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
     accessLogsBucket: new s3.Bucket(
       supportStack,
       "TestAccessLogsBucketOrigin",
@@ -581,6 +626,9 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       evalCasesTable,
       evalRunsTable,
       evalRunCaseResultsTable,
+      evalSamplingConfigTable,
+      evalProdSamplesTable,
+      idempotencyTable,
     } = buildSupportTables(supportStack);
     const stack = new TelemetryStack(app, "TestTelemetryStackUnconfigured", {
       environment: "test",
@@ -603,6 +651,9 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       evalCasesTable,
       evalRunsTable,
       evalRunCaseResultsTable,
+      evalSamplingConfigTable,
+      evalProdSamplesTable,
+      idempotencyTable,
       accessLogsBucket: new s3.Bucket(
         supportStack,
         "TestAccessLogsBucketUnconfigured",
@@ -976,11 +1027,12 @@ describe("TelemetryStack — platform-health dashboard (decision ab73ae1b)", () 
 });
 
 describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)", () => {
-  test("alarm count is existing (Off-frontier is in arbiter-stack, none pre-existing here) + 6 new", () => {
+  test("alarm count is existing (Off-frontier is in arbiter-stack, none pre-existing here) + 6 platform-health + 1 eval-drift (Phase 3)", () => {
     const { template } = buildStack();
-    // TelemetryStack itself has zero pre-existing alarms — all 6 present
-    // here are the new platform-health alarms.
-    template.resourceCountIs("AWS::CloudWatch::Alarm", 6);
+    // TelemetryStack itself has zero pre-existing alarms — 6 are the
+    // decision ab73ae1b platform-health alarms; the 7th (EvalDriftAlarm)
+    // is Phase 3's drift-detection alarm, added independently.
+    template.resourceCountIs("AWS::CloudWatch::Alarm", 7);
   });
 
   test("A1 node-failure: name, threshold, comparison, periods, datapoints, treatMissingData", () => {
@@ -1124,10 +1176,29 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
     });
   });
 
+  test("A7 eval-drift (Phase 3): name, threshold, comparison, periods, datapoints, treatMissingData, metric linkage", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "citadel-eval-drift-test",
+      Threshold: 0.15,
+      ComparisonOperator: "GreaterThanThreshold",
+      EvaluationPeriods: 3,
+      DatapointsToAlarm: 3,
+      TreatMissingData: "notBreaching",
+      // Metric linkage contract: must match eval-metrics-constants.ts's
+      // EVAL_DRIFT_NAMESPACE / METRIC_DRIFT_DELTA literals — the detector
+      // emits under these names; the alarm watches them.
+      Namespace: "Citadel/EvalDrift",
+      MetricName: "DriftDelta",
+      Dimensions: [{ Name: "Environment", Value: "test" }],
+    });
+  });
+
   test("every new alarm's AlarmActions references props.alarmTopic ARN", () => {
     const { template } = buildStack();
     const alarms = template.findResources("AWS::CloudWatch::Alarm");
-    expect(Object.keys(alarms)).toHaveLength(6);
+    // 6 platform-health alarms (decision ab73ae1b) + 1 Phase 3 eval-drift alarm.
+    expect(Object.keys(alarms)).toHaveLength(7);
     for (const [, resource] of Object.entries(alarms)) {
       const actions = resource.Properties?.AlarmActions ?? [];
       expect(actions.length).toBeGreaterThan(0);

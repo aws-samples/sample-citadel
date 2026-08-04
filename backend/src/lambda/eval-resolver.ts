@@ -194,6 +194,7 @@ function validateCaseInput(input: EvalCaseInput): void {
   assertWithinSizeCap("input.structuredInput", input.input?.structuredInput);
   assertWithinSizeCap("input.transcript", input.input?.transcript);
   assertWithinSizeCap("expectedOutcome", input.expectedOutcome);
+  assertWithinSizeCap("trajectorySpec", input.trajectorySpec);
 }
 
 // ── Immutability write-path guard ─────────────────────────────────────────
@@ -560,6 +561,7 @@ export async function addEvalCase(
     groundingRequirements: input.groundingRequirements,
     maxLatencyMs: input.maxLatencyMs,
     maxCostUsd: input.maxCostUsd,
+    trajectorySpec: input.trajectorySpec,
     provenance: { source: "AUTHORED", producerCommit: null },
     version: 1,
     createdAt: now,
@@ -640,6 +642,7 @@ export async function updateEvalCase(
     groundingRequirements: input.groundingRequirements,
     maxLatencyMs: input.maxLatencyMs,
     maxCostUsd: input.maxCostUsd,
+    trajectorySpec: input.trajectorySpec,
   };
   for (const [k, v] of Object.entries(fields)) {
     const nameKey = `#${k}`;

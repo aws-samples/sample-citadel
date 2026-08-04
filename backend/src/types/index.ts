@@ -422,6 +422,27 @@ export interface EvalSuiteInput {
 
 export type EvalCaseKindLiteral = "CONVERSATION" | "EXECUTION";
 
+/**
+ * Phase 2 (production sampling) — admin-authored, per-org sampling
+ * configuration. Hard gate: sampling occurs only when `optIn === true`
+ * (see eval-sampling-config.ts's resolveEffectiveRate — a config with
+ * optIn!==true, or an absent config entirely, always resolves rate=0).
+ */
+export interface EvalSamplingConfig {
+  orgId: string;
+  optIn: boolean;
+  defaultSampleRate: number;
+  perAgentSampleRate: Record<string, number>;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export interface EvalSamplingConfigInput {
+  optIn: boolean;
+  defaultSampleRate: number;
+  perAgentSampleRate?: Record<string, number>;
+}
+
 export interface EvalCaseInputPayload {
   prompt?: string | null;
   transcript?: TranscriptMessage[] | null;
@@ -448,6 +469,27 @@ export interface GroundingRequirement {
   sourceUri?: string;
   mustCiteAnyOf: string[];
   mustNotHallucinate: boolean;
+}
+
+export type ToolSequenceMode = "SET" | "SUBSEQUENCE" | "STRICT";
+
+export interface ToolSequenceSpec {
+  mode: ToolSequenceMode;
+  tools: string[];
+}
+
+/** Phase 1 (trajectory eval dimension) — see
+ * backend/src/lambda/utils/eval-trajectory.ts::TrajectorySpecForScoring.
+ * All sub-fields optional; each present sub-field contributes one
+ * sub-assertion to the trajectory dimension score. Ordered toolSequence
+ * modes (SUBSEQUENCE/STRICT) degrade to UNKNOWN at scoring time when no
+ * ordering signal is available — never guessed. */
+export interface TrajectorySpec {
+  toolSequence?: ToolSequenceSpec;
+  dagPath?: string[];
+  maxSteps?: number;
+  noLoop?: boolean;
+  noRedundantCalls?: boolean;
 }
 
 export type EvalCaseProvenanceSourceLiteral =
@@ -479,6 +521,7 @@ export interface EvalCase {
   groundingRequirements?: GroundingRequirement[];
   maxLatencyMs?: number;
   maxCostUsd?: number;
+  trajectorySpec?: TrajectorySpec;
   provenance: EvalCaseProvenance;
   version: number;
   createdAt: string;
@@ -498,6 +541,7 @@ export interface EvalCaseInput {
   groundingRequirements?: GroundingRequirement[];
   maxLatencyMs?: number;
   maxCostUsd?: number;
+  trajectorySpec?: TrajectorySpec;
 }
 
 // EvalRun / EvalRunCaseResult (CIT-102 — Eval Runner)

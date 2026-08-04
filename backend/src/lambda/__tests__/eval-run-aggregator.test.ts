@@ -257,7 +257,7 @@ describe("aggregateEvalRun — self-sufficient run aggregation", () => {
       unknown
     >;
     const aggregates = JSON.parse(values[":scoreAggregates"] as string);
-    expect(aggregates).toHaveLength(7);
+    expect(aggregates).toHaveLength(8);
   });
 });
 

@@ -42,6 +42,7 @@ import hashlib
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from common.model_resolver import resolve_model
@@ -259,6 +260,14 @@ def _prompt_hash(prompt: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _utc_now_iso() -> str:
+    """Current UTC time, ISO-8601 — the only non-deterministic value
+    intentionally used on the eval.usage.captured event (a capture
+    timestamp, distinct from the prompt hash's determinism contract
+    above, which must stay timestamp-free)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ---------------------------------------------------------------------------
 # Structured verdict parsing — strict: never fabricate.
 # ---------------------------------------------------------------------------
@@ -296,9 +305,14 @@ def _judge_dimension(
     rubric: str,
     artifact: dict[str, Any],
     resolved_model,
-) -> dict[str, Any]:
-    """Judge a single dimension and return the FROZEN judged payload dict
-    (governance.eval.case.judged — verbatim keys, no extras)."""
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Judge a single dimension and return (judged_payload, usage).
+
+    judged_payload is the FROZEN judged payload dict (governance.eval.
+    case.judged — verbatim keys, no extras). usage is the extracted
+    Bedrock token-usage dict (Phase 2 §2.6), or None when the response
+    carried no usable usage block (e.g. the invocation itself failed) —
+    the caller must never fabricate a usage event in that case."""
     prompt = _build_prompt(dimension, rubric, artifact)
     prompt_hash = _prompt_hash(prompt)
     judge_model_version = _judge_model_version(resolved_model)
@@ -313,6 +327,7 @@ def _judge_dimension(
         "judgePromptHash": prompt_hash,
     }
 
+    usage: dict[str, Any] | None = None
     try:
         client = _bedrock_client()
         response = client.converse(
@@ -322,6 +337,7 @@ def _judge_dimension(
             inferenceConfig={"temperature": 0, "maxTokens": 512},
         )
         raw_text = _extract_response_text(response)
+        usage = _extract_usage(response)
     except Exception as exc:  # noqa: BLE001 — a Bedrock call failure is UNKNOWN, not a crash
         logger.warning(
             "eval_judge: bedrock invocation failed for dimension=%s caseId=%s: %s",
@@ -344,7 +360,7 @@ def _judge_dimension(
         payload["status"] = "SCORED"
         payload["verdict"] = verdict
 
-    return payload
+    return payload, usage
 
 
 def _extract_response_text(response: dict[str, Any]) -> str | None:
@@ -356,6 +372,21 @@ def _extract_response_text(response: dict[str, Any]) -> str | None:
         return None
     except (KeyError, IndexError, TypeError):
         return None
+
+
+def _extract_usage(response: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract token usage from a Bedrock converse() response. Returns
+    None (never raises, never fabricates zeros) when the response has no
+    usable `usage` block — an older/mocked response shape or a failed
+    call must never produce a fabricated zero-cost usage event."""
+    usage = response.get("usage") if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = usage.get("inputTokens")
+    output_tokens = usage.get("outputTokens")
+    if not isinstance(input_tokens, (int, float)) or not isinstance(output_tokens, (int, float)):
+        return None
+    return {"inputTokens": input_tokens, "outputTokens": output_tokens}
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +414,7 @@ def handle_judge_requested(detail: dict[str, Any]) -> None:
         if dimension not in _JUDGEABLE_DIMENSIONS:
             logger.warning("eval_judge: skipping unrecognized dimension %r", dimension)
             continue
-        payload = _judge_dimension(
+        payload, usage = _judge_dimension(
             eval_run_id=eval_run_id,
             case_id=case_id,
             org_id=org_id,
@@ -395,13 +426,62 @@ def handle_judge_requested(detail: dict[str, Any]) -> None:
         events_client.put_events(
             Entries=[
                 {
-                    "Source": "citadel.governance",
+                    # Source MUST equal citadel.backend: this is the same
+                    # governance-event Source convention every other
+                    # governance.* event uses (notifier-base.ts's
+                    # emitGovernanceEvent hardcodes it, EVENTBRIDGE_CATALOG.md
+                    # documents it), and it is the exact source both
+                    # telemetry-stack.ts routing rules for this detail-type
+                    # (EvalCaseJudgedRule, EvalSampleJudgedRule) match on. A
+                    # different Source here means judged events route to NO
+                    # consumer (see test_judged_event_source_matches_the_
+                    # backend_routing_rule_convention).
+                    "Source": "citadel.backend",
                     "DetailType": "governance.eval.case.judged",
                     "Detail": json.dumps(payload, sort_keys=True),
                     "EventBusName": os.environ.get("EVENT_BUS_NAME", "default"),
                 }
             ]
         )
+        # Phase 2 §2.6: judge-invocation token usage, tagged
+        # costContext:"eval" unconditionally — never customer-billable
+        # spend. Best-effort: a failure constructing/emitting this event
+        # must never affect the judged emission above (already sent).
+        if usage is not None:
+            try:
+                usage_payload = {
+                    "orgId": org_id,
+                    # No judged-agent field exists on the FROZEN
+                    # judge.requested contract (evalRunId/caseId/orgId/
+                    # artifactRef/judgeDimensions/judgeSlot only) — agentId
+                    # is honestly omitted rather than fabricated from the
+                    # judge's OWN model id, which is a different concept
+                    # (cost-ledger-writer.ts's EvalUsageCapturedDetail.agentId
+                    # is optional for exactly this reason).
+                    "modelId": payload["judgeModelId"],
+                    "inputTokens": usage["inputTokens"],
+                    "outputTokens": usage["outputTokens"],
+                    "costContext": "eval",
+                    "capturedAt": _utc_now_iso(),
+                    "correlationId": eval_run_id,
+                }
+                events_client.put_events(
+                    Entries=[
+                        {
+                            "Source": "citadel.eval.usage",
+                            "DetailType": "eval.usage.captured",
+                            "Detail": json.dumps(usage_payload, sort_keys=True),
+                            "EventBusName": os.environ.get("EVENT_BUS_NAME", "default"),
+                        }
+                    ]
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort, never blocks the judged emission
+                logger.warning(
+                    "eval_judge: failed to emit eval.usage.captured for dimension=%s caseId=%s: %s",
+                    dimension,
+                    case_id,
+                    exc,
+                )
 
 
 def handler(event: dict[str, Any], _context: Any) -> None:

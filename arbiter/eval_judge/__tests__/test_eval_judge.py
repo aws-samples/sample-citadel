@@ -205,6 +205,42 @@ def test_happy_path_emits_scored_with_all_stamps():
     assert bedrock.calls[0]["inferenceConfig"]["temperature"] == 0
 
 
+def test_judged_event_source_matches_the_backend_routing_rule_convention():
+    """B2 (taskId 316427f2, HIGH): EvalCaseJudgedRule and
+    EvalSampleJudgedRule (telemetry-stack.ts) both match
+    source=["citadel.backend"] for governance.eval.case.judged — the same
+    Source every other governance.* event uses (notifier-base.ts's
+    emitGovernanceEvent hardcodes "citadel.backend"; EVENTBRIDGE_CATALOG.md
+    documents it as the convention for this event). If the judge emitted
+    any other Source, the event would route to NO consumer and every
+    judge-basis dimension (task_success, groundedness_faithfulness) would
+    silently stay PENDING forever. Pin the emitter's real Source against
+    the documented/rule-side convention so the two sides can't drift
+    again."""
+    bedrock = _FakeBedrockClient(_well_formed_verdict_text(0.9))
+    events_client = MagicMock()
+
+    with patch.object(ej, "_bedrock_client", return_value=bedrock), \
+         patch.object(ej, "_ddb_resource", return_value=_mock_ddb_resource()), \
+         patch.object(ej, "_ssm_client", return_value=_mock_ssm_client()), \
+         patch.object(ej, "_s3_client", return_value=_mock_s3_client()), \
+         patch.object(ej, "_events_client", return_value=events_client):
+        ej.handle_judge_requested(_requested_event())
+
+    (call_kwargs,) = [c.kwargs for c in events_client.put_events.call_args_list]
+    judged_entries = [
+        e for e in call_kwargs["Entries"]
+        if e["DetailType"] == "governance.eval.case.judged"
+    ]
+    assert len(judged_entries) == 1
+    # This is the documented rule-side convention (telemetry-stack.ts's
+    # EvalCaseJudgedRule/EvalSampleJudgedRule eventPattern.source), pinned
+    # here on the emitter side so a future edit to either cannot silently
+    # diverge from the other again.
+    EXPECTED_ROUTING_RULE_SOURCE = "citadel.backend"
+    assert judged_entries[0]["Source"] == EXPECTED_ROUTING_RULE_SOURCE
+
+
 def test_never_writes_ddb_directly():
     """Single-writer invariant (design §7): the judge handler must never
     call any DynamoDB write API. Only get_item/scan (reads) may be called

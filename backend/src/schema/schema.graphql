@@ -82,6 +82,10 @@ type Query {
   getEvalRun(evalRunId: ID!): EvalRun
   listEvalRuns(orgId: ID!, suiteId: ID): [EvalRun!]!
   listEvalRunCaseResults(evalRunId: ID!): [EvalRunCaseResult!]!
+  # Phase 2 (production sampling) — admin-only reads (enforced in
+  # eval-sampling-config-resolver.ts, not by schema visibility).
+  getEvalSamplingConfig(orgId: ID!): EvalSamplingConfig
+  listEvalProdSamples(orgId: ID!, agentId: ID): [EvalProdSample!]!
   # InterrogationRound
   getInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound
   listInterrogationRounds(projectId: ID!): [InterrogationRound!]!
@@ -351,6 +355,10 @@ type Mutation {
   # EvalRun (CIT-102) — start is the only mutation; runs are immutable
   # once created (outcome-only progression via the driver, not client edits).
   startEvalRun(input: StartEvalRunInput!): EvalRun!
+  # Phase 2 (production sampling) — admin-only (enforced in the resolver,
+  # not schema visibility). optIn/rate changes take effect on the NEXT
+  # terminal workflow/conversation signal; no retroactive resampling.
+  setEvalSamplingConfig(orgId: ID!, input: EvalSamplingConfigInput!): EvalSamplingConfig!
   # InterrogationRound
   startInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound!
   injectConstraints(projectId: ID!, roundN: Int!, constraints: [String!]!): InterrogationRound!
@@ -2156,6 +2164,43 @@ input GroundingRequirementInput {
   mustNotHallucinate: Boolean!
 }
 
+# Phase 1 (trajectory eval dimension) — see
+# backend/src/lambda/utils/eval-trajectory.ts::TrajectorySpecForScoring.
+# Ordered toolSequence modes (SUBSEQUENCE/STRICT) degrade to UNKNOWN at
+# scoring time when no ordering signal is available in the replay
+# artifact — never guessed.
+enum ToolSequenceMode {
+  SET
+  SUBSEQUENCE
+  STRICT
+}
+
+type ToolSequenceSpec {
+  mode: ToolSequenceMode!
+  tools: [String!]!
+}
+
+input ToolSequenceSpecInput {
+  mode: ToolSequenceMode!
+  tools: [String!]!
+}
+
+type TrajectorySpec {
+  toolSequence: ToolSequenceSpec
+  dagPath: [String!]
+  maxSteps: Int
+  noLoop: Boolean
+  noRedundantCalls: Boolean
+}
+
+input TrajectorySpecInput {
+  toolSequence: ToolSequenceSpecInput
+  dagPath: [String!]
+  maxSteps: Int
+  noLoop: Boolean
+  noRedundantCalls: Boolean
+}
+
 type EvalCaseInputPayload {
   prompt: String
   transcript: [TranscriptMessage!]
@@ -2197,6 +2242,7 @@ type EvalCase {
   groundingRequirements: [GroundingRequirement!]
   maxLatencyMs: Int
   maxCostUsd: Float
+  trajectorySpec: TrajectorySpec
   provenance: EvalCaseProvenance!
   version: Int!
   createdAt: AWSDateTime!
@@ -2216,6 +2262,7 @@ input EvalCaseInput {
   groundingRequirements: [GroundingRequirementInput!]
   maxLatencyMs: Int
   maxCostUsd: Float
+  trajectorySpec: TrajectorySpecInput
 }
 
 # EvalRun / EvalRunCaseResult (CIT-102 — Eval Runner)
@@ -2296,6 +2343,39 @@ type EvalRunCaseResult {
 
 type DeleteResult {
   success: Boolean!
+}
+
+# Phase 2 (production sampling) — admin-authored, per-org opt-in
+# sampling configuration. Hard gate: sampling occurs only when
+# optIn===true (eval-sampling-config.ts's resolveEffectiveRate).
+type EvalSamplingConfig {
+  orgId: ID!
+  optIn: Boolean!
+  defaultSampleRate: Float!
+  # Map<agentId, rate 0..1> — AWSJSON since GraphQL has no native map type.
+  perAgentSampleRate: AWSJSON
+  updatedAt: AWSDateTime
+  updatedBy: String
+}
+
+input EvalSamplingConfigInput {
+  optIn: Boolean!
+  defaultSampleRate: Float!
+  perAgentSampleRate: AWSJSON
+}
+
+# Phase 2 (production sampling) — a captured + scored production sample.
+# scoreVector uses the allowlisted prod dimension set (eval-prod-scoring.ts
+# PROD_DIMENSION_ORDER) — deliberately excludes task_success/tool_accuracy.
+type EvalProdSample {
+  orgId: ID!
+  runId: ID!
+  sampleId: ID!
+  agentId: ID!
+  kind: EvalCaseKind!
+  artifactRef: String!
+  scoreVector: AWSJSON
+  capturedAt: AWSDateTime!
 }
 
 # InterrogationRound

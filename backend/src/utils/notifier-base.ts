@@ -73,6 +73,25 @@ export const GOVERNANCE_DETAIL_TYPES = [
   // ONLY writer of eval tables — the judge handler never writes them
   // directly (single-writer invariant, design §7).
   "governance.eval.case.judged",
+  // Phase 2 (production sampling, design §2.3): emitted by
+  // eval-sampling-selector.ts after a sanitized prod-sample artifact has
+  // been materialized (reusing assembleReplayPackage verbatim) and
+  // written to `prod-samples/{orgId}/{runId}.json`. Never emitted when
+  // the fail-closed sanitisation gate throws — the sample is dropped
+  // instead (design invariant: no un-redacted content path exists).
+  // `dimensions` is the Phase 2 allowlist, deliberately EXCLUDING
+  // task_success/tool_accuracy (no per-case expectation exists for a
+  // production sample). Consumed by eval-sample-scorer.ts.
+  "governance.eval.sample.captured",
+  // Phase 3 (drift detection, design §3.2/§3.3): emitted by
+  // eval-drift-detector.ts (scheduled) when a current-vs-baseline
+  // production-sample comparison for one (agentId, dimension) pair
+  // breaches its configured threshold (eval-drift.ts::computeDrift).
+  // Best-effort — the EMF flush for the cycle has already happened
+  // regardless of whether this event is successfully delivered.
+  // Consumed by eval-drift-finding-writer.ts, which writes a
+  // GovernanceFinding row into GOVERNANCE_LEDGER_TABLE.
+  "governance.eval.drift.detected",
 ] as const;
 
 export type GovernanceDetailType = (typeof GOVERNANCE_DETAIL_TYPES)[number];
@@ -269,6 +288,36 @@ export interface GovernancePayloadMap {
     judgeModelId: string;
     judgeModelVersion: string;
     judgePromptHash: string;
+  };
+  // Phase 2 (production sampling): payload for governance.eval.sample.captured.
+  // Emitted by eval-sampling-selector.ts once the sanitized artifact is
+  // durably written. `dimensions` is the fixed allowlist this event
+  // always carries (PROD_DIMENSION_ORDER in eval-prod-scoring.ts) —
+  // deliberately excludes task_success/tool_accuracy.
+  "governance.eval.sample.captured": {
+    sampleId: string;
+    orgId: string;
+    agentId: string;
+    runId: string;
+    kind: "execution" | "conversation";
+    artifactRef: string;
+    dimensions: string[];
+  };
+  // Phase 3 (drift detection): payload for governance.eval.drift.detected.
+  // Emitted by eval-drift-detector.ts on a threshold breach for one
+  // (agentId, dimension) pair. `baseline`/`current` are the DimStat
+  // shapes from eval-drift.ts (passRate XOR meanScore + sampleCount);
+  // `delta` mirrors computeDrift's own DriftResult.delta (null when the
+  // two windows were not comparable — never fabricated). `window` is
+  // the CURRENT window's [from, to) hour-bucket bounds, used by
+  // eval-drift-finding-writer.ts as part of its idempotency key.
+  "governance.eval.drift.detected": {
+    agentId: string;
+    dimension: string;
+    baseline: { passRate?: number; meanScore?: number; sampleCount: number };
+    current: { passRate?: number; meanScore?: number; sampleCount: number };
+    delta: number | null;
+    window: { from: string; to: string };
   };
 }
 

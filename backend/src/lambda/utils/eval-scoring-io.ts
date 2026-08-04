@@ -26,6 +26,11 @@ import {
   type ScoringCostRow,
   type ScoringFinding,
 } from "./eval-scoring";
+import type {
+  ObservedTrajectory,
+  ObservedTrajectoryStep,
+  TrajectorySpecForScoring,
+} from "./eval-trajectory";
 import { resolveReplayBucketName } from "./eval-artifact-store";
 
 const dynamoClient = new DynamoDBClient({});
@@ -60,12 +65,26 @@ export interface EvalCaseRow {
   groundingRequirements?: EvalCaseForScoring["groundingRequirements"];
   maxLatencyMs?: number;
   maxCostUsd?: number;
+  trajectorySpec?: TrajectorySpecForScoring;
+}
+
+interface ReplayEnvelopeNode {
+  nodeId: string;
+  outputs: unknown;
+  /** Ordering anchors (Phase 1 additive nodes[] projection — see
+   * replay-package-builder.ts). Absent on envelopes generated before this
+   * projection extension; treated as "no order signal" (sorts last), not
+   * guessed. */
+  startedAt?: string | null;
+  completedAt?: string | null;
+  agentId?: string | null;
+  status?: unknown;
 }
 
 interface ReplayEnvelopeSubset {
   kind?: "execution" | "conversation";
   sections?: {
-    nodes?: Array<{ nodeId: string; outputs: unknown }>;
+    nodes?: ReplayEnvelopeNode[];
     findings?: unknown[] | { partial: true };
     messages?: Array<{ role: string; content: string }>;
   };
@@ -191,6 +210,93 @@ function findingsToScoringFindings(
     }));
 }
 
+/** Timestamp -> epoch-ms, or +Infinity when absent/unparseable so nodes
+ * without a startedAt anchor sort AFTER every anchored node (never
+ * guessed as "first" or "concurrent"). */
+function orderingKey(value: string | null | undefined): number {
+  if (!value) return Number.POSITIVE_INFINITY;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Design §1.3: EXECUTION-kind ordered DAG steps, sorted by startedAt
+ * (tiebreak completedAt, then nodeId — a fully deterministic total order
+ * even when several nodes share identical timestamps). Nodes lacking a
+ * startedAt anchor at all sort after every anchored node.
+ */
+function buildExecutionSteps(
+  nodes: ReplayEnvelopeNode[],
+): ObservedTrajectoryStep[] {
+  const sorted = [...nodes].sort((a, b) => {
+    const startDiff = orderingKey(a.startedAt) - orderingKey(b.startedAt);
+    if (startDiff !== 0) return startDiff;
+    const completeDiff =
+      orderingKey(a.completedAt) - orderingKey(b.completedAt);
+    if (completeDiff !== 0) return completeDiff;
+    return a.nodeId.localeCompare(b.nodeId);
+  });
+  return sorted.map((n, i) => ({
+    stepIndex: i,
+    nodeId: n.nodeId,
+    agentId: typeof n.agentId === "string" ? n.agentId : null,
+    status: typeof n.status === "string" ? n.status : null,
+  }));
+}
+
+const TOOL_PERMITTED_PREFIX = "tool_permitted:not_on_deny_list:";
+
+/**
+ * Design §1.3: toolSet is always reconstructable (set membership carries
+ * no ordering requirement) — sorted + deduplicated from
+ * tool_permitted findings. toolOrder stays `null` (the honest CIT-121
+ * gap marker) because finding rows do not currently carry a per-finding
+ * order/timestamp signal distinguishable from one another; this must
+ * NEVER be backfilled from finding array position, since findings are
+ * read via a Scan/Query with no guaranteed emission order (see
+ * replay-package-builder.ts's own findings-ordering caveats).
+ */
+function buildToolSetAndOrder(findings: ScoringFinding[]): {
+  toolSet: string[];
+  toolOrder: string[] | null;
+} {
+  const tools = new Set<string>();
+  for (const f of findings) {
+    if (f.reason.startsWith(TOOL_PERMITTED_PREFIX)) {
+      tools.add(f.reason.slice(TOOL_PERMITTED_PREFIX.length));
+    }
+  }
+  return { toolSet: [...tools].sort(), toolOrder: null };
+}
+
+/**
+ * Reconstructs ObservedTrajectory (design §1.3) from the replay envelope.
+ * Pure mapping over already-fetched data — no I/O of its own. Returns a
+ * fully-defined (never partially-undefined) shape even when the envelope
+ * is absent, so scoreTrajectory() always receives a consistent input.
+ */
+function buildObservedTrajectory(
+  caseKind: "CONVERSATION" | "EXECUTION",
+  envelope: ReplayEnvelopeSubset | undefined,
+): ObservedTrajectory {
+  const nodes = envelope?.sections?.nodes ?? [];
+  const messages = envelope?.sections?.messages ?? [];
+  const findings = findingsToScoringFindings(envelope?.sections?.findings);
+  const { toolSet, toolOrder } = buildToolSetAndOrder(findings);
+
+  if (caseKind === "CONVERSATION") {
+    const turnCount = messages.filter((m) => m.role === "assistant").length;
+    return { steps: [], turnCount, toolSet, toolOrder };
+  }
+
+  return {
+    steps: buildExecutionSteps(nodes),
+    turnCount: 0,
+    toolSet,
+    toolOrder,
+  };
+}
+
 /**
  * Maps a loaded case row + EvalCase definition + artifact envelope + cost
  * rows into the pure scoreCase() input shapes.
@@ -236,6 +342,7 @@ export function buildScoringInputs(
     })),
     findings: findingsToScoringFindings(envelope?.sections?.findings),
     costRows,
+    observedTrajectory: buildObservedTrajectory(caseRow.caseKind, envelope),
   };
 
   const evalCaseForScoring: EvalCaseForScoring = {
@@ -248,6 +355,7 @@ export function buildScoringInputs(
     groundingRequirements: evalCase.groundingRequirements,
     maxLatencyMs: evalCase.maxLatencyMs,
     maxCostUsd: evalCase.maxCostUsd,
+    trajectorySpec: evalCase.trajectorySpec,
   };
 
   return { caseRowForScoring, artifact, evalCaseForScoring };

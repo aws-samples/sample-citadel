@@ -44,6 +44,7 @@ const FORBIDDEN_IDENTIFIER_RE =
 const CURATED_FILES = [
   "src/lambda/utils/eval-scoring.ts",
   "src/lambda/utils/eval-score-aggregate.ts",
+  "src/lambda/utils/eval-trajectory.ts",
   "src/lambda/eval-case-scorer.ts",
   "src/lambda/eval-run-aggregator.ts",
 ];

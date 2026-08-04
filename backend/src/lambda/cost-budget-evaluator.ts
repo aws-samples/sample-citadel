@@ -124,11 +124,19 @@ async function periodToDateSpend(
         costMicros?: number | null;
         priced?: boolean;
         evalContext?: boolean;
+        costContext?: "eval";
       };
       // CIT-102 §5: eval-run rows never enter period-to-date spend — an
       // eval run must not be able to trip an org budget alarm. Excluded
       // rows are skipped entirely, not counted as unpriced either.
       if (row.evalContext === true) continue;
+      // Finding c93c0ab5: judge-invocation rows (Phase 2, written by
+      // handleEvalUsageCaptured in cost-ledger-writer.ts) carry
+      // costContext:"eval" instead of evalContext — a judge's own usage
+      // is never customer-billable spend (EVENTBRIDGE_CATALOG.md), so it
+      // must be excluded here too, not merely from cost-aggregate.ts's
+      // customer-facing rollups.
+      if (row.costContext === "eval") continue;
       if (row.priced && typeof row.costMicros === "number") {
         spentMicros += row.costMicros;
       } else {

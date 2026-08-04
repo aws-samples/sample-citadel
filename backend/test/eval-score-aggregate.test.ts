@@ -144,6 +144,7 @@ describe("aggregateScoreVectors — no rows for a dimension across the whole run
       "cost",
       "groundedness_citation",
       "groundedness_faithfulness",
+      "trajectory",
     ]);
     for (const agg of result) {
       expect(agg.scoredCount).toBe(0);

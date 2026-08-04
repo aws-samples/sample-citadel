@@ -25,6 +25,11 @@ import {
   DIMENSION_WORKFLOW_ID,
   DIMENSION_AGENT_ID,
 } from "../src/utils/metrics-constants";
+import {
+  EVAL_DRIFT_NAMESPACE,
+  METRIC_DRIFT_DELTA,
+  DIMENSION_ENVIRONMENT_EVAL,
+} from "../src/utils/eval-metrics-constants";
 
 // --- Cost-reconciler metric contract (pinned literals; see
 // cost-ledger-reconciler.ts `emitMetrics`). Not exported from
@@ -162,6 +167,29 @@ export interface TelemetryStackProps extends cdk.StackProps {
   evalCasesTable: dynamodb.ITable;
   evalRunsTable: dynamodb.ITable;
   evalRunCaseResultsTable: dynamodb.ITable;
+  /**
+   * Phase 2 (production sampling) — admin-authored sampling config +
+   * captured/scored production-sample tables (from BackendStack). Same
+   * cross-stack-dependency rationale as evalCasesTable/evalRunsTable
+   * above (TelemetryStack already depends on BackendStack).
+   */
+  evalSamplingConfigTable: dynamodb.ITable;
+  evalProdSamplesTable: dynamodb.ITable;
+  /**
+   * Phase 3 (drift detection) — comma-separated agentIds the scheduled
+   * eval-drift-detector checks each cycle. Optional; an empty/unset
+   * value means the detector no-ops (never fabricates an agent list by
+   * Scanning EvalProdSamples — see eval-drift-detector.ts's module doc).
+   */
+  evalDriftAgentIds?: string;
+  /**
+   * Shared idempotency table (from BackendStack) — reused by
+   * eval-sampling-selector.ts's IdempotencyGuard (keyed on runId) so a
+   * redelivered terminal signal is a no-op. Same table every other
+   * IdempotencyGuard consumer in the codebase uses (agent-message-handler.ts,
+   * app-invoke-handler.ts, gateway-registration-handler.ts) — no new table.
+   */
+  idempotencyTable: dynamodb.ITable;
 }
 
 /**
@@ -193,6 +221,12 @@ export class TelemetryStack extends cdk.Stack {
   public readonly costApiUrl: string;
   /** Platform-health dashboard name (design §2; decision ab73ae1b). */
   public readonly platformHealthDashboardName: string;
+  /**
+   * Phase 2 (production sampling) — admin-only resolver Lambda, exposed
+   * so GovernanceStack (which owns the real appSyncApi L2 construct) can
+   * attach the AppSync Lambda data source + resolvers cross-stack.
+   */
+  public readonly evalSamplingConfigResolverFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: TelemetryStackProps) {
     super(scope, id, props);
@@ -249,6 +283,18 @@ export class TelemetryStack extends cdk.Stack {
       indexName: "BudgetIndex",
       partitionKey: { name: "GSI5PK", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "GSI5SK", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // Phase 2 §2.6 — sparse GSI6 EvalContextIndex: written ONLY on rows
+    // tagged costContext:"eval" (judge-invocation usage,
+    // cost-ledger-writer.ts's handleEvalUsageCaptured). Lets an operator
+    // Query "all judge spend for org X" independently of the base-table
+    // org rollup, which excludes these rows entirely (cost-aggregate.ts).
+    this.costLedgerTable.addGlobalSecondaryIndex({
+      indexName: "EvalContextIndex",
+      partitionKey: { name: "GSI6PK", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "GSI6SK", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
@@ -327,6 +373,27 @@ export class TelemetryStack extends cdk.Stack {
       },
     );
     workflowNodeCompletedRule.addTarget(
+      new targets.LambdaFunction(this.costLedgerWriterFunction, retryProps),
+    );
+
+    // Phase 2 §2.6: judge-invocation token usage (emitted by
+    // arbiter/eval_judge/index.py after every Bedrock converse() call) —
+    // 4th consumed source, always tagged costContext:"eval" by the writer.
+    const evalUsageCapturedRule = new events.Rule(
+      this,
+      "EvalUsageCapturedRule",
+      {
+        eventBus: props.agentEventBus,
+        description:
+          "Routes judge-invocation usage events (source citadel.eval.usage) " +
+          "to the cost-ledger writer, tagged costContext:'eval'",
+        eventPattern: {
+          source: ["citadel.eval.usage"],
+          detailType: ["eval.usage.captured"],
+        },
+      },
+    );
+    evalUsageCapturedRule.addTarget(
       new targets.LambdaFunction(this.costLedgerWriterFunction, retryProps),
     );
 
@@ -1181,6 +1248,364 @@ export class TelemetryStack extends cdk.Stack {
         }),
       ],
     });
+
+    // ========================================================================
+    // Phase 2 — Production sampling (EvalSamplingSelector + EvalSampleScorer)
+    // ========================================================================
+    //
+    // Homed HERE for the same DECISION d36fbbf7 rationale as the Pass A
+    // scorer Lambdas above: both need this.costLedgerTable (owned by this
+    // stack) and props.evalSamplingConfigTable/evalProdSamplesTable (from
+    // BackendStack, which instantiates before this stack). Direct Lambda
+    // EventBridge targets, no new SQS queue/DLQ — every write here is
+    // idempotent SET (or a fail-closed drop), so at-least-once EventBridge
+    // delivery is safe without a dedicated dispatch queue.
+    const evalSamplingSelectorFunction = new lambda.Function(
+      this,
+      "EvalSamplingSelectorFunction",
+      {
+        functionName: `citadel-eval-sampling-selector-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-sampling-selector.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EVAL_SAMPLING_CONFIG_TABLE: props.evalSamplingConfigTable.tableName,
+          IDEMPOTENCY_TABLE: props.idempotencyTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          REPLAY_BUCKET: this.replayPackageBucket.bucketName,
+          ENVIRONMENT: props.environment,
+          ...(props.commitSha ? { COMMIT_SHA: props.commitSha } : {}),
+          EXECUTIONS_TABLE: props.executionsTable.tableName,
+          CONVERSATIONS_TABLE: props.conversationsTable.tableName,
+          PROJECTS_TABLE: props.projectsTable.tableName,
+          WORKFLOWS_TABLE: props.workflowsTable.tableName,
+          AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+          EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
+          MODEL_CONFIG_TABLE: props.modelConfigTable.tableName,
+          GOVERNANCE_LEDGER_TABLE: props.governanceLedgerTable.tableName,
+          COST_LEDGER_TABLE: this.costLedgerTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(60),
+        memorySize: 512,
+        logGroup: new logs.LogGroup(this, "EvalSamplingSelectorFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    props.evalSamplingConfigTable.grantReadData(evalSamplingSelectorFunction);
+    props.idempotencyTable.grantReadWriteData(evalSamplingSelectorFunction);
+    // assembleReplayPackage needs the same read-only source-table grants
+    // as ReplayPackageHandlerFunction/EvalCaseScorerFunction above — this
+    // selector calls the identical unchanged builder function.
+    props.executionsTable.grantReadData(evalSamplingSelectorFunction);
+    props.conversationsTable.grantReadData(evalSamplingSelectorFunction);
+    props.projectsTable.grantReadData(evalSamplingSelectorFunction);
+    props.workflowsTable.grantReadData(evalSamplingSelectorFunction);
+    props.agentConfigTable.grantReadData(evalSamplingSelectorFunction);
+    props.executionSpecificationsTable.grantReadData(
+      evalSamplingSelectorFunction,
+    );
+    props.modelConfigTable.grantReadData(evalSamplingSelectorFunction);
+    props.governanceLedgerTable.grantReadData(evalSamplingSelectorFunction);
+    this.costLedgerTable.grantReadData(evalSamplingSelectorFunction);
+    // Write access to prod-samples/ under the SAME bucket eval-runs/
+    // already uses (assembleReplayPackage itself does no S3 I/O; the
+    // selector does its own PutObject under a distinct prefix).
+    this.replayPackageBucket.grantReadWrite(evalSamplingSelectorFunction);
+    props.agentEventBus.grantPutEventsTo(evalSamplingSelectorFunction);
+
+    new events.Rule(this, "EvalSamplingWorkflowCompletionRule", {
+      eventBus: props.agentEventBus,
+      ruleName: `citadel-eval-sampling-workflow-completion-${props.environment}`,
+      description:
+        "Phase 2: routes workflow.completed/workflow.failed (Source " +
+        "citadel.workflows) to the sampling selector for EXECUTION-kind " +
+        "production-sampling candidates. The selector itself no-ops on " +
+        "any org that has not opted in (org opt-in gates everything).",
+      eventPattern: {
+        source: ["citadel.workflows"],
+        detailType: ["workflow.completed", "workflow.failed"],
+      },
+      targets: [
+        new targets.LambdaFunction(evalSamplingSelectorFunction, {
+          retryAttempts: 2,
+        }),
+      ],
+    });
+
+    // NOTE (honest gap, see EVENTBRIDGE_CATALOG.md): no production Lambda
+    // in this codebase currently emits a `conversation.completed` /
+    // Source citadel.conversations signal for a REAL (non-eval-suite)
+    // conversation turn — agent-message-handler.ts's storeAgentResponse
+    // path writes the transcript row but emits no completion event.
+    // eval-sampling-selector.ts's handler already discriminates on this
+    // detail-type and is ready to receive it; wiring the EventBridge rule
+    // is deferred to whenever that producer lands (out of Phase 2's file
+    // plan — agent-message-handler.ts is not a file this phase modifies).
+    // CONVERSATION-kind production sampling is therefore not yet reachable
+    // in this pass; EXECUTION-kind sampling (workflow.completed/failed) is
+    // fully wired above.
+
+    const evalSampleScorerFunction = new lambda.Function(
+      this,
+      "EvalSampleScorerFunction",
+      {
+        functionName: `citadel-eval-sample-scorer-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-sample-scorer.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EVAL_PROD_SAMPLES_TABLE: props.evalProdSamplesTable.tableName,
+          REPLAY_BUCKET: this.replayPackageBucket.bucketName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.seconds(60),
+        memorySize: 512,
+        logGroup: new logs.LogGroup(this, "EvalSampleScorerFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    props.evalProdSamplesTable.grantReadWriteData(evalSampleScorerFunction);
+    // Read-only artifact fetch, same least-privilege rationale as
+    // EvalCaseScorerFunction's identical grant above — this scorer never
+    // writes S3, only reads the sanitized artifact the selector wrote.
+    this.replayPackageBucket.grantRead(evalSampleScorerFunction);
+    props.agentEventBus.grantPutEventsTo(evalSampleScorerFunction);
+
+    new events.Rule(this, "EvalSampleCapturedRule", {
+      eventBus: props.agentEventBus,
+      ruleName: `citadel-eval-sample-captured-${props.environment}`,
+      description:
+        "Phase 2: routes governance.eval.sample.captured (emitted by " +
+        "eval-sampling-selector.ts after a sanitized artifact is durably " +
+        "written) to eval-sample-scorer for deterministic prod-dimension " +
+        "scoring + faithfulness judge-request emission.",
+      eventPattern: {
+        source: ["citadel.backend"],
+        detailType: ["governance.eval.sample.captured"],
+      },
+      targets: [
+        new targets.LambdaFunction(evalSampleScorerFunction, {
+          retryAttempts: 2,
+        }),
+      ],
+    });
+
+    // Both eval-case-scorer (Pass A) and eval-sample-scorer (Phase 2)
+    // subscribe to the SAME governance.eval.case.judged detail-type — the
+    // frozen judge.requested/judged contract is reused verbatim for prod
+    // samples (design §2.5), with caseId===sampleId as the prod-sample
+    // carrier convention. eval-sample-scorer locates its row via a Query
+    // on EvalProdSamplesTable's sparse SampleIdIndex GSI and independently
+    // no-ops on a zero-result Query when the row it owns does not exist,
+    // so both targets on one rule is correct rather than requiring the
+    // judge to discriminate. (A GetItem on {orgId,runId} does NOT match
+    // the table's real (PK,SK) key schema and would throw instead of
+    // missing cleanly — see EvalProdSamplesTable's SampleIdIndex GSI.)
+    new events.Rule(this, "EvalSampleJudgedRule", {
+      eventBus: props.agentEventBus,
+      ruleName: `citadel-eval-sample-judged-${props.environment}`,
+      description:
+        "Phase 2: routes governance.eval.case.judged to eval-sample-scorer " +
+        "(in addition to EvalCaseJudgedRule's existing eval-case-scorer " +
+        "target above) so a prod-sample judged result reaches its single " +
+        "writer too — reuses the FROZEN judge.requested/judged contract.",
+      eventPattern: {
+        source: ["citadel.backend"],
+        detailType: ["governance.eval.case.judged"],
+      },
+      targets: [
+        new targets.LambdaFunction(evalSampleScorerFunction, {
+          retryAttempts: 2,
+        }),
+      ],
+    });
+
+    // Admin-only resolver: setEvalSamplingConfig / getEvalSamplingConfig /
+    // listEvalProdSamples. A plain Lambda datasource (not a direct-DDB
+    // resolver) because admin-role gating + rate clamping is TS logic
+    // (eval-sampling-config-resolver.ts), same pattern as eval-resolver.ts.
+    // AppSync data-source/resolver attachment happens in GovernanceStack
+    // (see evalSamplingConfigResolverFunction below, exposed as a public
+    // property) because GovernanceStack — not this stack — holds the
+    // real `appSyncApi` L2 construct + the LAMBDA_REQUEST/RESPONSE_MAPPING
+    // templates used by every other Lambda-backed resolver in the app
+    // (interrogationRoundLambdaDataSource above being the in-stack
+    // exception, since GovernanceStack's OWN Lambdas can self-attach;
+    // this one lives in TelemetryStack for the table/DECISION d36fbbf7
+    // reasons in the section banner above, so it must attach from the
+    // other side of the stack boundary, same cross-stack pattern as
+    // governance-ui-resolver.ts's attachment in ArbiterStack).
+    this.evalSamplingConfigResolverFunction = new lambda.Function(
+      this,
+      "EvalSamplingConfigResolverFunction",
+      {
+        functionName: `citadel-eval-sampling-config-resolver-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-sampling-config-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EVAL_SAMPLING_CONFIG_TABLE: props.evalSamplingConfigTable.tableName,
+          EVAL_PROD_SAMPLES_TABLE: props.evalProdSamplesTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(
+          this,
+          "EvalSamplingConfigResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+    props.evalSamplingConfigTable.grantReadWriteData(
+      this.evalSamplingConfigResolverFunction,
+    );
+    props.evalProdSamplesTable.grantReadData(
+      this.evalSamplingConfigResolverFunction,
+    );
+
+    // ========================================================================
+    // Phase 3 — Drift detection (EvalDriftDetector + EvalDriftFindingWriter)
+    // ========================================================================
+    //
+    // Homed here for the same DECISION d36fbbf7 rationale as Phase 2 above:
+    // the detector reads props.evalProdSamplesTable (BackendStack) via its
+    // AgentDimTimeIndex GSI, and the finding writer writes
+    // props.governanceLedgerTable (ArbiterStack) — both already flow into
+    // this stack's props. No new SQS queue/DLQ: the detector's own EMF
+    // flush already durably lands in CloudWatch Logs regardless of whether
+    // the downstream drift.detected event is delivered, and the finding
+    // writer's write is idempotent (write-once ConditionExpression), so
+    // at-least-once EventBridge delivery is safe without a dispatch queue.
+    const evalDriftDetectorFunction = new lambda.Function(
+      this,
+      "EvalDriftDetectorFunction",
+      {
+        functionName: `citadel-eval-drift-detector-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-drift-detector.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EVAL_PROD_SAMPLES_TABLE: props.evalProdSamplesTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          ENVIRONMENT: props.environment,
+          // Comma-separated agentIds to check each cycle. Deliberately an
+          // operator-supplied allowlist rather than a Scan/discovery
+          // query — see eval-drift-detector.ts's own module doc ("never
+          // Scan EvalProdSamples"). Empty by default; an operator opts
+          // specific agents in as production sampling is enabled for them.
+          EVAL_DRIFT_AGENT_IDS: props.evalDriftAgentIds ?? "",
+        },
+        timeout: cdk.Duration.seconds(120),
+        memorySize: 512,
+        logGroup: new logs.LogGroup(this, "EvalDriftDetectorFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    props.evalProdSamplesTable.grantReadData(evalDriftDetectorFunction);
+    props.agentEventBus.grantPutEventsTo(evalDriftDetectorFunction);
+
+    // Hourly schedule — same rate as CostReconcilerScheduleRule above.
+    // dev-calibrated cadence; TUNE with prod sampling volume (a lower
+    // production-sampling rate may warrant a longer period so each
+    // window accumulates enough samples to clear DEFAULT_MIN_SAMPLE_COUNT).
+    new events.Rule(this, "EvalDriftDetectorScheduleRule", {
+      ruleName: `citadel-eval-drift-detector-${props.environment}`,
+      description:
+        "Phase 3: hourly drift-detection cycle — queries " +
+        "EvalProdSamples.AgentDimTimeIndex for current-vs-baseline per " +
+        "(agentId, dimension), emits Citadel/EvalDrift EMF, and emits " +
+        "governance.eval.drift.detected on a threshold breach.",
+      schedule: events.Schedule.rate(cdk.Duration.hours(1)),
+      targets: [new targets.LambdaFunction(evalDriftDetectorFunction)],
+    });
+
+    const evalDriftFindingWriterFunction = new lambda.Function(
+      this,
+      "EvalDriftFindingWriterFunction",
+      {
+        functionName: `citadel-eval-drift-finding-writer-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-drift-finding-writer.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          GOVERNANCE_LEDGER_TABLE: props.governanceLedgerTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(
+          this,
+          "EvalDriftFindingWriterFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    // Write access to the arbiter-owned governance ledger — a new grant;
+    // no existing TS Lambda writes this table today (only
+    // governance-ui-resolver.ts reads it). See eval-drift-finding-writer.ts's
+    // module doc for the exact field-mapping rationale onto the Python
+    // ledger.py schema this write must match.
+    props.governanceLedgerTable.grantWriteData(evalDriftFindingWriterFunction);
+
+    new events.Rule(this, "EvalDriftDetectedRule", {
+      eventBus: props.agentEventBus,
+      ruleName: `citadel-eval-drift-detected-${props.environment}`,
+      description:
+        "Phase 3: routes governance.eval.drift.detected (emitted by " +
+        "eval-drift-detector on a threshold breach) to " +
+        "eval-drift-finding-writer, which writes a write-once " +
+        "GovernanceFinding row into GOVERNANCE_LEDGER_TABLE.",
+      eventPattern: {
+        source: ["citadel.backend"],
+        detailType: ["governance.eval.drift.detected"],
+      },
+      targets: [
+        new targets.LambdaFunction(evalDriftFindingWriterFunction, {
+          retryAttempts: 2,
+        }),
+      ],
+    });
+
+    // A7 — eval drift: sustained per-(agent,dimension) DriftDelta breach
+    // over 3 cycles is actionable — a single noisy hour should not page.
+    // dev-calibrated; TUNE with prod baseline once real sampling volume
+    // establishes a stable per-dimension baseline variance.
+    const evalDriftAlarm = new cloudwatch.Alarm(this, "EvalDriftAlarm", {
+      alarmName: `citadel-eval-drift-${props.environment}`,
+      metric: new cloudwatch.Metric({
+        namespace: EVAL_DRIFT_NAMESPACE,
+        metricName: METRIC_DRIFT_DELTA,
+        dimensionsMap: { [DIMENSION_ENVIRONMENT_EVAL]: props.environment },
+        statistic: "Maximum",
+        period: cdk.Duration.hours(1),
+      }),
+      threshold: 0.15, // dev-calibrated; TUNE with prod baseline; mirrors eval-drift.ts's DEFAULT_DRIFT_THRESHOLDS
+      evaluationPeriods: 3,
+      datapointsToAlarm: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        "Production eval drift sustained above threshold for 3 cycles. " +
+        "Runbook: check the eval-drift-detector Lambda logs for the " +
+        "breaching (agentId, dimension) pair, review recent " +
+        "GovernanceFinding rows (category=eval-drift) in the governance " +
+        "UI, and inspect EvalProdSamples for the affected agent.",
+    });
+    evalDriftAlarm.addAlarmAction(new cw_actions.SnsAction(props.alarmTopic));
 
     // ========================================================================
     // Platform-health dashboard + SLO alarms (dashboards + alarms story,

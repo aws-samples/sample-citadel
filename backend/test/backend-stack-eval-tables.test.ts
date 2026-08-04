@@ -133,4 +133,64 @@ describe("BackendStack — EvalSuitesTable / EvalCasesTable (CIT-101)", () => {
       });
     });
   });
+
+  // Phase 2 — EvalProdSamplesTable (B1 regression pins, taskId 316427f2).
+  //
+  // B1's root cause was a CROSS-LAYER schema mismatch: eval-sample-scorer's
+  // applyProdJudgedResult issued a Get on {orgId, runId} while the table's
+  // real key schema is (PK, SK) — invisible to the Lambda unit tests because
+  // aws-sdk-client-mock is schema-agnostic. The Lambda-side tests
+  // (eval-sample-scorer.test.ts) pin the literal attribute names the code
+  // sends; the pins below anchor the OTHER side of that contract — the
+  // template's literal KeySchema and the SampleIdIndex GSI the fixed code
+  // Queries — so neither side can drift without a test failing.
+  describe("EvalProdSamplesTable (Phase 2 — production sampling)", () => {
+    test("real key schema is literally PK (HASH) / SK (RANGE) — the attributes applyProdJudgedResult's UpdateCommand must use", () => {
+      template.hasResourceProperties("AWS::DynamoDB::Table", {
+        TableName: "citadel-eval-prod-samples-test",
+        KeySchema: [
+          { AttributeName: "PK", KeyType: "HASH" },
+          { AttributeName: "SK", KeyType: "RANGE" },
+        ],
+      });
+    });
+
+    test("declares the sparse SampleIdIndex GSI (sampleId HASH, no range key, ProjectionType ALL) that applyProdJudgedResult Queries by caseId", () => {
+      const tables = template.findResources("AWS::DynamoDB::Table", {
+        Properties: { TableName: "citadel-eval-prod-samples-test" },
+      });
+      const logicalId = Object.keys(tables)[0];
+      expect(logicalId).toBeDefined();
+
+      const gsis: Array<{
+        IndexName: string;
+        KeySchema: Array<{ AttributeName: string; KeyType: string }>;
+        Projection: { ProjectionType: string };
+      }> = tables[logicalId].Properties.GlobalSecondaryIndexes;
+      const sampleIdIndex = gsis.find((g) => g.IndexName === "SampleIdIndex");
+
+      expect(sampleIdIndex).toBeDefined();
+      // Partition key MUST be the literal `sampleId` attribute (the judged
+      // event's caseId under the prod-sample carrier convention) and MUST
+      // NOT have a range key — the lookup is a point Query, never a Scan.
+      expect(sampleIdIndex!.KeySchema).toEqual([
+        { AttributeName: "sampleId", KeyType: "HASH" },
+      ]);
+      expect(sampleIdIndex!.Projection.ProjectionType).toBe("ALL");
+    });
+
+    test("has RETAIN removal policy, DeletionProtection, and PITR (same evidence posture as the eval-suite tables)", () => {
+      template.hasResource("AWS::DynamoDB::Table", {
+        Properties: Match.objectLike({
+          TableName: "citadel-eval-prod-samples-test",
+          DeletionProtectionEnabled: true,
+          PointInTimeRecoverySpecification: {
+            PointInTimeRecoveryEnabled: true,
+          },
+        }),
+        DeletionPolicy: "Retain",
+        UpdateReplacePolicy: "Retain",
+      });
+    });
+  });
 });

@@ -59,6 +59,13 @@ export class BackendStack extends cdk.Stack {
   // eval-run-resolver/eval-runner/eval-conversation-worker.
   public readonly evalRunsTable: dynamodb.Table;
   public readonly evalRunCaseResultsTable: dynamodb.Table;
+  // Phase 2 (production sampling) — admin-authored per-org sampling
+  // config (small, not release evidence — no RETAIN/deletionProtection
+  // needed, but PITR kept for consistency) and the captured+scored
+  // production-sample rows (RETAIN — an audit/observability record, same
+  // posture rationale as EvalRuns).
+  public readonly evalSamplingConfigTable: dynamodb.Table;
+  public readonly evalProdSamplesTable: dynamodb.Table;
   public readonly workflowProgressFanoutFunction: lambda.Function;
   public readonly idempotencyTable: dynamodb.Table;
   public readonly interrogationRoundsTable: dynamodb.Table;
@@ -3245,6 +3252,67 @@ export class BackendStack extends cdk.Stack {
       },
     );
 
+    // Phase 2 (production sampling) — EvalSamplingConfig: admin-authored,
+    // one row per org (PK=orgId). Small config table, DESTROY on stack
+    // teardown is acceptable (re-authored on next admin write, no
+    // historical value once superseded) — deliberately NOT RETAIN/
+    // deletionProtection like the release-evidence eval tables above.
+    this.evalSamplingConfigTable = new dynamodb.Table(
+      this,
+      "EvalSamplingConfigTable",
+      {
+        tableName: `citadel-eval-sampling-config-${props.environment}`,
+        partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+
+    // Phase 2 (production sampling) — EvalProdSamples: captured + scored
+    // production samples. PK=PK (ORG#<orgId>), SK=<capturedAt>#<sampleId>
+    // so a per-org time-range read is a plain Query. Sparse GSI1
+    // (AgentDimTimeIndex naming carried at the attribute level —
+    // GSI1PK=AGENT#<agentId>, GSI1SK=<hourBucket>#<sampleId>) makes a
+    // per-agent time series a Query too, never a Scan (design §2.4
+    // acceptance #1 substrate). RETAIN — this is an audit/observability
+    // record of what was actually sampled and judged, same posture
+    // rationale as EvalRunsTable (release evidence), not ephemeral
+    // working data.
+    this.evalProdSamplesTable = new dynamodb.Table(
+      this,
+      "EvalProdSamplesTable",
+      {
+        tableName: `citadel-eval-prod-samples-${props.environment}`,
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+        sortKey: { name: "SK", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+    this.evalProdSamplesTable.addGlobalSecondaryIndex({
+      indexName: "AgentDimTimeIndex",
+      partitionKey: { name: "GSI1PK", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "GSI1SK", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    // B1 fix (taskId 316427f2, CRITICAL): a judged event (frozen
+    // judge.requested/judged contract) carries only evalRunId/caseId/
+    // orgId — never capturedAt, which is embedded in this table's real
+    // SK. A point Get on {orgId, runId} does not match this table's key
+    // schema (PK/SK) at all and previously threw ValidationException in
+    // production (masked by aws-sdk-client-mock in tests). This sparse
+    // GSI makes the judged-event correlation ref (caseId, set to the
+    // sample's own sampleId by the "prod-sample carrier convention",
+    // EVENTBRIDGE_CATALOG.md) a plain Query — NEVER a Scan.
+    this.evalProdSamplesTable.addGlobalSecondaryIndex({
+      indexName: "SampleIdIndex",
+      partitionKey: { name: "sampleId", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // InterrogationRounds
     this.interrogationRoundsTable = new dynamodb.Table(
       this,
@@ -3338,6 +3406,52 @@ export class BackendStack extends cdk.Stack {
     publishHandlerDataSource.createResolver("UnpublishAppResolver", {
       typeName: "Mutation",
       fieldName: "unpublishApp",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+  }
+
+  /**
+   * Phase 2 (production sampling) — cross-stack AppSync wiring for
+   * eval-sampling-config-resolver.ts's Lambda, which lives in
+   * TelemetryStack (DECISION d36fbbf7 rationale: it needs
+   * EvalSamplingConfigTable/EvalProdSamplesTable, both owned by
+   * BackendStack, which instantiates BEFORE TelemetryStack — see the
+   * section banner in telemetry-stack.ts). Same
+   * fromFunctionAttributes+addLambdaDataSource pattern as
+   * addPublishHandlerResolvers above. Called from app.ts after both
+   * BackendStack and TelemetryStack are instantiated.
+   */
+  public addEvalSamplingConfigResolvers(resolverFunctionArn: string): void {
+    const resolverFn = lambda.Function.fromFunctionAttributes(
+      this,
+      "ImportedEvalSamplingConfigResolver",
+      {
+        functionArn: resolverFunctionArn,
+        sameEnvironment: true,
+      },
+    );
+
+    const dataSource = this.appSyncApi.addLambdaDataSource(
+      "EvalSamplingConfigLambdaDataSource",
+      resolverFn,
+    );
+
+    dataSource.createResolver("SetEvalSamplingConfigResolver", {
+      typeName: "Mutation",
+      fieldName: "setEvalSamplingConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+    dataSource.createResolver("GetEvalSamplingConfigResolver", {
+      typeName: "Query",
+      fieldName: "getEvalSamplingConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+    dataSource.createResolver("ListEvalProdSamplesResolver", {
+      typeName: "Query",
+      fieldName: "listEvalProdSamples",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
