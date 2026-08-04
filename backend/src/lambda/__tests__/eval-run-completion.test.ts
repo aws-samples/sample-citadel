@@ -48,6 +48,7 @@ describe("recordCaseCompletion", () => {
     ddbMock.on(GetCommand).resolves({
       Item: { evalRunId: "run-1", orgId: "org-1", suiteId: "s1", caseCount: 2 },
     });
+    ebMock.on(PutEventsCommand).resolves({});
 
     await recordCaseCompletion("run-1", "case-1");
 
@@ -350,6 +351,123 @@ describe("recordCaseCompletion — F4 artifact materialization", () => {
 
     await expect(
       recordCaseCompletion("run-1", "case-7"),
+    ).resolves.not.toThrow();
+  });
+});
+
+/**
+ * CIT-103 Pass A — additive governance.eval.case.completed emit tests.
+ * This emit fires AFTER materializeArtifactIfCompleted, inside the
+ * exactly-once completionRecorded guard region, and computes NO scores
+ * (design §2) — the pre-existing "no scores" contract for
+ * recordCaseCompletion is unchanged.
+ */
+describe("recordCaseCompletion — CIT-103 governance.eval.case.completed emit", () => {
+  function stubRunRowUpdate(pendingCases: number): void {
+    ddbMock.on(UpdateCommand).callsFake((input) => {
+      if (input.TableName === "citadel-eval-run-case-results-test") {
+        return { Attributes: {} };
+      }
+      return {
+        Attributes: {
+          evalRunId: "run-1",
+          orgId: "org-1",
+          suiteId: "s1",
+          pendingCases,
+        },
+      };
+    });
+  }
+
+  test("emits governance.eval.case.completed with artifactRef for a materialized COMPLETED case", async () => {
+    stubRunRowUpdate(1);
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        evalRunId: "run-1",
+        caseId: "case-1",
+        orgId: "org-1",
+        status: "COMPLETED",
+        caseKind: "EXECUTION",
+        executionId: "exec-1",
+        artifactRef: "eval-runs/run-1/case-1.json",
+      },
+    });
+    (materializeEvalCaseArtifact as jest.Mock).mockResolvedValue({
+      artifactRef: "eval-runs/run-1/case-1.json",
+      artifactKind: "execution",
+    });
+    ebMock.on(PutEventsCommand).resolves({});
+
+    await recordCaseCompletion("run-1", "case-1");
+
+    const caseCompletedCall = ebMock
+      .commandCalls(PutEventsCommand)
+      .find(
+        (c) =>
+          c.args[0].input.Entries![0].DetailType ===
+          "governance.eval.case.completed",
+      );
+    expect(caseCompletedCall).toBeDefined();
+    const detail = JSON.parse(
+      caseCompletedCall!.args[0].input.Entries![0].Detail!,
+    );
+    expect(detail.evalRunId).toBe("run-1");
+    expect(detail.caseId).toBe("case-1");
+    expect(detail.orgId).toBe("org-1");
+    expect(detail.caseKind).toBe("EXECUTION");
+    expect(detail.artifactRef).toBe("eval-runs/run-1/case-1.json");
+  });
+
+  test("emits governance.eval.case.completed for a FAILED case (no artifactRef) — scoring path decides scoreability, not this emitter", async () => {
+    stubRunRowUpdate(1);
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        evalRunId: "run-1",
+        caseId: "case-3",
+        orgId: "org-1",
+        status: "FAILED",
+        caseKind: "EXECUTION",
+        executionId: "exec-3",
+      },
+    });
+    ebMock.on(PutEventsCommand).resolves({});
+
+    await recordCaseCompletion("run-1", "case-3");
+
+    const caseCompletedCall = ebMock
+      .commandCalls(PutEventsCommand)
+      .find(
+        (c) =>
+          c.args[0].input.Entries![0].DetailType ===
+          "governance.eval.case.completed",
+      );
+    expect(caseCompletedCall).toBeDefined();
+    const detail = JSON.parse(
+      caseCompletedCall!.args[0].input.Entries![0].Detail!,
+    );
+    expect(detail.artifactRef).toBeUndefined();
+  });
+
+  test("a governance.eval.case.completed emit failure never propagates out of recordCaseCompletion", async () => {
+    stubRunRowUpdate(1);
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        evalRunId: "run-1",
+        caseId: "case-4",
+        orgId: "org-1",
+        status: "COMPLETED",
+        caseKind: "EXECUTION",
+        executionId: "exec-4",
+      },
+    });
+    (materializeEvalCaseArtifact as jest.Mock).mockResolvedValue({
+      artifactRef: "eval-runs/run-1/case-4.json",
+      artifactKind: "execution",
+    });
+    ebMock.on(PutEventsCommand).rejects(new Error("EventBridge unavailable"));
+
+    await expect(
+      recordCaseCompletion("run-1", "case-4"),
     ).resolves.not.toThrow();
   });
 });

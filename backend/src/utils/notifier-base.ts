@@ -53,6 +53,26 @@ export const GOVERNANCE_DETAIL_TYPES = [
   // to freeze the contract.
   "governance.eval.run.started",
   "governance.eval.run.completed",
+  // CIT-103 Pass A: emitted by recordCaseCompletion (eval-run-completion.ts)
+  // AFTER artifact materialization, inside the exactly-once
+  // completionRecorded guard region. Additive — computes NO scores itself
+  // (the completion-rollup's "no scores" contract is preserved); consumed
+  // by eval-case-scorer.ts.
+  "governance.eval.case.completed",
+  // CIT-103 Pass A -> Pass B: emitted by eval-case-scorer.ts when a case
+  // opts into one or more judge-basis dimensions (task_success.judge or
+  // groundingRequirements[].mustNotHallucinate). Consumed by the arbiter
+  // Python judge handler (Pass B) — TS never invokes bedrock-runtime
+  // itself (design §1).
+  "governance.eval.case.judge.requested",
+  // Pass B -> Pass A: emitted by the arbiter judge handler after a judge
+  // invocation completes. Consumed by the TS single-writer consumer in
+  // eval-case-scorer.ts, which validates the required reproducibility
+  // stamp fields (judgeModelId/judgeModelVersion/judgePromptHash) before
+  // patching the case's PENDING dimension to SCORED/UNKNOWN. TS is the
+  // ONLY writer of eval tables — the judge handler never writes them
+  // directly (single-writer invariant, design §7).
+  "governance.eval.case.judged",
 ] as const;
 
 export type GovernanceDetailType = (typeof GOVERNANCE_DETAIL_TYPES)[number];
@@ -195,6 +215,60 @@ export interface GovernancePayloadMap {
     };
     completedAt: string;
     durationMs: number;
+  };
+  // CIT-103 Pass A: payload for governance.eval.case.completed. Emitted
+  // from recordCaseCompletion AFTER materializeArtifactIfCompleted, so
+  // artifactRef (when materialization succeeded) is already stamped on
+  // the case row by the time this fires. artifactRef is OPTIONAL here —
+  // materialization degrades gracefully (never throws) and can leave it
+  // unset; eval-case-scorer.ts must tolerate a missing artifactRef.
+  "governance.eval.case.completed": {
+    evalRunId: string;
+    caseId: string;
+    orgId: string;
+    caseKind: "CONVERSATION" | "EXECUTION";
+    artifactRef?: string;
+  };
+  // CIT-103 Pass A -> Pass B (FROZEN for Pass B, verbatim — see level-2
+  // report). Emitted by eval-case-scorer.ts when a case opts into a
+  // judge-basis dimension. judgeDimensions carries one entry per
+  // judge-basis dimension the case requested (task_success and/or
+  // groundedness_faithfulness in v1); rubric is a short deterministic
+  // string describing what the judge must evaluate for that dimension
+  // (NOT free-form user text — derived from the case's own expectedOutcome
+  // target / groundingRequirements, so it is reproducible from the case
+  // definition alone).
+  "governance.eval.case.judge.requested": {
+    evalRunId: string;
+    caseId: string;
+    orgId: string;
+    artifactRef?: string;
+    judgeDimensions: Array<{
+      dimension: "task_success" | "groundedness_faithfulness";
+      rubric: string;
+    }>;
+    judgeSlot: "judge";
+  };
+  // CIT-103 Pass B -> Pass A (FROZEN for Pass B, verbatim — see level-2
+  // report). Emitted by the arbiter judge handler after invoking the
+  // resolved "judge" slot model. status is SCORED when the judge returned
+  // a usable verdict, UNKNOWN when the judge invocation itself failed /
+  // returned unusable output (never fabricated as a failing score).
+  // judgeModelId/judgeModelVersion/judgePromptHash are REQUIRED on every
+  // event of this type (the reproducibility stamp, design §1) — the TS
+  // consumer (eval-case-scorer.ts) validates their presence before
+  // applying the patch and rejects (logs + drops) an event missing any of
+  // the three. verdict is present iff status==='SCORED'.
+  "governance.eval.case.judged": {
+    evalRunId: string;
+    caseId: string;
+    orgId: string;
+    dimension: "task_success" | "groundedness_faithfulness";
+    status: "SCORED" | "UNKNOWN";
+    verdict?: { kind: "score"; score: number };
+    judgeModelId: string;
+    judgeModelVersion: string;
+    judgePromptHash: string;
   };
 }
 

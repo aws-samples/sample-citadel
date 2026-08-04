@@ -2257,6 +2257,10 @@ type EvalRun {
   idempotencyKey: String!
   evalScopedRoleArn: String
   error: String
+  # CIT-103, additive: per-dimension aggregates (eval-score-aggregate.ts
+  # DimensionAggregate[]), written by eval-run-aggregator.ts. NEVER a
+  # composite single number (design §4).
+  scoreAggregates: AWSJSON
 }
 
 input StartEvalRunInput {
@@ -2283,6 +2287,11 @@ type EvalRunCaseResult {
   artifactRef: String
   error: String
   timedOut: Boolean
+  # CIT-103, additive: this case's 7-dimension ScoreVector
+  # (eval-scoring.ts DimensionScore[]).
+  scoreVector: AWSJSON
+  scoredAt: AWSDateTime
+  scorerVersion: String
 }
 
 type DeleteResult {

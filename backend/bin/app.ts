@@ -286,6 +286,12 @@ const telemetryStack = new TelemetryStack(
     governanceLedgerTable: arbiterStack.governanceLedgerTable,
     accessLogsBucket: backendStack.accessLogsBucket,
     commitSha,
+    // CIT-103 Pass A: eval-run tables (from BackendStack) for
+    // eval-case-scorer/eval-run-aggregator. No new stack dependency —
+    // BackendStack is already a dependency below.
+    evalCasesTable: backendStack.evalCasesTable,
+    evalRunsTable: backendStack.evalRunsTable,
+    evalRunCaseResultsTable: backendStack.evalRunCaseResultsTable,
   },
 );
 telemetryStack.addStackDependency(backendStack);

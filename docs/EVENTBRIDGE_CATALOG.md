@@ -277,7 +277,10 @@ Implements requirement §3.4 of the governance spec. The naming distinction from
 | `governance.offfrontier.escalated` | arbiter/workerWrapper/tools/escalate.py | SIEM / audit, PagerDuty | Agent invoked the explicit escalate tool (C12) |
 | `governance.grandfathered.bypass` | project-resolver phase-transition gates via `isGrandfathered(project)` | SIEM / audit, telemetry | A governance gate (C3/C7/C10) was bypassed for a pre-`effective_at` project — payload: `{projectId, bypassedGate, projectCreatedAt, effectiveAt}` where `bypassedGate ∈ {C3_assessment_required, C7_adr_required, C10_spec_required}` |
 | `governance.eval.run.started` | eval-runner driver Lambda (CIT-102) | SIEM / audit; CIT-105 reporting (future) | Eval run created + fan-out begun — payload: `{evalRunId, suiteId, suiteVersion, agentTargetId, agentTargetVersion, orgId, caseCount, startedAt, startedBy}` |
-| `governance.eval.run.completed` | eval-runner driver Lambda (CIT-102) | SIEM / audit; CIT-105 reporting (future) | Atomic pendingCases counter reached zero — execution-outcome counts only, no scores (CIT-103 owns verdicts) — payload: `{evalRunId, suiteId, orgId, caseCounts: {total, completed, failed, timeout}, completedAt, durationMs}` |
+| `governance.eval.run.completed` | eval-runner driver Lambda (CIT-102) | SIEM / audit; CIT-105 reporting (future); `eval-run-aggregator` (CIT-103) | Atomic pendingCases counter reached zero — execution-outcome counts only, no scores (CIT-103 owns verdicts) — payload: `{evalRunId, suiteId, orgId, caseCounts: {total, completed, failed, timeout}, completedAt, durationMs}` |
+| `governance.eval.case.completed` | `recordCaseCompletion` (eval-run-completion.ts, CIT-103 Pass A) | `eval-case-scorer` (CIT-103) | Additive — emitted AFTER artifact materialization, inside the exactly-once `completionRecorded` guard region, for EVERY terminal case (COMPLETED/FAILED/TIMEOUT alike). Computes NO scores (CIT-103 owns verdicts is preserved) — payload: `{evalRunId, caseId, orgId, caseKind, artifactRef?}` (`artifactRef` absent when materialization was skipped/failed) |
+| `governance.eval.case.judge.requested` | `eval-case-scorer` (CIT-103 Pass A) | Arbiter judge handler (CIT-103 Pass B) | **FROZEN cross-language contract (TS → Py).** Emitted when a case opts into one or more judge-basis dimensions (`task_success` via `expectedOutcome.judge`, and/or `groundedness_faithfulness` via `groundingRequirements[].mustNotHallucinate`) — payload: `{evalRunId, caseId, orgId, artifactRef?, judgeDimensions: [{dimension: "task_success"\|"groundedness_faithfulness", rubric: string}], judgeSlot: "judge"}`. `rubric` is derived deterministically from the case's own definition (never free-form user text). |
+| `governance.eval.case.judged` | Arbiter judge handler (CIT-103 Pass B) | `eval-case-scorer` (CIT-103 Pass A) — **single writer of eval tables** | **FROZEN cross-language contract (Py → TS).** Emitted after a judge invocation completes — payload: `{evalRunId, caseId, orgId, dimension: "task_success"\|"groundedness_faithfulness", status: "SCORED"\|"UNKNOWN", verdict?: {kind:"score", score: number}, judgeModelId, judgeModelVersion, judgePromptHash}`. `judgeModelId`/`judgeModelVersion`/`judgePromptHash` are REQUIRED on every event of this type — the TS consumer validates their presence and DROPS (logs + never partially writes) an event missing any of the three. `verdict` is present iff `status==='SCORED'`. The judge handler NEVER writes DynamoDB directly — TS is the single writer of eval tables (design invariant). |
 
 Schemas are populated in individual emitter PRs per QT4-1 (same-PR catalog invariant). The list above is the reserved allocation; new types MUST NOT be added without updating this catalog in the same PR.
 
@@ -720,6 +723,16 @@ The consumer's write semantics make the family safe under duplicates, retries, a
 |------|--------------|--------|
 | `ProgressUpdateRule` | detailType: `intake.progress.updated`; source: `agent_intake.assessment`, `agent_intake.design`, `agent_intake.planning`, `agent_intake.implementation` | Project Progress Updater Lambda |
 | `AppInvokeRule` | source: `citadel.app.invoke`; detailType: `app.invoke.requested` | App Invoke Handler Lambda |
+
+### TelemetryStack Rules (CIT-103 Pass A)
+
+Homed in `TelemetryStack` (not `GovernanceStack`, where the eval-run driver lives) because `eval-case-scorer`/`eval-run-aggregator` need `costLedgerTable` (owned by this stack) and `governanceLedgerTable` (from `ArbiterStack`) for scoring — `GovernanceStack` instantiates before both in `bin/app.ts`. No new SQS queue/DLQ — direct Lambda EventBridge targets, safe because every write is idempotent `SET`, never `ADD`.
+
+| Rule | Event Pattern | Target |
+|------|--------------|--------|
+| `EvalCaseCompletedRule` | source: `citadel.backend`; detailType: `governance.eval.case.completed` | `eval-case-scorer` Lambda |
+| `EvalCaseJudgedRule` | source: `citadel.backend`; detailType: `governance.eval.case.judged` | `eval-case-scorer` Lambda (single writer of eval tables) |
+| `EvalRunCompletedAggregationRule` | source: `citadel.backend`; detailType: `governance.eval.run.completed` | `eval-run-aggregator` Lambda |
 
 ## Idempotency
 

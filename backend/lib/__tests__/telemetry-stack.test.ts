@@ -40,6 +40,9 @@ function buildSupportTables(supportStack: cdk.Stack): {
   executionSpecificationsTable: dynamodb.Table;
   modelConfigTable: dynamodb.Table;
   governanceLedgerTable: dynamodb.Table;
+  evalCasesTable: dynamodb.Table;
+  evalRunsTable: dynamodb.Table;
+  evalRunCaseResultsTable: dynamodb.Table;
 } {
   const modelCatalogTable = new dynamodb.Table(
     supportStack,
@@ -109,6 +112,26 @@ function buildSupportTables(supportStack: cdk.Stack): {
     partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
     sortKey: { name: "timestamp", type: dynamodb.AttributeType.NUMBER },
   });
+  // CIT-103 Pass A: eval-run tables (from BackendStack in the real app).
+  const evalCasesTable = new dynamodb.Table(
+    supportStack,
+    "TestEvalCasesTable",
+    {
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const evalRunsTable = new dynamodb.Table(supportStack, "TestEvalRunsTable", {
+    partitionKey: { name: "evalRunId", type: dynamodb.AttributeType.STRING },
+  });
+  const evalRunCaseResultsTable = new dynamodb.Table(
+    supportStack,
+    "TestEvalRunCaseResultsTable",
+    {
+      partitionKey: { name: "evalRunId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+    },
+  );
   return {
     modelCatalogTable,
     executionsTable,
@@ -119,6 +142,12 @@ function buildSupportTables(supportStack: cdk.Stack): {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
   };
 }
 
@@ -148,6 +177,9 @@ function buildStack(): {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
   } = buildSupportTables(supportStack);
 
   const stack = new TelemetryStack(app, "TestTelemetryStack", {
@@ -169,6 +201,9 @@ function buildStack(): {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
     accessLogsBucket: new s3.Bucket(supportStack, "TestAccessLogsBucket", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
@@ -205,6 +240,9 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
   } = buildSupportTables(supportStack);
 
   const stack = new TelemetryStack(app, "TestTelemetryStackOrigin", {
@@ -226,6 +264,9 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
     accessLogsBucket: new s3.Bucket(
       supportStack,
       "TestAccessLogsBucketOrigin",
@@ -537,6 +578,9 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       executionSpecificationsTable,
       modelConfigTable,
       governanceLedgerTable,
+      evalCasesTable,
+      evalRunsTable,
+      evalRunCaseResultsTable,
     } = buildSupportTables(supportStack);
     const stack = new TelemetryStack(app, "TestTelemetryStackUnconfigured", {
       environment: "test",
@@ -556,6 +600,9 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       executionSpecificationsTable,
       modelConfigTable,
       governanceLedgerTable,
+      evalCasesTable,
+      evalRunsTable,
+      evalRunCaseResultsTable,
       accessLogsBucket: new s3.Bucket(
         supportStack,
         "TestAccessLogsBucketUnconfigured",

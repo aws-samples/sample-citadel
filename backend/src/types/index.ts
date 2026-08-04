@@ -529,6 +529,13 @@ export interface EvalRun {
   idempotencyKey: string;
   evalScopedRoleArn?: string;
   error?: string;
+  /** CIT-103, additive: per-dimension aggregates computed by
+   * eval-run-aggregator.ts on governance.eval.run.completed. AWSJSON on
+   * the wire — serialized DimensionAggregate[] (eval-score-aggregate.ts).
+   * NEVER a composite single number (design §4 — see
+   * eval-no-composite.guard.test.ts). Absent until the aggregator has run
+   * at least once for this run. */
+  scoreAggregates?: string;
 }
 
 export interface StartEvalRunInput {
@@ -560,6 +567,20 @@ export interface EvalRunCaseResult {
   timedOut?: boolean;
   /** Guards the atomic pendingCases decrement against duplicate completion events. */
   completionRecorded?: boolean;
+  /** CIT-103, additive: the case's 7-dimension ScoreVector (eval-scoring.ts
+   * DimensionScore[]), SET idempotently by eval-case-scorer.ts (and,
+   * defensively, by eval-run-aggregator.ts's self-sufficient fallback
+   * scoring for any COMPLETED case missing one). AWSJSON on the wire.
+   * Absent for PENDING/DISPATCHED/RUNNING/FAILED/TIMEOUT cases and for a
+   * COMPLETED case not yet scored. */
+  scoreVector?: string;
+  /** ISO-8601 timestamp of the most recent scoreVector write. */
+  scoredAt?: string;
+  /** Scorer implementation version — bumping this is how CIT-107's
+   * pluggable-evaluator registry signals a re-score is warranted; a
+   * re-score with an unchanged scorerVersion is idempotent (deterministic
+   * dims are byte-equal, design §5/§6). */
+  scorerVersion?: string;
 }
 
 // InterrogationRound

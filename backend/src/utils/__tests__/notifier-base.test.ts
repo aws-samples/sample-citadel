@@ -118,9 +118,9 @@ describe("notifier-base emitGovernanceEvent", () => {
     expect(detail.sizeBytes).toBe(5242880);
   });
 
-  test("GOVERNANCE_DETAIL_TYPES contains exactly 17 values", () => {
-    expect(GOVERNANCE_DETAIL_TYPES).toHaveLength(17);
-    expect(new Set(GOVERNANCE_DETAIL_TYPES).size).toBe(17);
+  test("GOVERNANCE_DETAIL_TYPES contains exactly 20 values", () => {
+    expect(GOVERNANCE_DETAIL_TYPES).toHaveLength(20);
+    expect(new Set(GOVERNANCE_DETAIL_TYPES).size).toBe(20);
   });
 
   test("GovernanceDetailType union matches GOVERNANCE_DETAIL_TYPES array", () => {
@@ -142,8 +142,108 @@ describe("notifier-base emitGovernanceEvent", () => {
       "governance.eval.suite.frozen",
       "governance.eval.run.started",
       "governance.eval.run.completed",
+      "governance.eval.case.completed",
+      "governance.eval.case.judge.requested",
+      "governance.eval.case.judged",
     ];
     expect([...GOVERNANCE_DETAIL_TYPES].sort()).toEqual([...expected].sort());
+  });
+
+  test("emits governance.eval.case.completed with evalRunId/caseId/orgId/caseKind", async () => {
+    await emitGovernanceEvent("governance.eval.case.completed", {
+      evalRunId: "run-1",
+      caseId: "case-1",
+      orgId: "org-1",
+      caseKind: "CONVERSATION",
+      artifactRef: "eval-runs/run-1/case-1.json",
+    });
+    const detail = JSON.parse(
+      ebMock.commandCalls(PutEventsCommand)[0].args[0].input.Entries![0]
+        .Detail!,
+    );
+    expect(detail.evalRunId).toBe("run-1");
+    expect(detail.caseId).toBe("case-1");
+    expect(detail.caseKind).toBe("CONVERSATION");
+    expect(detail.artifactRef).toBe("eval-runs/run-1/case-1.json");
+  });
+
+  test("emits governance.eval.case.completed without artifactRef when materialization was skipped", async () => {
+    await emitGovernanceEvent("governance.eval.case.completed", {
+      evalRunId: "run-1",
+      caseId: "case-2",
+      orgId: "org-1",
+      caseKind: "EXECUTION",
+    });
+    const detail = JSON.parse(
+      ebMock.commandCalls(PutEventsCommand)[0].args[0].input.Entries![0]
+        .Detail!,
+    );
+    expect(detail.artifactRef).toBeUndefined();
+  });
+
+  test("emits governance.eval.case.judge.requested with judgeDimensions + judgeSlot", async () => {
+    await emitGovernanceEvent("governance.eval.case.judge.requested", {
+      evalRunId: "run-1",
+      caseId: "case-1",
+      orgId: "org-1",
+      artifactRef: "eval-runs/run-1/case-1.json",
+      judgeDimensions: [
+        { dimension: "task_success", rubric: "match target text" },
+      ],
+      judgeSlot: "judge",
+    });
+    const detail = JSON.parse(
+      ebMock.commandCalls(PutEventsCommand)[0].args[0].input.Entries![0]
+        .Detail!,
+    );
+    expect(detail.judgeSlot).toBe("judge");
+    expect(detail.judgeDimensions).toEqual([
+      { dimension: "task_success", rubric: "match target text" },
+    ]);
+  });
+
+  test("emits governance.eval.case.judged with SCORED status and full reproducibility stamp", async () => {
+    await emitGovernanceEvent("governance.eval.case.judged", {
+      evalRunId: "run-1",
+      caseId: "case-1",
+      orgId: "org-1",
+      dimension: "task_success",
+      status: "SCORED",
+      verdict: { kind: "score", score: 0.9 },
+      judgeModelId: "us.anthropic.claude-sonnet-4-6",
+      judgeModelVersion: "judge-v1:us.anthropic.claude-sonnet-4-6",
+      judgePromptHash: "sha256:deadbeef",
+    });
+    const detail = JSON.parse(
+      ebMock.commandCalls(PutEventsCommand)[0].args[0].input.Entries![0]
+        .Detail!,
+    );
+    expect(detail.status).toBe("SCORED");
+    expect(detail.verdict).toEqual({ kind: "score", score: 0.9 });
+    expect(detail.judgeModelId).toBe("us.anthropic.claude-sonnet-4-6");
+    expect(detail.judgeModelVersion).toBe(
+      "judge-v1:us.anthropic.claude-sonnet-4-6",
+    );
+    expect(detail.judgePromptHash).toBe("sha256:deadbeef");
+  });
+
+  test("emits governance.eval.case.judged with UNKNOWN status and no verdict", async () => {
+    await emitGovernanceEvent("governance.eval.case.judged", {
+      evalRunId: "run-1",
+      caseId: "case-1",
+      orgId: "org-1",
+      dimension: "groundedness_faithfulness",
+      status: "UNKNOWN",
+      judgeModelId: "us.anthropic.claude-sonnet-4-6",
+      judgeModelVersion: "judge-v1:us.anthropic.claude-sonnet-4-6",
+      judgePromptHash: "sha256:deadbeef",
+    });
+    const detail = JSON.parse(
+      ebMock.commandCalls(PutEventsCommand)[0].args[0].input.Entries![0]
+        .Detail!,
+    );
+    expect(detail.status).toBe("UNKNOWN");
+    expect(detail.verdict).toBeUndefined();
   });
 
   test("falls back to default event bus when EVENT_BUS_NAME is unset", async () => {

@@ -149,6 +149,19 @@ export interface TelemetryStackProps extends cdk.StackProps {
    * the envelope honestly reports `null` rather than a fabricated value.
    */
   commitSha?: string;
+  /**
+   * CIT-103 Pass A: eval-run tables (from BackendStack) — read/write
+   * source for eval-case-scorer/eval-run-aggregator's per-case and
+   * per-run score persistence. evalCasesTable is read-only (case
+   * definitions); evalRunsTable/evalRunCaseResultsTable need read+write
+   * (SET scoreVector/scoreAggregates). No new stack dependency:
+   * TelemetryStack already depends on BackendStack (see
+   * ReplayPackageHandlerFunction's identical executionsTable/
+   * conversationsTable/etc. sourcing above).
+   */
+  evalCasesTable: dynamodb.ITable;
+  evalRunsTable: dynamodb.ITable;
+  evalRunCaseResultsTable: dynamodb.ITable;
 }
 
 /**
@@ -1024,6 +1037,150 @@ export class TelemetryStack extends cdk.Stack {
     costBudgetEvaluatorScheduleRule.addTarget(
       new targets.LambdaFunction(this.costBudgetEvaluatorFunction),
     );
+
+    // ========================================================================
+    // CIT-103 Pass A — EvalCaseScorer + EvalRunAggregator
+    // ========================================================================
+    //
+    // Homed HERE (not GovernanceStack, where eval-run-resolver/eval-runner/
+    // eval-conversation-worker live) because both Lambdas need
+    // this.costLedgerTable (owned by this stack) and props.governanceLedgerTable
+    // (from ArbiterStack) for tool_accuracy/cost/policy_compliance scoring —
+    // GovernanceStack instantiates BEFORE both ArbiterStack and this stack
+    // in bin/app.ts, so it cannot hold direct construct references to
+    // either table (same DECISION d36fbbf7 rationale that already forces
+    // the replay-bucket SSM-parameter indirection above). Direct Lambda
+    // EventBridge targets — no new SQS queue/DLQ (design §2/§7): every
+    // write here is idempotent SET, never ADD, so at-least-once
+    // EventBridge delivery is safe without a dedicated dispatch queue.
+    // No new DLQ means no growth to the DLQ/alarm drift-guard list below.
+    const evalCaseScorerFunction = new lambda.Function(
+      this,
+      "EvalCaseScorerFunction",
+      {
+        functionName: `citadel-eval-case-scorer-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-case-scorer.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EVAL_CASES_TABLE: props.evalCasesTable.tableName,
+          EVAL_RUN_CASE_RESULTS_TABLE: props.evalRunCaseResultsTable.tableName,
+          COST_LEDGER_TABLE: this.costLedgerTable.tableName,
+          GOVERNANCE_LEDGER_TABLE: props.governanceLedgerTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          REPLAY_BUCKET: this.replayPackageBucket.bucketName,
+          ENVIRONMENT: props.environment,
+          SCORER_VERSION: "v1",
+        },
+        timeout: cdk.Duration.seconds(60),
+        memorySize: 512,
+        logGroup: new logs.LogGroup(this, "EvalCaseScorerFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    props.evalCasesTable.grantReadData(evalCaseScorerFunction);
+    props.evalRunCaseResultsTable.grantReadWriteData(evalCaseScorerFunction);
+    this.costLedgerTable.grantReadData(evalCaseScorerFunction);
+    props.agentEventBus.grantPutEventsTo(evalCaseScorerFunction);
+    // Read-only artifact fetch (eval-scoring-io.ts's readEvalArtifact,
+    // via eval-artifact-store.ts's resolveReplayBucketName — the SSM
+    // parameter this same stack publishes above). This scorer never
+    // WRITES artifacts, only reads them, so a scoped GetObject-only grant
+    // (not grantReadWrite) is correct least-privilege.
+    this.replayPackageBucket.grantRead(evalCaseScorerFunction);
+
+    new events.Rule(this, "EvalCaseCompletedRule", {
+      eventBus: props.agentEventBus,
+      ruleName: `citadel-eval-case-completed-${props.environment}`,
+      description:
+        "CIT-103 Pass A: routes governance.eval.case.completed " +
+        "(emitted by recordCaseCompletion after artifact materialization) " +
+        "to eval-case-scorer for deterministic per-dimension scoring.",
+      eventPattern: {
+        source: ["citadel.backend"],
+        detailType: ["governance.eval.case.completed"],
+      },
+      targets: [
+        new targets.LambdaFunction(evalCaseScorerFunction, {
+          retryAttempts: 2,
+        }),
+      ],
+    });
+
+    new events.Rule(this, "EvalCaseJudgedRule", {
+      eventBus: props.agentEventBus,
+      ruleName: `citadel-eval-case-judged-${props.environment}`,
+      description:
+        "CIT-103 Pass A -> Pass B: routes governance.eval.case.judged " +
+        "(emitted by the arbiter judge handler, Source=citadel.backend — " +
+        "same governance-event source convention as escalate.py's " +
+        "governance.offfrontier.escalated) back to eval-case-scorer, the " +
+        "single writer of eval tables (design §7) — the judge handler " +
+        "itself never writes DynamoDB directly.",
+      eventPattern: {
+        source: ["citadel.backend"],
+        detailType: ["governance.eval.case.judged"],
+      },
+      targets: [
+        new targets.LambdaFunction(evalCaseScorerFunction, {
+          retryAttempts: 2,
+        }),
+      ],
+    });
+
+    const evalRunAggregatorFunction = new lambda.Function(
+      this,
+      "EvalRunAggregatorFunction",
+      {
+        functionName: `citadel-eval-run-aggregator-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-run-aggregator.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
+          EVAL_RUN_CASE_RESULTS_TABLE: props.evalRunCaseResultsTable.tableName,
+          EVAL_CASES_TABLE: props.evalCasesTable.tableName,
+          COST_LEDGER_TABLE: this.costLedgerTable.tableName,
+          REPLAY_BUCKET: this.replayPackageBucket.bucketName,
+          ENVIRONMENT: props.environment,
+          SCORER_VERSION: "v1",
+        },
+        timeout: cdk.Duration.minutes(2),
+        memorySize: 512,
+        logGroup: new logs.LogGroup(this, "EvalRunAggregatorFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    props.evalRunsTable.grantReadWriteData(evalRunAggregatorFunction);
+    props.evalRunCaseResultsTable.grantReadWriteData(evalRunAggregatorFunction);
+    props.evalCasesTable.grantReadData(evalRunAggregatorFunction);
+    this.costLedgerTable.grantReadData(evalRunAggregatorFunction);
+    this.replayPackageBucket.grantRead(evalRunAggregatorFunction);
+
+    new events.Rule(this, "EvalRunCompletedAggregationRule", {
+      eventBus: props.agentEventBus,
+      ruleName: `citadel-eval-run-completed-aggregation-${props.environment}`,
+      description:
+        "CIT-103 Pass A: routes governance.eval.run.completed to " +
+        "eval-run-aggregator, which is self-sufficient (design §2) — it " +
+        "computes any missing deterministic scoreVector inline before " +
+        "writing per-dimension scoreAggregates onto the EvalRun row.",
+      eventPattern: {
+        source: ["citadel.backend"],
+        detailType: ["governance.eval.run.completed"],
+      },
+      targets: [
+        new targets.LambdaFunction(evalRunAggregatorFunction, {
+          retryAttempts: 2,
+        }),
+      ],
+    });
 
     // ========================================================================
     // Platform-health dashboard + SLO alarms (dashboards + alarms story,

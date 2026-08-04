@@ -193,6 +193,57 @@ export async function recordCaseCompletion(
 
   await materializeArtifactIfCompleted(evalRunId, caseId);
 
+  // CIT-103 Pass A (design §2): additive per-case scoring trigger. Fired
+  // for EVERY terminal case (COMPLETED/FAILED/TIMEOUT alike) — the scorer
+  // Lambda itself decides what, if anything, is scoreable for a non-
+  // COMPLETED case (today: nothing, since there is no artifact). This
+  // computes NO scores here — the "no scores, CIT-103 owns verdicts"
+  // contract for this function is unchanged. Read the just-fetched case
+  // row's caseKind straight off the same GetCommand result
+  // materializeArtifactIfCompleted already performed internally is not
+  // exposed here, so re-fetch the minimal fields needed for the event
+  // payload — a second GetItem, but on the same hot key, kept out of the
+  // critical completionRecorded/pendingCases-decrement path below (this
+  // emit is purely additive and best-effort, same discipline as the
+  // existing governance.eval.run.completed emit).
+  try {
+    const caseRowRes = await docClient.send(
+      new GetCommand({
+        TableName: EVAL_RUN_CASE_RESULTS_TABLE,
+        Key: { evalRunId, caseId },
+      }),
+    );
+    const caseRowForEvent = caseRowRes.Item as
+      | {
+          orgId: string;
+          caseKind: EvalCaseKindLiteral;
+          artifactRef?: string;
+        }
+      | undefined;
+    if (caseRowForEvent) {
+      await emitGovernanceEvent("governance.eval.case.completed", {
+        evalRunId,
+        caseId,
+        orgId: caseRowForEvent.orgId,
+        caseKind: caseRowForEvent.caseKind,
+        ...(caseRowForEvent.artifactRef
+          ? { artifactRef: caseRowForEvent.artifactRef }
+          : {}),
+      });
+    }
+  } catch (err) {
+    // Best-effort — failure never blocks the completion-rollup below
+    // (same discipline as the governance.eval.run.completed emit).
+    console.error(
+      "eval-run-completion: emit governance.eval.case.completed failed",
+      {
+        evalRunId,
+        caseId,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+  }
+
   const runUpdateRes = await docClient.send(
     new UpdateCommand({
       TableName: EVAL_RUNS_TABLE,
