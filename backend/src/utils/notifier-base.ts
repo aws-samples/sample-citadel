@@ -92,6 +92,15 @@ export const GOVERNANCE_DETAIL_TYPES = [
   // Consumed by eval-drift-finding-writer.ts, which writes a
   // GovernanceFinding row into GOVERNANCE_LEDGER_TABLE.
   "governance.eval.drift.detected",
+  // CIT-105: emitted by designateEvalBaseline on a successful baseline
+  // designation/re-designation. Audit trail + lets a future auto-
+  // comparison consumer react to a new baseline (design §9).
+  "governance.eval.baseline.designated",
+  // CIT-105: emitted by computeEvalComparison AFTER the verdict row is
+  // durably written. This is the machine-readable hand-off the future
+  // promotion gate subscribes to — carries only per-dimension-derived
+  // booleans/arrays/enum, no dimension-collapsing number (design §9).
+  "governance.eval.comparison.completed",
 ] as const;
 
 export type GovernanceDetailType = (typeof GOVERNANCE_DETAIL_TYPES)[number];
@@ -318,6 +327,32 @@ export interface GovernancePayloadMap {
     current: { passRate?: number; meanScore?: number; sampleCount: number };
     delta: number | null;
     window: { from: string; to: string };
+  };
+  // CIT-105: payload for governance.eval.baseline.designated.
+  "governance.eval.baseline.designated": {
+    orgId: string;
+    agentTargetId: string;
+    suiteId: string;
+    baselineEvalRunId: string;
+    previousBaselineEvalRunId?: string;
+    designatedBy: string;
+    at: string;
+  };
+  // CIT-105: payload for governance.eval.comparison.completed — the
+  // machine-readable hand-off the future promotion gate subscribes to.
+  // Carries only per-dimension-derived booleans/arrays/enum, no
+  // dimension-collapsing number (design §9).
+  "governance.eval.comparison.completed": {
+    orgId: string;
+    suiteId: string;
+    comparisonId: string;
+    baselineEvalRunId: string;
+    candidateEvalRunIds: string[];
+    anyMaterialRegression: boolean;
+    materiallyRegressedDimensions: string[];
+    unstableDimensions: string[];
+    verdictStatus: string;
+    at: string;
   };
 }
 

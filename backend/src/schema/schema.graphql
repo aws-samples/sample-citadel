@@ -82,6 +82,12 @@ type Query {
   getEvalRun(evalRunId: ID!): EvalRun
   listEvalRuns(orgId: ID!, suiteId: ID): [EvalRun!]!
   listEvalRunCaseResults(evalRunId: ID!): [EvalRunCaseResult!]!
+  # Eval baseline comparison + regression (CIT-105)
+  getEvalBaseline(orgId: ID!, agentTargetId: ID!, suiteId: ID!): EvalBaseline
+  listEvalBaselines(orgId: ID!): [EvalBaseline!]!
+  getEvalComparison(comparisonId: ID!): EvalComparisonVerdict
+  listEvalComparisons(orgId: ID!, suiteId: ID): [EvalComparisonVerdict!]!
+  getEvalComparisonThresholdConfig(orgId: ID!, suiteId: ID!): EvalComparisonThresholdConfig
   # Phase 2 (production sampling) — admin-only reads (enforced in
   # eval-sampling-config-resolver.ts, not by schema visibility).
   getEvalSamplingConfig(orgId: ID!): EvalSamplingConfig
@@ -355,6 +361,10 @@ type Mutation {
   # EvalRun (CIT-102) — start is the only mutation; runs are immutable
   # once created (outcome-only progression via the driver, not client edits).
   startEvalRun(input: StartEvalRunInput!): EvalRun!
+  # Eval baseline comparison + regression (CIT-105). UI: OUT OF SCOPE.
+  designateEvalBaseline(input: DesignateEvalBaselineInput!): EvalBaseline!
+  computeEvalComparison(input: ComputeEvalComparisonInput!): EvalComparisonVerdict!
+  setEvalComparisonThresholdConfig(orgId: ID!, suiteId: ID!, input: SetEvalComparisonThresholdConfigInput!): EvalComparisonThresholdConfig!
   # Phase 2 (production sampling) — admin-only (enforced in the resolver,
   # not schema visibility). optIn/rate changes take effect on the NEXT
   # terminal workflow/conversation signal; no retroactive resampling.
@@ -2343,6 +2353,151 @@ type EvalRunCaseResult {
 
 type DeleteResult {
   success: Boolean!
+}
+
+# Eval baseline comparison + regression (CIT-105 — Baseline Comparison +
+# Regression Analysis for Agent Evaluation). UI: OUT OF SCOPE. Reuses the
+# pure compareRuns()/eval-comparison.ts algorithm verbatim — this schema
+# only exposes its I/O-layer wire shapes. NEVER a composite single number
+# anywhere below (see eval-no-composite.guard.test.ts).
+enum EvalComparisonDirection {
+  improved
+  regressed
+  unchanged
+  unstable
+  incomparable
+  insufficient_sample
+}
+
+enum EvalComparisonVerdictStatus {
+  PASS
+  REGRESSED
+  UNSTABLE
+  INCOMPARABLE
+  NOTHING_TO_COMPARE
+}
+
+# Mutable (orgId, agentTargetId, suiteId) baseline designation pointer,
+# re-baselined on promotion (design §3). A governance act — audited via
+# governance.eval.baseline.designated.
+type EvalBaseline {
+  orgId: ID!
+  agentTargetId: String!
+  suiteId: ID!
+  baselineEvalRunId: ID!
+  baselineSuiteVersion: Int!
+  baselineAgentTargetVersion: String!
+  previousBaselineEvalRunId: ID
+  reason: String
+  designatedAt: AWSDateTime!
+  designatedBy: String!
+  version: Int!
+}
+
+input DesignateEvalBaselineInput {
+  orgId: ID!
+  agentTargetId: String!
+  suiteId: ID!
+  baselineEvalRunId: ID!
+  reason: String
+}
+
+# Per-case×per-dimension case counts for one dimension's comparison —
+# never a collapsed total, always the individual classification tallies.
+type EvalComparisonCaseCounts {
+  improved: Int!
+  regressed: Int!
+  unstable: Int!
+  unchanged: Int!
+  incomparable: Int!
+  new: Int!
+  dropped: Int!
+}
+
+# One dimension's comparison result (one per DIMENSION_ORDER entry).
+# `materialRegression` is THE per-dimension gate boolean the future
+# promotion gate keys off — never a numeric score. The per-case×per-
+# dimension breakdown (`perCase` in the pure EvalComparisonVerdict type)
+# is NOT exposed on this summary type; it lives in
+# EvalComparisonVerdict.caseDetail (AWSJSON, inline or S3-offloaded).
+type EvalComparisonDimension {
+  dimension: String!
+  direction: EvalComparisonDirection!
+  materialRegression: Boolean!
+  unstable: Boolean!
+  baselineStat: Float
+  candidateStat: Float
+  delta: Float
+  caseCounts: EvalComparisonCaseCounts!
+}
+
+# Threshold config echoed verbatim into every persisted verdict for
+# reproducibility (design §4) — the exact thresholds that produced this
+# comparison, even if org/suite config later changes.
+type EvalComparisonThresholds {
+  passRateDropThreshold: Float!
+  meanScoreDropThreshold: Float!
+  latencyP95IncreaseMsThreshold: Float!
+  costIncreaseThreshold: Float!
+  minSampleCount: Int!
+  scoreStabilityBand: Float!
+}
+
+# Computed baseline-vs-candidate-cohort regression verdict — release
+# evidence (design §3). `caseDetail` carries the full per-case×per-
+# dimension breakdown as AWSJSON (Map<dimension, EvalComparisonPerCaseRow[]>),
+# inline when small or resolved from the S3 offload transparently by the
+# resolver's getEvalComparisonHydrated — callers never need to know which
+# storage path was used. `verdictStatus`/`anyMaterialRegression`/
+# `materiallyRegressedDimensions`/`unstableDimensions` are the categorical
+# rollups a promotion gate consumes — booleans/arrays/enum ONLY, no
+# dimension-collapsing number anywhere on this type.
+type EvalComparisonVerdict {
+  comparisonId: ID!
+  orgId: ID!
+  suiteId: ID!
+  suiteVersion: Int!
+  agentTargetId: String!
+  baselineEvalRunId: ID!
+  baselineAgentTargetVersion: String!
+  candidateEvalRunIds: [ID!]!
+  candidateAgentTargetVersion: String!
+  repeatCount: Int!
+  scorerVersions: [String!]!
+  thresholds: EvalComparisonThresholds!
+  dimensions: [EvalComparisonDimension!]!
+  anyMaterialRegression: Boolean!
+  materiallyRegressedDimensions: [String!]!
+  unstableDimensions: [String!]!
+  verdictStatus: EvalComparisonVerdictStatus!
+  caseDetail: AWSJSON
+  caseDetailRef: String
+  createdAt: AWSDateTime!
+  createdBy: String!
+}
+
+input ComputeEvalComparisonInput {
+  orgId: ID!
+  suiteId: ID!
+  candidateEvalRunIds: [ID!]!
+  baselineEvalRunId: ID
+  thresholdOverride: AWSJSON
+  idempotencyKey: String!
+}
+
+# Admin-authored threshold config (design §4). suiteId=`__default__` sets
+# the per-org default row; any other suiteId sets a per-suite override.
+type EvalComparisonThresholdConfig {
+  orgId: ID!
+  suiteId: ID!
+  thresholds: AWSJSON!
+  updatedAt: AWSDateTime
+  updatedBy: String
+  version: Int!
+}
+
+input SetEvalComparisonThresholdConfigInput {
+  thresholds: AWSJSON!
 }
 
 # Phase 2 (production sampling) — admin-authored, per-org opt-in

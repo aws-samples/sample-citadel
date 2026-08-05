@@ -627,6 +627,105 @@ export interface EvalRunCaseResult {
   scorerVersion?: string;
 }
 
+// EvalBaseline / EvalComparison (CIT-105) — I/O layer wire shapes. The
+// pure compute types (EvalComparisonVerdict, EvalComparisonDimension, ...)
+// live in src/lambda/utils/eval-comparison.ts and are reused verbatim here
+// (never re-declared) — this section only adds the DDB row / GraphQL wire
+// shapes the resolver persists and returns.
+import type {
+  EvalComparisonVerdict,
+  ResolvedComparisonThresholds,
+} from "../lambda/utils/eval-comparison";
+import type { PartialComparisonThresholds } from "../lambda/utils/eval-comparison-config";
+
+/** EvalBaselinesTable row (PK orgId, SK `${agentTargetId}#${suiteId}`) —
+ * mutable designation pointer, re-baselined on promotion (design §3). */
+export interface EvalBaseline {
+  orgId: string;
+  agentTargetId: string;
+  suiteId: string;
+  baselineEvalRunId: string;
+  baselineSuiteVersion: number;
+  baselineAgentTargetVersion: string;
+  previousBaselineEvalRunId?: string;
+  reason?: string;
+  designatedAt: string;
+  designatedBy: string;
+  version: number;
+}
+
+export interface DesignateEvalBaselineInput {
+  orgId: string;
+  agentTargetId: string;
+  suiteId: string;
+  baselineEvalRunId: string;
+  reason?: string;
+}
+
+/** EvalComparisonsTable row (PK comparisonId) — computed verdict, release
+ * evidence (design §3). `caseDetail` carries the full per-case×per-dimension
+ * EvalComparisonVerdict.dimensions[].perCase breakdown inline as AWSJSON
+ * when under the size cap; `caseDetailRef` points at the S3 offload
+ * (`eval-comparisons/{comparisonId}.json`) when it exceeds the cap. Exactly
+ * one of the two is set. The dimension-level summary (everything in
+ * EvalComparisonVerdict EXCEPT perCase) is always stored inline — it is
+ * small and bounded (8 dims). */
+export interface EvalComparisonRow {
+  comparisonId: string;
+  orgId: string;
+  suiteId: string;
+  suiteVersion: number;
+  agentTargetId: string;
+  baselineEvalRunId: string;
+  baselineAgentTargetVersion: string;
+  candidateEvalRunIds: string[];
+  candidateAgentTargetVersion: string;
+  repeatCount: number;
+  scorerVersions: string[];
+  thresholds: ResolvedComparisonThresholds;
+  /** Dimension summaries WITHOUT the perCase breakdown (offloaded/inlined
+   * separately as caseDetail/caseDetailRef) — see design §3. */
+  dimensions: Omit<EvalComparisonVerdict["dimensions"][number], "perCase">[];
+  anyMaterialRegression: boolean;
+  materiallyRegressedDimensions: string[];
+  unstableDimensions: string[];
+  verdictStatus: EvalComparisonVerdict["verdictStatus"];
+  /** Inline per-case×per-dimension breakdown (AWSJSON on the wire) — set
+   * when under MAX_JSON_FIELD_BYTES, mutually exclusive with caseDetailRef. */
+  caseDetail?: string;
+  /** S3 key (`eval-comparisons/{comparisonId}.json`) — set when caseDetail
+   * would exceed the size cap, mutually exclusive with caseDetail. */
+  caseDetailRef?: string;
+  createdAt: string;
+  createdBy: string;
+}
+
+export interface ComputeEvalComparisonInput {
+  orgId: string;
+  suiteId: string;
+  candidateEvalRunIds: string[];
+  baselineEvalRunId?: string;
+  thresholdOverride?: PartialComparisonThresholds;
+  idempotencyKey: string;
+}
+
+/** EvalComparisonConfigTable row (PK orgId, SK suiteId; SK sentinel
+ * `__default__` = org-wide default) — admin-authored threshold config
+ * source of truth (design §4). Reuses ComparisonThresholdConfigRow's
+ * `thresholds` shape from eval-comparison-config.ts. */
+export interface EvalComparisonThresholdConfigRow {
+  orgId: string;
+  suiteId: string;
+  thresholds: PartialComparisonThresholds;
+  updatedAt?: string;
+  updatedBy?: string;
+  version: number;
+}
+
+export interface SetEvalComparisonThresholdConfigInput {
+  thresholds: PartialComparisonThresholds;
+}
+
 // InterrogationRound
 export type RoundStatusLiteral =
   "IN_PROGRESS" | "AWAITING_CONSTRAINTS" | "REVISED" | "STABILISED";

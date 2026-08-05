@@ -111,6 +111,21 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     "EvalRunCaseResults",
     "citadel-eval-run-case-results-test",
   );
+  const evalBaselinesTable = mockTable(
+    backendStack,
+    "EvalBaselines",
+    "citadel-eval-baselines-test",
+  );
+  const evalComparisonsTable = mockTable(
+    backendStack,
+    "EvalComparisons",
+    "citadel-eval-comparisons-test",
+  );
+  const evalComparisonConfigTable = mockTable(
+    backendStack,
+    "EvalComparisonConfig",
+    "citadel-eval-comparison-config-test",
+  );
   const executionsTable = mockTable(
     backendStack,
     "Executions",
@@ -139,6 +154,9 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     evalCasesTable,
     evalRunsTable,
     evalRunCaseResultsTable,
+    evalBaselinesTable,
+    evalComparisonsTable,
+    evalComparisonConfigTable,
     executionsTable,
     conversationsTable,
   });

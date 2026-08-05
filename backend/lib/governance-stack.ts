@@ -66,6 +66,13 @@ export interface GovernanceStackProps extends cdk.StackProps {
   // all homed here alongside the eval-resolver.
   evalRunsTable: dynamodb.ITable;
   evalRunCaseResultsTable: dynamodb.ITable;
+  // CIT-105: baseline designation pointer + computed comparison verdicts +
+  // threshold config — owned by BackendStack, consumed here by the
+  // eval-comparison-resolver (own file/IAM role per kept-separate
+  // doctrine — distinct from eval-run-resolver/eval-resolver above).
+  evalBaselinesTable: dynamodb.ITable;
+  evalComparisonsTable: dynamodb.ITable;
+  evalComparisonConfigTable: dynamodb.ITable;
   /** Adapter A dispatch target — execution rows for EXECUTION-kind cases. */
   executionsTable: dynamodb.ITable;
   /** Adapter B dispatch target — conversation transcript rows for CONVERSATION-kind cases. */
@@ -1022,6 +1029,142 @@ exports.handler = async (event) => {
       resolver.addResourceDependency(evalRunLambdaDataSource);
     }
 
+    // ============================================================
+    // EvalBaseline / EvalComparison Resolver (CIT-105)
+    // ============================================================
+    //
+    // Own file + own IAM role (kept-separate doctrine, mirrors
+    // EvalRunResolverFunction vs EvalResolverFunction above) — distinct
+    // tables (EvalBaselinesTable/EvalComparisonsTable/
+    // EvalComparisonConfigTable) + distinct AppSync data source. Reads
+    // EvalSuites/EvalCases/EvalRuns/EvalRunCaseResults (read-only — never
+    // mutates run/suite state), reads+writes its own three tables, PutEvents,
+    // and S3 get/put on the shared replay bucket's eval-comparisons/*
+    // prefix (design §3) via the SAME grantEvalArtifactAccess helper used
+    // by EvalRunResolverFunction/EvalRunnerFunction above.
+
+    const evalComparisonResolverFunction = new lambda.Function(
+      this,
+      "EvalComparisonResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "eval-comparison-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EVAL_BASELINES_TABLE: props.evalBaselinesTable.tableName,
+          EVAL_COMPARISONS_TABLE: props.evalComparisonsTable.tableName,
+          EVAL_COMPARISON_CONFIG_TABLE:
+            props.evalComparisonConfigTable.tableName,
+          EVAL_SUITES_TABLE: props.evalSuitesTable.tableName,
+          EVAL_CASES_TABLE: props.evalCasesTable.tableName,
+          EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
+          EVAL_RUN_CASE_RESULTS_TABLE: props.evalRunCaseResultsTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(
+          this,
+          "EvalComparisonResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    props.evalSuitesTable.grantReadData(evalComparisonResolverFunction);
+    props.evalCasesTable.grantReadData(evalComparisonResolverFunction);
+    props.evalRunsTable.grantReadData(evalComparisonResolverFunction);
+    props.evalRunCaseResultsTable.grantReadWriteData(
+      evalComparisonResolverFunction,
+    );
+    props.evalBaselinesTable.grantReadWriteData(evalComparisonResolverFunction);
+    props.evalComparisonsTable.grantReadWriteData(
+      evalComparisonResolverFunction,
+    );
+    props.evalComparisonConfigTable.grantReadWriteData(
+      evalComparisonResolverFunction,
+    );
+    props.agentEventBus.grantPutEventsTo(evalComparisonResolverFunction);
+    this.grantEvalArtifactAccess(
+      evalComparisonResolverFunction,
+      props.environment,
+      ["eval-runs/*", "eval-comparisons/*"],
+    );
+
+    const evalComparisonDataSourceRole = new iam.Role(
+      this,
+      "EvalComparisonDataSourceRole",
+      {
+        assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+      },
+    );
+    evalComparisonResolverFunction.grantInvoke(evalComparisonDataSourceRole);
+
+    const evalComparisonLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "EvalComparisonLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "EvalComparisonLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: evalComparisonDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: evalComparisonResolverFunction.functionArn,
+        },
+      },
+    );
+
+    const evalComparisonMutationFields = [
+      {
+        id: "DesignateEvalBaselineResolver",
+        fieldName: "designateEvalBaseline",
+      },
+      {
+        id: "ComputeEvalComparisonResolver",
+        fieldName: "computeEvalComparison",
+      },
+      {
+        id: "SetEvalComparisonThresholdConfigResolver",
+        fieldName: "setEvalComparisonThresholdConfig",
+      },
+    ];
+    for (const { id, fieldName } of evalComparisonMutationFields) {
+      const resolver = new appsyncCfn.CfnResolver(this, id, {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName,
+        dataSourceName: evalComparisonLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      });
+      resolver.addResourceDependency(evalComparisonLambdaDataSource);
+    }
+
+    const evalComparisonQueryFields = [
+      { id: "GetEvalBaselineResolver", fieldName: "getEvalBaseline" },
+      { id: "ListEvalBaselinesResolver", fieldName: "listEvalBaselines" },
+      { id: "GetEvalComparisonResolver", fieldName: "getEvalComparison" },
+      { id: "ListEvalComparisonsResolver", fieldName: "listEvalComparisons" },
+      {
+        id: "GetEvalComparisonThresholdConfigResolver",
+        fieldName: "getEvalComparisonThresholdConfig",
+      },
+    ];
+    for (const { id, fieldName } of evalComparisonQueryFields) {
+      const resolver = new appsyncCfn.CfnResolver(this, id, {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName,
+        dataSourceName: evalComparisonLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      });
+      resolver.addResourceDependency(evalComparisonLambdaDataSource);
+    }
+
     // eval-conversation-worker — Adapter B (CONVERSATION-kind cases), SQS
     // consumer of EvalDispatchQueue. 15-minute timeout bounds the inline
     // InvokeAgentRuntimeCommand await (design §1/§3). batchSize=1 mirrors
@@ -1631,6 +1774,7 @@ exports.handler = async (event) => {
   private grantEvalArtifactAccess(
     fn: lambda.Function,
     environment: string,
+    objectPrefixes: string[] = ["eval-runs/*"],
   ): void {
     const paramArn = `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/eval-replay-bucket-${environment}`;
     // CloudFormation's own deterministic naming convention for an S3 bucket
@@ -1651,11 +1795,14 @@ exports.handler = async (event) => {
         resources: [paramArn],
       }),
     );
+    const objectResources = objectPrefixes.map(
+      (prefix) => `${bucketArnPattern}/${prefix}`,
+    );
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ["s3:PutObject", "s3:GetObject"],
-        resources: [`${bucketArnPattern}/eval-runs/*`],
+        resources: objectResources,
       }),
     );
 
@@ -1674,14 +1821,15 @@ exports.handler = async (event) => {
             "CloudFormation's own random bucket-name suffix — the stack-" +
             "name and logical-id prefix (citadel-telemetry-{env}-" +
             "replaypackagebucket) are synth-time literals, and the pattern " +
-            "is further scoped to the eval-runs/* object prefix with just " +
+            "is further scoped to a specific object prefix (eval-runs/* " +
+            "and/or eval-comparisons/*, per caller) with just " +
             "s3:PutObject/s3:GetObject (no Delete/List) — mirrors the " +
             "existing synth-time-composed wildcard bucket ARN precedents " +
             "(backend-stack.ts citadel-schemas-*, registry-stack.ts " +
             "citadel-code-*), applied here at the IAM-resource-pattern " +
             "level since the bucket's random suffix cannot be synth-time-" +
             "literal for the stack-ordering reason above.",
-          appliesTo: [`Resource::${bucketArnPattern}/eval-runs/*`],
+          appliesTo: objectResources.map((resource) => `Resource::${resource}`),
         },
       ],
     );

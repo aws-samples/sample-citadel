@@ -66,6 +66,16 @@ export class BackendStack extends cdk.Stack {
   // posture rationale as EvalRuns).
   public readonly evalSamplingConfigTable: dynamodb.Table;
   public readonly evalProdSamplesTable: dynamodb.Table;
+  // CIT-105: baseline designation pointer + computed comparison verdicts
+  // + threshold config — same RETAIN + deletionProtection + PITR posture
+  // as EvalRuns for the two evidence tables (EvalBaselines/EvalComparisons);
+  // EvalComparisonConfig is a small admin-authored config table (DESTROY-ok
+  // like EvalSamplingConfigTable). Passed as dynamodb.ITable props into
+  // GovernanceStack, which owns the eval-comparison-resolver (own file/IAM
+  // role per kept-separate doctrine — distinct from eval-run-resolver).
+  public readonly evalBaselinesTable: dynamodb.Table;
+  public readonly evalComparisonsTable: dynamodb.Table;
+  public readonly evalComparisonConfigTable: dynamodb.Table;
   public readonly workflowProgressFanoutFunction: lambda.Function;
   public readonly idempotencyTable: dynamodb.Table;
   public readonly interrogationRoundsTable: dynamodb.Table;
@@ -3263,6 +3273,79 @@ export class BackendStack extends cdk.Stack {
       {
         tableName: `citadel-eval-sampling-config-${props.environment}`,
         partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+
+    // EvalBaselines (CIT-105) — mutable (orgId, agentTargetId, suiteId)
+    // baseline designation pointer, re-baselined on promotion (design §3).
+    // PK orgId, SK `${agentTargetId}#${suiteId}` so a point-get is exact
+    // and a Query on orgId lists every baseline for that org. RETAIN +
+    // deletionProtection + PITR — an evidence-adjacent governance record
+    // (which run was designated the release baseline, and when), same
+    // posture as EvalRunsTable.
+    this.evalBaselinesTable = new dynamodb.Table(this, "EvalBaselinesTable", {
+      tableName: `citadel-eval-baselines-${props.environment}`,
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: {
+        name: "agentTargetId_suiteId",
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+
+    // EvalComparisons (CIT-105) — computed baseline-vs-candidate-cohort
+    // regression verdicts, release evidence (design §3). Simple PK
+    // (comparisonId) with two GSIs mirroring EvalRunsTable's shape exactly:
+    // org-index (org-scoped listing) + suite-index (all comparisons for a
+    // suite). RETAIN + deletionProtection + PITR.
+    this.evalComparisonsTable = new dynamodb.Table(
+      this,
+      "EvalComparisonsTable",
+      {
+        tableName: `citadel-eval-comparisons-${props.environment}`,
+        partitionKey: {
+          name: "comparisonId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+    this.evalComparisonsTable.addGlobalSecondaryIndex({
+      indexName: "org-index",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    this.evalComparisonsTable.addGlobalSecondaryIndex({
+      indexName: "suite-index",
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // EvalComparisonConfig (CIT-105) — admin-authored threshold config
+    // source of truth (design §4). PK orgId, SK suiteId (SK sentinel
+    // `__default__` = org-wide default row). Small config table, DESTROY
+    // on stack teardown is acceptable (re-authored on next admin write,
+    // hardcoded DEFAULT_COMPARISON_THRESHOLDS always available in code) —
+    // same posture as EvalSamplingConfigTable, deliberately NOT RETAIN/
+    // deletionProtection like the release-evidence eval tables above.
+    this.evalComparisonConfigTable = new dynamodb.Table(
+      this,
+      "EvalComparisonConfigTable",
+      {
+        tableName: `citadel-eval-comparison-config-${props.environment}`,
+        partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+        sortKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
         pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
