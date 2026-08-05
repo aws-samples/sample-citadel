@@ -410,6 +410,12 @@ export interface EvalSuite {
   createdAt: string;
   createdBy: string;
   updatedAt: string;
+  /** Optional gate-class metadata consumable by a future release gate
+   * (e.g. "adversarial-injection", "unauthorized-tool-use",
+   * "data-leakage", "policy-bypass", "unsafe-delegation"). Not enum-locked
+   * so orgs can extend with their own pack classes. Additive/optional —
+   * absent on every pre-existing suite. */
+  gateClass?: string;
 }
 
 export interface EvalSuiteInput {
@@ -418,6 +424,7 @@ export interface EvalSuiteInput {
   name: string;
   description: string;
   semver: string;
+  gateClass?: string;
 }
 
 export type EvalCaseKindLiteral = "CONVERSATION" | "EXECUTION";

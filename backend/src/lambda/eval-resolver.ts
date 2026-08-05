@@ -241,6 +241,7 @@ export async function createEvalSuite(
     createdAt: now,
     createdBy: authContext.userId,
     updatedAt: now,
+    ...(input.gateClass !== undefined ? { gateClass: input.gateClass } : {}),
   };
 
   await docClient.send(

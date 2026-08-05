@@ -186,6 +186,29 @@ describe("eval-resolver", () => {
         createEvalSuite(baseSuiteInput({ agentTargetId: "" }), auth),
       ).rejects.toThrow(/ValidationError.*agentTargetId/);
     });
+
+    test("org-authored suite threads an optional gateClass through to the persisted suite", async () => {
+      ddbMock.on(PutCommand).resolves({});
+      const auth = authContextFor("architect");
+      const suite = await createEvalSuite(
+        baseSuiteInput({ gateClass: "unauthorized-tool-use" }),
+        auth,
+      );
+
+      expect(suite.gateClass).toBe("unauthorized-tool-use");
+      const puts = ddbMock.commandCalls(PutCommand);
+      expect(puts[0].args[0].input.Item).toMatchObject({
+        gateClass: "unauthorized-tool-use",
+      });
+    });
+
+    test("gateClass is omitted entirely when not supplied (no undefined attribute written)", async () => {
+      ddbMock.on(PutCommand).resolves({});
+      const auth = authContextFor("architect");
+      const suite = await createEvalSuite(baseSuiteInput(), auth);
+
+      expect(suite.gateClass).toBeUndefined();
+    });
   });
 
   // ── write-path guard: FROZEN or referenced rejects every mutation ──────
