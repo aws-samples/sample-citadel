@@ -1003,3 +1003,154 @@ describe("EVAL_COMPARISON_NAMESPACE", () => {
     expect(a).toBe(b);
   });
 });
+
+// ── Cross-org isolation on READ paths (medium finding fix) ─────────────────
+// These read paths must not rely on uuidv5 identifier opacity alone — they
+// must apply the SAME assertRowOrg/CrossOrgRowError discipline already used
+// on the write/compute paths above (test 23).
+describe("read-path cross-org isolation", () => {
+  test("getEvalBaseline rejects a row belonging to a different org", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-eval-baselines-test" })
+      .resolves({
+        Item: {
+          orgId: "org-2",
+          agentTargetId: "agent-1",
+          suiteId: "suite-1",
+          baselineEvalRunId: "run-1",
+          version: 1,
+        },
+      });
+
+    await expect(
+      getEvalBaseline("org-1", "agent-1", "suite-1"),
+    ).rejects.toThrow(CrossOrgRowError);
+  });
+
+  test("listEvalBaselines rejects when a returned row belongs to a different org", async () => {
+    ddbMock
+      .on(QueryCommand, { TableName: "citadel-eval-baselines-test" })
+      .resolves({
+        Items: [
+          {
+            orgId: "org-2",
+            agentTargetId: "agent-1",
+            suiteId: "suite-1",
+            baselineEvalRunId: "run-1",
+            version: 1,
+          },
+        ],
+      });
+
+    await expect(listEvalBaselines("org-1")).rejects.toThrow(CrossOrgRowError);
+  });
+
+  // getEvalComparison(comparisonId: ID!) has no orgId GraphQL argument
+  // (schema.graphql:88), but the caller's org is still recoverable from the
+  // AppSync identity — same precedent as execution-resolver.ts's
+  // getExecution(executionId, userId, event), which resolves
+  // extractOrgFromEvent(event) and compares it against the fetched row's
+  // orgId. getEvalComparisonHydrated now takes the event for that reason.
+  test("getEvalComparisonHydrated rejects a row belonging to a different org (identity-derived expectedOrgId)", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-eval-comparisons-test" })
+      .resolves({
+        Item: { comparisonId: "cmp-1", orgId: "org-2", suiteId: "suite-1" },
+      });
+
+    await expect(
+      getEvalComparisonHydrated("cmp-1", {
+        identity: { "custom:organization": "org-1" },
+      }),
+    ).rejects.toThrow(CrossOrgRowError);
+  });
+
+  test("getEvalComparisonHydrated allows a same-org row (identity-derived expectedOrgId)", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-eval-comparisons-test" })
+      .resolves({
+        Item: { comparisonId: "cmp-1", orgId: "org-1", suiteId: "suite-1" },
+      });
+
+    const result = await getEvalComparisonHydrated("cmp-1", {
+      identity: { "custom:organization": "org-1" },
+    });
+    expect(result?.comparisonId).toBe("cmp-1");
+  });
+
+  test("getEvalComparisonHydrated allows the row through when no org claim is present (API-key/IAM caller)", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-eval-comparisons-test" })
+      .resolves({
+        Item: { comparisonId: "cmp-1", orgId: "org-2", suiteId: "suite-1" },
+      });
+
+    const result = await getEvalComparisonHydrated("cmp-1", { identity: {} });
+    expect(result?.comparisonId).toBe("cmp-1");
+  });
+
+  test("handler dispatch rejects cross-org getEvalComparison via the identity claim", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-eval-comparisons-test" })
+      .resolves({
+        Item: { comparisonId: "cmp-1", orgId: "org-2", suiteId: "suite-1" },
+      });
+
+    await expect(
+      handler({
+        info: { fieldName: "getEvalComparison" },
+        identity: { "custom:organization": "org-1" },
+        arguments: { comparisonId: "cmp-1" },
+      }),
+    ).rejects.toThrow(CrossOrgRowError);
+  });
+
+  test("listEvalComparisons (suiteId path) applies the orgId predicate on the suite-index query", async () => {
+    ddbMock
+      .on(QueryCommand, {
+        TableName: "citadel-eval-comparisons-test",
+        IndexName: "suite-index",
+      })
+      .resolves({
+        // Real DynamoDB applies FilterExpression server-side, so a
+        // cross-org row for the same suiteId never reaches the client in
+        // the first place — only the org-1 row is returned here.
+        Items: [{ comparisonId: "cmp-1", orgId: "org-1", suiteId: "suite-1" }],
+      });
+
+    const result = await listEvalComparisons("org-1", "suite-1");
+    expect(result).toHaveLength(1);
+    expect(result[0].comparisonId).toBe("cmp-1");
+
+    const calls = ddbMock.commandCalls(QueryCommand, {
+      TableName: "citadel-eval-comparisons-test",
+      IndexName: "suite-index",
+    });
+    expect(calls[0].args[0].input.FilterExpression).toBe("orgId = :oid");
+    expect(
+      (
+        calls[0].args[0].input.ExpressionAttributeValues as Record<
+          string,
+          unknown
+        >
+      )[":oid"],
+    ).toBe("org-1");
+  });
+
+  test("getEvalComparisonThresholdConfig rejects a row belonging to a different org", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-eval-comparison-config-test" })
+      .resolves({
+        Item: {
+          orgId: "org-2",
+          suiteId: "suite-1",
+          thresholds: {},
+          version: 1,
+        },
+      });
+
+    await expect(
+      getEvalComparisonThresholdConfig("org-1", "suite-1"),
+    ).rejects.toThrow(CrossOrgRowError);
+  });
+});

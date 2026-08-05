@@ -32,6 +32,20 @@
  * Cross-org isolation (design §8, mirrors replay-package-builder.ts's
  * CrossOrgRowError/assertRowOrg discipline): every loaded run/suite row's
  * orgId must equal the caller-resolved orgId, or the request is rejected.
+ * Applied uniformly to READ paths too (getEvalBaseline, listEvalBaselines,
+ * listEvalComparisons's suite-index path via FilterExpression since
+ * suite-index's key schema is (suiteId, createdAt) with no orgId key
+ * attribute, getEvalComparisonThresholdConfig) — these must not rely on
+ * uuidv5/opaque-identifier secrecy alone as their only isolation boundary.
+ * getEvalComparison/getEvalComparisonHydrated (keyed solely by
+ * comparisonId) has no caller-supplied orgId in the GraphQL schema
+ * (`getEvalComparison(comparisonId: ID!)`, schema.graphql) or the frontend
+ * query that calls it, so the expectedOrgId is instead resolved from the
+ * AppSync identity via extractOrgFromEvent (../utils/auth-event) — the same
+ * precedent execution-resolver.ts's getExecution(executionId, userId, event)
+ * uses for its identically-shaped id-only lookup. A null org claim (API-key
+ * or IAM caller) is tolerated as a pass-through, matching that precedent's
+ * `if (userOrg && ...)` guard.
  *
  * S3 offload (design §3, mirrors eval-artifact-store.ts's SSM-resolved
  * replay bucket + `eval-runs/{evalRunId}/{caseId}.json` key convention):
@@ -61,6 +75,7 @@ import {
 import { v5 as uuidv5 } from "uuid";
 import { createHash } from "crypto";
 import { hasPermission } from "../utils/auth";
+import { extractOrgFromEvent } from "../utils/auth-event";
 import { emitGovernanceEvent } from "../utils/notifier-base";
 import { resolveReplayBucketName } from "./utils/eval-artifact-store";
 import { scoreCase, type DimensionScore } from "./utils/eval-scoring";
@@ -267,7 +282,9 @@ export async function getEvalBaseline(
       },
     }),
   );
-  return (res.Item as EvalBaseline | undefined) ?? null;
+  const item = (res.Item as EvalBaseline | undefined) ?? null;
+  assertRowOrg(EVAL_BASELINES_TABLE, item ?? undefined, orgId);
+  return item;
 }
 
 export async function listEvalBaselines(
@@ -280,7 +297,11 @@ export async function listEvalBaselines(
       ExpressionAttributeValues: { ":oid": orgId },
     }),
   );
-  return (res.Items as EvalBaseline[] | undefined) ?? [];
+  const items = (res.Items as EvalBaseline[] | undefined) ?? [];
+  for (const item of items) {
+    assertRowOrg(EVAL_BASELINES_TABLE, item, orgId);
+  }
+  return items;
 }
 
 async function getEvalRun(evalRunId: string): Promise<EvalRun | null> {
@@ -475,7 +496,10 @@ export async function getEvalComparisonThresholdConfig(
       Key: { orgId, suiteId },
     }),
   );
-  return (res.Item as EvalComparisonThresholdConfigRowType | undefined) ?? null;
+  const item =
+    (res.Item as EvalComparisonThresholdConfigRowType | undefined) ?? null;
+  assertRowOrg(EVAL_COMPARISON_CONFIG_TABLE, item ?? undefined, orgId);
+  return item;
 }
 
 async function getOrgDefaultThresholdConfig(
@@ -753,10 +777,19 @@ export async function listEvalComparisons(
         TableName: EVAL_COMPARISONS_TABLE,
         IndexName: "suite-index",
         KeyConditionExpression: "suiteId = :sid",
-        ExpressionAttributeValues: { ":sid": suiteId },
+        // suite-index's key schema is (suiteId, createdAt) — orgId is not a
+        // key attribute here, so the org scope must be enforced as a
+        // FilterExpression (post-query, pre-return) rather than a
+        // KeyConditionExpression predicate.
+        FilterExpression: "orgId = :oid",
+        ExpressionAttributeValues: { ":sid": suiteId, ":oid": orgId },
       }),
     );
-    return (res.Items as EvalComparisonRow[] | undefined) ?? [];
+    const items = (res.Items as EvalComparisonRow[] | undefined) ?? [];
+    for (const item of items) {
+      assertRowOrg(EVAL_COMPARISONS_TABLE, item, orgId);
+    }
+    return items;
   }
   const res = await docClient.send(
     new QueryCommand({
@@ -766,7 +799,11 @@ export async function listEvalComparisons(
       ExpressionAttributeValues: { ":oid": orgId },
     }),
   );
-  return (res.Items as EvalComparisonRow[] | undefined) ?? [];
+  const items = (res.Items as EvalComparisonRow[] | undefined) ?? [];
+  for (const item of items) {
+    assertRowOrg(EVAL_COMPARISONS_TABLE, item, orgId);
+  }
+  return items;
 }
 
 /** Extracts the perCase breakdown for S3/inline offload, and the
@@ -1029,12 +1066,26 @@ async function readCaseDetailFromS3(
 /** getEvalComparison with caseDetail hydrated from S3 when offloaded —
  * exported for direct testing; the handler dispatch uses this for the
  * getEvalComparison field so a caller always receives the full row
- * regardless of storage location. */
+ * regardless of storage location.
+ *
+ * `event` is optional and, when supplied, its identity is resolved via
+ * extractOrgFromEvent to an expectedOrgId that the fetched row is asserted
+ * against (assertRowOrg/CrossOrgRowError — same discipline as every other
+ * read path in this file). The GraphQL schema has no orgId argument for
+ * this field, so identity is the only source of an expectedOrgId; a null
+ * claim (API-key/IAM caller, or no event passed at all) is a pass-through,
+ * matching execution-resolver.ts's getExecution precedent.
+ */
 export async function getEvalComparisonHydrated(
   comparisonId: string,
+  event?: EvalComparisonResolverEvent | { identity?: GovernanceEventIdentity },
 ): Promise<EvalComparisonRow | null> {
   const row = await getEvalComparison(comparisonId);
   if (!row) return null;
+  const expectedOrgId = event ? await extractOrgFromEvent(event) : null;
+  if (expectedOrgId) {
+    assertRowOrg(EVAL_COMPARISONS_TABLE, row, expectedOrgId);
+  }
   if (row.caseDetailRef && !row.caseDetail) {
     const hydrated = await readCaseDetailFromS3(row.caseDetailRef);
     if (hydrated) {
@@ -1295,7 +1346,10 @@ export const handler = async (
       case "listEvalBaselines":
         return await listEvalBaselines(event.arguments.orgId);
       case "getEvalComparison":
-        return await getEvalComparisonHydrated(event.arguments.comparisonId);
+        return await getEvalComparisonHydrated(
+          event.arguments.comparisonId,
+          event,
+        );
       case "listEvalComparisons":
         return await listEvalComparisons(
           event.arguments.orgId,
