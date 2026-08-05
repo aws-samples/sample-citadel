@@ -29,6 +29,7 @@ import { GovernanceConstitution } from './pages/governance/Constitution';
 import { GovernanceCaseLaw } from './pages/governance/CaseLaw';
 import { GovernanceD4Retrospective } from './pages/governance/D4Retrospective';
 import { GovernanceIamTrustPath } from './pages/governance/IamTrustPath';
+import { GovernanceEvalComparison } from './pages/governance/EvalComparison';
 import { Observability } from './pages/Observability';
 import { NotFound } from './components/NotFound';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -238,6 +239,7 @@ function App() {
               <Route path="/governance/case-law" element={<GovernanceCaseLaw />} />
               <Route path="/governance/d4" element={<GovernanceD4Retrospective />} />
               <Route path="/governance/iam" element={<GovernanceIamTrustPath />} />
+              <Route path="/governance/eval-comparison" element={<GovernanceEvalComparison />} />
               <Route path="/team" element={<Team />} />
               <Route path="/observability" element={<Observability />} />
               <Route path="/observability/trace/:kind/:id" element={<Observability />} />

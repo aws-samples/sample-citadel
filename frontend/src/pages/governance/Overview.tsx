@@ -19,6 +19,7 @@ import {
   Gavel,
   Layers,
   KeyRound,
+  GitCompare,
   type LucideIcon,
 } from 'lucide-react';
 import {
@@ -166,6 +167,14 @@ const NAV_TILES: NavTile[] = [
     path: '/governance/iam',
     icon: KeyRound,
     adminOnly: true,
+  },
+  {
+    id: 'eval-comparison',
+    label: 'Eval baseline comparison',
+    description: 'Baseline-vs-candidate per-case diff + regression verdict',
+    path: '/governance/eval-comparison',
+    icon: GitCompare,
+    adminOnly: false,
   },
 ];
 
