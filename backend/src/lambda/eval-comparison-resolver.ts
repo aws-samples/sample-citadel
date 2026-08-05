@@ -67,9 +67,18 @@ import { scoreCase, type DimensionScore } from "./utils/eval-scoring";
 import {
   buildScoringInputs,
   getEvalCaseDefinition,
+  getEvalRunCaseRow,
   readCostRows,
   readEvalArtifact,
 } from "./utils/eval-scoring-io";
+import {
+  projectSideView,
+  type ReplayEnvelopeForView,
+} from "./utils/eval-artifact-view";
+import {
+  sanitizeBundle,
+  assertBundleSecretFree,
+} from "./utils/replay-sanitize";
 import {
   compareRuns,
   type EvalComparisonRunInput,
@@ -89,6 +98,10 @@ import type {
   DesignateEvalBaselineInput,
   ComputeEvalComparisonInput,
   SetEvalComparisonThresholdConfigInput,
+  GetEvalCaseArtifactDiffInput,
+  EvalCaseArtifactDiff,
+  EvalArtifactSideView,
+  EvalArtifactAvailability,
   EvalRun,
   EvalRunCaseResult,
   EvalSuite,
@@ -149,6 +162,11 @@ interface EvalComparisonResolverArguments {
   agentTargetId: string;
   suiteId: string;
   comparisonId: string;
+  caseId: string;
+  baselineEvalRunId: string;
+  candidateEvalRunId: string;
+  transcriptCursor?: string | null;
+  trajectoryCursor?: string | null;
 }
 
 type EvalComparisonResolverEvent =
@@ -1026,6 +1044,222 @@ export async function getEvalComparisonHydrated(
   return row;
 }
 
+// ── EvalCaseArtifactDiff (CIT-105 per-case artifact read path) ─────────────
+
+function validateArtifactDiffInput(input: GetEvalCaseArtifactDiffInput): void {
+  if (typeof input?.orgId !== "string" || !input.orgId) {
+    throw new Error("ValidationError: orgId is required");
+  }
+  if (typeof input?.suiteId !== "string" || !input.suiteId) {
+    throw new Error("ValidationError: suiteId is required");
+  }
+  if (typeof input?.caseId !== "string" || !input.caseId) {
+    throw new Error("ValidationError: caseId is required");
+  }
+  if (
+    typeof input?.baselineEvalRunId !== "string" ||
+    !input.baselineEvalRunId
+  ) {
+    throw new Error("ValidationError: baselineEvalRunId is required");
+  }
+  if (
+    typeof input?.candidateEvalRunId !== "string" ||
+    !input.candidateEvalRunId
+  ) {
+    throw new Error("ValidationError: candidateEvalRunId is required");
+  }
+}
+
+/**
+ * Loads and projects ONE side of the diff (design §3). Never throws for a
+ * legitimate absence — every gap degrades to a distinguishable
+ * availability state (RUN_ABSENT / RUN_NOT_COMPLETED / CASE_ABSENT /
+ * ARTIFACT_MISSING / ARTIFACT_UNRESOLVED / ARTIFACT_WITHHELD_SANITISATION).
+ * DOES throw CrossOrgRowError / ArtifactCursorError — both are request-
+ * level failures that must abort the whole diff, never be swallowed into
+ * a per-side state.
+ */
+async function loadArtifactSideView(
+  side: "BASELINE" | "CANDIDATE",
+  evalRunId: string,
+  suiteId: string,
+  caseId: string,
+  orgId: string,
+  cursors: {
+    transcriptCursor?: string | null;
+    trajectoryCursor?: string | null;
+  },
+): Promise<EvalArtifactSideView> {
+  const empty = {
+    transcript: [],
+    transcriptTotalCount: 0,
+    transcriptReturnedCount: 0,
+    transcriptTruncated: false,
+    transcriptNextCursor: null,
+    transcriptTotalBytes: 0,
+    transcriptReturnedBytes: 0,
+    trajectory: [],
+    trajectoryTotalCount: 0,
+    trajectoryReturnedCount: 0,
+    trajectoryTruncated: false,
+    trajectoryNextCursor: null,
+    toolSet: [],
+    toolOrder: null,
+  };
+
+  function withAvailability(
+    availability: EvalArtifactAvailability,
+    extra: Partial<EvalArtifactSideView> = {},
+  ): EvalArtifactSideView {
+    return {
+      side,
+      availability,
+      evalRunId,
+      caseId,
+      ...empty,
+      ...extra,
+    };
+  }
+
+  const run = await getEvalRun(evalRunId);
+  if (!run) {
+    return withAvailability("RUN_ABSENT");
+  }
+  assertRowOrg(EVAL_RUNS_TABLE, run, orgId);
+  if (run.suiteId !== suiteId) {
+    // Belongs to a different suite than requested — treated as absent
+    // rather than leaking cross-suite data.
+    return withAvailability("RUN_ABSENT");
+  }
+  if (run.status !== "COMPLETED") {
+    return withAvailability("RUN_NOT_COMPLETED");
+  }
+
+  const caseRow = await getEvalRunCaseRow(
+    EVAL_RUN_CASE_RESULTS_TABLE,
+    evalRunId,
+    caseId,
+  );
+  if (!caseRow) {
+    return withAvailability("CASE_ABSENT");
+  }
+  assertRowOrg(EVAL_RUN_CASE_RESULTS_TABLE, caseRow, orgId);
+
+  if (!caseRow.artifactRef) {
+    return withAvailability("ARTIFACT_MISSING", {
+      caseKind: caseRow.caseKind,
+      artifactKind: caseRow.artifactKind,
+    });
+  }
+
+  const envelope = (await readEvalArtifact(caseRow.artifactRef)) as
+    ReplayEnvelopeForView | undefined;
+  if (!envelope) {
+    // artifactRef was set but the object could not be read — distinct
+    // from ARTIFACT_MISSING: the run/case genuinely had an artifact, it is
+    // just no longer resolvable (e.g. expired/GC'd).
+    return withAvailability("ARTIFACT_UNRESOLVED", {
+      caseKind: caseRow.caseKind,
+      artifactKind: caseRow.artifactKind,
+    });
+  }
+
+  // Row-level defence-in-depth: the envelope itself carries orgId
+  // (assembleReplayPackage always stamps it) — verify independently of
+  // the row-level checks above.
+  assertRowOrg("EvalArtifactEnvelope", envelope, orgId);
+
+  const projection = projectSideView(envelope, caseRow.caseKind, cursors);
+
+  // HARD REQ 1: defence-in-depth re-sanitisation of the exact bytes
+  // leaving to the client. Reuses the EXISTING pipeline verbatim — never
+  // a new sanitiser, never bypassed. sanitizeBundle is documented
+  // idempotent, so re-running on already-sanitised content is safe.
+  const safeProjection = sanitizeBundle(projection) as typeof projection;
+  try {
+    assertBundleSecretFree(safeProjection);
+  } catch {
+    // Fail-closed: withhold content entirely, never leak partial/raw
+    // bytes. Distinguishable from every other absence state.
+    return withAvailability("ARTIFACT_WITHHELD_SANITISATION", {
+      caseKind: caseRow.caseKind,
+      artifactKind: caseRow.artifactKind,
+      correlationId: envelope.correlationId,
+    });
+  }
+
+  return {
+    side,
+    availability: "OK",
+    evalRunId,
+    caseId,
+    caseKind: caseRow.caseKind,
+    artifactKind: caseRow.artifactKind,
+    correlationId: envelope.correlationId,
+    sanitisation: envelope.sanitisation,
+    transcript: safeProjection.transcript,
+    transcriptTotalCount: safeProjection.transcriptTotalCount,
+    transcriptReturnedCount: safeProjection.transcriptReturnedCount,
+    transcriptTruncated: safeProjection.transcriptTruncated,
+    transcriptNextCursor: safeProjection.transcriptNextCursor,
+    transcriptTotalBytes: safeProjection.transcriptTotalBytes,
+    transcriptReturnedBytes: safeProjection.transcriptReturnedBytes,
+    trajectory: safeProjection.trajectory,
+    trajectoryTotalCount: safeProjection.trajectoryTotalCount,
+    trajectoryReturnedCount: safeProjection.trajectoryReturnedCount,
+    trajectoryTruncated: safeProjection.trajectoryTruncated,
+    trajectoryNextCursor: safeProjection.trajectoryNextCursor,
+    toolSet: safeProjection.toolSet,
+    toolOrder: safeProjection.toolOrder,
+  };
+}
+
+/**
+ * getEvalCaseArtifactDiff — read-only per-case artifact diff (design
+ * memory projects/cit-105-artifacts-design). Requires eval:run
+ * (deliberately stricter than today's unchecked getEvalComparison).
+ * Issues ZERO writes on any path (no inline scoring, no mutation) —
+ * strictly read-only.
+ */
+export async function getEvalCaseArtifactDiff(
+  input: GetEvalCaseArtifactDiffInput,
+  authContext: AuthContext,
+): Promise<EvalCaseArtifactDiff> {
+  requireEvalRunPermission(authContext, "read eval case artifacts");
+  validateArtifactDiffInput(input);
+
+  const cursors = {
+    transcriptCursor: input.transcriptCursor,
+    trajectoryCursor: input.trajectoryCursor,
+  };
+
+  const [baseline, candidate] = await Promise.all([
+    loadArtifactSideView(
+      "BASELINE",
+      input.baselineEvalRunId,
+      input.suiteId,
+      input.caseId,
+      input.orgId,
+      cursors,
+    ),
+    loadArtifactSideView(
+      "CANDIDATE",
+      input.candidateEvalRunId,
+      input.suiteId,
+      input.caseId,
+      input.orgId,
+      cursors,
+    ),
+  ]);
+
+  return {
+    suiteId: input.suiteId,
+    caseId: input.caseId,
+    baseline,
+    candidate,
+  };
+}
+
 // ── Handler dispatch ────────────────────────────────────────────────────────
 
 export const handler = async (
@@ -1071,6 +1305,19 @@ export const handler = async (
         return await getEvalComparisonThresholdConfig(
           event.arguments.orgId,
           event.arguments.suiteId,
+        );
+      case "getEvalCaseArtifactDiff":
+        return await getEvalCaseArtifactDiff(
+          {
+            orgId: event.arguments.orgId,
+            suiteId: event.arguments.suiteId,
+            caseId: event.arguments.caseId,
+            baselineEvalRunId: event.arguments.baselineEvalRunId,
+            candidateEvalRunId: event.arguments.candidateEvalRunId,
+            transcriptCursor: event.arguments.transcriptCursor,
+            trajectoryCursor: event.arguments.trajectoryCursor,
+          },
+          authContext,
         );
       default:
         throw new Error(`Unsupported field: ${fieldName}`);

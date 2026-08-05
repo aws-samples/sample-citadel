@@ -36,6 +36,7 @@ const EVAL_COMPARISON_QUERY_FIELDS = [
   "getEvalComparison",
   "listEvalComparisons",
   "getEvalComparisonThresholdConfig",
+  "getEvalCaseArtifactDiff",
 ];
 
 function mockTable(
@@ -334,6 +335,82 @@ describe("GovernanceStack — eval-comparison wiring (CIT-105)", () => {
           ),
         },
       ]),
+    });
+  });
+
+  // CIT-105 per-case artifact read path (memory
+  // projects/cit-105-artifacts-design §5): the read path is served by the
+  // SAME resolver Lambda/data source/role — it must add exactly one new
+  // CfnResolver (asserted via EVAL_COMPARISON_QUERY_FIELDS above) and NO
+  // new or bucket-wide S3 statement, since the existing eval-runs/* grant
+  // already covers the GetObject this path needs.
+  describe("CIT-105 getEvalCaseArtifactDiff — no new/bucket-wide S3 grant", () => {
+    test("exactly one S3 policy statement exists on the comparison role, still prefix-scoped to the same two prefixes", () => {
+      const policies = template.findResources("AWS::IAM::Policy");
+      const s3Statements: Array<Record<string, unknown>> = [];
+      for (const [, resource] of Object.entries(policies)) {
+        const props = (
+          resource as {
+            Properties: {
+              PolicyDocument: { Statement: Array<Record<string, unknown>> };
+              Roles?: Array<{ Ref?: string }>;
+            };
+          }
+        ).Properties;
+        const isComparisonRole = (props.Roles ?? []).some((r) =>
+          (r.Ref ?? "").startsWith("EvalComparisonResolverFunctionServiceRole"),
+        );
+        if (!isComparisonRole) continue;
+        for (const stmt of props.PolicyDocument.Statement) {
+          const actions = Array.isArray(stmt.Action)
+            ? (stmt.Action as string[])
+            : [stmt.Action as string];
+          if (
+            actions.some((a) => typeof a === "string" && a.startsWith("s3:"))
+          ) {
+            s3Statements.push(stmt);
+          }
+        }
+      }
+
+      // Exactly one S3 statement — no second/duplicate statement was
+      // introduced for the read path.
+      expect(s3Statements.length).toBe(1);
+
+      const resourceJson = JSON.stringify(s3Statements[0].Resource);
+      // Never bucket-wide: every resource entry must carry a `/` prefix
+      // segment (eval-runs/* or eval-comparisons/*), never a bare
+      // `.../replaypackagebucket*` with no prefix.
+      expect(resourceJson).toMatch(/eval-runs\\?\/\*/);
+      expect(resourceJson).toMatch(/eval-comparisons\\?\/\*/);
+      expect(resourceJson).not.toMatch(/replaypackagebucket\*"(?!.*eval-)/);
+    });
+
+    test("env vars on EvalComparisonResolverFunction are unchanged by the read path (still exactly the pre-existing seven table vars + event bus)", () => {
+      const fns = template.findResources("AWS::Lambda::Function", {
+        Properties: {
+          Handler: "eval-comparison-resolver.handler",
+        },
+      });
+      const [, fn] = Object.entries(fns)[0];
+      const vars = (
+        fn as {
+          Properties: { Environment: { Variables: Record<string, unknown> } };
+        }
+      ).Properties.Environment.Variables;
+      expect(Object.keys(vars).sort()).toEqual(
+        [
+          "ENVIRONMENT",
+          "EVAL_BASELINES_TABLE",
+          "EVAL_CASES_TABLE",
+          "EVAL_COMPARISONS_TABLE",
+          "EVAL_COMPARISON_CONFIG_TABLE",
+          "EVAL_RUNS_TABLE",
+          "EVAL_RUN_CASE_RESULTS_TABLE",
+          "EVAL_SUITES_TABLE",
+          "EVENT_BUS_NAME",
+        ].sort(),
+      );
     });
   });
 });

@@ -1152,6 +1152,10 @@ exports.handler = async (event) => {
         id: "GetEvalComparisonThresholdConfigResolver",
         fieldName: "getEvalComparisonThresholdConfig",
       },
+      {
+        id: "GetEvalCaseArtifactDiffResolver",
+        fieldName: "getEvalCaseArtifactDiff",
+      },
     ];
     for (const { id, fieldName } of evalComparisonQueryFields) {
       const resolver = new appsyncCfn.CfnResolver(this, id, {

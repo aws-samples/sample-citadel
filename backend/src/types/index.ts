@@ -726,6 +726,79 @@ export interface SetEvalComparisonThresholdConfigInput {
   thresholds: PartialComparisonThresholds;
 }
 
+// EvalCaseArtifactDiff (CIT-105 per-case artifact read path) — I/O-layer
+// wire shapes for getEvalCaseArtifactDiff. Honest per-side absence enum
+// (design memory projects/cit-105-artifacts-design §2): every state is
+// distinguishable and never faked/empty-defaulted.
+export type EvalArtifactAvailability =
+  | "OK"
+  | "RUN_ABSENT"
+  | "RUN_NOT_COMPLETED"
+  | "CASE_ABSENT"
+  | "ARTIFACT_MISSING"
+  | "ARTIFACT_UNRESOLVED"
+  | "ARTIFACT_WITHHELD_SANITISATION";
+
+export interface GetEvalCaseArtifactDiffInput {
+  orgId: string;
+  suiteId: string;
+  caseId: string;
+  baselineEvalRunId: string;
+  candidateEvalRunId: string;
+  transcriptCursor?: string | null;
+  trajectoryCursor?: string | null;
+}
+
+export interface EvalArtifactSideView {
+  side: "BASELINE" | "CANDIDATE";
+  availability: EvalArtifactAvailability;
+  evalRunId: string;
+  caseId: string;
+  caseKind?: EvalCaseKindLiteral;
+  artifactKind?: string;
+  correlationId?: string;
+  sanitisation?: {
+    redactPiiVersion: string;
+    secretPatternsVersion: string;
+    gate: string;
+  };
+  transcript: Array<{
+    index: number;
+    role: string;
+    content: string;
+    truncated: boolean;
+  }>;
+  transcriptTotalCount: number;
+  transcriptReturnedCount: number;
+  transcriptTruncated: boolean;
+  transcriptNextCursor: string | null;
+  transcriptTotalBytes: number;
+  transcriptReturnedBytes: number;
+  trajectory: Array<{
+    stepIndex: number;
+    nodeId: string;
+    agentId: string | null;
+    status: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    output: unknown;
+    outputTruncated: boolean;
+  }>;
+  trajectoryTotalCount: number;
+  trajectoryReturnedCount: number;
+  trajectoryTruncated: boolean;
+  trajectoryNextCursor: string | null;
+  toolSet: string[];
+  toolOrder: string[] | null;
+}
+
+export interface EvalCaseArtifactDiff {
+  suiteId: string;
+  caseId: string;
+  baseline: EvalArtifactSideView;
+  candidate: EvalArtifactSideView;
+}
+
 // InterrogationRound
 export type RoundStatusLiteral =
   "IN_PROGRESS" | "AWAITING_CONSTRAINTS" | "REVISED" | "STABILISED";

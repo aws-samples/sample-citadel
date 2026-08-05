@@ -49,6 +49,7 @@ export interface EvalRunCaseRow {
   startedAt?: string;
   completedAt?: string;
   artifactRef?: string;
+  artifactKind?: "execution" | "conversation";
   suiteId: string;
   executionId?: string;
   conversationId?: string;

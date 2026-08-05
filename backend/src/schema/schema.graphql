@@ -88,6 +88,7 @@ type Query {
   getEvalComparison(comparisonId: ID!): EvalComparisonVerdict
   listEvalComparisons(orgId: ID!, suiteId: ID): [EvalComparisonVerdict!]!
   getEvalComparisonThresholdConfig(orgId: ID!, suiteId: ID!): EvalComparisonThresholdConfig
+  getEvalCaseArtifactDiff(orgId: ID!, suiteId: ID!, caseId: ID!, baselineEvalRunId: ID!, candidateEvalRunId: ID!, transcriptCursor: String, trajectoryCursor: String): EvalCaseArtifactDiff!
   # Phase 2 (production sampling) — admin-only reads (enforced in
   # eval-sampling-config-resolver.ts, not by schema visibility).
   getEvalSamplingConfig(orgId: ID!): EvalSamplingConfig
@@ -2498,6 +2499,85 @@ type EvalComparisonThresholdConfig {
 
 input SetEvalComparisonThresholdConfigInput {
   thresholds: AWSJSON!
+}
+
+# CIT-105 per-case artifact read path — honest per-side absence enum.
+# Every state below is distinguishable and never faked/empty-defaulted
+# (memory projects/cit-105-artifacts-design §2).
+enum EvalArtifactAvailability {
+  OK
+  RUN_ABSENT
+  RUN_NOT_COMPLETED
+  CASE_ABSENT
+  ARTIFACT_MISSING
+  ARTIFACT_UNRESOLVED
+  ARTIFACT_WITHHELD_SANITISATION
+}
+
+enum EvalArtifactSide {
+  BASELINE
+  CANDIDATE
+}
+
+type EvalArtifactSanitisation {
+  redactPiiVersion: String!
+  secretPatternsVersion: String!
+  gate: String!
+}
+
+type EvalTranscriptMessage {
+  index: Int!
+  role: String!
+  content: String!
+  truncated: Boolean!
+}
+
+# Ordered, diffable DAG/tool-call step. `output` is bounded + already
+# re-sanitised; `outputTruncated` is set (never silently sliced) when the
+# per-node output exceeds the per-step byte cap.
+type EvalTrajectoryStep {
+  stepIndex: Int!
+  nodeId: String!
+  agentId: String
+  status: String
+  startedAt: AWSDateTime
+  completedAt: AWSDateTime
+  output: AWSJSON
+  outputTruncated: Boolean!
+}
+
+type EvalArtifactSideView {
+  side: EvalArtifactSide!
+  availability: EvalArtifactAvailability!
+  evalRunId: ID!
+  caseId: ID!
+  caseKind: EvalCaseKind
+  artifactKind: String
+  correlationId: String
+  sanitisation: EvalArtifactSanitisation
+  transcript: [EvalTranscriptMessage!]!
+  transcriptTotalCount: Int!
+  transcriptReturnedCount: Int!
+  transcriptTruncated: Boolean!
+  transcriptNextCursor: String
+  transcriptTotalBytes: Int!
+  transcriptReturnedBytes: Int!
+  trajectory: [EvalTrajectoryStep!]!
+  trajectoryTotalCount: Int!
+  trajectoryReturnedCount: Int!
+  trajectoryTruncated: Boolean!
+  trajectoryNextCursor: String
+  toolSet: [String!]!
+  # NULL = honest CIT-121 gap (per-tool-call ordering unavailable); never
+  # guessed from finding array position.
+  toolOrder: [String!]
+}
+
+type EvalCaseArtifactDiff {
+  suiteId: ID!
+  caseId: ID!
+  baseline: EvalArtifactSideView!
+  candidate: EvalArtifactSideView!
 }
 
 # Phase 2 (production sampling) — admin-authored, per-org opt-in
