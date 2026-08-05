@@ -47,6 +47,10 @@ const CURATED_FILES = [
   "src/lambda/utils/eval-trajectory.ts",
   "src/lambda/eval-case-scorer.ts",
   "src/lambda/eval-run-aggregator.ts",
+  // CIT-105 — baseline comparison + regression analysis.
+  "src/lambda/utils/eval-comparison.ts",
+  "src/lambda/utils/eval-comparison-config.ts",
+  "src/lambda/eval-comparison-resolver.ts",
 ];
 
 function scanFileForForbiddenIdentifiers(absPath: string): string[] {
