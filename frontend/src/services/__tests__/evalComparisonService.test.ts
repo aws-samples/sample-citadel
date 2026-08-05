@@ -158,4 +158,136 @@ describe('evalComparisonService', () => {
       'UnauthorizedError: eval:run permission required',
     );
   });
+
+  describe('getEvalCaseArtifactDiff', () => {
+    const sideView = {
+      side: 'BASELINE',
+      availability: 'OK',
+      evalRunId: 'run-base',
+      caseId: 'case-1',
+      caseKind: 'CONVERSATION',
+      artifactKind: 'conversation',
+      correlationId: 'corr-1',
+      sanitisation: {
+        redactPiiVersion: 'v1',
+        secretPatternsVersion: 'v1',
+        gate: 'strict',
+      },
+      transcript: [{ index: 0, role: 'user', content: 'hi', truncated: false }],
+      transcriptTotalCount: 1,
+      transcriptReturnedCount: 1,
+      transcriptTruncated: false,
+      transcriptNextCursor: null,
+      transcriptTotalBytes: 2,
+      transcriptReturnedBytes: 2,
+      trajectory: [],
+      trajectoryTotalCount: 0,
+      trajectoryReturnedCount: 0,
+      trajectoryTruncated: false,
+      trajectoryNextCursor: null,
+      toolSet: [],
+      toolOrder: null,
+    };
+
+    it('queries with all identifying args + cursors and unwraps the diff', async () => {
+      const diff = {
+        suiteId: 's1',
+        caseId: 'case-1',
+        baseline: sideView,
+        candidate: { ...sideView, side: 'CANDIDATE', evalRunId: 'run-cand' },
+      };
+      mockQuery.mockResolvedValue({ getEvalCaseArtifactDiff: diff });
+
+      const result = await evalComparisonService.getEvalCaseArtifactDiff({
+        orgId: 'o1',
+        suiteId: 's1',
+        caseId: 'case-1',
+        baselineEvalRunId: 'run-base',
+        candidateEvalRunId: 'run-cand',
+        transcriptCursor: 'cursor-t',
+        trajectoryCursor: 'cursor-j',
+      });
+
+      expect(mockQuery).toHaveBeenCalledWith(
+        expect.stringContaining('getEvalCaseArtifactDiff'),
+        {
+          orgId: 'o1',
+          suiteId: 's1',
+          caseId: 'case-1',
+          baselineEvalRunId: 'run-base',
+          candidateEvalRunId: 'run-cand',
+          transcriptCursor: 'cursor-t',
+          trajectoryCursor: 'cursor-j',
+        },
+      );
+      expect(result).toEqual(diff);
+    });
+
+    it('omits cursors when not provided (undefined, never fabricated)', async () => {
+      mockQuery.mockResolvedValue({
+        getEvalCaseArtifactDiff: {
+          suiteId: 's1',
+          caseId: 'case-1',
+          baseline: sideView,
+          candidate: sideView,
+        },
+      });
+
+      await evalComparisonService.getEvalCaseArtifactDiff({
+        orgId: 'o1',
+        suiteId: 's1',
+        caseId: 'case-1',
+        baselineEvalRunId: 'run-base',
+        candidateEvalRunId: 'run-cand',
+      });
+
+      expect(mockQuery).toHaveBeenCalledWith(
+        expect.stringContaining('getEvalCaseArtifactDiff'),
+        {
+          orgId: 'o1',
+          suiteId: 's1',
+          caseId: 'case-1',
+          baselineEvalRunId: 'run-base',
+          candidateEvalRunId: 'run-cand',
+          transcriptCursor: undefined,
+          trajectoryCursor: undefined,
+        },
+      );
+    });
+
+    it('propagates a non-OK per-side availability verbatim (never fabricated as OK)', async () => {
+      const diff = {
+        suiteId: 's1',
+        caseId: 'case-1',
+        baseline: { ...sideView, availability: 'RUN_NOT_COMPLETED', transcript: [], trajectory: [] },
+        candidate: { ...sideView, side: 'CANDIDATE', availability: 'ARTIFACT_WITHHELD_SANITISATION', transcript: [], trajectory: [] },
+      };
+      mockQuery.mockResolvedValue({ getEvalCaseArtifactDiff: diff });
+
+      const result = await evalComparisonService.getEvalCaseArtifactDiff({
+        orgId: 'o1',
+        suiteId: 's1',
+        caseId: 'case-1',
+        baselineEvalRunId: 'run-base',
+        candidateEvalRunId: 'run-cand',
+      });
+
+      expect(result.baseline.availability).toBe('RUN_NOT_COMPLETED');
+      expect(result.candidate.availability).toBe('ARTIFACT_WITHHELD_SANITISATION');
+    });
+
+    it('propagates query errors verbatim', async () => {
+      mockQuery.mockRejectedValue(new Error('ValidationError: invalid artifact cursor — not valid base64'));
+      await expect(
+        evalComparisonService.getEvalCaseArtifactDiff({
+          orgId: 'o1',
+          suiteId: 's1',
+          caseId: 'case-1',
+          baselineEvalRunId: 'run-base',
+          candidateEvalRunId: 'run-cand',
+          transcriptCursor: 'garbage',
+        }),
+      ).rejects.toThrow('ValidationError: invalid artifact cursor — not valid base64');
+    });
+  });
 });

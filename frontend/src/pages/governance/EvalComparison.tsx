@@ -29,14 +29,21 @@
  * are keyboard-expandable buttons; the case-detail table uses semantic
  * <table> markup via the shared Table primitives.
  *
- * Scope note: raw transcript/trajectory artifact rendering (executing
- * the conversation/execution replay viewer) is OUT OF SCOPE — no query
- * in the CIT-105 GraphQL surface returns raw artifacts, only the
- * per-case×per-dimension classification + numeric baseline/candidate
- * values via `caseDetail`. This page renders exactly that evidence.
+ * Artifact diff panel: each per-case row exposes a "view artifacts"
+ * action that opens a Sheet with the side-by-side baseline vs. candidate
+ * transcript diff and the ordered tool-call trajectory diff for that
+ * case, backed by the committed `getEvalCaseArtifactDiff` query
+ * (backend/src/schema/schema.graphql, backend/src/lambda/utils/
+ * eval-artifact-view.ts). Every one of the 7 per-side availability
+ * states (OK, RUN_ABSENT, RUN_NOT_COMPLETED, CASE_ABSENT,
+ * ARTIFACT_MISSING, ARTIFACT_UNRESOLVED, ARTIFACT_WITHHELD_SANITISATION)
+ * is rendered honestly and distinguishably per side — never collapsed or
+ * faked. Truncation is always surfaced visibly (returned-vs-total counts
+ * + bytes, a truncated flag) with a "load more" control wired to the
+ * server-issued cursor; nothing is ever padded or silently dropped.
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowDown,
@@ -65,6 +72,14 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table';
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from '../../components/ui/sheet';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '../../components/ui/tabs';
 import { useOrganization } from '../../contexts/OrganizationContext';
 import {
   evalComparisonService,
@@ -72,6 +87,10 @@ import {
   type EvalComparisonPerCaseRow,
   type EvalComparisonPerCaseClass,
   type EvalBaseline,
+  type EvalCaseArtifactDiff,
+  type EvalArtifactSideView,
+  type EvalArtifactSide,
+  type EvalArtifactAvailability,
 } from '../../services/evalComparisonService';
 
 // ---------------------------------------------------------------------------
@@ -131,6 +150,430 @@ function parseCaseDetail(
   } catch {
     return {};
   }
+}
+
+// ---------------------------------------------------------------------------
+// Artifact diff panel (transcript + trajectory) — per-side availability
+// ---------------------------------------------------------------------------
+
+const AVAILABILITY_PRESENTATION: Record<
+  EvalArtifactAvailability,
+  { label: string; icon: typeof CheckCircle2; badgeVariant: 'success' | 'destructive' | 'warning' | 'secondary' | 'outline' }
+> = {
+  OK: { label: 'OK', icon: CheckCircle2, badgeVariant: 'success' },
+  RUN_ABSENT: { label: 'Run absent', icon: XCircle, badgeVariant: 'destructive' },
+  RUN_NOT_COMPLETED: { label: 'Run not completed', icon: AlertTriangle, badgeVariant: 'warning' },
+  CASE_ABSENT: { label: 'Case absent from this run', icon: XCircle, badgeVariant: 'destructive' },
+  ARTIFACT_MISSING: { label: 'Artifact missing', icon: XCircle, badgeVariant: 'destructive' },
+  ARTIFACT_UNRESOLVED: { label: 'Artifact unresolved', icon: AlertTriangle, badgeVariant: 'warning' },
+  ARTIFACT_WITHHELD_SANITISATION: {
+    label: 'Artifact withheld (sanitisation)',
+    icon: ShieldAlert,
+    badgeVariant: 'secondary',
+  },
+};
+
+function AvailabilityBanner({ side, view }: { side: EvalArtifactSide; view: EvalArtifactSideView }) {
+  const presentation = AVAILABILITY_PRESENTATION[view.availability] ?? {
+    label: view.availability,
+    icon: ShieldAlert,
+    badgeVariant: 'outline' as const,
+  };
+  const Icon = presentation.icon;
+  return (
+    <div
+      className="flex items-center gap-2 mb-2"
+      data-testid={`artifact-availability-${side}`}
+    >
+      <Icon className="size-4" aria-hidden="true" />
+      <Badge variant={presentation.badgeVariant} role="status">
+        {presentation.label}
+      </Badge>
+      <span className="text-muted-foreground text-xs font-mono">{view.evalRunId}</span>
+    </div>
+  );
+}
+
+function TranscriptColumn({
+  side,
+  view,
+  onLoadMore,
+  loadingMore,
+}: {
+  side: EvalArtifactSide;
+  view: EvalArtifactSideView;
+  onLoadMore: () => void;
+  loadingMore: boolean;
+}) {
+  return (
+    <div data-testid={`artifact-transcript-column-${side}`} className="flex flex-col gap-2 min-w-0">
+      <h3 className="text-sm font-semibold">{side === 'BASELINE' ? 'Baseline' : 'Candidate'}</h3>
+      <AvailabilityBanner side={side} view={view} />
+      {view.availability !== 'OK' ? (
+        <p className="text-muted-foreground text-sm" data-testid={`artifact-transcript-unavailable-${side}`}>
+          No transcript available for this side.
+        </p>
+      ) : view.transcript.length === 0 ? (
+        <p className="text-muted-foreground text-sm" data-testid={`artifact-transcript-empty-${side}`}>
+          Transcript is empty.
+        </p>
+      ) : (
+        <ol
+          className="flex flex-col gap-2 border rounded-md p-2 max-h-96 overflow-y-auto"
+          data-testid={`artifact-transcript-${side}`}
+          aria-label={`${side === 'BASELINE' ? 'Baseline' : 'Candidate'} transcript`}
+        >
+          {view.transcript.map((msg) => (
+            <li key={msg.index} data-testid={`artifact-transcript-message-${side}-${msg.index}`} className="text-sm">
+              <span className="font-mono text-xs text-muted-foreground">[{msg.index}] {msg.role}:</span>{' '}
+              <span className="whitespace-pre-wrap">{msg.content}</span>
+              {msg.truncated && (
+                <span
+                  className="ml-2 text-amber-600 text-xs"
+                  data-testid={`artifact-transcript-message-truncated-${side}-${msg.index}`}
+                >
+                  (message content truncated)
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+      {view.transcriptTruncated && (
+        <p
+          className="text-amber-600 text-xs"
+          role="status"
+          data-testid={`artifact-transcript-truncated-${side}`}
+        >
+          Truncated: showing {view.transcriptReturnedCount} of {view.transcriptTotalCount} messages
+          ({view.transcriptReturnedBytes} of {view.transcriptTotalBytes} bytes).
+        </p>
+      )}
+      {view.transcriptNextCursor && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onLoadMore}
+          disabled={loadingMore}
+          data-testid={`artifact-transcript-load-more-${side}`}
+        >
+          {loadingMore ? 'Loading…' : 'Load more messages'}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function TrajectoryColumn({
+  side,
+  view,
+  onLoadMore,
+  loadingMore,
+}: {
+  side: EvalArtifactSide;
+  view: EvalArtifactSideView;
+  onLoadMore: () => void;
+  loadingMore: boolean;
+}) {
+  return (
+    <div data-testid={`artifact-trajectory-column-${side}`} className="flex flex-col gap-2 min-w-0">
+      <h3 className="text-sm font-semibold">{side === 'BASELINE' ? 'Baseline' : 'Candidate'}</h3>
+      <AvailabilityBanner side={side} view={view} />
+      {view.availability !== 'OK' ? (
+        <p className="text-muted-foreground text-sm" data-testid={`artifact-trajectory-unavailable-${side}`}>
+          No trajectory available for this side.
+        </p>
+      ) : view.trajectory.length === 0 ? (
+        <p className="text-muted-foreground text-sm" data-testid={`artifact-trajectory-empty-${side}`}>
+          Trajectory is empty.
+        </p>
+      ) : (
+        <ol
+          className="flex flex-col gap-2 border rounded-md p-2 max-h-96 overflow-y-auto"
+          data-testid={`artifact-trajectory-${side}`}
+          aria-label={`${side === 'BASELINE' ? 'Baseline' : 'Candidate'} tool-call trajectory`}
+        >
+          {view.trajectory.map((step) => (
+            <li
+              key={step.stepIndex}
+              data-testid={`artifact-trajectory-step-${side}-${step.stepIndex}`}
+              className="text-sm border-b pb-1 last:border-b-0"
+            >
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-xs text-muted-foreground">#{step.stepIndex}</span>
+                <span className="font-mono">{step.nodeId}</span>
+                {step.status && <Badge variant="outline">{step.status}</Badge>}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {step.agentId ? `agent: ${step.agentId}` : 'agent: \u2014'}
+                {' \u00b7 '}
+                {step.startedAt ?? '\u2014'} &rarr; {step.completedAt ?? '\u2014'}
+              </div>
+              <pre className="text-xs whitespace-pre-wrap break-words bg-muted rounded p-1 mt-1">
+                {JSON.stringify(step.output, null, 2)}
+              </pre>
+              {step.outputTruncated && (
+                <span
+                  className="text-amber-600 text-xs"
+                  data-testid={`artifact-trajectory-step-truncated-${side}-${step.stepIndex}`}
+                >
+                  (step output truncated)
+                </span>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+      {view.toolSet.length > 0 && (
+        <p className="text-muted-foreground text-xs">
+          Tools used: <span className="font-mono">{view.toolSet.join(', ')}</span>
+          {view.toolOrder === null && ' (call order unavailable)'}
+        </p>
+      )}
+      {view.trajectoryTruncated && (
+        <p
+          className="text-amber-600 text-xs"
+          role="status"
+          data-testid={`artifact-trajectory-truncated-${side}`}
+        >
+          Truncated: showing {view.trajectoryReturnedCount} of {view.trajectoryTotalCount} steps.
+        </p>
+      )}
+      {view.trajectoryNextCursor && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onLoadMore}
+          disabled={loadingMore}
+          data-testid={`artifact-trajectory-load-more-${side}`}
+        >
+          {loadingMore ? 'Loading…' : 'Load more steps'}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+interface ArtifactDiffPanelProps {
+  open: boolean;
+  onClose: () => void;
+  orgId: string;
+  suiteId: string;
+  caseId: string;
+  baselineEvalRunId: string;
+  candidateEvalRunId: string;
+}
+
+function ArtifactDiffPanel({
+  open,
+  onClose,
+  orgId,
+  suiteId,
+  caseId,
+  baselineEvalRunId,
+  candidateEvalRunId,
+}: ArtifactDiffPanelProps) {
+  const [diff, setDiff] = useState<EvalCaseArtifactDiff | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<'transcript' | 'trajectory'>('transcript');
+  const [loadingMore, setLoadingMore] = useState<string | null>(null);
+
+  const fetchDiff = useCallback(
+    async (cursors: { transcriptCursor?: string; trajectoryCursor?: string } = {}) => {
+      setError(null);
+      try {
+        const result = await evalComparisonService.getEvalCaseArtifactDiff({
+          orgId,
+          suiteId,
+          caseId,
+          baselineEvalRunId,
+          candidateEvalRunId,
+          transcriptCursor: cursors.transcriptCursor,
+          trajectoryCursor: cursors.trajectoryCursor,
+        });
+        setDiff(result);
+      } catch (err: any) {
+        setError(err?.message || 'Failed to load artifact diff');
+      }
+    },
+    [orgId, suiteId, caseId, baselineEvalRunId, candidateEvalRunId],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    setDiff(null);
+    setError(null);
+    setTab('transcript');
+    setLoading(true);
+    void fetchDiff().finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, caseId, baselineEvalRunId, candidateEvalRunId, orgId, suiteId]);
+
+  const handleLoadMoreTranscript = useCallback(
+    async (side: EvalArtifactSide) => {
+      if (!diff) return;
+      const view = side === 'BASELINE' ? diff.baseline : diff.candidate;
+      if (!view.transcriptNextCursor) return;
+      setLoadingMore(`transcript-${side}`);
+      try {
+        const result = await evalComparisonService.getEvalCaseArtifactDiff({
+          orgId,
+          suiteId,
+          caseId,
+          baselineEvalRunId,
+          candidateEvalRunId,
+          transcriptCursor: view.transcriptNextCursor,
+        });
+        setDiff((prev) => {
+          const prevView = side === 'BASELINE' ? prev?.baseline : prev?.candidate;
+          const nextSideView = side === 'BASELINE' ? result.baseline : result.candidate;
+          const merged: EvalArtifactSideView = {
+            ...nextSideView,
+            transcript: [...(prevView?.transcript ?? []), ...nextSideView.transcript],
+          };
+          if (!prev) return result;
+          return side === 'BASELINE' ? { ...prev, baseline: merged } : { ...prev, candidate: merged };
+        });
+      } catch (err: any) {
+        setError(err?.message || 'Failed to load more transcript messages');
+      } finally {
+        setLoadingMore(null);
+      }
+    },
+    [diff, orgId, suiteId, caseId, baselineEvalRunId, candidateEvalRunId],
+  );
+
+  const handleLoadMoreTrajectory = useCallback(
+    async (side: EvalArtifactSide) => {
+      if (!diff) return;
+      const view = side === 'BASELINE' ? diff.baseline : diff.candidate;
+      if (!view.trajectoryNextCursor) return;
+      setLoadingMore(`trajectory-${side}`);
+      try {
+        const result = await evalComparisonService.getEvalCaseArtifactDiff({
+          orgId,
+          suiteId,
+          caseId,
+          baselineEvalRunId,
+          candidateEvalRunId,
+          trajectoryCursor: view.trajectoryNextCursor,
+        });
+        setDiff((prev) => {
+          const prevView = side === 'BASELINE' ? prev?.baseline : prev?.candidate;
+          const nextSideView = side === 'BASELINE' ? result.baseline : result.candidate;
+          const merged: EvalArtifactSideView = {
+            ...nextSideView,
+            trajectory: [...(prevView?.trajectory ?? []), ...nextSideView.trajectory],
+          };
+          if (!prev) return result;
+          return side === 'BASELINE' ? { ...prev, baseline: merged } : { ...prev, candidate: merged };
+        });
+      } catch (err: any) {
+        setError(err?.message || 'Failed to load more trajectory steps');
+      } finally {
+        setLoadingMore(null);
+      }
+    },
+    [diff, orgId, suiteId, caseId, baselineEvalRunId, candidateEvalRunId],
+  );
+
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (!nextOpen) {
+        onClose();
+      }
+    },
+    [onClose],
+  );
+
+  return (
+    <Sheet open={open} onOpenChange={handleOpenChange}>
+      <SheetContent
+        side="right"
+        className="w-full sm:max-w-3xl overflow-y-auto"
+        data-testid="artifact-diff-panel"
+        aria-label={`Artifact diff for case ${caseId}`}
+      >
+        <SheetHeader>
+          <SheetTitle>Artifact diff — case {caseId}</SheetTitle>
+          <SheetDescription>
+            Baseline <span className="font-mono">{baselineEvalRunId}</span> vs. candidate{' '}
+            <span className="font-mono">{candidateEvalRunId}</span>
+          </SheetDescription>
+        </SheetHeader>
+        <div className="px-4 pb-4 flex flex-col gap-4">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => handleOpenChange(false)}
+            data-testid="artifact-diff-panel-close"
+            className="self-end"
+          >
+            Close
+          </Button>
+          {loading && (
+            <div className="flex flex-col gap-3" data-testid="artifact-diff-loading">
+              <Skeleton className="h-[60px] w-full" />
+              <Skeleton className="h-[240px] w-full" />
+            </div>
+          )}
+          {!loading && error && (
+            <Alert variant="destructive" data-testid="artifact-diff-error">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+          {!loading && !error && diff && (
+            <Tabs value={tab} onValueChange={(v) => setTab(v as 'transcript' | 'trajectory')}>
+              <TabsList>
+                <TabsTrigger value="transcript" onClick={() => setTab('transcript')}>
+                  Transcript
+                </TabsTrigger>
+                <TabsTrigger value="trajectory" onClick={() => setTab('trajectory')}>
+                  Trajectory
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="transcript">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <TranscriptColumn
+                    side="BASELINE"
+                    view={diff.baseline}
+                    onLoadMore={() => void handleLoadMoreTranscript('BASELINE')}
+                    loadingMore={loadingMore === 'transcript-BASELINE'}
+                  />
+                  <TranscriptColumn
+                    side="CANDIDATE"
+                    view={diff.candidate}
+                    onLoadMore={() => void handleLoadMoreTranscript('CANDIDATE')}
+                    loadingMore={loadingMore === 'transcript-CANDIDATE'}
+                  />
+                </div>
+              </TabsContent>
+              <TabsContent value="trajectory">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <TrajectoryColumn
+                    side="BASELINE"
+                    view={diff.baseline}
+                    onLoadMore={() => void handleLoadMoreTrajectory('BASELINE')}
+                    loadingMore={loadingMore === 'trajectory-BASELINE'}
+                  />
+                  <TrajectoryColumn
+                    side="CANDIDATE"
+                    view={diff.candidate}
+                    onLoadMore={() => void handleLoadMoreTrajectory('CANDIDATE')}
+                    loadingMore={loadingMore === 'trajectory-CANDIDATE'}
+                  />
+                </div>
+              </TabsContent>
+            </Tabs>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -210,11 +653,13 @@ function DimensionRow({
   expanded,
   onToggle,
   caseRows,
+  onViewArtifacts,
 }: {
   dim: EvalComparisonVerdict['dimensions'][number];
   expanded: boolean;
   onToggle: () => void;
   caseRows: EvalComparisonPerCaseRow[];
+  onViewArtifacts: (caseId: string) => void;
 }) {
   const DirectionIcon = directionIcon(dim.direction);
   const ToggleIcon = expanded ? ChevronDown : ChevronRight;
@@ -292,6 +737,7 @@ function DimensionRow({
                     <TableHead>Classification</TableHead>
                     <TableHead>Baseline value</TableHead>
                     <TableHead>Candidate value</TableHead>
+                    <TableHead>Artifacts</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -309,6 +755,17 @@ function DimensionRow({
                       <TableCell className="font-mono text-xs">
                         {row.candidateValue ?? '\u2014'}
                       </TableCell>
+                      <TableCell>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => onViewArtifacts(row.caseId)}
+                          data-testid={`eval-view-artifacts-${row.caseId}`}
+                        >
+                          View artifacts
+                        </Button>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -321,7 +778,13 @@ function DimensionRow({
   );
 }
 
-function DimensionsTable({ verdict }: { verdict: EvalComparisonVerdict }) {
+function DimensionsTable({
+  verdict,
+  onViewArtifacts,
+}: {
+  verdict: EvalComparisonVerdict;
+  onViewArtifacts: (caseId: string) => void;
+}) {
   const [expandedDim, setExpandedDim] = useState<string | null>(null);
   const caseDetail = useMemo(() => parseCaseDetail(verdict), [verdict]);
 
@@ -356,6 +819,7 @@ function DimensionsTable({ verdict }: { verdict: EvalComparisonVerdict }) {
               setExpandedDim((cur) => (cur === dim.dimension ? null : dim.dimension))
             }
             caseRows={caseDetail[dim.dimension] ?? []}
+            onViewArtifacts={onViewArtifacts}
           />
         ))}
       </TableBody>
@@ -383,6 +847,7 @@ export function GovernanceEvalComparison() {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [designateStatus, setDesignateStatus] = useState<string | null>(null);
+  const [artifactPanelCaseId, setArtifactPanelCaseId] = useState<string | null>(null);
 
   const handleCheckBaseline = useCallback(async () => {
     if (!suiteId.trim() || !agentTargetId.trim()) return;
@@ -618,10 +1083,22 @@ export function GovernanceEvalComparison() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <DimensionsTable verdict={verdict} />
+              <DimensionsTable verdict={verdict} onViewArtifacts={setArtifactPanelCaseId} />
             </CardContent>
           </Card>
         </>
+      )}
+
+      {verdict && artifactPanelCaseId && (
+        <ArtifactDiffPanel
+          open
+          onClose={() => setArtifactPanelCaseId(null)}
+          orgId={orgId}
+          suiteId={verdict.suiteId}
+          caseId={artifactPanelCaseId}
+          baselineEvalRunId={verdict.baselineEvalRunId}
+          candidateEvalRunId={verdict.candidateEvalRunIds[0]}
+        />
       )}
     </PageContainer>
   );

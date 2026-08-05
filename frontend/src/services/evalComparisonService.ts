@@ -149,6 +149,93 @@ export interface SetEvalComparisonThresholdConfigInput {
   thresholds: Record<string, unknown>;
 }
 
+// -- Per-case artifact diff (CIT-105 per-case artifact read path) --
+// Mirrors backend/src/types/index.ts EvalArtifactAvailability /
+// EvalArtifactSideView / EvalCaseArtifactDiff verbatim. Every per-side
+// state is distinguishable and never faked/defaulted — see
+// eval-artifact-view.ts header comment.
+
+export type EvalArtifactAvailability =
+  | 'OK'
+  | 'RUN_ABSENT'
+  | 'RUN_NOT_COMPLETED'
+  | 'CASE_ABSENT'
+  | 'ARTIFACT_MISSING'
+  | 'ARTIFACT_UNRESOLVED'
+  | 'ARTIFACT_WITHHELD_SANITISATION';
+
+export type EvalArtifactSide = 'BASELINE' | 'CANDIDATE';
+
+export interface EvalArtifactSanitisation {
+  redactPiiVersion: string;
+  secretPatternsVersion: string;
+  gate: string;
+}
+
+export interface EvalTranscriptMessage {
+  index: number;
+  role: string;
+  content: string;
+  truncated: boolean;
+}
+
+export interface EvalTrajectoryStep {
+  stepIndex: number;
+  nodeId: string;
+  agentId: string | null;
+  status: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  /** AWSJSON on the wire — already-bounded/re-sanitised step output, or
+   * `{ truncatedRaw: string }` when outputTruncated is true. */
+  output: unknown;
+  outputTruncated: boolean;
+}
+
+export interface EvalArtifactSideView {
+  side: EvalArtifactSide;
+  availability: EvalArtifactAvailability;
+  evalRunId: string;
+  caseId: string;
+  caseKind?: string | null;
+  artifactKind?: string | null;
+  correlationId?: string | null;
+  sanitisation?: EvalArtifactSanitisation | null;
+  transcript: EvalTranscriptMessage[];
+  transcriptTotalCount: number;
+  transcriptReturnedCount: number;
+  transcriptTruncated: boolean;
+  transcriptNextCursor: string | null;
+  transcriptTotalBytes: number;
+  transcriptReturnedBytes: number;
+  trajectory: EvalTrajectoryStep[];
+  trajectoryTotalCount: number;
+  trajectoryReturnedCount: number;
+  trajectoryTruncated: boolean;
+  trajectoryNextCursor: string | null;
+  toolSet: string[];
+  /** Null = honest CIT-121 gap (per-tool-call ordering unavailable); never
+   * guessed from array position. */
+  toolOrder: string[] | null;
+}
+
+export interface EvalCaseArtifactDiff {
+  suiteId: string;
+  caseId: string;
+  baseline: EvalArtifactSideView;
+  candidate: EvalArtifactSideView;
+}
+
+export interface GetEvalCaseArtifactDiffInput {
+  orgId: string;
+  suiteId: string;
+  caseId: string;
+  baselineEvalRunId: string;
+  candidateEvalRunId: string;
+  transcriptCursor?: string;
+  trajectoryCursor?: string;
+}
+
 // -- Queries --
 
 const getEvalBaselineQuery = `
@@ -313,6 +400,97 @@ async function getEvalComparisonThresholdConfig(
   return response.getEvalComparisonThresholdConfig;
 }
 
+const evalArtifactSideViewFields = `
+  side
+  availability
+  evalRunId
+  caseId
+  caseKind
+  artifactKind
+  correlationId
+  sanitisation {
+    redactPiiVersion
+    secretPatternsVersion
+    gate
+  }
+  transcript {
+    index
+    role
+    content
+    truncated
+  }
+  transcriptTotalCount
+  transcriptReturnedCount
+  transcriptTruncated
+  transcriptNextCursor
+  transcriptTotalBytes
+  transcriptReturnedBytes
+  trajectory {
+    stepIndex
+    nodeId
+    agentId
+    status
+    startedAt
+    completedAt
+    output
+    outputTruncated
+  }
+  trajectoryTotalCount
+  trajectoryReturnedCount
+  trajectoryTruncated
+  trajectoryNextCursor
+  toolSet
+  toolOrder
+`;
+
+const getEvalCaseArtifactDiffQuery = `
+  query GetEvalCaseArtifactDiff(
+    $orgId: ID!
+    $suiteId: ID!
+    $caseId: ID!
+    $baselineEvalRunId: ID!
+    $candidateEvalRunId: ID!
+    $transcriptCursor: String
+    $trajectoryCursor: String
+  ) {
+    getEvalCaseArtifactDiff(
+      orgId: $orgId
+      suiteId: $suiteId
+      caseId: $caseId
+      baselineEvalRunId: $baselineEvalRunId
+      candidateEvalRunId: $candidateEvalRunId
+      transcriptCursor: $transcriptCursor
+      trajectoryCursor: $trajectoryCursor
+    ) {
+      suiteId
+      caseId
+      baseline {
+        ${evalArtifactSideViewFields}
+      }
+      candidate {
+        ${evalArtifactSideViewFields}
+      }
+    }
+  }
+`;
+
+async function getEvalCaseArtifactDiff(
+  input: GetEvalCaseArtifactDiffInput,
+): Promise<EvalCaseArtifactDiff> {
+  const response = await serverService.query<{
+    getEvalCaseArtifactDiff: EvalCaseArtifactDiff;
+  }>(getEvalCaseArtifactDiffQuery, {
+    orgId: input.orgId,
+    suiteId: input.suiteId,
+    caseId: input.caseId,
+    baselineEvalRunId: input.baselineEvalRunId,
+    candidateEvalRunId: input.candidateEvalRunId,
+    transcriptCursor: input.transcriptCursor,
+    trajectoryCursor: input.trajectoryCursor,
+  });
+  return response.getEvalCaseArtifactDiff;
+}
+
 // -- Mutations --
 
 const designateEvalBaselineMutation = `
@@ -394,6 +572,7 @@ export const evalComparisonService = {
   designateEvalBaseline,
   computeEvalComparison,
   setEvalComparisonThresholdConfig,
+  getEvalCaseArtifactDiff,
 };
 
 export default evalComparisonService;

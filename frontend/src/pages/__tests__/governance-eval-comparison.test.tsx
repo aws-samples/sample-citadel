@@ -9,7 +9,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent, cleanup } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 jest.mock('react-router-dom', () => ({
@@ -115,6 +115,47 @@ jest.mock('../../components/ui/table', () => {
   };
 });
 
+jest.mock('../../components/ui/sheet', () => {
+  const ReactLib = require('react');
+  return {
+    Sheet: ({ children, open }: any) => (open ? ReactLib.createElement('div', { 'data-testid': 'sheet-root' }, children) : null),
+    SheetContent: ({ children, ...rest }: any) =>
+      ReactLib.createElement('div', { role: 'dialog', 'aria-modal': 'true', 'data-testid': 'sheet-content', ...rest }, children),
+    SheetHeader: ({ children }: any) => ReactLib.createElement('div', null, children),
+    SheetTitle: ({ children }: any) => ReactLib.createElement('h2', null, children),
+    SheetDescription: ({ children }: any) => ReactLib.createElement('p', null, children),
+    SheetFooter: ({ children }: any) => ReactLib.createElement('div', null, children),
+    SheetClose: ({ children }: any) => ReactLib.createElement('div', null, children),
+  };
+});
+
+jest.mock('../../components/ui/tabs', () => {
+  const ReactLib = require('react');
+  return {
+    Tabs: ({ children, value }: any) => {
+      const kids = ReactLib.Children.toArray(children) as any[];
+      return ReactLib.createElement(
+        'div',
+        { 'data-testid': 'tabs-root', 'data-value': value },
+        kids.map((child: any, i: number) =>
+          ReactLib.cloneElement(child, { key: child.key ?? i, __activeValue: value }),
+        ),
+      );
+    },
+    TabsList: ({ children }: any) => ReactLib.createElement('div', { role: 'tablist' }, children),
+    TabsTrigger: ({ children, value, onClick, ...rest }: any) =>
+      ReactLib.createElement(
+        'button',
+        { role: 'tab', onClick: () => onClick && onClick(value), 'data-value': value, ...rest },
+        children,
+      ),
+    TabsContent: ({ children, value, __activeValue, ...rest }: any) =>
+      __activeValue !== value
+        ? null
+        : ReactLib.createElement('div', { role: 'tabpanel', 'data-value': value, ...rest }, children),
+  };
+});
+
 const mockUseOrganization = jest.fn();
 jest.mock('../../contexts/OrganizationContext', () => ({
   useOrganization: () => mockUseOrganization(),
@@ -130,6 +171,7 @@ jest.mock('../../services/evalComparisonService', () => ({
     designateEvalBaseline: jest.fn(),
     computeEvalComparison: jest.fn(),
     setEvalComparisonThresholdConfig: jest.fn(),
+    getEvalCaseArtifactDiff: jest.fn(),
   },
 }));
 
@@ -472,6 +514,296 @@ describe('GovernanceEvalComparison', () => {
         suiteId: 'suite-1',
         baselineEvalRunId: 'run-base',
       });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Artifact diff panel (transcript + trajectory), reached from a per-case row
+// ---------------------------------------------------------------------------
+
+function makeSideView(overrides: Partial<any> = {}): any {
+  return {
+    side: 'BASELINE',
+    availability: 'OK',
+    evalRunId: 'run-base',
+    caseId: 'case-improved',
+    caseKind: 'CONVERSATION',
+    artifactKind: 'conversation',
+    correlationId: 'corr-1',
+    sanitisation: { redactPiiVersion: 'v1', secretPatternsVersion: 'v1', gate: 'strict' },
+    transcript: [
+      { index: 0, role: 'user', content: 'hello', truncated: false },
+      { index: 1, role: 'assistant', content: 'hi there', truncated: false },
+    ],
+    transcriptTotalCount: 2,
+    transcriptReturnedCount: 2,
+    transcriptTruncated: false,
+    transcriptNextCursor: null,
+    transcriptTotalBytes: 13,
+    transcriptReturnedBytes: 13,
+    trajectory: [
+      { stepIndex: 0, nodeId: 'node-a', agentId: 'agent-1', status: 'COMPLETED', startedAt: '2026-08-01T00:00:00Z', completedAt: '2026-08-01T00:00:01Z', output: { ok: true }, outputTruncated: false },
+    ],
+    trajectoryTotalCount: 1,
+    trajectoryReturnedCount: 1,
+    trajectoryTruncated: false,
+    trajectoryNextCursor: null,
+    toolSet: ['tool-a'],
+    toolOrder: null,
+    ...overrides,
+  };
+}
+
+async function renderWithExpandedCaseRow() {
+  (evalComparisonService.computeEvalComparison as jest.Mock).mockResolvedValue(
+    makeVerdict({
+      dimensions: [makeDimension({ dimension: 'task_success', direction: 'regressed', materialRegression: true })],
+      caseDetail: JSON.stringify({
+        task_success: [
+          { caseId: 'case-improved', classification: 'improved', baselineValue: 0, candidateValue: 1 },
+        ],
+      }),
+    }),
+  );
+
+  await act(async () => {
+    render(React.createElement(GovernanceEvalComparison));
+  });
+
+  fireEvent.change(screen.getByTestId('eval-suite-id-input'), { target: { value: 'suite-1' } });
+  fireEvent.change(screen.getByTestId('eval-baseline-run-id-input'), { target: { value: 'run-base' } });
+  fireEvent.change(screen.getByTestId('eval-candidate-run-id-input'), { target: { value: 'run-cand' } });
+
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('eval-compute-button'));
+  });
+
+  await waitFor(() => {
+    expect(screen.getByTestId('eval-dimension-row-task_success')).toBeInTheDocument();
+  });
+
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('eval-dimension-expand-task_success'));
+  });
+
+  await waitFor(() => {
+    expect(screen.getByTestId('eval-case-row-case-improved')).toBeInTheDocument();
+  });
+}
+
+describe('GovernanceEvalComparison — artifact diff panel', () => {
+  it('per-case row exposes a "view artifacts" action', async () => {
+    await renderWithExpandedCaseRow();
+    expect(screen.getByTestId('eval-view-artifacts-case-improved')).toBeInTheDocument();
+  });
+
+  it('opens the diff panel and fetches the artifact diff for baseline/candidate runs on the form', async () => {
+    (evalComparisonService.getEvalCaseArtifactDiff as jest.Mock).mockResolvedValue({
+      suiteId: 'suite-1',
+      caseId: 'case-improved',
+      baseline: makeSideView(),
+      candidate: makeSideView({ side: 'CANDIDATE', evalRunId: 'run-cand' }),
+    });
+
+    await renderWithExpandedCaseRow();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('eval-view-artifacts-case-improved'));
+    });
+
+    await waitFor(() => {
+      expect(evalComparisonService.getEvalCaseArtifactDiff).toHaveBeenCalledWith(
+        expect.objectContaining({
+          orgId: 'TestOrg',
+          suiteId: 'suite-1',
+          caseId: 'case-improved',
+          baselineEvalRunId: 'run-base',
+          candidateEvalRunId: 'run-cand',
+        }),
+      );
+    });
+
+    expect(screen.getByTestId('artifact-diff-panel')).toBeInTheDocument();
+    // Transcript rendered side by side, distinguishable per side.
+    expect(screen.getByTestId('artifact-transcript-BASELINE')).toHaveTextContent('hello');
+    expect(screen.getByTestId('artifact-transcript-CANDIDATE')).toHaveTextContent('hello');
+  });
+
+  it('renders each of the 7 per-side availability states honestly and distinguishably', async () => {
+    const states: string[] = [
+      'OK',
+      'RUN_ABSENT',
+      'RUN_NOT_COMPLETED',
+      'CASE_ABSENT',
+      'ARTIFACT_MISSING',
+      'ARTIFACT_UNRESOLVED',
+      'ARTIFACT_WITHHELD_SANITISATION',
+    ];
+
+    const stateLabelPattern: Record<string, RegExp> = {
+      OK: /OK/,
+      RUN_ABSENT: /run absent/i,
+      RUN_NOT_COMPLETED: /run not completed/i,
+      CASE_ABSENT: /case absent/i,
+      ARTIFACT_MISSING: /artifact missing/i,
+      ARTIFACT_UNRESOLVED: /artifact unresolved/i,
+      ARTIFACT_WITHHELD_SANITISATION: /artifact withheld/i,
+    };
+
+    for (const state of states) {
+      jest.clearAllMocks();
+      cleanup();
+      setOrg();
+      (evalComparisonService.getEvalCaseArtifactDiff as jest.Mock).mockResolvedValue({
+        suiteId: 'suite-1',
+        caseId: 'case-improved',
+        baseline: makeSideView({ availability: state, transcript: [], trajectory: [] }),
+        candidate: makeSideView({ side: 'CANDIDATE', evalRunId: 'run-cand' }),
+      });
+
+      await renderWithExpandedCaseRow();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('eval-view-artifacts-case-improved'));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('artifact-diff-panel')).toBeInTheDocument();
+      });
+
+      expect(screen.getByTestId('artifact-availability-BASELINE')).toHaveTextContent(
+        stateLabelPattern[state],
+      );
+    }
+  });
+
+  it('surfaces truncation visibly with returned-vs-total counts and bytes, and a "load more" control wired to the cursor', async () => {
+    (evalComparisonService.getEvalCaseArtifactDiff as jest.Mock).mockResolvedValue({
+      suiteId: 'suite-1',
+      caseId: 'case-improved',
+      baseline: makeSideView({
+        transcriptTruncated: true,
+        transcriptTotalCount: 50,
+        transcriptReturnedCount: 2,
+        transcriptTotalBytes: 5000,
+        transcriptReturnedBytes: 13,
+        transcriptNextCursor: 'cursor-abc',
+      }),
+      candidate: makeSideView({ side: 'CANDIDATE', evalRunId: 'run-cand' }),
+    });
+
+    await renderWithExpandedCaseRow();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('eval-view-artifacts-case-improved'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('artifact-diff-panel')).toBeInTheDocument();
+    });
+
+    const truncationNotice = screen.getByTestId('artifact-transcript-truncated-BASELINE');
+    expect(truncationNotice).toHaveTextContent('2');
+    expect(truncationNotice).toHaveTextContent('50');
+    expect(truncationNotice).toHaveTextContent('13');
+    expect(truncationNotice).toHaveTextContent('5000');
+
+    const loadMoreButton = screen.getByTestId('artifact-transcript-load-more-BASELINE');
+    expect(loadMoreButton).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(loadMoreButton);
+    });
+
+    await waitFor(() => {
+      expect(evalComparisonService.getEvalCaseArtifactDiff).toHaveBeenLastCalledWith(
+        expect.objectContaining({ transcriptCursor: 'cursor-abc' }),
+      );
+    });
+  });
+
+  it('does not render a "load more" control when not truncated (never fabricates pagination)', async () => {
+    (evalComparisonService.getEvalCaseArtifactDiff as jest.Mock).mockResolvedValue({
+      suiteId: 'suite-1',
+      caseId: 'case-improved',
+      baseline: makeSideView({ transcriptTruncated: false, transcriptNextCursor: null }),
+      candidate: makeSideView({ side: 'CANDIDATE', evalRunId: 'run-cand', transcriptTruncated: false, transcriptNextCursor: null }),
+    });
+
+    await renderWithExpandedCaseRow();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('eval-view-artifacts-case-improved'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('artifact-diff-panel')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByTestId('artifact-transcript-load-more-BASELINE')).not.toBeInTheDocument();
+  });
+
+  it('renders the ordered tool-call trajectory diff with truncation visibility', async () => {
+    (evalComparisonService.getEvalCaseArtifactDiff as jest.Mock).mockResolvedValue({
+      suiteId: 'suite-1',
+      caseId: 'case-improved',
+      baseline: makeSideView({
+        trajectory: [
+          { stepIndex: 0, nodeId: 'node-a', agentId: 'agent-1', status: 'COMPLETED', startedAt: '2026-08-01T00:00:00Z', completedAt: '2026-08-01T00:00:01Z', output: { ok: true }, outputTruncated: false },
+        ],
+        trajectoryTruncated: true,
+        trajectoryTotalCount: 10,
+        trajectoryReturnedCount: 1,
+        trajectoryNextCursor: 'traj-cursor',
+      }),
+      candidate: makeSideView({ side: 'CANDIDATE', evalRunId: 'run-cand' }),
+    });
+
+    await renderWithExpandedCaseRow();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('eval-view-artifacts-case-improved'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('artifact-diff-panel')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('tab', { name: /trajectory/i }));
+    });
+
+    expect(screen.getByTestId('artifact-trajectory-step-BASELINE-0')).toHaveTextContent('node-a');
+    expect(screen.getByTestId('artifact-trajectory-truncated-BASELINE')).toHaveTextContent('1');
+    expect(screen.getByTestId('artifact-trajectory-truncated-BASELINE')).toHaveTextContent('10');
+    expect(screen.getByTestId('artifact-trajectory-load-more-BASELINE')).toBeInTheDocument();
+  });
+
+  it('closes the diff panel via the close control', async () => {
+    (evalComparisonService.getEvalCaseArtifactDiff as jest.Mock).mockResolvedValue({
+      suiteId: 'suite-1',
+      caseId: 'case-improved',
+      baseline: makeSideView(),
+      candidate: makeSideView({ side: 'CANDIDATE', evalRunId: 'run-cand' }),
+    });
+
+    await renderWithExpandedCaseRow();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('eval-view-artifacts-case-improved'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('artifact-diff-panel')).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('artifact-diff-panel-close'));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('artifact-diff-panel')).not.toBeInTheDocument();
     });
   });
 });
