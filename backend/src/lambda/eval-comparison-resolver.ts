@@ -103,7 +103,6 @@ import {
 import {
   resolveComparisonThresholds,
   type ComparisonThresholdConfigRow,
-  type PartialComparisonThresholds,
 } from "./utils/eval-comparison-config";
 import type {
   AuthContext,
@@ -219,17 +218,14 @@ function requireEvalRunPermission(
   }
 }
 
-function requireEvalApprovePermission(
-  authContext: AuthContext,
-  action: string,
-): void {
-  if (!hasPermission(authContext, "eval:approve")) {
-    throw new Error(
-      `UnauthorizedError: eval:approve permission required to ${action}`,
-    );
-  }
-}
-
+/** requireEvalApprovePermission was removed: both eval:approve write
+ * mutations (designateEvalBaseline, setEvalComparisonThresholdConfig)
+ * already enforce the permission inline, wrapped in the audit-before-auth
+ * phase:"audit"/authResult:"PENDING" → phase:"audit-outcome" logging this
+ * bare helper cannot express, so it was never called. The equivalent
+ * check is `hasPermission(authContext, "eval:approve")` at each call
+ * site — see designateEvalBaseline and setEvalComparisonThresholdConfig
+ * below. */
 /** Cross-org guard (design §8, mirrors replay-package-builder.ts's
  * CrossOrgRowError/assertRowOrg). Thrown when a loaded row's orgId does
  * not match the caller-resolved orgId. */
@@ -816,7 +812,7 @@ function splitVerdictForStorage(verdict: EvalComparisonVerdict): {
   >;
 } {
   const dimensionSummaries = verdict.dimensions.map(
-    ({ perCase, ...rest }) => rest,
+    ({ perCase: _perCase, ...rest }) => rest,
   );
   const caseDetail: Record<
     string,

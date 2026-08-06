@@ -54,7 +54,7 @@ describe("cost-ledger-writer — eval.usage.captured (Phase 2 §2.6)", () => {
     await handler(evalUsageCapturedEvent());
 
     const putCalls = ddbMock.commandCalls(
-      require("@aws-sdk/lib-dynamodb").PutCommand,
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
     );
     expect(putCalls).toHaveLength(1);
     const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
@@ -65,7 +65,8 @@ describe("cost-ledger-writer — eval.usage.captured (Phase 2 §2.6)", () => {
   });
 
   test("resolves pricing the same way as other usage sources", async () => {
-    ddbMock.on(require("@aws-sdk/lib-dynamodb").GetCommand).resolves({
+    const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock.on(GetCommand).resolves({
       Item: {
         modelKey: "anthropic.claude-sonnet-5",
         inputPer1kTokens: 0.003,
@@ -77,7 +78,7 @@ describe("cost-ledger-writer — eval.usage.captured (Phase 2 §2.6)", () => {
     await handler(evalUsageCapturedEvent());
 
     const putCalls = ddbMock.commandCalls(
-      require("@aws-sdk/lib-dynamodb").PutCommand,
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
     );
     const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
     expect(item.priced).toBe(true);
@@ -87,7 +88,7 @@ describe("cost-ledger-writer — eval.usage.captured (Phase 2 §2.6)", () => {
   test("never writes a plain evalContext:true flag for this source (distinct from Phase 1 evalRunId/evalContext dispatch tagging)", async () => {
     await handler(evalUsageCapturedEvent());
     const putCalls = ddbMock.commandCalls(
-      require("@aws-sdk/lib-dynamodb").PutCommand,
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
     );
     const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
     expect(item.evalContext).toBeUndefined();

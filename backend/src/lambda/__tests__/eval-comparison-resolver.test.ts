@@ -15,7 +15,11 @@ import {
   QueryCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { S3Client } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+} from "@aws-sdk/client-s3";
 import { mockClient } from "aws-sdk-client-mock";
 import { v5 as uuidv5 } from "uuid";
 import type {
@@ -815,7 +819,7 @@ describe("computeEvalComparison — S3 offload for large caseDetail", () => {
       .resolves({});
     ddbMock.on(PutCommand).resolves({});
     (resolveReplayBucketName as jest.Mock).mockResolvedValue("replay-bucket");
-    s3Mock.on(require("@aws-sdk/client-s3").PutObjectCommand).resolves({});
+    s3Mock.on(PutObjectCommand).resolves({});
 
     const result = await computeEvalComparison(
       {
@@ -832,9 +836,7 @@ describe("computeEvalComparison — S3 offload for large caseDetail", () => {
       `eval-comparisons/${result.comparisonId}.json`,
     );
     expect(result.caseDetail).toBeUndefined();
-    const s3Puts = s3Mock.commandCalls(
-      require("@aws-sdk/client-s3").PutObjectCommand,
-    );
+    const s3Puts = s3Mock.commandCalls(PutObjectCommand);
     expect(s3Puts).toHaveLength(1);
   });
 
@@ -962,7 +964,6 @@ describe("getEvalComparisonHydrated", () => {
         },
       });
     (resolveReplayBucketName as jest.Mock).mockResolvedValue("replay-bucket");
-    const { GetObjectCommand } = require("@aws-sdk/client-s3");
     s3Mock.on(GetObjectCommand).resolves({
       Body: {
         transformToString: async () => JSON.stringify({ task_success: [] }),
