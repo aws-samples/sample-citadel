@@ -11,38 +11,44 @@ export interface TransitionMap {
 
 export const INTEGRATION_TRANSITIONS: TransitionMap = {
   transitions: {
-    CREATED: ['CONFIGURED', 'CONFIGURING'],
-    CONFIGURING: ['CONFIGURED', 'CREATED'],
-    CONFIGURED: ['TESTED', 'CONNECTING', 'CONFIGURED'],
-    TESTED: ['CONNECTING', 'CONFIGURED', 'TESTED'],
-    CONNECTING: ['CONNECTED', 'CONNECTION_FAILED'],
-    CONNECTED: ['DISCONNECTED', 'CONFIGURED'],
-    DISCONNECTED: ['CONFIGURED', 'CONNECTING'],
-    CONNECTION_FAILED: ['CONFIGURED', 'CONNECTING', 'TESTED'],
+    CREATED: ["CONFIGURED", "CONFIGURING"],
+    CONFIGURING: ["CONFIGURED", "CREATED"],
+    CONFIGURED: ["TESTED", "CONNECTING", "CONFIGURED"],
+    TESTED: ["CONNECTING", "CONFIGURED", "TESTED"],
+    CONNECTING: ["CONNECTED", "CONNECTION_FAILED"],
+    CONNECTED: ["DISCONNECTED", "CONFIGURED"],
+    DISCONNECTED: ["CONFIGURED", "CONNECTING"],
+    CONNECTION_FAILED: ["CONFIGURED", "CONNECTING", "TESTED"],
   },
   actions: {
-    test: ['CONFIGURED', 'TESTED', 'CONNECTED', 'DISCONNECTED', 'CONNECTION_FAILED'],
-    connect: ['TESTED', 'CONFIGURED', 'DISCONNECTED', 'CONNECTION_FAILED'],
-    disconnect: ['CONNECTED'],
+    test: [
+      "CONFIGURED",
+      "TESTED",
+      "CONNECTED",
+      "DISCONNECTED",
+      "CONNECTION_FAILED",
+    ],
+    connect: ["TESTED", "CONFIGURED", "DISCONNECTED", "CONNECTION_FAILED"],
+    disconnect: ["CONNECTED"],
   },
 };
 
 export const DATASTORE_TRANSITIONS: TransitionMap = {
   transitions: {
-    CREATED: ['CONNECTING', 'PROVISIONING', 'ERROR'],
-    PROVISIONING: ['PROVISIONED', 'CONNECTED', 'ERROR'],
-    PROVISIONED: ['CONNECTING', 'ERROR'],
-    CONNECTING: ['CONNECTED', 'ERROR'],
-    CONNECTED: ['DISCONNECTED', 'ERROR'],
-    DISCONNECTED: ['CONNECTING', 'ERROR', 'DELETING'],
-    ERROR: ['CONNECTING', 'DELETING', 'CREATED'],
+    CREATED: ["CONNECTING", "PROVISIONING", "ERROR"],
+    PROVISIONING: ["PROVISIONED", "CONNECTED", "ERROR"],
+    PROVISIONED: ["CONNECTING", "ERROR"],
+    CONNECTING: ["CONNECTED", "ERROR"],
+    CONNECTED: ["DISCONNECTED", "ERROR"],
+    DISCONNECTED: ["CONNECTING", "ERROR", "DELETING"],
+    ERROR: ["CONNECTING", "DELETING", "CREATED"],
     DELETING: [],
   },
   actions: {
-    test: ['CREATED', 'CONNECTED', 'DISCONNECTED', 'ERROR'],
-    connect: ['CREATED', 'DISCONNECTED', 'ERROR', 'PROVISIONED'],
-    disconnect: ['CONNECTED'],
-    provision: ['CREATED'],
+    test: ["CREATED", "CONNECTED", "DISCONNECTED", "ERROR"],
+    connect: ["CREATED", "DISCONNECTED", "ERROR", "PROVISIONED"],
+    disconnect: ["CONNECTED"],
+    provision: ["CREATED"],
   },
 };
 
@@ -68,34 +74,34 @@ export const DATASTORE_TRANSITIONS: TransitionMap = {
  */
 export const PROJECT_TRANSITIONS: TransitionMap = {
   transitions: {
-    CREATED: ['IN_PROGRESS', 'ERROR'],
-    IN_PROGRESS: ['ASSESSMENT_COMPLETE', 'ERROR'],
-    ASSESSMENT_COMPLETE: ['DESIGN_COMPLETE', 'ERROR'],
-    DESIGN_COMPLETE: ['PLANNING_COMPLETE', 'ERROR'],
-    PLANNING_COMPLETE: ['IMPLEMENTATION_READY', 'ERROR'],
-    IMPLEMENTATION_READY: ['COMPLETED', 'ERROR'],
+    CREATED: ["IN_PROGRESS", "ERROR"],
+    IN_PROGRESS: ["ASSESSMENT_COMPLETE", "ERROR"],
+    ASSESSMENT_COMPLETE: ["DESIGN_COMPLETE", "ERROR"],
+    DESIGN_COMPLETE: ["PLANNING_COMPLETE", "ERROR"],
+    PLANNING_COMPLETE: ["IMPLEMENTATION_READY", "ERROR"],
+    IMPLEMENTATION_READY: ["COMPLETED", "ERROR"],
     COMPLETED: [],
-    ERROR: ['IN_PROGRESS', 'COMPLETED'],
+    ERROR: ["IN_PROGRESS", "COMPLETED"],
   },
   actions: {
     advance: [
-      'CREATED',
-      'IN_PROGRESS',
-      'ASSESSMENT_COMPLETE',
-      'DESIGN_COMPLETE',
-      'PLANNING_COMPLETE',
-      'IMPLEMENTATION_READY',
+      "CREATED",
+      "IN_PROGRESS",
+      "ASSESSMENT_COMPLETE",
+      "DESIGN_COMPLETE",
+      "PLANNING_COMPLETE",
+      "IMPLEMENTATION_READY",
     ],
     fail: [
-      'CREATED',
-      'IN_PROGRESS',
-      'ASSESSMENT_COMPLETE',
-      'DESIGN_COMPLETE',
-      'PLANNING_COMPLETE',
-      'IMPLEMENTATION_READY',
+      "CREATED",
+      "IN_PROGRESS",
+      "ASSESSMENT_COMPLETE",
+      "DESIGN_COMPLETE",
+      "PLANNING_COMPLETE",
+      "IMPLEMENTATION_READY",
     ],
-    recover: ['ERROR'],
-    abandon: ['ERROR'],
+    recover: ["ERROR"],
+    abandon: ["ERROR"],
   },
 };
 
@@ -105,7 +111,7 @@ export const PROJECT_TRANSITIONS: TransitionMap = {
  * Matrix locked by QT3-5 in.kiro/planning/PLAN_GOV_DIFF.md §9. Supports the
  * C7 + C14 capabilities: an ADR is drafted (PROPOSED), decided (LOCKED), and
  * can later be SUPERSEDED (a successor ADR replaces it) or REOPENED (formal
- * revisit with audit-before-auth). A REOPENED ADR can be re-locked after 
+ * revisit with audit-before-auth). A REOPENED ADR can be re-locked after
  * revision.
  *
  * Transitions:
@@ -118,15 +124,15 @@ export const PROJECT_TRANSITIONS: TransitionMap = {
  */
 export const ADR_TRANSITIONS: TransitionMap = {
   transitions: {
-    PROPOSED: ['LOCKED', 'SUPERSEDED'],
-    LOCKED: ['SUPERSEDED', 'REOPENED'],
-    REOPENED: ['LOCKED'],
+    PROPOSED: ["LOCKED", "SUPERSEDED"],
+    LOCKED: ["SUPERSEDED", "REOPENED"],
+    REOPENED: ["LOCKED"],
     SUPERSEDED: [],
   },
   actions: {
-    lock: ['PROPOSED', 'REOPENED'],
-    supersede: ['PROPOSED', 'LOCKED'],
-    reopen: ['LOCKED'],
+    lock: ["PROPOSED", "REOPENED"],
+    supersede: ["PROPOSED", "LOCKED"],
+    reopen: ["LOCKED"],
   },
 };
 
@@ -145,16 +151,47 @@ export const ADR_TRANSITIONS: TransitionMap = {
  */
 export const EXECSPEC_TRANSITIONS: TransitionMap = {
   transitions: {
-    DRAFT: ['PENDING_REVIEW', 'REJECTED'],
-    PENDING_REVIEW: ['APPROVED', 'REJECTED'],
+    DRAFT: ["PENDING_REVIEW", "REJECTED"],
+    PENDING_REVIEW: ["APPROVED", "REJECTED"],
     APPROVED: [],
-    REJECTED: ['DRAFT'],
+    REJECTED: ["DRAFT"],
   },
   actions: {
-    submit: ['DRAFT'],
-    approve: ['PENDING_REVIEW', 'DRAFT'],
-    reject: ['DRAFT', 'PENDING_REVIEW'],
-    revise: ['REJECTED'],
+    submit: ["DRAFT"],
+    approve: ["PENDING_REVIEW", "DRAFT"],
+    reject: ["DRAFT", "PENDING_REVIEW"],
+    revise: ["REJECTED"],
+  },
+};
+
+// EVALSUITE_TRANSITIONS
+/**
+ * EvalSuite status transitions (CIT-101).
+ *
+ * Eval suites are release evidence, governed like ExecutionSpecifications:
+ * DRAFT is the only mutable state; FROZEN is the immutable-for-mutation
+ * terminal-for-editing state (an evolving suite clones into a new DRAFT via
+ * cloneEvalSuite rather than editing in place); ARCHIVED is terminal.
+ *
+ * Transitions:
+ *   DRAFT    -> FROZEN | ARCHIVED
+ *   FROZEN   -> ARCHIVED
+ *   ARCHIVED -> (terminal)
+ *
+ * This transition matrix governs the STATUS field only. The independent
+ * `references[] > 0` immutability trigger (see eval-resolver.ts's write-path
+ * guard) is enforced separately and is NOT expressible as a lifecycle
+ * transition — a referenced suite may still be DRAFT.
+ */
+export const EVALSUITE_TRANSITIONS: TransitionMap = {
+  transitions: {
+    DRAFT: ["FROZEN", "ARCHIVED"],
+    FROZEN: ["ARCHIVED"],
+    ARCHIVED: [],
+  },
+  actions: {
+    freeze: ["DRAFT"],
+    archive: ["DRAFT", "FROZEN"],
   },
 };
 
@@ -173,14 +210,14 @@ export const EXECSPEC_TRANSITIONS: TransitionMap = {
  */
 export const ROUND_TRANSITIONS: TransitionMap = {
   transitions: {
-    IN_PROGRESS: ['AWAITING_CONSTRAINTS', 'STABILISED'],
-    AWAITING_CONSTRAINTS: ['REVISED'],
-    REVISED: ['STABILISED', 'AWAITING_CONSTRAINTS'],
+    IN_PROGRESS: ["AWAITING_CONSTRAINTS", "STABILISED"],
+    AWAITING_CONSTRAINTS: ["REVISED"],
+    REVISED: ["STABILISED", "AWAITING_CONSTRAINTS"],
     STABILISED: [],
   },
   actions: {
-    injectConstraints: ['IN_PROGRESS', 'REVISED'],
-    stabilise: ['IN_PROGRESS', 'REVISED'],
+    injectConstraints: ["IN_PROGRESS", "REVISED"],
+    stabilise: ["IN_PROGRESS", "REVISED"],
   },
 };
 
@@ -191,18 +228,18 @@ export const ROUND_TRANSITIONS: TransitionMap = {
 // UpdateRegistryRecordStatus calls through LifecycleManager.validateTransition.
 export const REGISTRY_TRANSITIONS: TransitionMap = {
   transitions: {
-    DRAFT: ['PENDING_APPROVAL', 'DEPRECATED'],
-    PENDING_APPROVAL: ['APPROVED', 'REJECTED'],
-    REJECTED: ['DRAFT', 'DEPRECATED'],      // resubmit or abandon
-    APPROVED: ['DEPRECATED'],
-    DEPRECATED: [],                           // terminal
+    DRAFT: ["PENDING_APPROVAL", "DEPRECATED"],
+    PENDING_APPROVAL: ["APPROVED", "REJECTED"],
+    REJECTED: ["DRAFT", "DEPRECATED"], // resubmit or abandon
+    APPROVED: ["DEPRECATED"],
+    DEPRECATED: [], // terminal
   },
   actions: {
-    submit: ['DRAFT'],
-    approve: ['PENDING_APPROVAL'],
-    reject: ['PENDING_APPROVAL'],
-    resubmit: ['REJECTED'],
-    deprecate: ['DRAFT', 'REJECTED', 'APPROVED'],
+    submit: ["DRAFT"],
+    approve: ["PENDING_APPROVAL"],
+    reject: ["PENDING_APPROVAL"],
+    resubmit: ["REJECTED"],
+    deprecate: ["DRAFT", "REJECTED", "APPROVED"],
   },
 };
 
@@ -221,7 +258,7 @@ export class LifecycleManager {
       const valid = this.map.transitions[current] || [];
       throw new Error(
         `Invalid status transition: ${current} → ${next}. ` +
-        `Valid transitions from ${current}: ${valid.join(', ') || 'none'}`
+          `Valid transitions from ${current}: ${valid.join(", ") || "none"}`,
       );
     }
   }

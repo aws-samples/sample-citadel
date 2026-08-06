@@ -230,6 +230,20 @@ class GovernanceFinding:
                                                    # time, same try/except discipline
                                                    # as trace_id above; None when the
                                                    # orchestration carries no runId.
+    eval_run_id: str | None = None                # CIT-102 Pass B: eval-run
+                                                   # correlation id, serialized as
+                                                   # camelCase `evalRunId` (ledger.py)
+                                                   # ONLY when present. Read from the
+                                                   # dispatch detail's `evalRunId` key
+                                                   # (frozen contract, Pass A) and
+                                                   # stamped pre-write on every finding
+                                                   # produced during that dispatch —
+                                                   # same additive, best-effort, never-
+                                                   # gates-decision discipline as
+                                                   # trace_id/run_id above. None when
+                                                   # the dispatch carries no evalRunId
+                                                   # (the overwhelming majority of
+                                                   # non-eval dispatches).
 
     @classmethod
     def create(

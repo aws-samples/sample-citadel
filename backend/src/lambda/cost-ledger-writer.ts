@@ -91,6 +91,9 @@ interface TaskCompletionDetail {
   usage?: UsageRecord[];
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag. */
+  evalRunId?: string;
+  evalContext?: boolean;
 }
 
 interface IntakeUsageDetail {
@@ -101,6 +104,9 @@ interface IntakeUsageDetail {
   usage?: UsageRecord | UsageRecord[];
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag. */
+  evalRunId?: string;
+  evalContext?: boolean;
 }
 
 interface WorkflowNodeCompletedDetail {
@@ -113,10 +119,38 @@ interface WorkflowNodeCompletedDetail {
   usage?: UsageRecord[];
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag. */
+  evalRunId?: string;
+  evalContext?: boolean;
+}
+
+/**
+ * Phase 2 §2.6: emitted by the arbiter judge handler after a judge
+ * invocation (Bedrock `converse` call scoring an eval case or a
+ * production sample). Distinct from Phase 1's `evalContext` (dispatch-
+ * time tagging of eval-RUN spend, e.g. a CONVERSATION-kind eval case's
+ * own agent invocation) — this event tags the JUDGE's own token usage,
+ * which is always `costContext:"eval"` unconditionally (a judge
+ * invocation is never customer-billable spend, whether it judged an
+ * eval-suite case or a production sample).
+ */
+interface EvalUsageCapturedDetail {
+  orgId?: string;
+  agentId?: string;
+  modelId?: string;
+  inputTokens?: unknown;
+  outputTokens?: unknown;
+  capturedAt?: string;
+  /** evalRunId (eval-suite case) or sampleId/runId (prod sample) — carried
+   * through as a plain attribute for traceability; not a GSI key. */
+  correlationId?: string;
 }
 
 export type IncomingDetail =
-  TaskCompletionDetail | IntakeUsageDetail | WorkflowNodeCompletedDetail;
+  | TaskCompletionDetail
+  | IntakeUsageDetail
+  | WorkflowNodeCompletedDetail
+  | EvalUsageCapturedDetail;
 
 /** Non-negative-int coercion mirroring `usage.py`'s `_coerce_non_negative_int`. Never throws. */
 function coerceNonNegativeInt(value: unknown): number {
@@ -156,6 +190,13 @@ interface Dimensions {
   nodeId?: string;
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id. No new GSI this pass. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag. No new GSI this pass. */
+  evalRunId?: string;
+  /** Phase 2 §2.6, additive/nullable: "eval" tags a judge invocation's
+   * own token usage. Sparse GSI6 (EvalContextIndex) written only when
+   * present. */
+  costContext?: "eval";
+  evalContext?: boolean;
 }
 
 interface Decomposition {
@@ -192,6 +233,18 @@ interface LedgerRow {
   bedrockRequestId?: string;
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id, copied from detail.runId when present. No new GSI this pass. */
   runId?: string;
+  /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag,
+   * copied from detail.evalRunId/detail.evalContext when present. Consumed
+   * by cost-aggregate.ts/cost-budget-evaluator.ts to exclude eval-run spend
+   * from org rollups/budget sums. No new GSI this pass. */
+  evalRunId?: string;
+  evalContext?: boolean;
+  /** Phase 2 §2.6, additive/nullable: "eval" when this row is a judge
+   * invocation's own token usage (never customer-billable). Distinct
+   * from evalContext (Phase 1, eval-RUN dispatch spend) — a row can in
+   * principle carry both if a future pass needs to, but today only
+   * handleEvalUsageCaptured sets costContext. */
+  costContext?: "eval";
   // Pricing fields (pass 2): populated when the catalog row resolves to a
   // usable price; null + unpricedReason when it does not.
   currency: string | null;
@@ -211,6 +264,12 @@ interface LedgerRow {
   GSI3SK?: string;
   GSI4PK?: string;
   GSI4SK?: string;
+  /** Phase 2 §2.6, sparse: written ONLY on costContext==="eval" rows —
+   * EvalContextIndex GSI, PK=EVALCTX#<orgId>, SK time-prefixed like every
+   * other GSI in this table so a per-org eval-cost time-range read stays
+   * a plain Query, never a Scan. */
+  GSI6PK?: string;
+  GSI6SK?: string;
 }
 
 /** Builds one idempotent ledger row from a usage record + shared dimensions. */
@@ -309,6 +368,27 @@ async function buildLedgerRow(
   if (dims.runId) {
     row.runId = dims.runId;
   }
+  // Additive, nullable (CIT-102 §5): eval-run correlation id + context
+  // flag, copied straight through when present. evalContext is copied
+  // via an explicit `!== undefined` check (not truthiness) because
+  // `false` is a meaningful, intentional value here — a row explicitly
+  // NOT in eval context is distinct from a row that never mentions eval
+  // context at all (byte-identical omission for the latter).
+  if (dims.evalRunId) {
+    row.evalRunId = dims.evalRunId;
+  }
+  if (dims.evalContext !== undefined) {
+    row.evalContext = dims.evalContext;
+  }
+  // Phase 2 §2.6: costContext:"eval" + sparse GSI6 EvalContextIndex,
+  // written ONLY when the incoming detail is tagged eval (i.e. only via
+  // handleEvalUsageCaptured below) — a pre-Phase-2 row never gains these
+  // keys, byte-identical omission preserved.
+  if (dims.costContext === "eval") {
+    row.costContext = "eval";
+    row.GSI6PK = `EVALCTX#${orgId}`;
+    row.GSI6SK = `${capturedAt}#${ledgerId}`;
+  }
 
   return row;
 }
@@ -365,6 +445,8 @@ async function handleTaskCompletion(
     appId: detail.appId,
     agentId: detail.agentId,
     runId: detail.runId,
+    evalRunId: detail.evalRunId,
+    evalContext: detail.evalContext,
   };
 
   return Promise.all(
@@ -393,6 +475,8 @@ async function handleIntakeUsage(
     appId: detail.appId,
     agentId: detail.agentId,
     runId: detail.runId,
+    evalRunId: detail.evalRunId,
+    evalContext: detail.evalContext,
   };
 
   return Promise.all(
@@ -423,6 +507,8 @@ async function handleWorkflowNodeCompleted(
     workflowExecutionId: detail.workflowExecutionId,
     nodeId: detail.nodeId,
     runId: detail.runId,
+    evalRunId: detail.evalRunId,
+    evalContext: detail.evalContext,
   };
 
   return Promise.all(
@@ -437,6 +523,37 @@ async function handleWorkflowNodeCompleted(
       ),
     ),
   );
+}
+
+/**
+ * Phase 2 §2.6: judge-invocation token usage. Always tagged
+ * costContext:"eval" unconditionally — there is no case where a judge's
+ * own usage is customer-billable spend, whether it judged an eval-suite
+ * case or a production sample. Single usage record per event (a judge
+ * invocation is one Bedrock `converse` call), unlike the array-shaped
+ * usage on the other three event sources.
+ */
+async function handleEvalUsageCaptured(
+  eventId: string,
+  detail: EvalUsageCapturedDetail,
+  ingestedAt: string,
+): Promise<LedgerRow[]> {
+  const usage: UsageRecord = {
+    modelId: detail.modelId,
+    inputTokens: detail.inputTokens,
+    outputTokens: detail.outputTokens,
+    capturedAt: detail.capturedAt,
+    source: "worker",
+  };
+  const dims: Dimensions = {
+    orgId: detail.orgId,
+    agentId: detail.agentId,
+    costContext: "eval",
+  };
+
+  return [
+    await buildLedgerRow(eventId, 0, usage, dims, "eval_judge", ingestedAt),
+  ];
 }
 
 export const handler = async (
@@ -487,6 +604,15 @@ export const handler = async (
     rows = await handleWorkflowNodeCompleted(
       eventId,
       event.detail as WorkflowNodeCompletedDetail,
+      ingestedAt,
+    );
+  } else if (
+    source === "citadel.eval.usage" &&
+    detailType === "eval.usage.captured"
+  ) {
+    rows = await handleEvalUsageCaptured(
+      eventId,
+      event.detail as EvalUsageCapturedDetail,
       ingestedAt,
     );
   } else {

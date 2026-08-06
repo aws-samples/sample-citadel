@@ -40,6 +40,12 @@ function buildSupportTables(supportStack: cdk.Stack): {
   executionSpecificationsTable: dynamodb.Table;
   modelConfigTable: dynamodb.Table;
   governanceLedgerTable: dynamodb.Table;
+  evalCasesTable: dynamodb.Table;
+  evalRunsTable: dynamodb.Table;
+  evalRunCaseResultsTable: dynamodb.Table;
+  evalSamplingConfigTable: dynamodb.Table;
+  evalProdSamplesTable: dynamodb.Table;
+  idempotencyTable: dynamodb.Table;
 } {
   const modelCatalogTable = new dynamodb.Table(
     supportStack,
@@ -109,6 +115,56 @@ function buildSupportTables(supportStack: cdk.Stack): {
     partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
     sortKey: { name: "timestamp", type: dynamodb.AttributeType.NUMBER },
   });
+  // CIT-103 Pass A: eval-run tables (from BackendStack in the real app).
+  const evalCasesTable = new dynamodb.Table(
+    supportStack,
+    "TestEvalCasesTable",
+    {
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const evalRunsTable = new dynamodb.Table(supportStack, "TestEvalRunsTable", {
+    partitionKey: { name: "evalRunId", type: dynamodb.AttributeType.STRING },
+  });
+  const evalRunCaseResultsTable = new dynamodb.Table(
+    supportStack,
+    "TestEvalRunCaseResultsTable",
+    {
+      partitionKey: { name: "evalRunId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  // Phase 2 (production sampling): admin-authored sampling config +
+  // captured/scored production-sample tables, plus the shared idempotency
+  // table (from BackendStack in the real app).
+  const evalSamplingConfigTable = new dynamodb.Table(
+    supportStack,
+    "TestEvalSamplingConfigTable",
+    {
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  const evalProdSamplesTable = new dynamodb.Table(
+    supportStack,
+    "TestEvalProdSamplesTable",
+    {
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "SK", type: dynamodb.AttributeType.STRING },
+    },
+  );
+  evalProdSamplesTable.addGlobalSecondaryIndex({
+    indexName: "AgentDimTimeIndex",
+    partitionKey: { name: "GSI1PK", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "GSI1SK", type: dynamodb.AttributeType.STRING },
+  });
+  const idempotencyTable = new dynamodb.Table(
+    supportStack,
+    "TestIdempotencyTable",
+    {
+      partitionKey: { name: "eventId", type: dynamodb.AttributeType.STRING },
+    },
+  );
   return {
     modelCatalogTable,
     executionsTable,
@@ -119,6 +175,12 @@ function buildSupportTables(supportStack: cdk.Stack): {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
   };
 }
 
@@ -148,6 +210,12 @@ function buildStack(): {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
   } = buildSupportTables(supportStack);
 
   const stack = new TelemetryStack(app, "TestTelemetryStack", {
@@ -169,6 +237,12 @@ function buildStack(): {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
     accessLogsBucket: new s3.Bucket(supportStack, "TestAccessLogsBucket", {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
@@ -205,6 +279,12 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
   } = buildSupportTables(supportStack);
 
   const stack = new TelemetryStack(app, "TestTelemetryStackOrigin", {
@@ -226,6 +306,12 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
     executionSpecificationsTable,
     modelConfigTable,
     governanceLedgerTable,
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
     accessLogsBucket: new s3.Bucket(
       supportStack,
       "TestAccessLogsBucketOrigin",
@@ -238,6 +324,50 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
 
   return { template: Template.fromStack(stack) };
 }
+
+describe("TelemetryStack — F4 replay-package bucket SSM publication (design §6, DECISION d36fbbf7)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = buildStack());
+  });
+
+  test("publishes the replay-package bucket name to the exact SSM parameter naming convention", () => {
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Type: "String",
+      Name: "/citadel/eval-replay-bucket-test",
+      Value: Match.objectLike({
+        Ref: Match.stringLikeRegexp("ReplayPackageBucket"),
+      }),
+    });
+  });
+
+  test("the existing 7-day expiration lifecycle rule is scoped to the ORG# prefix, not bucket-wide (eval-runs/ artifacts must not expire)", () => {
+    template.hasResourceProperties("AWS::S3::Bucket", {
+      LifecycleConfiguration: {
+        Rules: Match.arrayWith([
+          Match.objectLike({
+            Id: "expire-replay-packages-after-7-days",
+            ExpirationInDays: 7,
+            Prefix: "ORG#",
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("exactly one lifecycle rule exists on the replay-package bucket (no separate/wider rule was added that would also expire eval-runs/)", () => {
+    const buckets = template.findResources("AWS::S3::Bucket");
+    const replayBucketEntries = Object.entries(buckets).filter(([id]) =>
+      id.startsWith("ReplayPackageBucket"),
+    );
+    expect(replayBucketEntries).toHaveLength(1);
+    const rules =
+      replayBucketEntries[0][1].Properties.LifecycleConfiguration.Rules;
+    expect(rules).toHaveLength(1);
+    expect(rules[0].Prefix).toBe("ORG#");
+  });
+});
 
 describe("TelemetryStack — cost API CORS AllowOrigins (finding d7d3dd61)", () => {
   test("AllowOrigins matches the provided frontendOrigin prop exactly", () => {
@@ -493,6 +623,12 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       executionSpecificationsTable,
       modelConfigTable,
       governanceLedgerTable,
+      evalCasesTable,
+      evalRunsTable,
+      evalRunCaseResultsTable,
+      evalSamplingConfigTable,
+      evalProdSamplesTable,
+      idempotencyTable,
     } = buildSupportTables(supportStack);
     const stack = new TelemetryStack(app, "TestTelemetryStackUnconfigured", {
       environment: "test",
@@ -512,6 +648,12 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       executionSpecificationsTable,
       modelConfigTable,
       governanceLedgerTable,
+      evalCasesTable,
+      evalRunsTable,
+      evalRunCaseResultsTable,
+      evalSamplingConfigTable,
+      evalProdSamplesTable,
+      idempotencyTable,
       accessLogsBucket: new s3.Bucket(
         supportStack,
         "TestAccessLogsBucketUnconfigured",
@@ -885,11 +1027,12 @@ describe("TelemetryStack — platform-health dashboard (decision ab73ae1b)", () 
 });
 
 describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)", () => {
-  test("alarm count is existing (Off-frontier is in arbiter-stack, none pre-existing here) + 6 new", () => {
+  test("alarm count is existing (Off-frontier is in arbiter-stack, none pre-existing here) + 6 platform-health + 1 eval-drift (Phase 3)", () => {
     const { template } = buildStack();
-    // TelemetryStack itself has zero pre-existing alarms — all 6 present
-    // here are the new platform-health alarms.
-    template.resourceCountIs("AWS::CloudWatch::Alarm", 6);
+    // TelemetryStack itself has zero pre-existing alarms — 6 are the
+    // decision ab73ae1b platform-health alarms; the 7th (EvalDriftAlarm)
+    // is Phase 3's drift-detection alarm, added independently.
+    template.resourceCountIs("AWS::CloudWatch::Alarm", 7);
   });
 
   test("A1 node-failure: name, threshold, comparison, periods, datapoints, treatMissingData", () => {
@@ -956,7 +1099,7 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
     // Independently-sourced (not imported from telemetry-stack.ts) list of
     // every `deadLetterQueue`-backed SQS queue's exact `queueName:` template
     // string, per `git grep -ni deadLetterQueue backend/lib/` recon:
-    //   arbiter-stack.ts:291,491,2348,2764 · governance-stack.ts:376 ·
+    //   arbiter-stack.ts:291,491,2348,2764 · governance-stack.ts:376,<EvalDispatchDLQ> ·
     //   registry-stack.ts:194
     // If a new DLQ is added anywhere and NOT added to telemetry-stack.ts's
     // `allDlqQueueNames`, this test fails — a DLQ can no longer silently
@@ -969,6 +1112,8 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
       `citadel-governance-finding-fanout-dlq-${environment}`,
       `citadel-governance-notifier-dlq-${environment}`,
       `citadel-registry-sync-dlq-${environment}`,
+      // CIT-102: eval-dispatch DLQ (governance-stack.ts EvalDispatchDLQ).
+      `citadel-eval-dispatch-dlq-${environment}`,
     ];
 
     const { template } = buildStack();
@@ -1031,10 +1176,29 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
     });
   });
 
+  test("A7 eval-drift (Phase 3): name, threshold, comparison, periods, datapoints, treatMissingData, metric linkage", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::CloudWatch::Alarm", {
+      AlarmName: "citadel-eval-drift-test",
+      Threshold: 0.15,
+      ComparisonOperator: "GreaterThanThreshold",
+      EvaluationPeriods: 3,
+      DatapointsToAlarm: 3,
+      TreatMissingData: "notBreaching",
+      // Metric linkage contract: must match eval-metrics-constants.ts's
+      // EVAL_DRIFT_NAMESPACE / METRIC_DRIFT_DELTA literals — the detector
+      // emits under these names; the alarm watches them.
+      Namespace: "Citadel/EvalDrift",
+      MetricName: "DriftDelta",
+      Dimensions: [{ Name: "Environment", Value: "test" }],
+    });
+  });
+
   test("every new alarm's AlarmActions references props.alarmTopic ARN", () => {
     const { template } = buildStack();
     const alarms = template.findResources("AWS::CloudWatch::Alarm");
-    expect(Object.keys(alarms)).toHaveLength(6);
+    // 6 platform-health alarms (decision ab73ae1b) + 1 Phase 3 eval-drift alarm.
+    expect(Object.keys(alarms)).toHaveLength(7);
     for (const [, resource] of Object.entries(alarms)) {
       const actions = resource.Properties?.AlarmActions ?? [];
       expect(actions.length).toBeGreaterThan(0);

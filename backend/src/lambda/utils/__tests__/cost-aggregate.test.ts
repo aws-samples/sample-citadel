@@ -155,3 +155,75 @@ describe("aggregateSeries", () => {
     expect(result.unpricedCount).toBe(0);
   });
 });
+
+// CIT-102 §5 — eval-context cost exclusion (pinned both ways). Eval-run
+// activity must never enter org cost summaries/series: evalContext===true
+// rows are skipped entirely (not counted, not summed, not even as
+// unpriced) so eval spend cannot inflate OR deflate a real org rollup.
+describe("aggregateSummary — evalContext exclusion (CIT-102)", () => {
+  test("PINNED: evalContext===true rows are excluded from totals, buckets, and row counts", () => {
+    const rows = [
+      row({ appId: "app-a", costMicros: 1_000_000, evalContext: true }),
+      row({ appId: "app-a", costMicros: 2_000_000 }),
+    ];
+    const result = aggregateSummary(rows, "app");
+    expect(result.totalCostMicros).toBe(2_000_000);
+    expect(result.pricedRows).toBe(1);
+    expect(result.unpricedRows).toBe(0);
+    expect(result.buckets).toHaveLength(1);
+    expect(result.buckets[0].costMicros).toBe(2_000_000);
+    expect(result.buckets[0].rows).toBe(1);
+  });
+
+  test("PINNED: non-eval rows (evalContext absent or false) are unaffected by the exclusion", () => {
+    const rows = [
+      row({ appId: "app-a", costMicros: 1_000_000, evalContext: false }),
+      row({ appId: "app-a", costMicros: 2_000_000 }),
+    ];
+    const result = aggregateSummary(rows, "app");
+    expect(result.totalCostMicros).toBe(3_000_000);
+    expect(result.pricedRows).toBe(2);
+    expect(result.buckets[0].rows).toBe(2);
+  });
+
+  test("all-eval input yields zeroed totals and no buckets (fully excluded, not dropped-then-miscounted)", () => {
+    const rows = [row({ evalContext: true }), row({ evalContext: true })];
+    const result = aggregateSummary(rows, "app");
+    expect(result.totalCostMicros).toBe(0);
+    expect(result.pricedRows).toBe(0);
+    expect(result.unpricedRows).toBe(0);
+    expect(result.buckets).toEqual([]);
+  });
+});
+
+describe("aggregateSeries — evalContext exclusion (CIT-102)", () => {
+  test("PINNED: evalContext===true rows are excluded from points and unpricedCount", () => {
+    const rows = [
+      row({
+        capturedAt: "2026-07-01T00:00:00.000Z",
+        costMicros: 1_000_000,
+        evalContext: true,
+      }),
+      row({ capturedAt: "2026-07-01T00:00:00.000Z", costMicros: 2_000_000 }),
+    ];
+    const result = aggregateSeries(rows, "day");
+    expect(result.points).toHaveLength(1);
+    expect(result.points[0].costMicros).toBe(2_000_000);
+    expect(result.points[0].rows).toBe(1);
+    expect(result.unpricedCount).toBe(0);
+  });
+
+  test("PINNED: non-eval rows (evalContext absent or false) are unaffected by the exclusion", () => {
+    const rows = [
+      row({
+        capturedAt: "2026-07-01T00:00:00.000Z",
+        costMicros: 1_000_000,
+        evalContext: false,
+      }),
+      row({ capturedAt: "2026-07-01T00:00:00.000Z", costMicros: 2_000_000 }),
+    ];
+    const result = aggregateSeries(rows, "day");
+    expect(result.points[0].costMicros).toBe(3_000_000);
+    expect(result.points[0].rows).toBe(2);
+  });
+});

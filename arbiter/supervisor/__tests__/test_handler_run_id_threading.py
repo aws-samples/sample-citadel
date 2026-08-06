@@ -70,6 +70,9 @@ class TestHandlerExtractsRunId:
             callback=None,
             app_id=None,
             run_id="run-abc-123",
+            eval_run_id=None,
+            eval_context=None,
+            forbidden_tools=None,
         )
 
     @patch.object(index, "orchestrate")
@@ -84,6 +87,9 @@ class TestHandlerExtractsRunId:
             callback=None,
             app_id=None,
             run_id=None,
+            eval_run_id=None,
+            eval_context=None,
+            forbidden_tools=None,
         )
 
 

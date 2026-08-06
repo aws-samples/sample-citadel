@@ -171,6 +171,7 @@ def build_subprocess_env(
     agent_id: str | None = None,
     workflow_id: str | None = None,
     denied_tools: list[str] | None = None,
+    eval_run_id: str | None = None,
 ) -> dict:
     """Build the subprocess environment with governance and config overrides.
 
@@ -186,7 +187,17 @@ def build_subprocess_env(
       - ``CITADEL_WORKFLOW_ID`` flows into every finding written at scope
         ``'worker-tool-handler'`` for trace correlation.
       - ``DENIED_TOOLS`` is the comma-separated allow-list of tools the
-        handler will deny at preprocess time.
+        handler will deny at preprocess time. Callers are responsible for
+        unioning any per-run forbiddenTools (CIT-102 Pass B) into
+        ``denied_tools`` BEFORE calling this function — this function only
+        serializes whatever set it is given, it never merges.
+
+    ``eval_run_id`` (CIT-102 Pass B) is additive and optional: when a
+    non-empty string, sets ``CITADEL_EVAL_RUN_ID`` so
+    ``agent_runner._install_governed_tool_handler`` stamps it on the
+    ``GovernedToolHandler`` it constructs. Omitted entirely when absent —
+    every non-eval caller (the overwhelming majority) produces a
+    byte-identical env dict to the pre-CIT-102 shape.
 
     Args:
         base_env: The base environment dict (typically ``os.environ.copy()``).
@@ -199,6 +210,9 @@ def build_subprocess_env(
         denied_tools: Optional list of tool IDs the layer-2 handler must
             deny. Non-string entries and empty strings are filtered out
             so a stray ``None`` from upstream doesn't produce garbage.
+        eval_run_id: Optional eval-run correlation id (CIT-102 Pass B) to
+            stamp on every finding the layer-2 handler writes during this
+            dispatch.
 
     Returns:
         The augmented environment dict.
@@ -244,5 +258,9 @@ def build_subprocess_env(
         cleaned = [str(t) for t in denied_tools if t]
         if cleaned:
             env['DENIED_TOOLS'] = ','.join(cleaned)
+
+    # CIT-102 Pass B: additive eval-run correlation id.
+    if isinstance(eval_run_id, str) and eval_run_id:
+        env['CITADEL_EVAL_RUN_ID'] = eval_run_id
 
     return env

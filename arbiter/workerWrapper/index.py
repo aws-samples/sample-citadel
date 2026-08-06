@@ -829,6 +829,14 @@ def process_event(event, context, message_attributes=None):
     system_prompt_addition = event.get('systemPromptAddition')
     app_id = event.get('appId') # App-scoped credential vending (Req 4 AC 5)
 
+    # CIT-102 Pass B: frozen contract keys (Pass A dispatch payload —
+    # supervisor.process_agent_call). Absent-tolerant reads: a non-eval
+    # dispatch (the overwhelming majority) has none of these keys and
+    # every downstream computation below degrades to its pre-CIT-102
+    # value (empty forbidden set, eval_run_id=None).
+    eval_run_id = event.get('evalRunId')
+    forbidden_tools = event.get('forbiddenTools') or []
+
     agent = load_config_from_dynamodb(agent_name)
     config = agent['config']
 
@@ -972,9 +980,17 @@ def process_event(event, context, message_attributes=None):
     # preprocess time and writes a distinct 'worker-tool-handler' finding.
     # QD-5 mandates the two layers stay independent — findings MUST NOT
     # be deduplicated across scopes.
+    #
+    # CIT-102 Pass B: forbidden_tools (the eval-run's per-run deny set,
+    # frozen contract detail.forbiddenTools) is ADDED to this union — it
+    # never replaces the static/binding-derived denials. An empty
+    # forbidden_tools (every non-eval dispatch) leaves denied_tools_set
+    # byte-identical to the pre-CIT-102 computation.
     denied_tools_set = set(blocked_tools)
     if tool_restrictions:
         denied_tools_set.update(tool_restrictions)
+    if forbidden_tools:
+        denied_tools_set.update(forbidden_tools)
 
     extra_env = build_subprocess_env(
         {},
@@ -984,6 +1000,7 @@ def process_event(event, context, message_attributes=None):
         agent_id=agent_name,
         workflow_id=orchestration_id,
         denied_tools=sorted(denied_tools_set) if denied_tools_set else None,
+        eval_run_id=eval_run_id,
     )
 
     print("running agent in isolated subprocess...")

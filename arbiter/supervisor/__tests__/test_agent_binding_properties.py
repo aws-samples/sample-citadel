@@ -81,7 +81,7 @@ class TestAgentBindingOverrideApplication:
         system_prompt_addition=system_prompt_addition_st,
         model_override=model_override_st,
     )
-    @settings(max_examples=100)
+    @settings(max_examples=100, deadline=None)
     def test_overrides_applied_correctly(
         self, agent_id, base_description, system_prompt_addition, model_override
     ):

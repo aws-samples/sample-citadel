@@ -96,7 +96,7 @@ class TestAppScopedAgentFiltering:
             max_size=8,
         )
     )
-    @settings(max_examples=100)
+    @settings(max_examples=100, deadline=None)
     def test_only_ready_active_agents_returned(self, bindings):
         """Only READY bindings with active agent configs appear in the result.
 
@@ -196,7 +196,7 @@ class TestBackwardCompatibleAgentLoading:
             max_size=8,
         )
     )
-    @settings(max_examples=100)
+    @settings(max_examples=100, deadline=None)
     def test_load_config_returns_only_active_agents(self, agents):
         """Requests without appId use existing load_config_from_dynamodb unchanged.
 

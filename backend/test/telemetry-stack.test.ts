@@ -300,6 +300,69 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
+  // CIT-103 Pass A: eval-run tables (from BackendStack in the real app).
+  const evalCasesTable = new dynamodb.Table(helperStack, "EvalCasesTable", {
+    tableName: "citadel-eval-cases-test",
+    partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+  });
+  const evalRunsTable = new dynamodb.Table(helperStack, "EvalRunsTable", {
+    tableName: "citadel-eval-runs-test",
+    partitionKey: { name: "evalRunId", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+  });
+  const evalRunCaseResultsTable = new dynamodb.Table(
+    helperStack,
+    "EvalRunCaseResultsTable",
+    {
+      tableName: "citadel-eval-run-case-results-test",
+      partitionKey: { name: "evalRunId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+
+  // Phase 2 (production sampling): admin-authored sampling config +
+  // captured/scored production-sample tables, plus the shared idempotency
+  // table (from BackendStack in the real app).
+  const evalSamplingConfigTable = new dynamodb.Table(
+    helperStack,
+    "EvalSamplingConfigTable",
+    {
+      tableName: "citadel-eval-sampling-config-test",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  const evalProdSamplesTable = new dynamodb.Table(
+    helperStack,
+    "EvalProdSamplesTable",
+    {
+      tableName: "citadel-eval-prod-samples-test",
+      partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "SK", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  evalProdSamplesTable.addGlobalSecondaryIndex({
+    indexName: "AgentDimTimeIndex",
+    partitionKey: { name: "GSI1PK", type: dynamodb.AttributeType.STRING },
+    sortKey: { name: "GSI1SK", type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+  const idempotencyTable = new dynamodb.Table(helperStack, "IdempotencyTable", {
+    tableName: "citadel-idempotency-test",
+    partitionKey: { name: "eventId", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+  });
+
   const stack = new TelemetryStack(app, "TestTelemetryStack", {
     environment: "test",
     env: { account: "123456789012", region: "us-east-1" },
@@ -326,6 +389,12 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
       autoDeleteObjects: true,
     }),
     commitSha: "test-commit-sha",
+    evalCasesTable,
+    evalRunsTable,
+    evalRunCaseResultsTable,
+    evalSamplingConfigTable,
+    evalProdSamplesTable,
+    idempotencyTable,
   });
 
   const template = Template.fromStack(stack);
@@ -363,13 +432,14 @@ describe("TelemetryStack — cost ledger (pass 1)", () => {
     expect(logicalId).toBeDefined();
 
     const gsis = tables[logicalId].Properties.GlobalSecondaryIndexes;
-    expect(gsis).toHaveLength(5);
+    expect(gsis).toHaveLength(6);
 
     const gsiNames = gsis.map((g: any) => g.IndexName).sort();
     expect(gsiNames).toEqual([
       "AgentIndex",
       "AppIndex",
       "BudgetIndex",
+      "EvalContextIndex",
       "ProjectIndex",
       "WorkflowIndex",
     ]);
@@ -443,13 +513,19 @@ describe("TelemetryStack — cost ledger (pass 1)", () => {
     });
     const fnLogicalId = Object.keys(functions)[0];
 
-    // Scope to event-pattern rules only — the reconciler's schedule-based
-    // rule (rate(1 hour), no EventPattern) is a separate rule asserted in
-    // its own describe block below.
+    // Scope to the cost-ledger-writer's own 3 event-pattern rules — CIT-103
+    // added 3 more EventPattern rules (EvalCaseCompletedRule/
+    // EvalCaseJudgedRule/EvalRunCompletedAggregationRule) targeting the
+    // eval scorer/aggregator Lambdas, not the writer, so this must filter
+    // by target Lambda rather than assuming every EventPattern rule in the
+    // stack targets the writer.
     const allRules = template.findResources("AWS::Events::Rule");
-    const ruleIds = Object.keys(allRules).filter(
-      (id) => allRules[id].Properties?.EventPattern !== undefined,
-    );
+    const ruleIds = Object.keys(allRules).filter((id) => {
+      const props = allRules[id].Properties;
+      if (!props?.EventPattern) return false;
+      const targetArn = props.Targets?.[0]?.Arn?.["Fn::GetAtt"];
+      return Array.isArray(targetArn) && targetArn[0] === fnLogicalId;
+    });
     expect(ruleIds.length).toBeGreaterThanOrEqual(3);
 
     for (const ruleId of ruleIds) {
@@ -835,5 +911,246 @@ describe("TelemetryStack — execution replay package (CIT-026, pass 1)", () => 
     // replay routes did not create a second HTTP API.
     const apis = template.findResources("AWS::ApiGatewayV2::Api");
     expect(Object.keys(apis)).toHaveLength(1);
+  });
+});
+
+describe("TelemetryStack — CIT-103 Pass A eval-case-scorer + eval-run-aggregator", () => {
+  test("eval-case-scorer Lambda: nodejs24.x, 60s timeout, expected env vars", () => {
+    const { template } = createTestStack();
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "eval-case-scorer.handler",
+      Runtime: "nodejs24.x",
+      Timeout: 60,
+      Environment: {
+        Variables: Match.objectLike({
+          EVAL_CASES_TABLE: Match.anyValue(),
+          EVAL_RUN_CASE_RESULTS_TABLE: Match.anyValue(),
+          COST_LEDGER_TABLE: Match.anyValue(),
+          GOVERNANCE_LEDGER_TABLE: Match.anyValue(),
+          SCORER_VERSION: "v1",
+        }),
+      },
+    });
+  });
+
+  test("eval-run-aggregator Lambda: nodejs24.x, 2min timeout, expected env vars", () => {
+    const { template } = createTestStack();
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "eval-run-aggregator.handler",
+      Runtime: "nodejs24.x",
+      Timeout: 120,
+      Environment: {
+        Variables: Match.objectLike({
+          EVAL_RUNS_TABLE: Match.anyValue(),
+          EVAL_RUN_CASE_RESULTS_TABLE: Match.anyValue(),
+          EVAL_CASES_TABLE: Match.anyValue(),
+          COST_LEDGER_TABLE: Match.anyValue(),
+          SCORER_VERSION: "v1",
+        }),
+      },
+    });
+  });
+
+  test("EvalCaseCompletedRule targets eval-case-scorer with source=citadel.backend detail-type=governance.eval.case.completed", () => {
+    const { template } = createTestStack();
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: Match.objectLike({
+        source: ["citadel.backend"],
+        "detail-type": ["governance.eval.case.completed"],
+      }),
+    });
+  });
+
+  test("EvalCaseJudgedRule targets eval-case-scorer with source=citadel.backend detail-type=governance.eval.case.judged", () => {
+    const { template } = createTestStack();
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: Match.objectLike({
+        source: ["citadel.backend"],
+        "detail-type": ["governance.eval.case.judged"],
+      }),
+    });
+  });
+
+  test("EvalRunCompletedAggregationRule targets eval-run-aggregator with source=citadel.backend detail-type=governance.eval.run.completed", () => {
+    const { template } = createTestStack();
+    template.hasResourceProperties("AWS::Events::Rule", {
+      EventPattern: Match.objectLike({
+        source: ["citadel.backend"],
+        "detail-type": ["governance.eval.run.completed"],
+      }),
+    });
+  });
+
+  test("eval-case-scorer role: read-only on EvalCasesTable/CostLedgerTable, read+write on EvalRunCaseResultsTable, events:PutEvents, S3 read-only on replay bucket", () => {
+    const { template } = createTestStack();
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "eval-case-scorer.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+    expect(fnLogicalId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const roleId = functions[fnLogicalId].Properties.Role["Fn::GetAtt"][0];
+    const ownPolicies = Object.values(policies).filter((p) => {
+      const policy = p as {
+        Properties: { Roles: Array<{ Ref: string }> };
+      };
+      return policy.Properties.Roles.some((r) => r.Ref === roleId);
+    });
+    const allActions = ownPolicies.flatMap((p) => {
+      const policy = p as {
+        Properties: {
+          PolicyDocument: { Statement: Array<{ Action: string | string[] }> };
+        };
+      };
+      return policy.Properties.PolicyDocument.Statement.flatMap((s) =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+    });
+    expect(allActions).toContain("events:PutEvents");
+    expect(allActions).toContain("s3:GetObject*");
+    expect(allActions).not.toContain("s3:PutObject");
+    // Note: grantReadWriteData's generated policy legitimately includes
+    // dynamodb:DeleteItem (CDK L2 default action set) — same precedent as
+    // evalConversationWorkerFunction's identical EVAL_RUN_CASE_RESULTS_TABLE
+    // grant elsewhere in this codebase. Not asserted against here.
+  });
+
+  test("eval-run-aggregator role: read+write on EvalRunsTable/EvalRunCaseResultsTable, read-only on EvalCasesTable/CostLedgerTable, S3 read-only on replay bucket, never publishes events", () => {
+    const { template } = createTestStack();
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "eval-run-aggregator.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+    expect(fnLogicalId).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const roleId = functions[fnLogicalId].Properties.Role["Fn::GetAtt"][0];
+    const ownPolicies = Object.values(policies).filter((p) => {
+      const policy = p as {
+        Properties: { Roles: Array<{ Ref: string }> };
+      };
+      return policy.Properties.Roles.some((r) => r.Ref === roleId);
+    });
+    const allActions = ownPolicies.flatMap((p) => {
+      const policy = p as {
+        Properties: {
+          PolicyDocument: { Statement: Array<{ Action: string | string[] }> };
+        };
+      };
+      return policy.Properties.PolicyDocument.Statement.flatMap((s) =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+    });
+    expect(allActions).not.toContain("events:PutEvents");
+    expect(allActions).not.toContain("s3:PutObject");
+  });
+
+  test("both new rules on eval-case-scorer set retryAttempts=2", () => {
+    const { template } = createTestStack();
+    const functions = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: "eval-case-scorer.handler" },
+    });
+    const fnLogicalId = Object.keys(functions)[0];
+
+    const allRules = template.findResources("AWS::Events::Rule");
+    const scorerRuleIds = Object.keys(allRules).filter((id) => {
+      const targetArn =
+        allRules[id].Properties.Targets?.[0]?.Arn?.["Fn::GetAtt"];
+      return Array.isArray(targetArn) && targetArn[0] === fnLogicalId;
+    });
+    expect(scorerRuleIds.length).toBe(2);
+    for (const ruleId of scorerRuleIds) {
+      expect(allRules[ruleId].Properties.Targets[0].RetryPolicy).toMatchObject({
+        MaximumRetryAttempts: 2,
+      });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2 — governance.eval.case.judged routing (B1/B2 regression pins,
+// taskId 316427f2).
+//
+// The judged contract is FROZEN (EVENTBRIDGE_CATALOG.md): a prod-sample
+// judged event and an eval-suite judged event are emitted by the SAME
+// arbiter judge handler with the SAME Source, detail-type, and field set —
+// there is deliberately NO discriminating field an event pattern could
+// match on (the prod-sample carrier convention reuses evalRunId/caseId).
+// Rule-level discrimination is therefore structurally impossible; the
+// documented design is dual delivery with each consumer no-oping cleanly
+// on rows it does not own (pinned lambda-side in eval-sample-scorer.test.ts
+// "drops (no throw) when no row matches the sampleId"). These pins anchor
+// the CDK half of that design: exactly two judged rules, each wired to its
+// own scorer, all sharing the single Source the Python emitter pins
+// (test_judged_event_source_matches_the_backend_routing_rule_convention).
+// ---------------------------------------------------------------------------
+describe("TelemetryStack — Phase 2 governance.eval.case.judged dual-consumer routing", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  /** Logical ids of every rule whose pattern matches governance.eval.case.judged. */
+  function judgedRules(): Record<string, any> {
+    const allRules = template.findResources("AWS::Events::Rule");
+    return Object.fromEntries(
+      Object.entries(allRules).filter(([, rule]: [string, any]) => {
+        const pattern = rule.Properties.EventPattern;
+        return (
+          Array.isArray(pattern?.["detail-type"]) &&
+          pattern["detail-type"].includes("governance.eval.case.judged")
+        );
+      }),
+    );
+  }
+
+  function fnLogicalId(handler: string): string {
+    const fns = template.findResources("AWS::Lambda::Function", {
+      Properties: { Handler: handler },
+    });
+    const id = Object.keys(fns)[0];
+    expect(id).toBeDefined();
+    return id;
+  }
+
+  test("EvalSampleJudgedRule targets eval-sample-scorer with source=citadel.backend detail-type=governance.eval.case.judged", () => {
+    const scorerId = fnLogicalId("eval-sample-scorer.handler");
+    const rules = judgedRules();
+    const sampleJudgedRule = Object.values(rules).find((r: any) =>
+      r.Properties.Targets?.some(
+        (t: any) => t.Arn?.["Fn::GetAtt"]?.[0] === scorerId,
+      ),
+    );
+    expect(sampleJudgedRule).toBeDefined();
+    expect((sampleJudgedRule as any).Properties.EventPattern).toMatchObject({
+      source: ["citadel.backend"],
+      "detail-type": ["governance.eval.case.judged"],
+    });
+  });
+
+  test("exactly two rules subscribe to governance.eval.case.judged — one per scorer, neither shared (dual-consumer design, EVENTBRIDGE_CATALOG.md)", () => {
+    const rules = judgedRules();
+    expect(Object.keys(rules)).toHaveLength(2);
+
+    const caseScorerId = fnLogicalId("eval-case-scorer.handler");
+    const sampleScorerId = fnLogicalId("eval-sample-scorer.handler");
+    const targetFnIds = Object.values(rules).map((r: any) => {
+      expect(r.Properties.Targets).toHaveLength(1);
+      return r.Properties.Targets[0].Arn["Fn::GetAtt"][0];
+    });
+    expect(targetFnIds.sort()).toEqual([caseScorerId, sampleScorerId].sort());
+  });
+
+  test("every judged-event rule source is exactly ['citadel.backend'] — the identical Source the arbiter judge emitter pins on the Python side (B2 linkage)", () => {
+    const rules = judgedRules();
+    for (const rule of Object.values(rules) as any[]) {
+      // Literal, exact equality — a widened or divergent source list on
+      // EITHER judged rule would silently strand judged events (B2's
+      // failure mode: judge emitted citadel.governance, rules matched
+      // citadel.backend, every judge-basis dimension stayed PENDING).
+      expect(rule.Properties.EventPattern.source).toEqual(["citadel.backend"]);
+    }
   });
 });

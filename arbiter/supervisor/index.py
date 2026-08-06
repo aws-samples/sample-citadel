@@ -295,7 +295,8 @@ def update_workflow_tracking(node: str, request_id: str, data: Any) -> bool:
     return all_completed, response
 
 
-def create_orchestration(conversation, callback=None, run_id=None):
+def create_orchestration(conversation, callback=None, run_id=None, eval_run_id=None,
+                          eval_context=None, forbidden_tools=None):
     """Create a fresh orchestration row.
 
     ``run_id`` is additive and optional (Pass 1, decision f1cbd5ef): the
@@ -308,6 +309,16 @@ def create_orchestration(conversation, callback=None, run_id=None):
     ``governed_process_agent_call`` later reads ``orchestration.get('runId')``
     to stamp the finding, right where it already derives ``workflow_id``
     from the same dict.
+
+    ``eval_run_id`` / ``eval_context`` / ``forbidden_tools`` (CIT-102 Pass B)
+    are the frozen-contract keys read off the inbound ``task.request``
+    detail by ``handler()`` and threaded here in the same additive,
+    omit-when-absent style: ``eval_run_id`` persists as ``evalRunId`` only
+    when a non-empty string, ``eval_context`` as ``evalContext`` only when
+    truthy, ``forbidden_tools`` as ``forbiddenTools`` only when a non-empty
+    list. A caller that never passes any of the three produces a
+    byte-identical row to the pre-CIT-102 shape (the additive-contract
+    guarantee).
     """
     instance = int(time.time())
 
@@ -322,6 +333,15 @@ def create_orchestration(conversation, callback=None, run_id=None):
 
     if isinstance(run_id, str) and run_id:
         item['runId'] = run_id
+
+    if isinstance(eval_run_id, str) and eval_run_id:
+        item['evalRunId'] = eval_run_id
+
+    if eval_context:
+        item['evalContext'] = True
+
+    if isinstance(forbidden_tools, list) and forbidden_tools:
+        item['forbiddenTools'] = forbidden_tools
 
     return item
 
@@ -527,6 +547,25 @@ def governed_process_agent_call(
     except Exception:
         logger.debug("run-id stamp failed; finding written without runId", exc_info=True)
 
+    # 4d. Stamp the eval-run correlation id (CIT-102 Pass B, frozen
+    # contract: detail.evalRunId ↔ finding.eval_run_id ↔ ledger evalRunId).
+    # Best-effort only, same try/except discipline as the trace_id/run_id
+    # stamps immediately above: a missing evalRunId or any exception from
+    # this read must NEVER deny dispatch or alter the finding's decision —
+    # it only leaves finding.eval_run_id as None, which write_finding/
+    # ledger already serialize as a byte-identical (non-eval) item. Write
+    # order is unchanged: this stamp happens strictly before write_finding,
+    # and write_finding's call site/position below is untouched.
+    try:
+        _eval_run_id = orchestration.get("evalRunId")
+        if isinstance(_eval_run_id, str) and _eval_run_id:
+            finding.eval_run_id = _eval_run_id
+    except Exception:
+        logger.debug(
+            "eval-run-id stamp failed; finding written without evalRunId",
+            exc_info=True,
+        )
+
     # 5. Write finding (fail-closed per D9). Any exception halts dispatch,
     # in every mode.
     write_finding(finding)
@@ -618,6 +657,22 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
     # for existing callers/tests.
     if supervisor_usage is not None:
         payload['supervisorUsage'] = supervisor_usage
+
+    # CIT-102 Pass B: thread the eval-run frozen-contract keys onto the
+    # worker dispatch payload, read off the orchestration row (see
+    # create_orchestration). Omitted entirely (not null keys) when absent
+    # — byte-identical payload for every non-eval dispatch (the
+    # additive-contract guarantee). forbiddenTools rides here so the
+    # worker's GovernedToolHandler can ADD it to (never replace) the
+    # static DENIED_TOOLS deny set.
+    _eval_run_id = orchestration.get('evalRunId')
+    if isinstance(_eval_run_id, str) and _eval_run_id:
+        payload['evalRunId'] = _eval_run_id
+    if orchestration.get('evalContext'):
+        payload['evalContext'] = True
+    _forbidden_tools = orchestration.get('forbiddenTools')
+    if isinstance(_forbidden_tools, list) and _forbidden_tools:
+        payload['forbiddenTools'] = _forbidden_tools
 
     # Activate the per-agent modelOverride binding: resolve the configured
     # model key to a concrete inference-profile id and forward it in the
@@ -764,7 +819,8 @@ def update_orchestration_with_results(results, orchestration):
     })
 
 
-def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=None, run_id=None):
+def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=None, run_id=None,
+                 eval_run_id=None, eval_context=None, forbidden_tools=None):
     if orchestration is None:
         # Pass 1, decision f1cbd5ef: forward the server-minted run_id (read
         # from the inbound task.request detail by handler(), or None for
@@ -772,6 +828,10 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
         # row. Additive/nullable — create_orchestration already treats
         # run_id=None as "omit the runId key", so this is byte-identical
         # to the pre-runId shape when run_id is None.
+        #
+        # CIT-102 Pass B: eval_run_id/eval_context/forbidden_tools are the
+        # same additive, absent-tolerant forwarding for the frozen eval
+        # contract (detail.evalRunId/evalContext/forbiddenTools).
         orchestration = create_orchestration(
             conversation=[{
                 "role": "user",
@@ -779,6 +839,9 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
             }],
             callback=callback,
             run_id=run_id,
+            eval_run_id=eval_run_id,
+            eval_context=eval_context,
+            forbidden_tools=forbidden_tools,
         )
 
     if app_id is not None:
@@ -970,12 +1033,24 @@ def handler(event, lambda_context):
         # nullable, so its absence (pre-runId caller, or a fallback
         # detail shape) must not raise or change behavior.
         run_id = event['detail'].get('runId')
-        
+
+        # CIT-102 Pass B: frozen contract keys (Pass A, detail.evalRunId /
+        # detail.evalContext / detail.forbiddenTools), absent-tolerant reads
+        # exactly like run_id immediately above — absence (a non-eval
+        # dispatch, the overwhelming majority) must not raise or change
+        # behavior.
+        eval_run_id = event['detail'].get('evalRunId')
+        eval_context = event['detail'].get('evalContext')
+        forbidden_tools = event['detail'].get('forbiddenTools')
+
         if callback:
             print(f"Task request includes callback: {json.dumps(callback, default=str)}")
         
         if task_details:
-            orchestrate(initial_message=task_details, callback=callback, app_id=app_id, run_id=run_id)
+            orchestrate(
+                initial_message=task_details, callback=callback, app_id=app_id, run_id=run_id,
+                eval_run_id=eval_run_id, eval_context=eval_context, forbidden_tools=forbidden_tools,
+            )
         else:
             print("No task details found in event")
     

@@ -164,6 +164,16 @@ def _serialize_finding(finding: GovernanceFinding) -> dict[str, Any]:
     # stamp found nothing on the orchestration dict, not a write failure.
     if finding.run_id is not None:
         item["runId"] = finding.run_id
+
+    # Optional camelCase alias for the CIT-102 Pass B eval-run correlation
+    # id. Same byte-identical-when-absent discipline as traceId/runId
+    # immediately above: emitted ONLY when finding.eval_run_id is not
+    # None. The top-level loop already stripped the None-valued
+    # `eval_run_id` dataclass field, so a non-eval finding (the vast
+    # majority) writes an item with neither `eval_run_id` nor `evalRunId`
+    # — byte-identical to the pre-CIT-102 shape.
+    if finding.eval_run_id is not None:
+        item["evalRunId"] = finding.eval_run_id
     return item
 
 

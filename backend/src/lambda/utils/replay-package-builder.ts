@@ -398,6 +398,14 @@ export interface ReplayPackageEnvelope {
       status: unknown;
       retries: unknown;
       usage: unknown;
+      /** Phase 1 (trajectory eval dimension) additive ordering anchors —
+       * see NodeResultRow. Never omitted (default null when the source
+       * row lacks the field), so this projection's shape is stable
+       * across old and new persisted executions; additive, no
+       * REPLAY_SCHEMA_VERSION bump required. */
+      startedAt: string | null;
+      completedAt: string | null;
+      agentId: string | null;
     }>;
     toolResults: ToolResultsSection;
     /** Execution kind: an array of governance-ledger finding rows.
@@ -476,6 +484,12 @@ export async function assembleReplayPackage(
     status: value?.status ?? null,
     retries: value?.retryCount ?? 0,
     usage: value?.usageTotals ?? null,
+    // Phase 1 additive ordering anchors (trajectory eval dimension) — see
+    // NodeResultRow + eval-scoring-io.ts::buildObservedTrajectory, which
+    // sorts on startedAt (tiebreak completedAt, then nodeId).
+    startedAt: value?.startedAt ?? null,
+    completedAt: value?.completedAt ?? null,
+    agentId: value?.agentId ?? null,
   }));
 
   // agentConfig section is keyed off the first node's agentId, when present

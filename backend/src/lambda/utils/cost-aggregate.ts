@@ -33,6 +33,17 @@ export interface CostLedgerRowForAggregation {
   tokenCost: number | null;
   currency: string | null;
   priced: boolean;
+  /** CIT-102 §5, additive/nullable: true on rows written by an eval-run
+   * dispatch. Rows carrying this flag are excluded from org rollups here —
+   * eval spend must never enter a customer-facing cost summary/series. */
+  evalContext?: boolean;
+  /** Phase 2 §2.6, additive/nullable: "eval" on rows written for a judge
+   * invocation's own token usage. Distinct attribute from evalContext
+   * (different producer, different semantics) but excluded from
+   * customer-facing rollups by the SAME rule — a judge's own spend is
+   * never customer-billable, whether it judged an eval-suite case or a
+   * production sample. */
+  costContext?: "eval";
 }
 
 export interface SummaryBucket {
@@ -98,6 +109,13 @@ export function aggregateSummary(
   let unpricedRows = 0;
 
   for (const row of rows) {
+    // CIT-102 §5: eval-context rows never enter org rollups — skip before
+    // any bucketing/summing so they don't appear as unpriced either.
+    if (row.evalContext === true) continue;
+    // Phase 2 §2.6: judge-invocation usage (costContext:"eval") never
+    // enters org rollups either — same exclusion rule, distinct attribute.
+    if (row.costContext === "eval") continue;
+
     const key = dimensionKey(row, groupBy);
     let bucket = buckets.get(key);
     if (!bucket) {
@@ -162,6 +180,13 @@ export function aggregateSeries(
   let unpricedCount = 0;
 
   for (const row of rows) {
+    // CIT-102 §5: eval-context rows never enter org time series — skip
+    // before bucketing so they don't appear as unpriced either.
+    if (row.evalContext === true) continue;
+    // Phase 2 §2.6: judge-invocation usage (costContext:"eval") excluded
+    // from the time series too, same rule.
+    if (row.costContext === "eval") continue;
+
     const t = keyFor(row.capturedAt);
     let point = points.get(t);
     if (!point) {

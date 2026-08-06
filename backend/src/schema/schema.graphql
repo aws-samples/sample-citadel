@@ -74,6 +74,25 @@ type Query {
   # ExecutionSpecification
   getExecutionSpecification(specId: ID!): ExecutionSpecification
   listExecutionSpecifications(projectId: ID!): [ExecutionSpecification!]!
+  # EvalSuite / EvalCase (CIT-101)
+  getEvalSuite(suiteId: ID!): EvalSuite
+  listEvalSuites(orgId: ID!, agentTargetId: ID): [EvalSuite!]!
+  listEvalCases(suiteId: ID!): [EvalCase!]!
+  # EvalRun / EvalRunCaseResult (CIT-102)
+  getEvalRun(evalRunId: ID!): EvalRun
+  listEvalRuns(orgId: ID!, suiteId: ID): [EvalRun!]!
+  listEvalRunCaseResults(evalRunId: ID!): [EvalRunCaseResult!]!
+  # Eval baseline comparison + regression (CIT-105)
+  getEvalBaseline(orgId: ID!, agentTargetId: ID!, suiteId: ID!): EvalBaseline
+  listEvalBaselines(orgId: ID!): [EvalBaseline!]!
+  getEvalComparison(comparisonId: ID!): EvalComparisonVerdict
+  listEvalComparisons(orgId: ID!, suiteId: ID): [EvalComparisonVerdict!]!
+  getEvalComparisonThresholdConfig(orgId: ID!, suiteId: ID!): EvalComparisonThresholdConfig
+  getEvalCaseArtifactDiff(orgId: ID!, suiteId: ID!, caseId: ID!, baselineEvalRunId: ID!, candidateEvalRunId: ID!, transcriptCursor: String, trajectoryCursor: String): EvalCaseArtifactDiff!
+  # Phase 2 (production sampling) — admin-only reads (enforced in
+  # eval-sampling-config-resolver.ts, not by schema visibility).
+  getEvalSamplingConfig(orgId: ID!): EvalSamplingConfig
+  listEvalProdSamples(orgId: ID!, agentId: ID): [EvalProdSample!]!
   # InterrogationRound
   getInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound
   listInterrogationRounds(projectId: ID!): [InterrogationRound!]!
@@ -328,6 +347,29 @@ type Mutation {
   approveExecutionSpecification(specId: ID!): ExecutionSpecification!
   rejectExecutionSpecification(specId: ID!, reason: String!): ExecutionSpecification!
   reviseExecutionSpecification(specId: ID!, input: ReviseExecutionSpecificationInput!): ExecutionSpecification!
+  # EvalSuite / EvalCase (CIT-101) — lifecycle verbs are separate mutations,
+  # never a generic update, per exec-spec doctrine.
+  createEvalSuite(input: EvalSuiteInput!): EvalSuite!
+  updateEvalSuite(suiteId: ID!, input: EvalSuiteInput!): EvalSuite!
+  freezeEvalSuite(suiteId: ID!): EvalSuite!
+  archiveEvalSuite(suiteId: ID!): EvalSuite!
+  cloneEvalSuite(suiteId: ID!, semver: String!): EvalSuite!
+  markEvalSuiteReferenced(suiteId: ID!, referenceId: String!): EvalSuite!
+  addEvalCase(suiteId: ID!, input: EvalCaseInput!): EvalCase!
+  updateEvalCase(suiteId: ID!, caseId: ID!, input: EvalCaseInput!): EvalCase!
+  deleteEvalCase(suiteId: ID!, caseId: ID!): DeleteResult!
+  importReplayAsEvalCase(suiteId: ID!, package: AWSJSON!): EvalCase!
+  # EvalRun (CIT-102) — start is the only mutation; runs are immutable
+  # once created (outcome-only progression via the driver, not client edits).
+  startEvalRun(input: StartEvalRunInput!): EvalRun!
+  # Eval baseline comparison + regression (CIT-105). UI: OUT OF SCOPE.
+  designateEvalBaseline(input: DesignateEvalBaselineInput!): EvalBaseline!
+  computeEvalComparison(input: ComputeEvalComparisonInput!): EvalComparisonVerdict!
+  setEvalComparisonThresholdConfig(orgId: ID!, suiteId: ID!, input: SetEvalComparisonThresholdConfigInput!): EvalComparisonThresholdConfig!
+  # Phase 2 (production sampling) — admin-only (enforced in the resolver,
+  # not schema visibility). optIn/rate changes take effect on the NEXT
+  # terminal workflow/conversation signal; no retroactive resampling.
+  setEvalSamplingConfig(orgId: ID!, input: EvalSamplingConfigInput!): EvalSamplingConfig!
   # InterrogationRound
   startInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound!
   injectConstraints(projectId: ID!, roundN: Int!, constraints: [String!]!): InterrogationRound!
@@ -2041,6 +2083,536 @@ input ReviseExecutionSpecificationInput {
   narrativeS3Uri: String!
 }
 
+# EvalSuite / EvalCase (CIT-101 — Evaluation Domain Model + Versioned Suites)
+# Eval suites are release evidence, governed exactly like
+# ExecutionSpecifications: RETAIN + deletionProtection tables, lifecycle-
+# gated, optimistically locked, architect-authors/admin-approves.
+enum EvalSuiteStatus {
+  DRAFT
+  FROZEN
+  ARCHIVED
+}
+
+type EvalSuite {
+  suiteId: ID!
+  orgId: ID!
+  agentTargetId: String!
+  name: String!
+  description: String!
+  semver: String!
+  status: EvalSuiteStatus!
+  version: Int!
+  references: [String!]!
+  parentSuiteId: ID
+  frozenAt: AWSDateTime
+  frozenBy: String
+  approvedAt: AWSDateTime
+  approvedBy: String
+  createdAt: AWSDateTime!
+  createdBy: String!
+  updatedAt: AWSDateTime!
+}
+
+input EvalSuiteInput {
+  orgId: ID!
+  agentTargetId: String!
+  name: String!
+  description: String!
+  semver: String!
+}
+
+enum EvalCaseKind {
+  CONVERSATION
+  EXECUTION
+}
+
+enum MatchSpecMode {
+  EXACT
+  CONTAINS
+  REGEX
+  JSON_SUBSET
+}
+
+type MatchSpec {
+  mode: MatchSpecMode!
+  target: AWSJSON!
+  path: String
+}
+
+input MatchSpecInput {
+  mode: MatchSpecMode!
+  target: AWSJSON!
+  path: String
+}
+
+enum PolicyDecision {
+  PERMIT
+  DENY
+  ESCALATE
+}
+
+type ExpectedPolicyOutcome {
+  decision: PolicyDecision!
+  findingTypes: [String!]!
+  minSeverity: String
+}
+
+input ExpectedPolicyOutcomeInput {
+  decision: PolicyDecision!
+  findingTypes: [String!]!
+  minSeverity: String
+}
+
+type GroundingRequirement {
+  sourceUri: String
+  mustCiteAnyOf: [String!]!
+  mustNotHallucinate: Boolean!
+}
+
+input GroundingRequirementInput {
+  sourceUri: String
+  mustCiteAnyOf: [String!]!
+  mustNotHallucinate: Boolean!
+}
+
+# Phase 1 (trajectory eval dimension) — see
+# backend/src/lambda/utils/eval-trajectory.ts::TrajectorySpecForScoring.
+# Ordered toolSequence modes (SUBSEQUENCE/STRICT) degrade to UNKNOWN at
+# scoring time when no ordering signal is available in the replay
+# artifact — never guessed.
+enum ToolSequenceMode {
+  SET
+  SUBSEQUENCE
+  STRICT
+}
+
+type ToolSequenceSpec {
+  mode: ToolSequenceMode!
+  tools: [String!]!
+}
+
+input ToolSequenceSpecInput {
+  mode: ToolSequenceMode!
+  tools: [String!]!
+}
+
+type TrajectorySpec {
+  toolSequence: ToolSequenceSpec
+  dagPath: [String!]
+  maxSteps: Int
+  noLoop: Boolean
+  noRedundantCalls: Boolean
+}
+
+input TrajectorySpecInput {
+  toolSequence: ToolSequenceSpecInput
+  dagPath: [String!]
+  maxSteps: Int
+  noLoop: Boolean
+  noRedundantCalls: Boolean
+}
+
+type EvalCaseInputPayload {
+  prompt: String
+  transcript: [TranscriptMessage!]
+  structuredInput: AWSJSON
+}
+
+input EvalCaseInputPayloadInput {
+  prompt: String
+  transcript: [TranscriptMessageInput!]
+  structuredInput: AWSJSON
+}
+
+enum EvalCaseProvenanceSource {
+  AUTHORED
+  IMPORTED_FROM_REPLAY
+}
+
+type EvalCaseProvenance {
+  source: EvalCaseProvenanceSource!
+  packageHash: String
+  producerCommit: String
+  correlationId: String
+  importedAt: AWSDateTime
+  toolResultsPartial: Boolean
+  note: String
+}
+
+type EvalCase {
+  suiteId: ID!
+  caseId: ID!
+  name: String!
+  description: String!
+  kind: EvalCaseKind!
+  input: EvalCaseInputPayload!
+  expectedOutcome: MatchSpec!
+  requiredTools: [String!]!
+  forbiddenTools: [String!]!
+  expectedPolicyOutcome: ExpectedPolicyOutcome
+  groundingRequirements: [GroundingRequirement!]
+  maxLatencyMs: Int
+  maxCostUsd: Float
+  trajectorySpec: TrajectorySpec
+  provenance: EvalCaseProvenance!
+  version: Int!
+  createdAt: AWSDateTime!
+  createdBy: String!
+  updatedAt: AWSDateTime!
+}
+
+input EvalCaseInput {
+  name: String!
+  description: String!
+  kind: EvalCaseKind!
+  input: EvalCaseInputPayloadInput!
+  expectedOutcome: MatchSpecInput!
+  requiredTools: [String!]
+  forbiddenTools: [String!]
+  expectedPolicyOutcome: ExpectedPolicyOutcomeInput
+  groundingRequirements: [GroundingRequirementInput!]
+  maxLatencyMs: Int
+  maxCostUsd: Float
+  trajectorySpec: TrajectorySpecInput
+}
+
+# EvalRun / EvalRunCaseResult (CIT-102 — Eval Runner)
+# Release evidence, governed exactly like EvalSuites/EvalCases (RETAIN +
+# deletionProtection + PITR tables). A run may only be started against a
+# FROZEN suite. No scores here — CIT-103 owns verdicts; this is
+# execution-outcome/dispatch facts only.
+enum EvalRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum EvalRunCaseStatus {
+  PENDING
+  DISPATCHED
+  RUNNING
+  COMPLETED
+  FAILED
+  TIMEOUT
+}
+
+type EvalRun {
+  evalRunId: ID!
+  orgId: ID!
+  suiteId: ID!
+  suiteVersion: Int!
+  agentTargetId: String!
+  agentTargetVersion: String!
+  status: EvalRunStatus!
+  caseCount: Int!
+  pendingCases: Int!
+  startedAt: AWSDateTime!
+  startedBy: String!
+  completedAt: AWSDateTime
+  durationMs: Int
+  idempotencyKey: String!
+  evalScopedRoleArn: String
+  error: String
+  # CIT-103, additive: per-dimension aggregates (eval-score-aggregate.ts
+  # DimensionAggregate[]), written by eval-run-aggregator.ts. NEVER a
+  # composite single number (design §4).
+  scoreAggregates: AWSJSON
+}
+
+input StartEvalRunInput {
+  suiteId: ID!
+  agentTargetId: String!
+  agentTargetVersion: String!
+  idempotencyKey: String!
+}
+
+type EvalRunCaseResult {
+  evalRunId: ID!
+  caseId: ID!
+  orgId: ID!
+  caseKind: EvalCaseKind!
+  status: EvalRunCaseStatus!
+  executionId: ID
+  conversationId: ID
+  runId: String
+  dispatchedAt: AWSDateTime
+  startedAt: AWSDateTime
+  completedAt: AWSDateTime
+  latencyMs: Int
+  artifactKind: String
+  artifactRef: String
+  error: String
+  timedOut: Boolean
+  # CIT-103, additive: this case's 7-dimension ScoreVector
+  # (eval-scoring.ts DimensionScore[]).
+  scoreVector: AWSJSON
+  scoredAt: AWSDateTime
+  scorerVersion: String
+}
+
+type DeleteResult {
+  success: Boolean!
+}
+
+# Eval baseline comparison + regression (CIT-105 — Baseline Comparison +
+# Regression Analysis for Agent Evaluation). UI: OUT OF SCOPE. Reuses the
+# pure compareRuns()/eval-comparison.ts algorithm verbatim — this schema
+# only exposes its I/O-layer wire shapes. NEVER a composite single number
+# anywhere below (see eval-no-composite.guard.test.ts).
+enum EvalComparisonDirection {
+  improved
+  regressed
+  unchanged
+  unstable
+  incomparable
+  insufficient_sample
+}
+
+enum EvalComparisonVerdictStatus {
+  PASS
+  REGRESSED
+  UNSTABLE
+  INCOMPARABLE
+  NOTHING_TO_COMPARE
+}
+
+# Mutable (orgId, agentTargetId, suiteId) baseline designation pointer,
+# re-baselined on promotion (design §3). A governance act — audited via
+# governance.eval.baseline.designated.
+type EvalBaseline {
+  orgId: ID!
+  agentTargetId: String!
+  suiteId: ID!
+  baselineEvalRunId: ID!
+  baselineSuiteVersion: Int!
+  baselineAgentTargetVersion: String!
+  previousBaselineEvalRunId: ID
+  reason: String
+  designatedAt: AWSDateTime!
+  designatedBy: String!
+  version: Int!
+}
+
+input DesignateEvalBaselineInput {
+  orgId: ID!
+  agentTargetId: String!
+  suiteId: ID!
+  baselineEvalRunId: ID!
+  reason: String
+}
+
+# Per-case×per-dimension case counts for one dimension's comparison —
+# never a collapsed total, always the individual classification tallies.
+type EvalComparisonCaseCounts {
+  improved: Int!
+  regressed: Int!
+  unstable: Int!
+  unchanged: Int!
+  incomparable: Int!
+  new: Int!
+  dropped: Int!
+}
+
+# One dimension's comparison result (one per DIMENSION_ORDER entry).
+# `materialRegression` is THE per-dimension gate boolean the future
+# promotion gate keys off — never a numeric score. The per-case×per-
+# dimension breakdown (`perCase` in the pure EvalComparisonVerdict type)
+# is NOT exposed on this summary type; it lives in
+# EvalComparisonVerdict.caseDetail (AWSJSON, inline or S3-offloaded).
+type EvalComparisonDimension {
+  dimension: String!
+  direction: EvalComparisonDirection!
+  materialRegression: Boolean!
+  unstable: Boolean!
+  baselineStat: Float
+  candidateStat: Float
+  delta: Float
+  caseCounts: EvalComparisonCaseCounts!
+}
+
+# Threshold config echoed verbatim into every persisted verdict for
+# reproducibility (design §4) — the exact thresholds that produced this
+# comparison, even if org/suite config later changes.
+type EvalComparisonThresholds {
+  passRateDropThreshold: Float!
+  meanScoreDropThreshold: Float!
+  latencyP95IncreaseMsThreshold: Float!
+  costIncreaseThreshold: Float!
+  minSampleCount: Int!
+  scoreStabilityBand: Float!
+}
+
+# Computed baseline-vs-candidate-cohort regression verdict — release
+# evidence (design §3). `caseDetail` carries the full per-case×per-
+# dimension breakdown as AWSJSON (Map<dimension, EvalComparisonPerCaseRow[]>),
+# inline when small or resolved from the S3 offload transparently by the
+# resolver's getEvalComparisonHydrated — callers never need to know which
+# storage path was used. `verdictStatus`/`anyMaterialRegression`/
+# `materiallyRegressedDimensions`/`unstableDimensions` are the categorical
+# rollups a promotion gate consumes — booleans/arrays/enum ONLY, no
+# dimension-collapsing number anywhere on this type.
+type EvalComparisonVerdict {
+  comparisonId: ID!
+  orgId: ID!
+  suiteId: ID!
+  suiteVersion: Int!
+  agentTargetId: String!
+  baselineEvalRunId: ID!
+  baselineAgentTargetVersion: String!
+  candidateEvalRunIds: [ID!]!
+  candidateAgentTargetVersion: String!
+  repeatCount: Int!
+  scorerVersions: [String!]!
+  thresholds: EvalComparisonThresholds!
+  dimensions: [EvalComparisonDimension!]!
+  anyMaterialRegression: Boolean!
+  materiallyRegressedDimensions: [String!]!
+  unstableDimensions: [String!]!
+  verdictStatus: EvalComparisonVerdictStatus!
+  caseDetail: AWSJSON
+  caseDetailRef: String
+  createdAt: AWSDateTime!
+  createdBy: String!
+}
+
+input ComputeEvalComparisonInput {
+  orgId: ID!
+  suiteId: ID!
+  candidateEvalRunIds: [ID!]!
+  baselineEvalRunId: ID
+  thresholdOverride: AWSJSON
+  idempotencyKey: String!
+}
+
+# Admin-authored threshold config (design §4). suiteId=`__default__` sets
+# the per-org default row; any other suiteId sets a per-suite override.
+type EvalComparisonThresholdConfig {
+  orgId: ID!
+  suiteId: ID!
+  thresholds: AWSJSON!
+  updatedAt: AWSDateTime
+  updatedBy: String
+  version: Int!
+}
+
+input SetEvalComparisonThresholdConfigInput {
+  thresholds: AWSJSON!
+}
+
+# CIT-105 per-case artifact read path — honest per-side absence enum.
+# Every state below is distinguishable and never faked/empty-defaulted
+# (memory projects/cit-105-artifacts-design §2).
+enum EvalArtifactAvailability {
+  OK
+  RUN_ABSENT
+  RUN_NOT_COMPLETED
+  CASE_ABSENT
+  ARTIFACT_MISSING
+  ARTIFACT_UNRESOLVED
+  ARTIFACT_WITHHELD_SANITISATION
+}
+
+enum EvalArtifactSide {
+  BASELINE
+  CANDIDATE
+}
+
+type EvalArtifactSanitisation {
+  redactPiiVersion: String!
+  secretPatternsVersion: String!
+  gate: String!
+}
+
+type EvalTranscriptMessage {
+  index: Int!
+  role: String!
+  content: String!
+  truncated: Boolean!
+}
+
+# Ordered, diffable DAG/tool-call step. `output` is bounded + already
+# re-sanitised; `outputTruncated` is set (never silently sliced) when the
+# per-node output exceeds the per-step byte cap.
+type EvalTrajectoryStep {
+  stepIndex: Int!
+  nodeId: String!
+  agentId: String
+  status: String
+  startedAt: AWSDateTime
+  completedAt: AWSDateTime
+  output: AWSJSON
+  outputTruncated: Boolean!
+}
+
+type EvalArtifactSideView {
+  side: EvalArtifactSide!
+  availability: EvalArtifactAvailability!
+  evalRunId: ID!
+  caseId: ID!
+  caseKind: EvalCaseKind
+  artifactKind: String
+  correlationId: String
+  sanitisation: EvalArtifactSanitisation
+  transcript: [EvalTranscriptMessage!]!
+  transcriptTotalCount: Int!
+  transcriptReturnedCount: Int!
+  transcriptTruncated: Boolean!
+  transcriptNextCursor: String
+  transcriptTotalBytes: Int!
+  transcriptReturnedBytes: Int!
+  trajectory: [EvalTrajectoryStep!]!
+  trajectoryTotalCount: Int!
+  trajectoryReturnedCount: Int!
+  trajectoryTruncated: Boolean!
+  trajectoryNextCursor: String
+  toolSet: [String!]!
+  # NULL = honest CIT-121 gap (per-tool-call ordering unavailable); never
+  # guessed from finding array position.
+  toolOrder: [String!]
+}
+
+type EvalCaseArtifactDiff {
+  suiteId: ID!
+  caseId: ID!
+  baseline: EvalArtifactSideView!
+  candidate: EvalArtifactSideView!
+}
+
+# Phase 2 (production sampling) — admin-authored, per-org opt-in
+# sampling configuration. Hard gate: sampling occurs only when
+# optIn===true (eval-sampling-config.ts's resolveEffectiveRate).
+type EvalSamplingConfig {
+  orgId: ID!
+  optIn: Boolean!
+  defaultSampleRate: Float!
+  # Map<agentId, rate 0..1> — AWSJSON since GraphQL has no native map type.
+  perAgentSampleRate: AWSJSON
+  updatedAt: AWSDateTime
+  updatedBy: String
+}
+
+input EvalSamplingConfigInput {
+  optIn: Boolean!
+  defaultSampleRate: Float!
+  perAgentSampleRate: AWSJSON
+}
+
+# Phase 2 (production sampling) — a captured + scored production sample.
+# scoreVector uses the allowlisted prod dimension set (eval-prod-scoring.ts
+# PROD_DIMENSION_ORDER) — deliberately excludes task_success/tool_accuracy.
+type EvalProdSample {
+  orgId: ID!
+  runId: ID!
+  sampleId: ID!
+  agentId: ID!
+  kind: EvalCaseKind!
+  artifactRef: String!
+  scoreVector: AWSJSON
+  capturedAt: AWSDateTime!
+}
+
 # InterrogationRound
 enum RoundStatus {
   IN_PROGRESS
@@ -2062,6 +2634,14 @@ type InterrogationRound {
 }
 
 input TranscriptMessageInput {
+  role: String!
+  content: String!
+}
+
+# Output-type counterpart to TranscriptMessageInput. Did not previously
+# exist because no prior query returned raw transcript messages as a typed
+# list; EvalCase.input.transcript (CIT-101) is the first such field.
+type TranscriptMessage {
   role: String!
   content: String!
 }

@@ -125,6 +125,7 @@ class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]
         agent_id: str = 'unknown-agent',
         workflow_id: str = 'unknown-workflow',
         denied_tools: set[str] | None = None,
+        eval_run_id: str | None = None,
     ):
         # Strands ``AgentToolHandler.__init__`` may require specific kwargs
         # and the signature has drifted across SDK releases. Fall back
@@ -148,6 +149,12 @@ class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]
         self.denied_tools = (
             denied_tools if denied_tools is not None else _parse_denied_tools_env()
         )
+        # CIT-102 Pass B: per-run eval-context correlation id, stamped on
+        # every finding this handler writes (PERMIT and DENY alike) so a
+        # forbidden-tool attempt in an eval dispatch surfaces in that run's
+        # replay-package findings. None (the default) for every non-eval
+        # invocation — byte-identical finding/ledger-write behavior.
+        self.eval_run_id = eval_run_id
 
     def preprocess(
         self,
@@ -187,6 +194,7 @@ class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]
             ),
             scope_evaluated=SCOPE_WORKER_TOOL_HANDLER,
             contract_evaluated=None,
+            eval_run_id=self.eval_run_id,
         )
 
         try:

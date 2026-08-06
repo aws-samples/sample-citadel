@@ -47,6 +47,35 @@ export class BackendStack extends cdk.Stack {
   public readonly adrsTable: dynamodb.Table;
   public readonly agentDesignAssessmentsTable: dynamodb.Table;
   public readonly executionSpecificationsTable: dynamodb.Table;
+  // CIT-101: eval suites are release evidence, governed like
+  // ExecutionSpecifications (RETAIN + deletionProtection + PITR). Passed as
+  // dynamodb.ITable props into GovernanceStack, which owns the eval-resolver.
+  public readonly evalSuitesTable: dynamodb.Table;
+  public readonly evalCasesTable: dynamodb.Table;
+  // CIT-102: eval runs are E11 release evidence (an eval run is proof that
+  // agentVersion X was validated against suiteVersion Y) — same RETAIN +
+  // deletionProtection + PITR posture as EvalSuites/EvalCases, no TTL.
+  // Passed as dynamodb.ITable props into GovernanceStack, which owns the
+  // eval-run-resolver/eval-runner/eval-conversation-worker.
+  public readonly evalRunsTable: dynamodb.Table;
+  public readonly evalRunCaseResultsTable: dynamodb.Table;
+  // Phase 2 (production sampling) — admin-authored per-org sampling
+  // config (small, not release evidence — no RETAIN/deletionProtection
+  // needed, but PITR kept for consistency) and the captured+scored
+  // production-sample rows (RETAIN — an audit/observability record, same
+  // posture rationale as EvalRuns).
+  public readonly evalSamplingConfigTable: dynamodb.Table;
+  public readonly evalProdSamplesTable: dynamodb.Table;
+  // CIT-105: baseline designation pointer + computed comparison verdicts
+  // + threshold config — same RETAIN + deletionProtection + PITR posture
+  // as EvalRuns for the two evidence tables (EvalBaselines/EvalComparisons);
+  // EvalComparisonConfig is a small admin-authored config table (DESTROY-ok
+  // like EvalSamplingConfigTable). Passed as dynamodb.ITable props into
+  // GovernanceStack, which owns the eval-comparison-resolver (own file/IAM
+  // role per kept-separate doctrine — distinct from eval-run-resolver).
+  public readonly evalBaselinesTable: dynamodb.Table;
+  public readonly evalComparisonsTable: dynamodb.Table;
+  public readonly evalComparisonConfigTable: dynamodb.Table;
   public readonly workflowProgressFanoutFunction: lambda.Function;
   public readonly idempotencyTable: dynamodb.Table;
   public readonly interrogationRoundsTable: dynamodb.Table;
@@ -3096,6 +3125,277 @@ export class BackendStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // EvalSuites (CIT-101) — release evidence, governed like
+    // ExecutionSpecifications: RETAIN + deletionProtection + PITR. Simple
+    // PK (suiteId) mirrors ExecutionSpecificationsTable. Two GSIs:
+    // org-index (org-scoped listing, mirrors the org-scoped list
+    // convention in datastore-resolver/integration-resolver) and
+    // agent-target-index ("list suites for this agent/template target").
+    this.evalSuitesTable = new dynamodb.Table(this, "EvalSuitesTable", {
+      tableName: `citadel-eval-suites-${props.environment}`,
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+    this.evalSuitesTable.addGlobalSecondaryIndex({
+      indexName: "org-index",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "updatedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    this.evalSuitesTable.addGlobalSecondaryIndex({
+      indexName: "agent-target-index",
+      partitionKey: {
+        name: "agentTargetId",
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: { name: "updatedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // EvalCases (CIT-101) — composite PK (suiteId) / SK (caseId) so all
+    // cases of a suite are a single Query, and a case is addressable by
+    // {suiteId, caseId}. Same governance posture as EvalSuitesTable. No GSI
+    // in v1 — cases are always accessed via their parent suiteId.
+    this.evalCasesTable = new dynamodb.Table(this, "EvalCasesTable", {
+      tableName: `citadel-eval-cases-${props.environment}`,
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+
+    // Seed Eval Suites Custom Resource (CIT-101) — deploy-time demo data:
+    // Suite A (intake-agent) + Suite B (template:monolithic_db), each with
+    // >=1 expected-DENY case, landing DRAFT so the app can demo freeze.
+    // Placed here (rather than alongside SeedBlueprints earlier in the
+    // constructor) because it needs evalSuitesTable/evalCasesTable, which
+    // are defined immediately above.
+    const seedEvalSuitesLambda = new lambda.Function(
+      this,
+      "SeedEvalSuitesFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "seed-eval-suites/index.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        timeout: cdk.Duration.seconds(30),
+        environment: {
+          EVAL_SUITES_TABLE: this.evalSuitesTable.tableName,
+          EVAL_CASES_TABLE: this.evalCasesTable.tableName,
+        },
+        logGroup: new logs.LogGroup(this, "SeedEvalSuitesFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    this.evalSuitesTable.grantWriteData(seedEvalSuitesLambda);
+    this.evalCasesTable.grantWriteData(seedEvalSuitesLambda);
+
+    const seedEvalSuitesResource = new cdk.CustomResource(
+      this,
+      "SeedEvalSuitesResource",
+      {
+        serviceToken: seedEvalSuitesLambda.functionArn,
+        properties: {
+          Version: "v1.0.0",
+        },
+      },
+    );
+
+    seedEvalSuitesResource.node.addDependency(this.evalSuitesTable);
+    seedEvalSuitesResource.node.addDependency(this.evalCasesTable);
+
+    // EvalRuns (CIT-102) — release evidence that agentVersion X was
+    // validated against suiteVersion Y; consumed by E11 release gating
+    // (CIT-105/111). RETAIN + deletionProtection + PITR, NO TTL — same
+    // posture as EvalSuites/EvalCases (this is the OPPOSITE of
+    // FabricationJobsTable's ephemeral DESTROY+TTL working-doc posture).
+    // Simple PK (evalRunId). Two GSIs: org-index ("all runs for this org",
+    // mirrors EvalSuites' org-index) and suite-index ("all runs for this
+    // suite", E11/CIT-105).
+    this.evalRunsTable = new dynamodb.Table(this, "EvalRunsTable", {
+      tableName: `citadel-eval-runs-${props.environment}`,
+      partitionKey: { name: "evalRunId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+    this.evalRunsTable.addGlobalSecondaryIndex({
+      indexName: "org-index",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "startedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    this.evalRunsTable.addGlobalSecondaryIndex({
+      indexName: "suite-index",
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "startedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // EvalRunCaseResults (CIT-102) — composite PK (evalRunId) / SK (caseId)
+    // so every case-result of a run is a single Query (InterrogationRounds
+    // shape). Same RETAIN + deletionProtection + PITR posture. No GSI in
+    // v1 — always accessed via the parent evalRunId. Holds outcome/dispatch
+    // facts only (no scores — CIT-103 owns verdicts).
+    this.evalRunCaseResultsTable = new dynamodb.Table(
+      this,
+      "EvalRunCaseResultsTable",
+      {
+        tableName: `citadel-eval-run-case-results-${props.environment}`,
+        partitionKey: {
+          name: "evalRunId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        sortKey: { name: "caseId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+
+    // Phase 2 (production sampling) — EvalSamplingConfig: admin-authored,
+    // one row per org (PK=orgId). Small config table, DESTROY on stack
+    // teardown is acceptable (re-authored on next admin write, no
+    // historical value once superseded) — deliberately NOT RETAIN/
+    // deletionProtection like the release-evidence eval tables above.
+    this.evalSamplingConfigTable = new dynamodb.Table(
+      this,
+      "EvalSamplingConfigTable",
+      {
+        tableName: `citadel-eval-sampling-config-${props.environment}`,
+        partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+
+    // EvalBaselines (CIT-105) — mutable (orgId, agentTargetId, suiteId)
+    // baseline designation pointer, re-baselined on promotion (design §3).
+    // PK orgId, SK `${agentTargetId}#${suiteId}` so a point-get is exact
+    // and a Query on orgId lists every baseline for that org. RETAIN +
+    // deletionProtection + PITR — an evidence-adjacent governance record
+    // (which run was designated the release baseline, and when), same
+    // posture as EvalRunsTable.
+    this.evalBaselinesTable = new dynamodb.Table(this, "EvalBaselinesTable", {
+      tableName: `citadel-eval-baselines-${props.environment}`,
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: {
+        name: "agentTargetId_suiteId",
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+
+    // EvalComparisons (CIT-105) — computed baseline-vs-candidate-cohort
+    // regression verdicts, release evidence (design §3). Simple PK
+    // (comparisonId) with two GSIs mirroring EvalRunsTable's shape exactly:
+    // org-index (org-scoped listing) + suite-index (all comparisons for a
+    // suite). RETAIN + deletionProtection + PITR.
+    this.evalComparisonsTable = new dynamodb.Table(
+      this,
+      "EvalComparisonsTable",
+      {
+        tableName: `citadel-eval-comparisons-${props.environment}`,
+        partitionKey: {
+          name: "comparisonId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+    this.evalComparisonsTable.addGlobalSecondaryIndex({
+      indexName: "org-index",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    this.evalComparisonsTable.addGlobalSecondaryIndex({
+      indexName: "suite-index",
+      partitionKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "createdAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // EvalComparisonConfig (CIT-105) — admin-authored threshold config
+    // source of truth (design §4). PK orgId, SK suiteId (SK sentinel
+    // `__default__` = org-wide default row). Small config table, DESTROY
+    // on stack teardown is acceptable (re-authored on next admin write,
+    // hardcoded DEFAULT_COMPARISON_THRESHOLDS always available in code) —
+    // same posture as EvalSamplingConfigTable, deliberately NOT RETAIN/
+    // deletionProtection like the release-evidence eval tables above.
+    this.evalComparisonConfigTable = new dynamodb.Table(
+      this,
+      "EvalComparisonConfigTable",
+      {
+        tableName: `citadel-eval-comparison-config-${props.environment}`,
+        partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+        sortKey: { name: "suiteId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+
+    // Phase 2 (production sampling) — EvalProdSamples: captured + scored
+    // production samples. PK=PK (ORG#<orgId>), SK=<capturedAt>#<sampleId>
+    // so a per-org time-range read is a plain Query. Sparse GSI1
+    // (AgentDimTimeIndex naming carried at the attribute level —
+    // GSI1PK=AGENT#<agentId>, GSI1SK=<hourBucket>#<sampleId>) makes a
+    // per-agent time series a Query too, never a Scan (design §2.4
+    // acceptance #1 substrate). RETAIN — this is an audit/observability
+    // record of what was actually sampled and judged, same posture
+    // rationale as EvalRunsTable (release evidence), not ephemeral
+    // working data.
+    this.evalProdSamplesTable = new dynamodb.Table(
+      this,
+      "EvalProdSamplesTable",
+      {
+        tableName: `citadel-eval-prod-samples-${props.environment}`,
+        partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING },
+        sortKey: { name: "SK", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+    this.evalProdSamplesTable.addGlobalSecondaryIndex({
+      indexName: "AgentDimTimeIndex",
+      partitionKey: { name: "GSI1PK", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "GSI1SK", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    // B1 fix (taskId 316427f2, CRITICAL): a judged event (frozen
+    // judge.requested/judged contract) carries only evalRunId/caseId/
+    // orgId — never capturedAt, which is embedded in this table's real
+    // SK. A point Get on {orgId, runId} does not match this table's key
+    // schema (PK/SK) at all and previously threw ValidationException in
+    // production (masked by aws-sdk-client-mock in tests). This sparse
+    // GSI makes the judged-event correlation ref (caseId, set to the
+    // sample's own sampleId by the "prod-sample carrier convention",
+    // EVENTBRIDGE_CATALOG.md) a plain Query — NEVER a Scan.
+    this.evalProdSamplesTable.addGlobalSecondaryIndex({
+      indexName: "SampleIdIndex",
+      partitionKey: { name: "sampleId", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // InterrogationRounds
     this.interrogationRoundsTable = new dynamodb.Table(
       this,
@@ -3189,6 +3489,52 @@ export class BackendStack extends cdk.Stack {
     publishHandlerDataSource.createResolver("UnpublishAppResolver", {
       typeName: "Mutation",
       fieldName: "unpublishApp",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+  }
+
+  /**
+   * Phase 2 (production sampling) — cross-stack AppSync wiring for
+   * eval-sampling-config-resolver.ts's Lambda, which lives in
+   * TelemetryStack (DECISION d36fbbf7 rationale: it needs
+   * EvalSamplingConfigTable/EvalProdSamplesTable, both owned by
+   * BackendStack, which instantiates BEFORE TelemetryStack — see the
+   * section banner in telemetry-stack.ts). Same
+   * fromFunctionAttributes+addLambdaDataSource pattern as
+   * addPublishHandlerResolvers above. Called from app.ts after both
+   * BackendStack and TelemetryStack are instantiated.
+   */
+  public addEvalSamplingConfigResolvers(resolverFunctionArn: string): void {
+    const resolverFn = lambda.Function.fromFunctionAttributes(
+      this,
+      "ImportedEvalSamplingConfigResolver",
+      {
+        functionArn: resolverFunctionArn,
+        sameEnvironment: true,
+      },
+    );
+
+    const dataSource = this.appSyncApi.addLambdaDataSource(
+      "EvalSamplingConfigLambdaDataSource",
+      resolverFn,
+    );
+
+    dataSource.createResolver("SetEvalSamplingConfigResolver", {
+      typeName: "Mutation",
+      fieldName: "setEvalSamplingConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+    dataSource.createResolver("GetEvalSamplingConfigResolver", {
+      typeName: "Query",
+      fieldName: "getEvalSamplingConfig",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+    dataSource.createResolver("ListEvalProdSamplesResolver", {
+      typeName: "Query",
+      fieldName: "listEvalProdSamples",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });

@@ -28,7 +28,8 @@ STEP_RUNNER_INVOKE_NODE_SOURCE = 'stepRunner.invoke_node'
 _logger = logging.getLogger(__name__)
 
 
-def publish_event(detail_type: str, detail: dict, run_id: str | None = None) -> None:
+def publish_event(detail_type: str, detail: dict, run_id: str | None = None,
+                   eval_run_id: str | None = None) -> None:
     """Publish a single event to EventBridge with timestamp injection.
 
     Additive, optional traceContext (design §"Carried-context format
@@ -40,6 +41,11 @@ def publish_event(detail_type: str, detail: dict, run_id: str | None = None) -> 
     f1cbd5ef): merged in as ``runId`` only when a non-empty string is
     supplied. Absent/None never gates the publish and never adds the key —
     byte-identical to the pre-runId detail shape.
+
+    ``eval_run_id`` (CIT-102 Pass B) mirrors ``run_id``'s omit-when-absent
+    contract exactly: merged in as ``evalRunId`` only when a non-empty
+    string is supplied. Absent/None (every non-eval execution) never adds
+    the key — byte-identical to the pre-CIT-102 detail shape.
     """
     detail['timestamp'] = datetime.now(timezone.utc).isoformat()
     trace_context = tracing.active_trace_context()
@@ -47,6 +53,8 @@ def publish_event(detail_type: str, detail: dict, run_id: str | None = None) -> 
         detail['traceContext'] = trace_context
     if isinstance(run_id, str) and run_id:
         detail['runId'] = run_id
+    if isinstance(eval_run_id, str) and eval_run_id:
+        detail['evalRunId'] = eval_run_id
     eb_client.put_events(Entries=[{
         'Source': SOURCE,
         'DetailType': detail_type,
@@ -150,23 +158,31 @@ def publish_node_retrying(
 
 def publish_workflow_completed(
     execution_id: str, workflow_id: str, completed_at: str, output: dict,
-    run_id: str | None = None,
+    run_id: str | None = None, eval_run_id: str | None = None,
 ) -> None:
-    """Publish workflow.completed event when all nodes complete successfully."""
+    """Publish workflow.completed event when all nodes complete successfully.
+
+    ``eval_run_id`` (CIT-102 Pass B) mirrors ``run_id``'s additive,
+    omit-when-absent contract — see ``publish_event``.
+    """
     publish_event('workflow.completed', {
         'executionId': execution_id,
         'workflowId': workflow_id,
         'completedAt': completed_at,
         'output': output,
         'correlationId': execution_id,
-    }, run_id=run_id)
+    }, run_id=run_id, eval_run_id=eval_run_id)
 
 
 def publish_workflow_failed(
     execution_id: str, workflow_id: str, failed_node_id: str, error: str, failed_at: str,
-    run_id: str | None = None,
+    run_id: str | None = None, eval_run_id: str | None = None,
 ) -> None:
-    """Publish workflow.failed event when execution fails."""
+    """Publish workflow.failed event when execution fails.
+
+    ``eval_run_id`` (CIT-102 Pass B) mirrors ``run_id``'s additive,
+    omit-when-absent contract — see ``publish_event``.
+    """
     publish_event('workflow.failed', {
         'executionId': execution_id,
         'workflowId': workflow_id,
@@ -174,7 +190,7 @@ def publish_workflow_failed(
         'error': error,
         'failedAt': failed_at,
         'correlationId': execution_id,
-    }, run_id=run_id)
+    }, run_id=run_id, eval_run_id=eval_run_id)
 
 
 def publish_supervisor_chatter(

@@ -699,6 +699,44 @@ describe("assembleReplayPackage — related-section population (execution kind)"
         status: null,
         retries: 0,
         usage: null,
+        startedAt: null,
+        completedAt: null,
+        agentId: null,
+      },
+    ]);
+  });
+
+  test("Phase 1 additive projection: startedAt/completedAt/agentId pass through nodes[] as ordering anchors for trajectory scoring", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(GetCommand, { TableName: "executions-test" }).resolves({
+      Item: {
+        ...baseExecutionItem("org-1"),
+        nodeResults: {
+          "node-1": {
+            nodeId: "node-1",
+            agentId: "coder",
+            status: "COMPLETED",
+            output: "ok",
+            startedAt: "2026-07-01T00:00:00.000Z",
+            completedAt: "2026-07-01T00:00:03.500Z",
+          },
+        },
+      },
+    });
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    const result = await assembleReplayPackage("org-1", "execution", "exec-1");
+    expect(result.sections.nodes).toEqual([
+      {
+        nodeId: "node-1",
+        inputs: null,
+        outputs: "ok",
+        status: "COMPLETED",
+        retries: 0,
+        usage: null,
+        startedAt: "2026-07-01T00:00:00.000Z",
+        completedAt: "2026-07-01T00:00:03.500Z",
+        agentId: "coder",
       },
     ]);
   });

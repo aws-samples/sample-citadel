@@ -153,6 +153,15 @@ const governanceStack = new GovernanceStack(
     agentDesignAssessmentsTable: backendStack.agentDesignAssessmentsTable,
     programReviewsTable: backendStack.programReviewsTable,
     projectsTable: backendStack.projectsTable,
+    evalSuitesTable: backendStack.evalSuitesTable,
+    evalCasesTable: backendStack.evalCasesTable,
+    evalRunsTable: backendStack.evalRunsTable,
+    evalRunCaseResultsTable: backendStack.evalRunCaseResultsTable,
+    evalBaselinesTable: backendStack.evalBaselinesTable,
+    evalComparisonsTable: backendStack.evalComparisonsTable,
+    evalComparisonConfigTable: backendStack.evalComparisonConfigTable,
+    executionsTable: backendStack.executionsTable,
+    conversationsTable: backendStack.conversationsTable,
   },
 );
 
@@ -280,10 +289,38 @@ const telemetryStack = new TelemetryStack(
     governanceLedgerTable: arbiterStack.governanceLedgerTable,
     accessLogsBucket: backendStack.accessLogsBucket,
     commitSha,
+    // CIT-103 Pass A: eval-run tables (from BackendStack) for
+    // eval-case-scorer/eval-run-aggregator. No new stack dependency —
+    // BackendStack is already a dependency below.
+    evalCasesTable: backendStack.evalCasesTable,
+    evalRunsTable: backendStack.evalRunsTable,
+    evalRunCaseResultsTable: backendStack.evalRunCaseResultsTable,
+    // Phase 2 (production sampling): admin-authored sampling config +
+    // captured/scored production-sample tables (from BackendStack), plus
+    // the shared idempotency table for eval-sampling-selector.ts's
+    // IdempotencyGuard. No new stack dependency — BackendStack is already
+    // a dependency below.
+    evalSamplingConfigTable: backendStack.evalSamplingConfigTable,
+    evalProdSamplesTable: backendStack.evalProdSamplesTable,
+    idempotencyTable: backendStack.idempotencyTable,
   },
 );
 telemetryStack.addStackDependency(backendStack);
 telemetryStack.addStackDependency(arbiterStack);
+
+// Phase 2 (production sampling): cross-stack AppSync wiring for
+// eval-sampling-config-resolver.ts, which lives in TelemetryStack (needs
+// tables owned by BackendStack — see telemetry-stack.ts's section banner).
+// Uses a DETERMINISTIC ARN (not telemetryStack.evalSamplingConfigResolverFunction
+// directly) for the exact same reason publishHandlerArn below is
+// deterministic rather than a construct reference: TelemetryStack already
+// depends on BackendStack (telemetryStack.addStackDependency(backendStack)
+// above), so a construct-level backendStack -> telemetryStack reference
+// here would create a cyclic stack dependency. The Lambda's functionName
+// is already fixed (`citadel-eval-sampling-config-resolver-${environment}`),
+// so the ARN is fully known at synth time without an actual reference.
+const evalSamplingConfigResolverArn = `arn:aws:lambda:${env.region}:${env.account}:function:citadel-eval-sampling-config-resolver-${environment}`;
+backendStack.addEvalSamplingConfigResolvers(evalSamplingConfigResolverArn);
 
 // Frontend hosting stack
 const frontendStack = new FrontendStack(

@@ -98,6 +98,115 @@ describe("evaluateBudgets", () => {
     );
   });
 
+  // CIT-102 §5 — eval-context cost exclusion (pinned both ways). A
+  // period-to-date spend sum must never count evalContext===true rows,
+  // so an eval run cannot trip an org's budget alarm.
+  test("PINNED (CIT-102): evalContext===true rows are excluded from period-to-date spend, never trip a threshold", async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName === "BudgetIndex") {
+        return { Items: [budgetIndexRow({ thresholds: [0.8] })] };
+      }
+      return {
+        Items: [
+          { costMicros: 100_000, priced: true },
+          // Eval-tagged row carries a huge cost that would otherwise cross
+          // the 0.8 threshold (100_000 + 900_000 = 1_000_000 / 1_000_000 = 1.0)
+          // but must be excluded entirely.
+          { costMicros: 900_000, priced: true, evalContext: true },
+        ],
+      };
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+    const emitSpy = jest
+      .spyOn(costNotifier, "emitBudgetEvent")
+      .mockResolvedValue();
+
+    await evaluateBudgets();
+
+    // Only the non-eval 100_000 counts -> 0.1 ratio -> below the 0.8
+    // threshold -> no notification.
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  test("PINNED (CIT-102): non-eval rows (evalContext absent or false) are unaffected by the exclusion", async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName === "BudgetIndex") {
+        return { Items: [budgetIndexRow({ thresholds: [0.8] })] };
+      }
+      return {
+        Items: [{ costMicros: 900_000, priced: true, evalContext: false }],
+      };
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+    const emitSpy = jest
+      .spyOn(costNotifier, "emitBudgetEvent")
+      .mockResolvedValue();
+
+    await evaluateBudgets();
+
+    expect(emitSpy).toHaveBeenCalledWith(
+      "cost.budget.threshold.crossed",
+      expect.objectContaining({ spentMicros: 900_000, threshold: 0.8 }),
+    );
+  });
+
+  // Finding c93c0ab5 (medium, pinned): judge-invocation rows (Phase 2)
+  // carry costContext:"eval" (written by handleEvalUsageCaptured in
+  // cost-ledger-writer.ts, dims={orgId, agentId, costContext:"eval"} — no
+  // evalContext attribute). Prior to this fix, periodToDateSpend excluded
+  // only evalContext===true rows, so a judge's own usage counted toward
+  // customer budget alarms — contradicting EVENTBRIDGE_CATALOG.md's "a
+  // judge's own usage is never customer-billable spend". Mirrors the
+  // evalContext exclusion test above exactly, for the sibling attribute.
+  test('PINNED (finding c93c0ab5): costContext==="eval" rows are excluded from period-to-date spend, never trip a threshold', async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName === "BudgetIndex") {
+        return { Items: [budgetIndexRow({ thresholds: [0.8] })] };
+      }
+      return {
+        Items: [
+          { costMicros: 100_000, priced: true },
+          // Judge-invocation row carries a huge cost that would otherwise
+          // cross the 0.8 threshold (100_000 + 900_000 = 1_000_000 /
+          // 1_000_000 = 1.0) but must be excluded entirely.
+          { costMicros: 900_000, priced: true, costContext: "eval" },
+        ],
+      };
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+    const emitSpy = jest
+      .spyOn(costNotifier, "emitBudgetEvent")
+      .mockResolvedValue();
+
+    await evaluateBudgets();
+
+    // Only the non-eval 100_000 counts -> 0.1 ratio -> below the 0.8
+    // threshold -> no notification.
+    expect(emitSpy).not.toHaveBeenCalled();
+  });
+
+  test("PINNED (finding c93c0ab5): non-judge rows (costContext absent or a non-eval value) are unaffected by the exclusion", async () => {
+    ddbMock.on(QueryCommand).callsFake((input) => {
+      if (input.IndexName === "BudgetIndex") {
+        return { Items: [budgetIndexRow({ thresholds: [0.8] })] };
+      }
+      return {
+        Items: [{ costMicros: 900_000, priced: true, costContext: undefined }],
+      };
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+    const emitSpy = jest
+      .spyOn(costNotifier, "emitBudgetEvent")
+      .mockResolvedValue();
+
+    await evaluateBudgets();
+
+    expect(emitSpy).toHaveBeenCalledWith(
+      "cost.budget.threshold.crossed",
+      expect.objectContaining({ spentMicros: 900_000, threshold: 0.8 }),
+    );
+  });
+
   test("dedupe: a threshold already notified this period is not re-notified", async () => {
     ddbMock.on(QueryCommand).callsFake((input) => {
       if (input.IndexName === "BudgetIndex") {
