@@ -7,7 +7,11 @@
  * sha256 ids, seedVersion-aware upsert ConditionExpression.
  */
 import { mockClient } from "aws-sdk-client-mock";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand,
+} from "@aws-sdk/lib-dynamodb";
 import type { CloudFormationCustomResourceEvent, Context } from "aws-lambda";
 
 jest.mock("https", () => ({
@@ -17,6 +21,11 @@ jest.mock("https", () => ({
     }
     return { on: jest.fn(), write: jest.fn(), end: jest.fn() };
   },
+}));
+
+const mockEmitGovernanceEvent = jest.fn().mockResolvedValue(undefined);
+jest.mock("../../utils/notifier-base", () => ({
+  emitGovernanceEvent: (...args: unknown[]) => mockEmitGovernanceEvent(...args),
 }));
 
 // Env must be set before importing the module under test (top-level consts
@@ -41,7 +50,7 @@ const invokeHandler = handler as (
 ) => Promise<void>;
 
 const EXPECTED_SUITE_CONDITION_EXPRESSION =
-  "attribute_not_exists(suiteId) OR attribute_not_exists(seedVersion) OR seedVersion < :v";
+  "attribute_not_exists(suiteId) OR ((attribute_not_exists(seedVersion) OR seedVersion < :v) AND #status = :draft AND size(#refs) = :zero)";
 
 const NOW = "2026-07-17T00:00:00.000Z";
 
@@ -94,6 +103,7 @@ describe("seed-eval-suites contract", () => {
 
   beforeEach(() => {
     ddbMock.reset();
+    mockEmitGovernanceEvent.mockClear();
     logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
   });
 
@@ -307,7 +317,7 @@ describe("seed-eval-suites contract", () => {
   });
 
   describe("CFN custom-resource upsert semantics", () => {
-    test("PutCommand for each suite uses seedVersion-aware ConditionExpression", async () => {
+    test("PutCommand for each suite uses the mutability-guarded ConditionExpression with ExpressionAttributeNames", async () => {
       ddbMock.on(PutCommand).resolves({});
 
       await invokeHandler(makeEvent("Update"), mockContext);
@@ -324,6 +334,12 @@ describe("seed-eval-suites contract", () => {
         );
         expect(call.args[0].input.ExpressionAttributeValues).toEqual({
           ":v": SEED_VERSION,
+          ":draft": "DRAFT",
+          ":zero": 0,
+        });
+        expect(call.args[0].input.ExpressionAttributeNames).toEqual({
+          "#status": "status",
+          "#refs": "references",
         });
       }
     });
@@ -349,16 +365,199 @@ describe("seed-eval-suites contract", () => {
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     });
 
-    test("skips (heals nothing) when rows are current (ConditionalCheckFailedException) and never touches user rows", async () => {
+    test("brand-new suite (no existing row) is still created", async () => {
+      // attribute_not_exists(suiteId) branch: no row present at all, so
+      // GetCommand (used only to classify a conditional failure) is never
+      // reached — Put succeeds directly.
+      ddbMock.on(GetCommand).resolves({});
+      ddbMock.on(PutCommand).resolves({});
+
+      await invokeHandler(makeEvent("Update"), mockContext);
+
+      const suitePuts = ddbMock
+        .commandCalls(PutCommand)
+        .filter(
+          (c) => c.args[0].input.TableName === "citadel-eval-suites-test",
+        );
+      expect(suitePuts).toHaveLength(SEED_EVAL_SUITES.length);
+      expect(logMessagesContaining(logSpy, "Created eval suite")).toBe(
+        SEED_EVAL_SUITES.length,
+      );
+      expect(mockEmitGovernanceEvent).not.toHaveBeenCalled();
+    });
+
+    test("a stale DRAFT, unreferenced seed row still heals (already-current skip is NOT confused with blocked)", async () => {
+      // Simulate: PutCommand's own condition succeeds (stale DRAFT,
+      // references empty, seedVersion < :v) -> heal proceeds normally,
+      // no GetCommand classification needed, no notification.
+      ddbMock.on(PutCommand).resolves({ Attributes: { seedVersion: 1 } });
+
+      await invokeHandler(makeEvent("Update"), mockContext);
+
+      expect(
+        logMessagesContaining(logSpy, "Updated outdated seed eval suite"),
+      ).toBe(SEED_EVAL_SUITES.length);
+      expect(mockEmitGovernanceEvent).not.toHaveBeenCalled();
+    });
+
+    test("skips silently (no notification) when the stale row is already current (ordinary redeploy no-op)", async () => {
       const conditionalError = new Error("The conditional request failed");
       conditionalError.name = "ConditionalCheckFailedException";
       ddbMock.on(PutCommand).rejects(conditionalError);
+      // Classification read: row IS current (seedVersion already >= :v),
+      // so this is the benign "already current" case, not a block.
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          suiteId: "some-id",
+          status: "DRAFT",
+          references: [],
+          seedVersion: SEED_VERSION,
+        },
+      });
 
       await expect(
         invokeHandler(makeEvent("Update"), mockContext),
       ).resolves.not.toThrow();
 
       expect(logMessagesContaining(logSpy, "skipping")).toBeGreaterThan(0);
+      expect(mockEmitGovernanceEvent).not.toHaveBeenCalled();
+    });
+
+    test("a FROZEN stale seed row is left completely untouched and emits exactly one blocked notification", async () => {
+      const conditionalError = new Error("The conditional request failed");
+      conditionalError.name = "ConditionalCheckFailedException";
+      ddbMock.on(PutCommand).rejects(conditionalError);
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          suiteId: "frozen-suite-id",
+          name: "Intake Agent Baseline Suite",
+          status: "FROZEN",
+          references: [],
+          seedVersion: 1,
+        },
+      });
+
+      await invokeHandler(makeEvent("Update"), mockContext);
+
+      // Never a second write attempt against a blocked row.
+      const suitePuts = ddbMock
+        .commandCalls(PutCommand)
+        .filter(
+          (c) => c.args[0].input.TableName === "citadel-eval-suites-test",
+        );
+      expect(suitePuts).toHaveLength(SEED_EVAL_SUITES.length);
+
+      const blockedCalls = mockEmitGovernanceEvent.mock.calls.filter(
+        ([detailType]) => detailType === "governance.eval.seed.heal.blocked",
+      );
+      expect(blockedCalls.length).toBe(SEED_EVAL_SUITES.length);
+      expect(blockedCalls[0][1]).toMatchObject({ reason: "not_draft" });
+      expect(logMessagesContaining(logSpy, "BLOCKED")).toBeGreaterThan(0);
+    });
+
+    test("a stale DRAFT seed row WITH references is left completely untouched and classified as referenced", async () => {
+      const conditionalError = new Error("The conditional request failed");
+      conditionalError.name = "ConditionalCheckFailedException";
+      ddbMock.on(PutCommand).rejects(conditionalError);
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          suiteId: "referenced-suite-id",
+          name: "Monolithic DB Template Baseline Suite",
+          status: "DRAFT",
+          references: ["evalRun-1"],
+          seedVersion: 1,
+        },
+      });
+
+      await invokeHandler(makeEvent("Update"), mockContext);
+
+      const blockedCalls = mockEmitGovernanceEvent.mock.calls.filter(
+        ([detailType]) => detailType === "governance.eval.seed.heal.blocked",
+      );
+      expect(blockedCalls.length).toBe(SEED_EVAL_SUITES.length);
+      expect(blockedCalls[0][1]).toMatchObject({
+        reason: "referenced",
+        referenceCount: 1,
+      });
+    });
+
+    test("a FROZEN and referenced row is classified not_draft_and_referenced, still exactly one notification per suite", async () => {
+      const conditionalError = new Error("The conditional request failed");
+      conditionalError.name = "ConditionalCheckFailedException";
+      ddbMock.on(PutCommand).rejects(conditionalError);
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          status: "FROZEN",
+          references: ["evalRun-1", "evalRun-2"],
+          seedVersion: 1,
+        },
+      });
+
+      await invokeHandler(makeEvent("Update"), mockContext);
+
+      const blockedCalls = mockEmitGovernanceEvent.mock.calls.filter(
+        ([detailType]) => detailType === "governance.eval.seed.heal.blocked",
+      );
+      expect(blockedCalls.length).toBe(SEED_EVAL_SUITES.length);
+      for (const [, detail] of blockedCalls) {
+        expect(detail).toMatchObject({
+          reason: "not_draft_and_referenced",
+          referenceCount: 2,
+        });
+      }
+    });
+
+    test("an ARCHIVED stale seed row does not heal and is treated as blocked (deliberate: ARCHIVED is a terminal state)", async () => {
+      const conditionalError = new Error("The conditional request failed");
+      conditionalError.name = "ConditionalCheckFailedException";
+      ddbMock.on(PutCommand).rejects(conditionalError);
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          status: "ARCHIVED",
+          references: [],
+          seedVersion: 1,
+        },
+      });
+
+      await invokeHandler(makeEvent("Update"), mockContext);
+
+      const blockedCalls = mockEmitGovernanceEvent.mock.calls.filter(
+        ([detailType]) => detailType === "governance.eval.seed.heal.blocked",
+      );
+      expect(blockedCalls.length).toBe(SEED_EVAL_SUITES.length);
+      for (const [, detail] of blockedCalls) {
+        expect(detail).toMatchObject({
+          status: "ARCHIVED",
+          reason: "not_draft",
+        });
+      }
+    });
+
+    test("at most one blocked notification per blocked suite per invocation even if the row read fails oddly twice", async () => {
+      const conditionalError = new Error("The conditional request failed");
+      conditionalError.name = "ConditionalCheckFailedException";
+      ddbMock.on(PutCommand).rejects(conditionalError);
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          suiteId: "frozen-suite-id",
+          name: "Intake Agent Baseline Suite",
+          status: "FROZEN",
+          references: [],
+          seedVersion: 1,
+        },
+      });
+
+      await invokeHandler(makeEvent("Update"), mockContext);
+
+      const perSuiteCounts = new Map<string, number>();
+      for (const [detailType, detail] of mockEmitGovernanceEvent.mock.calls) {
+        if (detailType !== "governance.eval.seed.heal.blocked") continue;
+        const id = (detail as { suiteId: string }).suiteId;
+        perSuiteCounts.set(id, (perSuiteCounts.get(id) ?? 0) + 1);
+      }
+      for (const count of perSuiteCounts.values()) {
+        expect(count).toBe(1);
+      }
     });
   });
 });

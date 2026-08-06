@@ -14,7 +14,11 @@
 import * as https from "https";
 import * as url from "url";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { createHash } from "crypto";
 import type {
   CloudFormationCustomResourceEvent,
@@ -28,6 +32,7 @@ import type {
   GroundingRequirement,
   TrajectorySpec,
 } from "../../types";
+import { emitGovernanceEvent } from "../../utils/notifier-base";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -636,6 +641,91 @@ async function sendCfnResponse(
   });
 }
 
+/** Minimal shape read back from EVAL_SUITES_TABLE to classify a blocked heal. */
+interface ExistingSuiteRow {
+  status?: string;
+  references?: string[];
+}
+
+/**
+ * After a conditional PutCommand failure on a suite seed row, distinguish
+ * "already current" (benign — the row's seedVersion already satisfies
+ * SEED_VERSION, expected on every redeploy) from "blocked" (the row is
+ * stale but FROZEN/ARCHIVED and/or referenced, so assertSuiteMutable's
+ * invariant correctly refused the heal). Returns null for the benign case
+ * so callers never notify on it.
+ */
+function classifyBlockedHeal(row: ExistingSuiteRow | null): {
+  reason: "not_draft" | "referenced" | "not_draft_and_referenced";
+  status: string;
+  referenceCount: number;
+} | null {
+  if (!row) {
+    // Row vanished between the failed conditional Put and the read —
+    // treat as benign; nothing to notify about.
+    return null;
+  }
+  const status = row.status ?? "UNKNOWN";
+  const referenceCount = row.references?.length ?? 0;
+  const isDraft = status === "DRAFT";
+  const isReferenced = referenceCount > 0;
+
+  if (isDraft && !isReferenced) {
+    // Row is DRAFT and unreferenced but the Put still failed: the only
+    // remaining reason under this ConditionExpression is that
+    // seedVersion is already >= SEED_VERSION — the ordinary
+    // already-current no-op every redeploy hits.
+    return null;
+  }
+
+  const reason =
+    !isDraft && isReferenced
+      ? "not_draft_and_referenced"
+      : !isDraft
+        ? "not_draft"
+        : "referenced";
+  return { reason, status, referenceCount };
+}
+
+/**
+ * Read the current row and, if it is genuinely blocked (not merely
+ * already-current), log a structured BLOCKED line and emit exactly one
+ * governance.eval.seed.heal.blocked notification for this suite.
+ */
+async function handleBlockedSuiteHeal(
+  suiteId: string,
+  suiteName: string,
+): Promise<void> {
+  const res = await docClient.send(
+    new GetCommand({ TableName: EVAL_SUITES_TABLE, Key: { suiteId } }),
+  );
+  const row = (res.Item as ExistingSuiteRow | undefined) ?? null;
+  const classification = classifyBlockedHeal(row);
+
+  if (!classification) {
+    console.log(
+      `skipping: eval suite current (seedVersion >= ${SEED_VERSION}): ${suiteName}`,
+    );
+    return;
+  }
+
+  console.log(
+    `BLOCKED: seed heal refused for eval suite "${suiteName}" (suiteId=${suiteId}) — ` +
+      `status=${classification.status}, references=${classification.referenceCount}, ` +
+      `reason=${classification.reason}. Row left untouched.`,
+  );
+
+  await emitGovernanceEvent("governance.eval.seed.heal.blocked", {
+    suiteId,
+    suiteName,
+    status: classification.status,
+    referenceCount: classification.referenceCount,
+    reason: classification.reason,
+    seedVersion: SEED_VERSION,
+    attemptedSeedVersion: SEED_VERSION,
+  });
+}
+
 export const handler: CloudFormationCustomResourceHandler = async (
   event,
   context,
@@ -659,16 +749,28 @@ export const handler: CloudFormationCustomResourceHandler = async (
 
       try {
         // Upsert semantics: create when absent, heal SYSTEM seed rows that
-        // predate the current SEED_VERSION, never touch rows already
-        // current. User-created suites never match a seed suiteId, so
-        // their rows are never touched by this condition.
+        // predate the current SEED_VERSION — but ONLY when the existing
+        // row is still DRAFT and unreferenced. A row that is FROZEN,
+        // ARCHIVED, or carries any reference is a mutability-guarded row
+        // under assertSuiteMutable (eval-resolver.ts) and must be left
+        // completely untouched, even on a seed-version bump. User-created
+        // suites never match a seed suiteId, so their rows are never
+        // touched by this condition either way.
         const result = await docClient.send(
           new PutCommand({
             TableName: EVAL_SUITES_TABLE,
             Item: suiteItem,
             ConditionExpression:
-              "attribute_not_exists(suiteId) OR attribute_not_exists(seedVersion) OR seedVersion < :v",
-            ExpressionAttributeValues: { ":v": SEED_VERSION },
+              "attribute_not_exists(suiteId) OR ((attribute_not_exists(seedVersion) OR seedVersion < :v) AND #status = :draft AND size(#refs) = :zero)",
+            ExpressionAttributeNames: {
+              "#status": "status",
+              "#refs": "references",
+            },
+            ExpressionAttributeValues: {
+              ":v": SEED_VERSION,
+              ":draft": "DRAFT",
+              ":zero": 0,
+            },
             ReturnValues: "ALL_OLD",
           }),
         );
@@ -685,9 +787,7 @@ export const handler: CloudFormationCustomResourceHandler = async (
           err instanceof Error &&
           err.name === "ConditionalCheckFailedException"
         ) {
-          console.log(
-            `skipping: eval suite current (seedVersion >= ${SEED_VERSION}): ${suiteDef.name}`,
-          );
+          await handleBlockedSuiteHeal(suiteItem.suiteId, suiteDef.name);
           continue;
         }
         throw err;

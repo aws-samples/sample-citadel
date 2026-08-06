@@ -101,6 +101,12 @@ export const GOVERNANCE_DETAIL_TYPES = [
   // promotion gate subscribes to — carries only per-dimension-derived
   // booleans/arrays/enum, no dimension-collapsing number (design §9).
   "governance.eval.comparison.completed",
+  // Emitted by the seed-eval-suites custom-resource Lambda when a
+  // seed-version bump's conditional heal PutCommand is rejected because
+  // the row is FROZEN or referenced (not merely already-current). At
+  // most one per blocked suite per invocation — never emitted for the
+  // ordinary already-current skip case.
+  "governance.eval.seed.heal.blocked",
 ] as const;
 
 export type GovernanceDetailType = (typeof GOVERNANCE_DETAIL_TYPES)[number];
@@ -353,6 +359,21 @@ export interface GovernancePayloadMap {
     unstableDimensions: string[];
     verdictStatus: string;
     at: string;
+  };
+  // Payload for governance.eval.seed.heal.blocked. `reason` distinguishes
+  // the two conditions that can keep a stale seed row from healing.
+  // "referenced" covers a DRAFT row with references.length > 0.
+  // "not_draft" covers any non-DRAFT status blocking the heal
+  // (FROZEN and ARCHIVED alike — both are terminal-mutability statuses
+  // under assertSuiteMutable's DRAFT-only heal contract).
+  "governance.eval.seed.heal.blocked": {
+    suiteId: string;
+    suiteName: string;
+    status: string;
+    referenceCount: number;
+    reason: "not_draft" | "referenced" | "not_draft_and_referenced";
+    seedVersion: number;
+    attemptedSeedVersion: number;
   };
 }
 
