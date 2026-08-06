@@ -6,9 +6,10 @@
   "critical": true,
   "allowlist": [
     "GHSA-mh99-v99m-4gvg",
-    "GHSA-qwww-vcr4-c8h2"
+    "GHSA-qwww-vcr4-c8h2",
+    "GHSA-rgw5-rvv9-x895"
   ],
   "report": true,
   "skip-dev": false,
-  "_comment": "Carries GHSA-mh99-v99m-4gvg (brace-expansion) and GHSA-qwww-vcr4-c8h2 (react-router, no fix version published yet). See audit-ci-allowlist-justifications.md for details and remediation path."
+  "_comment": "Carries GHSA-mh99-v99m-4gvg (brace-expansion) and GHSA-qwww-vcr4-c8h2 (react-router, no fix version published yet), and GHSA-rgw5-rvv9-x895 (brace-expansion, bundled in aws-cdk-lib, unreachable by overrides). See audit-ci-allowlist-justifications.md for details and remediation path."
 }
