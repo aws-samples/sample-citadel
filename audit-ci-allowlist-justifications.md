@@ -54,6 +54,38 @@ is why `aws-cdk-lib`'s override stays at `>=5.0.9 <6`. It does **not** apply to 
 which pins the same chains to a patched **1.x** version (`>=1.1.18 <2`) — same major line minimatch@3
 already expects, no API-shape change. Do not widen the minimatch@3 chains to 5.x.
 
+## GHSA-rgw5-rvv9-x895 — brace-expansion (HIGH DoS via unbounded intermediate arrays; bypasses GHSA-mh99-v99m-4gvg mitigation)
+
+**Affected instances:**
+- `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.7` (`inBundle: true`; advisory range `>=4.0.0 <5.0.9`)
+
+This is the same bundled copy as GHSA-mh99-v99m-4gvg above — rgw5 is its unallowlisted
+bypass-successor (mh99's mitigation covers `<5.0.8`; rgw5 extends the vulnerable range to `<5.0.9`).
+
+**Why remediation is blocked:**
+1. **Bundled, not reachable by `overrides`.** npm `overrides` cannot rewrite `bundleDependencies`
+   content. The existing nested override `aws-cdk-lib.minimatch.brace-expansion: ">=5.0.9 <6"` is
+   structurally ineffective against this copy — confirmed the installed tree still resolves
+   `brace-expansion@5.0.7` inside `node_modules/aws-cdk-lib/node_modules/`.
+2. **No upstream fix available yet.** Registry latest `aws-cdk-lib` is `2.263.0` (installed:
+   `2.262.1`); verified via the published tarball that `2.263.0` still bundles
+   `brace-expansion@5.0.8` — patched against mh99 (`<5.0.8`) but still inside rgw5's vulnerable
+   range (`<5.0.9`). Bumping to the latest available cdk release does not clear this advisory.
+
+**Exposure & Risk Acceptance:**
+- Same bundled, build-time-only, non-deployed instance as GHSA-mh99-v99m-4gvg above.
+- DoS-only, requires attacker-controlled unbounded brace-expansion syntax at CDK synth time; not
+  exposed to runtime/production traffic.
+- Acceptance: risk is minimal in this context; no remediation path exists until aws-cdk-lib ships
+  a release bundling brace-expansion >=5.0.9.
+
+**Recommended follow-ups (revisitBy: 2026-10-22):**
+1. Check for aws-cdk-lib releases with bundled brace-expansion >=5.0.9 (as of 2.263.0, still on 5.0.8).
+2. When available, bump aws-cdk-lib and confirm both mh99 and rgw5 clear together; remove both
+   entries from the allowlist.
+3. Re-run `npm audit` to confirm no new unallowlisted advisories land.
+
+
 ## GHSA-qwww-vcr4-c8h2 — react-router (HIGH RSC Mode CSRF Bypass Allows Action Execution Before 400 Response)
 
 **Affected instances:**
