@@ -859,3 +859,96 @@ export interface ProgramReview {
   runBy: string;
   createdAt: string;
 }
+
+// ── Agent Release Bundles (slice 1) ─────────────────────────────────────
+//
+// AgentRelease is a content-addressed, immutable audit record: its
+// identity (releaseId) is the sha256 of the canonicalized constituents
+// below, computed order-independently over object keys and set-like
+// collections (see release-hash.ts). It has no lifecycle/status field —
+// it is a pure snapshot, never updated or deleted after creation.
+//
+// Two reference classes (per design):
+//   Class A — POINTER: sources that are immutable-by-lifecycle
+//     (execSpecId+execSpecVersion; evalRunId+evalSuiteId+evalSuiteVersion).
+//   Class B — SNAPSHOT: sources that mutate in place, so the release
+//     pins an inline content snapshot + digest rather than a version
+//     pointer (agentConfig, promptVersions, modelConfigSnapshot,
+//     toolConfigs, policySnapshot).
+//
+// Eval evidence is intentionally NON-NULLABLE: a release cannot exist
+// without evalRunId + evalSuiteId + evalSuiteVersion.
+
+/** Class B — inline content snapshot + digest of a mutable source. */
+export interface ContentSnapshot {
+  /** Identifier of the source record this snapshot was taken from. */
+  sourceId: string;
+  /** Inline snapshot of the source's content at cut time. */
+  content: string;
+  /** sha256 digest of `content`, computed independently for tamper
+   * detection at the constituent level (in addition to the release-wide
+   * releaseId hash). */
+  digest: string;
+}
+
+/** Class B — resolved per-slot model configuration snapshot. */
+export interface ModelConfigSnapshot {
+  slot: string;
+  content: string;
+  digest: string;
+}
+
+/** Class B — governance/policy posture snapshot at cut time. */
+export interface PolicySnapshot {
+  enforcementMode: string;
+  ruleSetVersion: string;
+  authorityUnitGrantIds: string[];
+}
+
+/** Non-nullable eval evidence pinned into a release. Class A — referenced
+ * by pointer because EvalRun rows are append-only and the suite is frozen
+ * (references[]>0) at cut time rather than snapshotted. */
+export interface AgentReleaseEvalEvidence {
+  evalRunId: string;
+  evalSuiteId: string;
+  evalSuiteVersion: number;
+}
+
+/** The full set of constituents pinned by a release. This exact shape
+ * (independent of key/array ordering) is what releaseId's hash covers. */
+export interface AgentReleaseConstituents {
+  /** Class B — registry descriptor snapshot for the agent config. */
+  agentConfig: ContentSnapshot;
+  /** Class B — promptName -> content snapshot. */
+  promptVersions: Record<string, ContentSnapshot>;
+  /** Class A — APPROVED (terminal/immutable) execution specification. */
+  execSpecId: string;
+  execSpecVersion: number;
+  /** Class B — resolved per-slot model configuration snapshots. */
+  modelConfigSnapshots: ModelConfigSnapshot[];
+  /** Class B — tool descriptor snapshots. */
+  toolConfigs: ContentSnapshot[];
+  /** Class B — governance/policy posture snapshot. */
+  policySnapshot: PolicySnapshot;
+  /** Class A — non-nullable eval evidence. */
+  evalEvidence: AgentReleaseEvalEvidence;
+}
+
+/** A cut, immutable AgentRelease row. releaseId is the content hash of
+ * `constituents` (see release-hash.ts) and is never recomputed or
+ * reassigned after the row is created. */
+export interface AgentRelease extends AgentReleaseConstituents {
+  releaseId: string;
+  orgId: string;
+  agentTargetId: string;
+  semver: string;
+  createdAt: string;
+  createdBy: string;
+  /** Provenance mirrored from deployment-manifest.json. */
+  gitSha: string;
+  region: string;
+  runId: string;
+}
+
+/** Input to cut a new release — everything but the computed releaseId. */
+export type AgentReleaseInput = Omit<AgentRelease, "releaseId">;
