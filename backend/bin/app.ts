@@ -162,6 +162,14 @@ const governanceStack = new GovernanceStack(
     evalComparisonConfigTable: backendStack.evalComparisonConfigTable,
     executionsTable: backendStack.executionsTable,
     conversationsTable: backendStack.conversationsTable,
+    // Agent release bundles (slices 1-2, wiring in this slice): the
+    // resolver ASSUMES the existing AgentReleaseWriterRole rather than
+    // being granted grantReadWriteData — see governance-stack.ts's
+    // AgentRelease Resolver section.
+    agentReleasesTable: backendStack.agentReleasesTable,
+    agentReleaseWriterRole: backendStack.agentReleaseWriterRole,
+    registryArn: backendStack.registryArn,
+    registryId: backendStack.registryId,
   },
 );
 
@@ -882,6 +890,12 @@ if (app.node.tryGetContext("nag") !== "false") {
       servicesStack,
       "IntakeOrchestrationResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
+    // AgentReleaseWriterRole (backend-stack.ts): assumed by
+    // AgentReleaseResolverFunction (governance-stack.ts) to read the
+    // AgentCore registry record being released via GetRegistryRecord
+    // only. Not a fresh per-function ServiceRole — the shared, hand-named
+    // writer role — so its DefaultPolicy lives under backendStack.
+    [backendStack, "AgentReleaseWriterRole/DefaultPolicy/Resource"],
   ];
   for (const [stack, path] of registryArnPaths) {
     NagSuppressions.addResourceSuppressionsByPath(

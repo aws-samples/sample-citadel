@@ -362,6 +362,9 @@ type Mutation {
   # EvalRun (CIT-102) — start is the only mutation; runs are immutable
   # once created (outcome-only progression via the driver, not client edits).
   startEvalRun(input: StartEvalRunInput!): EvalRun!
+  # AgentRelease — cut is the only mutation; releases are immutable,
+  # content-addressed audit records (no update/delete field exists).
+  cutAgentRelease(input: CutAgentReleaseInput!): AgentRelease!
   # Eval baseline comparison + regression (CIT-105). UI: OUT OF SCOPE.
   designateEvalBaseline(input: DesignateEvalBaselineInput!): EvalBaseline!
   computeEvalComparison(input: ComputeEvalComparisonInput!): EvalComparisonVerdict!
@@ -2326,6 +2329,52 @@ input StartEvalRunInput {
   agentTargetId: String!
   agentTargetVersion: String!
   idempotencyKey: String!
+}
+
+# AgentRelease (agent release bundles, slices 1-2) — a content-addressed,
+# immutable audit record. releaseId is the sha256 hash of its constituents
+# (see release-hash.ts); there is no lifecycle/status field because a
+# release is a pure snapshot, never updated or deleted after creation.
+# Class A constituents (execSpecId/execSpecVersion, evalRunId/
+# evalSuiteId/evalSuiteVersion) are pinned by reference to already-frozen
+# sources; Class B constituents (agentConfig, promptVersions,
+# modelConfigSnapshots, toolConfigs, policySnapshot) are inline content
+# snapshots taken at cut time. Mirrors AWSJSON usage on EvalRun's
+# scoreAggregates for the free-form snapshot payloads below.
+type AgentRelease {
+  releaseId: ID!
+  orgId: ID!
+  agentTargetId: String!
+  semver: String!
+  agentConfig: AWSJSON!
+  promptVersions: AWSJSON!
+  execSpecId: ID!
+  execSpecVersion: Int!
+  modelConfigSnapshots: AWSJSON!
+  toolConfigs: AWSJSON!
+  policySnapshot: AWSJSON!
+  evalEvidence: AWSJSON!
+  createdAt: AWSDateTime!
+  createdBy: String!
+  gitSha: String!
+  region: String!
+  runId: String!
+}
+
+input CutAgentReleaseInput {
+  orgId: ID!
+  agentTargetId: String!
+  semver: String!
+  registryRecordId: ID!
+  execSpecId: ID!
+  evalRunId: ID!
+  promptVersions: AWSJSON!
+  modelConfigSnapshots: AWSJSON!
+  toolConfigs: AWSJSON!
+  policySnapshot: AWSJSON!
+  gitSha: String!
+  region: String!
+  runId: String!
 }
 
 type EvalRunCaseResult {

@@ -77,6 +77,18 @@ export interface GovernanceStackProps extends cdk.StackProps {
   executionsTable: dynamodb.ITable;
   /** Adapter B dispatch target — conversation transcript rows for CONVERSATION-kind cases. */
   conversationsTable: dynamodb.ITable;
+  // Agent release bundles (slices 1-2) — owned by BackendStack. The
+  // release-resolver Lambda ASSUMES agentReleaseWriterRole (the sole
+  // Put/Get/Query-only IAM floor for this table, see backend-stack.ts's
+  // AgentReleasesTable construction site) rather than being granted
+  // grantReadWriteData — no principal may hold UpdateItem/DeleteItem on
+  // this table, by design.
+  agentReleasesTable: dynamodb.ITable;
+  agentReleaseWriterRole: iam.IRole;
+  /** AgentCore Registry handles — release-resolver reads the registry
+   * record (agent config) being released via GetRegistryRecord only. */
+  registryArn: string;
+  registryId: string;
 }
 
 export class GovernanceStack extends cdk.Stack {
@@ -1028,6 +1040,123 @@ exports.handler = async (event) => {
       });
       resolver.addResourceDependency(evalRunLambdaDataSource);
     }
+
+    // ============================================================
+    // AgentRelease Resolver (cutAgentRelease reachability, wiring only)
+    // ============================================================
+    //
+    // release-resolver.ts (slice 2, already implemented/tested) is wired
+    // here rather than created in BackendStack, mirroring the eval-run
+    // resolver's home: governance-grade audit records live in
+    // GovernanceStack alongside their AppSync wiring. Two invariants:
+    //  - This function's execution role IS agentReleaseWriterRole
+    //    (`role:` prop below), ASSUMED rather than granted via
+    //    grantReadWriteData — the sole Put/Get/Query-only IAM floor for
+    //    AgentReleasesTable (backend-stack.ts). No additional grant is
+    //    issued against that table from this stack.
+    //  - Every other table this resolver reads for cross-validation
+    //    (execution specs, eval runs, eval suites, projects) receives a
+    //    SEPARATE, narrower read-side grant. Eval suites additionally
+    //    need write access for the suite-reference freeze step
+    //    (markEvalSuiteReferencedForRelease), but this MUST NOT be a
+    //    grantReadWriteData call: the function's role is the SHARED
+    //    AgentReleaseWriterRole, so a table-level grantReadWriteData
+    //    would hand DeleteItem/BatchWriteItem/UpdateItem on that table
+    //    to every principal that assumes the role. Instead: a plain
+    //    read-only grant plus one hand-written UpdateItem-only
+    //    PolicyStatement, scoped to exactly the action the resolver
+    //    issues (a single UpdateCommand by primary key).
+    const agentReleaseResolverFunction = new lambda.Function(
+      this,
+      "AgentReleaseResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "release-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        role: props.agentReleaseWriterRole,
+        environment: {
+          AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
+          EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
+          EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
+          EVAL_SUITES_TABLE: props.evalSuitesTable.tableName,
+          PROJECTS_TABLE: props.projectsTable.tableName,
+          REGISTRY_ID: props.registryId,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, "AgentReleaseResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    props.executionSpecificationsTable.grantReadData(
+      agentReleaseResolverFunction,
+    );
+    props.evalRunsTable.grantReadData(agentReleaseResolverFunction);
+    // Read: general suite lookups performed by the resolver.
+    props.evalSuitesTable.grantReadData(agentReleaseResolverFunction);
+    // Write: markEvalSuiteReferencedForRelease issues a single UpdateCommand
+    // (by primary key) against EvalSuitesTable to freeze the referenced
+    // suite's `references` attribute. A scoped UpdateItem-only statement is
+    // used deliberately instead of grantReadWriteData — this function's
+    // role is the SHARED AgentReleaseWriterRole (assumed, not a fresh
+    // per-function role), so a grantReadWriteData call here would also
+    // hand that role dynamodb:DeleteItem/BatchWriteItem/UpdateItem on
+    // EvalSuitesTable, widening every principal that can assume the role.
+    // This statement only ever needs UpdateItem.
+    agentReleaseResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [props.evalSuitesTable.tableArn],
+      }),
+    );
+    props.projectsTable.grantReadData(agentReleaseResolverFunction);
+    agentReleaseResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["bedrock-agentcore:GetRegistryRecord"],
+        resources: [props.registryArn, `${props.registryArn}/*`],
+      }),
+    );
+
+    const agentReleaseDataSourceRole = new iam.Role(
+      this,
+      "AgentReleaseDataSourceRole",
+      {
+        assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+      },
+    );
+    agentReleaseResolverFunction.grantInvoke(agentReleaseDataSourceRole);
+
+    const agentReleaseLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "AgentReleaseLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "AgentReleaseLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: agentReleaseDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: agentReleaseResolverFunction.functionArn,
+        },
+      },
+    );
+
+    const cutAgentReleaseResolver = new appsyncCfn.CfnResolver(
+      this,
+      "CutAgentReleaseResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "cutAgentRelease",
+        dataSourceName: agentReleaseLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    cutAgentReleaseResolver.addResourceDependency(agentReleaseLambdaDataSource);
 
     // ============================================================
     // EvalBaseline / EvalComparison Resolver (CIT-105)
