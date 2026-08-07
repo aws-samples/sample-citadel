@@ -153,6 +153,25 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     "AgentReleaseWriterRole",
     { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
   );
+  const environmentReleasePointersTable = new dynamodb.Table(
+    backendStack,
+    "EnvironmentReleasePointersTable",
+    {
+      tableName: "citadel-environment-release-pointers-test",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: {
+        name: "agentTargetId_environment",
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  const environmentReleasePointerWriterRole = new iam.Role(
+    backendStack,
+    "EnvironmentReleasePointerWriterRole",
+    { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
+  );
 
   const stack = new GovernanceStack(app, "TestGovernanceStackEvalRun", {
     env: { account: "123456789012", region: "us-east-1" },
@@ -181,6 +200,8 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     registryArn:
       "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test",
     registryId: "citadel-test",
+    environmentReleasePointersTable,
+    environmentReleasePointerWriterRole,
   });
 
   const template = Template.fromStack(stack);

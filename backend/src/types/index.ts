@@ -952,3 +952,51 @@ export interface AgentRelease extends AgentReleaseConstituents {
 
 /** Input to cut a new release — everything but the computed releaseId. */
 export type AgentReleaseInput = Omit<AgentRelease, "releaseId">;
+
+// ── Environment Release Pointer (agent releases, follow-on slice) ──────
+//
+// Value set mirrors the CDK deploy-stage literal already threaded through
+// this codebase as `props.environment` / `process.env.ENVIRONMENT` (see
+// bin/app.ts: `process.env.ENVIRONMENT || "dev"`; backend-stack.ts's
+// `${props.environment}` table-name suffixing) rather than inventing a
+// separate set of environment names. Cased UPPERCASE here, not lowercase
+// like the CDK prop, to match this codebase's own enum convention (every
+// other GraphQL-enum-backed literal type in this file —
+// EvalCaseKindLiteral, EvalRunStatusLiteral, SpecStatusLiteral, etc. — is
+// UPPERCASE end-to-end with its GraphQL enum). "TEST" is excluded — it is
+// a CDK-synth-only stack suffix (see e.g.
+// test/backend-stack-agent-releases-table.test.ts), never a real
+// promotion target an agent is dispatched against.
+export type EnvironmentLiteral = "DEV" | "STAGING" | "PROD";
+
+/**
+ * EnvironmentReleasePointerTable row (PK orgId, SK
+ * `${agentTargetId}#${environment}`) — the MUTABLE cursor saying which
+ * AgentRelease an (org, agent, environment) triple currently runs.
+ * Deliberately the opposite of AgentRelease's immutability: this row is
+ * overwritten on every promotion, but ONLY via a version-gated
+ * ConditionExpression at the write boundary (environment-release-
+ * pointer-store.ts) — never a blind Put. previousReleaseId is carried
+ * forward on every move so a later rollback story can read what was
+ * running immediately before the current release, without having to
+ * replay history from elsewhere.
+ */
+export interface EnvironmentReleasePointer {
+  orgId: string;
+  agentTargetId: string;
+  environment: EnvironmentLiteral;
+  releaseId: string;
+  previousReleaseId: string | null;
+  promotedAt: string;
+  promotedBy: string;
+  version: number;
+}
+
+/** Input to set (create-or-move) the pointer for one (agentTargetId,
+ * environment) pair. orgId is derived from the caller, never taken from
+ * caller-supplied input — same doctrine as CutAgentReleaseInput. */
+export interface SetEnvironmentReleasePointerInput {
+  agentTargetId: string;
+  environment: EnvironmentLiteral;
+  releaseId: string;
+}

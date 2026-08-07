@@ -183,6 +183,43 @@ function createTestStack(): {
     }),
   );
 
+  // Environment release pointer — separate table + separate role from
+  // AgentReleasesTable/AgentReleaseWriterRole above, mirroring
+  // backend-stack.ts's real EnvironmentReleasePointersTable /
+  // EnvironmentReleasePointerWriterRole construction. Kept separate on
+  // purpose — this is the invariant this slice guards.
+  const environmentReleasePointersTable = new dynamodb.Table(
+    backendStack,
+    "EnvironmentReleasePointersTable",
+    {
+      tableName: "citadel-environment-release-pointers-test",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: {
+        name: "agentTargetId_environment",
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  const environmentReleasePointerWriterRole = new iam.Role(
+    backendStack,
+    "EnvironmentReleasePointerWriterRole",
+    {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+    },
+  );
+  environmentReleasePointerWriterRole.addToPolicy(
+    new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query"],
+      resources: [
+        environmentReleasePointersTable.tableArn,
+        `${environmentReleasePointersTable.tableArn}/index/*`,
+      ],
+    }),
+  );
+
   const registryArn =
     "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test";
 
@@ -212,6 +249,8 @@ function createTestStack(): {
     agentReleaseWriterRole,
     registryArn,
     registryId: "citadel-test",
+    environmentReleasePointersTable,
+    environmentReleasePointerWriterRole,
   });
 
   const template = Template.fromStack(stack);

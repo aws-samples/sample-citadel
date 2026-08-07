@@ -85,6 +85,11 @@ type Query {
   # Eval baseline comparison + regression (CIT-105)
   getEvalBaseline(orgId: ID!, agentTargetId: ID!, suiteId: ID!): EvalBaseline
   listEvalBaselines(orgId: ID!): [EvalBaseline!]!
+  # Environment release pointer — the MUTABLE cursor saying which release
+  # an environment currently runs (orgId is always the caller's own org,
+  # resolved server-side, never a client-supplied value here).
+  getCurrentEnvironmentReleasePointer(agentTargetId: ID!, environment: DeploymentEnvironment!): EnvironmentReleasePointer
+  listEnvironmentReleasePointers(agentTargetId: ID!): [EnvironmentReleasePointer!]!
   getEvalComparison(comparisonId: ID!): EvalComparisonVerdict
   listEvalComparisons(orgId: ID!, suiteId: ID): [EvalComparisonVerdict!]!
   getEvalComparisonThresholdConfig(orgId: ID!, suiteId: ID!): EvalComparisonThresholdConfig
@@ -365,6 +370,12 @@ type Mutation {
   # AgentRelease — cut is the only mutation; releases are immutable,
   # content-addressed audit records (no update/delete field exists).
   cutAgentRelease(input: CutAgentReleaseInput!): AgentRelease!
+  # Environment release pointer — moves the mutable per-environment
+  # cursor to an existing, same-org release. release:promote-gated in the
+  # resolver (schema visibility alone is not the enforcement boundary).
+  # Quality gating is deferred to a later story — see
+  # environment-release-pointer-resolver.ts's validateReleaseGate() seam.
+  promoteEnvironmentReleasePointer(input: SetEnvironmentReleasePointerInput!): EnvironmentReleasePointer!
   # Eval baseline comparison + regression (CIT-105). UI: OUT OF SCOPE.
   designateEvalBaseline(input: DesignateEvalBaselineInput!): EvalBaseline!
   computeEvalComparison(input: ComputeEvalComparisonInput!): EvalComparisonVerdict!
@@ -2375,6 +2386,38 @@ input CutAgentReleaseInput {
   gitSha: String!
   region: String!
   runId: String!
+}
+
+# Reuses the CDK deploy-stage literal already threaded through this
+# codebase as `props.environment` / `process.env.ENVIRONMENT` (see
+# bin/app.ts, backend-stack.ts's `${props.environment}` table-name
+# suffixing) rather than a new set of tokens. "test" is excluded — it is a
+# CDK-synth-only stack suffix, never a real promotion target.
+enum DeploymentEnvironment { DEV STAGING PROD }
+
+# EnvironmentReleasePointer — the MUTABLE cursor saying which
+# AgentRelease an (org, agentTargetId, environment) triple currently
+# runs. Unlike AgentRelease, this record is overwritten on every
+# promotion; previousReleaseId is retained on every move so a later
+# rollback story can read what was running immediately before the
+# current release. version is the optimistic-lock counter enforced via a
+# DynamoDB ConditionExpression at the write boundary (see
+# environment-release-pointer-store.ts) — not merely advisory metadata.
+type EnvironmentReleasePointer {
+  orgId: ID!
+  agentTargetId: String!
+  environment: DeploymentEnvironment!
+  releaseId: ID!
+  previousReleaseId: ID
+  promotedAt: AWSDateTime!
+  promotedBy: String!
+  version: Int!
+}
+
+input SetEnvironmentReleasePointerInput {
+  agentTargetId: String!
+  environment: DeploymentEnvironment!
+  releaseId: ID!
 }
 
 type EvalRunCaseResult {

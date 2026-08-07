@@ -170,6 +170,14 @@ const governanceStack = new GovernanceStack(
     agentReleaseWriterRole: backendStack.agentReleaseWriterRole,
     registryArn: backendStack.registryArn,
     registryId: backendStack.registryId,
+    // Environment release pointer (follow-on to slices 1-2): separate
+    // table + separate writer role from AgentReleasesTable above — see
+    // backend-stack.ts's EnvironmentReleasePointersTable construction
+    // site for why these must never share a grant.
+    environmentReleasePointersTable:
+      backendStack.environmentReleasePointersTable,
+    environmentReleasePointerWriterRole:
+      backendStack.environmentReleasePointerWriterRole,
   },
 );
 

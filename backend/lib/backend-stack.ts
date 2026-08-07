@@ -74,6 +74,23 @@ export class BackendStack extends cdk.Stack {
   /** IAM floor for AgentReleasesTable — PutItem/GetItem/Query only, see
    * construction site below for the full rationale. */
   public readonly agentReleaseWriterRole: iam.Role;
+  // Environment release pointer (follow-on to slices 1-2) — the MUTABLE
+  // cursor saying which AgentRelease an (org, agentTargetId, environment)
+  // triple currently runs. Deliberately separate table AND separate
+  // writer role from AgentReleasesTable above: this table needs
+  // UpdateItem-equivalent write capability (a Put that moves the pointer,
+  // optimistic-locked via a version ConditionExpression at the write
+  // boundary — see environment-release-pointer-store.ts), and that
+  // capability must never be co-granted on AgentReleasesTable, which
+  // Slice 1 guarantees carries zero UpdateItem/DeleteItem from any
+  // principal. See backend-stack-environment-release-pointer-table.test.ts
+  // for the assertion that no single IAM statement names both tables.
+  public readonly environmentReleasePointersTable: dynamodb.Table;
+  /** IAM floor for EnvironmentReleasePointersTable — PutItem/GetItem/Query
+   * only (the Put IS the mutation; there is no separate UpdateItem call —
+   * see environment-release-pointer-store.ts). No DeleteItem anywhere:
+   * deleting a pointer would erase deployment history. */
+  public readonly environmentReleasePointerWriterRole: iam.Role;
   // Phase 2 (production sampling) — admin-authored per-org sampling
   // config (small, not release evidence — no RETAIN/deletionProtection
   // needed, but PITR kept for consistency) and the captured+scored
@@ -3333,6 +3350,64 @@ export class BackendStack extends cdk.Stack {
       }),
     );
     this.agentReleaseWriterRole = agentReleaseWriterRole;
+
+    // Environment release pointer — MUTABLE cursor, deliberately the
+    // opposite governance posture from AgentReleasesTable's immutability.
+    // PK orgId, SK `agentTargetId_environment` (composite, mirroring
+    // EvalBaselinesTable's `agentTargetId_suiteId` sort-key convention)
+    // so a point-get is exact for one (agent, environment) and a Query on
+    // orgId + begins_with(agentTargetId_environment, `${agentTargetId}#`)
+    // lists every environment's pointer for one agent. Still RETAIN +
+    // deletionProtection + PITR: even though the row's CONTENT changes on
+    // every promotion, the row's non-existence-to-existence-to-history is
+    // itself deployment history that must survive stack updates and be
+    // recoverable — mutability of content is not a reason to relax
+    // durability of the table.
+    this.environmentReleasePointersTable = new dynamodb.Table(
+      this,
+      "EnvironmentReleasePointersTable",
+      {
+        tableName: `citadel-environment-release-pointers-${props.environment}`,
+        partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+        sortKey: {
+          name: "agentTargetId_environment",
+          type: dynamodb.AttributeType.STRING,
+        },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+
+    // IAM floor — a SEPARATE role from agentReleaseWriterRole above, on
+    // purpose (see the invariant called out on the table's own doc
+    // comment and on the class field declaration). PutItem/GetItem/Query
+    // ONLY, granted against ONLY this table's ARN + index ARNs — never
+    // co-listed as a resource alongside AgentReleasesTable in the same
+    // statement, and never DeleteItem, anywhere. There is no UpdateItem
+    // grant either: the pointer's "move" operation is a conditional Put
+    // (environment-release-pointer-store.ts), not an UpdateCommand, so
+    // PutItem is the only write action this role needs.
+    const environmentReleasePointerWriterRole = new iam.Role(
+      this,
+      "EnvironmentReleasePointerWriterRole",
+      {
+        assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      },
+    );
+    environmentReleasePointerWriterRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query"],
+        resources: [
+          this.environmentReleasePointersTable.tableArn,
+          `${this.environmentReleasePointersTable.tableArn}/index/*`,
+        ],
+      }),
+    );
+    this.environmentReleasePointerWriterRole =
+      environmentReleasePointerWriterRole;
 
     // Phase 2 (production sampling) — EvalSamplingConfig: admin-authored,
     // one row per org (PK=orgId). Small config table, DESTROY on stack

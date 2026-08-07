@@ -89,6 +89,15 @@ export interface GovernanceStackProps extends cdk.StackProps {
    * record (agent config) being released via GetRegistryRecord only. */
   registryArn: string;
   registryId: string;
+  // Environment release pointer (follow-on to slices 1-2) — owned by
+  // BackendStack, consumed here by environment-release-pointer-resolver.
+  // Deliberately a SEPARATE table AND a SEPARATE role from
+  // agentReleasesTable/agentReleaseWriterRole above — see the invariant
+  // documented on backend-stack.ts's EnvironmentReleasePointersTable
+  // construction site: this role's write capability must never be
+  // co-granted on AgentReleasesTable.
+  environmentReleasePointersTable: dynamodb.ITable;
+  environmentReleasePointerWriterRole: iam.IRole;
 }
 
 export class GovernanceStack extends cdk.Stack {
@@ -1157,6 +1166,131 @@ exports.handler = async (event) => {
       },
     );
     cutAgentReleaseResolver.addResourceDependency(agentReleaseLambdaDataSource);
+
+    // ============================================================
+    // Environment Release Pointer Resolver (mutable per-environment cursor)
+    // ============================================================
+    //
+    // Own function, own AppSync data source, and — the invariant this
+    // slice is delicate about — its OWN, SEPARATE execution role
+    // (environmentReleasePointerWriterRole), never
+    // agentReleaseWriterRole. This function's role is granted
+    // PutItem/GetItem/Query on EnvironmentReleasePointersTable ONLY (see
+    // backend-stack.ts's construction site); AgentReleasesTable access
+    // (to validate the target release exists and belongs to the caller's
+    // org) is a SEPARATE, narrower grantReadData call below —
+    // grantReadData only ever adds GetItem/Query/BatchGetItem, never a
+    // write action, so it cannot widen either table's write floor. No
+    // statement anywhere names both tables, which
+    // backend-stack-environment-release-pointer-table.test.ts asserts
+    // directly.
+    const environmentReleasePointerResolverFunction = new lambda.Function(
+      this,
+      "EnvironmentReleasePointerResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "environment-release-pointer-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        role: props.environmentReleasePointerWriterRole,
+        environment: {
+          ENVIRONMENT_RELEASE_POINTERS_TABLE:
+            props.environmentReleasePointersTable.tableName,
+          AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(
+          this,
+          "EnvironmentReleasePointerResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    // Read-only: existence + org-ownership check against the target
+    // release, via a single GetCommand by primary key (never a batch or
+    // scan). A hand-scoped PolicyStatement is used here instead of
+    // grantReadData deliberately — grantReadData's standard action set
+    // includes BatchGetItem, which would violate this table's
+    // established narrow allowlist (PutItem/GetItem/Query only, enforced
+    // by backend-stack-agent-releases-table.test.ts /
+    // governance-stack-agent-release.test.ts) even though BatchGetItem is
+    // itself a read-only action. GetItem is all this resolver's
+    // getAgentRelease() ever issues.
+    environmentReleasePointerResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [props.agentReleasesTable.tableArn],
+      }),
+    );
+
+    const environmentReleasePointerDataSourceRole = new iam.Role(
+      this,
+      "EnvironmentReleasePointerDataSourceRole",
+      {
+        assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+      },
+    );
+    environmentReleasePointerResolverFunction.grantInvoke(
+      environmentReleasePointerDataSourceRole,
+    );
+
+    const environmentReleasePointerLambdaDataSource =
+      new appsyncCfn.CfnDataSource(
+        this,
+        "EnvironmentReleasePointerLambdaDataSource",
+        {
+          apiId: props.appSyncApi.apiId,
+          name: "EnvironmentReleasePointerLambdaDataSource",
+          type: "AWS_LAMBDA",
+          serviceRoleArn: environmentReleasePointerDataSourceRole.roleArn,
+          lambdaConfig: {
+            lambdaFunctionArn:
+              environmentReleasePointerResolverFunction.functionArn,
+          },
+        },
+      );
+
+    const promoteEnvironmentReleasePointerResolver = new appsyncCfn.CfnResolver(
+      this,
+      "PromoteEnvironmentReleasePointerResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "promoteEnvironmentReleasePointer",
+        dataSourceName: environmentReleasePointerLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    promoteEnvironmentReleasePointerResolver.addResourceDependency(
+      environmentReleasePointerLambdaDataSource,
+    );
+
+    const environmentReleasePointerQueryFields = [
+      {
+        id: "GetCurrentEnvironmentReleasePointerResolver",
+        fieldName: "getCurrentEnvironmentReleasePointer",
+      },
+      {
+        id: "ListEnvironmentReleasePointersResolver",
+        fieldName: "listEnvironmentReleasePointers",
+      },
+    ];
+    for (const { id, fieldName } of environmentReleasePointerQueryFields) {
+      const resolver = new appsyncCfn.CfnResolver(this, id, {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName,
+        dataSourceName: environmentReleasePointerLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      });
+      resolver.addResourceDependency(environmentReleasePointerLambdaDataSource);
+    }
 
     // ============================================================
     // EvalBaseline / EvalComparison Resolver (CIT-105)
