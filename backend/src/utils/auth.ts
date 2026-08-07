@@ -98,6 +98,12 @@ export function hasPermission(
       // CIT-102: architect may start/read eval runs (execute a frozen
       // suite against an agent target).
       "eval:run",
+      // Slice 2 (agent release bundles): cutting a release is a
+      // governance-grade freeze action (it pins APPROVED spec + registry
+      // state and permanently marks eval evidence referenced) — same
+      // grantee set as spec:approve/eval:approve, not project_manager or
+      // developer.
+      "release:cut",
     ],
     developer: [
       "project:read",

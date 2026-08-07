@@ -25,7 +25,11 @@ import {
   GetCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { computeReleaseHash } from "./utils/release-hash";
-import type { AgentRelease, AgentReleaseInput } from "../types";
+import type {
+  AgentRelease,
+  AgentReleaseConstituents,
+  AgentReleaseInput,
+} from "../types";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -43,17 +47,35 @@ function isConditionalCheckFailed(err: unknown): boolean {
 }
 
 /**
- * Create-only write. Computes releaseId from the constituents (pure,
- * order-independent hash) and attempts a conditional Put keyed on that
- * hash. If a row with the same releaseId already exists (identical
- * content), the Put is rejected by DynamoDB and this function treats
- * that as a no-op, returning the already-stored release. Any other
- * DynamoDB error propagates.
+ * Create-only write. Computes releaseId from the constituents ONLY (pure,
+ * order-independent hash) — volatile metadata that varies per call
+ * (createdAt, and any other non-constituent field on AgentReleaseInput)
+ * is deliberately excluded from the hash domain, so that re-cutting
+ * identical constituents at a different wall-clock time still collides on
+ * the same releaseId. Feeding the full input (including createdAt) into
+ * the hash would defeat content-addressing: a real retry after a
+ * transient failure mints a fresh createdAt and would otherwise produce a
+ * distinct row instead of the idempotent no-op this store exists to
+ * guarantee. Attempts a conditional Put keyed on that hash. If a row with
+ * the same releaseId already exists (identical constituents), the Put is
+ * rejected by DynamoDB and this function treats that as a no-op,
+ * returning the already-stored release. Any other DynamoDB error
+ * propagates.
  */
 export async function putRelease(
   input: AgentReleaseInput,
 ): Promise<AgentRelease> {
-  const releaseId = computeReleaseHash(input);
+  const constituents: AgentReleaseConstituents = {
+    agentConfig: input.agentConfig,
+    promptVersions: input.promptVersions,
+    execSpecId: input.execSpecId,
+    execSpecVersion: input.execSpecVersion,
+    modelConfigSnapshots: input.modelConfigSnapshots,
+    toolConfigs: input.toolConfigs,
+    policySnapshot: input.policySnapshot,
+    evalEvidence: input.evalEvidence,
+  };
+  const releaseId = computeReleaseHash(constituents);
   const release: AgentRelease = { ...input, releaseId };
 
   try {
