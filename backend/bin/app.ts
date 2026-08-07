@@ -206,6 +206,15 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   // API + user pool ARN here keeps that wiring centralised in app.ts.
   appSyncApi: backendStack.appSyncApi,
   userPoolArn: backendStack.userPool.userPoolArn,
+  // Release-aware dispatch (this story): read-only handles on the two
+  // release tables so the Supervisor and Step Runner can resolve the
+  // (org, agent, environment) pointer at dispatch time. Same tables
+  // GovernanceStack's release resolver already reads from — passed here
+  // too since ArbiterStack's Lambdas are a distinct set of principals with
+  // their own, narrower (GetItem/Query-only) grant (see ArbiterStack's
+  // agentReleasesTable/environmentReleasePointersTable prop doc comment).
+  agentReleasesTable: backendStack.agentReleasesTable,
+  environmentReleasePointersTable: backendStack.environmentReleasePointersTable,
 });
 
 // Telemetry stack — invocation cost ledger + cost query API/budgets

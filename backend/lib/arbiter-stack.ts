@@ -85,6 +85,23 @@ interface ArbiterStackProps extends cdk.StackProps {
   // the broader `userpool/*` ARN scope (with a TODO comment in the
   // attaching code).
   userPoolArn?: string;
+  // Release-aware dispatch (this story): optional read-only handles on the
+  // two release tables (both owned by BackendStack — see
+  // backend-stack.ts's AgentReleasesTable / EnvironmentReleasePointersTable
+  // construction sites) so the Supervisor and Step Runner Lambdas can
+  // resolve the (org, agent, environment) pointer at dispatch time.
+  // Optional because the release-resolution gate is forward-compatible —
+  // when either table/prop is absent, the corresponding env var is simply
+  // omitted and release_resolution.py's own table-name-unset check
+  // resolves every lookup to NO_POINTER (see that module's docstring),
+  // never a crash. GetItem/Query ONLY — see the grantReadData calls below;
+  // neither Lambda is ever granted PutItem/UpdateItem/DeleteItem on either
+  // table (the releases table must never gain a write grant beyond its
+  // sole writer role in backend-stack.ts/governance-stack.ts, and the
+  // pointer table's write grant is confined to the promotion resolver
+  // there too).
+  agentReleasesTable?: dynamodb.Table;
+  environmentReleasePointersTable?: dynamodb.Table;
 }
 
 export class ArbiterStack extends cdk.Stack {
@@ -136,8 +153,26 @@ export class ArbiterStack extends cdk.Stack {
 
     // Shared layer for arbiter root packages so all arbiter PythonFunctions
     // can `from catalog.registry_client import ...` and `from common.region
-    // import ...`. The layer structures catalog/ at /opt/python/catalog/ and
-    // common/ at /opt/python/common/ per the Python Lambda layer convention.
+    // import ...`. The layer structures catalog/ at /opt/python/catalog/,
+    // common/ at /opt/python/common/, and governance/ at
+    // /opt/python/governance/ per the Python Lambda layer convention.
+    //
+    // governance/ was added for release-aware dispatch (this story): the
+    // Step Runner's Lambda asset is `code.fromAsset(ARBITER_ROOT/stepRunner)`
+    // ONLY (see StepRunnerFunction below) — unlike the Supervisor, which
+    // widens `entry` to the arbiter/ root specifically so its own
+    // `_load_governance_package()` can reach the sibling governance/
+    // directory. Without this layer addition, executor.py's equivalent
+    // dynamic governance-package loader would have nothing to load in a
+    // deployed stepRunner Lambda, and its own fail-closed refusal (mirrors
+    // the Supervisor's _GOVERNANCE_AVAILABLE gate) would fire on every
+    // dispatch once RELEASE_DISPATCH_ENVIRONMENT is set. Bundled here
+    // (rather than widening the Step Runner's own `code.fromAsset` root the
+    // way the Supervisor does) because the layer is already the
+    // established sharing mechanism between the Step Runner and the
+    // catalog/common packages, and staging governance/ alongside them
+    // keeps a single copy shared by every governance-aware Python Lambda
+    // rather than duplicating the package per-function asset.
     const catalogLayer = new lambda.LayerVersion(this, "ArbiterCatalogLayer", {
       layerVersionName: `citadel-arbiter-catalog-${props.environment}`,
       code: lambda.Code.fromAsset(ARBITER_ROOT, {
@@ -146,14 +181,15 @@ export class ArbiterStack extends cdk.Stack {
           command: [
             "bash",
             "-c",
-            "mkdir -p /asset-output/python && cp -r /asset-input/catalog /asset-output/python/catalog && cp -r /asset-input/common /asset-output/python/common",
+            "mkdir -p /asset-output/python && cp -r /asset-input/catalog /asset-output/python/catalog && cp -r /asset-input/common /asset-output/python/common && cp -r /asset-input/governance /asset-output/python/governance",
           ],
         },
       }),
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_14],
       description:
         "Shared arbiter Python packages (catalog: registry_client and utilities; " +
-        "common: cross-region prefix helper).",
+        "common: cross-region prefix helper; governance: release resolution + " +
+        "grandfathering for release-aware dispatch).",
     });
 
     const supervisorLambda = new PythonFunction(this, "SupervisorAgent", {
@@ -207,6 +243,22 @@ export class ArbiterStack extends cdk.Stack {
         ...(props.appsTable && { APPS_TABLE: props.appsTable.tableName }),
         ...(props.registryId && { REGISTRY_ID: props.registryId }),
         ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+        // Release-aware dispatch (this story): table names only, omitted
+        // entirely when the tables aren't provisioned (forward-compatible
+        // no-op — see ArbiterStackProps's agentReleasesTable/
+        // environmentReleasePointersTable doc comment). RELEASE_DISPATCH_
+        // ENVIRONMENT / RELEASE_DEFAULT_ORG_ID are deliberately NOT set
+        // here — they are the feature switch and the named org seam
+        // respectively, both operator-provisioned per-deployment rather
+        // than CDK-derived, so an operator opts a deployment into the gate
+        // explicitly instead of it turning on the moment the tables exist.
+        ...(props.agentReleasesTable && {
+          AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
+        }),
+        ...(props.environmentReleasePointersTable && {
+          ENVIRONMENT_RELEASE_POINTERS_TABLE:
+            props.environmentReleasePointersTable.tableName,
+        }),
       },
       initialPolicy: [
         new PolicyStatement({
@@ -230,6 +282,16 @@ export class ArbiterStack extends cdk.Stack {
     props.agentConfigTable.grantReadData(supervisorLambda);
     if (props.appsTable) {
       props.appsTable.grantReadData(supervisorLambda);
+    }
+    // Release-aware dispatch (this story): GetItem/Query ONLY. This floor
+    // has been broken twice already in this story — grantReadData() never
+    // grants Put/Update/Delete, and no other statement below adds them.
+    // Do not widen this beyond grantReadData for either table.
+    if (props.agentReleasesTable) {
+      props.agentReleasesTable.grantReadData(supervisorLambda);
+    }
+    if (props.environmentReleasePointersTable) {
+      props.environmentReleasePointersTable.grantReadData(supervisorLambda);
     }
 
     // Configurable model selection (read-only). The supervisor reads the
@@ -869,6 +931,19 @@ export class ArbiterStack extends cdk.Stack {
             // this SQS queue; the worker runs the agent and emits the node
             // completed/failed events the rules below consume.
             WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
+            // Release-aware dispatch (this story): mirrors the Supervisor's
+            // env var wiring above — table names only, omitted when the
+            // tables aren't provisioned. See ArbiterStackProps's doc
+            // comment and the Supervisor's identical block for the
+            // rationale (RELEASE_DISPATCH_ENVIRONMENT / RELEASE_DEFAULT_
+            // ORG_ID are operator-set, not derived here).
+            ...(props.agentReleasesTable && {
+              AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
+            }),
+            ...(props.environmentReleasePointersTable && {
+              ENVIRONMENT_RELEASE_POINTERS_TABLE:
+                props.environmentReleasePointersTable.tableName,
+            }),
           },
         },
       );
@@ -878,6 +953,15 @@ export class ArbiterStack extends cdk.Stack {
       props.workflowsTable.grantReadData(stepRunnerFunction);
       props.agentConfigTable.grantReadData(stepRunnerFunction);
       toolsConfigTable.grantReadData(stepRunnerFunction);
+      // Release-aware dispatch (this story): GetItem/Query ONLY, mirrors
+      // the Supervisor's identical grant above. Never widen beyond
+      // grantReadData for either table.
+      if (props.agentReleasesTable) {
+        props.agentReleasesTable.grantReadData(stepRunnerFunction);
+      }
+      if (props.environmentReleasePointersTable) {
+        props.environmentReleasePointersTable.grantReadData(stepRunnerFunction);
+      }
       props.agentEventBus.grantPutEventsTo(stepRunnerFunction);
       // SendMessage only, on the single worker agent queue — the Step Runner
       // dispatches node execution to the worker via SQS and never receives or

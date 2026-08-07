@@ -59,5 +59,19 @@ export const METRIC_UNSTAMPED_DISPATCH = "UnstampedDispatch";
 export const UNIT_MILLISECONDS = "Milliseconds";
 export const UNIT_COUNT = "Count";
 
+// ── Release-aware dispatch (this story) ─────────────────────────────────
+// Mirrors the Python arbiter tier's METRIC_RELEASE_DISPATCH_EVALUATED /
+// METRIC_RELEASE_DISPATCH_WOULD_BLOCK / METRIC_RELEASE_DISPATCH_REFUSED in
+// arbiter/common/metrics_constants.py. TypeScript resolvers do not emit
+// these today (the release-aware dispatch gate lives entirely in the
+// Python arbiter tier); declared here so a future TS-side emitter (or a
+// cross-language dashboard) references the same literal rather than
+// hand-typing it, mirroring every other metric name in this file.
+export const METRIC_RELEASE_DISPATCH_EVALUATED = "ReleaseDispatchEvaluated";
+export const METRIC_RELEASE_DISPATCH_WOULD_BLOCK = "ReleaseDispatchWouldBlock";
+export const METRIC_RELEASE_DISPATCH_REFUSED = "ReleaseDispatchRefused";
+export const DIMENSION_RELEASE_MODE = "ReleaseDispatchMode";
+export const DIMENSION_RELEASE_OUTCOME = "ReleaseDispatchOutcome";
+
 export const DIMENSION_WORKFLOW_ID = "WorkflowId";
 export const DIMENSION_AGENT_ID = "AgentId";
