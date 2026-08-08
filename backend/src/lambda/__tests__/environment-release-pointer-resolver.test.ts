@@ -19,11 +19,16 @@ import {
   QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
-import type { AuthContext, AgentRelease } from "../../types";
+import type { AuthContext, AgentRelease, EvalSuite } from "../../types";
 
 process.env.AGENT_RELEASES_TABLE = "citadel-agent-releases-test";
 process.env.ENVIRONMENT_RELEASE_POINTERS_TABLE =
   "citadel-environment-release-pointers-test";
+process.env.EVAL_RUNS_TABLE = "citadel-eval-runs-test";
+process.env.EVAL_SUITES_TABLE = "citadel-eval-suites-test";
+process.env.EVAL_RUN_CASE_RESULTS_TABLE = "citadel-eval-run-case-results-test";
+process.env.GOVERNANCE_LEDGER_TABLE = "citadel-governance-ledger-test";
+process.env.ENVIRONMENT = "test";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
@@ -34,6 +39,20 @@ import {
   validateReleaseGate,
   handler,
 } from "../environment-release-pointer-resolver";
+import * as governanceFlag from "../../utils/governance-flag";
+import * as releaseGateEvidence from "../utils/release-gate-evidence";
+import * as releaseGateFindingWriter from "../utils/release-gate-finding-writer";
+import type { ReleaseGateInputs } from "../utils/release-gate";
+
+function evalSuite(overrides: Partial<EvalSuite> = {}): EvalSuite {
+  return {
+    suiteId: "suite-1",
+    orgId: "org-1",
+    version: 1,
+    status: "FROZEN",
+    ...overrides,
+  } as EvalSuite;
+}
 
 function authContextFor(role: string): AuthContext {
   return {
@@ -77,12 +96,411 @@ function release(overrides: Partial<AgentRelease> = {}): AgentRelease {
 
 beforeEach(() => {
   ddbMock.reset();
+  jest.restoreAllMocks();
+  governanceFlag.__resetGovernanceFlagCacheForTest();
+});
+
+/** Convenience: stub the evidence resolver to return a fixed
+ * ReleaseGateInputs shape (Slice 3 tests exercise the WIRING —
+ * evidence-resolution correctness is Slice 2's own test file). */
+function stubEvidence(inputs: ReleaseGateInputs) {
+  jest
+    .spyOn(releaseGateEvidence, "resolveReleaseGateEvidence")
+    .mockResolvedValue({ ok: true, inputs });
+}
+
+function passingInputs(): ReleaseGateInputs {
+  return {
+    hasBaseline: true,
+    comparisonVerdict: {
+      verdictStatus: "PASS",
+      anyMaterialRegression: false,
+      materiallyRegressedDimensions: [],
+      dimensions: [],
+    } as never,
+    candidateAggregates: [
+      {
+        dimension: "task_success",
+        passRate: 1.0,
+        scoredCount: 10,
+        passedCount: 10,
+      },
+    ] as never,
+    pinnedSuiteVersion: 1,
+    liveSuite: evalSuite(),
+    runCompletedAt: "2026-01-01T00:00:00.000Z",
+    now: "2026-01-01T01:00:00.000Z",
+    policy: {
+      taskSuccessMin: 0.9,
+      policyComplianceMin: 1.0,
+      latencyP95TargetMs: 5000,
+      avgCostBudgetUsd: 1.0,
+      minSampleCount: 5,
+      requiredGateClasses: [],
+      maxEvidenceAgeDays: 7,
+      allowNoBaselineOnAbsoluteFloors: false,
+    },
+  };
+}
+
+function failingInputs(): ReleaseGateInputs {
+  return {
+    ...passingInputs(),
+    comparisonVerdict: {
+      verdictStatus: "REGRESSED",
+      anyMaterialRegression: true,
+      materiallyRegressedDimensions: ["task_success"],
+      dimensions: [],
+    } as never,
+  };
+}
+
+describe("validateReleaseGate — real async signature", () => {
+  const architect = authContextFor("architect");
+
+  test("has a real async signature — returns a Promise, not undefined", () => {
+    stubEvidence(passingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+
+    const result = validateReleaseGate(release(), "PROD", "org-1", architect);
+    expect(result).toBeInstanceOf(Promise);
+    return result;
+  });
+
+  test("PASS verdict resolves without throwing in every mode", async () => {
+    stubEvidence(passingInputs());
+    for (const mode of ["permissive", "shadow", "strict"] as const) {
+      jest
+        .spyOn(governanceFlag, "getGovernanceEnforce")
+        .mockResolvedValue(mode);
+      await expect(
+        validateReleaseGate(release(), "PROD", "org-1", architect),
+      ).resolves.toBeUndefined();
+    }
+  });
+});
+
+describe("validateReleaseGate — mode literal contract (guards Python/TS drift)", () => {
+  const architect = authContextFor("architect");
+
+  test.each(["permissive", "shadow", "strict"] as const)(
+    "mode=%s is a recognized literal accepted by validateReleaseGate",
+    async (mode) => {
+      stubEvidence(passingInputs());
+      jest
+        .spyOn(governanceFlag, "getGovernanceEnforce")
+        .mockResolvedValue(mode);
+      await expect(
+        validateReleaseGate(release(), "PROD", "org-1", architect),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  test("permissive: FAIL verdict does NOT block, and does NOT write a finding (telemetry only)", async () => {
+    stubEvidence(failingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+    const writeSpy = jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).resolves.toBeUndefined();
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  test("shadow: FAIL verdict writes a finding but does NOT block", async () => {
+    stubEvidence(failingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("shadow");
+    const writeSpy = jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).resolves.toBeUndefined();
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0][0]).toMatchObject({
+      decision: "deny",
+      mode: "shadow",
+    });
+  });
+
+  test("strict: FAIL verdict writes a finding AND blocks (throws)", async () => {
+    stubEvidence(failingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    const writeSpy = jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).rejects.toThrow(/ReleaseGateError|quality gate/i);
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0][0]).toMatchObject({
+      decision: "deny",
+      mode: "strict",
+    });
+  });
+
+  test("the verdict is computed IDENTICALLY across all three modes — evidence resolver called once per mode with the same inputs", async () => {
+    const evidence = passingInputs();
+    const evidenceSpy = jest
+      .spyOn(releaseGateEvidence, "resolveReleaseGateEvidence")
+      .mockResolvedValue({ ok: true, inputs: evidence });
+
+    for (const mode of ["permissive", "shadow", "strict"] as const) {
+      jest
+        .spyOn(governanceFlag, "getGovernanceEnforce")
+        .mockResolvedValue(mode);
+      await validateReleaseGate(release(), "PROD", "org-1", architect);
+    }
+
+    // Called once per mode iteration — same evidence, same evaluation
+    // path, not skipped for permissive.
+    expect(evidenceSpy).toHaveBeenCalledTimes(3);
+  });
+
+  test("PASS verdict: never blocks in any mode; a finding is written only when the mode's disposition records (shadow/strict), never in permissive", async () => {
+    stubEvidence(passingInputs());
+    const writeSpy = jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).resolves.toBeUndefined();
+    expect(writeSpy).not.toHaveBeenCalled();
+
+    for (const mode of ["shadow", "strict"] as const) {
+      jest
+        .spyOn(governanceFlag, "getGovernanceEnforce")
+        .mockResolvedValue(mode);
+      await expect(
+        validateReleaseGate(release(), "PROD", "org-1", architect),
+      ).resolves.toBeUndefined();
+    }
+    expect(writeSpy).toHaveBeenCalledTimes(2);
+    expect(writeSpy.mock.calls[0][0]).toMatchObject({ decision: "permit" });
+    expect(writeSpy.mock.calls[1][0]).toMatchObject({ decision: "permit" });
+  });
+});
+
+describe("validateReleaseGate — ordering and failure independence (design item 5)", () => {
+  const architect = authContextFor("architect");
+
+  test("strict refusal does NOT depend on the finding write succeeding — throws even when the ledger write fails", async () => {
+    stubEvidence(failingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockRejectedValue(new Error("GOVERNANCE_LEDGER_TABLE unavailable"));
+
+    // Must still refuse the promotion — a telemetry failure must never
+    // let a FAIL verdict slip through in strict mode.
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).rejects.toThrow(/ReleaseGateError|quality gate/i);
+  });
+
+  test("shadow: a failed finding write is surfaced (thrown), not swallowed — it is the SOLE record of a would-block", async () => {
+    stubEvidence(failingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("shadow");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockRejectedValue(new Error("GOVERNANCE_LEDGER_TABLE unavailable"));
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).rejects.toThrow(/GOVERNANCE_LEDGER_TABLE unavailable/);
+  });
+
+  test("permissive: never attempts a finding write, so a ledger outage cannot affect permissive-mode promotions", async () => {
+    stubEvidence(failingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+    const writeSpy = jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockRejectedValue(new Error("GOVERNANCE_LEDGER_TABLE unavailable"));
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).resolves.toBeUndefined();
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("promoteEnvironmentReleasePointer — gate wiring position + zero-write-on-refusal (design item 1)", () => {
+  const architect = authContextFor("architect");
+
+  test("strict FAIL: pointer write is never attempted — zero PutCommand calls, not merely an unchanged value", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    stubEvidence(failingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-1",
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toThrow(/ReleaseGateError|quality gate/i);
+
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("shadow FAIL: pointer write STILL proceeds (shadow never blocks)", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    stubEvidence(failingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("shadow");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    const result = await promoteEnvironmentReleasePointer(
+      {
+        agentTargetId: "agent-1",
+        environment: "PROD",
+        releaseId: "release-1",
+      },
+      architect,
+      "org-1",
+    );
+    expect(result.releaseId).toBe("release-1");
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+  });
+
+  test("PASS verdict: pointer write proceeds and a PERMIT finding is written in shadow/strict", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    stubEvidence(passingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    const writeSpy = jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    const result = await promoteEnvironmentReleasePointer(
+      {
+        agentTargetId: "agent-1",
+        environment: "PROD",
+        releaseId: "release-1",
+      },
+      architect,
+      "org-1",
+    );
+    expect(result.releaseId).toBe("release-1");
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0][0]).toMatchObject({ decision: "permit" });
+  });
+
+  test("gate runs AFTER permission/existence/org checks — an unauthorized caller never reaches evidence resolution", async () => {
+    const evidenceSpy = jest.spyOn(
+      releaseGateEvidence,
+      "resolveReleaseGateEvidence",
+    );
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-1",
+        },
+        authContextFor("developer"),
+        "org-1",
+      ),
+    ).rejects.toThrow(/UnauthorizedError/);
+
+    expect(evidenceSpy).not.toHaveBeenCalled();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("gate runs AFTER existence/org checks — a nonexistent release never reaches evidence resolution", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: undefined });
+    const evidenceSpy = jest.spyOn(
+      releaseGateEvidence,
+      "resolveReleaseGateEvidence",
+    );
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-missing",
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toThrow(/ValidationError/);
+
+    expect(evidenceSpy).not.toHaveBeenCalled();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
 });
 
 describe("validateReleaseGate", () => {
-  test("is an explicit no-op seam — never enforces, never throws", () => {
-    expect(() => validateReleaseGate()).not.toThrow();
-    expect(validateReleaseGate()).toBeUndefined();
+  test("legacy zero-arg no-op form no longer applies — the real signature requires release/environment/orgId/authContext", () => {
+    // Retained as documentation that the seam's SHAPE changed in Slice 3:
+    // validateReleaseGate is no longer callable with zero arguments. A
+    // TypeScript compile error is the real enforcement here (see
+    // tsc --noEmit); this test only documents intent for a reader
+    // skimming the suite.
+    expect(typeof validateReleaseGate).toBe("function");
+    expect(validateReleaseGate.length).toBeGreaterThanOrEqual(4);
   });
 });
 
