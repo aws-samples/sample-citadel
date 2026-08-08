@@ -40,12 +40,23 @@ def _reset_caches() -> None:
 
 
 def _install_fake_ssm(monkeypatch: pytest.MonkeyPatch, value: str | None) -> MagicMock:
-    """Patch boto3.client('ssm') to return ``value`` for GetParameter."""
+    """Patch boto3.client('ssm') to return ``value`` for the enforce-mode
+    GetParameter call. The sibling effective_at parameter (also read by
+    load_governance_state -> _resolve_effective_at) is answered with an
+    empty value so it never affects these enforcement-mode-focused
+    assertions; effective_at has its own dedicated test module
+    (test_hierarchy_effective_at.py).
+    """
     fake_client = MagicMock()
-    if value is None:
-        fake_client.get_parameter.side_effect = Exception("ParameterNotFound (simulated)")
-    else:
-        fake_client.get_parameter.return_value = {"Parameter": {"Value": value}}
+
+    def _get_parameter(Name: str, **_kw: Any) -> Any:
+        if Name.startswith("/citadel/governance/effective_at/"):
+            return {"Parameter": {"Value": ""}}
+        if value is None:
+            raise Exception("ParameterNotFound (simulated)")
+        return {"Parameter": {"Value": value}}
+
+    fake_client.get_parameter.side_effect = _get_parameter
 
     def _client(service_name: str, *a: Any, **kw: Any) -> Any:
         assert service_name == "ssm"
@@ -53,6 +64,17 @@ def _install_fake_ssm(monkeypatch: pytest.MonkeyPatch, value: str | None) -> Mag
 
     monkeypatch.setattr(hierarchy.boto3, "client", _client)
     return fake_client
+
+
+def _enforce_calls(fake_client: MagicMock) -> list[Any]:
+    """Filter the fake client's recorded calls to just the enforce-mode
+    parameter, so effective_at's sibling call (added alongside this test
+    module) never perturbs these mode-focused call-count assertions."""
+    return [
+        call
+        for call in fake_client.get_parameter.call_args_list
+        if call.kwargs.get("Name", "").startswith("/citadel/governance/enforce/")
+    ]
 
 
 def _stub_ddb_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,9 +125,7 @@ def test_valid_ssm_value_is_used_directly(
     state = load_governance_state()
 
     assert state.enforcement_mode == mode
-    fake_client.get_parameter.assert_called_once_with(
-        Name="/citadel/governance/enforce/test-env"
-    )
+    assert len(_enforce_calls(fake_client)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +178,7 @@ def test_mode_is_cached_within_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
     load_governance_state()
     load_governance_state()  # cache hit on both DDB state and mode
 
-    assert fake_client.get_parameter.call_count == 1
+    assert len(_enforce_calls(fake_client)) == 1
 
 
 def test_explicit_force_reload_also_refreshes_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -171,7 +191,7 @@ def test_explicit_force_reload_also_refreshes_mode(monkeypatch: pytest.MonkeyPat
     load_governance_state(force_reload=True)
     load_governance_state(force_reload=True)
 
-    assert fake_client.get_parameter.call_count == 2
+    assert len(_enforce_calls(fake_client)) == 2
 
 
 def test_force_reload_refreshes_mode_after_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,8 +203,8 @@ def test_force_reload_refreshes_mode_after_ttl(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(hierarchy.time, "time", lambda: fake_now[0])
 
     load_governance_state()
-    assert fake_client.get_parameter.call_count == 1
+    assert len(_enforce_calls(fake_client)) == 1
 
     fake_now[0] = 1000.0 + hierarchy._MODE_CACHE_TTL_SECONDS + 1
     load_governance_state(force_reload=True)
-    assert fake_client.get_parameter.call_count == 2
+    assert len(_enforce_calls(fake_client)) == 2

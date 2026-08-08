@@ -12,6 +12,7 @@ import boto3
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
@@ -39,10 +40,111 @@ from common.metrics_constants import (
     METRIC_NODE_FAILURE,
     METRIC_NODE_QUEUE_WAIT_MS,
     METRIC_UNSTAMPED_DISPATCH,
+    METRIC_RELEASE_DISPATCH_EVALUATED,
+    METRIC_RELEASE_DISPATCH_WOULD_BLOCK,
+    METRIC_RELEASE_DISPATCH_REFUSED,
     UNIT_MILLISECONDS,
     UNIT_COUNT,
     DIMENSION_WORKFLOW_ID,
+    DIMENSION_RELEASE_MODE,
+    DIMENSION_RELEASE_OUTCOME,
 )
+
+# ---------------------------------------------------------------------------
+# Release-aware dispatch (this story) — governance package import.
+#
+# Mirrors supervisor/index.py's ``_load_governance_package`` exactly (same
+# private-namespace loading technique, same fail-closed contract), but
+# loads only the three submodules this choke point needs: ``hierarchy``
+# (mode + effective_at resolution), ``release_resolution`` (pointer/release
+# lookup), and ``grandfathering`` (the ported pure rule). The full
+# authority-graph engine (``engine``, ``ledger``, ``models``) is
+# deliberately NOT loaded here — this choke point gains ONLY the release
+# gate, not the DENY/ESCALATE authority machinery supervisor/index.py's
+# ``governed_process_agent_call`` already has (out of scope for this
+# story; see task scope).
+#
+# Deployment note: the Step Runner Lambda's asset is
+# `code.fromAsset(ARBITER_ROOT/stepRunner)` only (backend/lib/
+# arbiter-stack.ts's StepRunnerFunction) — unlike the Supervisor, which
+# widens its own `entry` to the arbiter/ root. governance/ is instead
+# staged into the shared `catalogLayer` (see arbiter-stack.ts's
+# ArbiterCatalogLayer bundling command) at /opt/python/governance/, so it
+# is loaded from the layer path rather than a sibling directory.
+_stepRunner_dir = os.path.dirname(os.path.abspath(__file__))
+_arbiter_dir = os.path.dirname(_stepRunner_dir)
+
+
+def _load_release_governance_modules():
+    """Load hierarchy/release_resolution/grandfathering from either the
+    sibling arbiter/governance/ directory (pytest / local dev, where
+    conftest.py puts arbiter/ on sys.path the same way it does for
+    supervisor) or the Lambda layer path /opt/python/governance/
+    (deployed Step Runner Lambda). Returns None if neither is available.
+    """
+    import importlib.util as _ilu
+
+    candidates = [
+        os.path.join(_arbiter_dir, 'governance'),
+        '/opt/python/governance',
+    ]
+    pkg_dir = next((c for c in candidates if os.path.isfile(os.path.join(c, '__init__.py'))), None)
+    if pkg_dir is None:
+        return None
+
+    pkg_name = '_citadel_governance_stepRunner'
+    if pkg_name in sys.modules:
+        return sys.modules[pkg_name]
+
+    spec = _ilu.spec_from_file_location(
+        pkg_name, os.path.join(pkg_dir, '__init__.py'),
+        submodule_search_locations=[pkg_dir],
+    )
+    pkg = _ilu.module_from_spec(spec)
+    sys.modules[pkg_name] = pkg
+    spec.loader.exec_module(pkg)
+
+    for submod in ('hierarchy', 'release_resolution', 'grandfathering'):
+        sub_file = os.path.join(pkg_dir, f'{submod}.py')
+        if not os.path.isfile(sub_file):
+            continue
+        sub_spec = _ilu.spec_from_file_location(f'{pkg_name}.{submod}', sub_file)
+        sub_mod = _ilu.module_from_spec(sub_spec)
+        sys.modules[f'{pkg_name}.{submod}'] = sub_mod
+        sub_spec.loader.exec_module(sub_mod)
+        setattr(pkg, submod, sub_mod)
+
+    return pkg
+
+
+try:
+    _gov_pkg = _load_release_governance_modules()
+    if _gov_pkg is None:
+        raise ImportError("governance package files not found for stepRunner")
+    load_governance_state = _gov_pkg.hierarchy.load_governance_state
+    resolve_release = _gov_pkg.release_resolution.resolve_release
+    ReleaseResolutionStatus = _gov_pkg.release_resolution.ReleaseResolutionStatus
+    is_grandfathered_pure = _gov_pkg.grandfathering.is_grandfathered_pure
+    _RELEASE_GOVERNANCE_AVAILABLE = True
+    _RELEASE_GOVERNANCE_IMPORT_ERROR: str | None = None
+except ImportError as e:
+    # Fail-closed (same doctrine as supervisor/index.py's
+    # _GOVERNANCE_AVAILABLE gate): if the release-governance modules are
+    # not present in the deployed asset/layer, the release gate refuses
+    # every dispatch WHEN ACTIVE (RELEASE_DISPATCH_ENVIRONMENT set) rather
+    # than silently skipping the check — see invoke_node below. When
+    # RELEASE_DISPATCH_ENVIRONMENT is unset, this deployment hasn't opted
+    # into the gate at all, so the missing-package state is irrelevant and
+    # invoke_node's own feature-switch check short-circuits before ever
+    # consulting this flag.
+    _RELEASE_GOVERNANCE_AVAILABLE = False
+    _RELEASE_GOVERNANCE_IMPORT_ERROR = str(e)
+    _logger_bootstrap = logging.getLogger(__name__)
+    _logger_bootstrap.warning(
+        "release-governance package unavailable (%s); release-aware "
+        "dispatch will refuse if RELEASE_DISPATCH_ENVIRONMENT is set. "
+        "This is not a bypass.", e,
+    )
 
 # DynamoDB table names from environment
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'citadel-workflows-dev')
@@ -147,6 +249,157 @@ def _emit_metric(metric_name: str, value: float, unit: str, *, workflow_id: str 
         )
     except Exception as exc:  # noqa: BLE001 — telemetry must never raise
         _logger.warning('cloudwatch metric emit failed metric=%s: %s', metric_name, exc)
+
+
+# ---------------------------------------------------------------------------
+# Release-aware dispatch (this story)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_agent_created_at(agent_id: str) -> str | None:
+    """Best-effort per-agent creation timestamp for the grandfathering
+    check. Mirrors supervisor/index.py's identical helper: returns None
+    when no signal is available, which is the honest default in this
+    codebase today (see release_resolution.py's module docstring) — the
+    Step Runner's workflow node dict carries no createdAt either, and the
+    AgentCore Registry lookup that DOES expose one requires
+    REGISTRY_ENABLED + a resolvable recordId, neither of which is
+    guaranteed. A None return routes through grandfathering.py's
+    conservative-bypass branch, not a special case here.
+    """
+    if os.environ.get('REGISTRY_ENABLED') != 'true':
+        return None
+    registry_id = os.environ.get('REGISTRY_ID')
+    if not registry_id or not agent_id:
+        return None
+    try:
+        from catalog.registry_client import get_agent_record
+        record = get_agent_record(registry_id, agent_id)
+    except Exception:
+        return None
+    if record is None:
+        return None
+    created_at = record.get('createdAt')
+    return created_at if isinstance(created_at, str) and created_at else None
+
+
+def _emit_release_dispatch_metric(
+    *, mode: str, outcome: str, would_block: bool, workflow_id: str = '',
+) -> None:
+    """Best-effort CloudWatch telemetry for the release-aware dispatch
+    gate. Mirrors supervisor/index.py's identical helper exactly (same
+    metric names/dimensions, same never-raises discipline) so a downstream
+    dashboard can aggregate across both dispatch choke points without a
+    branch per producer.
+    """
+    try:
+        cw = _get_cloudwatch_client()
+        dimensions = [{'Name': DIMENSION_RELEASE_MODE, 'Value': mode}]
+        if workflow_id:
+            dimensions.append({'Name': DIMENSION_WORKFLOW_ID, 'Value': workflow_id})
+        outcome_dimensions = dimensions + [
+            {'Name': DIMENSION_RELEASE_OUTCOME, 'Value': outcome},
+        ]
+        metric_data = [{
+            'MetricName': METRIC_RELEASE_DISPATCH_EVALUATED,
+            'Value': 1.0,
+            'Unit': UNIT_COUNT,
+            'Dimensions': outcome_dimensions,
+        }]
+        if would_block:
+            metric_data.append({
+                'MetricName': METRIC_RELEASE_DISPATCH_WOULD_BLOCK,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            })
+        if outcome == 'refused':
+            metric_data.append({
+                'MetricName': METRIC_RELEASE_DISPATCH_REFUSED,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            })
+        cw.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=metric_data)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never raise
+        _logger.warning('release-dispatch metric emit failed: %s', exc)
+
+
+def _check_release_gate(agent_id: str, workflow_id: str) -> tuple[bool, str | None]:
+    """Evaluates the release-aware dispatch gate for one node dispatch.
+
+    Returns ``(refused, refusal_reason)``. ``refused`` is always False
+    when ``RELEASE_DISPATCH_ENVIRONMENT`` is unset (the gate's own feature
+    switch — backward-compat no-op, see module docstring above) or when
+    the release-governance modules failed to load AND the switch is unset
+    (irrelevant in that case). When the switch IS set but the modules
+    failed to load, this refuses unconditionally — the same fail-closed
+    contract as supervisor/index.py's package-unavailable gate: a missing
+    package means there is nothing to evaluate against, so dispatch must
+    be refused, never silently ungoverned.
+
+    Telemetry is emitted for every mode via
+    ``_emit_release_dispatch_metric`` before returning, so the rollout can
+    be measured before strict is flipped, in every branch including the
+    package-unavailable one.
+    """
+    release_dispatch_environment = os.environ.get('RELEASE_DISPATCH_ENVIRONMENT')
+    if not release_dispatch_environment:
+        return False, None
+
+    if not _RELEASE_GOVERNANCE_AVAILABLE:
+        _logger.error(
+            "release dispatch refused: release-governance package "
+            "unavailable (%s); workflow_id=%s target_agent=%s",
+            _RELEASE_GOVERNANCE_IMPORT_ERROR, workflow_id, agent_id,
+        )
+        return True, 'release_governance_package_unavailable'
+
+    state = load_governance_state()
+    enforcement_mode = getattr(state, 'enforcement_mode', 'shadow')
+
+    release_result = resolve_release(
+        org_id=os.environ.get('RELEASE_DEFAULT_ORG_ID') or '',
+        agent_target_id=agent_id,
+        environment=release_dispatch_environment,
+    )
+
+    if release_result.status == ReleaseResolutionStatus.RESOLVED:
+        outcome, would_block = 'proceed', False
+    elif release_result.status == ReleaseResolutionStatus.LOOKUP_FAILED:
+        # Assert-or-refuse doctrine — see release_resolution.py's module
+        # docstring and supervisor/index.py's identical branch. Never
+        # excused by grandfathering.
+        outcome = 'refused' if enforcement_mode == 'strict' else 'proceed'
+        would_block = enforcement_mode != 'strict'
+    else:
+        # NO_POINTER — clean backward-compat state. Strict refuses unless
+        # grandfathered via the ported pure rule.
+        created_at = _resolve_agent_created_at(agent_id)
+        grandfathered = is_grandfathered_pure(created_at, getattr(state, 'effective_at', None))
+        outcome = 'refused' if (enforcement_mode == 'strict' and not grandfathered) else 'proceed'
+        would_block = enforcement_mode != 'strict'
+
+    _emit_release_dispatch_metric(
+        mode=enforcement_mode, outcome=outcome, would_block=would_block,
+        workflow_id=workflow_id,
+    )
+
+    if outcome == 'refused':
+        refusal_reason = (
+            'release_lookup_failed'
+            if release_result.status == ReleaseResolutionStatus.LOOKUP_FAILED
+            else 'no_release_resolvable'
+        )
+        _logger.error(
+            "release dispatch refused: %s; workflow_id=%s target_agent=%s "
+            "environment=%s detail=%s",
+            refusal_reason, workflow_id, agent_id, release_dispatch_environment,
+            release_result.error,
+        )
+        return True, refusal_reason
+
+    return False, None
 
 
 def _load_workflow(workflow_id: str) -> dict:
@@ -293,6 +546,18 @@ def invoke_node(
     # validator (workflow-resolver.validateDefinition) use the top-level
     # shape, so executor must read top-level too.
     agent_id = node.get('agentId', '')
+
+    # Release-aware dispatch (this story). Evaluated before any state
+    # mutation (node status update, node.started event, SQS send) so a
+    # strict-mode refusal leaves no partial/inconsistent trace of a
+    # dispatch that never actually happened — the node simply stays in
+    # whatever state DAG scheduling left it, and the refusal is observable
+    # via the ERROR-level log line and the ReleaseDispatchRefused metric
+    # emitted inside _check_release_gate.
+    _release_refused, _release_refusal_reason = _check_release_gate(agent_id, workflow_id)
+    if _release_refused:
+        return
+
     now = _now_iso()
 
     # Correlation log: one line per node dispatch, tagged with the ids a log

@@ -58,6 +58,19 @@ _DEFAULT_ENFORCEMENT_MODE = "shadow"
 # Maps env name to (mode, loaded_at).
 _mode_cache: dict[str, tuple[str, float]] = {}
 
+# effective_at cache — same TTL/cache shape as the enforcement-mode cache
+# above (independent SSM parameter, same env-scoped cache key). Mirrors the
+# second parameter ``backend/src/utils/governance-flag.ts`` reads
+# (``getGovernanceEffectiveAt``). ``None`` means "no cutoff set" (pre-flip),
+# which is the value the grandfathering rule
+# (``arbiter/governance/grandfathering.py``) treats as "grandfather
+# everyone" — same semantics as the TS reader's ``effectiveAt: string |
+# null``.
+_EFFECTIVE_AT_CACHE_TTL_SECONDS = 300
+
+# Maps env name to (effective_at, loaded_at).
+_effective_at_cache: dict[str, tuple[str | None, float]] = {}
+
 
 # ---------------------------------------------------------------------------
 # Public dataclass
@@ -89,6 +102,14 @@ class GovernanceState:
     loaded_at: float = 0.0
     registry_id: str | None = None
     enforcement_mode: str = _DEFAULT_ENFORCEMENT_MODE
+    # The persisted grandfathering cutoff (``/citadel/governance/
+    # effective_at/{env}``), resolved from the same SSM-backed control
+    # surface as ``enforcement_mode`` — see ``_resolve_effective_at``.
+    # ``None`` means no cutoff has been written yet (pre-shadow-flip);
+    # every grandfathering check for that state treats every subject as
+    # grandfathered, matching ``is_grandfathered_pure``'s ``None``/``''``
+    # branch and the TS reader's ``effectiveAt: string | null`` contract.
+    effective_at: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +497,72 @@ def __reset_mode_cache_for_test() -> None:
     _mode_cache.clear()
 
 
+def _resolve_effective_at(force_reload: bool = False) -> str | None:
+    """Resolve the persisted grandfathering cutoff.
+
+    Reads the SSM parameter ``/citadel/governance/effective_at/{ENVIRONMENT}``
+    — the second parameter the TypeScript governance-flag reader
+    (``getGovernanceEffectiveAt`` in ``backend/src/utils/
+    governance-flag.ts``) consults, alongside ``enforce`` (see
+    ``_resolve_enforcement_mode`` above, which this function mirrors
+    structurally: same cache shape, same env-unset short-circuit, same
+    fail-soft posture on any SSM error).
+
+    Returns ``None`` when: ``ENVIRONMENT`` is unset, the parameter does not
+    exist, the value is empty, or the SSM call raises for any reason
+    (permissions, throttling, network). ``None`` is itself a meaningful,
+    valid value here (not a degraded fallback like
+    ``_DEFAULT_ENFORCEMENT_MODE``) — it means "no cutoff has been written
+    yet", which the grandfathering rule (``grandfathering.py``) already
+    treats as "grandfather everyone". There is deliberately no
+    default-to-a-literal-string fallback the way enforcement mode falls
+    back to ``'shadow'``: an unresolvable cutoff must never manufacture a
+    real-looking date that could accidentally un-grandfather a subject.
+
+    Cached in-process for ``_EFFECTIVE_AT_CACHE_TTL_SECONDS`` per
+    environment name, independently of the enforcement-mode cache.
+    """
+    env_name = os.environ.get("ENVIRONMENT")
+    if not env_name:
+        return None
+
+    now = time.time()
+
+    if not force_reload:
+        cached = _effective_at_cache.get(env_name)
+        if cached is not None:
+            effective_at, loaded_at = cached
+            if now - loaded_at < _EFFECTIVE_AT_CACHE_TTL_SECONDS:
+                return effective_at
+
+    resolved: str | None = None
+    try:
+        response = _get_ssm_client().get_parameter(
+            Name=f"/citadel/governance/effective_at/{env_name}"
+        )
+        raw_value = response.get("Parameter", {}).get("Value")
+        if raw_value:
+            resolved = raw_value
+    except Exception as e:
+        # Any SSM failure (missing param, permissions, throttling, network)
+        # resolves to None (no cutoff), same fail-soft posture as
+        # _resolve_enforcement_mode's SSM-failure branch, logged the same
+        # way for operator visibility.
+        logger.warning(
+            "Failed to resolve governance effective_at from SSM for "
+            "env=%s; defaulting to no cutoff (None). Error: %s",
+            env_name, e,
+        )
+
+    _effective_at_cache[env_name] = (resolved, now)
+    return resolved
+
+
+def __reset_effective_at_cache_for_test() -> None:
+    """Clear the process-local effective_at cache. Test-only helper."""
+    _effective_at_cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
@@ -517,6 +604,7 @@ def load_governance_state(
     case_law = _load_case_law()
     constitutional_layers = _load_constitutional_layers()
     enforcement_mode = _resolve_enforcement_mode(force_reload=force_reload)
+    effective_at = _resolve_effective_at(force_reload=force_reload)
 
     loaded_at = time.time()
     state = GovernanceState(
@@ -527,6 +615,7 @@ def load_governance_state(
         loaded_at=loaded_at,
         registry_id=registry_id,
         enforcement_mode=enforcement_mode,
+        effective_at=effective_at,
     )
     _cache[cache_key] = (state, loaded_at)
 
@@ -551,3 +640,4 @@ def __reset_hierarchy_cache_for_test() -> None:
     """
     _cache.clear()
     _mode_cache.clear()
+    _effective_at_cache.clear()

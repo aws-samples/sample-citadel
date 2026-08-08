@@ -162,6 +162,22 @@ const governanceStack = new GovernanceStack(
     evalComparisonConfigTable: backendStack.evalComparisonConfigTable,
     executionsTable: backendStack.executionsTable,
     conversationsTable: backendStack.conversationsTable,
+    // Agent release bundles (slices 1-2, wiring in this slice): the
+    // resolver ASSUMES the existing AgentReleaseWriterRole rather than
+    // being granted grantReadWriteData — see governance-stack.ts's
+    // AgentRelease Resolver section.
+    agentReleasesTable: backendStack.agentReleasesTable,
+    agentReleaseWriterRole: backendStack.agentReleaseWriterRole,
+    registryArn: backendStack.registryArn,
+    registryId: backendStack.registryId,
+    // Environment release pointer (follow-on to slices 1-2): separate
+    // table + separate writer role from AgentReleasesTable above — see
+    // backend-stack.ts's EnvironmentReleasePointersTable construction
+    // site for why these must never share a grant.
+    environmentReleasePointersTable:
+      backendStack.environmentReleasePointersTable,
+    environmentReleasePointerWriterRole:
+      backendStack.environmentReleasePointerWriterRole,
   },
 );
 
@@ -190,6 +206,15 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   // API + user pool ARN here keeps that wiring centralised in app.ts.
   appSyncApi: backendStack.appSyncApi,
   userPoolArn: backendStack.userPool.userPoolArn,
+  // Release-aware dispatch (this story): read-only handles on the two
+  // release tables so the Supervisor and Step Runner can resolve the
+  // (org, agent, environment) pointer at dispatch time. Same tables
+  // GovernanceStack's release resolver already reads from — passed here
+  // too since ArbiterStack's Lambdas are a distinct set of principals with
+  // their own, narrower (GetItem/Query-only) grant (see ArbiterStack's
+  // agentReleasesTable/environmentReleasePointersTable prop doc comment).
+  agentReleasesTable: backendStack.agentReleasesTable,
+  environmentReleasePointersTable: backendStack.environmentReleasePointersTable,
 });
 
 // Telemetry stack — invocation cost ledger + cost query API/budgets
@@ -882,6 +907,12 @@ if (app.node.tryGetContext("nag") !== "false") {
       servicesStack,
       "IntakeOrchestrationResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
+    // AgentReleaseWriterRole (backend-stack.ts): assumed by
+    // AgentReleaseResolverFunction (governance-stack.ts) to read the
+    // AgentCore registry record being released via GetRegistryRecord
+    // only. Not a fresh per-function ServiceRole — the shared, hand-named
+    // writer role — so its DefaultPolicy lives under backendStack.
+    [backendStack, "AgentReleaseWriterRole/DefaultPolicy/Resource"],
   ];
   for (const [stack, path] of registryArnPaths) {
     NagSuppressions.addResourceSuppressionsByPath(

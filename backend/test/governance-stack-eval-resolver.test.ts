@@ -21,6 +21,7 @@ import { Template, Match } from "aws-cdk-lib/assertions";
 import * as appsync from "aws-cdk-lib/aws-appsync";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
+import * as iam from "aws-cdk-lib/aws-iam";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
@@ -158,6 +159,41 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     "citadel-conversations-test",
   );
 
+  const agentReleasesTable = new dynamodb.Table(
+    backendStack,
+    "AgentReleasesTable",
+    {
+      tableName: "citadel-agent-releases-test",
+      partitionKey: { name: "releaseId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  const agentReleaseWriterRole = new iam.Role(
+    backendStack,
+    "AgentReleaseWriterRole",
+    { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
+  );
+  const environmentReleasePointersTable = new dynamodb.Table(
+    backendStack,
+    "EnvironmentReleasePointersTable",
+    {
+      tableName: "citadel-environment-release-pointers-test",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: {
+        name: "agentTargetId_environment",
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  const environmentReleasePointerWriterRole = new iam.Role(
+    backendStack,
+    "EnvironmentReleasePointerWriterRole",
+    { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
+  );
+
   const stack = new GovernanceStack(app, "TestGovernanceStackEval", {
     env: { account: "123456789012", region: "us-east-1" },
     environment: "test",
@@ -180,6 +216,13 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     evalComparisonConfigTable,
     executionsTable,
     conversationsTable,
+    agentReleasesTable,
+    agentReleaseWriterRole,
+    registryArn:
+      "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test",
+    registryId: "citadel-test",
+    environmentReleasePointersTable,
+    environmentReleasePointerWriterRole,
   });
 
   const template = Template.fromStack(stack);

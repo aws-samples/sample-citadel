@@ -89,6 +89,16 @@ from model_config_loader import load_model_id
 # today — unlike workerWrapper's deferred-bundling situation for
 # ``tools_config``/``workflow_contract``.
 from common.usage import build_usage_record, extract_converse_usage, extract_request_id
+from common.metrics_constants import (
+    METRIC_NAMESPACE,
+    METRIC_RELEASE_DISPATCH_EVALUATED,
+    METRIC_RELEASE_DISPATCH_WOULD_BLOCK,
+    METRIC_RELEASE_DISPATCH_REFUSED,
+    UNIT_COUNT,
+    DIMENSION_WORKFLOW_ID,
+    DIMENSION_RELEASE_MODE,
+    DIMENSION_RELEASE_OUTCOME,
+)
 
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
 # import BEFORE the sqs/dynamodb/bedrock-runtime/events boto3 clients are
@@ -132,7 +142,7 @@ def _load_governance_package():
     # Explicitly load the submodules the supervisor needs. They use relative
     # imports (``from .models import ...``) which need the parent package
     # (``_citadel_governance``) to already be registered — done above.
-    for submod in ('models', 'hierarchy', 'engine', 'ledger'):
+    for submod in ('models', 'hierarchy', 'engine', 'ledger', 'release_resolution', 'grandfathering'):
         sub_file = os.path.join(pkg_dir, f'{submod}.py')
         if not os.path.isfile(sub_file):
             continue
@@ -158,6 +168,18 @@ try:
     DispatchRequest = _gov_pkg.models.DispatchRequest
     ArbitrationDecision = _gov_pkg.models.ArbitrationDecision
     GovernanceFinding = _gov_pkg.models.GovernanceFinding
+    # Release-aware dispatch: read-only pointer/release resolution + the
+    # ported pure grandfathering rule. Loaded the same way as the four
+    # symbols above — no code path exists where these load but the
+    # authority-gate symbols don't (a single try/except covers both), so a
+    # packaging regression that drops release_resolution.py or
+    # grandfathering.py surfaces as the SAME fail-closed
+    # governance_package_unavailable refusal the authority gate already
+    # has, not a silent release-gate bypass.
+    resolve_release = _gov_pkg.release_resolution.resolve_release
+    ReleaseResolution = _gov_pkg.release_resolution.ReleaseResolution
+    ReleaseResolutionStatus = _gov_pkg.release_resolution.ReleaseResolutionStatus
+    is_grandfathered_pure = _gov_pkg.grandfathering.is_grandfathered_pure
     _GOVERNANCE_AVAILABLE = True
     _GOVERNANCE_IMPORT_ERROR: str | None = None
 except ImportError as e:
@@ -380,6 +402,139 @@ def _get_sns():
 
 ESCALATION_TOPIC_ARN = os.environ.get('ESCALATION_TOPIC_ARN')
 
+# ---------------------------------------------------------------------------
+# Release-aware dispatch (this story)
+# ---------------------------------------------------------------------------
+#
+# RELEASE_DISPATCH_ENVIRONMENT is the feature switch: when unset, the
+# release gate is a complete no-op (resolve_release is never called) so an
+# existing deployment with no releases/pointers dispatches byte-identically
+# to pre-feature behaviour. When set, it names which EnvironmentLiteral
+# ("DEV" | "STAGING" | "PROD") this deployment's dispatch path checks
+# pointers for — the same literal set environment-release-pointer-store.ts
+# keys rows by (see backend/src/types/index.ts's EnvironmentLiteral).
+#
+# Read live (os.environ.get(...) at call time, in
+# governed_process_agent_call below) rather than snapshotted once at module
+# import — mirrors ARBITER_GOVERNANCE_BYPASS's own read-live pattern a few
+# lines below, and lets an operator flip this without a redeploy the same
+# way the emergency bypass can be flipped.
+
+# Named seam, not a fabricated multi-tenancy layer: the arbiter's dispatch
+# path (agent_config.py's load_config_from_dynamodb / load_app_scoped_agents,
+# and the orchestration dict itself) carries no orgId anywhere today —
+# org resolution in this codebase happens exclusively at the AppSync/
+# resolver layer from an authenticated Cognito caller (see
+# intake-orchestration-resolver.ts's resolveOrgId), which the arbiter's
+# EventBridge/SQS-driven dispatch has no equivalent of. Rather than
+# fabricate a per-request caller identity that doesn't exist, this env var
+# is the explicit, documented seam: a single org id the deployment's
+# release pointers are scoped under, until a future story threads real
+# per-request org identity into the arbiter. Unset -> the release gate
+# treats every environment as NO_POINTER (see governed_process_agent_call),
+# which is the same safe, backward-compatible outcome as the release
+# tables themselves being unprovisioned. Read live, same rationale as
+# RELEASE_DISPATCH_ENVIRONMENT above.
+
+
+def _resolve_agent_created_at(agent_name: str) -> str | None:
+    """Best-effort per-agent creation timestamp for the grandfathering
+    check. Returns None when no signal is available — which is the honest
+    default in this codebase today (see release_resolution.py's module
+    docstring and RELEASE_DEFAULT_ORG_ID's comment above): the arbiter's
+    agent config rows (agent_config.py) carry no createdAt field, and the
+    AgentCore Registry lookup that DOES expose one
+    (catalog.registry_client.get_agent_record) requires REGISTRY_ENABLED +
+    a resolvable recordId, which is optional and not guaranteed present.
+
+    A None return is not a special case for the grandfathering rule — see
+    grandfathering.py's module docstring: is_grandfathered_pure(None, ...)
+    already resolves via the same conservative-bypass branch defined for
+    any malformed/absent created_at, so no additional logic is needed here
+    to accommodate "the arbiter doesn't have this data yet".
+
+    This function is a single, named seam for a future story to fill in
+    (e.g. once REGISTRY_ENABLED + a resolvable recordId are available for
+    every agent) without touching the call site in
+    governed_process_agent_call.
+    """
+    if os.environ.get('REGISTRY_ENABLED') != 'true':
+        return None
+    registry_id = os.environ.get('REGISTRY_ID')
+    if not registry_id:
+        return None
+    try:
+        from catalog.registry_client import get_agent_record
+        record = get_agent_record(registry_id, agent_name)
+    except Exception:
+        return None
+    if record is None:
+        return None
+    created_at = record.get('createdAt')
+    return created_at if isinstance(created_at, str) and created_at else None
+
+
+_cloudwatch_client = None
+
+
+def _get_cloudwatch():
+    global _cloudwatch_client
+    if _cloudwatch_client is None:
+        _cloudwatch_client = boto3.client('cloudwatch')
+    return _cloudwatch_client
+
+
+def _emit_release_dispatch_metric(
+    *,
+    mode: str,
+    outcome: str,
+    would_block: bool,
+    workflow_id: str = '',
+) -> None:
+    """Best-effort CloudWatch telemetry for the release-aware dispatch
+    gate, emitted for every mode so the rollout can be measured before
+    strict is flipped (Req 5). Never raises — a telemetry backend failure
+    must not affect dispatch, same discipline as executor.py's
+    ``_emit_metric``.
+
+    Always emits METRIC_RELEASE_DISPATCH_EVALUATED (the gate ran).
+    Additionally emits METRIC_RELEASE_DISPATCH_WOULD_BLOCK when
+    ``would_block`` is True (permissive/shadow: what strict WOULD have
+    done), or METRIC_RELEASE_DISPATCH_REFUSED when ``outcome`` is
+    'refused' (strict: what actually happened).
+    """
+    try:
+        cw = _get_cloudwatch()
+        dimensions = [{'Name': DIMENSION_RELEASE_MODE, 'Value': mode}]
+        if workflow_id:
+            dimensions.append({'Name': DIMENSION_WORKFLOW_ID, 'Value': workflow_id})
+        outcome_dimensions = dimensions + [
+            {'Name': DIMENSION_RELEASE_OUTCOME, 'Value': outcome},
+        ]
+        metric_data = [{
+            'MetricName': METRIC_RELEASE_DISPATCH_EVALUATED,
+            'Value': 1.0,
+            'Unit': UNIT_COUNT,
+            'Dimensions': outcome_dimensions,
+        }]
+        if would_block:
+            metric_data.append({
+                'MetricName': METRIC_RELEASE_DISPATCH_WOULD_BLOCK,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            })
+        if outcome == 'refused':
+            metric_data.append({
+                'MetricName': METRIC_RELEASE_DISPATCH_REFUSED,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            })
+        cw.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=metric_data)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never raise
+        logger.warning('release-dispatch metric emit failed: %s', exc)
+
 
 def governed_process_agent_call(
     agents_config: dict,
@@ -434,6 +589,17 @@ def governed_process_agent_call(
 
     ``app_id`` scopes the authority graph (D2). ``None`` means no app
     filter.
+
+    Release-aware dispatch (additive, this story): after the authority
+    finding is written (step 5), a second and fully independent gate
+    resolves the (org, agent, environment) release pointer — see step 5b
+    below and ``arbiter/governance/release_resolution.py`` /
+    ``arbiter/governance/grandfathering.py``. It reuses this same
+    ``enforcement_mode`` (permissive/shadow telemetry-only,
+    strict-refuses-on-no-release-with-grandfathering) rather than a
+    parallel mode system, and is a no-op end to end when
+    ``RELEASE_DISPATCH_ENVIRONMENT`` is unset — the backward-compatibility
+    floor this story's top constraint requires.
     """
     # Gate 1 — package availability. Fail-closed: refuse, never fall through
     # to ungoverned dispatch. This is intentionally unconditional; it must
@@ -569,6 +735,92 @@ def governed_process_agent_call(
     # 5. Write finding (fail-closed per D9). Any exception halts dispatch,
     # in every mode.
     write_finding(finding)
+
+    # 5b. Release-aware dispatch (this story). A completely separate,
+    # additive gate from the authority-graph decision above — the two are
+    # AND'd, not either/or: a PERMIT from the authority engine can still be
+    # refused here, and vice versa is impossible (the authority gate's own
+    # DENY/ESCALATE/HALT branches return before reaching this point in
+    # strict mode; in permissive/shadow they fall through to here exactly
+    # like a PERMIT would).
+    #
+    # Backward-compatible no-op: RELEASE_DISPATCH_ENVIRONMENT unset means
+    # this deployment has not opted into release-aware dispatch at all —
+    # resolve_release is never called, so an existing deployment with no
+    # releases/pointers/env-var dispatches byte-identically to pre-feature
+    # behaviour, in every mode including strict.
+    if os.environ.get('RELEASE_DISPATCH_ENVIRONMENT'):
+        release_dispatch_environment = os.environ['RELEASE_DISPATCH_ENVIRONMENT']
+        release_result = resolve_release(
+            org_id=os.environ.get('RELEASE_DEFAULT_ORG_ID') or '',
+            agent_target_id=agent_name,
+            environment=release_dispatch_environment,
+        )
+
+        if release_result.status == ReleaseResolutionStatus.RESOLVED:
+            release_gate_outcome = 'proceed'
+            release_would_block = False
+        elif release_result.status == ReleaseResolutionStatus.LOOKUP_FAILED:
+            # Assert-or-refuse doctrine (this codebase's established
+            # posture — see hierarchy.py's SSM-failure handling and
+            # release_resolution.py's module docstring): the lookup itself
+            # failing (throttle, network, missing table, a dangling
+            # pointer) is NEVER treated the same as a clean "no release
+            # configured yet". Grandfathering does not apply here — a
+            # broken control-surface read is not the same class of thing
+            # as "this agent predates the gate", so bypassing it on
+            # grandfathering grounds would defeat the whole point of
+            # distinguishing LOOKUP_FAILED from NO_POINTER.
+            release_gate_outcome = 'refused' if enforcement_mode == 'strict' else 'proceed'
+            release_would_block = enforcement_mode != 'strict'
+        else:
+            # NO_POINTER — the clean, expected backward-compat state. In
+            # strict mode this refuses UNLESS the (org, agent, environment)
+            # triple is grandfathered, via the same ported pure rule the
+            # TS side owns (grandfathering.py's is_grandfathered_pure).
+            # _resolve_agent_created_at's honest None default (see its
+            # docstring) already routes through that rule's conservative-
+            # bypass branch, so an arbiter with no per-agent creation
+            # signal available today grandfathers by default rather than
+            # hardening into a block.
+            created_at = _resolve_agent_created_at(agent_name)
+            grandfathered = is_grandfathered_pure(created_at, state.effective_at)
+            if enforcement_mode == 'strict' and not grandfathered:
+                release_gate_outcome = 'refused'
+            else:
+                release_gate_outcome = 'proceed'
+            release_would_block = enforcement_mode != 'strict'
+
+        _emit_release_dispatch_metric(
+            mode=enforcement_mode,
+            outcome=release_gate_outcome,
+            would_block=release_would_block,
+            workflow_id=workflow_id,
+        )
+
+        if release_gate_outcome == 'refused':
+            refusal_reason = (
+                'release_lookup_failed'
+                if release_result.status == ReleaseResolutionStatus.LOOKUP_FAILED
+                else 'no_release_resolvable'
+            )
+            logger.error(
+                "release dispatch refused: %s; workflow_id=%s target_agent=%s "
+                "environment=%s detail=%s",
+                refusal_reason,
+                workflow_id,
+                agent_name,
+                release_dispatch_environment,
+                release_result.error,
+            )
+            return {
+                'denied': True,
+                'reason': refusal_reason,
+                'detail': release_result.error,
+                'workflow_id': workflow_id,
+                'target_agent': agent_name,
+                'agent_use_id': agent_use_id,
+            }
 
     # 6. Branch on mode + decision.
     #    permissive/shadow (or the emergency bypass override): evaluate +

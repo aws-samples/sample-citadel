@@ -859,3 +859,144 @@ export interface ProgramReview {
   runBy: string;
   createdAt: string;
 }
+
+// ── Agent Release Bundles (slice 1) ─────────────────────────────────────
+//
+// AgentRelease is a content-addressed, immutable audit record: its
+// identity (releaseId) is the sha256 of the canonicalized constituents
+// below, computed order-independently over object keys and set-like
+// collections (see release-hash.ts). It has no lifecycle/status field —
+// it is a pure snapshot, never updated or deleted after creation.
+//
+// Two reference classes (per design):
+//   Class A — POINTER: sources that are immutable-by-lifecycle
+//     (execSpecId+execSpecVersion; evalRunId+evalSuiteId+evalSuiteVersion).
+//   Class B — SNAPSHOT: sources that mutate in place, so the release
+//     pins an inline content snapshot + digest rather than a version
+//     pointer (agentConfig, promptVersions, modelConfigSnapshot,
+//     toolConfigs, policySnapshot).
+//
+// Eval evidence is intentionally NON-NULLABLE: a release cannot exist
+// without evalRunId + evalSuiteId + evalSuiteVersion.
+
+/** Class B — inline content snapshot + digest of a mutable source. */
+export interface ContentSnapshot {
+  /** Identifier of the source record this snapshot was taken from. */
+  sourceId: string;
+  /** Inline snapshot of the source's content at cut time. */
+  content: string;
+  /** sha256 digest of `content`, computed independently for tamper
+   * detection at the constituent level (in addition to the release-wide
+   * releaseId hash). */
+  digest: string;
+}
+
+/** Class B — resolved per-slot model configuration snapshot. */
+export interface ModelConfigSnapshot {
+  slot: string;
+  content: string;
+  digest: string;
+}
+
+/** Class B — governance/policy posture snapshot at cut time. */
+export interface PolicySnapshot {
+  enforcementMode: string;
+  ruleSetVersion: string;
+  authorityUnitGrantIds: string[];
+}
+
+/** Non-nullable eval evidence pinned into a release. Class A — referenced
+ * by pointer because EvalRun rows are append-only and the suite is frozen
+ * (references[]>0) at cut time rather than snapshotted. */
+export interface AgentReleaseEvalEvidence {
+  evalRunId: string;
+  evalSuiteId: string;
+  evalSuiteVersion: number;
+}
+
+/** The full set of constituents pinned by a release. This exact shape
+ * (independent of key/array ordering) is what releaseId's hash covers. */
+export interface AgentReleaseConstituents {
+  /** Class B — registry descriptor snapshot for the agent config. */
+  agentConfig: ContentSnapshot;
+  /** Class B — promptName -> content snapshot. */
+  promptVersions: Record<string, ContentSnapshot>;
+  /** Class A — APPROVED (terminal/immutable) execution specification. */
+  execSpecId: string;
+  execSpecVersion: number;
+  /** Class B — resolved per-slot model configuration snapshots. */
+  modelConfigSnapshots: ModelConfigSnapshot[];
+  /** Class B — tool descriptor snapshots. */
+  toolConfigs: ContentSnapshot[];
+  /** Class B — governance/policy posture snapshot. */
+  policySnapshot: PolicySnapshot;
+  /** Class A — non-nullable eval evidence. */
+  evalEvidence: AgentReleaseEvalEvidence;
+}
+
+/** A cut, immutable AgentRelease row. releaseId is the content hash of
+ * `constituents` (see release-hash.ts) and is never recomputed or
+ * reassigned after the row is created. */
+export interface AgentRelease extends AgentReleaseConstituents {
+  releaseId: string;
+  orgId: string;
+  agentTargetId: string;
+  semver: string;
+  createdAt: string;
+  createdBy: string;
+  /** Provenance mirrored from deployment-manifest.json. */
+  gitSha: string;
+  region: string;
+  runId: string;
+}
+
+/** Input to cut a new release — everything but the computed releaseId. */
+export type AgentReleaseInput = Omit<AgentRelease, "releaseId">;
+
+// ── Environment Release Pointer (agent releases, follow-on slice) ──────
+//
+// Value set mirrors the CDK deploy-stage literal already threaded through
+// this codebase as `props.environment` / `process.env.ENVIRONMENT` (see
+// bin/app.ts: `process.env.ENVIRONMENT || "dev"`; backend-stack.ts's
+// `${props.environment}` table-name suffixing) rather than inventing a
+// separate set of environment names. Cased UPPERCASE here, not lowercase
+// like the CDK prop, to match this codebase's own enum convention (every
+// other GraphQL-enum-backed literal type in this file —
+// EvalCaseKindLiteral, EvalRunStatusLiteral, SpecStatusLiteral, etc. — is
+// UPPERCASE end-to-end with its GraphQL enum). "TEST" is excluded — it is
+// a CDK-synth-only stack suffix (see e.g.
+// test/backend-stack-agent-releases-table.test.ts), never a real
+// promotion target an agent is dispatched against.
+export type EnvironmentLiteral = "DEV" | "STAGING" | "PROD";
+
+/**
+ * EnvironmentReleasePointerTable row (PK orgId, SK
+ * `${agentTargetId}#${environment}`) — the MUTABLE cursor saying which
+ * AgentRelease an (org, agent, environment) triple currently runs.
+ * Deliberately the opposite of AgentRelease's immutability: this row is
+ * overwritten on every promotion, but ONLY via a version-gated
+ * ConditionExpression at the write boundary (environment-release-
+ * pointer-store.ts) — never a blind Put. previousReleaseId is carried
+ * forward on every move so a later rollback story can read what was
+ * running immediately before the current release, without having to
+ * replay history from elsewhere.
+ */
+export interface EnvironmentReleasePointer {
+  orgId: string;
+  agentTargetId: string;
+  environment: EnvironmentLiteral;
+  releaseId: string;
+  previousReleaseId: string | null;
+  promotedAt: string;
+  promotedBy: string;
+  version: number;
+}
+
+/** Input to set (create-or-move) the pointer for one (agentTargetId,
+ * environment) pair. orgId is derived from the caller, never taken from
+ * caller-supplied input — same doctrine as CutAgentReleaseInput. */
+export interface SetEnvironmentReleasePointerInput {
+  agentTargetId: string;
+  environment: EnvironmentLiteral;
+  releaseId: string;
+}

@@ -61,3 +61,27 @@ UNIT_COUNT = 'Count'
 
 DIMENSION_WORKFLOW_ID = 'WorkflowId'
 DIMENSION_AGENT_ID = 'AgentId'
+
+# Release-aware dispatch (this story): per-mode dispatch outcome counters
+# so the release-gate rollout can be measured before strict is flipped.
+# Mirrors the TS backend tier's METRIC_RELEASE_DISPATCH_EVALUATED /
+# METRIC_RELEASE_DISPATCH_WOULD_BLOCK / METRIC_RELEASE_DISPATCH_REFUSED in
+# backend/src/utils/metrics-constants.ts. Dimensions: WorkflowId (existing,
+# above) plus DIMENSION_RELEASE_MODE and DIMENSION_RELEASE_OUTCOME (both
+# low-cardinality — 3 modes x 4 status literals).
+
+# Emitted on every governed dispatch once RELEASE_DISPATCH_ENVIRONMENT is
+# set, in every mode — the baseline "the gate ran" counter.
+METRIC_RELEASE_DISPATCH_EVALUATED = 'ReleaseDispatchEvaluated'
+
+# Emitted in shadow mode (and, informationally, permissive) whenever the
+# resolution would have caused a refusal had the mode been strict. Never
+# emitted in strict mode itself — strict either proceeds or refuses, it
+# does not also "would-block".
+METRIC_RELEASE_DISPATCH_WOULD_BLOCK = 'ReleaseDispatchWouldBlock'
+
+# Emitted only in strict mode, only when dispatch is actually refused.
+METRIC_RELEASE_DISPATCH_REFUSED = 'ReleaseDispatchRefused'
+
+DIMENSION_RELEASE_MODE = 'ReleaseDispatchMode'
+DIMENSION_RELEASE_OUTCOME = 'ReleaseDispatchOutcome'
