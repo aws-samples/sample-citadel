@@ -20,6 +20,10 @@ ENV/
 # E2E test artifacts
 scripts/*
 !scripts/verify-doc-claims.js
+!scripts/smoke/
+!scripts/smoke/**
+scripts/smoke/**/node_modules/
+scripts/smoke/**/dist/
 
 # Build outputs
 dist/

@@ -1,0 +1,21 @@
+{
+  "name": "release-path-smoke-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Self-contained, dev-only smoke harness proving cutAgentRelease -> promoteEnvironmentReleasePointer -> dispatch resolve_release end to end. Never run in CI against AWS; see RUNBOOK.md.",
+  "type": "commonjs",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke": "ts-node run-smoke.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "3.1106.0",
+    "@aws-sdk/client-dynamodb": "3.1106.0",
+    "@aws-sdk/lib-dynamodb": "3.1106.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "ts-node": "10.9.2",
+    "typescript": "5.9.3"
+  }
+}
