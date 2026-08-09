@@ -21,6 +21,8 @@
  */
 process.env.GOVERNANCE_LEDGER_TABLE = "citadel-governance-ledger-test";
 
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import {
@@ -142,5 +144,90 @@ describe("writeReleaseGateFinding", () => {
     const item = ddbMock.commandCalls(PutCommand)[0].args[0].input
       .Item as Record<string, unknown>;
     expect(item.decided_by).toBe("user-abc");
+  });
+
+  test("identifiers absent -> persisted item is byte-identical to the pre-stamping shape", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    await writeReleaseGateFinding(findingInput());
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input
+      .Item as Record<string, unknown>;
+
+    // No null placeholders, no empty strings — the keys must be entirely
+    // absent, matching Python's _serialize_finding None-stripping.
+    expect(Object.prototype.hasOwnProperty.call(item, "traceId")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(item, "runId")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(item, "evalRunId")).toBe(false);
+
+    // Exhaustive shape check: the pre-stamping key set, nothing more.
+    expect(Object.keys(item).sort()).toEqual(
+      [
+        "findingId",
+        "workflowId",
+        "timestamp",
+        "workflow_id",
+        "decision",
+        "requesting_agent",
+        "target_agent",
+        "reason",
+        "finding_id",
+        "decided_by",
+        "category",
+        "org_id",
+        "environment",
+        "release_id",
+        "enforcement_mode",
+        "score_vector",
+        "gate_reasons",
+        "ttl",
+      ].sort(),
+    );
+  });
+
+  test("identifiers present -> stamped verbatim onto the persisted item", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    await writeReleaseGateFinding(
+      findingInput({
+        traceId: "1-abcdef01-0123456789abcdef01234567",
+        runId: "run-abc-123",
+      }),
+    );
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input
+      .Item as Record<string, unknown>;
+
+    expect(item.traceId).toBe("1-abcdef01-0123456789abcdef01234567");
+    expect(item.runId).toBe("run-abc-123");
+  });
+
+  test("only traceId present -> only traceId is stamped, runId stays absent", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    await writeReleaseGateFinding(
+      findingInput({ traceId: "1-abcdef01-0123456789abcdef01234567" }),
+    );
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input
+      .Item as Record<string, unknown>;
+
+    expect(item.traceId).toBe("1-abcdef01-0123456789abcdef01234567");
+    expect(Object.prototype.hasOwnProperty.call(item, "runId")).toBe(false);
+  });
+
+  test("field-name parity: TS identifier field names match Python's _serialize_finding aliases", () => {
+    // Drift guard: if the Python ledger serializer's camelCase aliases
+    // ever change, this assertion fails a test rather than silently
+    // breaking the cross-runtime join. Source of truth read directly
+    // from the checked-in Python serializer at
+    // arbiter/governance/ledger.py::_serialize_finding.
+    const ledgerPySource = readFileSync(
+      resolve(__dirname, "../../../../../arbiter/governance/ledger.py"),
+      "utf-8",
+    );
+    expect(ledgerPySource).toContain('item["traceId"] = finding.trace_id');
+    expect(ledgerPySource).toContain('item["runId"] = finding.run_id');
+
+    // The TS-side field names this writer accepts and persists verbatim.
+    const tsFieldNames: Array<keyof ReleaseGateFindingInput> = [
+      "traceId",
+      "runId",
+    ];
+    expect(tsFieldNames).toEqual(["traceId", "runId"]);
   });
 });

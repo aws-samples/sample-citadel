@@ -39,6 +39,18 @@
  * eval-drift-finding-writer.ts's `findingIdFor`. A promotion attempt that
  * is retried against the SAME release+environment+decision collides on
  * PutItem rather than producing a duplicate finding row.
+ *
+ * Trace/run stamping (decision-to-trace join): `traceId`/`runId` are
+ * OPTIONAL input fields, mirroring Python's `_serialize_finding` camelCase
+ * field names for join-key parity. `traceId` is sourced by the caller from
+ * `getActiveTraceContext()` and passed in verbatim — see
+ * ReleaseGateFindingInput's doc comment for the full rationale. `runId` is
+ * accepted here for the same parity reason (Python's serializer emits
+ * `item["runId"]`), but as of this writing NO TypeScript call site
+ * populates it: `getActiveTraceContext()` (trace-context.ts) does not
+ * carry a run identifier, so there is nothing to source it from. This is
+ * current fact, not a gap to close in this module — a caller with a
+ * genuine run identifier can pass it through once one exists.
  */
 import { createHash } from "crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -81,6 +93,43 @@ export interface ReleaseGateFindingInput {
    * the pass/fail label. */
   scoreVector: DimensionAggregate[];
   mode: GovernanceEnforce;
+  /**
+   * Trace/run identifiers for joining this promotion decision to the
+   * runtime trace that produced it (mirrors Python's
+   * `arbiter/governance/ledger.py::_serialize_finding` camelCase field
+   * names — `traceId`/`runId` — verbatim, so the join key matches across
+   * runtimes). Both optional and additive: `traceId` is sourced from
+   * `getActiveTraceContext()` (trace-context.ts) at the CALL SITE, same
+   * convention as `events.ts::publishEvent`, rather than read from
+   * ambient state inside this writer — keeps the writer a pure function
+   * of its input and testable without mocking X-Ray. Absent -> the
+   * persisted item omits both fields entirely (no null placeholders, no
+   * empty strings), byte-identical to the pre-stamping shape — same
+   * discipline as `_serialize_finding`'s None-stripping.
+   *
+   * `runId` exists on this input purely for parity with the Python
+   * ledger serializer's `item["runId"]`. As of this writing, no
+   * TypeScript call site populates it, because `getActiveTraceContext()`
+   * does not carry a run identifier — there is nothing for a caller to
+   * source it from today. This is a statement of current fact, not an
+   * aspiration to fulfill elsewhere in this file; a future caller that
+   * genuinely has a run identifier can pass it through this same field
+   * without any change here.
+   *
+   * `evalRunId` (Python's CIT-102 Pass B eval-run correlation id) is
+   * deliberately NOT included here: that field is stamped from a
+   * dispatch detail's `evalRunId` key in the Python arbiter's dispatch
+   * path, a correlation id this release-promotion gate never receives.
+   * The gate already carries its OWN eval run id via
+   * `release.evalEvidence.evalRunId` (a different concept — "which eval
+   * run backs this candidate release", not "which dispatch produced
+   * this finding") through `scoreVector`, not through this identifier.
+   * Adding a fabricated `evalRunId` here would invent a value this gate
+   * has no basis for, so it is out of scope until an eval-run
+   * correlation id is genuinely available at this call site.
+   */
+  traceId?: string;
+  runId?: string;
 }
 
 function findingIdFor(input: ReleaseGateFindingInput): string {
@@ -152,6 +201,19 @@ export async function writeReleaseGateFinding(
     gate_reasons: input.reasons,
     ttl,
   };
+
+  // Additive, optional trace/run identifiers — mirrors
+  // `_serialize_finding`'s byte-identical-when-absent discipline: only
+  // set the key when the caller supplied a value, so an unstamped call
+  // (no active trace context at the call site) produces an item with
+  // neither `traceId` nor `runId` — no null placeholders, no empty
+  // strings, identical to the pre-stamping shape.
+  if (input.traceId !== undefined) {
+    item.traceId = input.traceId;
+  }
+  if (input.runId !== undefined) {
+    item.runId = input.runId;
+  }
 
   try {
     await docClient.send(

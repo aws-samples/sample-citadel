@@ -1,12 +1,16 @@
 /**
  * release-gate-evidence.ts — READ-ONLY evidence resolution adapter for
- * the pure gate evaluator (release-gate.ts).
+ * the pure gate evaluator (evaluateReleaseGate, release-gate.ts).
  *
  * This module performs NO writes. It never imports a raw DynamoDB write
  * command, or any store write function — only GetCommand/QueryCommand
  * and the one read export release-store.ts already offers (getRelease).
- * It stays UNWIRED: nothing here is called from
- * promoteEnvironmentReleasePointer yet (a later slice wires it).
+ * Promotion-time wiring status: this resolver is called by
+ * validateReleaseGate (environment-release-pointer-resolver.ts), which
+ * is itself wired into that file's promoteEnvironmentReleasePointer.
+ * The cut-time twin of that seam, release-resolver.ts's own (unrelated,
+ * same-named) no-op at :197-199, remains a deliberate no-op — this
+ * module is not called from there.
  *
  * Responsibilities, matching the design 1:1:
  *  1. From the release's pinned evidence

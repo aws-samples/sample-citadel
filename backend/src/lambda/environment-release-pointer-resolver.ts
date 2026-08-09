@@ -98,6 +98,7 @@ import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { hasPermission } from "../utils/auth";
 import { extractOrgFromEvent } from "../utils/auth-event";
 import { getGovernanceEnforce } from "../utils/governance-flag";
+import { getActiveTraceContext } from "../utils/trace-context";
 import { governanceDisposition } from "./utils/governance-disposition";
 import {
   evaluateReleaseGate,
@@ -217,6 +218,13 @@ export async function validateReleaseGate(
   // change what `shouldBlock` already is.
   const shouldBlock = disposition.block && failed;
 
+  // Sourced ONCE at the call site (same convention as
+  // events.ts::publishEvent) rather than read from ambient state deep
+  // inside the writer — keeps writeReleaseGateFinding a pure function of
+  // its input. undefined outside an active X-Ray segment (e.g. Jest) —
+  // the writer omits both fields entirely in that case.
+  const traceContext = getActiveTraceContext();
+
   if (disposition.recordFinding) {
     // strict: write, then (independent of write outcome) enforce
     // shouldBlock below — a write failure here must not suppress the
@@ -236,6 +244,7 @@ export async function validateReleaseGate(
           reasons: verdict.reasons as never,
           scoreVector: verdict.scoreVector,
           mode,
+          ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
         });
       } catch (writeErr) {
         // Logged, not rethrown: strict's refusal below must not depend
@@ -264,6 +273,7 @@ export async function validateReleaseGate(
         reasons: verdict.reasons as never,
         scoreVector: verdict.scoreVector,
         mode,
+        ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
       });
     }
   }
