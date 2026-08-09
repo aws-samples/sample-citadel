@@ -53,6 +53,12 @@ def is_grandfathered_pure(
         grandfathered).
       - ``created_at > effective_at`` -> False.
     """
+    # PARITY-GUARD:BEGIN — mirrored verbatim in
+    # backend/src/utils/is-grandfathered.ts's isGrandfatheredPure. If you
+    # change the logic between these markers, you MUST update BOTH
+    # implementations AND recompute the sha256 in
+    # backend/src/utils/grandfathering-parity-cases.json (regionHashes.python),
+    # or the parity guard test will fail. See finding 887db42a.
     # Pre-shadow-flip (no cutoff set): everyone is grandfathered.
     if effective_at is None or effective_at == "":
         return True
@@ -63,3 +69,4 @@ def is_grandfathered_pure(
     # ISO-8601 strings compare correctly lexicographically when
     # timezone-normalized, matching the TS side's string comparison.
     return created_at < effective_at
+    # PARITY-GUARD:END

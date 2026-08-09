@@ -1,0 +1,86 @@
+{
+  "description": "Shared cross-language case table for the grandfathering rule (finding 887db42a). Consumed verbatim by backend/src/utils/__tests__/is-grandfathered.parity.test.ts and arbiter/governance/__tests__/test_grandfathering_parity.py. Do not hand-copy into either suite — both load this file directly.",
+  "regionHashes": {
+    "hashAlgorithm": "sha256 of the NORMALIZED substring strictly between the line containing 'PARITY-GUARD:BEGIN' (exclusive) and the line containing 'PARITY-GUARD:END' (exclusive), i.e. text.index(beginMarker)+len(beginMarker) .. text.index(endMarker). Normalization, applied line-by-line after splitting on newline: (1) drop every line whose trimmed content is empty or starts with that entry's commentPrefix ('//' for ts, '#' for python); (2) on each remaining line, strip a single trailing backslash (line-continuation marker), then map both '\\'' and '\"' to the single canonical character '\\'' (so a formatter's quote-style rewrite, e.g. prettier flipping '' to \"\", does not change the hash); (3) collapse every run of whitespace to a single space and trim the line; (4) join the kept, transformed lines with a single SPACE (not '\\n') and UTF-8 encode — so re-wrapping/re-indentation, including splitting one statement across physical lines via backslash continuation, does not change the hash. NOT normalized: relative order of kept lines, identifier/operator/literal text, and which logic lines are present — any change to those still changes the hash. This makes the hash blind to comment-only edits and formatter-driven quote-style/whitespace/line-wrap churn while still tripping on any change to executable logic.",
+    "ts": {
+      "file": "backend/src/utils/is-grandfathered.ts",
+      "beginMarker": "PARITY-GUARD:BEGIN",
+      "endMarker": "PARITY-GUARD:END",
+      "commentPrefix": "//",
+      "sha256": "291d8c808e03c0376ad3c574ac99ad63bec9fd0e5d6c0d22d4b5e5abb7b3c0d3"
+    },
+    "python": {
+      "file": "arbiter/governance/grandfathering.py",
+      "beginMarker": "PARITY-GUARD:BEGIN",
+      "endMarker": "PARITY-GUARD:END",
+      "commentPrefix": "#",
+      "sha256": "f3291043ba6818b26efa89030290644a2199247796f3ef2f9fc1aefc083e0ac2"
+    }
+  },
+  "cases": [
+    {
+      "branch": "pre_shadow_flip_null_effective_at",
+      "description": "null effectiveAt with normal createdAt is always grandfathered (pre-shadow-flip)",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "effectiveAt": null,
+      "expected": true
+    },
+    {
+      "branch": "pre_shadow_flip_empty_effective_at",
+      "description": "empty-string effectiveAt with normal createdAt is always grandfathered (pre-shadow-flip)",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "effectiveAt": "",
+      "expected": true
+    },
+    {
+      "branch": "pre_shadow_flip_null_effective_at_distant_future_created_at",
+      "description": "distant-future createdAt with null cutoff is still grandfathered",
+      "createdAt": "9999-12-31T23:59:59Z",
+      "effectiveAt": null,
+      "expected": true
+    },
+    {
+      "branch": "malformed_created_at_undefined",
+      "description": "absent/undefined createdAt is a conservative bypass (true)",
+      "createdAt": null,
+      "effectiveAt": "2026-05-15T00:00:00Z",
+      "expected": true,
+      "createdAtIsUndefined": true
+    },
+    {
+      "branch": "malformed_created_at_null",
+      "description": "null createdAt is a conservative bypass (true)",
+      "createdAt": null,
+      "effectiveAt": "2026-05-15T00:00:00Z",
+      "expected": true
+    },
+    {
+      "branch": "malformed_created_at_empty_string",
+      "description": "empty-string createdAt is a conservative bypass (true)",
+      "createdAt": "",
+      "effectiveAt": "2026-05-15T00:00:00Z",
+      "expected": true
+    },
+    {
+      "branch": "created_at_before_effective_at",
+      "description": "createdAt strictly before effectiveAt is grandfathered (true)",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "effectiveAt": "2026-05-15T00:00:00Z",
+      "expected": true
+    },
+    {
+      "branch": "created_at_equal_effective_at",
+      "description": "createdAt exactly equal to effectiveAt is NOT grandfathered (false) - the exact cutoff belongs to the new regime",
+      "createdAt": "2026-05-15T00:00:00Z",
+      "effectiveAt": "2026-05-15T00:00:00Z",
+      "expected": false
+    },
+    {
+      "branch": "created_at_after_effective_at",
+      "description": "createdAt strictly after effectiveAt is NOT grandfathered (false)",
+      "createdAt": "2026-05-20T00:00:00Z",
+      "effectiveAt": "2026-05-15T00:00:00Z",
+      "expected": false
+    }
+  ]
+}

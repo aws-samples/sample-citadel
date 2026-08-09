@@ -12,13 +12,11 @@
  * gates being in `permissive` (telemetry-only) mode anyway.
  */
 
-import type { Project } from '../types';
+import type { Project } from "../types";
 
 /** Canonical gate identifiers used in the bypass event's `bypassedGate` field. */
 export type GrandfatheredBypassedGate =
-  | 'C3_assessment_required'
-  | 'C7_adr_required'
-  | 'C10_spec_required';
+  "C3_assessment_required" | "C7_adr_required" | "C10_spec_required";
 
 /**
  * Pure implementation of the grandfathering rule.
@@ -36,16 +34,22 @@ export function isGrandfatheredPure(
   createdAt: string | null | undefined,
   effectiveAt: string | null,
 ): boolean {
+  // PARITY-GUARD:BEGIN — mirrored verbatim in arbiter/governance/grandfathering.py's
+  // is_grandfathered_pure. If you change the logic between these markers, you MUST
+  // update BOTH implementations AND recompute the sha256 in
+  // backend/src/utils/grandfathering-parity-cases.json (regionHashes.ts), or the
+  // parity guard test will fail. See finding 887db42a.
   // Pre-shadow-flip (no cutoff set): everyone is grandfathered.
-  if (effectiveAt === null || effectiveAt === '') return true;
+  if (effectiveAt === null || effectiveAt === "") return true;
   // Conservative fallback for malformed project data: bypass rather than
   // block. Matches the telemetry-only Phase-1 stance — a malformed record
   // in permissive mode must not become a hard failure in shadow/strict.
-  if (typeof createdAt !== 'string' || createdAt === '') return true;
+  if (typeof createdAt !== "string" || createdAt === "") return true;
   // ISO-8601 strings compare correctly lexicographically when timezone-
   // normalized. Both getGovernanceEffectiveAt and Project.createdAt are
   // written in UTC ISO format elsewhere in the codebase.
   return createdAt < effectiveAt;
+  // PARITY-GUARD:END
 }
 
 /**
@@ -58,16 +62,16 @@ export function isGrandfatheredPure(
  * strict-allowlist discipline).
  */
 export async function isGrandfathered(
-  project: Pick<Project, 'createdAt'>,
+  project: Pick<Project, "createdAt">,
   env?: string,
 ): Promise<boolean> {
   const resolvedEnv = env ?? process.env.ENVIRONMENT;
   if (!resolvedEnv) {
     throw new Error(
-      'isGrandfathered: env argument or process.env.ENVIRONMENT must be set',
+      "isGrandfathered: env argument or process.env.ENVIRONMENT must be set",
     );
   }
-  const { getGovernanceEffectiveAt } = await import('./governance-flag');
+  const { getGovernanceEffectiveAt } = await import("./governance-flag");
   const effectiveAt = await getGovernanceEffectiveAt(resolvedEnv);
   return isGrandfatheredPure(project.createdAt, effectiveAt);
 }
@@ -87,9 +91,9 @@ export async function emitGrandfatheredBypass(
   effectiveAt: string,
   correlationId?: string,
 ): Promise<void> {
-  const { emitGovernanceEvent } = await import('./notifier-base');
+  const { emitGovernanceEvent } = await import("./notifier-base");
   await emitGovernanceEvent(
-    'governance.grandfathered.bypass',
+    "governance.grandfathered.bypass",
     { projectId, bypassedGate, projectCreatedAt, effectiveAt },
     correlationId,
   );
