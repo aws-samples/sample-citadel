@@ -664,7 +664,13 @@ describe("promoteEnvironmentReleasePointer — moving an existing pointer", () =
     expect(result.releaseId).toBe("release-2");
     expect(result.version).toBe(2);
 
-    const putCall = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    const putCall = ddbMock
+      .commandCalls(PutCommand)
+      .find(
+        (call) =>
+          call.args[0].input.TableName ===
+          "citadel-environment-release-pointers-test",
+      )!.args[0].input;
     expect(putCall.ConditionExpression).toBe(
       "attribute_not_exists(orgId) OR #version = :expectedVersion",
     );

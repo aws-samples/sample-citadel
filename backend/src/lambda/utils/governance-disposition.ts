@@ -22,9 +22,17 @@
  * disposition, never whether evaluation runs).
  *
  * Dispositions:
- *   - permissive: telemetry only. No ledger finding, no block. The
- *     caller still emits a metric (that is the telemetry), but the
- *     ledger — a durable, queryable audit record — is not written.
+ *   - permissive: no-op. No ledger finding, no block, and — contrary to
+ *     a previous version of this comment — no metric either: the sole
+ *     caller (environment-release-pointer-resolver.ts's
+ *     validateReleaseGate) does not emit anything when
+ *     `recordFinding` is false. Corrected here rather than adding a
+ *     metric emission, because a permissive-mode metric was never part
+ *     of any consumer's contract and inventing one now, purely to match
+ *     stale documentation, would be a behavior change with no requester.
+ *     If permissive-mode telemetry is wanted later, add it at the call
+ *     site (validateReleaseGate) and update this comment to match, in
+ *     that order.
  *   - shadow: ledger finding written (this is the ONLY record of a
  *     would-block outcome — see release-gate-finding-writer.ts's
  *     module doc for why a failed write here must be surfaced, never

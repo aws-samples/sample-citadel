@@ -454,8 +454,15 @@ export async function createAgentConfigRegistry(
  * behaviour of every non-imported / already-attested activation is byte-
  * identical to the pre-gate code path.
  *
- * `getGovernanceEnforce` fails open to 'permissive' internally (never throws),
- * so an absent/unreadable SSM parameter can never hard-fail an activation.
+ * `getGovernanceEnforce` fails open to 'shadow' internally on a read
+ * failure (never throws) — and this gate only blocks when mode ===
+ * 'strict', so a defaulted 'shadow' behaves identically to a configured
+ * 'shadow' or the historical 'permissive' default here: no new blocking.
+ * See `backend/src/utils/governance-flag.ts`'s module doc for why the
+ * fallback was moved from 'permissive' to 'shadow' (visibility, not
+ * enforcement, was the defect being fixed) and why 'strict' was
+ * deliberately NOT chosen as the fallback (it would have newly blocked
+ * this exact gate during a transient SSM outage).
  */
 async function enforceImportActivationGate(
   registryService: RegistryService,
@@ -598,8 +605,7 @@ export async function updateAgentConfigRegistry(
   });
 
   let importAttestationToPersist:
-    | GovernanceAttestationWithTrustPath
-    | undefined;
+    GovernanceAttestationWithTrustPath | undefined;
   let gateContentOverride: string | undefined;
   const existingAttestation = importView.governanceAttestation;
   const invocationRoleArn = importView.invocation?.roleArn;

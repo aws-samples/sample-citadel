@@ -1384,7 +1384,7 @@ def handler(event, context):
             // it the resolver skips straight to the org-less caller
             // default.
             ...(props.userPoolId && { USER_POOL_ID: props.userPoolId }),
-            // Governance activation gate (fails open to 'permissive')
+            // Governance activation gate (defaults to 'shadow')
             ENVIRONMENT: props.environment,
             ACCOUNT_ID: cdk.Stack.of(this).account,
           },
@@ -1502,7 +1502,7 @@ def handler(event, context):
           resources: [tableArn(`citadel-authority-units-${props.environment}`)],
         }),
       );
-      // Governance activation gate rollout flag (read-only; gate fails open).
+      // Governance activation gate rollout flag (read-only; defaults to 'shadow').
       intakeOrchestrationResolverFn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ["ssm:GetParameter"],

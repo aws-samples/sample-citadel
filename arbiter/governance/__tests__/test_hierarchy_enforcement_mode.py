@@ -166,6 +166,83 @@ def test_ssm_failure_defaults_to_shadow_with_warning(
 
 
 # ---------------------------------------------------------------------------
+# Visibility: a defaulted mode must be distinguishable from a configured one
+# (mirrors backend/src/utils/governance-flag.ts's "GovernanceFlagDefaulted"
+# EMF signal — see governance-flag.test.ts's equivalent assertions).
+# ---------------------------------------------------------------------------
+
+
+def test_ssm_failure_emits_a_governance_flag_defaulted_signal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "test-env")
+    _stub_ddb_empty(monkeypatch)
+    _install_fake_ssm(monkeypatch, None)  # raises inside get_parameter
+
+    with caplog.at_level(logging.WARNING, logger=hierarchy.logger.name):
+        load_governance_state()
+
+    defaulted_records = [
+        r for r in caplog.records if getattr(r, "governance_flag_defaulted", None)
+    ]
+    assert len(defaulted_records) >= 1
+    assert defaulted_records[0].governance_flag_defaulted_reason == "ssm_error"
+
+
+def test_invalid_value_emits_a_governance_flag_defaulted_signal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "test-env")
+    _stub_ddb_empty(monkeypatch)
+    _install_fake_ssm(monkeypatch, "not-a-real-mode")
+
+    with caplog.at_level(logging.WARNING, logger=hierarchy.logger.name):
+        load_governance_state()
+
+    defaulted_records = [
+        r for r in caplog.records if getattr(r, "governance_flag_defaulted", None)
+    ]
+    assert len(defaulted_records) >= 1
+    assert defaulted_records[0].governance_flag_defaulted_reason == "invalid_value"
+
+
+def test_valid_value_does_not_emit_the_defaulted_signal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "test-env")
+    _stub_ddb_empty(monkeypatch)
+    _install_fake_ssm(monkeypatch, "strict")
+
+    with caplog.at_level(logging.WARNING, logger=hierarchy.logger.name):
+        load_governance_state()
+
+    defaulted_records = [
+        r for r in caplog.records if getattr(r, "governance_flag_defaulted", None)
+    ]
+    assert defaulted_records == []
+
+
+# ---------------------------------------------------------------------------
+# Cross-runtime contract: Python's default MUST equal TS's default. A future
+# edit that lets the two runtimes diverge on the fallback literal must fail
+# a test, not just a code review — see the assessment's recommendation that
+# both readers draw from the shared three-literal contract and are
+# deliberately THE SAME (not differentiated) on the default value.
+# ---------------------------------------------------------------------------
+
+
+def test_default_enforcement_mode_is_shadow_matching_ts_reader() -> None:
+    """Mirrors backend/src/utils/governance-flag.ts's
+    `DEFAULT_ENFORCEMENT_MODE` constant and
+    governance-flag.test.ts's "TS fallback literal matches the shared
+    cross-runtime default" test. Both runtimes must default to the exact
+    same literal — 'shadow' — deliberately, not by coincidence.
+    """
+    assert hierarchy._DEFAULT_ENFORCEMENT_MODE == "shadow"
+    assert hierarchy._DEFAULT_ENFORCEMENT_MODE in hierarchy._VALID_ENFORCEMENT_MODES
+
+
+# ---------------------------------------------------------------------------
 # Caching: second call within TTL does not re-query SSM
 # ---------------------------------------------------------------------------
 

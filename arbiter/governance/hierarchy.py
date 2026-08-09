@@ -444,6 +444,25 @@ def _resolve_enforcement_mode(force_reload: bool = False) -> str:
     silently degrades into either an accidental hard-block or an
     accidental bypass.
 
+    WHY THIS MUST MATCH THE TS READER, DELIBERATELY (not incidentally):
+    ``backend/src/utils/governance-flag.ts``'s ``getGovernanceEnforce``
+    defaults to this SAME literal, 'shadow', on the identical failure
+    class (SSM throw or an out-of-allowlist value). This is a deliberate
+    non-divergence, not a coincidence: 'permissive' would silently drop
+    the only durable record of a degraded read (permissive never writes a
+    governance-ledger finding), and 'strict' would newly BLOCK promotions
+    and activations that were previously passing during what is likely a
+    transient SSM outage — a surprising, self-inflicted escalation nobody
+    configured. 'shadow' is the one literal that is simultaneously
+    non-blocking (matches the historical, safe non-enforcing behavior)
+    and observable (a ledger finding + a `governance_flag_defaulted` log
+    field are written, unlike permissive's silence). See the
+    cross-runtime contract test
+    ``test_default_enforcement_mode_is_shadow_matching_ts_reader`` and its
+    TS-side twin in ``governance-flag.test.ts`` — if a future change ever
+    needs the two runtimes to differ, that decision must be re-justified
+    here and in the TS module doc, not made by one side drifting alone.
+
     When ``ENVIRONMENT`` is unset (local dev, unit tests, or any process
     not running as a deployed Lambda) the SSM lookup is skipped entirely —
     there is no well-formed parameter path to query — and the default is
@@ -477,6 +496,16 @@ def _resolve_enforcement_mode(force_reload: bool = False) -> str:
                 "Governance enforcement mode parameter has unresolvable "
                 "value %r for env=%s; defaulting to %r.",
                 raw_value, env_name, _DEFAULT_ENFORCEMENT_MODE,
+                extra={
+                    # VISIBILITY: a distinct, filterable field so a
+                    # defaulted mode is never indistinguishable from a
+                    # configured one in log queries — mirrors the
+                    # "GovernanceFlagDefaulted" EMF metric emitted by the
+                    # TS reader (backend/src/utils/governance-flag.ts)
+                    # on the identical branch.
+                    "governance_flag_defaulted": True,
+                    "governance_flag_defaulted_reason": "invalid_value",
+                },
             )
     except Exception as e:
         # Any SSM failure (missing param, permissions, throttling, network)
@@ -486,6 +515,13 @@ def _resolve_enforcement_mode(force_reload: bool = False) -> str:
             "Failed to resolve governance enforcement mode from SSM for "
             "env=%s; defaulting to %r. Error: %s",
             env_name, _DEFAULT_ENFORCEMENT_MODE, e,
+            extra={
+                # VISIBILITY: see the matching `extra` on the
+                # invalid-value branch above — same distinguishing
+                # fields, different reason.
+                "governance_flag_defaulted": True,
+                "governance_flag_defaulted_reason": "ssm_error",
+            },
         )
 
     _mode_cache[env_name] = (resolved, now)

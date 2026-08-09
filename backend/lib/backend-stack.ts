@@ -820,7 +820,7 @@ export class BackendStack extends cdk.Stack {
           // governance rollout SSM parameter path (getGovernanceEnforce);
           // EVENT_BUS_NAME targets the shared bus for best-effort gate
           // telemetry. Both mirror the agent-import resolver. Scoped IAM
-          // grants below; getGovernanceEnforce fails open to 'permissive'.
+          // grants below; getGovernanceEnforce defaults to 'shadow'.
           ENVIRONMENT: props.environment,
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
           // Phase-2 cross-account trust-path: the deploying account id powers
@@ -960,7 +960,7 @@ export class BackendStack extends cdk.Stack {
     // consumers with the minimal scoped grants:
     //   • events:PutEvents on the shared agent event bus (gate telemetry event)
     //   • ssm:GetParameter on the two governance rollout parameters only
-    // getGovernanceEnforce fails open to 'permissive' internally, so a missing
+    // getGovernanceEnforce defaults to 'shadow' internally, so a missing
     // parameter or denied read can never hard-fail an activation.
     this.agentEventBus.grantPutEventsTo(agentConfigResolverFunction);
     agentConfigResolverFunction.addToRolePolicy(

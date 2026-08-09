@@ -64,28 +64,26 @@
  * agent-import-resolver.ts already consults. No new TS mode reader is
  * introduced here.
  *
- * KNOWN CROSS-RUNTIME DIVERGENCE ON MODE-LOOKUP FAILURE (design item 6 —
- * investigated, NOT silently copied): `getGovernanceEnforce` itself
- * falls back to 'permissive' on any SSM read error or an out-of-allowlist
- * value (see governance-flag.ts's `refresh`/`isValidEnforce`). The
- * Python dispatch path's equivalent resolver,
+ * MODE-LOOKUP FAILURE FALLBACK (design item 6 — investigated; runtimes now
+ * match): `getGovernanceEnforce` falls back to 'shadow' on any SSM read
+ * error or an out-of-allowlist value (see governance-flag.ts's
+ * `DEFAULT_ENFORCEMENT_MODE` / `refresh`/`isValidEnforce`). The Python
+ * dispatch path's equivalent resolver,
  * `arbiter/governance/hierarchy.py::_resolve_enforcement_mode`, falls
- * back to 'shadow' (`_DEFAULT_ENFORCEMENT_MODE`) on the identical failure
- * class, and both `arbiter/stepRunner/executor.py` and
- * `arbiter/supervisor/index.py` consume that value via
+ * back to the SAME literal, 'shadow' (`_DEFAULT_ENFORCEMENT_MODE`), on
+ * the identical failure class, and both `arbiter/stepRunner/executor.py`
+ * and `arbiter/supervisor/index.py` consume that value via
  * `getattr(state, 'enforcement_mode', 'shadow')` before gating dispatch.
- * So on a lookup failure, Python's dispatch path fails toward
- * "evaluate + record, never block" while this TS reader's existing
- * fallback fails toward "evaluate, but neither block nor record"
- * (permissive's disposition here is telemetry-only, no ledger write).
- * This gate does NOT invent new behavior to paper over that gap: per
- * instruction, it reuses the SINGLE existing TS reader verbatim, exactly
- * as agent-import-resolver.ts already does, rather than adding a second,
- * divergent mode-resolution path inside a promotion gate. The conflict
- * is real and is called out here (and in the implementation summary) for
- * a maintainer to resolve at the governance-flag.ts layer — fixing it
- * locally in this file would create the exact two-divergent-
- * implementations problem the design explicitly warns against.
+ * This was previously a documented DIVERGENCE (TS fell back to
+ * 'permissive', which is telemetry-and-record-silent per
+ * governanceDisposition('permissive')) — that divergence has been fixed
+ * by moving the TS default to 'shadow' to match Python, deliberately,
+ * per the enforcement-lookup fallback assessment: 'shadow' evaluates and
+ * records (a ledger finding IS written, per this file's own gate below)
+ * without introducing any new blocking versus the old 'permissive'
+ * default (both are `block: false`). See governance-flag.ts's module doc
+ * for the full rationale and the cross-runtime contract test pinning
+ * both sides to the same literal.
  *
  * The twin `validateReleaseGate` in `release-resolver.ts:197` (cut-time
  * seam) is a DIFFERENT concern and stays a no-op — this file does not
