@@ -820,7 +820,7 @@ export class BackendStack extends cdk.Stack {
           // governance rollout SSM parameter path (getGovernanceEnforce);
           // EVENT_BUS_NAME targets the shared bus for best-effort gate
           // telemetry. Both mirror the agent-import resolver. Scoped IAM
-          // grants below; getGovernanceEnforce fails open to 'permissive'.
+          // grants below; getGovernanceEnforce defaults to 'shadow'.
           ENVIRONMENT: props.environment,
           EVENT_BUS_NAME: this.agentEventBus.eventBusName,
           // Phase-2 cross-account trust-path: the deploying account id powers
@@ -960,7 +960,7 @@ export class BackendStack extends cdk.Stack {
     // consumers with the minimal scoped grants:
     //   • events:PutEvents on the shared agent event bus (gate telemetry event)
     //   • ssm:GetParameter on the two governance rollout parameters only
-    // getGovernanceEnforce fails open to 'permissive' internally, so a missing
+    // getGovernanceEnforce defaults to 'shadow' internally, so a missing
     // parameter or denied read can never hard-fail an activation.
     this.agentEventBus.grantPutEventsTo(agentConfigResolverFunction);
     agentConfigResolverFunction.addToRolePolicy(
@@ -3404,6 +3404,35 @@ export class BackendStack extends cdk.Stack {
           this.environmentReleasePointersTable.tableArn,
           `${this.environmentReleasePointersTable.tableArn}/index/*`,
         ],
+      }),
+    );
+
+    // Finding 23971f32 (fail-closed ledger recording): this role also
+    // backs environment-release-pointer-resolver.ts, which writes a
+    // GovernanceFinding row (release-gate-finding-writer.ts) into
+    // GOVERNANCE_LEDGER_TABLE BEFORE the pointer moves — in both shadow
+    // and strict mode, per the USER DECISION that recording is
+    // fail-closed regardless of mode. That table (governanceLedgerTable)
+    // is owned by ArbiterStack, which is instantiated AFTER BackendStack
+    // in bin/app.ts (arbiter depends on backend via ServicesStack), so a
+    // construct reference here is impossible without a cyclic stack
+    // dependency. Referenced instead by deterministic ARN STRING — same
+    // no-cross-ref convention as agentCodeResolverFunction's S3 grant in
+    // registry-stack.ts and the FabricationJobsTable grants throughout
+    // this file — built from the SAME `citadel-governance-ledger-
+    // ${environment}` name arbiter-stack.ts uses to construct the table.
+    // Explicit dynamodb:PutItem-only PolicyStatement, deliberately NOT
+    // grantWriteData: grantWriteData also confers UpdateItem/DeleteItem/
+    // BatchWriteItem, a widening rejected twice in prior work on this
+    // exact role (see the PutItem-only rationale on this role's
+    // construction site above). This writer only ever issues PutCommand
+    // (release-gate-finding-writer.ts) — no other action is needed.
+    const governanceLedgerTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-governance-ledger-${props.environment}`;
+    environmentReleasePointerWriterRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [governanceLedgerTableArn],
       }),
     );
     this.environmentReleasePointerWriterRole =

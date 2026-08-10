@@ -23,33 +23,40 @@
  * the shared import-descriptor validator are reused from agent-config-resolver
  * so import and create stay in lock-step.
  */
-import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import {
   BedrockAgentCoreControlClient,
   CreateGatewayTargetCommand,
   DeleteGatewayTargetCommand,
-} from '@aws-sdk/client-bedrock-agentcore-control';
-import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+} from "@aws-sdk/client-bedrock-agentcore-control";
+import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import {
   buildMCPServerTargetPayload,
   deleteTargetAndProvider,
-} from '../utils/gateway-target-manager';
-import { createOrUpsertApiKeyProvider } from '../utils/credential-provider-manager';
-import { getRegistryService, validateImportDescriptor } from './agent-config-resolver';
-import { createADR } from './adr-resolver';
-import { extractOrgFromEvent, isAdminFromEvent, hasRoleFromEvent } from '../utils/auth-event';
-import { probeReachability } from '../utils/reachability-probe';
-import { v4 as uuidv4 } from 'uuid';
-import { publishEvent, EventTypes } from '../utils/events';
-import { grantFabricatorAuthority } from './registry-agent-authority-lifecycle';
-import { getGovernanceEnforce } from '../utils/governance-flag';
+} from "../utils/gateway-target-manager";
+import { createOrUpsertApiKeyProvider } from "../utils/credential-provider-manager";
+import {
+  getRegistryService,
+  validateImportDescriptor,
+} from "./agent-config-resolver";
+import { createADR } from "./adr-resolver";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  hasRoleFromEvent,
+} from "../utils/auth-event";
+import { probeReachability } from "../utils/reachability-probe";
+import { v4 as uuidv4 } from "uuid";
+import { publishEvent, EventTypes } from "../utils/events";
+import { grantFabricatorAuthority } from "./registry-agent-authority-lifecycle";
+import { getGovernanceEnforce } from "../utils/governance-flag";
 import {
   storeAgentInvocationSecret,
   getAgentInvocationSecret,
   type StoreAgentInvocationSecretResult,
-} from '../utils/credential-manager';
-import { sanitizeUntrustedAgentOutput } from '../utils/sanitize-agent-output';
-import type { AgentEvent, AuthContext } from '../types';
+} from "../utils/credential-manager";
+import { sanitizeUntrustedAgentOutput } from "../utils/sanitize-agent-output";
+import type { AgentEvent, AuthContext } from "../types";
 import {
   resolveSourceRef,
   tagScanDiscover,
@@ -57,20 +64,23 @@ import {
   getDiscoveryAdapterForSubstrate,
   UnsupportedSourceError,
   InvalidSourceRefError,
-} from '../services/agent-discovery';
-import { buildDefaultAgentSourceRegistry } from '../adapters/agent-source/registry-factory';
-import { assumeRoleCredentials, isCrossAccountRoleArn } from '../utils/trust-path';
+} from "../services/agent-discovery";
+import { buildDefaultAgentSourceRegistry } from "../adapters/agent-source/registry-factory";
+import {
+  assumeRoleCredentials,
+  isCrossAccountRoleArn,
+} from "../utils/trust-path";
 import {
   vendImportCredentials,
   toInvokeCredentials,
-} from '../adapters/agent-source/invoke-support';
-import type { InvokeCredentials } from '../adapters/agent-source/invoke-support';
+} from "../adapters/agent-source/invoke-support";
+import type { InvokeCredentials } from "../adapters/agent-source/invoke-support";
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
   Confidence,
   JsonSchema,
-} from '../adapters/agent-source/types';
+} from "../adapters/agent-source/types";
 import type {
   AgentConfig,
   AgentCustomMetadata,
@@ -83,17 +93,17 @@ import type {
   GatewayPublicationMetadata,
   ProposedManifestMetadata,
   RegistryRecord,
-} from '../services/registry-service';
+} from "../services/registry-service";
 
 // Re-export the shared RegistryService singleton reset so the whole import
 // surface (and tests) can be imported from this module.
-export { _resetRegistryService } from './agent-config-resolver';
+export { _resetRegistryService } from "./agent-config-resolver";
 
 /** How a detected import conflict should be resolved by the caller. */
-export type ImportConflictResolution = 'link' | 'replace' | 'copy';
+export type ImportConflictResolution = "link" | "replace" | "copy";
 
 /** Why an incoming import collided with an existing record. */
-export type ImportConflictReason = 'sourceArn' | 'name';
+export type ImportConflictReason = "sourceArn" | "name";
 
 /**
  * Returned (instead of an AgentConfig) when an import collides with an
@@ -181,12 +191,16 @@ export interface ImportReachabilityResult {
   checkedAt: string;
 }
 
-const CONFLICT_OPTIONS: readonly ImportConflictResolution[] = ['link', 'replace', 'copy'];
+const CONFLICT_OPTIONS: readonly ImportConflictResolution[] = [
+  "link",
+  "replace",
+  "copy",
+];
 
 const AGENT_METADATA_DEFAULTS: AgentCustomMetadata = {
   categories: [],
-  icon: '',
-  state: 'inactive',
+  icon: "",
+  state: "inactive",
 };
 
 // --- Tier-3 manifest proposal (B2): Fabricator-queue enqueue ---------------
@@ -209,7 +223,7 @@ const sqsClient = new SQSClient({});
 function getFabricatorQueueUrl(): string {
   const url = process.env.FABRICATOR_QUEUE_URL;
   if (!url) {
-    throw new Error('FABRICATOR_QUEUE_URL is not configured');
+    throw new Error("FABRICATOR_QUEUE_URL is not configured");
   }
   return url;
 }
@@ -262,7 +276,7 @@ interface Tier3ProposalSignals {
  * human-readable rather than a UUID because createADR does not validate
  * `projectId` as a UUID.
  */
-export const SYNTHETIC_IMPORT_PROJECT_ID = 'citadel-imports-global';
+export const SYNTHETIC_IMPORT_PROJECT_ID = "citadel-imports-global";
 
 /**
  * System principal under which import-triggered ADRs are written. The import
@@ -275,10 +289,10 @@ export const SYNTHETIC_IMPORT_PROJECT_ID = 'citadel-imports-global';
  * userId becomes the ADR's `createdBy`, yielding a clean audit trail.
  */
 const SYSTEM_IMPORT_ADR_AUTHOR: AuthContext = {
-  userId: 'system:agent-import',
-  username: 'system:agent-import',
+  userId: "system:agent-import",
+  username: "system:agent-import",
   groups: [],
-  roles: ['admin'],
+  roles: ["admin"],
 };
 
 /** Imported-agent metadata: standard agent metadata plus the importer identity. */
@@ -310,21 +324,23 @@ interface ImportAgentEvent {
 // --- Narrowing helpers ------------------------------------------------------
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+  return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
 function asStringArray(value: unknown): string[] | undefined {
-  return Array.isArray(value) && value.every((v) => typeof v === 'string')
+  return Array.isArray(value) && value.every((v) => typeof v === "string")
     ? (value as string[])
     : undefined;
 }
 
-function isConflictResolution(value: unknown): value is ImportConflictResolution {
-  return value === 'link' || value === 'replace' || value === 'copy';
+function isConflictResolution(
+  value: unknown,
+): value is ImportConflictResolution {
+  return value === "link" || value === "replace" || value === "copy";
 }
 
 // --- Best-effort import lifecycle event emission ---------------------------
@@ -349,7 +365,7 @@ async function emitImportEvent(
   try {
     const event: AgentEvent = {
       eventType,
-      projectId: '',
+      projectId: "",
       payload,
       timestamp: new Date().toISOString(),
       correlationId,
@@ -374,7 +390,10 @@ function uniqueSubstrates(candidates: FlatAgentCandidate[]): string[] {
  * integer (`"<base> (imported copy 2)"`, `3`, …) until an unused name is
  * found. Exported for direct unit testing of the increment logic.
  */
-export function buildImportCopyName(baseName: string, takenNames: Set<string>): string {
+export function buildImportCopyName(
+  baseName: string,
+  takenNames: Set<string>,
+): string {
   const first = `${baseName} (imported copy)`;
   if (!takenNames.has(first)) return first;
   let n = 2;
@@ -389,8 +408,10 @@ export function buildImportCopyName(baseName: string, takenNames: Set<string>): 
  * onto the internal lower-case {@link ImportConflictResolution}. Returns
  * undefined for any absent/unrecognised value so the caller is re-prompted.
  */
-function mapConflictPolicy(value: unknown): ImportConflictResolution | undefined {
-  if (typeof value !== 'string') return undefined;
+function mapConflictPolicy(
+  value: unknown,
+): ImportConflictResolution | undefined {
+  if (typeof value !== "string") return undefined;
   const lowered = value.toLowerCase();
   return isConflictResolution(lowered) ? lowered : undefined;
 }
@@ -402,7 +423,7 @@ function mapConflictPolicy(value: unknown): ImportConflictResolution | undefined
  */
 function parseManifestInput(value: unknown): Record<string, unknown> {
   if (isRecord(value)) return value;
-  if (typeof value === 'string' && value.trim() !== '') {
+  if (typeof value === "string" && value.trim() !== "") {
     try {
       const parsed: unknown = JSON.parse(value);
       if (isRecord(parsed)) return parsed;
@@ -428,7 +449,7 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
   const flat = isRecord(input) ? input : {};
 
   const auth: Record<string, unknown> = {
-    mode: asNonEmptyString(flat.invocationAuthMode) ?? 'NONE',
+    mode: asNonEmptyString(flat.invocationAuthMode) ?? "NONE",
   };
   const secretRef = asNonEmptyString(flat.invocationSecretRef);
   if (secretRef) auth.secretRef = secretRef;
@@ -444,7 +465,7 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
     protocol: flat.invocationProtocol,
     target: flat.invocationTarget,
     auth,
-    mode: asNonEmptyString(flat.invocationMode) ?? 'sync',
+    mode: asNonEmptyString(flat.invocationMode) ?? "sync",
   };
   if (region) invocation.region = region;
   if (account) invocation.account = account;
@@ -452,7 +473,7 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
   const origin: Record<string, unknown> = {
     substrate: flat.substrate,
     discoveredAt: new Date().toISOString(),
-    ownership: 'external',
+    ownership: "external",
   };
   const sourceArn = asNonEmptyString(flat.sourceArn);
   if (sourceArn) origin.sourceArn = sourceArn;
@@ -480,8 +501,11 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
   // Unlike a secret it is NOT sensitive (the role must trust Citadel and is
   // externalId-gated), so it is persisted verbatim; it is kept OFF the nested
   // invocation here so the flat→nested stamp stays single-sourced in importAgent.
-  const invocationAnalysisRoleArn = asNonEmptyString(flat.invocationAnalysisRoleArn);
-  if (invocationAnalysisRoleArn) descriptor.invocationAnalysisRoleArn = invocationAnalysisRoleArn;
+  const invocationAnalysisRoleArn = asNonEmptyString(
+    flat.invocationAnalysisRoleArn,
+  );
+  if (invocationAnalysisRoleArn)
+    descriptor.invocationAnalysisRoleArn = invocationAnalysisRoleArn;
   // Optional operator-supplied CROSS-ACCOUNT INVOKE role + STS external id
   // (US-IMP Phase-2 keystone). Carried as top-level descriptor fields — mirroring
   // invocationAnalysisRoleArn — so importAgent can stamp them onto
@@ -491,7 +515,8 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
   const invocationRoleArn = asNonEmptyString(flat.invocationRoleArn);
   if (invocationRoleArn) descriptor.invocationRoleArn = invocationRoleArn;
   const invocationExternalId = asNonEmptyString(flat.invocationExternalId);
-  if (invocationExternalId) descriptor.invocationExternalId = invocationExternalId;
+  if (invocationExternalId)
+    descriptor.invocationExternalId = invocationExternalId;
   return descriptor;
 }
 
@@ -520,7 +545,13 @@ export function toImportAgentResult(
       options: [...result.options],
     };
   }
-  return { agent: result, conflict: false, existingId: null, reason: null, options: null };
+  return {
+    agent: result,
+    conflict: false,
+    existingId: null,
+    reason: null,
+    options: null,
+  };
 }
 
 /**
@@ -554,74 +585,76 @@ export const handler = async (
   const correlationId = uuidv4();
   try {
     switch (fieldName) {
-      case 'importAgent': {
+      case "importAgent": {
         const descriptor = buildImportDescriptor(event.arguments?.input);
         const result = await importAgent(descriptor, event);
         return toImportAgentResult(result);
       }
-      case 'attestAgentImport': {
+      case "attestAgentImport": {
         // Authentication is required up-front (mirrors the discovery queries);
         // the admin/architect authorization gate lives inside attestAgentImport.
         requireAuthenticated(event);
         const agentId = asNonEmptyString(event.arguments?.agentId);
         if (!agentId) {
-          throw new Error('attestAgentImport: agentId is required');
+          throw new Error("attestAgentImport: agentId is required");
         }
         return await attestAgentImport(agentId, event, correlationId);
       }
-      case 'testImportedAgent': {
+      case "testImportedAgent": {
         // Authentication is required up-front (mirrors attestAgentImport); the
         // admin/architect authorization gate lives inside testImportedAgent.
         requireAuthenticated(event);
         return await testImportedAgent(event.arguments?.input, event);
       }
-      case 'probeAgentCandidate': {
+      case "probeAgentCandidate": {
         // Authentication is required up-front (mirrors testImportedAgent); the
         // admin/architect authorization gate lives inside probeAgentCandidate.
         requireAuthenticated(event);
         return await probeAgentCandidate(event.arguments?.input, event);
       }
-      case 'probeImportReachability': {
+      case "probeImportReachability": {
         // Authentication is required up-front (mirrors the sibling import
         // mutations); the admin/architect authorization gate lives inside
         // probeImportReachability.
         requireAuthenticated(event);
         const importId = asNonEmptyString(event.arguments?.importId);
         if (!importId) {
-          throw new Error('probeImportReachability: importId is required');
+          throw new Error("probeImportReachability: importId is required");
         }
         return await probeImportReachability(importId, event);
       }
-      case 'publishImportToGateway': {
+      case "publishImportToGateway": {
         // Authentication is required up-front (mirrors the sibling import
         // mutations); the admin/architect authorization gate lives inside
         // publishImportToGateway.
         requireAuthenticated(event);
         const importId = asNonEmptyString(event.arguments?.importId);
         if (!importId) {
-          throw new Error('publishImportToGateway: importId is required');
+          throw new Error("publishImportToGateway: importId is required");
         }
         return await publishImportToGateway(importId, event);
       }
-      case 'unpublishImportFromGateway': {
+      case "unpublishImportFromGateway": {
         // Authentication is required up-front (mirrors the sibling import
         // mutations); the admin/architect authorization gate lives inside
         // unpublishImportFromGateway.
         requireAuthenticated(event);
         const importId = asNonEmptyString(event.arguments?.importId);
         if (!importId) {
-          throw new Error('unpublishImportFromGateway: importId is required');
+          throw new Error("unpublishImportFromGateway: importId is required");
         }
         return await unpublishImportFromGateway(importId, event);
       }
-      case 'proposeAgentManifestTier3': {
+      case "proposeAgentManifestTier3": {
         // Authentication is required up-front (mirrors the sibling import
         // mutations); the admin/architect authorization gate lives inside
         // proposeAgentManifestTier3.
         requireAuthenticated(event);
         const ref = asNonEmptyString(event.arguments?.ref);
         if (!ref) {
-          throw new InvalidSourceRefError('proposeAgentManifestTier3: ref is required');
+          throw new InvalidSourceRefError(
+            "proposeAgentManifestTier3: ref is required",
+          );
         }
         return await proposeAgentManifestTier3(
           ref,
@@ -631,37 +664,45 @@ export const handler = async (
           correlationId,
         );
       }
-      case 'acceptProposedManifestTier3': {
+      case "acceptProposedManifestTier3": {
         // Authentication is required up-front (mirrors the sibling import
         // mutations); the admin/architect (human) gate lives inside
         // acceptProposedManifestTier3.
         requireAuthenticated(event);
         const importId = asNonEmptyString(event.arguments?.importId);
         if (!importId) {
-          throw new Error('acceptProposedManifestTier3: importId is required');
+          throw new Error("acceptProposedManifestTier3: importId is required");
         }
         return await acceptProposedManifestTier3(importId, event);
       }
-      case 'discoverAgents': {
+      case "discoverAgents": {
         requireAuthenticated(event);
         requireDiscoveryRole(event);
         const input = event.arguments?.input;
         const candidates = await discoverAgents(input);
         // Best-effort discovery summary — exactly one event per discovery call.
-        const source = isRecord(input) ? asNonEmptyString(input.source) ?? null : null;
+        const source = isRecord(input)
+          ? (asNonEmptyString(input.source) ?? null)
+          : null;
         await emitImportEvent(
           EventTypes.AGENT_IMPORT_DISCOVERED,
-          { source, candidateCount: candidates.length, substrates: uniqueSubstrates(candidates) },
+          {
+            source,
+            candidateCount: candidates.length,
+            substrates: uniqueSubstrates(candidates),
+          },
           correlationId,
         );
         return candidates;
       }
-      case 'describeAgentCandidate': {
+      case "describeAgentCandidate": {
         requireAuthenticated(event);
         requireDiscoveryRole(event);
         const ref = asNonEmptyString(event.arguments?.ref);
         if (!ref) {
-          throw new InvalidSourceRefError('describeAgentCandidate: ref is required');
+          throw new InvalidSourceRefError(
+            "describeAgentCandidate: ref is required",
+          );
         }
         // Optional CROSS-ACCOUNT describe (US-IMP Phase-2): when a discovery
         // role is supplied, the describe runs in the TARGET account under that
@@ -676,16 +717,16 @@ export const handler = async (
         throw new Error(`Unknown field: ${String(fieldName)}`);
     }
   } catch (error) {
-    console.error('agent-import-resolver error:', error);
+    console.error("agent-import-resolver error:", error);
     // Best-effort failure telemetry, emitted BEFORE rethrowing. The original
     // error is always what propagates to the caller — emission never alters it.
     const operation =
-      fieldName === 'importAgent'
-        ? 'import'
-        : fieldName === 'discoverAgents'
-          ? 'discover'
-          : fieldName === 'describeAgentCandidate'
-            ? 'describe'
+      fieldName === "importAgent"
+        ? "import"
+        : fieldName === "discoverAgents"
+          ? "discover"
+          : fieldName === "describeAgentCandidate"
+            ? "describe"
             : undefined;
     if (operation) {
       const message = error instanceof Error ? error.message : String(error);
@@ -698,7 +739,10 @@ export const handler = async (
     // Surface discovery errors (unsupported substrate / unparseable ref) as
     // clean GraphQL errors — message only, no internal stack — so the caller
     // gets an actionable message instead of an opaque failure.
-    if (error instanceof UnsupportedSourceError || error instanceof InvalidSourceRefError) {
+    if (
+      error instanceof UnsupportedSourceError ||
+      error instanceof InvalidSourceRefError
+    ) {
       throw new Error(error.message);
     }
     throw error;
@@ -734,8 +778,14 @@ export interface FlatAgentCandidate {
  */
 function requireAuthenticated(event: ImportAgentEvent): void {
   const identity = event.identity;
-  if (!identity || typeof identity !== 'object' || Object.keys(identity).length === 0) {
-    throw new Error('Unauthenticated: discovery queries require an authenticated caller');
+  if (
+    !identity ||
+    typeof identity !== "object" ||
+    Object.keys(identity).length === 0
+  ) {
+    throw new Error(
+      "Unauthenticated: discovery queries require an authenticated caller",
+    );
   }
 }
 
@@ -751,10 +801,12 @@ function requireAuthenticated(event: ImportAgentEvent): void {
  * existing org-scoped flow (tenant derived from the caller's identity).
  */
 function requireDiscoveryRole(event: ImportAgentEvent): void {
-  if (isAdminFromEvent(event) || hasRoleFromEvent(event, 'architect')) {
+  if (isAdminFromEvent(event) || hasRoleFromEvent(event, "architect")) {
     return;
   }
-  throw new Error('Unauthorized: discovery queries require the admin or architect role');
+  throw new Error(
+    "Unauthorized: discovery queries require the admin or architect role",
+  );
 }
 
 /** Maps an internal (origin-nested) {@link AgentCandidate} to the flat GraphQL shape. */
@@ -774,8 +826,8 @@ function toFlatCandidate(candidate: AgentCandidate): FlatAgentCandidate {
 
 /** Standard ARN field extraction: `arn:partition:service:region:account:…`. */
 function parseArnFields(arn: string): { region?: string; account?: string } {
-  const parts = arn.split(':');
-  if (parts[0] !== 'arn' || parts.length < 6) return {};
+  const parts = arn.split(":");
+  if (parts[0] !== "arn" || parts.length < 6) return {};
   return { region: parts[3] || undefined, account: parts[4] || undefined };
 }
 
@@ -786,15 +838,21 @@ function parseArnFields(arn: string): { region?: string; account?: string } {
  * consistent display names.
  */
 function deriveDisplayName(ref: string): string {
-  if (ref.startsWith('arn:')) {
-    const parts = ref.split(':');
-    const resource = parts.length >= 6 ? parts.slice(5).join(':') : ref;
-    const tail = resource.split(/[/:]/).filter((s) => s.length > 0).pop();
+  if (ref.startsWith("arn:")) {
+    const parts = ref.split(":");
+    const resource = parts.length >= 6 ? parts.slice(5).join(":") : ref;
+    const tail = resource
+      .split(/[/:]/)
+      .filter((s) => s.length > 0)
+      .pop();
     return tail ?? ref;
   }
   try {
     const url = new URL(ref);
-    const seg = url.pathname.split('/').filter((s) => s.length > 0).pop();
+    const seg = url.pathname
+      .split("/")
+      .filter((s) => s.length > 0)
+      .pop();
     return seg ?? url.host ?? ref;
   } catch {
     return ref;
@@ -803,9 +861,11 @@ function deriveDisplayName(ref: string): string {
 
 /** Narrows an AWSJSON `manifest` argument (string or object) for candidateFromManifest. */
 function asManifestInput(value: unknown): string | Record<string, unknown> {
-  if (typeof value === 'string' && value.trim() !== '') return value;
+  if (typeof value === "string" && value.trim() !== "") return value;
   if (isRecord(value)) return value;
-  throw new InvalidSourceRefError('manifest is required when source is MANIFEST');
+  throw new InvalidSourceRefError(
+    "manifest is required when source is MANIFEST",
+  );
 }
 
 /**
@@ -822,7 +882,7 @@ async function discoverAgents(input: unknown): Promise<FlatAgentCandidate[]> {
   const source = asNonEmptyString(flat.source);
 
   switch (source) {
-    case 'SCAN': {
+    case "SCAN": {
       // Cross-account discovery: when discoveryRoleArn is supplied,
       // tagScanDiscover assumes that READ-ONLY role in the TARGET account
       // (externalId-gated) and scans THERE; absent ⇒ same-account scan under
@@ -837,13 +897,15 @@ async function discoverAgents(input: unknown): Promise<FlatAgentCandidate[]> {
       });
       return candidates.map(toFlatCandidate);
     }
-    case 'PASTE': {
+    case "PASTE": {
       const ref = asNonEmptyString(flat.ref);
       if (!ref) {
-        throw new InvalidSourceRefError('discoverAgents: ref is required when source is PASTE');
+        throw new InvalidSourceRefError(
+          "discoverAgents: ref is required when source is PASTE",
+        );
       }
       const { substrate } = resolveSourceRef(ref);
-      const isArn = ref.startsWith('arn:');
+      const isArn = ref.startsWith("arn:");
       const arnFields = isArn ? parseArnFields(ref) : {};
       return [
         {
@@ -853,13 +915,15 @@ async function discoverAgents(input: unknown): Promise<FlatAgentCandidate[]> {
           sourceArn: isArn ? ref : null,
           region: arnFields.region ?? null,
           account: arnFields.account ?? null,
-          ownership: 'external',
+          ownership: "external",
           discoveredAt: new Date().toISOString(),
         },
       ];
     }
-    case 'MANIFEST': {
-      const { candidate } = candidateFromManifest(asManifestInput(flat.manifest));
+    case "MANIFEST": {
+      const { candidate } = candidateFromManifest(
+        asManifestInput(flat.manifest),
+      );
       return [toFlatCandidate(candidate)];
     }
     default:
@@ -897,22 +961,29 @@ async function resolveDescribeCredentialProvider(
   // Cross-account: assume the operator-supplied READ-ONLY discovery role
   // (externalId-gated). A throw here propagates to the caller (the handler),
   // surfacing a clean GraphQL error. The assumed credentials are NEVER logged.
-  const assumed = await assumeRoleCredentials(discoveryRoleArn, discoveryExternalId);
+  const assumed = await assumeRoleCredentials(
+    discoveryRoleArn,
+    discoveryExternalId,
+  );
   // Map the raw temp credentials onto the invoke-credentials shape with the SAME
   // mapper the invoke paths use. toInvokeCredentials consumes the
   // VendedCredentials shape (expiry as an ISO string), so the Date expiration is
   // serialized; only the access-key/secret/token are required.
-  const credentialProvider: InvokeCredentials | undefined = toInvokeCredentials({
-    accessKeyId: assumed.accessKeyId,
-    secretAccessKey: assumed.secretAccessKey,
-    sessionToken: assumed.sessionToken,
-    ...(assumed.expiration ? { expiresAt: assumed.expiration.toISOString() } : {}),
-  });
+  const credentialProvider: InvokeCredentials | undefined = toInvokeCredentials(
+    {
+      accessKeyId: assumed.accessKeyId,
+      secretAccessKey: assumed.secretAccessKey,
+      sessionToken: assumed.sessionToken,
+      ...(assumed.expiration
+        ? { expiresAt: assumed.expiration.toISOString() }
+        : {}),
+    },
+  );
   if (!credentialProvider) {
     // Assume produced no usable credentials — do NOT fall back to this Lambda's
     // identity (it would describe in the wrong account).
     throw new Error(
-      'describeAgentCandidate: cross-account discovery-role assume produced no usable credentials',
+      "describeAgentCandidate: cross-account discovery-role assume produced no usable credentials",
     );
   }
   return credentialProvider;
@@ -952,13 +1023,13 @@ async function describeAgentCandidate(
   discoveryExternalId?: string,
 ): Promise<string> {
   const { protocol, substrate, target } = resolveSourceRef(ref);
-  const isArn = ref.startsWith('arn:');
+  const isArn = ref.startsWith("arn:");
   const arnFields = isArn ? parseArnFields(ref) : {};
 
   const origin: AgentOrigin = {
     substrate,
     discoveredAt: new Date().toISOString(),
-    ownership: 'external',
+    ownership: "external",
   };
   if (isArn) origin.sourceArn = ref;
   if (arnFields.region) origin.region = arnFields.region;
@@ -984,8 +1055,12 @@ async function describeAgentCandidate(
   // HTTP adapter); otherwise the protocol-keyed registry path (unchanged). The
   // assumed credentialProvider is threaded into the discovery adapter so a
   // cross-account ECS describe runs in the TARGET account.
-  const discoveryAdapter = getDiscoveryAdapterForSubstrate(substrate, { credentialProvider });
-  const adapter = discoveryAdapter ?? buildDescribeRegistry(credentialProvider).resolve(protocol);
+  const discoveryAdapter = getDiscoveryAdapterForSubstrate(substrate, {
+    credentialProvider,
+  });
+  const adapter =
+    discoveryAdapter ??
+    buildDescribeRegistry(credentialProvider).resolve(protocol);
   const descriptor = await adapter.describe(candidate);
   return JSON.stringify(descriptor);
 }
@@ -1006,24 +1081,32 @@ export async function importAgent(
   //    agent-config resolver so import and create stay in lock-step.
   const validation = validateImportDescriptor(input);
   if (!validation.valid) {
-    throw new Error(`Invalid import descriptor: ${validation.errors.join('; ')}`);
+    throw new Error(
+      `Invalid import descriptor: ${validation.errors.join("; ")}`,
+    );
   }
   // validateImportDescriptor guarantees `input` is an object with plain
   // invocation/origin sub-objects; re-narrow so the type-checker agrees.
-  if (!isRecord(input) || !isRecord(input.invocation) || !isRecord(input.origin)) {
-    throw new Error('Invalid import descriptor: malformed structure');
+  if (
+    !isRecord(input) ||
+    !isRecord(input.invocation) ||
+    !isRecord(input.origin)
+  ) {
+    throw new Error("Invalid import descriptor: malformed structure");
   }
   const root = input;
 
   const name = asNonEmptyString(root.name);
   if (!name) {
-    throw new Error('Invalid import descriptor: name is required and must be a non-empty string');
+    throw new Error(
+      "Invalid import descriptor: name is required and must be a non-empty string",
+    );
   }
 
   // 2. Tenant is ALWAYS derived from the caller's identity, never the input.
   const orgId = await extractOrgFromEvent(event);
   if (!orgId) {
-    throw new Error('Cannot determine caller organization');
+    throw new Error("Cannot determine caller organization");
   }
 
   // Build the typed descriptor blocks. validateImportDescriptor confirmed
@@ -1060,15 +1143,19 @@ export async function importAgent(
   }
   const origin = {
     ...(root.origin as Record<string, unknown>),
-    ownership: 'external',
+    ownership: "external",
   } as unknown as AgentOrigin;
   // An imported agent always carries a manifest so Registry reads classify the
   // record as an agent (vs a tool). Fall back to {} when absent.
   const manifest = isRecord(root.manifest) ? root.manifest : {};
   const categories = asStringArray(root.categories) ?? [];
   const createdBy =
-    asNonEmptyString(event.identity?.sub) ?? asNonEmptyString(event.identity?.username) ?? 'import';
-  const onConflict = isConflictResolution(root.onConflict) ? root.onConflict : undefined;
+    asNonEmptyString(event.identity?.sub) ??
+    asNonEmptyString(event.identity?.username) ??
+    "import";
+  const onConflict = isConflictResolution(root.onConflict)
+    ? root.onConflict
+    : undefined;
   // RAW caller-submitted invocation secret (transient; see buildImportDescriptor).
   // Persisted to Secrets Manager on a record-creating path — only the returned
   // ref is ever written to the record. Read here; consumed by
@@ -1080,13 +1167,17 @@ export async function importAgent(
   // 3. Conflict resolution. Scope dedupe to the caller's org so one tenant can
   //    never link to / replace another tenant's record (cross-tenant
   //    isolation). Primary key: origin.sourceArn; secondary: display name.
-  const allRecords = await registryService.listResources('agent');
+  const allRecords = await registryService.listResources("agent");
   const orgRecords = allRecords.filter(
     (rec) => readMeta(registryService, rec).orgId === orgId,
   );
 
-  const inputSourceArn = asNonEmptyString((root.origin as Record<string, unknown>).sourceArn);
-  const inputSubstrate = asNonEmptyString((root.origin as Record<string, unknown>).substrate);
+  const inputSourceArn = asNonEmptyString(
+    (root.origin as Record<string, unknown>).sourceArn,
+  );
+  const inputSubstrate = asNonEmptyString(
+    (root.origin as Record<string, unknown>).substrate,
+  );
 
   // Best-effort `agent.import.registered` emission for the paths that CREATE,
   // REPLACE, or COPY a record (never on a no-op link or unresolved conflict).
@@ -1103,15 +1194,16 @@ export async function importAgent(
 
   if (inputSourceArn) {
     match = orgRecords.find(
-      (rec) => readMeta(registryService, rec).origin?.sourceArn === inputSourceArn,
+      (rec) =>
+        readMeta(registryService, rec).origin?.sourceArn === inputSourceArn,
     );
-    if (match) reason = 'sourceArn';
+    if (match) reason = "sourceArn";
   }
   if (!match) {
     const nameMatch = orgRecords.find((rec) => rec.name === name);
     if (nameMatch) {
       match = nameMatch;
-      reason = 'name';
+      reason = "name";
     }
   }
 
@@ -1122,15 +1214,19 @@ export async function importAgent(
 
   // Serialised custom metadata carrying a fresh 'pending' governance attestation.
   // enforcementMode comes from the governance rollout flag (env name from
-  // ENVIRONMENT; the reader fails-open to 'permissive' internally and never
+  // ENVIRONMENT; the reader defaults to 'shadow' internally and never
   // throws). Built lazily so attestation is stamped only when a record is
   // actually written.
-  const buildStampedCustomMetadata = async (adrId?: string): Promise<string> => {
-    const enforcementMode = await getGovernanceEnforce(process.env.ENVIRONMENT || 'unknown');
+  const buildStampedCustomMetadata = async (
+    adrId?: string,
+  ): Promise<string> => {
+    const enforcementMode = await getGovernanceEnforce(
+      process.env.ENVIRONMENT || "unknown",
+    );
     const governanceAttestation: NonNullable<
-      AgentCustomMetadata['governanceAttestation']
+      AgentCustomMetadata["governanceAttestation"]
     > = {
-      status: 'pending',
+      status: "pending",
       enforcementMode,
       authorityRequested: true,
       requestedAt: new Date().toISOString(),
@@ -1185,19 +1281,19 @@ export async function importAgent(
           title: `Import external agent: ${name}`,
           decision:
             `Registered externally-owned agent "${name}" as a DRAFT/inactive ` +
-            `Registry record (substrate=${inputSubstrate ?? 'unknown'}, ` +
-            `sourceArn=${inputSourceArn ?? 'none'}, orgId=${orgId}). Ownership is ` +
+            `Registry record (substrate=${inputSubstrate ?? "unknown"}, ` +
+            `sourceArn=${inputSourceArn ?? "none"}, orgId=${orgId}). Ownership is ` +
             `external and the agent is never auto-activated by import.`,
           reasoning:
-            'System-generated governance record: importing an externally-owned ' +
-            'agent introduces third-party execution surface into the organization, ' +
-            'so it is tracked as an architecture decision for audit and for the ' +
-            'later DRAFT→APPROVED activation review.',
+            "System-generated governance record: importing an externally-owned " +
+            "agent introduces third-party execution surface into the organization, " +
+            "so it is tracked as an architecture decision for audit and for the " +
+            "later DRAFT→APPROVED activation review.",
           constraints: [],
           alternativesConsidered: [],
           revisitConditions: [],
-          severity: 'LOW',
-          affectsModules: ['agent-registry'],
+          severity: "LOW",
+          affectsModules: ["agent-registry"],
           reviewers: [],
           sourceRoundIds: [],
         },
@@ -1206,7 +1302,7 @@ export async function importAgent(
       return adr.adrId;
     } catch (err) {
       console.error(
-        'agent-import-resolver: best-effort import ADR creation failed (swallowed):',
+        "agent-import-resolver: best-effort import ADR creation failed (swallowed):",
         err,
       );
       return undefined;
@@ -1229,16 +1325,20 @@ export async function importAgent(
     try {
       // Keyed by a fresh UUID under /citadel/agents/{orgId}/{id} so concurrent
       // imports never collide; the returned ARN becomes the secretRef.
-      stored = await storeAgentInvocationSecret(orgId, uuidv4(), rawInvocationSecret);
+      stored = await storeAgentInvocationSecret(
+        orgId,
+        uuidv4(),
+        rawInvocationSecret,
+      );
     } catch (err) {
       // Redaction: the raw secret is never interpolated into the logged or
       // thrown message — only the (secret-free) underlying error is surfaced.
       console.error(
-        'agent-import-resolver: failed to store imported-agent invocation secret (raw value not logged):',
+        "agent-import-resolver: failed to store imported-agent invocation secret (raw value not logged):",
         err,
       );
       throw new Error(
-        'Failed to persist invocation secret to Secrets Manager for imported agent',
+        "Failed to persist invocation secret to Secrets Manager for imported agent",
       );
     }
     // mode is already set from invocationAuthMode by buildImportDescriptor; we
@@ -1259,32 +1359,46 @@ export async function importAgent(
       };
     }
     // link → idempotent: return the existing record, no mutation (no stamp/grant).
-    if (onConflict === 'link') {
+    if (onConflict === "link") {
       return registryService.mapToAgentConfig(match);
     }
     // replace → overwrite the existing record in place (preserve its recordId).
-    if (onConflict === 'replace') {
+    if (onConflict === "replace") {
       await ensureInvocationSecretStored();
       const adrId = await createImportAdrBestEffort();
-      const replaced = await registryService.updateResource('agent', match.recordId, {
-        name,
-        description: buildConfigDescription(name, manifest, invocation, origin),
-        customMetadata: await buildStampedCustomMetadata(adrId),
-      });
+      const replaced = await registryService.updateResource(
+        "agent",
+        match.recordId,
+        {
+          name,
+          description: buildConfigDescription(
+            name,
+            manifest,
+            invocation,
+            origin,
+          ),
+          customMetadata: await buildStampedCustomMetadata(adrId),
+        },
+      );
       const config = registryService.mapToAgentConfig(replaced);
       await grantAuthorityBestEffort(replaced.recordId);
       await emitRegistered(config);
       return config;
     }
     // copy → create a new record under a non-colliding suffixed name.
-    if (onConflict === 'copy') {
+    if (onConflict === "copy") {
       await ensureInvocationSecretStored();
       const taken = new Set(orgRecords.map((r) => r.name));
       const copyName = buildImportCopyName(name, taken);
       const adrId = await createImportAdrBestEffort();
-      const copied = await registryService.createResource('agent', copyName, {
+      const copied = await registryService.createResource("agent", copyName, {
         name: copyName,
-        description: buildConfigDescription(copyName, manifest, invocation, origin),
+        description: buildConfigDescription(
+          copyName,
+          manifest,
+          invocation,
+          origin,
+        ),
         customMetadata: await buildStampedCustomMetadata(adrId),
       });
       const config = registryService.mapToAgentConfig(copied);
@@ -1298,7 +1412,7 @@ export async function importAgent(
   //    DRAFT/inactive record. Never auto-activate.
   await ensureInvocationSecretStored();
   const adrId = await createImportAdrBestEffort();
-  const created = await registryService.createResource('agent', name, {
+  const created = await registryService.createResource("agent", name, {
     name,
     description: buildConfigDescription(name, manifest, invocation, origin),
     customMetadata: await buildStampedCustomMetadata(adrId),
@@ -1344,14 +1458,16 @@ export async function attestAgentImport(
 ): Promise<AgentConfig> {
   // 1. Authorization: admin OR architect only (same gate as discovery).
   const isAdmin = isAdminFromEvent(event);
-  if (!isAdmin && !hasRoleFromEvent(event, 'architect')) {
-    throw new Error('Unauthorized: attestAgentImport requires the admin or architect role');
+  if (!isAdmin && !hasRoleFromEvent(event, "architect")) {
+    throw new Error(
+      "Unauthorized: attestAgentImport requires the admin or architect role",
+    );
   }
 
   const registryService = getRegistryService();
 
   // 2. Load the record. getResource returns null on a 404 → clean not-found.
-  const record = await registryService.getResource('agent', agentId);
+  const record = await registryService.getResource("agent", agentId);
   if (!record) {
     throw new Error(`Agent not found: ${agentId}`);
   }
@@ -1374,11 +1490,11 @@ export async function attestAgentImport(
   //    is not an imported record, so there is nothing to attest.
   const attestation = meta.governanceAttestation;
   if (!attestation) {
-    throw new Error('not an imported agent: nothing to attest');
+    throw new Error("not an imported agent: nothing to attest");
   }
 
   // 6. Idempotent no-op: already attested → return unchanged (no write/event).
-  if (attestation.status === 'attested') {
+  if (attestation.status === "attested") {
     return registryService.mapToAgentConfig(record);
   }
 
@@ -1388,10 +1504,12 @@ export async function attestAgentImport(
   const attestedBy =
     asNonEmptyString(event.identity?.sub) ??
     asNonEmptyString(event.identity?.username) ??
-    'unknown';
-  const updatedAttestation: NonNullable<AgentCustomMetadata['governanceAttestation']> = {
+    "unknown";
+  const updatedAttestation: NonNullable<
+    AgentCustomMetadata["governanceAttestation"]
+  > = {
     ...attestation,
-    status: 'attested',
+    status: "attested",
     attestedBy,
     attestedAt: new Date().toISOString(),
   };
@@ -1402,9 +1520,13 @@ export async function attestAgentImport(
 
   // Update only the custom metadata in place (recordId preserved); name and
   // description are intentionally left untouched.
-  const updated = await registryService.updateResource('agent', record.recordId, {
-    customMetadata: registryService.serializeCustomMetadata(mergedMeta),
-  });
+  const updated = await registryService.updateResource(
+    "agent",
+    record.recordId,
+    {
+      customMetadata: registryService.serializeCustomMetadata(mergedMeta),
+    },
+  );
   const config = registryService.mapToAgentConfig(updated);
 
   // 8. Best-effort lifecycle event — never fails the mutation on emit error.
@@ -1453,14 +1575,16 @@ export async function probeImportReachability(
   // 1. Authorization: admin OR architect only (same gate as test-invoke/probe).
   //    This is the ONLY path that throws.
   const isAdmin = isAdminFromEvent(event);
-  if (!isAdmin && !hasRoleFromEvent(event, 'architect')) {
-    throw new Error('Unauthorized: probeImportReachability requires the admin or architect role');
+  if (!isAdmin && !hasRoleFromEvent(event, "architect")) {
+    throw new Error(
+      "Unauthorized: probeImportReachability requires the admin or architect role",
+    );
   }
 
   const registryService = getRegistryService();
 
   // 2. Load the record (null → clean not-found, mirrors attestAgentImport).
-  const record = await registryService.getResource('agent', importId);
+  const record = await registryService.getResource("agent", importId);
   if (!record) {
     throw new Error(`Agent not found: ${importId}`);
   }
@@ -1499,7 +1623,7 @@ export async function probeImportReachability(
   //    (secret-free) and still returns the classified result.
   const mergedMeta: AgentCustomMetadata = { ...meta, reachability };
   try {
-    await registryService.updateResource('agent', record.recordId, {
+    await registryService.updateResource("agent", record.recordId, {
       customMetadata: registryService.serializeCustomMetadata(mergedMeta),
     });
   } catch (err) {
@@ -1564,7 +1688,9 @@ async function resolveGatewayId(): Promise<string> {
   }
   const paramName = process.env.GATEWAY_ID_PARAM;
   if (paramName) {
-    const resp = await ssmGatewayClient.send(new GetParameterCommand({ Name: paramName }));
+    const resp = await ssmGatewayClient.send(
+      new GetParameterCommand({ Name: paramName }),
+    );
     const value = resp.Parameter?.Value;
     if (value) {
       cachedGatewayId = value;
@@ -1574,7 +1700,7 @@ async function resolveGatewayId(): Promise<string> {
     }
   }
   throw new Error(
-    'AgentCore Gateway not configured: set AGENTCORE_GATEWAY_ID or GATEWAY_ID_PARAM',
+    "AgentCore Gateway not configured: set AGENTCORE_GATEWAY_ID or GATEWAY_ID_PARAM",
   );
 }
 
@@ -1584,14 +1710,14 @@ async function resolveGatewayId(): Promise<string> {
  * secret-free human-readable note.
  */
 export interface GatewayPublicationResult {
-  status: 'published' | 'unpublished';
+  status: "published" | "unpublished";
   gatewayTargetId: string | null;
   detail: string;
 }
 
 /** Auth modes whose credential is offloaded to an AgentCore api-key provider. */
 const API_KEY_AUTH_MODES: ReadonlySet<AgentInvocationAuthMode> =
-  new Set<AgentInvocationAuthMode>(['API_KEY', 'BEARER']);
+  new Set<AgentInvocationAuthMode>(["API_KEY", "BEARER"]);
 
 /**
  * Shared admin/architect gate + record load for the gateway publish/unpublish
@@ -1610,12 +1736,12 @@ async function loadImportForGatewayOp(
   op: string,
 ): Promise<{ record: RegistryRecord; meta: AgentCustomMetadata }> {
   const isAdmin = isAdminFromEvent(event);
-  if (!isAdmin && !hasRoleFromEvent(event, 'architect')) {
+  if (!isAdmin && !hasRoleFromEvent(event, "architect")) {
     throw new Error(`Unauthorized: ${op} requires the admin or architect role`);
   }
 
   const registryService = getRegistryService();
-  const record = await registryService.getResource('agent', importId);
+  const record = await registryService.getResource("agent", importId);
   if (!record) {
     throw new Error(`Agent not found: ${importId}`);
   }
@@ -1658,27 +1784,27 @@ export async function publishImportToGateway(
   const { record, meta } = await loadImportForGatewayOp(
     importId,
     event,
-    'publishImportToGateway',
+    "publishImportToGateway",
   );
 
   // Idempotent: already published with a live target → return it (no duplicate
   // create, no re-write). Checked first so a re-publish is a clean no-op.
   const existing = meta.gatewayPublication;
-  if (existing && existing.status === 'published' && existing.gatewayTargetId) {
+  if (existing && existing.status === "published" && existing.gatewayTargetId) {
     return {
-      status: 'published',
+      status: "published",
       gatewayTargetId: existing.gatewayTargetId,
-      detail: 'already published',
+      detail: "already published",
     };
   }
 
   // INVARIANT 2: eligibility — only an MCP-substrate import is gateway-publishable.
-  const protocol = meta.invocation?.protocol ?? 'AGENTCORE_RUNTIME';
-  if (protocol !== 'MCP') {
-    if (protocol === 'HTTP_ENDPOINT') {
+  const protocol = meta.invocation?.protocol ?? "AGENTCORE_RUNTIME";
+  if (protocol !== "MCP") {
+    if (protocol === "HTTP_ENDPOINT") {
       throw new Error(
-        'REST/OpenAPI gateway publish not yet supported (deferred): only MCP-substrate ' +
-          'imports are gateway-publishable',
+        "REST/OpenAPI gateway publish not yet supported (deferred): only MCP-substrate " +
+          "imports are gateway-publishable",
       );
     }
     throw new Error(
@@ -1687,25 +1813,25 @@ export async function publishImportToGateway(
   }
 
   // INVARIANT 3a: governance attestation must be ATTESTED (not 'pending'/absent).
-  if (meta.governanceAttestation?.status !== 'attested') {
+  if (meta.governanceAttestation?.status !== "attested") {
     throw new Error(
-      'Cannot publish: the import is not governance-attested — attest it before publishing',
+      "Cannot publish: the import is not governance-attested — attest it before publishing",
     );
   }
 
   // INVARIANT 3b: the agent must be publicly reachable (a prior probe classified
   // it 'reachable'). 'unverifiable_private' / 'no_endpoint' / 'unreachable' /
   // absent all reject.
-  if (meta.reachability?.classification !== 'reachable') {
+  if (meta.reachability?.classification !== "reachable") {
     throw new Error(
-      'Cannot publish: agent is not publicly reachable — probe reachability first ' +
+      "Cannot publish: agent is not publicly reachable — probe reachability first " +
         '(classification must be "reachable")',
     );
   }
 
   const invocation = meta.invocation;
   if (!invocation) {
-    throw new Error('Cannot publish: the import has no invocation block');
+    throw new Error("Cannot publish: the import has no invocation block");
   }
 
   // Resolve the shared gateway id up-front (clear 'gateway not configured' error).
@@ -1714,7 +1840,7 @@ export async function publishImportToGateway(
   // INVARIANT 4: auth offload supports NONE / API_KEY / BEARER only.
   const authMode = invocation.auth.mode;
   let credentialProviderArn: string | undefined;
-  if (authMode === 'NONE') {
+  if (authMode === "NONE") {
     credentialProviderArn = undefined;
   } else if (API_KEY_AUTH_MODES.has(authMode)) {
     const secretRef = invocation.auth.secretRef;
@@ -1728,12 +1854,15 @@ export async function publishImportToGateway(
     // (`integration-<importId>-api-key`), matching the unpublish teardown so the
     // same provider is deleted later.
     const secret = await getAgentInvocationSecret(secretRef);
-    const provider = await createOrUpsertApiKeyProvider({ integrationId: importId, apiKey: secret });
+    const provider = await createOrUpsertApiKeyProvider({
+      integrationId: importId,
+      apiKey: secret,
+    });
     credentialProviderArn = provider.credentialProviderArn;
   } else {
     throw new Error(
       `Cannot publish: auth mode ${authMode} offload is not supported (deferred); ` +
-        'use NONE, API_KEY or BEARER',
+        "use NONE, API_KEY or BEARER",
     );
   }
 
@@ -1744,7 +1873,7 @@ export async function publishImportToGateway(
     integrationId: importId,
     config: { serverUrl: invocation.target },
     ...(credentialProviderArn
-      ? { credentialProviderArn, credentialProviderType: 'API_KEY' as const }
+      ? { credentialProviderArn, credentialProviderType: "API_KEY" as const }
       : {}),
   });
   const createInput = {
@@ -1758,9 +1887,13 @@ export async function publishImportToGateway(
   // carries no secret — the secret VALUE never reaches the SDK input or logs.
   let gatewayTargetId: string;
   try {
-    const resp = await bedrockAgentCoreClient.send(new CreateGatewayTargetCommand(createInput));
+    const resp = await bedrockAgentCoreClient.send(
+      new CreateGatewayTargetCommand(createInput),
+    );
     if (!resp.targetId) {
-      throw new Error('AgentCore returned no targetId for the created gateway target');
+      throw new Error(
+        "AgentCore returned no targetId for the created gateway target",
+      );
     }
     gatewayTargetId = resp.targetId;
   } catch (err) {
@@ -1774,10 +1907,10 @@ export async function publishImportToGateway(
   const publishedBy =
     asNonEmptyString(event.identity?.sub) ??
     asNonEmptyString(event.identity?.username) ??
-    'unknown';
+    "unknown";
   const gatewayPublication: GatewayPublicationMetadata = {
-    status: 'published',
-    targetType: 'mcpServer',
+    status: "published",
+    targetType: "mcpServer",
     gatewayId,
     gatewayTargetId,
     ...(credentialProviderArn ? { credentialProviderArn } : {}),
@@ -1791,11 +1924,15 @@ export async function publishImportToGateway(
   // status), mirroring attestAgentImport, so the record STAYS DRAFT.
   const registryService = getRegistryService();
   const mergedMeta: AgentCustomMetadata = { ...meta, gatewayPublication };
-  await registryService.updateResource('agent', record.recordId, {
+  await registryService.updateResource("agent", record.recordId, {
     customMetadata: registryService.serializeCustomMetadata(mergedMeta),
   });
 
-  return { status: 'published', gatewayTargetId, detail: 'mcpServer target created' };
+  return {
+    status: "published",
+    gatewayTargetId,
+    detail: "mcpServer target created",
+  };
 }
 
 /**
@@ -1819,17 +1956,17 @@ export async function unpublishImportFromGateway(
   const { record, meta } = await loadImportForGatewayOp(
     importId,
     event,
-    'unpublishImportFromGateway',
+    "unpublishImportFromGateway",
   );
 
   const pub = meta.gatewayPublication;
   // Idempotent no-op: nothing currently published (absent, already unpublished,
   // or missing a target id). No gateway calls, no re-write.
-  if (!pub || pub.status !== 'published' || !pub.gatewayTargetId) {
+  if (!pub || pub.status !== "published" || !pub.gatewayTargetId) {
     return {
-      status: 'unpublished',
+      status: "unpublished",
       gatewayTargetId: pub?.gatewayTargetId ?? null,
-      detail: 'nothing published',
+      detail: "nothing published",
     };
   }
 
@@ -1844,7 +1981,7 @@ export async function unpublishImportFromGateway(
     await deleteTargetAndProvider({
       targetId: pub.gatewayTargetId,
       integrationId: importId,
-      credentialProviderType: 'API_KEY',
+      credentialProviderType: "API_KEY",
     });
   } else {
     await bedrockAgentCoreClient.send(
@@ -1857,17 +1994,23 @@ export async function unpublishImportFromGateway(
 
   // Flip status to 'unpublished' (retain the audit fields). INVARIANT: never
   // change state/governanceAttestation; the update sends customMetadata only.
-  const updatedPublication: GatewayPublicationMetadata = { ...pub, status: 'unpublished' };
+  const updatedPublication: GatewayPublicationMetadata = {
+    ...pub,
+    status: "unpublished",
+  };
   const registryService = getRegistryService();
-  const mergedMeta: AgentCustomMetadata = { ...meta, gatewayPublication: updatedPublication };
-  await registryService.updateResource('agent', record.recordId, {
+  const mergedMeta: AgentCustomMetadata = {
+    ...meta,
+    gatewayPublication: updatedPublication,
+  };
+  await registryService.updateResource("agent", record.recordId, {
     customMetadata: registryService.serializeCustomMetadata(mergedMeta),
   });
 
   return {
-    status: 'unpublished',
+    status: "unpublished",
     gatewayTargetId: pub.gatewayTargetId,
-    detail: 'gateway target removed',
+    detail: "gateway target removed",
   };
 }
 
@@ -1878,7 +2021,7 @@ export async function unpublishImportFromGateway(
  * placeholder is attached to trigger resolution; the resolver closure returns
  * the raw value verbatim and ignores the ref. NEVER persisted.
  */
-const TRANSIENT_TEST_SECRET_REF = 'inline-test-invocation-secret';
+const TRANSIENT_TEST_SECRET_REF = "inline-test-invocation-secret";
 
 /**
  * Builds the minimal {@link AgentCapabilityDescriptor} a TEST-INVOKE needs. Only
@@ -1892,8 +2035,9 @@ function buildTestInvocationDescriptor(
   flat: Record<string, unknown>,
   hasRawSecret: boolean,
 ): AgentCapabilityDescriptor {
-  const auth: AgentInvocationBlock['auth'] = {
-    mode: (asNonEmptyString(flat.invocationAuthMode) ?? 'NONE') as AgentInvocationAuthMode,
+  const auth: AgentInvocationBlock["auth"] = {
+    mode: (asNonEmptyString(flat.invocationAuthMode) ??
+      "NONE") as AgentInvocationAuthMode,
   };
   const authHeader = asNonEmptyString(flat.invocationAuthHeader);
   if (authHeader) auth.header = authHeader;
@@ -1910,7 +2054,8 @@ function buildTestInvocationDescriptor(
     protocol: flat.invocationProtocol as AgentInvocationProtocol,
     target: flat.invocationTarget as string,
     auth,
-    mode: (asNonEmptyString(flat.invocationMode) ?? 'sync') as AgentInvocationMode,
+    mode: (asNonEmptyString(flat.invocationMode) ??
+      "sync") as AgentInvocationMode,
   };
   const region = asNonEmptyString(flat.region);
   const account = asNonEmptyString(flat.account);
@@ -1927,17 +2072,17 @@ function buildTestInvocationDescriptor(
   if (externalId) invocation.externalId = externalId;
 
   const origin: AgentOrigin = {
-    substrate: 'test-invoke',
+    substrate: "test-invoke",
     discoveredAt: new Date().toISOString(),
-    ownership: 'external',
+    ownership: "external",
   };
   if (region) origin.region = region;
   if (account) origin.account = account;
 
   return {
-    name: 'import-test-candidate',
-    description: '',
-    version: '0.0.0',
+    name: "import-test-candidate",
+    description: "",
+    version: "0.0.0",
     skills: [],
     categories: [],
     inputSchema: {},
@@ -1984,11 +2129,14 @@ async function buildInvokeRegistryFor(
   // A throw here propagates to the caller's try/catch and becomes a normal
   // failure result. The vended/assumed credentials are NEVER logged.
   const vended = await vendImportCredentials(invocation);
-  const credentialProvider: InvokeCredentials | undefined = toInvokeCredentials(vended);
+  const credentialProvider: InvokeCredentials | undefined =
+    toInvokeCredentials(vended);
   if (!credentialProvider) {
     // Assume produced no usable credentials — do NOT fall back to this Lambda's
     // identity (it would invoke with the wrong account's credentials).
-    throw new Error('Cross-account invoke-role assume produced no usable credentials');
+    throw new Error(
+      "Cross-account invoke-role assume produced no usable credentials",
+    );
   }
   return buildDefaultAgentSourceRegistry({ resolveSecret, credentialProvider });
 }
@@ -2021,8 +2169,10 @@ export async function testImportedAgent(
 ): Promise<ImportTestResult> {
   // Authorization: admin OR architect only (same gate as discovery/attest).
   // This is the ONLY path that throws — every invoke outcome is a normal result.
-  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, 'architect')) {
-    throw new Error('Unauthorized: testImportedAgent requires the admin or architect role');
+  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, "architect")) {
+    throw new Error(
+      "Unauthorized: testImportedAgent requires the admin or architect role",
+    );
   }
 
   const flat = isRecord(input) ? input : {};
@@ -2033,8 +2183,10 @@ export async function testImportedAgent(
   try {
     const protocol = asNonEmptyString(flat.invocationProtocol);
     const target = asNonEmptyString(flat.invocationTarget);
-    if (!protocol) throw new Error('testImportedAgent: invocationProtocol is required');
-    if (!target) throw new Error('testImportedAgent: invocationTarget is required');
+    if (!protocol)
+      throw new Error("testImportedAgent: invocationProtocol is required");
+    if (!target)
+      throw new Error("testImportedAgent: invocationTarget is required");
 
     // Transient secret resolver — NEVER persisted. A RAW secret is returned
     // verbatim (ref ignored); else a provided ref is fetched on demand; else no
@@ -2054,16 +2206,27 @@ export async function testImportedAgent(
     // with the assumed credentials; otherwise it is the current same-account
     // registry. A cross-account assume failure THROWS and is caught below as a
     // normal { ok:false, error } result (never a thrown 500).
-    const registry = await buildInvokeRegistryFor(descriptor.invocation, resolveSecret);
+    const registry = await buildInvokeRegistryFor(
+      descriptor.invocation,
+      resolveSecret,
+    );
     const adapter = registry.resolve(descriptor.invocation.protocol);
     const resp = await adapter.invoke(
-      { prompt: asNonEmptyString(flat.prompt) ?? 'ping', sessionId: `import-test-${uuidv4()}` },
+      {
+        prompt: asNonEmptyString(flat.prompt) ?? "ping",
+        sessionId: `import-test-${uuidv4()}`,
+      },
       descriptor,
     );
     // The candidate is an UNTRUSTED foreign agent — neutralize injection markers
     // in its output before it re-enters our flow / reaches the caller.
     const sanitized = sanitizeUntrustedAgentOutput(resp.output);
-    return { ok: true, output: sanitized.sanitized, error: null, latencyMs: Date.now() - start };
+    return {
+      ok: true,
+      output: sanitized.sanitized,
+      error: null,
+      latencyMs: Date.now() - start,
+    };
   } catch (err) {
     // A failed test-invoke is a NORMAL result (NOT a thrown error). The raw
     // secret is never interpolated into the message — only the underlying error.
@@ -2081,7 +2244,8 @@ export async function testImportedAgent(
  * supply one. Deliberately neutral and non-destructive — the probe only needs
  * to observe the candidate's response SHAPE, not perform real work.
  */
-const PROBE_PROMPT = 'Capability probe: reply with a short example of your normal output.';
+const PROBE_PROMPT =
+  "Capability probe: reply with a short example of your normal output.";
 
 /**
  * A capability descriptor enriched by a Tier-2 probe. ADDITIVE to
@@ -2106,7 +2270,7 @@ function isEmptySchema(schema: JsonSchema | undefined): boolean {
  * explicitly 'low' or entirely absent. 'medium'/'high' are not gaps.
  */
 function isLowOrAbsentConfidence(confidence: Confidence | undefined): boolean {
-  return confidence === undefined || confidence === 'low';
+  return confidence === undefined || confidence === "low";
 }
 
 /**
@@ -2115,11 +2279,14 @@ function isLowOrAbsentConfidence(confidence: Confidence | undefined): boolean {
  * handle describe() resolves). region/account are carried onto the origin when
  * present; ownership is always 'external' (Citadel never owns the target).
  */
-function buildProbeCandidate(flat: Record<string, unknown>, target: string): AgentCandidate {
+function buildProbeCandidate(
+  flat: Record<string, unknown>,
+  target: string,
+): AgentCandidate {
   const origin: AgentOrigin = {
-    substrate: 'import-probe',
+    substrate: "import-probe",
     discoveredAt: new Date().toISOString(),
-    ownership: 'external',
+    ownership: "external",
   };
   const region = asNonEmptyString(flat.region);
   const account = asNonEmptyString(flat.account);
@@ -2164,15 +2331,19 @@ export async function probeAgentCandidate(
 ): Promise<string> {
   // Authorization: admin OR architect only (same gate as test-invoke). This is
   // the ONLY path that throws — every dry-run outcome is a normal result.
-  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, 'architect')) {
-    throw new Error('Unauthorized: probeAgentCandidate requires the admin or architect role');
+  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, "architect")) {
+    throw new Error(
+      "Unauthorized: probeAgentCandidate requires the admin or architect role",
+    );
   }
 
   const flat = isRecord(input) ? input : {};
   const protocol = asNonEmptyString(flat.invocationProtocol);
   const target = asNonEmptyString(flat.invocationTarget);
-  if (!protocol) throw new Error('probeAgentCandidate: invocationProtocol is required');
-  if (!target) throw new Error('probeAgentCandidate: invocationTarget is required');
+  if (!protocol)
+    throw new Error("probeAgentCandidate: invocationProtocol is required");
+  if (!target)
+    throw new Error("probeAgentCandidate: invocationTarget is required");
 
   const rawSecret = asNonEmptyString(flat.invocationSecret);
   const secretRef = asNonEmptyString(flat.invocationSecretRef);
@@ -2215,7 +2386,10 @@ export async function probeAgentCandidate(
   //    fields but overlays the operator-supplied invocation block (built by the
   //    shared test-invoke helper) so the SAME transient/secretRef resolution
   //    applies and the dry-run reaches the operator's target with their auth.
-  const probeInvocation = buildTestInvocationDescriptor(flat, Boolean(rawSecret)).invocation;
+  const probeInvocation = buildTestInvocationDescriptor(
+    flat,
+    Boolean(rawSecret),
+  ).invocation;
   const invokeDescriptor: AgentCapabilityDescriptor = {
     ...descriptor,
     invocation: probeInvocation,
@@ -2227,7 +2401,10 @@ export async function probeAgentCandidate(
     // (externalId-gated) so the dry-run runs under the assumed credentials. The
     // assume is INSIDE this existing try/catch, so a failure is BEST-EFFORT — it
     // maps to the describe-only + probeNote result below, never a thrown 500.
-    const invokeRegistry = await buildInvokeRegistryFor(probeInvocation, resolveSecret);
+    const invokeRegistry = await buildInvokeRegistryFor(
+      probeInvocation,
+      resolveSecret,
+    );
     const invokeAdapter = invokeRegistry.resolve(probeInvocation.protocol);
     const resp = await invokeAdapter.invoke(
       {
@@ -2247,7 +2424,7 @@ export async function probeAgentCandidate(
       ...(descriptor.fieldConfidence ?? {}),
     };
     if (outputSchemaGap) {
-      fieldConfidence.outputSchema = 'medium';
+      fieldConfidence.outputSchema = "medium";
     }
     const merged: ProbedDescriptor = {
       ...descriptor,
@@ -2289,7 +2466,7 @@ function buildTier3ProposalSignals(
   descriptor: DescribedDescriptor,
 ): Tier3ProposalSignals {
   const { substrate } = resolveSourceRef(ref);
-  const isArn = ref.startsWith('arn:');
+  const isArn = ref.startsWith("arn:");
   const signals: Tier3ProposalSignals = {
     substrate,
     arn: isArn ? ref : null,
@@ -2309,7 +2486,7 @@ function buildTier3ProposalSignals(
   // OPTIONAL Tier-2 probe summary — included ONLY when the describe output
   // ALREADY carries a sandboxed-probe shape hint (no new invoke is performed
   // here). It is a sanitized observed-shape sample, never a secret.
-  if (typeof descriptor.outputSample === 'string') {
+  if (typeof descriptor.outputSample === "string") {
     signals.tier2Probe = descriptor.outputSample;
   }
   // OPTIONAL OpenAPI fragment — structural metadata only; forwarded when present.
@@ -2336,8 +2513,8 @@ async function sendManifestProposalToFabricator(
   const body = { requestId, correlationId, importId, signals };
   console.log(
     JSON.stringify({
-      level: 'info',
-      msg: 'agent-import: enqueuing Tier-3 manifest proposal',
+      level: "info",
+      msg: "agent-import: enqueuing Tier-3 manifest proposal",
       requestId,
       correlationId,
       importId,
@@ -2350,16 +2527,21 @@ async function sendManifestProposalToFabricator(
         QueueUrl: getFabricatorQueueUrl(),
         MessageBody: JSON.stringify(body),
         MessageAttributes: {
-          requestType: { DataType: 'String', StringValue: 'manifest-proposal' },
-          requestId: { DataType: 'String', StringValue: requestId },
+          requestType: { DataType: "String", StringValue: "manifest-proposal" },
+          requestId: { DataType: "String", StringValue: requestId },
         },
       }),
     );
   } catch (err) {
     // The underlying SQS error carries no secret (the signals are secret-free);
     // log it WITHOUT the body.
-    console.error('agent-import: failed to enqueue Tier-3 manifest proposal:', err);
-    throw new Error(`Failed to send manifest proposal to Fabricator: ${String(err)}`);
+    console.error(
+      "agent-import: failed to enqueue Tier-3 manifest proposal:",
+      err,
+    );
+    throw new Error(
+      `Failed to send manifest proposal to Fabricator: ${String(err)}`,
+    );
   }
 }
 
@@ -2387,13 +2569,15 @@ export async function proposeAgentManifestTier3(
   correlationId: string = uuidv4(),
 ): Promise<Tier3ProposalResult> {
   // 1. Authorization: admin OR architect only (same gate as discovery/attest).
-  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, 'architect')) {
+  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, "architect")) {
     throw new Error(
-      'Unauthorized: proposeAgentManifestTier3 requires the admin or architect role',
+      "Unauthorized: proposeAgentManifestTier3 requires the admin or architect role",
     );
   }
   if (!ref) {
-    throw new InvalidSourceRefError('proposeAgentManifestTier3: ref is required');
+    throw new InvalidSourceRefError(
+      "proposeAgentManifestTier3: ref is required",
+    );
   }
 
   // 2. Gather SECRET-FREE signals by REUSING the describe path. describe()
@@ -2409,9 +2593,14 @@ export async function proposeAgentManifestTier3(
   // 3. Enqueue the proposal request. `importId := ref` flows through to the
   //    async result so the B1 handler targets the right DRAFT record.
   const requestId = uuidv4();
-  await sendManifestProposalToFabricator(requestId, correlationId, ref, signals);
+  await sendManifestProposalToFabricator(
+    requestId,
+    correlationId,
+    ref,
+    signals,
+  );
 
-  return { requestId, status: 'PENDING' };
+  return { requestId, status: "PENDING" };
 }
 
 /**
@@ -2440,16 +2629,16 @@ export async function acceptProposedManifestTier3(
 ): Promise<AgentConfig> {
   // 1. Authorization: admin OR architect (human) only (same gate as attest).
   const isAdmin = isAdminFromEvent(event);
-  if (!isAdmin && !hasRoleFromEvent(event, 'architect')) {
+  if (!isAdmin && !hasRoleFromEvent(event, "architect")) {
     throw new Error(
-      'Unauthorized: acceptProposedManifestTier3 requires the admin or architect role',
+      "Unauthorized: acceptProposedManifestTier3 requires the admin or architect role",
     );
   }
 
   const registryService = getRegistryService();
 
   // 2. Load the record (null → clean not-found).
-  const record = await registryService.getResource('agent', importId);
+  const record = await registryService.getResource("agent", importId);
   if (!record) {
     throw new Error(`Agent not found: ${importId}`);
   }
@@ -2468,17 +2657,19 @@ export async function acceptProposedManifestTier3(
   //    are first-class on ProposedManifestMetadata, so no local widening is needed.
   const proposed: ProposedManifestMetadata | undefined = meta.proposedManifest;
   if (!proposed) {
-    throw new Error('No proposed manifest to accept: nothing is pending review');
+    throw new Error(
+      "No proposed manifest to accept: nothing is pending review",
+    );
   }
 
   // 5. Idempotent no-op: already accepted → return the record unchanged.
-  if (proposed.reviewState === 'accepted') {
+  if (proposed.reviewState === "accepted") {
     return registryService.mapToAgentConfig(record);
   }
 
   // 6. Only a 'pending_review' proposal carrying a manifest body can be
   //    promoted. A 'failed' marker (no body) is a clear, non-promotable error.
-  if (proposed.reviewState !== 'pending_review' || !proposed.manifest) {
+  if (proposed.reviewState !== "pending_review" || !proposed.manifest) {
     throw new Error(
       `No proposed manifest pending review to accept (reviewState=${proposed.reviewState})`,
     );
@@ -2492,10 +2683,10 @@ export async function acceptProposedManifestTier3(
   const reviewedBy =
     asNonEmptyString(event.identity?.sub) ??
     asNonEmptyString(event.identity?.username) ??
-    'unknown';
+    "unknown";
   const updatedProposed: ProposedManifestMetadata = {
     ...proposed,
-    reviewState: 'accepted',
+    reviewState: "accepted",
     reviewedBy,
     reviewedAt: new Date().toISOString(),
   };
@@ -2509,9 +2700,13 @@ export async function acceptProposedManifestTier3(
     proposedManifest: updatedProposed,
   };
 
-  const updated = await registryService.updateResource('agent', record.recordId, {
-    customMetadata: registryService.serializeCustomMetadata(mergedMeta),
-  });
+  const updated = await registryService.updateResource(
+    "agent",
+    record.recordId,
+    {
+      customMetadata: registryService.serializeCustomMetadata(mergedMeta),
+    },
+  );
   return registryService.mapToAgentConfig(updated);
 }
 
@@ -2533,12 +2728,12 @@ function buildImportedMetadata(args: {
   origin: AgentOrigin;
   orgId: string;
   createdBy: string;
-  governanceAttestation?: AgentCustomMetadata['governanceAttestation'];
+  governanceAttestation?: AgentCustomMetadata["governanceAttestation"];
 }): ImportedAgentMetadata {
   const meta: ImportedAgentMetadata = {
     categories: args.categories,
-    icon: '',
-    state: 'inactive',
+    icon: "",
+    state: "inactive",
     manifest: args.manifest,
     invocation: args.invocation,
     origin: args.origin,

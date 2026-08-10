@@ -1196,6 +1196,18 @@ exports.handler = async (event) => {
           ENVIRONMENT_RELEASE_POINTERS_TABLE:
             props.environmentReleasePointersTable.tableName,
           AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
+          // Finding 23971f32: this function calls
+          // writeReleaseGateFinding (release-gate-finding-writer.ts) in
+          // BOTH shadow and strict mode before the pointer moves — the
+          // env var was previously missing entirely, so every write
+          // failed with a runtime `GOVERNANCE_LEDGER_TABLE!` crash
+          // (non-null assertion on `undefined`). Deterministic name,
+          // same string arbiter-stack.ts uses to construct the actual
+          // table (`citadel-governance-ledger-${environment}`) — see
+          // backend-stack.ts's environmentReleasePointerWriterRole PutItem
+          // grant for why this is a literal string, not a construct
+          // reference.
+          GOVERNANCE_LEDGER_TABLE: `citadel-governance-ledger-${props.environment}`,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(

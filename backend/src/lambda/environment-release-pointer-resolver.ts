@@ -13,20 +13,85 @@
  * Validation order — permission check FIRST (matches release-resolver.ts
  * / execspec-resolver.ts's "permission check before any DDB access"
  * convention), then target-release existence, then target-release
- * org-ownership, ALL before the store's conditional write. Cross-org
- * pointer promotion is a distinct SecurityError, not folded into the
- * generic ValidationError bucket, mirroring release-resolver.ts's
- * "malformed input" vs "attempted to pin/point at another tenant's data"
- * distinction.
+ * org-ownership, THEN the quality gate (validateReleaseGate), ALL before
+ * the store's conditional write. Cross-org pointer promotion is a
+ * distinct SecurityError, not folded into the generic ValidationError
+ * bucket, mirroring release-resolver.ts's "malformed input" vs
+ * "attempted to pin/point at another tenant's data" distinction.
  *
- * QUALITY GATING SEAM: validateReleaseGate() is exported here (not
- * imported from release-resolver.ts) and is an intentional no-op. It is
- * the explicit, named place a later story attaches release-quality gating
- * (test pass rate, eval score thresholds, etc.) before a promotion is
- * allowed to proceed. It is NOT called from promoteEnvironmentReleasePointer
- * — this slice ships an existence + org + permission gate only, never an
- * ungated promotion path that silently skips a check a caller might
- * assume is already enforced.
+ * QUALITY GATING SEAM (Slice 3 — wired): validateReleaseGate() now has a
+ * real async signature and IS called from
+ * promoteEnvironmentReleasePointer, positioned after the
+ * permission/existence/org checks and BEFORE setEnvironmentReleasePointer
+ * (the store's conditional write, and the last statement in this
+ * function). Because the write is the LAST statement, a gate that throws
+ * before it runs leaves the pointer PROVABLY untouched — no compensating
+ * rollback is needed, and tests assert zero store-write calls, not merely
+ * an unchanged value (see environment-release-pointer-resolver.test.ts's
+ * "gate wiring position" describe block).
+ *
+ * ORDERING AND FAILURE (design item 5 — read this before changing the
+ * gate call; UPDATED by finding 23971f32, USER DECISION: fail-closed in
+ * BOTH modes): validateReleaseGate ALWAYS computes the full
+ * ReleaseGateVerdict first, via resolveReleaseGateEvidence +
+ * evaluateReleaseGate — identically in every mode, so permissive-mode
+ * rollout telemetry is never silently skipped. Mode only selects what
+ * happens NEXT, via the shared governanceDisposition(mode) mapper:
+ *
+ *   - The decision to BLOCK (throw a ReleaseGateError) is derived from
+ *     `disposition.block && verdict.status is a fail state` ALONE,
+ *     computed BEFORE the finding write is attempted (`shouldBlock` is
+ *     captured first) — a write failure can never SUPPRESS a refusal
+ *     that was already decided.
+ *   - The finding write itself (shadow AND strict) is now FAIL-CLOSED in
+ *     both modes: any error other than the writer's own
+ *     ConditionalCheckFailedException dedupe swallow (see
+ *     release-gate-finding-writer.ts) propagates out of
+ *     validateReleaseGate uncaught, in strict mode exactly as it always
+ *     did in shadow. This closes a real gap in the PREVIOUS asymmetric
+ *     design (strict wrapped the write in try/catch + log): a
+ *     PASS-verdict promotion in strict mode would proceed UNRECORDED if
+ *     the ledger write failed — the refusal path was fine (a FAIL
+ *     verdict still threw regardless of the write outcome), but a
+ *     passing promotion had no such backstop. A promotion must never
+ *     proceed without its finding recorded, in either mode — an
+ *     infrastructure fault in the ledger write now blocks the promotion
+ *     the same way a fail verdict does, which is the deliberate tradeoff
+ *     fail-closed accepts.
+ *   - In permissive mode, no finding write is attempted at all
+ *     (governanceDisposition("permissive").recordFinding === false), so
+ *     a ledger outage can never affect a permissive-mode promotion.
+ *
+ * MODE SOURCE (design item 2 — do not add a second reader): mode comes
+ * exclusively from the existing `getGovernanceEnforce(env)`
+ * (backend/src/utils/governance-flag.ts), the SAME reader
+ * agent-import-resolver.ts already consults. No new TS mode reader is
+ * introduced here.
+ *
+ * MODE-LOOKUP FAILURE FALLBACK (design item 6 — investigated; runtimes now
+ * match): `getGovernanceEnforce` falls back to 'shadow' on any SSM read
+ * error or an out-of-allowlist value (see governance-flag.ts's
+ * `DEFAULT_ENFORCEMENT_MODE` / `refresh`/`isValidEnforce`). The Python
+ * dispatch path's equivalent resolver,
+ * `arbiter/governance/hierarchy.py::_resolve_enforcement_mode`, falls
+ * back to the SAME literal, 'shadow' (`_DEFAULT_ENFORCEMENT_MODE`), on
+ * the identical failure class, and both `arbiter/stepRunner/executor.py`
+ * and `arbiter/supervisor/index.py` consume that value via
+ * `getattr(state, 'enforcement_mode', 'shadow')` before gating dispatch.
+ * This was previously a documented DIVERGENCE (TS fell back to
+ * 'permissive', which is telemetry-and-record-silent per
+ * governanceDisposition('permissive')) — that divergence has been fixed
+ * by moving the TS default to 'shadow' to match Python, deliberately,
+ * per the enforcement-lookup fallback assessment: 'shadow' evaluates and
+ * records (a ledger finding IS written, per this file's own gate below)
+ * without introducing any new blocking versus the old 'permissive'
+ * default (both are `block: false`). See governance-flag.ts's module doc
+ * for the full rationale and the cross-runtime contract test pinning
+ * both sides to the same literal.
+ *
+ * The twin `validateReleaseGate` in `release-resolver.ts:197` (cut-time
+ * seam) is a DIFFERENT concern and stays a no-op — this file does not
+ * touch it. Promotion-gating != cut-gating.
  *
  * The caller's org is derived from the AppSync identity's
  * `custom:organization` claim (extractOrgFromEvent), never from
@@ -36,6 +101,15 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { hasPermission } from "../utils/auth";
 import { extractOrgFromEvent } from "../utils/auth-event";
+import { getGovernanceEnforce } from "../utils/governance-flag";
+import { getActiveTraceContext } from "../utils/trace-context";
+import { governanceDisposition } from "./utils/governance-disposition";
+import {
+  evaluateReleaseGate,
+  DEFAULT_PROMOTION_POLICY,
+} from "./utils/release-gate";
+import { resolveReleaseGateEvidence } from "./utils/release-gate-evidence";
+import { writeReleaseGateFinding } from "./utils/release-gate-finding-writer";
 import {
   getEnvironmentReleasePointer,
   listEnvironmentReleasePointersForAgent,
@@ -44,6 +118,7 @@ import {
 import type {
   AgentRelease,
   AuthContext,
+  EnvironmentLiteral,
   EnvironmentReleasePointer,
   GovernanceEventIdentity,
   GovernanceResolverEvent,
@@ -65,17 +140,130 @@ function requireReleasePromotePermission(authContext: AuthContext): void {
   }
 }
 
+/** Thrown when the quality gate blocks a promotion (strict mode, FAIL
+ * verdict). Distinct from ValidationError/SecurityError so callers can
+ * react specifically — e.g. surface the gate's reasons in a UI — rather
+ * than string-matching a generic Error. */
+export class ReleaseGateError extends Error {
+  constructor(
+    public readonly releaseId: string,
+    public readonly reasons: string[],
+  ) {
+    super(
+      `ReleaseGateError: release quality gate refused promotion of ${releaseId} — reasons=[${reasons.join(", ")}]`,
+    );
+    this.name = "ReleaseGateError";
+  }
+}
+
+/** A ReleaseGateVerdict.status that represents a FAIL disposition for
+ * promotion purposes. NO_BASELINE is treated as a fail state here (no
+ * baseline to compare against and absolute-floor bootstrap is disabled
+ * by policy) — only PASS and NO_BASELINE_PASS are non-blocking. */
+function isFailStatus(status: string): boolean {
+  return status === "FAIL" || status === "NO_BASELINE";
+}
+
 /**
- * Deferred quality-gating seam (mirrors release-resolver.ts's
- * validateReleaseGate — same pattern, separate seam because promotion
- * gating and cut-time gating are different concerns). Intentionally a
- * no-op and NOT called from promoteEnvironmentReleasePointer. Quality
- * gating (test pass rate, eval score thresholds, canary results) is a
- * later story; this exists purely so that story has a named place to hang
- * gate logic without an interface-shape migration.
+ * Quality-gating seam. Gives the release-promotion path a single place
+ * to enforce eval-based promotion criteria before the pointer moves.
+ *
+ * ALWAYS resolves evidence and evaluates the gate, in every mode — mode
+ * only changes what happens with the resulting verdict (see the module
+ * doc comment above for the full ordering-and-failure contract). Never
+ * called from release-resolver.ts's cut-time seam (a different,
+ * unrelated no-op of the same name).
+ *
+ * Throws `ReleaseGateError` when, and only when, the resolved mode's
+ * disposition blocks AND the verdict is a fail state. Never throws for a
+ * PASS/NO_BASELINE_PASS verdict, regardless of mode.
  */
-export function validateReleaseGate(): void {
-  // Intentionally empty — see doc comment above.
+export async function validateReleaseGate(
+  release: AgentRelease,
+  environment: EnvironmentLiteral,
+  callerOrgId: string,
+  authContext: AuthContext,
+): Promise<void> {
+  const policy = DEFAULT_PROMOTION_POLICY;
+  const now = new Date().toISOString();
+
+  const evidence = await resolveReleaseGateEvidence(
+    release,
+    environment,
+    callerOrgId,
+    policy,
+    now,
+  );
+
+  const verdict = evidence.ok
+    ? evaluateReleaseGate(evidence.inputs)
+    : {
+        status: "FAIL" as const,
+        reasons: [evidence.reason] as unknown as string[],
+        failedThresholds: [],
+        scoreVector: [],
+        staleness: { stale: true, reasons: [] },
+        requiredPacksSatisfied: false,
+      };
+
+  // Mode is resolved per-environment (matching getGovernanceEnforce's own
+  // parameter — every other caller, e.g. agent-import-resolver.ts, keys
+  // it the same way), not per-org — the SSM parameter path is
+  // `/citadel/governance/enforce/{env}`.
+  const mode = await getGovernanceEnforce(environment);
+  const disposition = governanceDisposition(mode);
+
+  const failed = isFailStatus(verdict.status);
+  const decision: "permit" | "deny" = failed ? "deny" : "permit";
+
+  // The block decision is derived from disposition+verdict ALONE, before
+  // any finding-write is attempted — see module doc "ORDERING AND
+  // FAILURE". Capturing it now means a write failure below can never
+  // change what `shouldBlock` already is.
+  const shouldBlock = disposition.block && failed;
+
+  // Sourced ONCE at the call site (same convention as
+  // events.ts::publishEvent) rather than read from ambient state deep
+  // inside the writer — keeps writeReleaseGateFinding a pure function of
+  // its input. undefined outside an active X-Ray segment (e.g. Jest) —
+  // the writer omits both fields entirely in that case.
+  const traceContext = getActiveTraceContext();
+
+  if (disposition.recordFinding) {
+    // Finding 23971f32 — FAIL-CLOSED in BOTH modes (USER DECISION): a
+    // promotion must never proceed without its finding recorded. This
+    // used to swallow strict-mode write failures (log + continue) on the
+    // theory that shouldBlock was already fixed above and didn't need
+    // the write to succeed. That reasoning is true for a FAIL verdict
+    // (the refusal still throws either way — the try/catch never
+    // affected THAT test), but it is a live gap for a PASS verdict: a
+    // passing-verdict strict-mode promotion would proceed UNRECORDED if
+    // the ledger write failed, silently defeating the audit trail the
+    // gate exists to produce. Unified with shadow's existing behavior
+    // below — every non-dedupe write failure propagates in both modes.
+    // The writer's own ConditionalCheckFailedException dedupe swallow
+    // (release-gate-finding-writer.ts) is untouched — a retried
+    // promotion against the same decision must still succeed.
+    await writeReleaseGateFinding({
+      orgId: callerOrgId,
+      agentTargetId: release.agentTargetId,
+      environment,
+      releaseId: release.releaseId,
+      decidedBy: authContext.userId,
+      decision,
+      reasons: verdict.reasons as never,
+      scoreVector: verdict.scoreVector,
+      mode,
+      ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
+    });
+  }
+
+  if (shouldBlock) {
+    throw new ReleaseGateError(
+      release.releaseId,
+      verdict.reasons as unknown as string[],
+    );
+  }
 }
 
 async function getAgentRelease(
@@ -89,7 +277,8 @@ async function getAgentRelease(
 
 /**
  * promoteEnvironmentReleasePointer — validates the target release EXISTS
- * and belongs to the caller's org, then moves the (org, agentTargetId,
+ * and belongs to the caller's org, runs the quality gate
+ * (validateReleaseGate), then moves the (org, agentTargetId,
  * environment) pointer to it via the version-gated write boundary in
  * environment-release-pointer-store.ts. Permission-gated by
  * release:promote (do not ship an ungated promotion path).
@@ -119,6 +308,13 @@ export async function promoteEnvironmentReleasePointer(
       `SecurityError: release ${input.releaseId} belongs to a different org — an environment pointer must never point at another org's release`,
     );
   }
+
+  await validateReleaseGate(
+    targetRelease,
+    input.environment,
+    callerOrgId,
+    authContext,
+  );
 
   const currentPointer = await getEnvironmentReleasePointer(
     callerOrgId,
