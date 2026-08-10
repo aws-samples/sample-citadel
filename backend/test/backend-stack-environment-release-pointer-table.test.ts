@@ -208,4 +208,103 @@ describe("BackendStack — EnvironmentReleasePointersTable (environment release 
       }
     });
   });
+
+  // Finding 23971f32 (fail-closed governance ledger recording, verified
+  // against live AWS): the resolver Lambda's role had NO statement for
+  // citadel-governance-ledger-*. Asserts the fix directly against the
+  // REAL synthesized BackendStack (this file's own `template`), which is
+  // where environmentReleasePointerWriterRole's policy actually lives.
+  describe("environmentReleasePointerWriterRole — governance ledger PutItem grant (finding 23971f32)", () => {
+    function policiesTargetingLedgerTable() {
+      const policies = template.findResources("AWS::IAM::Policy");
+      return Object.values(policies).filter((p) => {
+        const stmts = p.Properties?.PolicyDocument?.Statement ?? [];
+        return stmts.some((s: { Resource?: unknown }) => {
+          const resources = Array.isArray(s.Resource)
+            ? s.Resource
+            : [s.Resource];
+          return resources.some((r: unknown) =>
+            JSON.stringify(r).includes("citadel-governance-ledger-test"),
+          );
+        });
+      });
+    }
+
+    test("grants dynamodb:PutItem on the deterministic governance ledger table ARN (citadel-governance-ledger-test)", () => {
+      const policies = policiesTargetingLedgerTable();
+      expect(policies.length).toBeGreaterThan(0);
+
+      const grantsPutItem = policies.some((policy) => {
+        const stmts = policy.Properties.PolicyDocument.Statement as Array<{
+          Action?: string | string[];
+          Resource?: unknown;
+        }>;
+        return stmts.some((stmt) => {
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          const targetsLedger = resources.some((r) =>
+            JSON.stringify(r).includes("citadel-governance-ledger-test"),
+          );
+          if (!targetsLedger) return false;
+          const actions = Array.isArray(stmt.Action)
+            ? stmt.Action
+            : [stmt.Action];
+          return actions.includes("dynamodb:PutItem");
+        });
+      });
+      expect(grantsPutItem).toBe(true);
+    });
+
+    test("no statement targeting the ledger table grants UpdateItem/DeleteItem/BatchWriteItem — PutItem-only, never grantWriteData (rejected twice in prior work)", () => {
+      const policies = policiesTargetingLedgerTable();
+      expect(policies.length).toBeGreaterThan(0);
+
+      for (const policy of policies) {
+        const stmts = policy.Properties.PolicyDocument.Statement as Array<{
+          Action?: string | string[];
+          Resource?: unknown;
+        }>;
+        for (const stmt of stmts) {
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          const targetsLedger = resources.some((r) =>
+            JSON.stringify(r).includes("citadel-governance-ledger-test"),
+          );
+          if (!targetsLedger) continue;
+
+          const actions = Array.isArray(stmt.Action)
+            ? stmt.Action
+            : [stmt.Action];
+          expect(actions).not.toContain("dynamodb:UpdateItem");
+          expect(actions).not.toContain("dynamodb:DeleteItem");
+          expect(actions).not.toContain("dynamodb:BatchWriteItem");
+        }
+      }
+    });
+
+    test("no single IAM statement grants access to both EnvironmentReleasePointersTable and the governance ledger table", () => {
+      const policies = template.findResources("AWS::IAM::Policy");
+      for (const policy of Object.values(policies)) {
+        const stmts: Array<{
+          Action?: string | string[];
+          Resource?: unknown;
+        }> = policy.Properties?.PolicyDocument?.Statement ?? [];
+        for (const stmt of stmts) {
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          const asStrings = resources.map((r) => JSON.stringify(r));
+          const targetsPointers = asStrings.some((s) =>
+            s.includes("EnvironmentReleasePointersTable"),
+          );
+          const targetsLedger = asStrings.some((s) =>
+            s.includes("citadel-governance-ledger-test"),
+          );
+          expect(targetsPointers && targetsLedger).toBe(false);
+        }
+      }
+    });
+  });
 });

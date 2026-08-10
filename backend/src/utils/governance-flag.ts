@@ -29,9 +29,20 @@
  *     evaluates and records (a ledger finding is written — see
  *     governanceDisposition('shadow') === { recordFinding: true, block:
  *     false }), so a degraded read is now a durable, queryable event
- *     instead of a silent one, while introducing ZERO new blocking
+ *     instead of a silent one, while introducing no new VERDICT-blocking
  *     behavior versus the old 'permissive' default (permissive and
- *     shadow are both `block: false`).
+ *     shadow are both `block: false` for the verdict itself). CORRECTED
+ *     (finding 23971f32): this does NOT mean shadow mode is blocking-free
+ *     end to end. Per the USER DECISION that ledger recording is
+ *     fail-closed in BOTH modes, the recording write in shadow mode is a
+ *     bare, unguarded `await` — if GOVERNANCE_LEDGER_TABLE write fails
+ *     (e.g. an infrastructure fault such as a missing IAM grant), that
+ *     failure propagates and blocks the promotion, even though the
+ *     underlying gate VERDICT never asked for a block. Shadow is also
+ *     the fallback mode this file resolves to on any SSM read failure or
+ *     out-of-allowlist value, so a ledger outage co-occurring with an
+ *     SSM outage is a real, non-hypothetical failure mode to consider,
+ *     not just a theoretical edge case.
  * This mirrors `arbiter/governance/hierarchy.py`'s
  * `_DEFAULT_ENFORCEMENT_MODE = "shadow"`, which already used this value —
  * see the cross-runtime contract test in this file's test suite

@@ -439,10 +439,23 @@ def _resolve_enforcement_mode(force_reload: bool = False) -> str:
     Falls back to ``_DEFAULT_ENFORCEMENT_MODE`` ('shadow') whenever the
     parameter is missing, the value is outside the allowed literal set, or
     the SSM call raises for any reason (permissions, throttling, network).
-    Shadow is the safe middle ground: findings are still evaluated and
-    recorded, but nothing is blocked, so an unresolvable mode never
-    silently degrades into either an accidental hard-block or an
-    accidental bypass.
+    Shadow is the safe middle ground for the GATE VERDICT: findings are
+    still evaluated and recorded, but nothing is blocked on the verdict
+    itself, so an unresolvable mode never silently degrades into either
+    an accidental hard-block or an accidental bypass of the ARBITRATION
+    decision.
+
+    CORRECTED (finding 23971f32, cross-referenced from the TypeScript
+    module doc's identical correction): "nothing is blocked" above refers
+    only to the verdict/arbitration outcome, NOT to promotion as a whole.
+    Per the USER DECISION that ledger-finding recording is fail-closed in
+    BOTH shadow and strict mode, shadow's recording write is an
+    unguarded write whose failure propagates — an infrastructure fault
+    while writing the finding (e.g. a missing IAM grant on the ledger
+    table) blocks the promotion even though shadow's arbitration verdict
+    never asked for a block. Shadow is also the fallback mode this
+    resolver returns to on any SSM failure, so this is not a purely
+    theoretical interaction.
 
     WHY THIS MUST MATCH THE TS READER, DELIBERATELY (not incidentally):
     ``backend/src/utils/governance-flag.ts``'s ``getGovernanceEnforce``

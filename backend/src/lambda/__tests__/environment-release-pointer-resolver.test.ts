@@ -300,7 +300,18 @@ describe("validateReleaseGate — mode literal contract (guards Python/TS drift)
 describe("validateReleaseGate — ordering and failure independence (design item 5)", () => {
   const architect = authContextFor("architect");
 
-  test("strict refusal does NOT depend on the finding write succeeding — throws even when the ledger write fails", async () => {
+  // UPDATED for finding 23971f32 (fail-closed in both modes): previously
+  // this asserted the refusal came from the FAIL verdict specifically
+  // (ReleaseGateError), independent of the write's own error surfacing.
+  // Under unified fail-closed, a write failure now propagates AS ITSELF
+  // rather than being swallowed — so for a FAIL verdict, the promotion
+  // is refused either way (the caller never proceeds), but the thrown
+  // error is the ledger write's own error, not a ReleaseGateError. The
+  // load-bearing guarantee this test protects — "the promotion never
+  // slips through" — still holds; only the specific rejection identity
+  // changed, which is intentional (see the resolver's module doc,
+  // ORDERING AND FAILURE section).
+  test("strict, FAIL verdict: the promotion is still refused when the ledger write fails — surfaces the write's own error under fail-closed", async () => {
     stubEvidence(failingInputs());
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -310,10 +321,11 @@ describe("validateReleaseGate — ordering and failure independence (design item
       .mockRejectedValue(new Error("GOVERNANCE_LEDGER_TABLE unavailable"));
 
     // Must still refuse the promotion — a telemetry failure must never
-    // let a FAIL verdict slip through in strict mode.
+    // let it proceed. Fail-closed means the caller sees the write's own
+    // error rather than a ReleaseGateError in this scenario.
     await expect(
       validateReleaseGate(release(), "PROD", "org-1", architect),
-    ).rejects.toThrow(/ReleaseGateError|quality gate/i);
+    ).rejects.toThrow(/GOVERNANCE_LEDGER_TABLE unavailable/);
   });
 
   test("shadow: a failed finding write is surfaced (thrown), not swallowed — it is the SOLE record of a would-block", async () => {
@@ -328,6 +340,61 @@ describe("validateReleaseGate — ordering and failure independence (design item
     await expect(
       validateReleaseGate(release(), "PROD", "org-1", architect),
     ).rejects.toThrow(/GOVERNANCE_LEDGER_TABLE unavailable/);
+  });
+
+  // Finding 23971f32 regression coverage: the PREVIOUS strict-mode
+  // try/catch swallowed exactly this case (a PASS verdict, so `shouldBlock`
+  // is false, so nothing else would have thrown) — a passing promotion
+  // would have proceeded UNRECORDED. USER DECISION: fail-closed in BOTH
+  // modes means a write failure must abort the promotion regardless of
+  // the underlying verdict.
+  test("strict, PASS verdict: a failed finding write now aborts the promotion — fail-closed, not swallowed (finding 23971f32 regression)", async () => {
+    stubEvidence(passingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockRejectedValue(new Error("GOVERNANCE_LEDGER_TABLE unavailable"));
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).rejects.toThrow(/GOVERNANCE_LEDGER_TABLE unavailable/);
+  });
+
+  test("shadow, PASS verdict: a failed finding write aborts the promotion — same fail-closed posture as strict", async () => {
+    stubEvidence(passingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("shadow");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockRejectedValue(new Error("GOVERNANCE_LEDGER_TABLE unavailable"));
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).rejects.toThrow(/GOVERNANCE_LEDGER_TABLE unavailable/);
+  });
+
+  // Dedupe must never abort — the ConditionalCheckFailedException swallow
+  // lives inside writeReleaseGateFinding itself (see
+  // release-gate-finding-writer.test.ts's own dedupe coverage); this
+  // asserts the caller-side contract: a resolved (non-rejected) write
+  // call — which is what a dedupe-swallowed write looks like from
+  // validateReleaseGate's point of view — never blocks a PASS promotion.
+  test("dedupe (writer resolves normally on a swallowed ConditionalCheckFailedException) does NOT abort the promotion", async () => {
+    stubEvidence(passingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    const writeSpy = jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).resolves.toBeUndefined();
+    expect(writeSpy).toHaveBeenCalledTimes(1);
   });
 
   test("permissive: never attempts a finding write, so a ledger outage cannot affect permissive-mode promotions", async () => {

@@ -31,29 +31,33 @@
  * "gate wiring position" describe block).
  *
  * ORDERING AND FAILURE (design item 5 — read this before changing the
- * gate call): validateReleaseGate ALWAYS computes the full
+ * gate call; UPDATED by finding 23971f32, USER DECISION: fail-closed in
+ * BOTH modes): validateReleaseGate ALWAYS computes the full
  * ReleaseGateVerdict first, via resolveReleaseGateEvidence +
  * evaluateReleaseGate — identically in every mode, so permissive-mode
  * rollout telemetry is never silently skipped. Mode only selects what
  * happens NEXT, via the shared governanceDisposition(mode) mapper:
  *
  *   - The decision to BLOCK (throw a ReleaseGateError) is derived from
- *     `disposition.block && verdict.status is a fail state` ALONE — it
- *     does not depend on whether the ledger-finding write succeeds or
- *     even runs. In strict mode, the finding write is attempted and
- *     AWAITED before the throw, but its outcome (success OR failure) is
- *     never consulted to decide whether to throw: the write is wrapped
- *     so a write failure cannot suppress or replace the refusal — see
- *     the try/finally-shaped control flow below. A promotion must never
- *     slip through because a telemetry write happened to fail.
- *   - In shadow mode, the ledger finding IS the sole durable record of a
- *     would-block decision (shadow never throws to the caller). A failed
- *     write there is NOT swallowed — it is allowed to propagate out of
- *     validateReleaseGate as a real error, because silently dropping it
- *     would erase the only evidence shadow mode exists to produce. This
- *     is a deliberate asymmetry: strict's write failure never overrides
- *     the block decision; shadow's write failure IS surfaced because
- *     shadow has no other decision to fall back on.
+ *     `disposition.block && verdict.status is a fail state` ALONE,
+ *     computed BEFORE the finding write is attempted (`shouldBlock` is
+ *     captured first) — a write failure can never SUPPRESS a refusal
+ *     that was already decided.
+ *   - The finding write itself (shadow AND strict) is now FAIL-CLOSED in
+ *     both modes: any error other than the writer's own
+ *     ConditionalCheckFailedException dedupe swallow (see
+ *     release-gate-finding-writer.ts) propagates out of
+ *     validateReleaseGate uncaught, in strict mode exactly as it always
+ *     did in shadow. This closes a real gap in the PREVIOUS asymmetric
+ *     design (strict wrapped the write in try/catch + log): a
+ *     PASS-verdict promotion in strict mode would proceed UNRECORDED if
+ *     the ledger write failed — the refusal path was fine (a FAIL
+ *     verdict still threw regardless of the write outcome), but a
+ *     passing promotion had no such backstop. A promotion must never
+ *     proceed without its finding recorded, in either mode — an
+ *     infrastructure fault in the ledger write now blocks the promotion
+ *     the same way a fail verdict does, which is the deliberate tradeoff
+ *     fail-closed accepts.
  *   - In permissive mode, no finding write is attempted at all
  *     (governanceDisposition("permissive").recordFinding === false), so
  *     a ledger outage can never affect a permissive-mode promotion.
@@ -226,56 +230,32 @@ export async function validateReleaseGate(
   const traceContext = getActiveTraceContext();
 
   if (disposition.recordFinding) {
-    // strict: write, then (independent of write outcome) enforce
-    // shouldBlock below — a write failure here must not suppress the
-    // block, so we swallow ONLY in strict mode, where the block decision
-    // was already fixed above and does not read this write's result.
-    // shadow: NEVER swallow — this finding is the sole record of a
-    // would-block, so a write failure must propagate to the caller.
-    if (mode === "strict") {
-      try {
-        await writeReleaseGateFinding({
-          orgId: callerOrgId,
-          agentTargetId: release.agentTargetId,
-          environment,
-          releaseId: release.releaseId,
-          decidedBy: authContext.userId,
-          decision,
-          reasons: verdict.reasons as never,
-          scoreVector: verdict.scoreVector,
-          mode,
-          ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
-        });
-      } catch (writeErr) {
-        // Logged, not rethrown: strict's refusal below must not depend
-        // on this write succeeding. The failure is still visible in
-        // logs/observability even though it cannot change the outcome.
-        console.error(
-          "environment-release-pointer-resolver: strict-mode gate finding write failed — refusal proceeds regardless",
-          {
-            releaseId: release.releaseId,
-            environment,
-            error:
-              writeErr instanceof Error ? writeErr.message : String(writeErr),
-          },
-        );
-      }
-    } else {
-      // shadow — propagate any write failure; it is the ONLY record of
-      // this would-block decision.
-      await writeReleaseGateFinding({
-        orgId: callerOrgId,
-        agentTargetId: release.agentTargetId,
-        environment,
-        releaseId: release.releaseId,
-        decidedBy: authContext.userId,
-        decision,
-        reasons: verdict.reasons as never,
-        scoreVector: verdict.scoreVector,
-        mode,
-        ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
-      });
-    }
+    // Finding 23971f32 — FAIL-CLOSED in BOTH modes (USER DECISION): a
+    // promotion must never proceed without its finding recorded. This
+    // used to swallow strict-mode write failures (log + continue) on the
+    // theory that shouldBlock was already fixed above and didn't need
+    // the write to succeed. That reasoning is true for a FAIL verdict
+    // (the refusal still throws either way — the try/catch never
+    // affected THAT test), but it is a live gap for a PASS verdict: a
+    // passing-verdict strict-mode promotion would proceed UNRECORDED if
+    // the ledger write failed, silently defeating the audit trail the
+    // gate exists to produce. Unified with shadow's existing behavior
+    // below — every non-dedupe write failure propagates in both modes.
+    // The writer's own ConditionalCheckFailedException dedupe swallow
+    // (release-gate-finding-writer.ts) is untouched — a retried
+    // promotion against the same decision must still succeed.
+    await writeReleaseGateFinding({
+      orgId: callerOrgId,
+      agentTargetId: release.agentTargetId,
+      environment,
+      releaseId: release.releaseId,
+      decidedBy: authContext.userId,
+      decision,
+      reasons: verdict.reasons as never,
+      scoreVector: verdict.scoreVector,
+      mode,
+      ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
+    });
   }
 
   if (shouldBlock) {

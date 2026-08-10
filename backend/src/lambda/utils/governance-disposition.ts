@@ -36,8 +36,18 @@
  *   - shadow: ledger finding written (this is the ONLY record of a
  *     would-block outcome — see release-gate-finding-writer.ts's
  *     module doc for why a failed write here must be surfaced, never
- *     swallowed), no block.
- *   - strict: ledger finding written AND the promotion is blocked.
+ *     swallowed), no block ON THE VERDICT. CORRECTED (finding 23971f32):
+ *     `block: false` here describes only the verdict/arbitration
+ *     decision. Per the USER DECISION that ledger recording is
+ *     fail-closed in both shadow and strict mode, the caller
+ *     (environment-release-pointer-resolver.ts) does not swallow a
+ *     failed finding write in shadow mode — that failure propagates and
+ *     DOES block the promotion, even though this disposition's `block`
+ *     field is `false`. This field answers "does a FAIL verdict block
+ *     promotion", not "can this mode ever prevent a promotion".
+ *   - strict: ledger finding written AND the promotion is blocked when
+ *     the verdict fails — and, per the same fail-closed decision, ALSO
+ *     blocked if the finding write itself fails, even on a PASS verdict.
  */
 import type { GovernanceEnforce } from "../../utils/governance-flag";
 
