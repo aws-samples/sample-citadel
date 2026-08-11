@@ -98,6 +98,9 @@ type Query {
   # eval-sampling-config-resolver.ts, not by schema visibility).
   getEvalSamplingConfig(orgId: ID!): EvalSamplingConfig
   listEvalProdSamples(orgId: ID!, agentId: ID): [EvalProdSample!]!
+  # Decision ada70113 — admin-only read (enforced in
+  # promotion-policy-resolver.ts, not by schema visibility).
+  getPromotionPolicy(orgId: ID!): PromotionPolicyConfig
   # InterrogationRound
   getInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound
   listInterrogationRounds(projectId: ID!): [InterrogationRound!]!
@@ -384,6 +387,10 @@ type Mutation {
   # not schema visibility). optIn/rate changes take effect on the NEXT
   # terminal workflow/conversation signal; no retroactive resampling.
   setEvalSamplingConfig(orgId: ID!, input: EvalSamplingConfigInput!): EvalSamplingConfig!
+  # Decision ada70113 — admin-only write (enforced in
+  # promotion-policy-resolver.ts, not by schema visibility). updatedBy is
+  # server-derived from the caller's identity, never accepted from input.
+  setPromotionPolicy(orgId: ID!, input: PromotionPolicyConfigInput!): PromotionPolicyConfig!
   # InterrogationRound
   startInterrogationRound(projectId: ID!, roundN: Int!): InterrogationRound!
   injectConstraints(projectId: ID!, roundN: Int!, constraints: [String!]!): InterrogationRound!
@@ -2689,6 +2696,29 @@ input EvalSamplingConfigInput {
   optIn: Boolean!
   defaultSampleRate: Float!
   perAgentSampleRate: AWSJSON
+}
+
+# Decision ada70113: promotion policy becomes per-org config. Admin-authored
+# floor for environment-release-pointer-resolver.ts's validateReleaseGate
+# (via promotion-policy-store.ts's resolvePromotionPolicy). Mirrors
+# EvalSamplingConfig's structure: `policy` overrides DEFAULT_PROMOTION_POLICY
+# field-by-field, `perAgentPolicyOverrides` further overrides per
+# agentTargetId. Both are AWSJSON since GraphQL has no native map/partial
+# type and PromotionPolicy fields are resolved field-by-field, not as a
+# whole-object replace.
+type PromotionPolicyConfig {
+  orgId: ID!
+  # Partial<PromotionPolicy> — org-wide floor overrides.
+  policy: AWSJSON
+  # Map<agentTargetId, Partial<PromotionPolicy>> — per-agent floor overrides.
+  perAgentPolicyOverrides: AWSJSON
+  updatedAt: AWSDateTime
+  updatedBy: String
+}
+
+input PromotionPolicyConfigInput {
+  policy: AWSJSON
+  perAgentPolicyOverrides: AWSJSON
 }
 
 # Phase 2 (production sampling) — a captured + scored production sample.

@@ -104,11 +104,9 @@ import { extractOrgFromEvent } from "../utils/auth-event";
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { getActiveTraceContext } from "../utils/trace-context";
 import { governanceDisposition } from "./utils/governance-disposition";
-import {
-  evaluateReleaseGate,
-  DEFAULT_PROMOTION_POLICY,
-} from "./utils/release-gate";
+import { evaluateReleaseGate } from "./utils/release-gate";
 import { resolveReleaseGateEvidence } from "./utils/release-gate-evidence";
+import { resolvePromotionPolicy } from "./utils/promotion-policy-store";
 import { writeReleaseGateFinding } from "./utils/release-gate-finding-writer";
 import {
   getEnvironmentReleasePointer,
@@ -184,16 +182,37 @@ export async function validateReleaseGate(
   callerOrgId: string,
   authContext: AuthContext,
 ): Promise<void> {
-  const policy = DEFAULT_PROMOTION_POLICY;
   const now = new Date().toISOString();
 
-  const evidence = await resolveReleaseGateEvidence(
-    release,
-    environment,
+  // Decision ada70113: promotion policy is per-org config, resolved
+  // (org, agentTargetId)-scoped via promotion-policy-store.ts (field-level
+  // merge floor<-org<-agent; absent config -> DEFAULT_PROMOTION_POLICY).
+  // A resolution failure (thrown GetItem or a schema-invalid row) is
+  // UNREADABLE and MUST fail the gate closed exactly like a
+  // resolveReleaseGateEvidence UNREADABLE_RECORD — never fall back to
+  // DEFAULT_PROMOTION_POLICY on this branch, which would silently
+  // downgrade an org's intentionally-tightened policy on an
+  // infrastructure blip.
+  const policyResolution = await resolvePromotionPolicy(
     callerOrgId,
-    policy,
-    now,
+    release.agentTargetId,
   );
+
+  // evidence is only resolved when the policy itself resolved OK — an
+  // UNREADABLE policy short-circuits before any evidence read, and the
+  // synthetic FAIL verdict below carries the SAME
+  // `reasons: [<failure-reason>]` shape resolveReleaseGateEvidence's own
+  // ok:false branch produces, so downstream consumers (the ledger
+  // finding, isFailStatus) treat the two failure sources identically.
+  const evidence = policyResolution.ok
+    ? await resolveReleaseGateEvidence(
+        release,
+        environment,
+        callerOrgId,
+        policyResolution.policy,
+        now,
+      )
+    : ({ ok: false, reason: policyResolution.reason } as const);
 
   const verdict = evidence.ok
     ? evaluateReleaseGate(evidence.inputs)
