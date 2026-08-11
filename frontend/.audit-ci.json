@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/IBM/audit-ci/main/docs/schema.json",
+  "low": true,
+  "moderate": true,
+  "high": true,
+  "critical": true,
+  "allowlist": [],
+  "report": true,
+  "skip-dev": false,
+  "_comment": "Frontend-scoped audit-ci gate (finding 9c287884). Mirrors root .audit-ci.json's severity threshold (low and above, blocking). Empty allowlist: npm audit --prefix frontend currently reports 0 vulnerabilities. If a future advisory is unfixable, add its exact GHSA id here AND a corresponding justification entry in ../audit-ci-allowlist-justifications.md naming that GHSA id."
+}
