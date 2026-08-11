@@ -108,6 +108,7 @@ import { evaluateReleaseGate } from "./utils/release-gate";
 import { resolveReleaseGateEvidence } from "./utils/release-gate-evidence";
 import { resolvePromotionPolicy } from "./utils/promotion-policy-store";
 import { writeReleaseGateFinding } from "./utils/release-gate-finding-writer";
+import { writeReleasePromotionApprovalFinding } from "./utils/release-promotion-approval-writer";
 import {
   getEnvironmentReleasePointer,
   listEnvironmentReleasePointersForAgent,
@@ -120,6 +121,7 @@ import type {
   EnvironmentReleasePointer,
   GovernanceEventIdentity,
   GovernanceResolverEvent,
+  PromotionApproval,
   SetEnvironmentReleasePointerInput,
 } from "../types";
 
@@ -151,6 +153,25 @@ export class ReleaseGateError extends Error {
       `ReleaseGateError: release quality gate refused promotion of ${releaseId} — reasons=[${reasons.join(", ")}]`,
     );
     this.name = "ReleaseGateError";
+  }
+}
+
+/** Thrown when strict-mode governance requires an explicit human
+ * approval (approved=true) before a promotion may proceed, and the
+ * caller's `approval` input is absent or `approved=false`. Distinct from
+ * ReleaseGateError — this is a MISSING-DECISION refusal (no operator has
+ * approved this promotion yet), not a quality-evidence refusal, so
+ * callers must be able to tell the two apart and surface a clear,
+ * distinct operator message ("get this approved" vs. "the release
+ * failed the quality gate"). Decision 8165b7e5: interim human approval
+ * rides this existing mutation — there is no separate CIT-030 approval
+ * substrate. */
+export class ReleaseApprovalRequiredError extends Error {
+  constructor(public readonly releaseId: string) {
+    super(
+      `ReleaseApprovalRequiredError: strict-mode governance requires an explicit approved=true PromotionApproval before promoting release ${releaseId} — none was supplied, or approval was denied. Obtain approval and retry with { approval: { approved: true } }.`,
+    );
+    this.name = "ReleaseApprovalRequiredError";
   }
 }
 
@@ -295,6 +316,103 @@ async function getAgentRelease(
 }
 
 /**
+ * Interim human-approval seam (decision 8165b7e5 — rides this existing
+ * mutation; the CIT-030 approval substrate does not exist).
+ *
+ * Uses the SAME `governanceDisposition(mode)` mapper validateReleaseGate
+ * already consults — `disposition.block` selects whether an approval is
+ * REQUIRED, `disposition.recordFinding` selects whether a supplied
+ * approval (or its absence, in the deny case) is recorded at all:
+ *
+ *   - strict (block:true): approval with approved=true is REQUIRED.
+ *     Absent input, or approved=false, throws
+ *     ReleaseApprovalRequiredError. On approved=false specifically, the
+ *     denial finding is recorded FIRST (fail-closed — a failed write
+ *     aborts the promotion here too), THEN the error is thrown, so the
+ *     denial is never lost even though the promotion is refused either
+ *     way.
+ *   - shadow (block:false, recordFinding:true): approval is NOT
+ *     required. If the caller supplied one, it is recorded (permit OR
+ *     deny) but never blocks — mirrors validateReleaseGate's own
+ *     shadow-mode telemetry-only disposition for the quality gate.
+ *   - permissive (recordFinding:false): approval is ignored entirely —
+ *     no recording, no requirement, no read of the input at all beyond
+ *     this early return.
+ *
+ * Called AFTER validateReleaseGate and BEFORE
+ * getEnvironmentReleasePointer/setEnvironmentReleasePointer — same
+ * "everything before the store's conditional write" ordering
+ * validateReleaseGate itself documents. The store write remains the
+ * LAST statement in promoteEnvironmentReleasePointer.
+ *
+ * Resolves mode itself via `getGovernanceEnforce(environment)` — the
+ * SAME per-environment reader validateReleaseGate uses — rather than
+ * threading it through validateReleaseGate's return value, so
+ * validateReleaseGate's existing signature and tests are undisturbed.
+ */
+export async function validatePromotionApproval(
+  release: AgentRelease,
+  environment: EnvironmentLiteral,
+  callerOrgId: string,
+  authContext: AuthContext,
+  approval: PromotionApproval | null | undefined,
+): Promise<void> {
+  const mode = await getGovernanceEnforce(environment);
+  const disposition = governanceDisposition(mode);
+
+  if (!disposition.recordFinding) {
+    // permissive: approval is ignored entirely.
+    return;
+  }
+
+  if (!approval) {
+    // No approval supplied.
+    if (disposition.block) {
+      throw new ReleaseApprovalRequiredError(release.releaseId);
+    }
+    // shadow: nothing to record when nothing was supplied.
+    return;
+  }
+
+  const decision: "permit" | "deny" = approval.approved ? "permit" : "deny";
+  const traceContext = getActiveTraceContext();
+
+  if (!approval.approved) {
+    // Record the denial finding BEFORE throwing (strict) — fail-closed:
+    // a failed write here aborts the promotion, same as the gate
+    // finding. In shadow, this records the deny without blocking.
+    await writeReleasePromotionApprovalFinding({
+      orgId: callerOrgId,
+      agentTargetId: release.agentTargetId,
+      environment,
+      releaseId: release.releaseId,
+      decidedBy: authContext.userId,
+      decision,
+      justification: approval.justification,
+      ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
+    });
+
+    if (disposition.block) {
+      throw new ReleaseApprovalRequiredError(release.releaseId);
+    }
+    return;
+  }
+
+  // approved=true: record the permit finding (strict and shadow both
+  // record; only strict required it to reach here at all when absent).
+  await writeReleasePromotionApprovalFinding({
+    orgId: callerOrgId,
+    agentTargetId: release.agentTargetId,
+    environment,
+    releaseId: release.releaseId,
+    decidedBy: authContext.userId,
+    decision,
+    justification: approval.justification,
+    ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
+  });
+}
+
+/**
  * promoteEnvironmentReleasePointer — validates the target release EXISTS
  * and belongs to the caller's org, runs the quality gate
  * (validateReleaseGate), then moves the (org, agentTargetId,
@@ -333,6 +451,14 @@ export async function promoteEnvironmentReleasePointer(
     input.environment,
     callerOrgId,
     authContext,
+  );
+
+  await validatePromotionApproval(
+    targetRelease,
+    input.environment,
+    callerOrgId,
+    authContext,
+    input.approval,
   );
 
   const currentPointer = await getEnvironmentReleasePointer(

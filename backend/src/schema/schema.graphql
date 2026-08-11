@@ -2425,6 +2425,17 @@ input SetEnvironmentReleasePointerInput {
   agentTargetId: String!
   environment: DeploymentEnvironment!
   releaseId: ID!
+  approval: PromotionApproval
+}
+
+# Interim human-approval input for promoteEnvironmentReleasePointer
+# (decision 8165b7e5 — rides the existing promote mutation; the CIT-030
+# approval substrate does not exist). decidedBy is NEVER part of this
+# input — it is server-derived from the caller's identity in the
+# resolver, same doctrine as every other decidedBy field in this schema.
+input PromotionApproval {
+  approved: Boolean!
+  justification: String
 }
 
 type EvalRunCaseResult {

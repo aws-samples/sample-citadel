@@ -992,11 +992,25 @@ export interface EnvironmentReleasePointer {
   version: number;
 }
 
+/** Interim human-approval input for promoteEnvironmentReleasePointer
+ * (decision 8165b7e5 — rides the existing promote mutation; the CIT-030
+ * approval substrate does not exist). `approved` is caller-supplied;
+ * `decidedBy` is deliberately ABSENT here — it is derived from
+ * authContext.userId in the resolver, never accepted from input. */
+export interface PromotionApproval {
+  approved: boolean;
+  justification?: string | null;
+}
+
 /** Input to set (create-or-move) the pointer for one (agentTargetId,
  * environment) pair. orgId is derived from the caller, never taken from
- * caller-supplied input — same doctrine as CutAgentReleaseInput. */
+ * caller-supplied input — same doctrine as CutAgentReleaseInput.
+ * `approval` is OPTIONAL and its requirement is mode-dependent — see
+ * environment-release-pointer-resolver.ts's promoteEnvironmentReleasePointer
+ * for the strict/shadow/permissive disposition. */
 export interface SetEnvironmentReleasePointerInput {
   agentTargetId: string;
   environment: EnvironmentLiteral;
   releaseId: string;
+  approval?: PromotionApproval | null;
 }
