@@ -202,7 +202,19 @@ cdk_diff() {
   [ -n "${AWS_PROFILE:-}" ] && diff_cmd="$diff_cmd --profile $AWS_PROFILE"
   local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
   [ -n "$admin_email" ] && diff_cmd="$diff_cmd -c adminEmail=$admin_email"
-  $diff_cmd --all 2>&1 | tee -a "$DEPLOY_LOG" || true
+  # cdk diff stays non-blocking by design (it's a preview, not a gate) —
+  # but a failure is now named instead of silently swallowed by `|| true`.
+  # Note: --all is intentionally NOT passed; it is not a supported cdk diff
+  # flag (cdk diff diffs all stacks in the app by default with no args).
+  local diff_output
+  local diff_rc=0
+  diff_output=$($diff_cmd 2>&1) || diff_rc=$?
+  echo "$diff_output" | tee -a "$DEPLOY_LOG"
+  if [ $diff_rc -ne 0 ]; then
+    local last_error
+    last_error=$(echo "$diff_output" | grep -v '^[[:space:]]*$' | tail -1)
+    warn "cdk diff unavailable: $last_error"
+  fi
   popd > /dev/null
 }
 
@@ -257,6 +269,28 @@ verify_stack_coverage() {
   ok "Stack coverage verified (${#expected[@]} stacks match 'cdk list')"
 }
 
+# --- Check whether the API-key HMAC pepper SSM parameter exists ---
+# Returns 0 if the parameter exists, 1 if it does NOT exist (ParameterNotFound
+# specifically), and aborts the whole deploy for any other failure (expired
+# credentials, AccessDenied, wrong region, throttling, etc.) since those are
+# NOT evidence of absence and must never be treated as "go ahead and create
+# a new pepper". Sets PEPPER_CHECK_STDERR as a side channel for the caller.
+check_api_key_pepper_exists() {
+  local param_name="$1"
+  local profile_flag="$2"
+  local stderr_output
+  local rc=0
+
+  stderr_output=$(aws ssm get-parameter \
+    --name "$param_name" \
+    --region "$CDK_DEFAULT_REGION" \
+    $profile_flag \
+    2>&1 >/dev/null) || rc=$?
+
+  PEPPER_CHECK_STDERR="$stderr_output"
+  return $rc
+}
+
 # --- Ensure the API-key HMAC pepper SSM parameter exists (idempotent) ---
 # Never overwrites an existing parameter and never echoes the value.
 ensure_api_key_pepper() {
@@ -265,18 +299,42 @@ ensure_api_key_pepper() {
   [ -n "${AWS_PROFILE:-}" ] && profile_flag="--profile $AWS_PROFILE"
 
   log "Checking API-key HMAC pepper SSM parameter..."
-  if aws ssm get-parameter \
-    --name "$param_name" \
-    --region "$CDK_DEFAULT_REGION" \
-    $profile_flag \
-    >/dev/null 2>&1; then
+
+  local PEPPER_CHECK_STDERR=""
+  if check_api_key_pepper_exists "$param_name" "$profile_flag"; then
     ok "API-key HMAC pepper already exists at $param_name"
     return 0
+  fi
+
+  # The get-parameter call failed. Only a ParameterNotFound error means the
+  # pepper genuinely does not exist yet — every other failure (expired/invalid
+  # credentials, AccessDenied, unauthorized, wrong region, throttling, etc.)
+  # must abort the deploy rather than being treated as "not found", since
+  # silently falling through to generate-and-store on those errors would let
+  # a credentials/permission/region problem masquerade as a first-run bootstrap.
+  if ! echo "$PEPPER_CHECK_STDERR" | grep -q "ParameterNotFound"; then
+    err "Could not verify API-key HMAC pepper at $param_name — aborting deploy."
+    if echo "$PEPPER_CHECK_STDERR" | grep -qiE "ExpiredToken|InvalidClientTokenId|UnrecognizedClientException|could not be found|Unable to locate credentials|You need to authenticate|Midway"; then
+      err "Cause: AWS credentials appear to be missing or expired. Re-authenticate and retry."
+    elif echo "$PEPPER_CHECK_STDERR" | grep -qiE "AccessDenied|not authorized|UnauthorizedOperation"; then
+      err "Cause: AccessDenied — the current identity lacks ssm:GetParameter on $param_name."
+    elif echo "$PEPPER_CHECK_STDERR" | grep -qiE "could not connect to the endpoint|InvalidRegion|is not a valid region"; then
+      err "Cause: region error — check CDK_DEFAULT_REGION/AWS_DEFAULT_REGION ($CDK_DEFAULT_REGION)."
+    else
+      err "Cause: unrecognized error from aws ssm get-parameter (see below)."
+    fi
+    err "aws ssm get-parameter said: $PEPPER_CHECK_STDERR"
+    exit 1
   fi
 
   log "API-key HMAC pepper not found — generating and storing a new SecureString..."
   local pepper_value
   pepper_value=$(openssl rand -base64 32)
+  # NOTE: --overwrite is deliberately ABSENT here. This is a safety property,
+  # not an oversight: overwriting the pepper would invalidate every existing
+  # API-key HMAC hash (see backend api-key-hash.ts consumers), silently
+  # locking out every issued API key. Never add --overwrite to this call
+  # outside of an explicit, confirmed key-rotation procedure.
   aws ssm put-parameter \
     --name "$param_name" \
     --type SecureString \
@@ -287,6 +345,26 @@ ensure_api_key_pepper() {
     >/dev/null
   unset pepper_value
   ok "API-key HMAC pepper created at $param_name"
+}
+
+# --- Classify a failed deploy attempt's captured output ---
+# Echoes "retry" if the failure looks like a CloudFormation-side transient
+# (worth a retry), or "fail-fast:<root-cause-line>" if the failure is a
+# deterministic client-side problem (missing binary, subprocess crash, CDK
+# synth/type error) that a bare retry cannot fix — retrying just wastes
+# 10s+ and reproduces the identical error.
+classify_deploy_failure() {
+  local output="$1"
+
+  # Deterministic client-side signatures: retrying will reproduce them exactly.
+  local root_cause
+  root_cause=$(echo "$output" | grep -E "spawnSync .* ENOENT|Subprocess exited with error|error TS[0-9]+:|SyntaxError:|Cannot find module|is not a function|Error: Cannot find" | tail -1)
+  if [ -n "$root_cause" ]; then
+    echo "fail-fast:$root_cause"
+    return 0
+  fi
+
+  echo "retry"
 }
 
 # --- Deploy a single stack with retry ---
@@ -351,6 +429,17 @@ deploy_stack() {
     fi
 
   while [ $attempt -le $max_attempts ]; do
+    # Re-check the container runtime immediately before EACH attempt — it
+    # can disappear mid-run (e.g. Docker Desktop auto-updating), and a stale
+    # "it was there at script start" assumption would otherwise burn a full
+    # retry cycle on a doomed attempt before failing.
+    local docker_cmd="${CDK_DOCKER:-docker}"
+    if ! command -v "$docker_cmd" &>/dev/null; then
+      popd > /dev/null 2>&1 || true
+      err "Container runtime '$docker_cmd' is no longer available (attempt $attempt/$max_attempts) — aborting $stack_name deploy."
+      return 1
+    fi
+
     log "Deploying $stack_name (attempt $attempt/$max_attempts)..."
     pushd backend > /dev/null
     local cmd="npx cdk deploy $stack_name --require-approval never --outputs-file ../cdk-outputs.json"
@@ -360,12 +449,27 @@ deploy_stack() {
     local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
     [ -n "$admin_email" ] && cmd="$cmd -c adminEmail=$admin_email"
 
-    if $cmd 2>&1 | tee -a "$DEPLOY_LOG"; then
+    local attempt_output
+    local attempt_rc=0
+    attempt_output=$($cmd 2>&1) || attempt_rc=$?
+    echo "$attempt_output" | tee -a "$DEPLOY_LOG"
+    popd > /dev/null
+
+    if [ $attempt_rc -eq 0 ]; then
       ok "$stack_name deployed successfully"
-      popd > /dev/null
       return 0
     fi
-    popd > /dev/null
+
+    # Classify before deciding whether a retry is worthwhile. Deterministic
+    # client-side failures (missing binary, crashed subprocess, synth/type
+    # errors) will fail identically on a second attempt — fail fast instead.
+    local classification
+    classification=$(classify_deploy_failure "$attempt_output")
+    if [[ "$classification" == fail-fast:* ]]; then
+      err "$stack_name failed with a deterministic error — not retrying."
+      err "Root cause: ${classification#fail-fast:}"
+      return 1
+    fi
 
     # Check if stack ended up in ROLLBACK_COMPLETE — delete before retry
     stack_status=$(aws cloudformation describe-stacks \
@@ -388,8 +492,8 @@ deploy_stack() {
     fi
 
     if [ $attempt -lt $max_attempts ]; then
-      warn "$stack_name failed, retrying in 10s..."
-      sleep 10
+      warn "$stack_name failed, retrying in ${CDK_DEPLOY_RETRY_SLEEP:-10}s..."
+      sleep "${CDK_DEPLOY_RETRY_SLEEP:-10}"
     fi
     attempt=$((attempt + 1))
   done
@@ -589,6 +693,17 @@ show_help() {
   echo "  --help               Show this help message"
   exit 0
 }
+
+# --- Testability seam ---
+# `DEPLOY_SH_SOURCE_ONLY=1 source deploy.sh` defines every function above
+# and then returns here without running the main flow below, so a test
+# harness can source this file and call functions (ensure_api_key_pepper,
+# deploy_stack, classify_deploy_failure, cdk_diff, ...) directly with faked
+# PATH binaries. Default (unset/non-"1") behaviour is byte-for-byte
+# unchanged — this guard is a pure no-op unless the env var is explicitly set.
+if [ "${DEPLOY_SH_SOURCE_ONLY:-}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 # --- Main ---
 STACK_NAME=""
