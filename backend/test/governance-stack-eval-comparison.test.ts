@@ -109,6 +109,29 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
   );
 
+  const promotionPolicyConfigTable = new dynamodb.Table(
+    backendStack,
+    "PromotionPolicyConfigTable",
+    {
+      tableName: "citadel-promotion-policy-config-test",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  const promotionPolicyConfigWriterRole = new iam.Role(
+    backendStack,
+    "PromotionPolicyConfigWriterRole",
+    { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
+  );
+  promotionPolicyConfigWriterRole.addToPolicy(
+    new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ["dynamodb:GetItem", "dynamodb:PutItem"],
+      resources: [promotionPolicyConfigTable.tableArn],
+    }),
+  );
+
   const stack = new GovernanceStack(app, "TestGovernanceStackEvalComparison", {
     env: { account: "123456789012", region: "us-east-1" },
     environment: "test",
@@ -194,6 +217,8 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
     registryId: "citadel-test",
     environmentReleasePointersTable,
     environmentReleasePointerWriterRole,
+    promotionPolicyConfigTable,
+    promotionPolicyConfigWriterRole,
   });
 
   const template = Template.fromStack(stack);

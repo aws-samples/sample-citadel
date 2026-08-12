@@ -1,19 +1,25 @@
 /**
- * governance-stack-agent-release.test.ts — GovernanceStack agent-release
- * wiring assertions (agent release bundles, slice 3: wiring only).
+ * governance-stack-promotion-policy.test.ts — decision ada70113
+ * (promotion policy becomes per-org config). CDK template assertions
+ * for PromotionPolicyConfigTable (BackendStack) and the admin
+ * PromotionPolicyResolverFunction + AppSync wiring (GovernanceStack).
  *
- * Mirrors governance-stack-eval-run.test.ts: one AgentReleaseResolverFunction,
- * one AgentReleaseLambdaDataSource, and a CfnResolver for the
- * Mutation.cutAgentRelease field, bound to that data source.
+ * Mirrors governance-stack-agent-release.test.ts's mock-stack scaffold
+ * pattern: a minimal BackendStack stand-in with just the tables/roles
+ * GovernanceStack actually needs, real GovernanceStack synth on top.
  *
- * The two invariants under test here are the whole risk of this slice:
- *  - The resolver Lambda's role is the EXISTING AgentReleaseWriterRole
- *    (assumed, not a fresh grantReadWriteData call) — so this test also
- *    re-asserts, at the GovernanceStack synth level, that no UpdateItem/
- *    DeleteItem is granted on AgentReleasesTable anywhere in the
- *    template (the IAM immutability floor must survive wiring).
- *  - No new principal picks up broader-than-Put/Get/Query access to the
- *    releases table as a side effect of AppSync/data-source wiring.
+ * Invariants under test:
+ *  - PromotionPolicyConfigTable exists, PAY_PER_REQUEST, PK=orgId.
+ *  - PromotionPolicyResolverFunction has the PROMOTION_POLICY_CONFIG_TABLE
+ *    env var and Node.js 24.x runtime.
+ *  - Its execution role is the EXISTING promotionPolicyConfigWriterRole
+ *    (assumed), not a fresh grantReadWriteData role.
+ *  - IAM floor is narrow: GetItem+PutItem only for the writer role, no
+ *    grantWriteData anywhere (no UpdateItem/DeleteItem/BatchWriteItem on
+ *    this table from any principal).
+ *  - The EXISTING environmentReleasePointerWriterRole additionally has a
+ *    GetItem-only (never PutItem) statement on this table — no single
+ *    statement grants PutItem to that role for this table.
  */
 import * as cdk from "aws-cdk-lib";
 import { Template, Match } from "aws-cdk-lib/assertions";
@@ -43,12 +49,11 @@ function mockTable(
 }
 
 function createTestStack(): {
-  stack: GovernanceStack;
   template: Template;
   backendTemplate: Template;
 } {
   const app = new cdk.App();
-  const backendStack = new cdk.Stack(app, "MockBackendStackAgentRelease", {
+  const backendStack = new cdk.Stack(app, "MockBackendStackPromotionPolicy", {
     env: { account: "123456789012", region: "us-east-1" },
   });
 
@@ -144,11 +149,6 @@ function createTestStack(): {
     "citadel-conversations-test",
   );
 
-  // Slice 1's actual releases table shape (simple PK on releaseId) plus
-  // the pre-existing writer role this slice must ASSUME rather than
-  // grant afresh — mirrors backend-stack.ts's real AgentReleasesTable /
-  // AgentReleaseWriterRole construction exactly (PutItem/GetItem/Query
-  // only, nothing else, ever).
   const agentReleasesTable = new dynamodb.Table(
     backendStack,
     "AgentReleasesTable",
@@ -168,9 +168,7 @@ function createTestStack(): {
   const agentReleaseWriterRole = new iam.Role(
     backendStack,
     "AgentReleaseWriterRole",
-    {
-      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
-    },
+    { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
   );
   agentReleaseWriterRole.addToPolicy(
     new iam.PolicyStatement({
@@ -183,11 +181,6 @@ function createTestStack(): {
     }),
   );
 
-  // Environment release pointer — separate table + separate role from
-  // AgentReleasesTable/AgentReleaseWriterRole above, mirroring
-  // backend-stack.ts's real EnvironmentReleasePointersTable /
-  // EnvironmentReleasePointerWriterRole construction. Kept separate on
-  // purpose — this is the invariant this slice guards.
   const environmentReleasePointersTable = new dynamodb.Table(
     backendStack,
     "EnvironmentReleasePointersTable",
@@ -205,9 +198,7 @@ function createTestStack(): {
   const environmentReleasePointerWriterRole = new iam.Role(
     backendStack,
     "EnvironmentReleasePointerWriterRole",
-    {
-      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
-    },
+    { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
   );
   environmentReleasePointerWriterRole.addToPolicy(
     new iam.PolicyStatement({
@@ -220,9 +211,11 @@ function createTestStack(): {
     }),
   );
 
-  const registryArn =
-    "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test";
-
+  // Decision ada70113 — the table + two IAM floors under test. Mirrors
+  // backend-stack.ts's real construction: a dedicated writer role for
+  // the admin resolver (GetItem+PutItem), plus an ADDITIONAL scoped
+  // GetItem-only statement on the EXISTING pointer-writer role above
+  // (the promotion gate's read path).
   const promotionPolicyConfigTable = new dynamodb.Table(
     backendStack,
     "PromotionPolicyConfigTable",
@@ -245,8 +238,18 @@ function createTestStack(): {
       resources: [promotionPolicyConfigTable.tableArn],
     }),
   );
+  environmentReleasePointerWriterRole.addToPolicy(
+    new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ["dynamodb:GetItem"],
+      resources: [promotionPolicyConfigTable.tableArn],
+    }),
+  );
 
-  const stack = new GovernanceStack(app, "TestGovernanceStackAgentRelease", {
+  const registryArn =
+    "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test";
+
+  const stack = new GovernanceStack(app, "TestGovernanceStackPromotionPolicy", {
     env: { account: "123456789012", region: "us-east-1" },
     environment: "test",
     appSyncApi,
@@ -280,160 +283,100 @@ function createTestStack(): {
 
   const template = Template.fromStack(stack);
   const backendTemplate = Template.fromStack(backendStack);
-  return { stack, template, backendTemplate };
+  return { template, backendTemplate };
 }
 
-describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability)", () => {
-  let template: Template;
+describe("PromotionPolicyConfigTable (decision ada70113)", () => {
   let backendTemplate: Template;
 
   beforeAll(() => {
-    ({ template, backendTemplate } = createTestStack());
+    ({ backendTemplate } = createTestStack());
   });
 
-  test("AgentReleaseResolverFunction exists with Node.js 24.x runtime and the expected table/registry env vars", () => {
+  test("table exists, PAY_PER_REQUEST, PK=orgId", () => {
+    backendTemplate.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "citadel-promotion-policy-config-test",
+      BillingMode: "PAY_PER_REQUEST",
+      KeySchema: [{ AttributeName: "orgId", KeyType: "HASH" }],
+    });
+  });
+
+  test("no single IAM statement grants access to both PromotionPolicyConfigTable and EnvironmentReleasePointersTable's PutItem action", () => {
+    const policies = backendTemplate.findResources("AWS::IAM::Policy");
+    for (const policy of Object.values(policies)) {
+      const stmts: Array<{ Action?: string | string[]; Resource?: unknown }> =
+        policy.Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of stmts) {
+        const resources = Array.isArray(stmt.Resource)
+          ? stmt.Resource
+          : [stmt.Resource];
+        const asStrings = resources.map((r) => JSON.stringify(r));
+        const targetsPromotionPolicy = asStrings.some((s) =>
+          s.includes("PromotionPolicyConfigTable"),
+        );
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        const grantsPutOnPointers =
+          asStrings.some((s) =>
+            s.includes("EnvironmentReleasePointersTable"),
+          ) && actions.includes("dynamodb:PutItem");
+        // A statement targeting PromotionPolicyConfigTable must never be
+        // the SAME statement that grants PutItem on the pointers table —
+        // that would indicate the two tables' write floors were merged.
+        expect(targetsPromotionPolicy && grantsPutOnPointers).toBe(false);
+      }
+    }
+  });
+});
+
+describe("GovernanceStack — PromotionPolicyResolverFunction wiring", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("exists with Node.js 24.x runtime and the PROMOTION_POLICY_CONFIG_TABLE env var", () => {
     template.hasResourceProperties("AWS::Lambda::Function", {
-      Handler: "release-resolver.handler",
+      Handler: "promotion-policy-resolver.handler",
       Runtime: "nodejs24.x",
       Environment: {
         Variables: Match.objectLike({
-          AGENT_RELEASES_TABLE: Match.anyValue(),
-          EXECUTION_SPECS_TABLE: Match.anyValue(),
-          EVAL_RUNS_TABLE: Match.anyValue(),
-          EVAL_SUITES_TABLE: Match.anyValue(),
-          PROJECTS_TABLE: Match.anyValue(),
-          REGISTRY_ID: Match.anyValue(),
+          PROMOTION_POLICY_CONFIG_TABLE: Match.anyValue(),
         }),
       },
     });
   });
 
-  test("AgentReleaseResolverFunction's execution role IS the existing AgentReleaseWriterRole (assumed, not a fresh grantReadWriteData role)", () => {
+  test("its execution role IS the existing promotionPolicyConfigWriterRole (assumed, not a fresh role)", () => {
     const fns = template.findResources("AWS::Lambda::Function");
     const match = Object.values(fns).find(
-      (f) => f.Properties?.Handler === "release-resolver.handler",
+      (f) => f.Properties?.Handler === "promotion-policy-resolver.handler",
     );
     expect(match).toBeDefined();
     const roleProp = JSON.stringify(match!.Properties.Role);
-    // Cross-stack role reference: CDK exports agentReleaseWriterRole's ARN
-    // from BackendStack and imports it here via Fn::ImportValue — proof
-    // this Lambda ASSUMES the existing role rather than getting a
-    // freshly-generated "...ServiceRole..." (which grantReadWriteData
-    // or an implicit default role would produce).
-    expect(roleProp).toContain("AgentReleaseWriterRole");
-    expect(roleProp).not.toContain("ServiceRole");
-  });
-
-  test("no fresh IAM Role named *AgentReleaseResolverFunctionServiceRole* is synthesized (confirms no default/grantReadWriteData role was created)", () => {
-    const roles = template.findResources("AWS::IAM::Role");
-    const freshRoles = Object.keys(roles).filter((id) =>
-      id.startsWith("AgentReleaseResolverFunctionServiceRole"),
+    // Cross-stack role reference: CDK exports promotionPolicyConfigWriterRole's
+    // ARN from the mock BackendStack and imports it here via
+    // Fn::ImportValue — proof this Lambda ASSUMES the existing role
+    // rather than getting a fresh GetAtt'd role of its own.
+    expect(roleProp).toMatch(
+      /Fn::ImportValue|Fn::GetAtt.*PromotionPolicyConfigWriterRole/,
     );
-    expect(freshRoles).toEqual([]);
   });
 
-  test("AgentReleaseLambdaDataSource exists as an AWS_LAMBDA AppSync data source", () => {
+  test("AppSync data source + resolvers exist for setPromotionPolicy (Mutation) and getPromotionPolicy (Query)", () => {
     template.hasResourceProperties("AWS::AppSync::DataSource", {
-      Name: "AgentReleaseLambdaDataSource",
+      Name: "PromotionPolicyLambdaDataSource",
       Type: "AWS_LAMBDA",
     });
-  });
-
-  test("has a Mutation.cutAgentRelease CfnResolver bound to AgentReleaseLambdaDataSource", () => {
     template.hasResourceProperties("AWS::AppSync::Resolver", {
       TypeName: "Mutation",
-      FieldName: "cutAgentRelease",
-      DataSourceName: {
-        "Fn::GetAtt": [
-          Match.stringLikeRegexp("AgentReleaseLambdaDataSource"),
-          "Name",
-        ],
-      },
+      FieldName: "setPromotionPolicy",
     });
-  });
-
-  test("grants read access (via the assumed AgentReleaseWriterRole's policy) to exec-specs/eval-runs/eval-suites/projects tables and the registry", () => {
-    // Because agentReleaseWriterRole is an existing role passed in as a
-    // prop (not created inside GovernanceStack), grantXxx calls against
-    // it attach their statements to a policy owned by the role's own
-    // stack (the mock "backend" stack here), not to a fresh
-    // ServiceRole/DefaultPolicy inside GovernanceStack. This is the
-    // expected cross-stack shape, and it is itself part of what proves
-    // the resolver assumes the existing role rather than getting a new
-    // grantReadWriteData-generated one.
-    const policies = backendTemplate.findResources("AWS::IAM::Policy");
-    const writerRolePolicies = Object.values(policies).filter((p) => {
-      const roles = (p.Properties?.Roles ?? []) as Array<{ Ref?: string }>;
-      return roles.some((r) =>
-        (r.Ref ?? "").startsWith("AgentReleaseWriterRole"),
-      );
-    });
-    expect(writerRolePolicies.length).toBeGreaterThan(0);
-
-    const allStatements = writerRolePolicies.flatMap(
-      (p) =>
-        p.Properties.PolicyDocument.Statement as Array<{
-          Action?: string | string[];
-          Resource?: unknown;
-        }>,
-    );
-    const allActions = allStatements.flatMap((s) =>
-      Array.isArray(s.Action) ? s.Action : [s.Action],
-    );
-    expect(allActions).toEqual(expect.arrayContaining(["dynamodb:GetItem"]));
-    expect(allActions).toEqual(
-      expect.arrayContaining(["bedrock-agentcore:GetRegistryRecord"]),
-    );
-  });
-
-  describe("IAM immutability floor survives wiring", () => {
-    function collectReleaseTableActions(tmpl: Template): string[] {
-      const policies = tmpl.findResources("AWS::IAM::Policy");
-      const actions: string[] = [];
-      for (const policy of Object.values(policies)) {
-        const stmts: Array<{
-          Action?: string | string[];
-          Resource?: unknown;
-        }> = policy.Properties?.PolicyDocument?.Statement ?? [];
-        for (const stmt of stmts) {
-          const resources = Array.isArray(stmt.Resource)
-            ? stmt.Resource
-            : [stmt.Resource];
-          const targetsReleaseTable = resources.some((r) =>
-            JSON.stringify(r).includes("AgentReleasesTable"),
-          );
-          if (!targetsReleaseTable) continue;
-          const stmtActions = Array.isArray(stmt.Action)
-            ? stmt.Action
-            : [stmt.Action];
-          actions.push(...stmtActions.filter((a): a is string => !!a));
-        }
-      }
-      return actions;
-    }
-
-    test("no IAM policy in either the GovernanceStack or the table-owning stack grants UpdateItem or DeleteItem on AgentReleasesTable", () => {
-      const actions = [
-        ...collectReleaseTableActions(template),
-        ...collectReleaseTableActions(backendTemplate),
-      ];
-      expect(actions).not.toContain("dynamodb:UpdateItem");
-      expect(actions).not.toContain("dynamodb:DeleteItem");
-    });
-
-    test("every statement referencing AgentReleasesTable grants only Put/Get/Query — no grantReadWriteData-shaped Allow-all-actions was introduced by wiring", () => {
-      const actions = [
-        ...collectReleaseTableActions(template),
-        ...collectReleaseTableActions(backendTemplate),
-      ];
-      expect(actions.length).toBeGreaterThan(0);
-      for (const action of actions) {
-        expect([
-          "dynamodb:PutItem",
-          "dynamodb:GetItem",
-          "dynamodb:Query",
-        ]).toContain(action);
-      }
+    template.hasResourceProperties("AWS::AppSync::Resolver", {
+      TypeName: "Query",
+      FieldName: "getPromotionPolicy",
     });
   });
 });

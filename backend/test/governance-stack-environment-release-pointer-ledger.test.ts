@@ -223,6 +223,29 @@ function createTestStack(): {
   const registryArn =
     "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test";
 
+  const promotionPolicyConfigTable = new dynamodb.Table(
+    backendStack,
+    "PromotionPolicyConfigTable",
+    {
+      tableName: "citadel-promotion-policy-config-test",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+  const promotionPolicyConfigWriterRole = new iam.Role(
+    backendStack,
+    "PromotionPolicyConfigWriterRole",
+    { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
+  );
+  promotionPolicyConfigWriterRole.addToPolicy(
+    new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ["dynamodb:GetItem", "dynamodb:PutItem"],
+      resources: [promotionPolicyConfigTable.tableArn],
+    }),
+  );
+
   const stack = new GovernanceStack(
     app,
     "TestGovernanceStackEnvPointerLedger",
@@ -254,6 +277,8 @@ function createTestStack(): {
       registryId: "citadel-test",
       environmentReleasePointersTable,
       environmentReleasePointerWriterRole,
+      promotionPolicyConfigTable,
+      promotionPolicyConfigWriterRole,
     },
   );
 

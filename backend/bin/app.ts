@@ -178,6 +178,14 @@ const governanceStack = new GovernanceStack(
       backendStack.environmentReleasePointersTable,
     environmentReleasePointerWriterRole:
       backendStack.environmentReleasePointerWriterRole,
+    // Decision ada70113 (promotion policy becomes per-org config): the
+    // admin resolver's OWN table + writer role — separate from
+    // environmentReleasePointerWriterRole above, which carries only an
+    // additional scoped GetItem statement for this same table (see
+    // backend-stack.ts's construction site).
+    promotionPolicyConfigTable: backendStack.promotionPolicyConfigTable,
+    promotionPolicyConfigWriterRole:
+      backendStack.promotionPolicyConfigWriterRole,
   },
 );
 

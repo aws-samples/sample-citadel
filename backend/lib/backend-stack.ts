@@ -98,6 +98,33 @@ export class BackendStack extends cdk.Stack {
   // posture rationale as EvalRuns).
   public readonly evalSamplingConfigTable: dynamodb.Table;
   public readonly evalProdSamplesTable: dynamodb.Table;
+  // Decision ada70113 (promotion policy becomes per-org config) — small
+  // admin-authored config table, same posture as EvalSamplingConfigTable
+  // (DESTROY-ok, PITR kept for consistency, no RETAIN/deletionProtection —
+  // re-authored on next admin write, DEFAULT_PROMOTION_POLICY always
+  // available in code as the floor). Two SEPARATE, narrow IAM floors
+  // (mirrors AgentReleasesTable/EnvironmentReleasePointersTable's
+  // separate-role doctrine): the pointer resolver (read path, gates a
+  // promotion) gets GetItem-only; the admin resolver (write path) gets
+  // GetItem+PutItem. Neither role is granted on the other table this
+  // decision touches.
+  public readonly promotionPolicyConfigTable: dynamodb.Table;
+  /** IAM floor for PROMOTION_POLICY_CONFIG_TABLE reads+writes from
+   * promotion-policy-resolver.ts's admin getPromotionPolicy/
+   * setPromotionPolicy — GetItem+PutItem only, explicitly NOT
+   * grantWriteData (which would also confer UpdateItem/DeleteItem/
+   * BatchWriteItem). The READ side consumed by the promotion gate itself
+   * (environment-release-pointer-resolver.ts's validateReleaseGate) is
+   * NOT a separate role here — it is a scoped GetItem-only
+   * PolicyStatement added directly onto the EXISTING
+   * environmentReleasePointerWriterRole below, mirroring how that role
+   * already carries a narrow GetItem-only statement for
+   * AgentReleasesTable (see its construction site for the identical
+   * rationale: a Lambda has exactly one execution role, so a second
+   * table's read access is an additional scoped statement on that same
+   * role, never a second role the function can't actually assume). */
+  public readonly promotionPolicyConfigWriterRole: iam.Role;
+
   // CIT-105: baseline designation pointer + computed comparison verdicts
   // + threshold config — same RETAIN + deletionProtection + PITR posture
   // as EvalRuns for the two evidence tables (EvalBaselines/EvalComparisons);
@@ -3453,6 +3480,61 @@ export class BackendStack extends cdk.Stack {
         removalPolicy: cdk.RemovalPolicy.DESTROY,
         pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       },
+    );
+
+    // Decision ada70113 — PromotionPolicyConfig: admin-authored, one row
+    // per org (PK=orgId). Same small-config-table posture as
+    // EvalSamplingConfigTable above.
+    this.promotionPolicyConfigTable = new dynamodb.Table(
+      this,
+      "PromotionPolicyConfigTable",
+      {
+        tableName: `citadel-promotion-policy-config-${props.environment}`,
+        partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+
+    // Writer role — promotion-policy-resolver.ts's admin
+    // getPromotionPolicy/setPromotionPolicy needs GetItem+PutItem only.
+    // Explicit PolicyStatement, deliberately NOT grantWriteData (which
+    // would also confer UpdateItem/DeleteItem/BatchWriteItem — a wider
+    // floor than this resolver's own two DDB commands ever issue).
+    const promotionPolicyConfigWriterRole = new iam.Role(
+      this,
+      "PromotionPolicyConfigWriterRole",
+      {
+        assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      },
+    );
+    promotionPolicyConfigWriterRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem", "dynamodb:PutItem"],
+        resources: [this.promotionPolicyConfigTable.tableArn],
+      }),
+    );
+    this.promotionPolicyConfigWriterRole = promotionPolicyConfigWriterRole;
+
+    // Read-only grant for the PROMOTION GATE itself
+    // (environment-release-pointer-resolver.ts's validateReleaseGate,
+    // via promotion-policy-store.ts's resolvePromotionPolicy). A Lambda
+    // has exactly one execution role, and that function already assumes
+    // environmentReleasePointerWriterRole (constructed above) — so this
+    // is an ADDITIONAL scoped GetItem-only statement on that SAME role,
+    // never a second role the function couldn't actually use. Mirrors
+    // that role's existing narrow AgentReleasesTable GetItem grant
+    // (added in governance-stack.ts directly on the resolver function,
+    // which resolves to the same role) — GetItem only, no PutItem: the
+    // promotion gate must never be able to author policy, only read it.
+    environmentReleasePointerWriterRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [this.promotionPolicyConfigTable.tableArn],
+      }),
     );
 
     // EvalBaselines (CIT-105) — mutable (orgId, agentTargetId, suiteId)

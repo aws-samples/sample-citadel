@@ -28,6 +28,8 @@ process.env.EVAL_RUNS_TABLE = "citadel-eval-runs-test";
 process.env.EVAL_SUITES_TABLE = "citadel-eval-suites-test";
 process.env.EVAL_RUN_CASE_RESULTS_TABLE = "citadel-eval-run-case-results-test";
 process.env.GOVERNANCE_LEDGER_TABLE = "citadel-governance-ledger-test";
+process.env.PROMOTION_POLICY_CONFIG_TABLE =
+  "citadel-promotion-policy-config-test";
 process.env.ENVIRONMENT = "test";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -37,11 +39,15 @@ import {
   getCurrentEnvironmentReleasePointer,
   listEnvironmentReleasePointers,
   validateReleaseGate,
+  validatePromotionApproval,
+  ReleaseApprovalRequiredError,
   handler,
 } from "../environment-release-pointer-resolver";
 import * as governanceFlag from "../../utils/governance-flag";
 import * as releaseGateEvidence from "../utils/release-gate-evidence";
 import * as releaseGateFindingWriter from "../utils/release-gate-finding-writer";
+import * as releasePromotionApprovalWriter from "../utils/release-promotion-approval-writer";
+import * as promotionPolicyStore from "../utils/promotion-policy-store";
 import type { ReleaseGateInputs } from "../utils/release-gate";
 
 function evalSuite(overrides: Partial<EvalSuite> = {}): EvalSuite {
@@ -98,6 +104,15 @@ beforeEach(() => {
   ddbMock.reset();
   jest.restoreAllMocks();
   governanceFlag.__resetGovernanceFlagCacheForTest();
+  // Default: no promotion-policy config row exists for any org, so
+  // resolvePromotionPolicy resolves ok:true/DEFAULT_PROMOTION_POLICY for
+  // every test that doesn't explicitly stub/mock policy resolution
+  // itself — preserves this suite's pre-existing behaviour (every test
+  // written before decision ada70113 implicitly assumed
+  // DEFAULT_PROMOTION_POLICY).
+  ddbMock
+    .on(GetCommand, { TableName: "citadel-promotion-policy-config-test" })
+    .resolves({ Item: undefined });
 });
 
 /** Convenience: stub the evidence resolver to return a fixed
@@ -496,12 +511,23 @@ describe("promoteEnvironmentReleasePointer — gate wiring position + zero-write
     const writeSpy = jest
       .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
       .mockResolvedValue(undefined);
+    // Strict mode requires an explicit approval (decision 8165b7e5) —
+    // supply one so this PASS-verdict test exercises the gate-write
+    // assertion below without tripping the (separately tested) approval
+    // requirement.
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
 
     const result = await promoteEnvironmentReleasePointer(
       {
         agentTargetId: "agent-1",
         environment: "PROD",
         releaseId: "release-1",
+        approval: { approved: true },
       },
       architect,
       "org-1",
@@ -907,5 +933,719 @@ describe("handler — AppSync dispatch", () => {
       arguments: {},
     };
     await expect(handler(event as never)).rejects.toThrow(/Unsupported field/);
+  });
+});
+
+describe("validateReleaseGate — decision ada70113 (per-org promotion policy)", () => {
+  const architect = authContextFor("architect");
+
+  test("unreadable promotion policy refuses promotion BEFORE any pointer write — zero PutCommands, evidence resolution never reached", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    jest
+      .spyOn(promotionPolicyStore, "resolvePromotionPolicy")
+      .mockResolvedValue({ ok: false, reason: "UNREADABLE" });
+    const evidenceSpy = jest.spyOn(
+      releaseGateEvidence,
+      "resolveReleaseGateEvidence",
+    );
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-1",
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toThrow(/ReleaseGateError|quality gate/i);
+
+    expect(evidenceSpy).not.toHaveBeenCalled();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("unreadable promotion policy fails closed in shadow mode too (finding recorded, decision=deny)", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    jest
+      .spyOn(promotionPolicyStore, "resolvePromotionPolicy")
+      .mockResolvedValue({ ok: false, reason: "UNREADABLE" });
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("shadow");
+    const writeSpy = jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    // Shadow never blocks, but the finding must still record a deny
+    // decision derived from the UNREADABLE policy resolution.
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).resolves.toBeUndefined();
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0][0]).toMatchObject({
+      decision: "deny",
+      reasons: ["UNREADABLE"],
+    });
+  });
+
+  test("absent promotion policy config preserves today's behaviour byte-identically on the gate inputs (real resolvePromotionPolicy, no stub)", async () => {
+    // Deliberately does NOT stub promotionPolicyStore.resolvePromotionPolicy
+    // — the real module runs, issues a real GetCommand against
+    // PROMOTION_POLICY_CONFIG_TABLE, and the shared ddbMock has no
+    // matching stub for that table, so aws-sdk-client-mock resolves an
+    // empty response ({}), i.e. Item: undefined -> absent row ->
+    // DEFAULT_PROMOTION_POLICY. This is the exact PromotionPolicy value
+    // validateReleaseGate always passed to resolveReleaseGateEvidence
+    // before this change, so evidence resolution — and therefore the
+    // gate's downstream inputs — are unchanged when no config row exists.
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    const evidenceSpy = jest
+      .spyOn(releaseGateEvidence, "resolveReleaseGateEvidence")
+      .mockResolvedValue({ ok: true, inputs: passingInputs() });
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).resolves.toBeUndefined();
+
+    expect(evidenceSpy).toHaveBeenCalledTimes(1);
+    const policyArg = evidenceSpy.mock.calls[0][3];
+    expect(policyArg).toEqual({
+      taskSuccessMin: 0.9,
+      policyComplianceMin: 1.0,
+      latencyP95TargetMs: 5000,
+      avgCostBudgetUsd: 1.0,
+      minSampleCount: 5,
+      requiredGateClasses: [],
+      maxEvidenceAgeDays: 7,
+      allowNoBaselineOnAbsoluteFloors: false,
+    });
+  });
+
+  test("resolvePromotionPolicy is called with (callerOrgId, release.agentTargetId), not orgId alone", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release({ agentTargetId: "agent-42" }) });
+    const policySpy = jest
+      .spyOn(promotionPolicyStore, "resolvePromotionPolicy")
+      .mockResolvedValue({ ok: true, policy: passingInputs().policy });
+    jest
+      .spyOn(releaseGateEvidence, "resolveReleaseGateEvidence")
+      .mockResolvedValue({ ok: true, inputs: passingInputs() });
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+
+    await validateReleaseGate(
+      release({ agentTargetId: "agent-42" }),
+      "PROD",
+      "org-9",
+      architect,
+    );
+
+    expect(policySpy).toHaveBeenCalledWith("org-9", "agent-42");
+  });
+
+  test("a config row with a wrong-primitive-type field (string where number expected) refuses promotion BEFORE any pointer write — real resolvePromotionPolicy, not stubbed", async () => {
+    // Command-layer probe per verify_policy_config feedback: exercises
+    // the REAL resolvePromotionPolicy (no spy/mock on the store module)
+    // against a config row shaped exactly like the failing repro
+    // ({orgId:"org-1", policy:{taskSuccessMin:"0.99"}}) to prove the
+    // org's tightened floor can never be silently bypassed by a
+    // type-mismatched field falling through to the default.
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-promotion-policy-config-test" })
+      .resolves({
+        Item: {
+          orgId: "org-1",
+          policy: { taskSuccessMin: "0.99" },
+        },
+      });
+    const evidenceSpy = jest.spyOn(
+      releaseGateEvidence,
+      "resolveReleaseGateEvidence",
+    );
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-1",
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toThrow(/ReleaseGateError|quality gate/i);
+
+    expect(evidenceSpy).not.toHaveBeenCalled();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+});
+
+describe("validatePromotionApproval — decision 8165b7e5 (interim human approval)", () => {
+  const architect = authContextFor("architect");
+
+  test("strict, approval absent: throws ReleaseApprovalRequiredError, no finding written", async () => {
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    const writeSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validatePromotionApproval(
+        release(),
+        "PROD",
+        "org-1",
+        architect,
+        undefined,
+      ),
+    ).rejects.toBeInstanceOf(ReleaseApprovalRequiredError);
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  test("strict, approved=false: denial finding written THEN error thrown", async () => {
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    const calls: string[] = [];
+    const writeSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockImplementation(async () => {
+        calls.push("write");
+      });
+
+    await expect(
+      validatePromotionApproval(release(), "PROD", "org-1", architect, {
+        approved: false,
+        justification: "not ready",
+      }),
+    ).rejects.toBeInstanceOf(ReleaseApprovalRequiredError);
+
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0][0]).toMatchObject({
+      decision: "deny",
+      decidedBy: "user-architect",
+      justification: "not ready",
+    });
+    expect(calls).toEqual(["write"]);
+  });
+
+  test("strict, approved=true: approval finding recorded (category/decision/decidedBy from identity/justification), does not throw", async () => {
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    let captured: unknown;
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockImplementation(async (input) => {
+        captured = input;
+      });
+
+    await expect(
+      validatePromotionApproval(release(), "PROD", "org-1", architect, {
+        approved: true,
+        justification: "reviewed by ops",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(captured).toMatchObject({
+      decision: "permit",
+      decidedBy: "user-architect", // from identity, NOT from input
+      justification: "reviewed by ops",
+      orgId: "org-1",
+      releaseId: "release-1",
+      environment: "PROD",
+    });
+  });
+
+  test("shadow, approved=false: finding recorded (deny) but does NOT block (block:false)", async () => {
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("shadow");
+    const writeSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validatePromotionApproval(release(), "PROD", "org-1", architect, {
+        approved: false,
+        justification: "still evaluating",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0][0]).toMatchObject({ decision: "deny" });
+  });
+
+  test("shadow, approved=true: finding recorded (permit), does not block", async () => {
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("shadow");
+    const writeSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validatePromotionApproval(release(), "PROD", "org-1", architect, {
+        approved: true,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0][0]).toMatchObject({ decision: "permit" });
+  });
+
+  test("shadow, approval absent: not required, nothing recorded", async () => {
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("shadow");
+    const writeSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validatePromotionApproval(
+        release(),
+        "PROD",
+        "org-1",
+        architect,
+        undefined,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  test("permissive: approval ignored entirely — no finding, regardless of approved value", async () => {
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+    const writeSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validatePromotionApproval(release(), "PROD", "org-1", architect, {
+        approved: false,
+        justification: "irrelevant in permissive",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      validatePromotionApproval(
+        release(),
+        "PROD",
+        "org-1",
+        architect,
+        undefined,
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  test("approval-finding write failure (AccessDenied) propagates uncaught — fail-closed", async () => {
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    const accessDenied = new Error("AccessDenied");
+    accessDenied.name = "AccessDeniedException";
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockRejectedValue(accessDenied);
+
+    await expect(
+      validatePromotionApproval(release(), "PROD", "org-1", architect, {
+        approved: true,
+      }),
+    ).rejects.toThrow("AccessDenied");
+  });
+
+  test("dedupe ConditionalCheckFailedException from the writer proceeds without throwing", async () => {
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    // The real writer swallows ConditionalCheckFailedException itself
+    // (release-promotion-approval-writer.ts) — validatePromotionApproval
+    // only needs to not re-throw when the writer resolves normally after
+    // its own internal dedupe swallow, which we simulate here by simply
+    // resolving.
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validatePromotionApproval(release(), "PROD", "org-1", architect, {
+        approved: true,
+      }),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e5)", () => {
+  const architect = authContextFor("architect");
+
+  function stubGatePass() {
+    stubEvidence(passingInputs());
+  }
+
+  test("strict without approval: ReleaseApprovalRequiredError, zero pointer PutCommands", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    stubGatePass();
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+    const approvalWriteSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-1",
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toBeInstanceOf(ReleaseApprovalRequiredError);
+
+    expect(approvalWriteSpy).not.toHaveBeenCalled();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("strict approved=false: denial finding written, then error, zero pointer writes", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    stubGatePass();
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+    const approvalWriteSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-1",
+          approval: { approved: false, justification: "blocked by ops" },
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toBeInstanceOf(ReleaseApprovalRequiredError);
+
+    expect(approvalWriteSpy).toHaveBeenCalledTimes(1);
+    expect(approvalWriteSpy.mock.calls[0][0]).toMatchObject({
+      decision: "deny",
+    });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("strict approved=true: approval finding (category/decision/decidedBy from identity/justification) written, then pointer moves", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    stubGatePass();
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+    let capturedApprovalItem: unknown;
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockImplementation(async (input) => {
+        capturedApprovalItem = input;
+      });
+
+    const result = await promoteEnvironmentReleasePointer(
+      {
+        agentTargetId: "agent-1",
+        environment: "PROD",
+        releaseId: "release-1",
+        approval: {
+          approved: true,
+          justification: "approved by release manager",
+        },
+      },
+      architect,
+      "org-1",
+    );
+
+    expect(capturedApprovalItem).toMatchObject({
+      decision: "permit",
+      decidedBy: "user-architect", // server-derived identity, not input
+      justification: "approved by release manager",
+    });
+    expect(result.releaseId).toBe("release-1");
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+  });
+
+  test("shadow with approved=false: deny finding recorded (block:false must NOT block), pointer still moves", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    stubGatePass();
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("shadow");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+    const approvalWriteSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    const result = await promoteEnvironmentReleasePointer(
+      {
+        agentTargetId: "agent-1",
+        environment: "PROD",
+        releaseId: "release-1",
+        approval: { approved: false, justification: "shadow deny" },
+      },
+      architect,
+      "org-1",
+    );
+
+    // shadow's disposition.block is false — a deny must be RECORDED but
+    // must NOT block. Assert exactly that: the finding was written with
+    // decision=deny, and the promotion still completed (pointer moved).
+    expect(approvalWriteSpy).toHaveBeenCalledTimes(1);
+    expect(approvalWriteSpy.mock.calls[0][0]).toMatchObject({
+      decision: "deny",
+    });
+    expect(result.releaseId).toBe("release-1");
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+  });
+
+  test("permissive: no finding, pointer moves regardless of approved value", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    stubGatePass();
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+    const approvalWriteSpy = jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    const result = await promoteEnvironmentReleasePointer(
+      {
+        agentTargetId: "agent-1",
+        environment: "PROD",
+        releaseId: "release-1",
+        approval: { approved: false },
+      },
+      architect,
+      "org-1",
+    );
+
+    expect(approvalWriteSpy).not.toHaveBeenCalled();
+    expect(result.releaseId).toBe("release-1");
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+  });
+
+  test("approval-finding write failure (AccessDenied mock): promotion aborts, zero pointer writes", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    stubGatePass();
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+    const accessDenied = new Error("AccessDenied");
+    accessDenied.name = "AccessDeniedException";
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockRejectedValue(accessDenied);
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-1",
+          approval: { approved: true },
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toThrow("AccessDenied");
+
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("dedupe ConditionalCheck on approval writer: proceeds, pointer moves", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    stubGatePass();
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+    // The real writer swallows ConditionalCheckFailedException itself —
+    // simulate the writer's post-swallow resolved state so the resolver
+    // is exercised on the "proceeds" branch.
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockResolvedValue(undefined);
+
+    const result = await promoteEnvironmentReleasePointer(
+      {
+        agentTargetId: "agent-1",
+        environment: "PROD",
+        releaseId: "release-1",
+        approval: { approved: true },
+      },
+      architect,
+      "org-1",
+    );
+
+    expect(result.releaseId).toBe("release-1");
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
   });
 });

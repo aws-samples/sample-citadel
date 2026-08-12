@@ -98,6 +98,16 @@ export interface GovernanceStackProps extends cdk.StackProps {
   // co-granted on AgentReleasesTable.
   environmentReleasePointersTable: dynamodb.ITable;
   environmentReleasePointerWriterRole: iam.IRole;
+  // Decision ada70113 (promotion policy becomes per-org config) — owned
+  // by BackendStack, consumed here by the new admin
+  // promotion-policy-resolver (getPromotionPolicy/setPromotionPolicy).
+  // The READ side used by validateReleaseGate itself is wired via the
+  // ALREADY-passed environmentReleasePointerWriterRole above (that role
+  // carries an additional scoped GetItem statement for this table — see
+  // backend-stack.ts's construction site); this prop pair is for the
+  // SEPARATE admin resolver Lambda only.
+  promotionPolicyConfigTable: dynamodb.ITable;
+  promotionPolicyConfigWriterRole: iam.IRole;
 }
 
 export class GovernanceStack extends cdk.Stack {
@@ -1196,6 +1206,15 @@ exports.handler = async (event) => {
           ENVIRONMENT_RELEASE_POINTERS_TABLE:
             props.environmentReleasePointersTable.tableName,
           AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
+          // Decision ada70113: validateReleaseGate resolves the
+          // per-org/per-agent promotion policy via
+          // promotion-policy-store.ts's resolvePromotionPolicy before
+          // any evidence read. This role (environmentReleasePointerWriterRole)
+          // carries an ADDITIONAL scoped GetItem-only statement for this
+          // table (backend-stack.ts construction site) — no PutItem, the
+          // gate never authors policy.
+          PROMOTION_POLICY_CONFIG_TABLE:
+            props.promotionPolicyConfigTable.tableName,
           // Finding 23971f32: this function calls
           // writeReleaseGateFinding (release-gate-finding-writer.ts) in
           // BOTH shadow and strict mode before the pointer moves — the
@@ -1303,6 +1322,101 @@ exports.handler = async (event) => {
       });
       resolver.addResourceDependency(environmentReleasePointerLambdaDataSource);
     }
+
+    // ============================================================
+    // PromotionPolicy Resolver (decision ada70113 — per-org config)
+    // ============================================================
+    //
+    // Own function, own AppSync data source, own execution role
+    // (promotionPolicyConfigWriterRole — GetItem+PutItem on
+    // PromotionPolicyConfigTable ONLY, see backend-stack.ts's
+    // construction site), mirroring the EnvironmentReleasePointer
+    // resolver's own-role convention above. This role is entirely
+    // separate from environmentReleasePointerWriterRole: the admin write
+    // path (this resolver) and the promotion-gate read path
+    // (environment-release-pointer-resolver.ts, which carries its OWN
+    // scoped GetItem-only statement for this same table, added directly
+    // on its existing role in backend-stack.ts) must never share a role,
+    // so a compromised/buggy admin-resolver deploy can never inherit the
+    // pointer-mutation capability, and vice versa.
+    const promotionPolicyResolverFunction = new lambda.Function(
+      this,
+      "PromotionPolicyResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "promotion-policy-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        role: props.promotionPolicyConfigWriterRole,
+        environment: {
+          PROMOTION_POLICY_CONFIG_TABLE:
+            props.promotionPolicyConfigTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(
+          this,
+          "PromotionPolicyResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    const promotionPolicyDataSourceRole = new iam.Role(
+      this,
+      "PromotionPolicyDataSourceRole",
+      {
+        assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+      },
+    );
+    promotionPolicyResolverFunction.grantInvoke(promotionPolicyDataSourceRole);
+
+    const promotionPolicyLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "PromotionPolicyLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "PromotionPolicyLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: promotionPolicyDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: promotionPolicyResolverFunction.functionArn,
+        },
+      },
+    );
+
+    const setPromotionPolicyResolver = new appsyncCfn.CfnResolver(
+      this,
+      "SetPromotionPolicyResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName: "setPromotionPolicy",
+        dataSourceName: promotionPolicyLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    setPromotionPolicyResolver.addResourceDependency(
+      promotionPolicyLambdaDataSource,
+    );
+
+    const getPromotionPolicyResolver = new appsyncCfn.CfnResolver(
+      this,
+      "GetPromotionPolicyResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "getPromotionPolicy",
+        dataSourceName: promotionPolicyLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    getPromotionPolicyResolver.addResourceDependency(
+      promotionPolicyLambdaDataSource,
+    );
 
     // ============================================================
     // EvalBaseline / EvalComparison Resolver (CIT-105)
