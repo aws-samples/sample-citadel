@@ -66,6 +66,6 @@
     }
   },
   "peerDependencies": {
-    "aws-cdk-lib": "^2.262.1"
+    "aws-cdk-lib": "2.264.0"
   }
 }
