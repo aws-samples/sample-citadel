@@ -267,9 +267,21 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
 
       - name: Install workspaces (root lockfile)
         run: npm ci
 
       - name: Audit dependencies (blocking, with justified allowlist)
         run: npx audit-ci --config .audit-ci.json
+
+      - name: Install frontend deps (frontend lockfile)
+        run: npm ci
+        working-directory: frontend
+
+      - name: Audit frontend dependencies (blocking, with justified allowlist)
+        run: npx audit-ci --config .audit-ci.json
+        working-directory: frontend

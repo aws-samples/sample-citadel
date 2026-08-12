@@ -86,41 +86,28 @@ bypass-successor (mh99's mitigation covers `<5.0.8`; rgw5 extends the vulnerable
 3. Re-run `npm audit` to confirm no new unallowlisted advisories land.
 
 
-## GHSA-qwww-vcr4-c8h2 — react-router (HIGH RSC Mode CSRF Bypass Allows Action Execution Before 400 Response)
+## GHSA-qwww-vcr4-c8h2 — react-router (RESOLVED 2026-08-11, no longer fires; vestigial root entry pending cleanup)
 
-**Affected instances:**
-- `frontend/node_modules/react-router@7.18.1` (transitive via react-router-dom)
-- `frontend/node_modules/react-router-dom@7.18.1` (direct; `^7.18.1` in frontend/package.json)
+**Prior claim (now false):** this entry previously asserted no fix version was published for the
+7.x line and that `react-router-dom@latest` topped out at `7.18.1`.
 
-**Why remediation is blocked:**
-1. **No fix version exists on the registry.** The advisory's stated fix (`8.3.0`) does not exist:
-   `npm view react-router-dom versions --json` shows the published line tops out at `7.18.1`;
-   `npm view react-router-dom@latest version` → `7.18.1`; `npm view react-router-dom@8.3.0 peerDependencies`
-   → `404 Not Found`. There is no 8.x release at all yet. Dependabot alert #86 is citing a not-yet-shipped fix version.
-2. **Downgrading within 7.x makes things strictly worse.** `npm audit fix --force` on the installed 7.18.1
-   suggests downgrading to `react-router-dom@7.11.0`. Verified live: 7.11.0 falls into a *different, much wider*
-   advisory range (`react-router` `6.0.0 - 7.17.0`) bundling 14 distinct CVEs (open redirect/XSS, SSR XSS in
-   ScrollRestoration, arbitrary constructor invocation via vendored turbo-stream deserialization → unauth RCE,
-   DoS via unbounded `__manifest` path expansion, stored XSS via unescaped `Location` header, etc.), versus the
-   single CSRF-bypass advisory covering `7.12.0 - 8.2.0` that 7.18.1 sits in. No published 7.x or 8.x version is
-   outside every vulnerable range simultaneously — 7.18.1 (latest available) is the least-exposed option on the
-   registry today.
-3. **App does not use the vulnerable surface.** The CVE requires RSC (React Server Components) mode
-   (`unstable_RSC`, `RSCStaticRouter`, `ServerRouter`, `react-router/rsc` imports). `grep -rn` across
-   `frontend/src` found zero matches for any RSC-mode API. Usage is confined to the classic component API:
-   `BrowserRouter`/`Routes`/`Route`/`useNavigate`/`useParams`/`useSearchParams`/`Link`/`MemoryRouter`
-   (see `frontend/src/App.tsx:2` and route/test files under `frontend/src/pages/__tests__/`). The CSRF-bypass
-   action-execution path this advisory describes is not reachable from this codebase's router configuration.
+**Resolution:** `react-router`/`react-router-dom` **7.18.2** landed via merged PR #67 and is the
+advisory's documented `first_patched_version` for the `>=7.12.0, <7.18.2` vulnerable range
+(GHSA record vulnerable ranges: `>=7.12.0 <7.18.2` and `>=8.0.0 <8.3.0`; first patched `7.18.2`
+and `8.3.0` respectively). `frontend/package.json` declares `"react-router-dom": "^7.18.2"`, and
+`frontend/package-lock.json` already resolved `react-router-dom@7.18.2` / `react-router@7.18.2`
+— `node_modules` was simply stale relative to the lockfile (`npm ls` reported
+`invalid: "^7.18.2"` against an installed `7.18.1`) until `npm install` resynced it on
+2026-08-11. `npm audit --audit-level=low --prefix frontend` no longer reports this advisory (0
+vulnerabilities from react-router).
 
-**Exposure & Risk Acceptance:**
-- Advisory requires RSC mode; this frontend runs classic SPA routing only (Vite + BrowserRouter), no server
-  actions, no RSC. Exploitability in this deployment is effectively nil.
-- Remediation path is registry-blocked, not effort-blocked — there is nothing to upgrade to yet.
-- Acceptance: risk is non-applicable given routing mode in use; no in-range fix exists upstream.
-
-**Recommended follow-ups (revisitBy: 2026-09-01):**
-1. Re-check `npm view react-router-dom versions --json` periodically for the `8.3.0` (or later) release landing.
-2. When `>=8.3.0` publishes, re-verify its peer `react` requirement (unpublished builds referenced `react>=19.2.7`,
-   vs. this app's `react: ^18.3.1`) — a React 19 upgrade may be a co-requirement, not just a router bump.
-3. Re-run `npm audit --prefix frontend` after any bump attempt to confirm the advisory clears without
-   reintroducing the wider pre-7.18.1 CVE set.
+**Allowlist status (accurate as of this edit):** `GHSA-qwww-vcr4-c8h2` was **never added** to the
+new `frontend/.audit-ci.json` (that file was created with an empty allowlist and stays that way —
+frontend's own `npm audit` reports 0 vulnerabilities, so nothing there needs allowlisting). The ID
+**remains present** in the **root** `.audit-ci.json` allowlist and its `_comment` still says "no
+fix version published yet" — that is now stale but is **out of scope** for this change (root
+`.audit-ci.json` is intentionally left byte-identical to keep this change's diff scoped to the
+frontend gate). Removing the vestigial root entry and correcting its `_comment` is a follow-up,
+root-scoped cleanup; the root gate continues to exit 0 either way since audit-ci does not fail on
+an allowlisted-but-non-firing advisory (it only warns "Consider not allowlisting advisory:
+GHSA-qwww-vcr4-c8h2").
