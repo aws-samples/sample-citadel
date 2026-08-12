@@ -5,7 +5,13 @@ Each entry below corresponds to an advisory ID (or module name) added to the
 array after a justification is written here. Review and either remediate or
 renew the justification by the listed `revisitBy` date.
 
-## GHSA-mh99-v99m-4gvg — brace-expansion (HIGH DoS via unbounded expansion)
+## GHSA-mh99-v99m-4gvg — brace-expansion (HIGH DoS via unbounded expansion) — RESOLVED, entry removed
+
+**Resolved (2026-08-12):** the last remaining blocker — the `aws-cdk-lib` bundled copy
+(`node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.7`) — is fixed by the
+`aws-cdk-lib` 2.264.0 bump. mh99's `fixedIn` is `5.0.8`; the bundled subtree now resolves to
+`brace-expansion@5.0.8`. `npm audit` no longer reports this advisory. The allowlist entry has
+been removed from `.audit-ci.json`. Historical detail retained below for context.
 
 **Affected instances:**
 - `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.7` (bundled; advisory range <=5.0.7)
@@ -57,7 +63,7 @@ already expects, no API-shape change. Do not widen the minimatch@3 chains to 5.x
 ## GHSA-rgw5-rvv9-x895 — brace-expansion (HIGH DoS via unbounded intermediate arrays; bypasses GHSA-mh99-v99m-4gvg mitigation)
 
 **Affected instances:**
-- `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.7` (`inBundle: true`; advisory range `>=4.0.0 <5.0.9`)
+- `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.8` (`inBundle: true`; advisory range `>=4.0.0 <5.0.9`)
 
 This is the same bundled copy as GHSA-mh99-v99m-4gvg above — rgw5 is its unallowlisted
 bypass-successor (mh99's mitigation covers `<5.0.8`; rgw5 extends the vulnerable range to `<5.0.9`).
@@ -66,11 +72,11 @@ bypass-successor (mh99's mitigation covers `<5.0.8`; rgw5 extends the vulnerable
 1. **Bundled, not reachable by `overrides`.** npm `overrides` cannot rewrite `bundleDependencies`
    content. The existing nested override `aws-cdk-lib.minimatch.brace-expansion: ">=5.0.9 <6"` is
    structurally ineffective against this copy — confirmed the installed tree still resolves
-   `brace-expansion@5.0.7` inside `node_modules/aws-cdk-lib/node_modules/`.
-2. **No upstream fix available yet.** Registry latest `aws-cdk-lib` is `2.263.0` (installed:
-   `2.262.1`); verified via the published tarball that `2.263.0` still bundles
-   `brace-expansion@5.0.8` — patched against mh99 (`<5.0.8`) but still inside rgw5's vulnerable
-   range (`<5.0.9`). Bumping to the latest available cdk release does not clear this advisory.
+   `brace-expansion@5.0.8` inside `node_modules/aws-cdk-lib/node_modules/`.
+2. **No upstream fix available yet.** Installed `aws-cdk-lib` is `2.264.0` (bumped 2026-08-12);
+   its bundled `brace-expansion` is `5.0.8` — patched against mh99 (`<5.0.8`) but still inside
+   rgw5's vulnerable range (fix is `5.0.9`, i.e. `<5.0.9` remains vulnerable). No newer
+   `aws-cdk-lib` release exists yet that bundles `>=5.0.9`.
 
 **Exposure & Risk Acceptance:**
 - Same bundled, build-time-only, non-deployed instance as GHSA-mh99-v99m-4gvg above.
@@ -80,13 +86,12 @@ bypass-successor (mh99's mitigation covers `<5.0.8`; rgw5 extends the vulnerable
   a release bundling brace-expansion >=5.0.9.
 
 **Recommended follow-ups (revisitBy: 2026-10-22):**
-1. Check for aws-cdk-lib releases with bundled brace-expansion >=5.0.9 (as of 2.263.0, still on 5.0.8).
-2. When available, bump aws-cdk-lib and confirm both mh99 and rgw5 clear together; remove both
-   entries from the allowlist.
+1. Check for aws-cdk-lib releases with bundled brace-expansion >=5.0.9 (as of 2.264.0, still on 5.0.8).
+2. When available, bump aws-cdk-lib and confirm rgw5 clears; remove the entry from the allowlist.
 3. Re-run `npm audit` to confirm no new unallowlisted advisories land.
 
 
-## GHSA-qwww-vcr4-c8h2 — react-router (RESOLVED 2026-08-11, no longer fires; vestigial root entry pending cleanup)
+## GHSA-qwww-vcr4-c8h2 — react-router (RESOLVED 2026-08-11; root allowlist entry removed 2026-08-12)
 
 **Prior claim (now false):** this entry previously asserted no fix version was published for the
 7.x line and that `react-router-dom@latest` topped out at `7.18.1`.
@@ -95,19 +100,12 @@ bypass-successor (mh99's mitigation covers `<5.0.8`; rgw5 extends the vulnerable
 advisory's documented `first_patched_version` for the `>=7.12.0, <7.18.2` vulnerable range
 (GHSA record vulnerable ranges: `>=7.12.0 <7.18.2` and `>=8.0.0 <8.3.0`; first patched `7.18.2`
 and `8.3.0` respectively). `frontend/package.json` declares `"react-router-dom": "^7.18.2"`, and
-`frontend/package-lock.json` already resolved `react-router-dom@7.18.2` / `react-router@7.18.2`
-— `node_modules` was simply stale relative to the lockfile (`npm ls` reported
-`invalid: "^7.18.2"` against an installed `7.18.1`) until `npm install` resynced it on
-2026-08-11. `npm audit --audit-level=low --prefix frontend` no longer reports this advisory (0
-vulnerabilities from react-router).
+`frontend/package-lock.json` already resolved `react-router-dom@7.18.2` / `react-router@7.18.2`.
+`npm audit --audit-level=low --prefix frontend` reports 0 vulnerabilities from react-router.
 
-**Allowlist status (accurate as of this edit):** `GHSA-qwww-vcr4-c8h2` was **never added** to the
-new `frontend/.audit-ci.json` (that file was created with an empty allowlist and stays that way —
-frontend's own `npm audit` reports 0 vulnerabilities, so nothing there needs allowlisting). The ID
-**remains present** in the **root** `.audit-ci.json` allowlist and its `_comment` still says "no
-fix version published yet" — that is now stale but is **out of scope** for this change (root
-`.audit-ci.json` is intentionally left byte-identical to keep this change's diff scoped to the
-frontend gate). Removing the vestigial root entry and correcting its `_comment` is a follow-up,
-root-scoped cleanup; the root gate continues to exit 0 either way since audit-ci does not fail on
-an allowlisted-but-non-firing advisory (it only warns "Consider not allowlisting advisory:
-GHSA-qwww-vcr4-c8h2").
+**Allowlist status (accurate as of this edit):** `GHSA-qwww-vcr4-c8h2` was never added to
+`frontend/.audit-ci.json`. PR #70 deferred the root-scoped cleanup of the vestigial root
+`.audit-ci.json` entry to keep that change's diff scoped to the frontend gate; PR #70 is now
+merged into main with no conflicts, so that deferred cleanup is applied here: the entry and its
+stale `_comment` claim have been removed from the root `.audit-ci.json` allowlist. The advisory
+is fully resolved with no remaining allowlist entries anywhere in the repo.
