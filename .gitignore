@@ -19,6 +19,7 @@ ENV/
 
 # E2E test artifacts
 scripts/*
+!scripts/test-deploy-sh.sh
 !scripts/verify-doc-claims.js
 !scripts/smoke/
 !scripts/smoke/**
