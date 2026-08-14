@@ -39,9 +39,13 @@ export type SpanFilterResult = { ok: true; clause: string } | { ok: false };
  * it fails the allowlist (reject-first — never falls back to a
  * sanitized/escaped variant, matching xray-filter.ts's posture).
  *
- * Backtick-quoted field name (`` `annotation.correlation_id` ``) because
- * Logs Insights field names containing `.` must be backtick-quoted to be
- * parsed as a single field reference rather than nested-field access.
+ * Verified (evidence report finding a3d8a2ea, probe B vs probe C):
+ * `aws/spans` merges X-Ray annotations into `attributes.<key>` — there is
+ * no `annotation.*` field. Filters on `` `attributes.correlation_id` ``.
+ *
+ * Backtick-quoted field name because Logs Insights field names containing
+ * `.` must be backtick-quoted to be parsed as a single field reference
+ * rather than nested-field access.
  */
 export function buildSpanCorrelationFilter(id: string): SpanFilterResult {
   if (!isAllowlistedSpanId(id)) {
@@ -49,7 +53,7 @@ export function buildSpanCorrelationFilter(id: string): SpanFilterResult {
   }
   return {
     ok: true,
-    clause: `filter \`annotation.correlation_id\` = "${id}"`,
+    clause: `filter \`attributes.correlation_id\` = "${id}"`,
   };
 }
 
@@ -65,6 +69,6 @@ export function buildSpanRunIdFilter(id: string): SpanFilterResult {
   }
   return {
     ok: true,
-    clause: `filter \`annotation.run_id\` = "${id}"`,
+    clause: `filter \`attributes.run_id\` = "${id}"`,
   };
 }

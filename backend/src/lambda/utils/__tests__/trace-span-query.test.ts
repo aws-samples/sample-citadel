@@ -67,7 +67,7 @@ describe("buildSpanCorrelationFilter", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.clause).toBe(
-        'filter `annotation.correlation_id` = "exec-1"',
+        'filter `attributes.correlation_id` = "exec-1"',
       );
     }
   });
@@ -86,7 +86,7 @@ describe("buildSpanRunIdFilter", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.clause).toBe(
-        'filter `annotation.run_id` = "run-11111111-1111-1111-1111-111111111111"',
+        'filter `attributes.run_id` = "run-11111111-1111-1111-1111-111111111111"',
       );
     }
   });

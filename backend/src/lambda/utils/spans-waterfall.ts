@@ -6,25 +6,34 @@
  * backend produced a response.
  *
  * ============================================================================
- * SCHEMA-VERIFICATION GATE (design §2, HIGH risk #1) — READ BEFORE EDITING
+ * SCHEMA VERIFIED (evidence report, finding a3d8a2ea, 2026-08-03 +
+ * 2026-08-14 real-account samples — see docs/TRACING_RUNBOOK.md cutover
+ * procedure) — READ BEFORE EDITING
  * ============================================================================
- * EVERY aws/spans field name referenced in this file (`spanId`,
- * `parentSpanId`, `traceId`, `startTimeUnixNano`/`endTimeUnixNano`, the
- * `attributes.*`/`annotation.*` attribute-key shapes, `statusCode`) is an
- * ASSUMPTION carried from the design doc, not a value verified against a
- * real CloudWatch Transaction Search span. Do NOT trust these names as
- * ground truth. Before `TRACE_BACKEND=spans` is ever flipped against a
- * real account, run a real query against `aws/spans` (see
- * docs/TRACING_RUNBOOK.md cutover procedure's "verify span schema with a
- * real sample" step) and reconcile every field-name constant below (and
- * the corresponding `spans-query.ts`/`trace-span-query.ts` query text)
- * against the actual result columns. Until that verification happens,
- * treat every mapping in this file as best-effort and unverified.
+ * Every aws/spans field name below was reconciled against real
+ * CloudWatch Transaction Search span/subsegment events (Lambda + AppSync
+ * producers). Key corrections from the original design-doc assumptions:
+ *   - Annotations are merged into `attributes.<key>` (bare key), NOT
+ *     `annotation.<key>` — enumerated via
+ *     `attributes["aws.xray.annotation_keys"]`.
+ *   - OTel status is the flattened `status.code` field (UNSET/ERROR
+ *     observed; OK never observed — untested), not `statusCode`.
+ *   - Subsegment display name/namespace live at `_aws.xray.name` /
+ *     `_aws.xray.namespace` — top-level `name` is `""` on subsegments.
+ *   - http-status fallback key is `attributes.http.status_code`
+ *     (attributes-prefixed), not bare `http.status_code`.
+ *   - Exception text observed at `_aws.xray.cause.message`; OTel
+ *     `attributes.exception.*` is kept as primary but unobserved.
+ *   - In-progress snapshots (`attributes["aws.xray.inprogress"]===true`,
+ *     no `endTimeUnixNano`) and the completed event share a `spanId` —
+ *     deduped before tree-building.
+ * Re-verify against a live sample if aws/spans schema changes upstream.
  * ============================================================================
  *
  * Pure and I/O-free — no AWS SDK imports. Consumes the plain
  * `SpanQueryRow` shape `spans-query.ts` returns (a flat string-keyed
- * record per Logs Insights result row).
+ * record per Logs Insights result row, with each row's `@message` JSON
+ * document flattened into dot-notation keys by spans-query.ts).
  *
  * Invariant-4 analog (binding, mirrors xray-waterfall.ts): malformed or
  * incomplete rows (missing spanId/traceId) are skipped, never thrown.
@@ -43,8 +52,9 @@ import type {
 export type { SpanStatus, TraceEntry, TraceSpan, TraceWaterfallShape };
 
 /** Flat string-keyed view of one Logs Insights `aws/spans` result row —
- * matches `SpanQueryRow` from spans-query.ts. Field names are the
- * UNVERIFIED assumptions flagged in the module header above. */
+ * matches `SpanQueryRow` from spans-query.ts (dot-flattened `@message`
+ * JSON). Field names are verified against real samples per the module
+ * header above. */
 export type SpanQueryRowLike = Record<string, string | undefined>;
 
 function parseUnixNanoToSeconds(value: string | undefined): number | null {
@@ -55,14 +65,18 @@ function parseUnixNanoToSeconds(value: string | undefined): number | null {
 }
 
 function statusOf(row: SpanQueryRowLike): SpanStatus {
-  // UNVERIFIED field names (module header): `statusCode` (OTel
-  // status.code, expected "UNSET"|"OK"|"ERROR"), the http-status
-  // attribute keys below. Best-effort trichotomy (design §2): OTel is
-  // binary UNSET/OK/ERROR vs X-Ray's fault/error/throttle four-state.
+  // Verified (evidence report finding a3d8a2ea, probe B): the OTel status
+  // is a flattened `status.code` field (values observed: UNSET, ERROR;
+  // OK never observed — treat as untested). The http-status fallback key
+  // is `attributes.http.status_code` (attributes-prefixed), not bare
+  // `http.status_code` (probe B/D). Best-effort trichotomy (design §2):
+  // OTel is binary UNSET/OK/ERROR vs X-Ray's fault/error/throttle
+  // four-state.
   const httpStatusRaw =
-    row["attributes.http.response.status_code"] ?? row["http.status_code"];
+    row["attributes.http.response.status_code"] ??
+    row["attributes.http.status_code"];
   const httpStatus = httpStatusRaw ? Number(httpStatusRaw) : undefined;
-  const isError = row.statusCode === "ERROR";
+  const isError = row["status.code"] === "ERROR";
 
   if (httpStatus === 429) return "throttle";
   if (isError && typeof httpStatus === "number" && httpStatus >= 500) {
@@ -74,7 +88,8 @@ function statusOf(row: SpanQueryRowLike): SpanStatus {
 
 function httpOf(row: SpanQueryRowLike): { status: number } | null {
   const raw =
-    row["attributes.http.response.status_code"] ?? row["http.status_code"];
+    row["attributes.http.response.status_code"] ??
+    row["attributes.http.status_code"];
   if (typeof raw !== "string" || raw.length === 0) return null;
   const status = Number(raw);
   return Number.isFinite(status) ? { status } : null;
@@ -83,8 +98,14 @@ function httpOf(row: SpanQueryRowLike): { status: number } | null {
 function errorOf(
   row: SpanQueryRowLike,
 ): { type: string; message: string } | null {
-  // UNVERIFIED (module header): exception attribute key shape.
-  const message = row["attributes.exception.message"];
+  // `attributes.exception.*` is NOT-OBSERVABLE in the evidence report
+  // (no SDK-instrumented producer sampled emits it) but is kept as the
+  // primary OTel-standard key for producers that do emit it. The real
+  // sampled ERROR span (AppSync, 401) carried its cause text at
+  // `_aws.xray.cause.message` instead — added as a fallback so real
+  // X-Ray-origin error spans surface a message.
+  const message =
+    row["attributes.exception.message"] ?? row["_aws.xray.cause.message"];
   if (typeof message !== "string" || message.length === 0) return null;
   return {
     type: row["attributes.exception.type"] ?? "Error",
@@ -93,15 +114,27 @@ function errorOf(
 }
 
 function collectAnnotations(rows: SpanQueryRowLike[]): Record<string, unknown> {
+  // Verified (evidence report finding a3d8a2ea, probe B/C + archived
+  // sample): annotations are NOT under an `annotation.` prefix — X-Ray
+  // annotations are merged into `attributes` under their bare key, and
+  // enumerated by the `attributes["aws.xray.annotation_keys"]` array
+  // (JSON-stringified array leaf per spans-query.ts's flatten()).
   const annotations: Record<string, unknown> = {};
   for (const row of rows) {
-    for (const [key, value] of Object.entries(row)) {
-      // UNVERIFIED (module header): the `annotation.` prefix is the
-      // expected attribute-key shape carrying X-Ray-style annotations
-      // through aws/spans; may need to become a flattened column name
-      // (e.g. `annotation_correlation_id`) once verified.
-      if (key.startsWith("annotation.") && typeof value === "string") {
-        annotations[key.slice("annotation.".length)] = value;
+    const keysRaw = row["attributes.aws.xray.annotation_keys"];
+    if (typeof keysRaw !== "string" || keysRaw.length === 0) continue;
+    let keys: unknown;
+    try {
+      keys = JSON.parse(keysRaw);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(keys)) continue;
+    for (const key of keys) {
+      if (typeof key !== "string" || key.length === 0) continue;
+      const value = row[`attributes.${key}`];
+      if (typeof value === "string") {
+        annotations[key] = value;
       }
     }
   }
@@ -134,11 +167,21 @@ function buildSpan(
   const span: TraceSpan = {
     id: spanId,
     parentId: row.parentSpanId ?? null,
-    name: typeof row.name === "string" ? row.name : "",
-    // UNVERIFIED (module header): namespace/origin attribute-key shape.
+    // Verified (evidence report finding a3d8a2ea, samples + probe D):
+    // subsegments always carry an empty top-level `name` (""); their
+    // display name lives only in `_aws.xray.name`. Fall back to it when
+    // the top-level name is empty/absent.
+    name:
+      typeof row.name === "string" && row.name.length > 0
+        ? row.name
+        : typeof row["_aws.xray.name"] === "string"
+          ? row["_aws.xray.name"]!
+          : "",
+    // Verified: namespace lives at `_aws.xray.namespace` (e.g. "aws" on
+    // the AppSync segment), never `attributes.namespace` (unobserved).
     namespace:
-      typeof row["attributes.namespace"] === "string"
-        ? row["attributes.namespace"]!
+      typeof row["_aws.xray.namespace"] === "string"
+        ? row["_aws.xray.namespace"]!
         : null,
     origin:
       typeof row["resource.attributes.service.name"] === "string"
@@ -178,13 +221,46 @@ function buildSpan(
   return span;
 }
 
+/** In-progress snapshots (`attributes["aws.xray.inprogress"]===true`, no
+ * `endTimeUnixNano`) and the eventual completed event share the same
+ * `spanId` — Transaction Search emits both as the stream progresses
+ * (evidence report finding a3d8a2ea: 3 duplicate spanIds observed in a
+ * 10-event window). Dedup before tree-building: keep the completed row
+ * (has `endTimeUnixNano`) when both are present for a spanId, else keep
+ * whichever snapshot row was seen last (the latest in-progress state).
+ */
+function dedupBySpanId(rows: SpanQueryRowLike[]): SpanQueryRowLike[] {
+  const bySpanId = new Map<string, SpanQueryRowLike>();
+  const order: string[] = [];
+  for (const row of rows) {
+    const spanId = row.spanId as string;
+    const existing = bySpanId.get(spanId);
+    if (!existing) {
+      bySpanId.set(spanId, row);
+      order.push(spanId);
+      continue;
+    }
+    const existingCompleted =
+      typeof existing.endTimeUnixNano === "string" &&
+      existing.endTimeUnixNano.length > 0;
+    const rowCompleted =
+      typeof row.endTimeUnixNano === "string" && row.endTimeUnixNano.length > 0;
+    if (rowCompleted || !existingCompleted) {
+      // Either this row is the completed one (always wins), or neither
+      // row is completed yet and this is the latest snapshot seen.
+      bySpanId.set(spanId, row);
+    }
+  }
+  return order.map((id) => bySpanId.get(id)!);
+}
+
 function shapeSingleTrace(
   traceId: string,
   rows: SpanQueryRowLike[],
   options: { includeMetadata: boolean },
 ): TraceEntry {
-  const validRows = rows.filter(
-    (r) => typeof r.spanId === "string" && r.spanId.length > 0,
+  const validRows = dedupBySpanId(
+    rows.filter((r) => typeof r.spanId === "string" && r.spanId.length > 0),
   );
   const byId = new Set(validRows.map((r) => r.spanId as string));
 
@@ -226,10 +302,16 @@ function shapeSingleTrace(
   const hasThrottle = validRows.some((r) => statusOf(r) === "throttle");
 
   const rootRow = roots[0];
+  const rootName =
+    rootRow && typeof rootRow.name === "string" && rootRow.name.length > 0
+      ? rootRow.name
+      : rootRow && typeof rootRow["_aws.xray.name"] === "string"
+        ? rootRow["_aws.xray.name"]!
+        : null;
 
   return {
     traceId,
-    rootName: rootRow && typeof rootRow.name === "string" ? rootRow.name : null,
+    rootName,
     startTime: minStartTime,
     endTime: endTimes.length > 0 ? maxEndTime : null,
     durationMs: Math.max(0, (maxEndTime - minStartTime) * 1000),
