@@ -70,6 +70,25 @@ const xrayClient = new XRayClient({});
  * start; a warm invocation reflects whatever the env held at that
  * cold-start snapshot, matching how every other env-driven Lambda config
  * in this codebase (e.g. AGENT_MODEL in services-stack.ts) is read. */
+/** Matches an X-Ray-format trace id: `1-{8hex}-{24hex}` (e.g.
+ * `1-5f84c7c1-000000000000000000000001`). */
+const XRAY_TRACE_ID_RE = /^1-([0-9a-f]{8})-([0-9a-f]{24})$/i;
+
+/**
+ * Normalizes an X-Ray-format traceId (`1-{8hex}-{24hex}`) to the plain
+ * 32-hex form aws/spans stores its `traceId` field as (verified: all
+ * sampled aws/spans traceIds are 32-hex with no `1-` prefix — evidence
+ * report finding a3d8a2ea, verdict #1). Any other shape (already 32-hex,
+ * or unrecognized) is passed through unchanged, so existing links minted
+ * before this normalization, and ids that are already in the spans-native
+ * form, keep working identically.
+ */
+export function normalizeToSpansTraceId(traceId: string): string {
+  const match = XRAY_TRACE_ID_RE.exec(traceId);
+  if (!match) return traceId;
+  return `${match[1]}${match[2]}`;
+}
+
 function traceBackend(): "xray" | "spans" {
   return process.env.TRACE_BACKEND === "spans" ? "spans" : "xray";
 }
@@ -440,7 +459,12 @@ async function handleRawTraceId(
     // form, checked at the route level by the admin gate above, never a
     // user-supplied filter target for annotation purposes here) and is
     // the natural Logs Insights equivalent of BatchGetTraces([traceId]).
-    const filter = buildSpanCorrelationFilter(traceId);
+    // Old links (minted while TRACE_BACKEND=xray) carry the X-Ray-format
+    // `1-{8hex}-{24hex}` id; aws/spans stores plain 32-hex (verified,
+    // evidence report finding a3d8a2ea) — normalize before filtering so
+    // those links keep resolving under the spans backend too.
+    const spansTraceId = normalizeToSpansTraceId(traceId);
+    const filter = buildSpanCorrelationFilter(spansTraceId);
     if (!filter.ok) {
       return json(200, {
         query: { kind: "traceId", id: traceId, correlationId: null },
@@ -454,7 +478,7 @@ async function handleRawTraceId(
     // Filter on traceId itself, not the correlation-id annotation — build
     // the clause directly rather than reusing the annotation-targeted
     // builder's field name.
-    const traceIdClause = `filter traceId = "${traceId}"`;
+    const traceIdClause = `filter traceId = "${spansTraceId}"`;
     const { traces, queryStatus } = await fetchTracesBySpanFilter(
       traceIdClause,
       new Date(Date.now() - DEFAULT_WINDOW_MS).toISOString(),

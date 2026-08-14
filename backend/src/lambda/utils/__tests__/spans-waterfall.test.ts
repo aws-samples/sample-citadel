@@ -3,14 +3,13 @@
  * `TraceEntry[]`/`TraceSpan[]` shaping (design §2 "aws/spans -> TraceEntry/
  * TraceSpan mapping", §8 "spans-waterfall.test.ts").
  *
- * SCHEMA-VERIFICATION GATE (design §2, HIGH risk #1): the exact aws/spans
- * field names used below are a captured Red-phase FIXTURE, not a verified
- * real-account sample — spans-waterfall.ts itself carries the same
- * unverified-schema comment at every field-name assumption. This fixture
- * exists so the shaping/tree-building/allowlist LOGIC has test coverage
- * now; the field names must be reconciled against a real Transaction
- * Search span the first time TRACE_BACKEND=spans is exercised against a
- * live account (see docs/TRACING_RUNBOOK.md cutover procedure).
+ * SCHEMA VERIFIED (evidence report, finding a3d8a2ea): fixtures below are
+ * built from the VERBATIM real span/subsegment events captured against
+ * `aws/spans` (2026-08-03 archived sample + 2026-08-14 fresh samples),
+ * already flattened the way spans-query.ts's flatten() would produce from
+ * the real nested JSON `@message` body. Structure is kept intact; PII
+ * (user-agent/IP) is [REDACTED]. See spans-waterfall.ts's module header
+ * for the field-name corrections this fixture set encodes.
  */
 import { shapeSpanRows, type SpanQueryRowLike } from "../spans-waterfall";
 
@@ -19,37 +18,41 @@ function row(fields: Partial<SpanQueryRowLike>): SpanQueryRowLike {
 }
 
 describe("shapeSpanRows — tree building", () => {
-  test("root span with one child -> nested children[], same TraceEntry/TraceSpan shape as xray-waterfall", () => {
+  test("root segment with one subsegment child -> nested children[], same TraceEntry/TraceSpan shape as xray-waterfall", () => {
     const rows: SpanQueryRowLike[] = [
       row({
-        traceId: "1-5f84c7c1-000000000000000000000001",
-        spanId: "root-1",
-        parentSpanId: undefined,
-        name: "root-op",
-        startTimeUnixNano: "1000000000000",
-        endTimeUnixNano: "1002000000000",
-        "annotation.correlation_id": "exec-1",
+        traceId: "6a700e664c404f251827e0c81544e084",
+        spanId: "edcde8a7f824252d",
+        name: "citadel-document-ingest-poller-dev/LambdaExecutionEnvironment",
+        startTimeUnixNano: "1785728614687603968",
+        endTimeUnixNano: "1785728614718127104",
+        "status.code": "UNSET",
+        "_aws.xray.name": "citadel-document-ingest-poller-dev",
+        "_aws.xray.type": "segment",
       }),
       row({
-        traceId: "1-5f84c7c1-000000000000000000000001",
-        spanId: "child-1",
-        parentSpanId: "root-1",
-        name: "child-op",
-        startTimeUnixNano: "1000500000000",
-        endTimeUnixNano: "1001000000000",
+        traceId: "6a700e664c404f251827e0c81544e084",
+        spanId: "144ee6e12cda94ee",
+        parentSpanId: "edcde8a7f824252d",
+        name: "",
+        startTimeUnixNano: "1785728614690000000",
+        endTimeUnixNano: "1785728614710000000",
+        "status.code": "UNSET",
+        "_aws.xray.name": "Attempt #1",
+        "_aws.xray.type": "subsegment",
       }),
     ];
 
     const shaped = shapeSpanRows(rows, { includeMetadata: false });
     expect(shaped.traces).toHaveLength(1);
     const entry = shaped.traces[0];
-    expect(entry.traceId).toBe("1-5f84c7c1-000000000000000000000001");
+    expect(entry.traceId).toBe("6a700e664c404f251827e0c81544e084");
     expect(entry.spans).toHaveLength(1);
-    expect(entry.spans[0].id).toBe("root-1");
+    expect(entry.spans[0].id).toBe("edcde8a7f824252d");
     expect(entry.spans[0].parentId).toBeNull();
     expect(entry.spans[0].children).toHaveLength(1);
-    expect(entry.spans[0].children[0].id).toBe("child-1");
-    expect(entry.spans[0].children[0].parentId).toBe("root-1");
+    expect(entry.spans[0].children[0].id).toBe("144ee6e12cda94ee");
+    expect(entry.spans[0].children[0].parentId).toBe("edcde8a7f824252d");
   });
 
   test("a row whose parentSpanId is not in the set is treated as a root (orphan-safe)", () => {
@@ -95,6 +98,99 @@ describe("shapeSpanRows — tree building", () => {
   });
 });
 
+describe("shapeSpanRows — dedup of in-progress snapshot vs completed event (finding a3d8a2ea #5)", () => {
+  test("same spanId as in-progress snapshot (no endTimeUnixNano, aws.xray.inprogress) and completed event -> completed wins, no duplicate tree node", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "6a7e5de027c150316d0ff197004e14b1",
+        spanId: "021348f2ab124f06",
+        name: "PopObservability-dev-CanaryFnEAA4AF84-rA1uxPLOe98U/LambdaService",
+        startTimeUnixNano: "1786666464924999936",
+        // in-progress snapshot: no endTimeUnixNano
+        "attributes.aws.xray.inprogress": "true",
+        "status.code": "UNSET",
+        "_aws.xray.name": "PopObservability-dev-CanaryFnEAA4AF84-rA1uxPLOe98U",
+        "_aws.xray.type": "segment",
+      }),
+      row({
+        traceId: "6a7e5de027c150316d0ff197004e14b1",
+        spanId: "021348f2ab124f06",
+        name: "PopObservability-dev-CanaryFnEAA4AF84-rA1uxPLOe98U/LambdaService",
+        startTimeUnixNano: "1786666464924999936",
+        endTimeUnixNano: "1786666467263000064",
+        "status.code": "UNSET",
+        "_aws.xray.name": "PopObservability-dev-CanaryFnEAA4AF84-rA1uxPLOe98U",
+        "_aws.xray.type": "segment",
+      }),
+    ];
+
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces).toHaveLength(1);
+    expect(shaped.traces[0].spans).toHaveLength(1);
+    const span = shaped.traces[0].spans[0];
+    expect(span.id).toBe("021348f2ab124f06");
+    expect(span.inProgress).toBe(false);
+    expect(span.endTime).not.toBeNull();
+  });
+
+  test("two in-progress snapshots of the same spanId, no completed event yet -> keeps the latest snapshot, still one tree node", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "trace-dup",
+        spanId: "span-dup",
+        name: "snapshot-1",
+        startTimeUnixNano: "1000000000000",
+        "attributes.aws.xray.inprogress": "true",
+      }),
+      row({
+        traceId: "trace-dup",
+        spanId: "span-dup",
+        name: "snapshot-2",
+        startTimeUnixNano: "1000000000000",
+        "attributes.aws.xray.inprogress": "true",
+      }),
+    ];
+
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].spans).toHaveLength(1);
+    expect(shaped.traces[0].spans[0].name).toBe("snapshot-2");
+    expect(shaped.traces[0].spans[0].inProgress).toBe(true);
+  });
+
+  test("dedup applies across parent+child pairs without breaking tree assembly", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "trace-tree-dedup",
+        spanId: "root-1",
+        name: "root",
+        startTimeUnixNano: "1000000000000",
+        "attributes.aws.xray.inprogress": "true",
+      }),
+      row({
+        traceId: "trace-tree-dedup",
+        spanId: "root-1",
+        name: "root",
+        startTimeUnixNano: "1000000000000",
+        endTimeUnixNano: "1005000000000",
+      }),
+      row({
+        traceId: "trace-tree-dedup",
+        spanId: "child-1",
+        parentSpanId: "root-1",
+        name: "",
+        startTimeUnixNano: "1001000000000",
+        endTimeUnixNano: "1002000000000",
+        "_aws.xray.name": "Attempt #1",
+      }),
+    ];
+
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].spans).toHaveLength(1);
+    expect(shaped.traces[0].spans[0].children).toHaveLength(1);
+    expect(shaped.traces[0].spans[0].inProgress).toBe(false);
+  });
+});
+
 describe("shapeSpanRows — field mapping", () => {
   test("startTimeUnixNano/endTimeUnixNano map to epoch-seconds startTime/endTime, durationMs computed", () => {
     const rows: SpanQueryRowLike[] = [
@@ -131,7 +227,7 @@ describe("shapeSpanRows — field mapping", () => {
     expect(span.durationMs).toBe(0);
   });
 
-  test("http status mapped from attributes.http.response.status_code fallback http.status_code", () => {
+  test("http status mapped from attributes.http.response.status_code, fallback attributes.http.status_code (attributes-prefixed, finding a3d8a2ea #7/#8)", () => {
     const rows: SpanQueryRowLike[] = [
       row({
         traceId: "trace-1",
@@ -147,7 +243,9 @@ describe("shapeSpanRows — field mapping", () => {
         name: "op2",
         startTimeUnixNano: "1000000000000",
         endTimeUnixNano: "1001000000000",
-        "http.status_code": "429",
+        // fallback key is attributes-prefixed, per the real subsegment
+        // sample (attributes.http.status_code), NOT bare http.status_code
+        "attributes.http.status_code": "429",
       }),
     ];
 
@@ -156,7 +254,54 @@ describe("shapeSpanRows — field mapping", () => {
     expect(shaped.traces[1].spans[0].http).toEqual({ status: 429 });
   });
 
-  test("annotation.* attributes surface on TraceEntry.annotations, pinned correlation_id/run_id keys survive", () => {
+  test("a bare (non-attributes-prefixed) http.status_code fallback key is NOT honored (negative case for #7)", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "trace-bare-http",
+        spanId: "s1",
+        name: "op",
+        startTimeUnixNano: "1000000000000",
+        endTimeUnixNano: "1001000000000",
+        "http.status_code": "429",
+      }),
+    ];
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].spans[0].http).toBeNull();
+  });
+
+  test("subsegment name falls back to _aws.xray.name when top-level name is empty (finding a3d8a2ea #6)", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "trace-subseg-name",
+        spanId: "s1",
+        name: "",
+        startTimeUnixNano: "1786666464967000064",
+        endTimeUnixNano: "1786666467263000064",
+        "_aws.xray.name": "Attempt #1",
+        "_aws.xray.type": "subsegment",
+      }),
+    ];
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].spans[0].name).toBe("Attempt #1");
+  });
+
+  test("namespace mapped from _aws.xray.namespace, not attributes.namespace (finding a3d8a2ea #6/#11)", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "trace-ns",
+        spanId: "s1",
+        name: "partner-offering-api-dev",
+        startTimeUnixNano: "1786666467044000000",
+        endTimeUnixNano: "1786666467046999808",
+        "_aws.xray.namespace": "aws",
+        "attributes.namespace": "should-be-ignored",
+      }),
+    ];
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].spans[0].namespace).toBe("aws");
+  });
+
+  test("annotations extracted from attributes.<key> enumerated by attributes.aws.xray.annotation_keys, not an annotation. prefix (finding a3d8a2ea #7)", () => {
     const rows: SpanQueryRowLike[] = [
       row({
         traceId: "trace-1",
@@ -164,14 +309,40 @@ describe("shapeSpanRows — field mapping", () => {
         name: "op",
         startTimeUnixNano: "1000000000000",
         endTimeUnixNano: "1001000000000",
-        "annotation.correlation_id": "exec-1",
-        "annotation.run_id": "run-1",
+        "attributes.aws.xray.annotation_keys": JSON.stringify([
+          "correlation_id",
+          "run_id",
+        ]),
+        "attributes.correlation_id": "exec-1",
+        "attributes.run_id": "run-1",
       }),
     ];
 
     const shaped = shapeSpanRows(rows, { includeMetadata: false });
     expect(shaped.traces[0].annotations.correlation_id).toBe("exec-1");
     expect(shaped.traces[0].annotations.run_id).toBe("run-1");
+  });
+
+  test("real AppSync annotation_keys sample (request_id) extracts via the array, an annotation.* prefixed field is ignored (negative case)", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "6a7e5de3482f491c1277d50434df3636",
+        spanId: "5a075ffebf0c12fe",
+        name: "POST /graphql",
+        startTimeUnixNano: "1786666467044000000",
+        endTimeUnixNano: "1786666467046999808",
+        "attributes.aws.xray.annotation_keys": JSON.stringify(["request_id"]),
+        "attributes.request_id": "d1edb09a-360f-4075-9876-d1ffbcbbec97",
+        // Should NOT be picked up — annotation. prefix does not exist on
+        // the real schema and must not be treated as a source.
+        "annotation.request_id": "wrong-shape-should-be-ignored",
+      }),
+    ];
+
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].annotations.request_id).toBe(
+      "d1edb09a-360f-4075-9876-d1ffbcbbec97",
+    );
   });
 
   test("metadata/aws/sql dropped by default, present only with includeMetadata:true (allowlist invariant 5)", () => {
@@ -195,7 +366,7 @@ describe("shapeSpanRows — field mapping", () => {
 });
 
 describe("shapeSpanRows — status trichotomy (best-effort OTel -> ok|error|fault|throttle)", () => {
-  test("ERROR + http>=500 -> fault", () => {
+  test("status.code=ERROR + http>=500 -> fault", () => {
     const rows: SpanQueryRowLike[] = [
       row({
         traceId: "t1",
@@ -203,7 +374,7 @@ describe("shapeSpanRows — status trichotomy (best-effort OTel -> ok|error|faul
         name: "op",
         startTimeUnixNano: "1000000000000",
         endTimeUnixNano: "1001000000000",
-        statusCode: "ERROR",
+        "status.code": "ERROR",
         "attributes.http.response.status_code": "503",
       }),
     ];
@@ -228,21 +399,38 @@ describe("shapeSpanRows — status trichotomy (best-effort OTel -> ok|error|faul
     expect(shaped.traces[0].hasThrottle).toBe(true);
   });
 
-  test("ERROR without 5xx/429 -> error", () => {
+  test("real ERROR AppSync 401 sample: status.code=ERROR, http=401 -> error (not fault, not ok) — finding a3d8a2ea #5", () => {
     const rows: SpanQueryRowLike[] = [
       row({
-        traceId: "t1",
-        spanId: "s1",
-        name: "op",
-        startTimeUnixNano: "1000000000000",
-        endTimeUnixNano: "1001000000000",
-        statusCode: "ERROR",
-        "attributes.http.response.status_code": "400",
+        traceId: "6a7e5de3482f491c1277d50434df3636",
+        spanId: "5a075ffebf0c12fe",
+        name: "POST /graphql",
+        startTimeUnixNano: "1786666467044000000",
+        endTimeUnixNano: "1786666467046999808",
+        "status.code": "ERROR",
+        "attributes.http.response.status_code": "401",
+        "attributes.aws.xray.error": "true",
       }),
     ];
     const shaped = shapeSpanRows(rows, { includeMetadata: false });
     expect(shaped.traces[0].spans[0].status).toBe("error");
     expect(shaped.traces[0].hasError).toBe(true);
+    expect(shaped.traces[0].hasFault).toBe(false);
+  });
+
+  test("a bare (non-flattened) statusCode:'ERROR' field is NOT honored — must be status.code (negative case for #4)", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "t-bare-status",
+        spanId: "s1",
+        name: "op",
+        startTimeUnixNano: "1000000000000",
+        endTimeUnixNano: "1001000000000",
+        statusCode: "ERROR",
+      }),
+    ];
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].spans[0].status).toBe("ok");
   });
 
   test("no error signal -> ok", () => {
@@ -257,6 +445,61 @@ describe("shapeSpanRows — status trichotomy (best-effort OTel -> ok|error|faul
     ];
     const shaped = shapeSpanRows(rows, { includeMetadata: false });
     expect(shaped.traces[0].spans[0].status).toBe("ok");
+  });
+});
+
+describe("shapeSpanRows — error/exception message (finding a3d8a2ea #8)", () => {
+  test("_aws.xray.cause.message fallback surfaces the real ERROR span's cause text when attributes.exception.* is absent", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "6a7e5de3482f491c1277d50434df3636",
+        spanId: "5a075ffebf0c12fe",
+        name: "POST /graphql",
+        startTimeUnixNano: "1786666467044000000",
+        endTimeUnixNano: "1786666467046999808",
+        "status.code": "ERROR",
+        "_aws.xray.cause.message": "Valid authorization header not provided.",
+      }),
+    ];
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].spans[0].error).toEqual({
+      type: "Error",
+      message: "Valid authorization header not provided.",
+    });
+  });
+
+  test("attributes.exception.message still takes priority over _aws.xray.cause.message when both are present", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "t1",
+        spanId: "s1",
+        name: "op",
+        startTimeUnixNano: "1000000000000",
+        endTimeUnixNano: "1001000000000",
+        "attributes.exception.message": "otel exception message",
+        "attributes.exception.type": "CustomError",
+        "_aws.xray.cause.message": "xray cause message",
+      }),
+    ];
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].spans[0].error).toEqual({
+      type: "CustomError",
+      message: "otel exception message",
+    });
+  });
+
+  test("neither key present -> error null", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "t1",
+        spanId: "s1",
+        name: "op",
+        startTimeUnixNano: "1000000000000",
+        endTimeUnixNano: "1001000000000",
+      }),
+    ];
+    const shaped = shapeSpanRows(rows, { includeMetadata: false });
+    expect(shaped.traces[0].spans[0].error).toBeNull();
   });
 });
 
@@ -286,6 +529,23 @@ describe("shapeSpanRows — malformed rows never throw (invariant-4 analog)", ()
     expect(shapeSpanRows(rows, { includeMetadata: false }).traces).toHaveLength(
       0,
     );
+  });
+
+  test("a row with a malformed attributes.aws.xray.annotation_keys value (not JSON array) is skipped for annotation extraction, never throws", () => {
+    const rows: SpanQueryRowLike[] = [
+      row({
+        traceId: "t1",
+        spanId: "s1",
+        name: "op",
+        startTimeUnixNano: "1000000000000",
+        endTimeUnixNano: "1001000000000",
+        "attributes.aws.xray.annotation_keys": "{not valid json",
+      }),
+    ];
+    expect(() => shapeSpanRows(rows, { includeMetadata: false })).not.toThrow();
+    expect(
+      shapeSpanRows(rows, { includeMetadata: false }).traces[0].annotations,
+    ).toEqual({});
   });
 
   test("empty rows array -> empty traces, never throws", () => {

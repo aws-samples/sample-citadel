@@ -70,14 +70,61 @@ const IN_PROGRESS_STATUSES = new Set(["Scheduled", "Running"]);
  * Cancelled/Timeout status: log + fall back to window mapping"). */
 const FAILED_STATUSES = new Set(["Failed", "Cancelled", "Timeout"]);
 
+/** Flattens a nested JSON value into dot-notation string keys (e.g.
+ * `{status:{code:"ERROR"}}` -> `{"status.code":"ERROR"}`), matching the
+ * flattened-field naming Logs Insights itself uses when a field is
+ * projected directly (e.g. `status.code`, `_aws.xray.name`). Arrays are
+ * kept as JSON-stringified leaves (e.g. `aws.xray.annotation_keys`)
+ * rather than flattened by index, since callers consume them as whole
+ * lists, not per-element fields. */
+function flatten(value: unknown, prefix: string, out: SpanQueryRow): void {
+  if (Array.isArray(value)) {
+    out[prefix] = JSON.stringify(value);
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, child] of Object.entries(
+      value as Record<string, unknown>,
+    )) {
+      flatten(child, prefix.length > 0 ? `${prefix}.${key}` : key, out);
+    }
+    return;
+  }
+  if (value === null || value === undefined) return;
+  out[prefix] = typeof value === "string" ? value : String(value);
+}
+
+/**
+ * Row shape once `| fields @message` is projected (see runSpanQuery
+ * below): each result row carries exactly one cell, `@message`, holding
+ * the full JSON document for that span event (verified: probe A showed
+ * an unprojected query returns only `@timestamp`/`@message`/`@ptr`, and
+ * `row.spanId`/`row.traceId` were undefined — evidence report finding
+ * a3d8a2ea). Parsing + flattening `@message` here recovers the nested
+ * `status.code`, `_aws.xray.*`, and `attributes.*` field names the rest
+ * of the spans pipeline (trace-span-query.ts/spans-waterfall.ts) expects,
+ * without changing the flat `SpanQueryRow` contract downstream.
+ */
 function rowToObject(
   row: Array<{ field?: string; value?: string }> | undefined,
 ): SpanQueryRow {
   const obj: SpanQueryRow = {};
   for (const cell of row ?? []) {
-    if (typeof cell?.field === "string" && typeof cell.value === "string") {
-      obj[cell.field] = cell.value;
+    if (typeof cell?.field !== "string" || typeof cell.value !== "string") {
+      continue;
     }
+    if (cell.field === "@message") {
+      try {
+        const parsed = JSON.parse(cell.value) as unknown;
+        flatten(parsed, "", obj);
+      } catch (err: unknown) {
+        console.error("spans-query: failed to JSON.parse @message row", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      continue;
+    }
+    obj[cell.field] = cell.value;
   }
   return obj;
 }
@@ -102,7 +149,7 @@ export async function runSpanQuery(
       logGroupName: options.logGroupName,
       startTime: options.startTimeSec,
       endTime: options.endTimeSec,
-      queryString: `${options.queryString} | limit ${options.limit}`,
+      queryString: `${options.queryString} | fields @message | limit ${options.limit}`,
     }),
   );
 

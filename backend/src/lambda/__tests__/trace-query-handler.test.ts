@@ -526,11 +526,16 @@ describe("TRACE_BACKEND=spans dispatch (design §3 dual-backend, §1 query mecha
       status: "Complete",
       results: [
         [
-          { field: "traceId", value: "1-5f84c7c1-000000000000000000000001" },
-          { field: "spanId", value: "root-1" },
-          { field: "name", value: "root-op" },
-          { field: "startTimeUnixNano", value: "1000000000000" },
-          { field: "endTimeUnixNano", value: "1001000000000" },
+          {
+            field: "@message",
+            value: JSON.stringify({
+              traceId: "5f84c7c1000000000000000000000001",
+              spanId: "root-1",
+              name: "root-op",
+              startTimeUnixNano: 1000000000000,
+              endTimeUnixNano: 1001000000000,
+            }),
+          },
         ],
       ],
     });
@@ -551,7 +556,7 @@ describe("TRACE_BACKEND=spans dispatch (design §3 dual-backend, §1 query mecha
     expect(body).toHaveProperty("truncated");
     expect(body).toHaveProperty("meta");
     expect(body.traces).toHaveLength(1);
-    expect(body.traces[0].traceId).toBe("1-5f84c7c1-000000000000000000000001");
+    expect(body.traces[0].traceId).toBe("5f84c7c1000000000000000000000001");
   });
 
   test("TRACE_BACKEND=spans, query Complete with zero rows + entry fresh -> status:indexing", async () => {
@@ -688,22 +693,27 @@ describe("TRACE_BACKEND=spans dispatch (design §3 dual-backend, §1 query mecha
     expect(startCall).toBeDefined();
     const input = (startCall!.args[0] as StartQueryCommand).input;
     expect(input.queryString).toContain(
-      'filter `annotation.run_id` = "run-22222222-2222-2222-2222-222222222222"',
+      'filter `attributes.run_id` = "run-22222222-2222-2222-2222-222222222222"',
     );
   });
 
-  test("TRACE_BACKEND=spans, admin raw traceId route queries aws/spans by traceId, response shape unchanged", async () => {
+  test("TRACE_BACKEND=spans, admin raw traceId route with an X-Ray-format id normalizes to 32-hex before querying aws/spans (finding a3d8a2ea #9)", async () => {
     process.env.TRACE_BACKEND = "spans";
     logsMock.on(StartQueryCommand).resolves({ queryId: "q-h8" });
     logsMock.on(GetQueryResultsCommand).resolves({
       status: "Complete",
       results: [
         [
-          { field: "traceId", value: "1-5f84c7c1-000000000000000000000002" },
-          { field: "spanId", value: "root-2" },
-          { field: "name", value: "root-op-2" },
-          { field: "startTimeUnixNano", value: "1000000000000" },
-          { field: "endTimeUnixNano", value: "1001000000000" },
+          {
+            field: "@message",
+            value: JSON.stringify({
+              traceId: "5f84c7c1000000000000000000000002",
+              spanId: "root-2",
+              name: "root-op-2",
+              startTimeUnixNano: 1000000000000,
+              endTimeUnixNano: 1001000000000,
+            }),
+          },
         ],
       ],
     });
@@ -720,6 +730,58 @@ describe("TRACE_BACKEND=spans dispatch (design §3 dual-backend, §1 query mecha
     expect(body.status).toBe("ready");
     expect(body.traces).toHaveLength(1);
     expect(xrayMock.calls()).toHaveLength(0);
+
+    const startCall = logsMock
+      .calls()
+      .find((c) => c.args[0] instanceof StartQueryCommand);
+    expect(startCall).toBeDefined();
+    const input = (startCall!.args[0] as StartQueryCommand).input;
+    // Normalized to plain 32-hex — no `1-` prefix, no dash separators.
+    expect(input.queryString).toContain(
+      'filter traceId = "5f84c7c1000000000000000000000002"',
+    );
+    expect(input.queryString).not.toContain("1-5f84c7c1");
+  });
+
+  test("TRACE_BACKEND=spans, admin raw traceId route with an already-32-hex id passes it through unchanged (finding a3d8a2ea #9, both formats)", async () => {
+    process.env.TRACE_BACKEND = "spans";
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-h8b" });
+    logsMock.on(GetQueryResultsCommand).resolves({
+      status: "Complete",
+      results: [
+        [
+          {
+            field: "@message",
+            value: JSON.stringify({
+              traceId: "6a7e5de027c150316d0ff197004e14b1",
+              spanId: "021348f2ab124f06",
+              name: "root-op-3",
+              startTimeUnixNano: 1000000000000,
+              endTimeUnixNano: 1001000000000,
+            }),
+          },
+        ],
+      ],
+    });
+
+    const event = makeEvent(
+      "GET /traces/{traceId}",
+      { traceId: "6a7e5de027c150316d0ff197004e14b1" },
+      { "custom:organization": "org-1", "custom:role": "admin" },
+    );
+
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body!);
+    expect(body.traces).toHaveLength(1);
+
+    const startCall = logsMock
+      .calls()
+      .find((c) => c.args[0] instanceof StartQueryCommand);
+    const input = (startCall!.args[0] as StartQueryCommand).input;
+    expect(input.queryString).toContain(
+      'filter traceId = "6a7e5de027c150316d0ff197004e14b1"',
+    );
   });
 
   test("TRACE_BACKEND=spans, non-admin raw traceId route -> still 403, zero Logs Insights calls (invariant 2 unchanged)", async () => {
@@ -1197,11 +1259,16 @@ describe("TRACE_BACKEND=spans — defensive filter rejects, failed-status mappin
     // SPANS_QUERY_ROW_LIMIT is 1000 — return exactly 1000 rows so
     // runSpanQuery reports truncated (rows.length >= limit).
     const results = Array.from({ length: 1000 }, (_, i) => [
-      { field: "traceId", value: "1-5f84c7c1-00000000000000000000000e" },
-      { field: "spanId", value: `span-${i}` },
-      { field: "name", value: `op-${i}` },
-      { field: "startTimeUnixNano", value: "1000000000000" },
-      { field: "endTimeUnixNano", value: "1001000000000" },
+      {
+        field: "@message",
+        value: JSON.stringify({
+          traceId: "5f84c7c100000000000000000000000e",
+          spanId: `span-${i}`,
+          name: `op-${i}`,
+          startTimeUnixNano: 1000000000000,
+          endTimeUnixNano: 1001000000000,
+        }),
+      },
     ]);
     logsMock.on(StartQueryCommand).resolves({ queryId: "q-trunc" });
     logsMock
@@ -1223,12 +1290,17 @@ describe("TRACE_BACKEND=spans — defensive filter rejects, failed-status mappin
   });
 
   const metadataRow = [
-    { field: "traceId", value: "1-5f84c7c1-00000000000000000000000f" },
-    { field: "spanId", value: "meta-span-1" },
-    { field: "name", value: "meta-op" },
-    { field: "startTimeUnixNano", value: "1000000000000" },
-    { field: "endTimeUnixNano", value: "1001000000000" },
-    { field: "attributes.custom.stage", value: "prod" },
+    {
+      field: "@message",
+      value: JSON.stringify({
+        traceId: "5f84c7c100000000000000000000000f",
+        spanId: "meta-span-1",
+        name: "meta-op",
+        startTimeUnixNano: 1000000000000,
+        endTimeUnixNano: 1001000000000,
+        attributes: { custom: { stage: "prod" } },
+      }),
+    },
   ];
 
   test("spans: includeMetadata=1 as ADMIN -> metadata bag included on spans (admin + explicit opt-in honored)", async () => {

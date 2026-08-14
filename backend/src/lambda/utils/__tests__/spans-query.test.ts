@@ -19,21 +19,29 @@ beforeEach(() => {
 });
 
 describe("runSpanQuery — happy path", () => {
-  test("Complete with rows -> queryStatus:complete, rows returned", async () => {
+  test("Complete with rows -> queryStatus:complete, @message JSON parsed+flattened into row fields", async () => {
     logsMock.on(StartQueryCommand).resolves({ queryId: "q-1" });
     logsMock.on(GetQueryResultsCommand).resolves({
       status: "Complete",
       results: [
         [
-          { field: "spanId", value: "span-1" },
-          { field: "traceId", value: "trace-1" },
+          {
+            field: "@message",
+            value: JSON.stringify({
+              traceId: "6a7e5de027c150316d0ff197004e14b1",
+              spanId: "021348f2ab124f06",
+              name: "PopObservability-dev-CanaryFnEAA4AF84-rA1uxPLOe98U/LambdaService",
+              startTimeUnixNano: 1786666464924999936,
+              status: { code: "UNSET" },
+            }),
+          },
         ],
       ],
     });
 
     const result = await runSpanQuery({
       logGroupName: "aws/spans",
-      queryString: 'filter `annotation.correlation_id` = "exec-1"',
+      queryString: 'filter `attributes.correlation_id` = "exec-1"',
       startTimeSec: 1000,
       endTimeSec: 2000,
       limit: 100,
@@ -41,11 +49,31 @@ describe("runSpanQuery — happy path", () => {
 
     expect(result.queryStatus).toBe("complete");
     expect(result.rows).toHaveLength(1);
-    expect(result.rows[0].spanId).toBe("span-1");
-    expect(result.rows[0].traceId).toBe("trace-1");
+    expect(result.rows[0].spanId).toBe("021348f2ab124f06");
+    expect(result.rows[0].traceId).toBe("6a7e5de027c150316d0ff197004e14b1");
+    expect(result.rows[0]["status.code"]).toBe("UNSET");
   });
 
-  test("passes logGroupName/startTime/endTime/queryString/limit through to StartQuery", async () => {
+  test("a malformed @message value is skipped without throwing, no fields surface for that row", async () => {
+    logsMock.on(StartQueryCommand).resolves({ queryId: "q-1b" });
+    logsMock.on(GetQueryResultsCommand).resolves({
+      status: "Complete",
+      results: [[{ field: "@message", value: "{not valid json" }]],
+    });
+
+    const result = await runSpanQuery({
+      logGroupName: "aws/spans",
+      queryString: 'filter `attributes.correlation_id` = "exec-1"',
+      startTimeSec: 1000,
+      endTimeSec: 2000,
+      limit: 100,
+    });
+
+    expect(result.rows).toHaveLength(1);
+    expect(Object.keys(result.rows[0])).toHaveLength(0);
+  });
+
+  test("passes logGroupName/startTime/endTime/queryString/limit through to StartQuery, including the @message fields projection", async () => {
     logsMock.on(StartQueryCommand).resolves({ queryId: "q-2" });
     logsMock
       .on(GetQueryResultsCommand)
@@ -53,7 +81,7 @@ describe("runSpanQuery — happy path", () => {
 
     await runSpanQuery({
       logGroupName: "aws/spans",
-      queryString: 'filter `annotation.run_id` = "run-1"',
+      queryString: 'filter `attributes.run_id` = "run-1"',
       startTimeSec: 1000,
       endTimeSec: 2000,
       limit: 50,
@@ -67,8 +95,13 @@ describe("runSpanQuery — happy path", () => {
     expect(input.logGroupName).toBe("aws/spans");
     expect(input.startTime).toBe(1000);
     expect(input.endTime).toBe(2000);
-    expect(input.queryString).toContain("filter `annotation.run_id`");
+    expect(input.queryString).toContain("filter `attributes.run_id`");
+    expect(input.queryString).toContain("| fields @message");
     expect(input.queryString).toContain("limit 50");
+    // The fields projection must precede the limit clause.
+    expect(input.queryString!.indexOf("fields @message")).toBeLessThan(
+      input.queryString!.indexOf("limit 50"),
+    );
   });
 });
 
@@ -81,12 +114,14 @@ describe("runSpanQuery — bounded poll", () => {
       .resolvesOnce({ status: "Running", results: [] })
       .resolves({
         status: "Complete",
-        results: [[{ field: "spanId", value: "span-2" }]],
+        results: [
+          [{ field: "@message", value: JSON.stringify({ spanId: "span-2" }) }],
+        ],
       });
 
     const result = await runSpanQuery({
       logGroupName: "aws/spans",
-      queryString: 'filter `annotation.correlation_id` = "exec-1"',
+      queryString: 'filter `attributes.correlation_id` = "exec-1"',
       startTimeSec: 1000,
       endTimeSec: 2000,
       limit: 100,
@@ -107,7 +142,7 @@ describe("runSpanQuery — bounded poll", () => {
 
     const result = await runSpanQuery({
       logGroupName: "aws/spans",
-      queryString: 'filter `annotation.correlation_id` = "exec-1"',
+      queryString: 'filter `attributes.correlation_id` = "exec-1"',
       startTimeSec: 1000,
       endTimeSec: 2000,
       limit: 100,
@@ -133,7 +168,7 @@ describe("runSpanQuery — bounded poll", () => {
 
     const result = await runSpanQuery({
       logGroupName: "aws/spans",
-      queryString: 'filter `annotation.correlation_id` = "exec-1"',
+      queryString: 'filter `attributes.correlation_id` = "exec-1"',
       startTimeSec: 1000,
       endTimeSec: 2000,
       limit: 100,
@@ -154,7 +189,7 @@ describe("runSpanQuery — failure statuses", () => {
 
     const result = await runSpanQuery({
       logGroupName: "aws/spans",
-      queryString: 'filter `annotation.correlation_id` = "exec-1"',
+      queryString: 'filter `attributes.correlation_id` = "exec-1"',
       startTimeSec: 1000,
       endTimeSec: 2000,
       limit: 100,
@@ -174,7 +209,7 @@ describe("runSpanQuery — failure statuses", () => {
 
     const result = await runSpanQuery({
       logGroupName: "aws/spans",
-      queryString: 'filter `annotation.correlation_id` = "exec-1"',
+      queryString: 'filter `attributes.correlation_id` = "exec-1"',
       startTimeSec: 1000,
       endTimeSec: 2000,
       limit: 100,
@@ -191,7 +226,7 @@ describe("runSpanQuery — failure statuses", () => {
     await expect(
       runSpanQuery({
         logGroupName: "aws/spans",
-        queryString: 'filter `annotation.correlation_id` = "exec-1"',
+        queryString: 'filter `attributes.correlation_id` = "exec-1"',
         startTimeSec: 1000,
         endTimeSec: 2000,
         limit: 100,
@@ -208,7 +243,7 @@ describe("runSpanQuery — failure statuses", () => {
     await expect(
       runSpanQuery({
         logGroupName: "aws/spans",
-        queryString: 'filter `annotation.correlation_id` = "exec-1"',
+        queryString: 'filter `attributes.correlation_id` = "exec-1"',
         startTimeSec: 1000,
         endTimeSec: 2000,
         limit: 100,
@@ -220,16 +255,18 @@ describe("runSpanQuery — failure statuses", () => {
 });
 
 describe("runSpanQuery — row shape / malformed rows never throw", () => {
-  test("a row missing a value field is skipped for that field, never throws", async () => {
+  test("an @message cell whose JSON body omits a field leaves that field undefined, never throws", async () => {
     logsMock.on(StartQueryCommand).resolves({ queryId: "q-9" });
     logsMock.on(GetQueryResultsCommand).resolves({
       status: "Complete",
-      results: [[{ field: "spanId" }, { field: "traceId", value: "trace-9" }]],
+      results: [
+        [{ field: "@message", value: JSON.stringify({ traceId: "trace-9" }) }],
+      ],
     });
 
     const result = await runSpanQuery({
       logGroupName: "aws/spans",
-      queryString: 'filter `annotation.correlation_id` = "exec-1"',
+      queryString: 'filter `attributes.correlation_id` = "exec-1"',
       startTimeSec: 1000,
       endTimeSec: 2000,
       limit: 100,
@@ -245,14 +282,14 @@ describe("runSpanQuery — row shape / malformed rows never throw", () => {
     logsMock.on(GetQueryResultsCommand).resolves({
       status: "Complete",
       results: [
-        [{ field: "spanId", value: "s1" }],
-        [{ field: "spanId", value: "s2" }],
+        [{ field: "@message", value: JSON.stringify({ spanId: "s1" }) }],
+        [{ field: "@message", value: JSON.stringify({ spanId: "s2" }) }],
       ],
     });
 
     const result = await runSpanQuery({
       logGroupName: "aws/spans",
-      queryString: 'filter `annotation.correlation_id` = "exec-1"',
+      queryString: 'filter `attributes.correlation_id` = "exec-1"',
       startTimeSec: 1000,
       endTimeSec: 2000,
       limit: 2,
