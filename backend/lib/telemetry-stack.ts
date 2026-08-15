@@ -664,7 +664,7 @@ export class TelemetryStack extends cdk.Stack {
           // Transaction Search is enabled account-wide. See
           // docs/TRACING_RUNBOOK.md cutover procedure.
           TRACE_BACKEND:
-            process.env.TRACE_BACKEND === "spans" ? "spans" : "xray",
+            process.env.TRACE_BACKEND === "xray" ? "xray" : "spans",
         },
         logGroup: new logs.LogGroup(this, "TraceQueryHandlerLogs", {
           retention: logs.RetentionDays.ONE_WEEK,

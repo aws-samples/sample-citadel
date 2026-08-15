@@ -916,13 +916,13 @@ describe("TelemetryStack — TraceQueryHandler (waterfall trace viewer, pass 1)"
     expect(joined).toContain("logs:getqueryresults");
   });
 
-  test("TraceQueryHandler Lambda has a TRACE_BACKEND environment variable defaulting to xray", () => {
+  test("TraceQueryHandler Lambda has a TRACE_BACKEND environment variable defaulting to spans", () => {
     const { template } = buildStack();
     template.hasResourceProperties("AWS::Lambda::Function", {
       Handler: "trace-query-handler.handler",
       Environment: {
         Variables: Match.objectLike({
-          TRACE_BACKEND: "xray",
+          TRACE_BACKEND: "spans",
         }),
       },
     });
