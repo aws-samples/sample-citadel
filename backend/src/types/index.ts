@@ -990,7 +990,56 @@ export interface EnvironmentReleasePointer {
   promotedAt: string;
   promotedBy: string;
   version: number;
+  /** Canary state (attribution-only interim — decision D2). Absent/null
+   * ⇒ no canary ⇒ 100% of dispatch resolves the stable `releaseId`, so
+   * every pre-canary pointer row (and every reader) behaves exactly as
+   * before. When present, `releaseId` remains the STABLE arm (source of
+   * truth) and `canary.candidateReleaseId` is arm B; the split is a pure
+   * function of a server-minted stickiness key, the preserved salt, and
+   * `percentBasisPoints`. See canary-assignment.ts. */
+  canary?: CanaryState | null;
+  /** Discriminates why this pointer version was written (I3 gap-free
+   * history). Absent on pre-canary rows (treated as PROMOTE). */
+  transitionType?: PointerTransitionType;
 }
+
+/** Why a pointer version was written. PROMOTE is the pre-canary move
+ * (and the default when the attribute is absent, for backward-compat).
+ * The CANARY_* transitions are all written through the SAME version-gated
+ * atomic pointer+history write as PROMOTE. */
+export type PointerTransitionType =
+  | "PROMOTE"
+  | "CANARY_START"
+  | "CANARY_REWEIGHT"
+  | "CANARY_PROMOTE"
+  | "CANARY_ABORT";
+
+/** Canary traffic-split state carried on the pointer row (decision D2:
+ * ATTRIBUTION-ONLY — there is no release→config binding yet, so both arms
+ * run the identical live config; the arm only labels which release WOULD
+ * serve, recorded on usage/findings/metrics). `salt` is minted ONCE at
+ * startCanary and PRESERVED verbatim across every reweight (decision D3,
+ * stable-salt-recompute, NO pin store); it is cleared only on
+ * promote/abort. Deliberately NOT exposed over GraphQL (internal). */
+export interface CanaryState {
+  /** Arm B — a release already gate-passed for this env at startCanary. */
+  candidateReleaseId: string;
+  /** Threshold in basis points, integer 0..10000 (0.00%..100.00%). */
+  percentBasisPoints: number;
+  /** Stickiness unit. Interim keys are server-minted orchestrationId
+   * (supervisor) / executionId (stepRunner) — see decision D1. */
+  stickiness: CanaryStickiness;
+  /** Minted once at start, preserved across reweight (decision D3). */
+  salt: string;
+  startedAt: string;
+  /** Server-derived identity of the operator who started the canary. */
+  startedBy: string;
+}
+
+/** Canary stickiness unit. `conversation`/`user` are the specced units;
+ * the interim implementation keys on the server-minted orchestration /
+ * execution id (decision D1 — no conversationId threading yet). */
+export type CanaryStickiness = "conversation" | "user";
 
 /** Interim human-approval input for promoteEnvironmentReleasePointer
  * (decision 8165b7e5 — rides the existing promote mutation; the CIT-030
@@ -1039,4 +1088,42 @@ export interface EnvironmentReleasePointerHistoryEntry {
   promotedAt: string;
   promotedBy: string;
   version: number;
+  /** Snapshot of the canary state at this version (null when the version
+   * carried no canary — e.g. a plain PROMOTE, or a CANARY_PROMOTE/ABORT
+   * that cleared it). Absent on pre-canary history rows. */
+  canary?: CanaryState | null;
+  /** Discriminates the transition that produced this version. Absent on
+   * pre-canary rows (treated as PROMOTE). */
+  transitionType?: PointerTransitionType;
+}
+
+/** Input to startCanary — begins a canary episode. `orgId`/`startedBy`
+ * are server-derived, never taken from input. `approval` rides the same
+ * strict-mode gate as a full promotion (decision D4/D7: startCanary runs
+ * the identical ladder + quality gate + approval chain). */
+export interface StartCanaryInput {
+  agentTargetId: string;
+  environment: EnvironmentLiteral;
+  candidateReleaseId: string;
+  percentBasisPoints: number;
+  stickiness: CanaryStickiness;
+  approval?: PromotionApproval | null;
+}
+
+/** Input to reweightCanary — moves only the threshold; the salt (hence
+ * every key's bucket) is preserved, so only keys the threshold crosses
+ * re-bucket (decision D3). No re-gate. */
+export interface ReweightCanaryInput {
+  agentTargetId: string;
+  environment: EnvironmentLiteral;
+  percentBasisPoints: number;
+}
+
+/** Input to promoteCanary (→100%, stable := candidate, clears canary) and
+ * abortCanary (→0%, revert to stable, clears canary). `approval` is
+ * consumed by promoteCanary's re-gate (decision D4). */
+export interface CanaryOpInput {
+  agentTargetId: string;
+  environment: EnvironmentLiteral;
+  approval?: PromotionApproval | null;
 }

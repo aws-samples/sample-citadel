@@ -30,6 +30,8 @@ The pointer is a **mutable cursor**; the release it points at is immutable.
 |---|---|
 | Cut a release | `release:cut` |
 | Promote a release (move a pointer) | `release:promote` |
+| Start / reweight / abort a canary | `release:canary` |
+| Promote a canary to 100% | `release:canary` **and** `release:promote` |
 | Author promotion policy | `admin` (platform-wide) |
 
 The caller's org is derived from the `custom:organization` claim, never
@@ -213,3 +215,81 @@ Promotion outcomes are observable via the governance ledger findings and
 the `release.pointer.moved` event stream; wire dashboards/alarms off
 those (deny-rate, gate-refusal-rate, monotonicity-refusal-rate) alongside
 the platform-health SLO alarms in [OBSERVABILITY.md](OBSERVABILITY.md).
+
+
+## 16. Canary agent releases (attribution-only interim)
+
+Canary lets an operator run a *candidate* release alongside the current
+*stable* release for one `(agent, environment)` and route a bounded,
+deterministic fraction of dispatch to the candidate — then promote it to
+100% or abort back to 0% as a single, audited pointer move.
+
+> **HONEST SCOPING — read this before using canary.** This is an
+> **attribution-only** interim (decision D2). **Both arms run the identical
+> live agent config today.** The canary does **not** yet change agent
+> behavior: there is no release→config binding, so a dispatch routed to
+> the `candidate` arm executes the same prompts/model/tools/policy as the
+> `stable` arm. What the canary DOES do is **deterministically label**
+> which release *would* serve each session (the arm) and record that label
+> on usage rows, the cost ledger, findings, and the `CanaryAssignment`
+> CloudWatch metric (dimensioned `ReleaseArm=stable|candidate`), so you can
+> measure the split and per-arm cost/quality *before* behavioral binding
+> is built. Do **not** present canary to stakeholders as behavioral
+> traffic-shifting until the release→config binding lands as a separate,
+> separately-gated change. The pointer/history `transitionType`
+> (`CANARY_START|REWEIGHT|PROMOTE|ABORT`) and this section are the record
+> of that limitation.
+
+### Assignment (deterministic, sticky)
+
+The arm is a **pure** function `assignArm(stickinessKey, percentBasisPoints,
+salt)` (mirrored byte-for-byte in TS `canary-assignment.ts` and Python
+`canary_assignment.py`, guarded by a cross-language parity fixture):
+`bucket = sha256(salt + ":" + key)[:8] mod 10000`, `candidate` iff
+`bucket < percentBasisPoints`.
+
+- **Stickiness key (decision D1):** assigned ONCE at flow entry from a
+  **server-minted** envelope field — `orchestrationId` (supervisor) /
+  `executionId` (stepRunner). Never read from a client-supplied field; any
+  external `releaseArm`/`resolvedReleaseId` claim on the envelope is
+  stripped at the boundary and re-minted server-side. `conversationId`
+  threading is NOT wired yet, so a chat spanning multiple orchestrations
+  may re-bucket between orchestrations (within one orchestration/execution
+  it never mixes arms).
+- **Salt (decision D3):** minted once at `startCanary`, **preserved
+  verbatim across every reweight**, cleared only on promote/abort. Because
+  the salt (hence every key's bucket) is fixed across a reweight, changing
+  the percent only re-buckets keys the threshold crosses — a one-way
+  delta-band move — never a wholesale flap. There is **no pin store**.
+
+### Operations & RBAC (decision D6)
+
+| Action | Permission | Gate |
+|---|---|---|
+| `startCanary` | `release:canary` | Full ladder adjacency (D7) + quality gate + approval — identical to a promotion, because the candidate starts serving real traffic. Also enforces the org ceiling (below). |
+| `reweightCanary` | `release:canary` | Ceiling only; salt preserved; NO re-gate. |
+| `promoteCanary` (→100%) | `release:canary` **AND** `release:promote` | Re-runs the FULL ladder + quality gate + approval (decision D4) — max blast radius, freshest evidence. Sets `stable := candidate`, clears canary. |
+| `abortCanary` (→0%) | `release:canary` | None (reverting to the already-live stable is always safe). Clears canary. |
+
+Every transition is ONE version-gated atomic `TransactWriteItems` (pointer
++ history), same optimistic lock as a promotion — a raced transition loses
+with `ConcurrentPromotionError` and writes nothing.
+
+### Org ceiling (decision D5)
+
+`canaryMaxBasisPoints` bounds the maximum canary fraction. **Default 2500
+(25%)**; raise it explicitly per-org/per-agent/per-env through the existing
+`PromotionPolicy` override chain. It is a **tightening** ceiling
+(`prod ≤ staging`, enforced by the same monotonicity check as latency/cost/
+evidence-age), so a prod canary can never expose a wider fraction than
+staging. An UNREADABLE policy refuses the canary change fail-closed —
+`CanaryCeilingError`.
+
+### Triage
+
+| Symptom | Likely cause / action |
+|---|---|
+| `CanaryCeilingError` | Requested percent > org `canaryMaxBasisPoints`, or the policy is UNREADABLE. Lower the percent or raise the ceiling. |
+| `CanaryStateError` | No active canary for that `(agent, env)` (reweight/promote/abort), or no stable pointer to canary against (start). |
+| `PromotionLadderError` at start/promote | Predecessor env's current pointer ≠ candidate (D7/D4). Promote the lower env first. |
+| Everyone on stable despite a canary | The choke point failed to thread a server-minted stickiness key — the safe degradation. Check `orchestrationId`/`executionId` presence. |

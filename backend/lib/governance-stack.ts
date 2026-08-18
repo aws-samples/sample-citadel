@@ -1345,6 +1345,32 @@ exports.handler = async (event) => {
       environmentReleasePointerLambdaDataSource,
     );
 
+    // Canary agent releases (attribution-only, decision D2). All four
+    // mutations are backed by the SAME environment-release-pointer
+    // resolver function and data source as promoteEnvironmentReleasePointer
+    // — they read/write the same pointer + history tables and resolve the
+    // same promotion policy, so no new IAM surface is introduced.
+    const environmentReleasePointerCanaryMutationFields = [
+      { id: "StartCanaryResolver", fieldName: "startCanary" },
+      { id: "ReweightCanaryResolver", fieldName: "reweightCanary" },
+      { id: "PromoteCanaryResolver", fieldName: "promoteCanary" },
+      { id: "AbortCanaryResolver", fieldName: "abortCanary" },
+    ];
+    for (const {
+      id,
+      fieldName,
+    } of environmentReleasePointerCanaryMutationFields) {
+      const resolver = new appsyncCfn.CfnResolver(this, id, {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Mutation",
+        fieldName,
+        dataSourceName: environmentReleasePointerLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      });
+      resolver.addResourceDependency(environmentReleasePointerLambdaDataSource);
+    }
+
     const environmentReleasePointerQueryFields = [
       {
         id: "GetCurrentEnvironmentReleasePointerResolver",

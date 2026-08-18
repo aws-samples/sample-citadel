@@ -93,6 +93,11 @@ const TIGHTENING_CEILING_FIELDS = [
   "latencyP95TargetMs",
   "avgCostBudgetUsd",
   "maxEvidenceAgeDays",
+  // Canary blast-radius ceiling (decision D5): a prod canary must never
+  // be allowed a WIDER traffic fraction than staging, so this ceiling
+  // TIGHTENS going up the ladder (prod ≤ staging) exactly like latency /
+  // cost / evidence-age.
+  "canaryMaxBasisPoints",
 ] as const;
 
 /**

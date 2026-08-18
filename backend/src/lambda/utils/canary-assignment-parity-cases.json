@@ -1,0 +1,126 @@
+{
+  "description": "Shared cross-language case table for the canary arm-assignment rule (canary agent releases). Consumed verbatim by backend/src/lambda/utils/__tests__/canary-assignment.parity.test.ts and arbiter/governance/__tests__/test_canary_assignment_parity.py. Do not hand-copy into either suite — both load this file directly. Region hashes use the SAME normalization as grandfathering-parity-cases.json (drop comment/blank lines, strip trailing backslash, canonicalize quotes to ', collapse whitespace, join kept lines with a single space, sha256 of the UTF-8 result).",
+  "regionHashes": {
+    "hashAlgorithm": "sha256 of the NORMALIZED substring strictly between 'PARITY-GUARD:BEGIN' (exclusive) and 'PARITY-GUARD:END' (exclusive). Normalization identical to grandfathering-parity-cases.json.",
+    "ts": {
+      "file": "backend/src/lambda/utils/canary-assignment.ts",
+      "beginMarker": "PARITY-GUARD:BEGIN",
+      "endMarker": "PARITY-GUARD:END",
+      "commentPrefix": "//",
+      "sha256": "350d873efa3d003fcdfe01a64efe8e1a78e74b0031c7151f24c939ac7555baea"
+    },
+    "python": {
+      "file": "arbiter/governance/canary_assignment.py",
+      "beginMarker": "PARITY-GUARD:BEGIN",
+      "endMarker": "PARITY-GUARD:END",
+      "commentPrefix": "#",
+      "sha256": "9c31f89475d05a5cc66bdf7fffb5d051b0488e692828479e52da5c148b8c5c14"
+    }
+  },
+  "cases": [
+    {
+      "branch": "pct_zero_always_stable",
+      "description": "percentBasisPoints=0 routes every key to stable regardless of hash",
+      "stickinessKey": "orch-42",
+      "percentBasisPoints": 0,
+      "salt": "salt-A",
+      "expected": "stable"
+    },
+    {
+      "branch": "pct_full_always_candidate",
+      "description": "percentBasisPoints=10000 routes every key to candidate (promote-to-100 shape)",
+      "stickinessKey": "orch-42",
+      "percentBasisPoints": 10000,
+      "salt": "salt-A",
+      "expected": "candidate"
+    },
+    {
+      "branch": "empty_key_stable",
+      "description": "an empty stickiness key degrades to the safe stable arm, never candidate",
+      "stickinessKey": "",
+      "percentBasisPoints": 5000,
+      "salt": "salt-A",
+      "expected": "stable"
+    },
+    {
+      "branch": "below_threshold_candidate",
+      "description": "user-x hashes to bucket 1200 under salt-A; at 15% it is below threshold -> candidate",
+      "stickinessKey": "user-x",
+      "percentBasisPoints": 1500,
+      "salt": "salt-A",
+      "expected": "candidate"
+    },
+    {
+      "branch": "above_threshold_stable",
+      "description": "user-x hashes to bucket 1200 under salt-A; at 10% it is at/above threshold -> stable",
+      "stickinessKey": "user-x",
+      "percentBasisPoints": 1000,
+      "salt": "salt-A",
+      "expected": "stable"
+    },
+    {
+      "branch": "boundary_bucket_equals_threshold_stable",
+      "description": "orch-42 hashes to bucket 1817 under salt-A; threshold exactly 1817 -> stable (bucket < threshold is strict; this is the MUST-BITE case for a < vs <= mutant)",
+      "stickinessKey": "orch-42",
+      "percentBasisPoints": 1817,
+      "salt": "salt-A",
+      "expected": "stable"
+    },
+    {
+      "branch": "boundary_just_above_candidate",
+      "description": "orch-42 bucket 1817; threshold 1818 -> candidate",
+      "stickinessKey": "orch-42",
+      "percentBasisPoints": 1818,
+      "salt": "salt-A",
+      "expected": "candidate"
+    },
+    {
+      "branch": "mid_candidate",
+      "description": "conv-3 bucket 6104 under salt-A; at 70% -> candidate",
+      "stickinessKey": "conv-3",
+      "percentBasisPoints": 7000,
+      "salt": "salt-A",
+      "expected": "candidate"
+    },
+    {
+      "branch": "mid_stable",
+      "description": "conv-3 bucket 6104 under salt-A; at 50% -> stable",
+      "stickinessKey": "conv-3",
+      "percentBasisPoints": 5000,
+      "salt": "salt-A",
+      "expected": "stable"
+    },
+    {
+      "branch": "negative_pct_clamped_stable",
+      "description": "a negative percent clamps to 0 -> stable, never throws",
+      "stickinessKey": "conv-3",
+      "percentBasisPoints": -100,
+      "salt": "salt-A",
+      "expected": "stable"
+    },
+    {
+      "branch": "fractional_pct_floored_candidate",
+      "description": "conv-3 bucket 6104; 6105.9 floors to 6105 so 6104 < 6105 -> candidate (floor applied before compare)",
+      "stickinessKey": "conv-3",
+      "percentBasisPoints": 6105.9,
+      "salt": "salt-A",
+      "expected": "candidate"
+    },
+    {
+      "branch": "salt_a_orch_candidate",
+      "description": "orch-42 bucket 1817 under salt-A; at 50% -> candidate",
+      "stickinessKey": "orch-42",
+      "percentBasisPoints": 5000,
+      "salt": "salt-A",
+      "expected": "candidate"
+    },
+    {
+      "branch": "salt_b_orch_stable",
+      "description": "orch-42 hashes to bucket 8135 under salt-B; at 50% -> stable. Same key+percent, different salt, different arm: proves a fresh episode salt re-buckets deliberately",
+      "stickinessKey": "orch-42",
+      "percentBasisPoints": 5000,
+      "salt": "salt-B",
+      "expected": "stable"
+    }
+  ]
+}

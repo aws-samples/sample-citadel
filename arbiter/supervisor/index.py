@@ -98,6 +98,8 @@ from common.metrics_constants import (
     DIMENSION_WORKFLOW_ID,
     DIMENSION_RELEASE_MODE,
     DIMENSION_RELEASE_OUTCOME,
+    METRIC_CANARY_ASSIGNMENT,
+    DIMENSION_RELEASE_ARM,
 )
 
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
@@ -536,6 +538,34 @@ def _emit_release_dispatch_metric(
         logger.warning('release-dispatch metric emit failed: %s', exc)
 
 
+def _emit_canary_assignment_metric(arm: str, workflow_id: str = '') -> None:
+    """Best-effort CloudWatch counter of which canary arm a dispatch
+    resolved to (decision D2, attribution-only). Dimensioned ONLY by
+    low-cardinality keys — WorkflowId x ReleaseArm (stable|candidate).
+    releaseId is high-cardinality and is NEVER a dimension (it lives on
+    the usage row / cost ledger / findings). Never raises — telemetry must
+    not affect dispatch.
+    """
+    if arm not in ('stable', 'candidate'):
+        return
+    try:
+        cw = _get_cloudwatch()
+        dimensions = [{'Name': DIMENSION_RELEASE_ARM, 'Value': arm}]
+        if workflow_id:
+            dimensions.append({'Name': DIMENSION_WORKFLOW_ID, 'Value': workflow_id})
+        cw.put_metric_data(
+            Namespace=METRIC_NAMESPACE,
+            MetricData=[{
+                'MetricName': METRIC_CANARY_ASSIGNMENT,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            }],
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must never raise
+        logger.warning('canary-assignment metric emit failed: %s', exc)
+
+
 def governed_process_agent_call(
     agents_config: dict,
     orchestration: dict,
@@ -751,15 +781,40 @@ def governed_process_agent_call(
     # behaviour, in every mode including strict.
     if os.environ.get('RELEASE_DISPATCH_ENVIRONMENT'):
         release_dispatch_environment = os.environ['RELEASE_DISPATCH_ENVIRONMENT']
+        # D1: the canary stickiness key is assigned ONCE at flow entry from
+        # a SERVER-MINTED envelope field — the orchestrationId (minted as
+        # str(uuid4()) when the orchestration row is created; runId
+        # precedent). It is NEVER read from a client-supplied field. Any
+        # externally-supplied arm/releaseId claim on the orchestration
+        # envelope is stripped here (boundary strip) so a replayed or
+        # spoofed envelope can never smuggle an arm — the arm is
+        # recomputed deterministically by resolve_release from this
+        # server-minted key alone. Interim key = orchestrationId (no
+        # conversationId threading yet).
+        orchestration.pop('releaseArm', None)
+        orchestration.pop('resolvedReleaseId', None)
+        canary_stickiness_key = orchestration.get('orchestrationId') or ''
         release_result = resolve_release(
             org_id=os.environ.get('RELEASE_DEFAULT_ORG_ID') or '',
             agent_target_id=agent_name,
             environment=release_dispatch_environment,
+            stickiness_key=canary_stickiness_key,
         )
 
         if release_result.status == ReleaseResolutionStatus.RESOLVED:
             release_gate_outcome = 'proceed'
             release_would_block = False
+            # Attribution-only canary metric: record which arm this
+            # dispatch resolved to (server-minted key). Stamp the
+            # server-computed arm/releaseId back onto the envelope as the
+            # authoritative, server-minted fields (never trusting an
+            # inbound claim).
+            orchestration['releaseArm'] = release_result.arm
+            if release_result.resolved_release_id:
+                orchestration['resolvedReleaseId'] = release_result.resolved_release_id
+            _emit_canary_assignment_metric(
+                arm=release_result.arm, workflow_id=workflow_id,
+            )
         elif release_result.status == ReleaseResolutionStatus.LOOKUP_FAILED:
             # Assert-or-refuse doctrine (this codebase's established
             # posture — see hierarchy.py's SSM-failure handling and

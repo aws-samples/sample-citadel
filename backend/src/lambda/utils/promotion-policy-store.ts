@@ -122,6 +122,11 @@ function isSaneNonNegative(v: unknown): v is number {
   return isFiniteNumber(v) && v >= 0;
 }
 
+/** Basis-points fields: integer-ish within [0,10000]. */
+function isSaneBasisPoints(v: unknown): v is number {
+  return isFiniteNumber(v) && v >= 0 && v <= 10000;
+}
+
 function isSaneStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
@@ -145,6 +150,7 @@ const FIELD_VALIDATORS: {
   requiredGateClasses: isSaneStringArray,
   maxEvidenceAgeDays: isSaneNonNegative,
   allowNoBaselineOnAbsoluteFloors: isSaneBoolean,
+  canaryMaxBasisPoints: isSaneBasisPoints,
 };
 
 /**
@@ -168,6 +174,7 @@ const FIELD_TYPE_GUARDS: {
     Array.isArray(v) && v.every((x) => typeof x === "string"),
   maxEvidenceAgeDays: (v) => typeof v === "number",
   allowNoBaselineOnAbsoluteFloors: (v) => typeof v === "boolean",
+  canaryMaxBasisPoints: (v) => typeof v === "number",
 };
 
 const POLICY_FIELDS = Object.keys(
