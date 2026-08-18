@@ -7,7 +7,7 @@
       "beginMarker": "PARITY-GUARD:BEGIN",
       "endMarker": "PARITY-GUARD:END",
       "commentPrefix": "//",
-      "sha256": "350d873efa3d003fcdfe01a64efe8e1a78e74b0031c7151f24c939ac7555baea"
+      "sha256": "fafe880d38702096d2bd7f112dcc8482611338f4f08aaa8c6a69fa232b4b5518"
     },
     "python": {
       "file": "arbiter/governance/canary_assignment.py",
