@@ -1,4 +1,4 @@
 strands-agents==1.30.0
 strands-agents-tools==0.8.5
-boto3>=1.43.56
+boto3==1.43.73
 aws-xray-sdk==2.15.0

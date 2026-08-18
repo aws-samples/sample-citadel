@@ -21,7 +21,7 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
   let template: Template;
 
   beforeAll(() => {
-    const app = new cdk.App();
+    const app = new cdk.App({ context: { "aws:cdk:bundling-stacks": [] } });
 
     // Create a mock BackendStack to provide cross-stack references
     const backendStack = new cdk.Stack(app, "MockBackendStack", {

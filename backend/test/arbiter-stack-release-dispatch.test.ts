@@ -43,7 +43,7 @@ function mockTable(
 }
 
 function synth(withRelease: boolean): Template {
-  const app = new cdk.App();
+  const app = new cdk.App({ context: { "aws:cdk:bundling-stacks": [] } });
   const backendStack = new cdk.Stack(app, "MockBackendStackReleaseDispatch", {
     env: { account: "123456789012", region: "us-east-1" },
   });

@@ -139,7 +139,7 @@ describe("Supervisor with registryArn provided", () => {
   let template: Template;
 
   beforeAll(() => {
-    const app = new cdk.App();
+    const app = new cdk.App({ context: { "aws:cdk:bundling-stacks": [] } });
     const fixture = createFixture(app);
 
     const stack = new ArbiterStack(app, "TestArbiterStack", {
@@ -241,7 +241,7 @@ describe("Supervisor without registryArn", () => {
   let template: Template;
 
   beforeAll(() => {
-    const app = new cdk.App();
+    const app = new cdk.App({ context: { "aws:cdk:bundling-stacks": [] } });
     const fixture = createFixture(app);
 
     const stack = new ArbiterStack(app, "TestArbiterStackNoRegistry", {
