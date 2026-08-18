@@ -15,8 +15,8 @@
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
+  TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import type { AuthContext, AgentRelease, EvalSuite } from "../../types";
@@ -24,6 +24,8 @@ import type { AuthContext, AgentRelease, EvalSuite } from "../../types";
 process.env.AGENT_RELEASES_TABLE = "citadel-agent-releases-test";
 process.env.ENVIRONMENT_RELEASE_POINTERS_TABLE =
   "citadel-environment-release-pointers-test";
+process.env.ENVIRONMENT_RELEASE_POINTER_HISTORY_TABLE =
+  "citadel-environment-release-pointer-history-test";
 process.env.EVAL_RUNS_TABLE = "citadel-eval-runs-test";
 process.env.EVAL_SUITES_TABLE = "citadel-eval-suites-test";
 process.env.EVAL_RUN_CASE_RESULTS_TABLE = "citadel-eval-run-case-results-test";
@@ -38,9 +40,11 @@ import {
   promoteEnvironmentReleasePointer,
   getCurrentEnvironmentReleasePointer,
   listEnvironmentReleasePointers,
+  getEnvironmentReleasePointerHistory,
   validateReleaseGate,
   validatePromotionApproval,
   ReleaseApprovalRequiredError,
+  PromotionLadderError,
   handler,
 } from "../environment-release-pointer-resolver";
 import * as governanceFlag from "../../utils/governance-flag";
@@ -48,6 +52,7 @@ import * as releaseGateEvidence from "../utils/release-gate-evidence";
 import * as releaseGateFindingWriter from "../utils/release-gate-finding-writer";
 import * as releasePromotionApprovalWriter from "../utils/release-promotion-approval-writer";
 import * as promotionPolicyStore from "../utils/promotion-policy-store";
+import * as events from "../../utils/events";
 import type { ReleaseGateInputs } from "../utils/release-gate";
 
 function evalSuite(overrides: Partial<EvalSuite> = {}): EvalSuite {
@@ -98,6 +103,64 @@ function release(overrides: Partial<AgentRelease> = {}): AgentRelease {
     runId: "runid-1",
     ...overrides,
   };
+}
+
+const POINTERS_TABLE = "citadel-environment-release-pointers-test";
+const ENV_PREDECESSOR: Record<string, "DEV" | "STAGING" | null> = {
+  DEV: null,
+  STAGING: "DEV",
+  PROD: "STAGING",
+};
+
+/**
+ * Stub the immediately-lower env's CURRENT pointer to reference
+ * `releaseId`, satisfying the G1 ladder adjacency check for a promotion
+ * INTO `environment`. MUST be called AFTER any generic pointers-table
+ * stub in the same test so the specific-key match wins (aws-sdk-client-
+ * mock: the last matching behavior wins). No-op for DEV (ladder entry).
+ */
+function stubLadderPredecessor(
+  environment: "DEV" | "STAGING" | "PROD",
+  releaseId: string,
+  agentTargetId = "agent-1",
+  orgId = "org-1",
+): void {
+  const predecessor = ENV_PREDECESSOR[environment];
+  if (!predecessor) return;
+  ddbMock
+    .on(GetCommand, {
+      TableName: POINTERS_TABLE,
+      Key: {
+        orgId,
+        agentTargetId_environment: `${agentTargetId}#${predecessor}`,
+      },
+    })
+    .resolves({
+      Item: {
+        orgId,
+        agentTargetId,
+        environment: predecessor,
+        releaseId,
+        previousReleaseId: null,
+        promotedAt: "2026-01-01T00:00:00.000Z",
+        promotedBy: "user-x",
+        version: 1,
+      },
+    });
+}
+
+/** Satisfy adjacency for a promotion into EITHER STAGING or PROD by
+ * stubbing BOTH the DEV and STAGING predecessor keys to `releaseId`. A
+ * PROD promote reads only STAGING, a STAGING promote reads only DEV, so
+ * stubbing both is env-agnostic and harmless. Declared AFTER any generic
+ * pointers stub so the specific-key match wins. */
+function stubLadderSatisfied(
+  releaseId = "release-1",
+  agentTargetId = "agent-1",
+  orgId = "org-1",
+): void {
+  stubLadderPredecessor("STAGING", releaseId, agentTargetId, orgId);
+  stubLadderPredecessor("PROD", releaseId, agentTargetId, orgId);
 }
 
 beforeEach(() => {
@@ -440,6 +503,7 @@ describe("promoteEnvironmentReleasePointer — gate wiring position + zero-write
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
+    stubLadderSatisfied();
     stubEvidence(failingInputs());
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -460,7 +524,7 @@ describe("promoteEnvironmentReleasePointer — gate wiring position + zero-write
       ),
     ).rejects.toThrow(/ReleaseGateError|quality gate/i);
 
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   test("shadow FAIL: pointer write STILL proceeds (shadow never blocks)", async () => {
@@ -472,7 +536,8 @@ describe("promoteEnvironmentReleasePointer — gate wiring position + zero-write
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
     stubEvidence(failingInputs());
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -491,7 +556,7 @@ describe("promoteEnvironmentReleasePointer — gate wiring position + zero-write
       "org-1",
     );
     expect(result.releaseId).toBe("release-1");
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
   test("PASS verdict: pointer write proceeds and a PERMIT finding is written in shadow/strict", async () => {
@@ -503,7 +568,8 @@ describe("promoteEnvironmentReleasePointer — gate wiring position + zero-write
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
     stubEvidence(passingInputs());
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -556,7 +622,7 @@ describe("promoteEnvironmentReleasePointer — gate wiring position + zero-write
     ).rejects.toThrow(/UnauthorizedError/);
 
     expect(evidenceSpy).not.toHaveBeenCalled();
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   test("gate runs AFTER existence/org checks — a nonexistent release never reaches evidence resolution", async () => {
@@ -581,7 +647,7 @@ describe("promoteEnvironmentReleasePointer — gate wiring position + zero-write
     ).rejects.toThrow(/ValidationError/);
 
     expect(evidenceSpy).not.toHaveBeenCalled();
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 });
 
@@ -612,7 +678,7 @@ describe("promoteEnvironmentReleasePointer — permission gate", () => {
     ).rejects.toThrow(/UnauthorizedError/);
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   test("architect role (release:promote) is allowed through the gate", async () => {
@@ -626,7 +692,8 @@ describe("promoteEnvironmentReleasePointer — permission gate", () => {
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
 
     const result = await promoteEnvironmentReleasePointer(
       {
@@ -664,7 +731,7 @@ describe("promoteEnvironmentReleasePointer — release existence + org validatio
       ),
     ).rejects.toThrow(/ValidationError/);
 
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   test("rejects when the target release belongs to a different org", async () => {
@@ -686,7 +753,7 @@ describe("promoteEnvironmentReleasePointer — release existence + org validatio
       ),
     ).rejects.toThrow(/SecurityError/);
 
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   test("accepts a same-org, existing release and writes the pointer", async () => {
@@ -700,7 +767,8 @@ describe("promoteEnvironmentReleasePointer — release existence + org validatio
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
 
     const result = await promoteEnvironmentReleasePointer(
       { agentTargetId: "agent-1", environment: "PROD", releaseId: "release-1" },
@@ -741,7 +809,9 @@ describe("promoteEnvironmentReleasePointer — moving an existing pointer", () =
           version: 1,
         },
       });
-    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
+    // G1: DEV predecessor must reference the release being promoted to STAGING.
+    stubLadderPredecessor("STAGING", "release-2");
 
     const result = await promoteEnvironmentReleasePointer(
       {
@@ -757,13 +827,13 @@ describe("promoteEnvironmentReleasePointer — moving an existing pointer", () =
     expect(result.releaseId).toBe("release-2");
     expect(result.version).toBe(2);
 
-    const putCall = ddbMock
-      .commandCalls(PutCommand)
-      .find(
-        (call) =>
-          call.args[0].input.TableName ===
-          "citadel-environment-release-pointers-test",
-      )!.args[0].input;
+    const transactInput = ddbMock.commandCalls(TransactWriteCommand)[0].args[0]
+      .input as {
+      TransactItems: { Put: { TableName: string; [k: string]: unknown } }[];
+    };
+    const putCall = transactInput.TransactItems.map((t) => t.Put).find(
+      (p) => p.TableName === "citadel-environment-release-pointers-test",
+    )!;
     expect(putCall.ConditionExpression).toBe(
       "attribute_not_exists(orgId) OR #version = :expectedVersion",
     );
@@ -798,7 +868,10 @@ describe("promoteEnvironmentReleasePointer — moving an existing pointer", () =
       new Error("The conditional request failed"),
       { name: "ConditionalCheckFailedException" },
     );
-    ddbMock.on(PutCommand).rejects(conditionalError);
+    ddbMock.on(TransactWriteCommand).rejects(conditionalError);
+    // G1: DEV predecessor must reference release-2 so the flow reaches
+    // the store's transactional write where the race is surfaced.
+    stubLadderPredecessor("STAGING", "release-2");
 
     await expect(
       promoteEnvironmentReleasePointer(
@@ -888,7 +961,8 @@ describe("handler — AppSync dispatch", () => {
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
 
     const event = {
       info: { fieldName: "promoteEnvironmentReleasePointer" },
@@ -943,6 +1017,7 @@ describe("validateReleaseGate — decision ada70113 (per-org promotion policy)",
     ddbMock
       .on(GetCommand, { TableName: "citadel-agent-releases-test" })
       .resolves({ Item: release() });
+    stubLadderSatisfied();
     jest
       .spyOn(promotionPolicyStore, "resolvePromotionPolicy")
       .mockResolvedValue({ ok: false, reason: "UNREADABLE" });
@@ -970,7 +1045,7 @@ describe("validateReleaseGate — decision ada70113 (per-org promotion policy)",
     ).rejects.toThrow(/ReleaseGateError|quality gate/i);
 
     expect(evidenceSpy).not.toHaveBeenCalled();
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   test("unreadable promotion policy fails closed in shadow mode too (finding recorded, decision=deny)", async () => {
@@ -982,7 +1057,8 @@ describe("validateReleaseGate — decision ada70113 (per-org promotion policy)",
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
     jest
       .spyOn(promotionPolicyStore, "resolvePromotionPolicy")
       .mockResolvedValue({ ok: false, reason: "UNREADABLE" });
@@ -1067,7 +1143,7 @@ describe("validateReleaseGate — decision ada70113 (per-org promotion policy)",
       architect,
     );
 
-    expect(policySpy).toHaveBeenCalledWith("org-9", "agent-42");
+    expect(policySpy).toHaveBeenCalledWith("org-9", "agent-42", "PROD");
   });
 
   test("a config row with a wrong-primitive-type field (string where number expected) refuses promotion BEFORE any pointer write — real resolvePromotionPolicy, not stubbed", async () => {
@@ -1088,6 +1164,7 @@ describe("validateReleaseGate — decision ada70113 (per-org promotion policy)",
           policy: { taskSuccessMin: "0.99" },
         },
       });
+    stubLadderSatisfied();
     const evidenceSpy = jest.spyOn(
       releaseGateEvidence,
       "resolveReleaseGateEvidence",
@@ -1112,7 +1189,7 @@ describe("validateReleaseGate — decision ada70113 (per-org promotion policy)",
     ).rejects.toThrow(/ReleaseGateError|quality gate/i);
 
     expect(evidenceSpy).not.toHaveBeenCalled();
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 });
 
@@ -1360,6 +1437,7 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
+    stubLadderSatisfied();
     stubGatePass();
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -1387,7 +1465,7 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
     ).rejects.toBeInstanceOf(ReleaseApprovalRequiredError);
 
     expect(approvalWriteSpy).not.toHaveBeenCalled();
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   test("strict approved=false: denial finding written, then error, zero pointer writes", async () => {
@@ -1399,6 +1477,7 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
+    stubLadderSatisfied();
     stubGatePass();
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -1430,7 +1509,7 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
     expect(approvalWriteSpy.mock.calls[0][0]).toMatchObject({
       decision: "deny",
     });
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   test("strict approved=true: approval finding (category/decision/decidedBy from identity/justification) written, then pointer moves", async () => {
@@ -1442,7 +1521,8 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
     stubGatePass();
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -1480,7 +1560,7 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
       justification: "approved by release manager",
     });
     expect(result.releaseId).toBe("release-1");
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
   test("shadow with approved=false: deny finding recorded (block:false must NOT block), pointer still moves", async () => {
@@ -1492,7 +1572,8 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
     stubGatePass();
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -1526,7 +1607,7 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
       decision: "deny",
     });
     expect(result.releaseId).toBe("release-1");
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
   test("permissive: no finding, pointer moves regardless of approved value", async () => {
@@ -1538,7 +1619,8 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
     stubGatePass();
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -1563,7 +1645,7 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
 
     expect(approvalWriteSpy).not.toHaveBeenCalled();
     expect(result.releaseId).toBe("release-1");
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
   });
 
   test("approval-finding write failure (AccessDenied mock): promotion aborts, zero pointer writes", async () => {
@@ -1575,6 +1657,7 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
+    stubLadderSatisfied();
     stubGatePass();
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -1604,7 +1687,7 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
       ),
     ).rejects.toThrow("AccessDenied");
 
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
 
   test("dedupe ConditionalCheck on approval writer: proceeds, pointer moves", async () => {
@@ -1616,7 +1699,8 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
         TableName: "citadel-environment-release-pointers-test",
       })
       .resolves({ Item: undefined });
-    ddbMock.on(PutCommand).resolves({});
+    stubLadderSatisfied();
+    ddbMock.on(TransactWriteCommand).resolves({});
     stubGatePass();
     jest
       .spyOn(governanceFlag, "getGovernanceEnforce")
@@ -1646,6 +1730,400 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
     );
 
     expect(result.releaseId).toBe("release-1");
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+});
+
+describe("promoteEnvironmentReleasePointer — ladder adjacency (G1, consensus decision 1)", () => {
+  const architect = authContextFor("architect");
+
+  function stubAgentRelease(releaseId = "release-1") {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release({ releaseId }) });
+  }
+
+  function stubPredecessorPointer(
+    predecessor: "DEV" | "STAGING",
+    releaseId: string | null,
+  ) {
+    ddbMock
+      .on(GetCommand, {
+        TableName: POINTERS_TABLE,
+        Key: {
+          orgId: "org-1",
+          agentTargetId_environment: `agent-1#${predecessor}`,
+        },
+      })
+      .resolves({
+        Item:
+          releaseId === null
+            ? undefined
+            : {
+                orgId: "org-1",
+                agentTargetId: "agent-1",
+                environment: predecessor,
+                releaseId,
+                previousReleaseId: null,
+                promotedAt: "2026-01-01T00:00:00.000Z",
+                promotedBy: "user-x",
+                version: 1,
+              },
+      });
+  }
+
+  test("STAGING promotion is refused with PromotionLadderError when DEV's current pointer references a DIFFERENT release", async () => {
+    stubAgentRelease("release-1");
+    stubPredecessorPointer("DEV", "release-OTHER");
+    const evidenceSpy = jest.spyOn(
+      releaseGateEvidence,
+      "resolveReleaseGateEvidence",
+    );
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "STAGING",
+          releaseId: "release-1",
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toBeInstanceOf(PromotionLadderError);
+
+    // Adjacency runs BEFORE the gate — evidence resolution never reached,
+    // and nothing is written.
+    expect(evidenceSpy).not.toHaveBeenCalled();
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test("STAGING promotion is refused when DEV has no pointer at all", async () => {
+    stubAgentRelease("release-1");
+    stubPredecessorPointer("DEV", null);
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "STAGING",
+          releaseId: "release-1",
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toBeInstanceOf(PromotionLadderError);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  test("PROD promotion is refused when STAGING's current pointer references a different release", async () => {
+    stubAgentRelease("release-1");
+    stubPredecessorPointer("STAGING", "release-OTHER");
+
+    await expect(
+      promoteEnvironmentReleasePointer(
+        {
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-1",
+        },
+        architect,
+        "org-1",
+      ),
+    ).rejects.toBeInstanceOf(PromotionLadderError);
+  });
+
+  test("STAGING promotion PROCEEDS when DEV's current pointer references the same release", async () => {
+    stubAgentRelease("release-1");
+    stubPredecessorPointer("DEV", "release-1");
+    ddbMock
+      .on(GetCommand, {
+        TableName: POINTERS_TABLE,
+        Key: { orgId: "org-1", agentTargetId_environment: "agent-1#STAGING" },
+      })
+      .resolves({ Item: undefined });
+    ddbMock.on(TransactWriteCommand).resolves({});
+    stubEvidence(passingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+
+    const result = await promoteEnvironmentReleasePointer(
+      {
+        agentTargetId: "agent-1",
+        environment: "STAGING",
+        releaseId: "release-1",
+      },
+      architect,
+      "org-1",
+    );
+    expect(result.releaseId).toBe("release-1");
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  test("DEV promotion is the ladder entry — NO adjacency required, proceeds with no predecessor pointer", async () => {
+    stubAgentRelease("release-1");
+    ddbMock
+      .on(GetCommand, { TableName: POINTERS_TABLE })
+      .resolves({ Item: undefined });
+    ddbMock.on(TransactWriteCommand).resolves({});
+    stubEvidence(passingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+
+    const result = await promoteEnvironmentReleasePointer(
+      { agentTargetId: "agent-1", environment: "DEV", releaseId: "release-1" },
+      architect,
+      "org-1",
+    );
+    expect(result.environment).toBe("DEV");
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+});
+
+describe("validateReleaseGate — gate-time prod≥staging monotonicity (G2, fail-closed)", () => {
+  const architect = authContextFor("architect");
+
+  test("PROD promotion under a per-env policy WEAKER than STAGING fails closed (synthetic FAIL, evidence never reached)", async () => {
+    // Real resolvePromotionPolicy over a config row whose PROD floor is
+    // LOWER than STAGING's — a monotonicity inversion. taskSuccessMin
+    // STAGING=0.95 vs PROD=0.80.
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-promotion-policy-config-test" })
+      .resolves({
+        Item: {
+          orgId: "org-1",
+          perEnvironmentPolicyOverrides: {
+            STAGING: { taskSuccessMin: 0.95 },
+            PROD: { taskSuccessMin: 0.8 },
+          },
+        },
+      });
+    const evidenceSpy = jest.spyOn(
+      releaseGateEvidence,
+      "resolveReleaseGateEvidence",
+    );
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    const writeSpy = jest
+      .spyOn(releaseGateFindingWriter, "writeReleaseGateFinding")
+      .mockResolvedValue(undefined);
+
+    await expect(
+      validateReleaseGate(release(), "PROD", "org-1", architect),
+    ).rejects.toThrow(/ReleaseGateError|quality gate/i);
+
+    // Monotonicity is evaluated over the resolved policies BEFORE any
+    // evidence read — fail-closed short-circuit.
+    expect(evidenceSpy).not.toHaveBeenCalled();
+    // The refusal is recorded as a deny finding.
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls[0][0]).toMatchObject({ decision: "deny" });
+  });
+
+  test("PROD promotion under a per-env policy STRICTER than STAGING passes monotonicity and reaches evidence resolution", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-promotion-policy-config-test" })
+      .resolves({
+        Item: {
+          orgId: "org-1",
+          perEnvironmentPolicyOverrides: {
+            STAGING: { taskSuccessMin: 0.9 },
+            PROD: { taskSuccessMin: 0.95 },
+          },
+        },
+      });
+    const evidenceSpy = jest
+      .spyOn(releaseGateEvidence, "resolveReleaseGateEvidence")
+      .mockResolvedValue({ ok: true, inputs: passingInputs() });
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+
+    await validateReleaseGate(release(), "PROD", "org-1", architect);
+
+    // Monotonicity held, so evidence resolution proceeds; the PROD floor
+    // (0.95) is the resolved policy passed to the evidence resolver.
+    expect(evidenceSpy).toHaveBeenCalledTimes(1);
+    expect(evidenceSpy.mock.calls[0][3]).toMatchObject({
+      taskSuccessMin: 0.95,
+    });
+  });
+
+  test("DEV promotion has no predecessor, so monotonicity is skipped entirely", async () => {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-promotion-policy-config-test" })
+      .resolves({
+        Item: {
+          orgId: "org-1",
+          perEnvironmentPolicyOverrides: {
+            // A deliberately inverted ladder — must be irrelevant for DEV.
+            STAGING: { taskSuccessMin: 0.99 },
+            DEV: { taskSuccessMin: 0.5 },
+          },
+        },
+      });
+    const evidenceSpy = jest
+      .spyOn(releaseGateEvidence, "resolveReleaseGateEvidence")
+      .mockResolvedValue({ ok: true, inputs: passingInputs() });
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+
+    await validateReleaseGate(release(), "DEV", "org-1", architect);
+    expect(evidenceSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("promoteEnvironmentReleasePointer — RELEASE_POINTER_MOVED event (G5, best-effort post-commit)", () => {
+  const architect = authContextFor("architect");
+
+  function stubHappyPromotion() {
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, { TableName: POINTERS_TABLE })
+      .resolves({ Item: undefined });
+    ddbMock.on(TransactWriteCommand).resolves({});
+    stubEvidence(passingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+  }
+
+  test("emits RELEASE_POINTER_MOVED with the moved-pointer payload AFTER a successful move", async () => {
+    stubHappyPromotion();
+    const publishSpy = jest
+      .spyOn(events, "publishEvent")
+      .mockResolvedValue(undefined);
+
+    const result = await promoteEnvironmentReleasePointer(
+      { agentTargetId: "agent-1", environment: "DEV", releaseId: "release-1" },
+      architect,
+      "org-1",
+    );
+
+    expect(result.releaseId).toBe("release-1");
+    expect(publishSpy).toHaveBeenCalledTimes(1);
+    const emitted = publishSpy.mock.calls[0][0];
+    expect(emitted.eventType).toBe(events.EventTypes.RELEASE_POINTER_MOVED);
+    expect(emitted.agentId).toBe("agent-1");
+    expect(emitted.payload).toMatchObject({
+      orgId: "org-1",
+      agentTargetId: "agent-1",
+      environment: "DEV",
+      releaseId: "release-1",
+      version: 1,
+    });
+  });
+
+  test("a publish failure is swallowed — the committed move is still returned (never blocking)", async () => {
+    stubHappyPromotion();
+    jest
+      .spyOn(events, "publishEvent")
+      .mockRejectedValue(new Error("EventBridge unavailable"));
+
+    const result = await promoteEnvironmentReleasePointer(
+      { agentTargetId: "agent-1", environment: "DEV", releaseId: "release-1" },
+      architect,
+      "org-1",
+    );
+
+    // The move succeeded and is returned despite the emit failure.
+    expect(result.releaseId).toBe("release-1");
+    expect(result.version).toBe(1);
+    expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
+  });
+
+  test("the event is emitted only AFTER the pointer write commits (post-commit ordering)", async () => {
+    const order: string[] = [];
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: release() });
+    ddbMock
+      .on(GetCommand, { TableName: POINTERS_TABLE })
+      .resolves({ Item: undefined });
+    ddbMock.on(TransactWriteCommand).callsFake(() => {
+      order.push("write");
+      return {};
+    });
+    stubEvidence(passingInputs());
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("permissive");
+    jest.spyOn(events, "publishEvent").mockImplementation(async () => {
+      order.push("emit");
+    });
+
+    await promoteEnvironmentReleasePointer(
+      { agentTargetId: "agent-1", environment: "DEV", releaseId: "release-1" },
+      architect,
+      "org-1",
+    );
+
+    expect(order).toEqual(["write", "emit"]);
+  });
+});
+
+describe("handler — environmentReleasePointerHistory query (G6)", () => {
+  test("routes to the history reader and returns rows, scoped to the caller's org", async () => {
+    const historyRows = [
+      {
+        orgId: "org-1",
+        agentTargetId: "agent-1",
+        environment: "PROD",
+        releaseId: "release-1",
+        previousReleaseId: null,
+        promotedAt: "2026-01-01T00:00:00.000Z",
+        promotedBy: "user-1",
+        version: 1,
+      },
+    ];
+    ddbMock
+      .on(QueryCommand, {
+        TableName: "citadel-environment-release-pointer-history-test",
+      })
+      .resolves({ Items: historyRows });
+
+    const event = {
+      info: { fieldName: "environmentReleasePointerHistory" },
+      identity: {
+        sub: "user-1",
+        "custom:role": "architect",
+        "custom:organization": "org-1",
+      },
+      arguments: {
+        agentTargetId: "agent-1",
+        environment: "PROD",
+        until: "2026-06-01T00:00:00.000Z",
+      },
+    };
+
+    const result = await handler(event as never);
+    expect(result).toEqual(historyRows);
+  });
+
+  test("getEnvironmentReleasePointerHistory passes `until` through to the reader", async () => {
+    const querySpy = ddbMock
+      .on(QueryCommand, {
+        TableName: "citadel-environment-release-pointer-history-test",
+      })
+      .resolves({ Items: [] });
+
+    await getEnvironmentReleasePointerHistory(
+      "org-1",
+      "agent-1",
+      "PROD",
+      "2026-06-01T00:00:00.000Z",
+    );
+
+    const input = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(input.KeyConditionExpression).toContain(
+      "BETWEEN :prefix AND :upper",
+    );
+    void querySpy;
   });
 });

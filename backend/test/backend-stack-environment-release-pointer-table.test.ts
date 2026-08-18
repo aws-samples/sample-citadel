@@ -308,3 +308,71 @@ describe("BackendStack — EnvironmentReleasePointersTable (environment release 
     });
   });
 });
+
+describe("BackendStack — G5/G6 writer-role grants (history table + event bus)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new cdk.App();
+    const stack = new BackendStack(app, "TestBackendStackEnvPointerG5G6", {
+      environment: "test",
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+    template = Template.fromStack(stack);
+  });
+
+  function statementsTargeting(fragment: string) {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const out: Array<{ Action?: string | string[]; Resource?: unknown }> = [];
+    for (const policy of Object.values(policies)) {
+      const stmts: Array<{ Action?: string | string[]; Resource?: unknown }> =
+        policy.Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of stmts) {
+        const resources = Array.isArray(stmt.Resource)
+          ? stmt.Resource
+          : [stmt.Resource];
+        if (resources.some((r) => JSON.stringify(r).includes(fragment))) {
+          out.push(stmt);
+        }
+      }
+    }
+    return out;
+  }
+
+  test("G6: writer role grants PutItem/GetItem/Query on the history table (deterministic ARN), never Update/Delete", () => {
+    const stmts = statementsTargeting(
+      "citadel-environment-release-pointer-history-test",
+    );
+    expect(stmts.length).toBeGreaterThan(0);
+
+    const actions = new Set<string>();
+    for (const stmt of stmts) {
+      for (const a of Array.isArray(stmt.Action)
+        ? stmt.Action
+        : [stmt.Action]) {
+        if (typeof a === "string") actions.add(a);
+      }
+    }
+    expect(actions.has("dynamodb:PutItem")).toBe(true);
+    expect(actions.has("dynamodb:GetItem")).toBe(true);
+    expect(actions.has("dynamodb:Query")).toBe(true);
+    expect(actions.has("dynamodb:UpdateItem")).toBe(false);
+    expect(actions.has("dynamodb:DeleteItem")).toBe(false);
+    expect(actions.has("dynamodb:BatchWriteItem")).toBe(false);
+  });
+
+  test("G5: writer role is granted events:PutEvents (for the best-effort RELEASE_POINTER_MOVED emit)", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const grantsPutEvents = Object.values(policies).some((policy) => {
+      const stmts: Array<{ Action?: string | string[] }> =
+        policy.Properties?.PolicyDocument?.Statement ?? [];
+      return stmts.some((stmt) => {
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        return actions.includes("events:PutEvents");
+      });
+    });
+    expect(grantsPutEvents).toBe(true);
+  });
+});

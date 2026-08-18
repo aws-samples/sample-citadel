@@ -90,6 +90,10 @@ type Query {
   # resolved server-side, never a client-supplied value here).
   getCurrentEnvironmentReleasePointer(agentTargetId: ID!, environment: DeploymentEnvironment!): EnvironmentReleasePointer
   listEnvironmentReleasePointers(agentTargetId: ID!): [EnvironmentReleasePointer!]!
+  # Promotion history (G6) — "what release ran in <environment> on date
+  # D". Oldest→newest; `until` (ISO-8601) bounds to promotedAt <= D. orgId
+  # is the caller's own org, resolved server-side.
+  environmentReleasePointerHistory(agentTargetId: ID!, environment: DeploymentEnvironment!, until: AWSDateTime): [EnvironmentReleasePointerHistoryEntry!]!
   getEvalComparison(comparisonId: ID!): EvalComparisonVerdict
   listEvalComparisons(orgId: ID!, suiteId: ID): [EvalComparisonVerdict!]!
   getEvalComparisonThresholdConfig(orgId: ID!, suiteId: ID!): EvalComparisonThresholdConfig
@@ -2421,6 +2425,21 @@ type EnvironmentReleasePointer {
   version: Int!
 }
 
+# EnvironmentReleasePointerHistoryEntry — append-only record of one
+# pointer move (G6, "what ran in <env> on date D"). Written ATOMICALLY
+# with the pointer move (TransactWriteItems in the sole pointer writer),
+# so history is a gap-free time-series. Mirrors EnvironmentReleasePointer.
+type EnvironmentReleasePointerHistoryEntry {
+  orgId: ID!
+  agentTargetId: String!
+  environment: DeploymentEnvironment!
+  releaseId: ID!
+  previousReleaseId: ID
+  promotedAt: AWSDateTime!
+  promotedBy: String!
+  version: Int!
+}
+
 input SetEnvironmentReleasePointerInput {
   agentTargetId: String!
   environment: DeploymentEnvironment!
@@ -2723,6 +2742,10 @@ type PromotionPolicyConfig {
   policy: AWSJSON
   # Map<agentTargetId, Partial<PromotionPolicy>> — per-agent floor overrides.
   perAgentPolicyOverrides: AWSJSON
+  # Map<DeploymentEnvironment, Partial<PromotionPolicy>> — per-target-env
+  # floor overrides (G2). Highest-precedence layer at gate time;
+  # prod≥staging monotonic (enforced write-time AND gate-time).
+  perEnvironmentPolicyOverrides: AWSJSON
   updatedAt: AWSDateTime
   updatedBy: String
 }
@@ -2730,6 +2753,7 @@ type PromotionPolicyConfig {
 input PromotionPolicyConfigInput {
   policy: AWSJSON
   perAgentPolicyOverrides: AWSJSON
+  perEnvironmentPolicyOverrides: AWSJSON
 }
 
 # Phase 2 (production sampling) — a captured + scored production sample.

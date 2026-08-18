@@ -102,6 +102,14 @@ interface ArbiterStackProps extends cdk.StackProps {
   // there too).
   agentReleasesTable?: dynamodb.Table;
   environmentReleasePointersTable?: dynamodb.Table;
+  // G3 — the named org seam for release-aware dispatch. resolve_release
+  // resolves pointers for this single org per deployment
+  // (RELEASE_DEFAULT_ORG_ID); the switch itself is RELEASE_DISPATCH_
+  // ENVIRONMENT, derived from `environment` at synth time. Optional and
+  // operator-provisioned (env/CDK context in bin/app.ts): when absent,
+  // RELEASE_DEFAULT_ORG_ID is omitted and every resolve_release lookup
+  // falls to NO_POINTER (see release_resolution.py) — never a crash.
+  releaseDefaultOrgId?: string;
 }
 
 export class ArbiterStack extends cdk.Stack {
@@ -246,18 +254,21 @@ export class ArbiterStack extends cdk.Stack {
         // Release-aware dispatch (this story): table names only, omitted
         // entirely when the tables aren't provisioned (forward-compatible
         // no-op — see ArbiterStackProps's agentReleasesTable/
-        // environmentReleasePointersTable doc comment). RELEASE_DISPATCH_
-        // ENVIRONMENT / RELEASE_DEFAULT_ORG_ID are deliberately NOT set
-        // here — they are the feature switch and the named org seam
-        // respectively, both operator-provisioned per-deployment rather
-        // than CDK-derived, so an operator opts a deployment into the gate
-        // explicitly instead of it turning on the moment the tables exist.
+        // environmentReleasePointersTable doc comment). G3: this stack now
+        // ALSO sets RELEASE_DISPATCH_ENVIRONMENT (the feature switch,
+        // uppercased to match EnvironmentLiteral / pointer SK) and
+        // RELEASE_DEFAULT_ORG_ID (the named org seam) so each env's stack
+        // resolves its OWN pointer set at dispatch time.
         ...(props.agentReleasesTable && {
           AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
         }),
         ...(props.environmentReleasePointersTable && {
           ENVIRONMENT_RELEASE_POINTERS_TABLE:
             props.environmentReleasePointersTable.tableName,
+          RELEASE_DISPATCH_ENVIRONMENT: props.environment.toUpperCase(),
+        }),
+        ...(props.releaseDefaultOrgId && {
+          RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId,
         }),
       },
       initialPolicy: [
@@ -932,17 +943,21 @@ export class ArbiterStack extends cdk.Stack {
             // completed/failed events the rules below consume.
             WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
             // Release-aware dispatch (this story): mirrors the Supervisor's
-            // env var wiring above — table names only, omitted when the
-            // tables aren't provisioned. See ArbiterStackProps's doc
-            // comment and the Supervisor's identical block for the
-            // rationale (RELEASE_DISPATCH_ENVIRONMENT / RELEASE_DEFAULT_
-            // ORG_ID are operator-set, not derived here).
+            // env var wiring above — table names, plus G3's
+            // RELEASE_DISPATCH_ENVIRONMENT (feature switch, uppercased) and
+            // RELEASE_DEFAULT_ORG_ID (named org seam). Omitted when the
+            // tables/prop aren't provisioned. See ArbiterStackProps's doc
+            // comment for the rationale.
             ...(props.agentReleasesTable && {
               AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
             }),
             ...(props.environmentReleasePointersTable && {
               ENVIRONMENT_RELEASE_POINTERS_TABLE:
                 props.environmentReleasePointersTable.tableName,
+              RELEASE_DISPATCH_ENVIRONMENT: props.environment.toUpperCase(),
+            }),
+            ...(props.releaseDefaultOrgId && {
+              RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId,
             }),
           },
         },

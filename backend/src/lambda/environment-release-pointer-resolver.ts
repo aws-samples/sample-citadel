@@ -107,18 +107,25 @@ import { governanceDisposition } from "./utils/governance-disposition";
 import { evaluateReleaseGate } from "./utils/release-gate";
 import { resolveReleaseGateEvidence } from "./utils/release-gate-evidence";
 import { resolvePromotionPolicy } from "./utils/promotion-policy-store";
+import {
+  predecessorEnvironment,
+  comparePolicyStrictness,
+} from "./utils/promotion-ladder";
 import { writeReleaseGateFinding } from "./utils/release-gate-finding-writer";
 import { writeReleasePromotionApprovalFinding } from "./utils/release-promotion-approval-writer";
+import { publishEvent, createReleaseEvent, EventTypes } from "../utils/events";
 import {
   getEnvironmentReleasePointer,
   listEnvironmentReleasePointersForAgent,
   setEnvironmentReleasePointer,
 } from "./environment-release-pointer-store";
+import { queryEnvironmentReleasePointerHistory } from "./environment-release-pointer-history-store";
 import type {
   AgentRelease,
   AuthContext,
   EnvironmentLiteral,
   EnvironmentReleasePointer,
+  EnvironmentReleasePointerHistoryEntry,
   GovernanceEventIdentity,
   GovernanceResolverEvent,
   PromotionApproval,
@@ -153,6 +160,30 @@ export class ReleaseGateError extends Error {
       `ReleaseGateError: release quality gate refused promotion of ${releaseId} — reasons=[${reasons.join(", ")}]`,
     );
     this.name = "ReleaseGateError";
+  }
+}
+
+/** Thrown when a promotion violates the dev→staging→prod ladder (G1):
+ * the immediately-lower environment's CURRENT pointer does not reference
+ * the release being promoted. Distinct class (like ReleaseGateError) so
+ * callers can surface a precise "promote to <predecessor> first" message
+ * rather than string-matching a generic Error. Consensus decision 1:
+ * adjacency is the predecessor's CURRENT pointer, NOT a history-based
+ * "was ever there" — promoting a release that has since been superseded
+ * in the lower env is a distinct ROLLBACK operation, not built here.
+ * Promotion INTO DEV (the ladder entry) is unconstrained and never
+ * throws this. */
+export class PromotionLadderError extends Error {
+  constructor(
+    public readonly releaseId: string,
+    public readonly targetEnvironment: EnvironmentLiteral,
+    public readonly predecessorEnvironment: EnvironmentLiteral,
+    public readonly predecessorReleaseId: string | null,
+  ) {
+    super(
+      `PromotionLadderError: release ${releaseId} cannot be promoted to ${targetEnvironment} — the ladder requires ${predecessorEnvironment}'s current pointer to reference it, but ${predecessorEnvironment} currently points at ${predecessorReleaseId ?? "no release"}. Promote it to ${predecessorEnvironment} first.`,
+    );
+    this.name = "PromotionLadderError";
   }
 }
 
@@ -217,23 +248,66 @@ export async function validateReleaseGate(
   const policyResolution = await resolvePromotionPolicy(
     callerOrgId,
     release.agentTargetId,
+    environment,
   );
 
-  // evidence is only resolved when the policy itself resolved OK — an
-  // UNREADABLE policy short-circuits before any evidence read, and the
-  // synthetic FAIL verdict below carries the SAME
-  // `reasons: [<failure-reason>]` shape resolveReleaseGateEvidence's own
-  // ok:false branch produces, so downstream consumers (the ledger
-  // finding, isFailStatus) treat the two failure sources identically.
-  const evidence = policyResolution.ok
-    ? await resolveReleaseGateEvidence(
-        release,
-        environment,
+  // G2 gate-time monotonicity (AUTHORITATIVE, fail-closed): the TARGET
+  // env's fully-resolved policy must be at least as strict as the
+  // immediately-LOWER env's, for the SAME (org, agent). This sees
+  // per-agent overrides that the write-time check in
+  // promotion-policy-resolver.ts cannot, so an inversion introduced after
+  // the write can never let a prod promotion run under a policy weaker
+  // than staging. Skipped for DEV (no predecessor). A violation — or an
+  // UNREADABLE predecessor policy — becomes a synthetic FAIL verdict of
+  // the SAME shape as the UNREADABLE branch below, so downstream
+  // consumers (ledger finding, isFailStatus) treat it identically.
+  let monotonicityFailure: string | null = null;
+  if (policyResolution.ok) {
+    const predecessor = predecessorEnvironment(environment);
+    if (predecessor !== null) {
+      const predecessorResolution = await resolvePromotionPolicy(
         callerOrgId,
-        policyResolution.policy,
-        now,
-      )
-    : ({ ok: false, reason: policyResolution.reason } as const);
+        release.agentTargetId,
+        predecessor,
+      );
+      if (!predecessorResolution.ok) {
+        // Fail-closed: can't prove monotonicity against an unreadable
+        // lower-env policy, so refuse rather than assume it holds.
+        monotonicityFailure = `MONOTONICITY_PREDECESSOR_${predecessorResolution.reason}`;
+      } else {
+        const comparison = comparePolicyStrictness(
+          policyResolution.policy,
+          predecessorResolution.policy,
+        );
+        if (!comparison.monotonic) {
+          monotonicityFailure = `MONOTONICITY_VIOLATION: ${comparison.violations
+            .map((v) => v.field)
+            .join(", ")}`;
+        }
+      }
+    }
+  }
+
+  // evidence is only resolved when the policy itself resolved OK AND the
+  // per-env monotonicity ladder holds — either failure short-circuits
+  // before any evidence read, and the synthetic FAIL verdict below
+  // carries the SAME `reasons: [<failure-reason>]` shape
+  // resolveReleaseGateEvidence's own ok:false branch produces, so
+  // downstream consumers treat every failure source identically.
+  const gateBlockingReason: string | null = !policyResolution.ok
+    ? policyResolution.reason
+    : monotonicityFailure;
+
+  const evidence =
+    policyResolution.ok && monotonicityFailure === null
+      ? await resolveReleaseGateEvidence(
+          release,
+          environment,
+          callerOrgId,
+          policyResolution.policy,
+          now,
+        )
+      : ({ ok: false, reason: gateBlockingReason as string } as const);
 
   const verdict = evidence.ok
     ? evaluateReleaseGate(evidence.inputs)
@@ -446,6 +520,33 @@ export async function promoteEnvironmentReleasePointer(
     );
   }
 
+  // G1 — ladder adjacency (consensus decision 1): promotion INTO a
+  // non-DEV environment requires the immediately-lower env's CURRENT
+  // pointer to reference this exact release. DEV is the ladder entry and
+  // is unconstrained. Positioned AFTER permission/existence/org checks
+  // and BEFORE the quality gate — a ladder violation refuses the
+  // promotion before any evidence read or pointer write (tests assert
+  // zero writes on refusal).
+  const predecessor = predecessorEnvironment(input.environment);
+  if (predecessor !== null) {
+    const predecessorPointer = await getEnvironmentReleasePointer(
+      callerOrgId,
+      input.agentTargetId,
+      predecessor,
+    );
+    if (
+      !predecessorPointer ||
+      predecessorPointer.releaseId !== input.releaseId
+    ) {
+      throw new PromotionLadderError(
+        input.releaseId,
+        input.environment,
+        predecessor,
+        predecessorPointer?.releaseId ?? null,
+      );
+    }
+  }
+
   await validateReleaseGate(
     targetRelease,
     input.environment,
@@ -467,7 +568,7 @@ export async function promoteEnvironmentReleasePointer(
     input.environment,
   );
 
-  return setEnvironmentReleasePointer({
+  const moved = await setEnvironmentReleasePointer({
     orgId: callerOrgId,
     agentTargetId: input.agentTargetId,
     environment: input.environment,
@@ -476,6 +577,56 @@ export async function promoteEnvironmentReleasePointer(
     currentReleaseId: currentPointer?.releaseId ?? null,
     promotedBy: authContext.userId,
   });
+
+  // G5 — RELEASE_POINTER_MOVED, best-effort POST-commit (consensus
+  // decision 2). The move is already durably audited by the atomic
+  // history row + the fail-closed ledger finding; making this
+  // NOTIFICATION fail-closed would let a transient EventBridge blip abort
+  // an already-committed, already-audited move — strictly worse. So a
+  // publish failure is logged and swallowed here, never propagated: the
+  // caller still receives the successfully-moved pointer.
+  await emitReleasePointerMovedEvent(moved);
+
+  return moved;
+}
+
+/**
+ * Best-effort emit of the RELEASE_POINTER_MOVED event (G5). Deliberately
+ * NOT fail-closed — see the call site. Any error is logged and swallowed
+ * so a downstream notification failure can never roll back or hide an
+ * already-committed, already-audited pointer move.
+ */
+async function emitReleasePointerMovedEvent(
+  moved: EnvironmentReleasePointer,
+): Promise<void> {
+  try {
+    await publishEvent(
+      createReleaseEvent(
+        EventTypes.RELEASE_POINTER_MOVED,
+        moved.agentTargetId,
+        {
+          orgId: moved.orgId,
+          agentTargetId: moved.agentTargetId,
+          environment: moved.environment,
+          releaseId: moved.releaseId,
+          previousReleaseId: moved.previousReleaseId,
+          version: moved.version,
+          promotedBy: moved.promotedBy,
+          promotedAt: moved.promotedAt,
+        },
+      ),
+    );
+  } catch (err: unknown) {
+    console.error(
+      "environment-release-pointer-resolver: best-effort RELEASE_POINTER_MOVED emit failed — move is already committed and audited, continuing",
+      {
+        agentTargetId: moved.agentTargetId,
+        environment: moved.environment,
+        releaseId: moved.releaseId,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+  }
 }
 
 /** Read: the current pointer for one agent+environment. Returns null when
@@ -496,11 +647,30 @@ export async function listEnvironmentReleasePointers(
   return listEnvironmentReleasePointersForAgent(orgId, agentTargetId);
 }
 
+/** Read: the append-only promotion history for one agent+environment
+ * (G6). Oldest→newest; optionally bounded to promotedAt <= `until` — the
+ * "what ran in <env> on date D" query. Read-only: delegates to the
+ * dedicated history reader module, never the pointer writer. */
+export async function getEnvironmentReleasePointerHistory(
+  orgId: string,
+  agentTargetId: string,
+  environment: SetEnvironmentReleasePointerInput["environment"],
+  until?: string | null,
+): Promise<EnvironmentReleasePointerHistoryEntry[]> {
+  return queryEnvironmentReleasePointerHistory(
+    orgId,
+    agentTargetId,
+    environment,
+    until ?? undefined,
+  );
+}
+
 /** Merged view of every argument this resolver's fields receive. */
 interface EnvironmentReleasePointerResolverArguments {
   input: SetEnvironmentReleasePointerInput;
   agentTargetId: string;
   environment: SetEnvironmentReleasePointerInput["environment"];
+  until?: string | null;
 }
 
 type EnvironmentReleasePointerResolverEvent =
@@ -574,6 +744,20 @@ export const handler = async (
         return await listEnvironmentReleasePointers(
           callerOrgId,
           event.arguments.agentTargetId,
+        );
+      }
+      case "environmentReleasePointerHistory": {
+        const callerOrgId = await extractOrgFromEvent(event);
+        if (!callerOrgId) {
+          throw new Error(
+            "ValidationError: caller organization could not be determined",
+          );
+        }
+        return await getEnvironmentReleasePointerHistory(
+          callerOrgId,
+          event.arguments.agentTargetId,
+          event.arguments.environment,
+          event.arguments.until,
         );
       }
       default:

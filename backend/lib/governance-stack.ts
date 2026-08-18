@@ -1194,6 +1194,34 @@ exports.handler = async (event) => {
     // statement anywhere names both tables, which
     // backend-stack-environment-release-pointer-table.test.ts asserts
     // directly.
+    //
+    // G6 — append-only promotion history table (provisioned here per the
+    // design's file-by-file change map). PK orgId, SK historySortKey
+    // (`${agentTargetId}#${environment}#${promotedAt}#${version}`). Same
+    // durable posture as the pointer table (RETAIN + deletionProtection +
+    // PITR): the time-series of every move is deployment history that
+    // must survive stack updates. Written ATOMICALLY with the pointer
+    // move by the sole pointer writer; the writer role's grant lives in
+    // backend-stack.ts (deterministic ARN string, cycle-free — see
+    // there). No construct-based grant is issued here (that would create
+    // a governance→backend→governance cycle via the imported role).
+    const environmentReleasePointerHistoryTable = new dynamodb.Table(
+      this,
+      "EnvironmentReleasePointerHistoryTable",
+      {
+        tableName: `citadel-environment-release-pointer-history-${props.environment}`,
+        partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+        sortKey: {
+          name: "historySortKey",
+          type: dynamodb.AttributeType.STRING,
+        },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+
     const environmentReleasePointerResolverFunction = new lambda.Function(
       this,
       "EnvironmentReleasePointerResolverFunction",
@@ -1205,6 +1233,18 @@ exports.handler = async (event) => {
         environment: {
           ENVIRONMENT_RELEASE_POINTERS_TABLE:
             props.environmentReleasePointersTable.tableName,
+          // G6 — append-only promotion history. Written ATOMICALLY with
+          // the pointer move (TransactWriteItems) by the sole pointer
+          // writer, and read by the environmentReleasePointerHistory
+          // query. The writer role's PutItem/GetItem/Query grant on this
+          // table is added in backend-stack.ts by deterministic ARN
+          // string (the table is provisioned in THIS stack, which is
+          // instantiated after BackendStack — a construct reference from
+          // there would be a cyclic dependency, same pattern as the
+          // GOVERNANCE_LEDGER_TABLE grant). Deterministic name matches
+          // the string ARN backend-stack.ts grants against.
+          ENVIRONMENT_RELEASE_POINTER_HISTORY_TABLE:
+            environmentReleasePointerHistoryTable.tableName,
           AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
           // Decision ada70113: validateReleaseGate resolves the
           // per-org/per-agent promotion policy via
@@ -1227,6 +1267,10 @@ exports.handler = async (event) => {
           // grant for why this is a literal string, not a construct
           // reference.
           GOVERNANCE_LEDGER_TABLE: `citadel-governance-ledger-${props.environment}`,
+          // G5 — best-effort RELEASE_POINTER_MOVED emit target. The
+          // writer role's PutEvents grant on this bus is added in
+          // backend-stack.ts (bus is BackendStack-owned).
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(
@@ -1309,6 +1353,10 @@ exports.handler = async (event) => {
       {
         id: "ListEnvironmentReleasePointersResolver",
         fieldName: "listEnvironmentReleasePointers",
+      },
+      {
+        id: "EnvironmentReleasePointerHistoryResolver",
+        fieldName: "environmentReleasePointerHistory",
       },
     ];
     for (const { id, fieldName } of environmentReleasePointerQueryFields) {

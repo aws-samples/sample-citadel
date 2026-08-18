@@ -280,3 +280,100 @@ describe("resolvePromotionPolicy — merged numerics stay sane", () => {
     expect(Number.isFinite(result.policy.taskSuccessMin)).toBe(true);
   });
 });
+
+describe("resolvePromotionPolicy — perEnvironmentPolicyOverrides (G2)", () => {
+  test("per-environment override wins over per-agent AND org for the SAME field, when an environment is supplied", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        orgId: "org-1",
+        policy: { taskSuccessMin: 0.9 },
+        perAgentPolicyOverrides: { "agent-1": { taskSuccessMin: 0.93 } },
+        perEnvironmentPolicyOverrides: { PROD: { taskSuccessMin: 0.99 } },
+      },
+    });
+
+    const result = await resolvePromotionPolicy("org-1", "agent-1", "PROD");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.policy.taskSuccessMin).toBe(0.99);
+  });
+
+  test("a field only the per-env override supplies falls through per-agent/org to the env value", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        orgId: "org-1",
+        policy: {},
+        perAgentPolicyOverrides: {},
+        perEnvironmentPolicyOverrides: {
+          STAGING: { latencyP95TargetMs: 2500 },
+        },
+      },
+    });
+
+    const result = await resolvePromotionPolicy("org-1", "agent-1", "STAGING");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.policy.latencyP95TargetMs).toBe(2500);
+  });
+
+  test("the per-env override for a DIFFERENT environment is not applied", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        orgId: "org-1",
+        policy: { taskSuccessMin: 0.9 },
+        perEnvironmentPolicyOverrides: { PROD: { taskSuccessMin: 0.99 } },
+      },
+    });
+
+    const result = await resolvePromotionPolicy("org-1", "agent-1", "DEV");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    // DEV has no override -> org floor 0.9, NOT PROD's 0.99.
+    expect(result.policy.taskSuccessMin).toBe(0.9);
+  });
+
+  test("omitting the environment reproduces the pre-G2 merge (per-env override ignored)", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        orgId: "org-1",
+        policy: { taskSuccessMin: 0.9 },
+        perEnvironmentPolicyOverrides: { PROD: { taskSuccessMin: 0.99 } },
+      },
+    });
+
+    const result = await resolvePromotionPolicy("org-1", "agent-1");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.policy.taskSuccessMin).toBe(0.9);
+  });
+
+  test("a wrong-primitive-type field inside a per-env override fails the whole row closed (UNREADABLE)", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        orgId: "org-1",
+        perEnvironmentPolicyOverrides: { PROD: { taskSuccessMin: "0.99" } },
+      },
+    });
+
+    const result = await resolvePromotionPolicy("org-1", "agent-1", "PROD");
+
+    expect(result).toEqual({ ok: false, reason: "UNREADABLE" });
+  });
+
+  test("a non-object per-env override container fails the whole row closed (UNREADABLE)", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        orgId: "org-1",
+        perEnvironmentPolicyOverrides: "not-an-object",
+      },
+    });
+
+    const result = await resolvePromotionPolicy("org-1", "agent-1", "PROD");
+
+    expect(result).toEqual({ ok: false, reason: "UNREADABLE" });
+  });
+});

@@ -69,6 +69,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { DEFAULT_PROMOTION_POLICY, type PromotionPolicy } from "./release-gate";
+import type { EnvironmentLiteral } from "../../types";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -81,6 +82,13 @@ export interface PromotionPolicyConfigRow {
   orgId: string;
   policy?: Partial<PromotionPolicy>;
   perAgentPolicyOverrides?: Record<string, Partial<PromotionPolicy>>;
+  // G2 (per-target-env thresholds + prod≥staging monotonicity): a
+  // Partial<PromotionPolicy> keyed by DeploymentEnvironment. Layered as
+  // the HIGHEST-precedence source when resolvePromotionPolicy is called
+  // with an `environment` (see below) — the target-env floor is the most
+  // authoritative when gating a promotion INTO that env. Same shape and
+  // same field-level fail-closed discipline as perAgentPolicyOverrides.
+  perEnvironmentPolicyOverrides?: Record<string, Partial<PromotionPolicy>>;
   updatedAt?: string;
   updatedBy?: string;
 }
@@ -221,6 +229,21 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
+ * Pure: the AGENTLESS per-environment BASE policy (DEFAULT ← org policy ←
+ * that environment's override). No I/O, no per-agent layer — used by the
+ * admin write-time prod≥staging monotonicity check
+ * (promotion-policy-resolver.ts). Reuses the SAME field-level merge (with
+ * per-field sanity floors) as resolvePromotionPolicy so the two never
+ * diverge.
+ */
+export function resolveBaseEnvironmentPolicy(
+  policy: Partial<PromotionPolicy> | undefined,
+  environmentOverride: Partial<PromotionPolicy> | undefined,
+): PromotionPolicy {
+  return mergePolicyFields([policy, environmentOverride]);
+}
+
+/**
  * Validates the overall row SHAPE (not individual field RANGES — those
  * are validated per-field during merge, see mergePolicyFields). Returns
  * false for anything that would make the row untrustworthy to merge:
@@ -244,6 +267,13 @@ function isReadableRow(row: unknown): row is PromotionPolicyConfigRow {
       if (hasWrongTypeField(override)) return false;
     }
   }
+  if (row.perEnvironmentPolicyOverrides !== undefined) {
+    if (!isPlainObject(row.perEnvironmentPolicyOverrides)) return false;
+    for (const override of Object.values(row.perEnvironmentPolicyOverrides)) {
+      if (!isPlainObject(override)) return false;
+      if (hasWrongTypeField(override)) return false;
+    }
+  }
   return true;
 }
 
@@ -260,23 +290,34 @@ async function getPromotionPolicyConfigRow(
 }
 
 /**
- * Resolves the effective PromotionPolicy for (orgId, agentTargetId).
+ * Resolves the effective PromotionPolicy for (orgId, agentTargetId) —
+ * optionally scoped to a target `environment` (G2).
+ *
+ * Precedence (low→high, field-level merge):
+ *   DEFAULT ← row.policy ← perAgentPolicyOverrides[agent]
+ *           ← perEnvironmentPolicyOverrides[environment]
+ * The per-env override is layered LAST (highest precedence) and only
+ * when an `environment` is supplied — the target-env floor is the most
+ * authoritative when gating a promotion INTO that env. Omitting
+ * `environment` reproduces the pre-G2 behaviour exactly (DEFAULT ← org ←
+ * agent), so callers that don't need env-scoping are undisturbed.
  *
  * ok:true, policy=DEFAULT_PROMOTION_POLICY  — no config row exists yet.
  * ok:true, policy=<merged>                  — row exists and is readable;
- *   field-level merge floor <- org <- agent, invalid/missing individual
- *   fields fall through rather than failing the whole resolution.
+ *   field-level merge, invalid/missing individual fields fall through
+ *   rather than failing the whole resolution.
  * ok:false, reason:'UNREADABLE'              — thrown GetItem, or a
  *   schema-invalid row (missing/wrong-typed orgId, a non-object
- *   policy/perAgentPolicyOverrides container, or any present field
- *   inside policy/perAgentPolicyOverrides[*] with the wrong PRIMITIVE
- *   TYPE). Callers MUST treat this as fail-closed — never substitute
- *   DEFAULT_PROMOTION_POLICY on this branch (that would silently
- *   downgrade an org's tightened policy).
+ *   policy/perAgentPolicyOverrides/perEnvironmentPolicyOverrides
+ *   container, or any present field inside any of those with the wrong
+ *   PRIMITIVE TYPE). Callers MUST treat this as fail-closed — never
+ *   substitute DEFAULT_PROMOTION_POLICY on this branch (that would
+ *   silently downgrade an org's tightened policy).
  */
 export async function resolvePromotionPolicy(
   orgId: string,
   agentTargetId: string,
+  environment?: EnvironmentLiteral,
 ): Promise<PromotionPolicyResolutionResult> {
   let row: PromotionPolicyConfigRow | undefined;
   try {
@@ -306,6 +347,13 @@ export async function resolvePromotionPolicy(
   }
 
   const agentOverride = row.perAgentPolicyOverrides?.[agentTargetId];
-  const merged = mergePolicyFields([row.policy, agentOverride]);
+  const envOverride =
+    environment !== undefined
+      ? row.perEnvironmentPolicyOverrides?.[environment]
+      : undefined;
+  // Precedence low→high: DEFAULT (baked into mergePolicyFields) ← org ←
+  // per-agent ← per-environment. envOverride is undefined when no
+  // environment was supplied, preserving the pre-G2 merge exactly.
+  const merged = mergePolicyFields([row.policy, agentOverride, envOverride]);
   return { ok: true, policy: merged };
 }
