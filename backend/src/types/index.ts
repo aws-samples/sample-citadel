@@ -1014,3 +1014,29 @@ export interface SetEnvironmentReleasePointerInput {
   releaseId: string;
   approval?: PromotionApproval | null;
 }
+
+/**
+ * EnvironmentReleasePointerHistory row (G6 — "what ran in PROD on date
+ * D"). Append-only time-series of every pointer move, written ATOMICALLY
+ * with the pointer move itself (TransactWriteItems inside the sole
+ * pointer writer, environment-release-pointer-store.ts), so history is a
+ * gap-free record of every promotion — an invariant enforced at the
+ * write boundary, matching AgentRelease's own immutability philosophy.
+ * PK orgId, SK `${agentTargetId}#${environment}#${promotedAt}#${version}`
+ * (the composite stored under the `historySortKey` attribute) so a
+ * `begins_with(agent#env#)` Query with a `<= D` range answers "what
+ * release was running in that env at date D" — take the greatest
+ * (latest) row ≤ D. `version` disambiguates equal-millisecond timestamps
+ * and guarantees uniqueness. Every attribute mirrors
+ * EnvironmentReleasePointer.
+ */
+export interface EnvironmentReleasePointerHistoryEntry {
+  orgId: string;
+  agentTargetId: string;
+  environment: EnvironmentLiteral;
+  releaseId: string;
+  previousReleaseId: string | null;
+  promotedAt: string;
+  promotedBy: string;
+  version: number;
+}

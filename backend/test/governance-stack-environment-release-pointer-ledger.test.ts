@@ -345,6 +345,35 @@ describe("GovernanceStack + BackendStack — fail-closed governance ledger recor
     expect(grantsPutItem).toBe(true);
   });
 
+  test("provisions the append-only EnvironmentReleasePointerHistoryTable (PK orgId, SK historySortKey)", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "citadel-environment-release-pointer-history-test",
+      KeySchema: Match.arrayWith([
+        Match.objectLike({ AttributeName: "orgId", KeyType: "HASH" }),
+        Match.objectLike({ AttributeName: "historySortKey", KeyType: "RANGE" }),
+      ]),
+    });
+  });
+
+  test("EnvironmentReleasePointerResolverFunction's env carries the history table + EVENT_BUS_NAME (G6/G5)", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "environment-release-pointer-resolver.handler",
+      Environment: {
+        Variables: Match.objectLike({
+          ENVIRONMENT_RELEASE_POINTER_HISTORY_TABLE: Match.anyValue(),
+          EVENT_BUS_NAME: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test("wires the environmentReleasePointerHistory query resolver (G6)", () => {
+    template.hasResourceProperties("AWS::AppSync::Resolver", {
+      TypeName: "Query",
+      FieldName: "environmentReleasePointerHistory",
+    });
+  });
+
   test("no statement targeting the governance ledger table also grants UpdateItem/DeleteItem/BatchWriteItem (PutItem-only, never grantWriteData)", () => {
     const policies = policiesTargetingLedgerTable();
     expect(policies.length).toBeGreaterThan(0);

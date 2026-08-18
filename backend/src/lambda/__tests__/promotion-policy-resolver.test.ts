@@ -192,3 +192,76 @@ describe("handler — AppSync dispatch", () => {
     await expect(handler(event as never)).rejects.toThrow(/Unknown field/);
   });
 });
+
+describe("setPromotionPolicy — G2 write-time prod≥staging monotonicity", () => {
+  test("accepts a monotonic per-env ladder (floors rise DEV→STAGING→PROD)", async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    const result = await setPromotionPolicy(
+      "org-1",
+      {
+        perEnvironmentPolicyOverrides: {
+          DEV: { taskSuccessMin: 0.8 },
+          STAGING: { taskSuccessMin: 0.9 },
+          PROD: { taskSuccessMin: 0.95 },
+        },
+      },
+      adminAuth,
+    );
+
+    expect(result.perEnvironmentPolicyOverrides.PROD).toEqual({
+      taskSuccessMin: 0.95,
+    });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+  });
+
+  test("rejects a non-monotonic ladder (PROD floor lower than STAGING) BEFORE persisting", async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    await expect(
+      setPromotionPolicy(
+        "org-1",
+        {
+          perEnvironmentPolicyOverrides: {
+            STAGING: { taskSuccessMin: 0.95 },
+            PROD: { taskSuccessMin: 0.8 },
+          },
+        },
+        adminAuth,
+      ),
+    ).rejects.toThrow(/ValidationError.*monotonic/i);
+
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("rejects a non-monotonic ceiling (PROD latency budget looser than STAGING)", async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    await expect(
+      setPromotionPolicy(
+        "org-1",
+        {
+          perEnvironmentPolicyOverrides: {
+            STAGING: { latencyP95TargetMs: 3000 },
+            PROD: { latencyP95TargetMs: 6000 },
+          },
+        },
+        adminAuth,
+      ),
+    ).rejects.toThrow(/ValidationError.*monotonic/i);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("an org-wide policy with no per-env overrides is trivially monotonic (all envs share the same base)", async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    await expect(
+      setPromotionPolicy(
+        "org-1",
+        { policy: { taskSuccessMin: 0.95 } },
+        adminAuth,
+      ),
+    ).resolves.toMatchObject({ orgId: "org-1" });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+  });
+});

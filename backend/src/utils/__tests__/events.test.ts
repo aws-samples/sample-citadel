@@ -14,7 +14,7 @@ jest.mock("aws-xray-sdk-core", () => ({
 }));
 
 import * as AWSXRay from "aws-xray-sdk-core";
-import { publishEvent } from "../events";
+import { publishEvent, createReleaseEvent, EventTypes } from "../events";
 
 describe("events.ts traceContext propagation (additive)", () => {
   beforeEach(() => {
@@ -114,5 +114,51 @@ describe("events.ts traceContext propagation (additive)", () => {
     const detail = lastPublishedDetail();
     expect("traceContext" in detail).toBe(false);
     expect(detail.eventType).toBeUndefined();
+  });
+});
+
+describe("createReleaseEvent (G5 — RELEASE_POINTER_MOVED)", () => {
+  beforeEach(() => {
+    mockSend.mockClear();
+    (AWSXRay.getSegment as jest.Mock).mockReset();
+  });
+
+  it("builds an AgentEvent carrying agentTargetId as agentId, with no projectId", () => {
+    const event = createReleaseEvent(
+      EventTypes.RELEASE_POINTER_MOVED,
+      "agent-1",
+      { environment: "PROD", releaseId: "release-1" },
+      "corr-1",
+    );
+    expect(event.eventType).toBe("release.pointer.moved");
+    expect(event.agentId).toBe("agent-1");
+    expect(event.correlationId).toBe("corr-1");
+    expect(
+      (event as unknown as { projectId?: string }).projectId,
+    ).toBeUndefined();
+    expect(typeof event.timestamp).toBe("string");
+  });
+
+  it("publishes with the citadel.backend Source and drops projectId from the Detail body", async () => {
+    (AWSXRay.getSegment as jest.Mock).mockReturnValue(undefined);
+
+    await publishEvent(
+      createReleaseEvent(EventTypes.RELEASE_POINTER_MOVED, "agent-1", {
+        environment: "PROD",
+        releaseId: "release-1",
+      }),
+    );
+
+    const call = mockSend.mock.calls[mockSend.mock.calls.length - 1][0];
+    const entry = call.input.Entries[0];
+    expect(entry.Source).toBe("citadel.backend");
+    expect(entry.DetailType).toBe("release.pointer.moved");
+    const detail = JSON.parse(entry.Detail);
+    expect("projectId" in detail).toBe(false);
+    expect(detail.agentId).toBe("agent-1");
+    expect(detail.payload).toEqual({
+      environment: "PROD",
+      releaseId: "release-1",
+    });
   });
 });

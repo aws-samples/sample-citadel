@@ -27,16 +27,25 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
+  TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
-import type { EnvironmentLiteral, EnvironmentReleasePointer } from "../types";
+import type {
+  EnvironmentLiteral,
+  EnvironmentReleasePointer,
+  EnvironmentReleasePointerHistoryEntry,
+} from "../types";
+import { historySortKeyPrefix } from "./environment-release-pointer-history-store";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 
 function tableName(): string {
   return process.env.ENVIRONMENT_RELEASE_POINTERS_TABLE!;
+}
+
+function historyTableName(): string {
+  return process.env.ENVIRONMENT_RELEASE_POINTER_HISTORY_TABLE!;
 }
 
 function sortKey(
@@ -66,11 +75,26 @@ export class ConcurrentPromotionError extends Error {
 }
 
 function isConditionalCheckFailed(err: unknown): boolean {
-  return (
-    !!err &&
-    typeof err === "object" &&
-    (err as { name?: string }).name === "ConditionalCheckFailedException"
-  );
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: string }).name;
+  // Direct conditional Put failure (kept for callers/tests that still
+  // surface a bare ConditionalCheckFailedException) AND the
+  // TransactWriteItems form: a cancelled transaction whose pointer-Put
+  // condition failed surfaces as TransactionCanceledException carrying a
+  // CancellationReasons entry with Code "ConditionalCheckFailed". Either
+  // shape means "another promotion won the race".
+  if (name === "ConditionalCheckFailedException") return true;
+  if (name === "TransactionCanceledException") {
+    const reasons = (err as { CancellationReasons?: { Code?: string }[] })
+      .CancellationReasons;
+    if (Array.isArray(reasons)) {
+      return reasons.some((r) => r?.Code === "ConditionalCheckFailed");
+    }
+    // Some SDK/runtime combinations only embed the reason in the message.
+    const message = (err as { message?: string }).message ?? "";
+    return /ConditionalCheckFailed/.test(message);
+  }
+  return false;
 }
 
 /** Point read for the current pointer of one (org, agent, environment). */
@@ -130,19 +154,34 @@ export interface SetEnvironmentReleasePointerParams {
 /**
  * Create-or-move write for the (orgId, agentTargetId, environment)
  * pointer. This is the ONLY function in the codebase permitted to issue a
- * write against EnvironmentReleasePointersTable.
+ * write against EnvironmentReleasePointersTable — AND the ONLY writer of
+ * EnvironmentReleasePointerHistoryTable (G6), by the SAME single-writer
+ * discipline release-store.ts applies to AgentReleasesTable.
  *
- * The single ConditionExpression `attribute_not_exists(orgId) OR
- * #version = :expectedVersion` covers both cases with one write path:
+ * The pointer move and its append-only history row are written ATOMICALLY
+ * in one TransactWriteItems: either both land or neither does. This makes
+ * the history table a gap-free record of every move (invariant I3) — a
+ * refusal or race can never leave a pointer moved without its history row
+ * (or vice versa).
+ *
+ * The pointer Put's single ConditionExpression `attribute_not_exists(orgId)
+ * OR #version = :expectedVersion` covers both cases with one write path:
  *  - First-ever promotion (expectedVersion === null): the row must not
  *    exist yet, mirroring release-store.ts's create-only idempotency
  *    guard structurally, though this table is mutable thereafter.
  *  - Every subsequent move: the row's current `version` must equal what
- *    the caller last read. A stale caller's Put is rejected by DynamoDB
- *    with ConditionalCheckFailedException, surfaced as
- *    ConcurrentPromotionError, BEFORE any data is overwritten — this is
- *    the write-boundary enforcement the optimistic lock exists for, not
- *    a read-then-compare done in this function's own logic.
+ *    the caller last read. A stale caller's transaction is rejected by
+ *    DynamoDB with TransactionCanceledException (CancellationReasons
+ *    carrying ConditionalCheckFailed for the pointer item), surfaced as
+ *    ConcurrentPromotionError, BEFORE any data is written — this is the
+ *    write-boundary enforcement the optimistic lock exists for. Because
+ *    the two Puts share one transaction, the loser's history row never
+ *    lands either.
+ *
+ * The history row carries no ConditionExpression: its SK includes the
+ * monotonic `version`, so a genuine retry cannot double-append (the
+ * pointer item's version condition fails first and cancels the whole
+ * transaction).
  */
 export async function setEnvironmentReleasePointer(
   params: SetEnvironmentReleasePointerParams,
@@ -162,30 +201,54 @@ export async function setEnvironmentReleasePointer(
     version: nextVersion,
   };
 
+  const historyEntry: EnvironmentReleasePointerHistoryEntry = { ...pointer };
+  // SK: `${agentTargetId}#${environment}#${promotedAt}#${version}` — the
+  // prefix is shared with the reader (historySortKeyPrefix) so the two
+  // halves cannot drift; version disambiguates equal-ms timestamps.
+  const historySortKey = `${historySortKeyPrefix(
+    params.agentTargetId,
+    params.environment,
+  )}${promotedAt}#${nextVersion}`;
+
   try {
     const conditionExpression =
       params.expectedVersion === null
         ? "attribute_not_exists(orgId)"
         : "attribute_not_exists(orgId) OR #version = :expectedVersion";
     await docClient.send(
-      new PutCommand({
-        TableName: tableName(),
-        Item: {
-          ...pointer,
-          agentTargetId_environment: sortKey(
-            params.agentTargetId,
-            params.environment,
-          ),
-        },
-        ConditionExpression: conditionExpression,
-        ExpressionAttributeNames:
-          params.expectedVersion === null
-            ? undefined
-            : { "#version": "version" },
-        ExpressionAttributeValues:
-          params.expectedVersion === null
-            ? undefined
-            : { ":expectedVersion": params.expectedVersion },
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: tableName(),
+              Item: {
+                ...pointer,
+                agentTargetId_environment: sortKey(
+                  params.agentTargetId,
+                  params.environment,
+                ),
+              },
+              ConditionExpression: conditionExpression,
+              ExpressionAttributeNames:
+                params.expectedVersion === null
+                  ? undefined
+                  : { "#version": "version" },
+              ExpressionAttributeValues:
+                params.expectedVersion === null
+                  ? undefined
+                  : { ":expectedVersion": params.expectedVersion },
+            },
+          },
+          {
+            Put: {
+              TableName: historyTableName(),
+              Item: {
+                ...historyEntry,
+                historySortKey,
+              },
+            },
+          },
+        ],
       }),
     );
     return pointer;

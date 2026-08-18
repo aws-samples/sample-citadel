@@ -3462,6 +3462,34 @@ export class BackendStack extends cdk.Stack {
         resources: [governanceLedgerTableArn],
       }),
     );
+
+    // G6 — atomic promotion history. The pointer move + append-only
+    // history row are written in ONE TransactWriteItems by the sole
+    // pointer writer (environment-release-pointer-store.ts), so this role
+    // needs PutItem on the history table for the transactional write,
+    // plus GetItem/Query for the read-only history query
+    // (environment-release-pointer-history-store.ts). The history table
+    // is provisioned in governance-stack.ts, instantiated AFTER
+    // BackendStack, so — like the GOVERNANCE_LEDGER grant above — it is
+    // referenced by deterministic ARN STRING rather than a construct,
+    // avoiding a cyclic stack dependency. PutItem/GetItem/Query only,
+    // never DeleteItem/UpdateItem — the history table is append-only.
+    const environmentReleasePointerHistoryTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-environment-release-pointer-history-${props.environment}`;
+    environmentReleasePointerWriterRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:Query"],
+        resources: [environmentReleasePointerHistoryTableArn],
+      }),
+    );
+
+    // G5 — best-effort RELEASE_POINTER_MOVED emit (post-commit). The
+    // promotion resolver publishes to the shared bus via publishEvent;
+    // granted here on the sole-writer role rather than in governance-
+    // stack.ts to keep every grant for this role co-located and
+    // cross-stack-cycle-free (agentEventBus is BackendStack-owned).
+    this.agentEventBus.grantPutEventsTo(environmentReleasePointerWriterRole);
+
     this.environmentReleasePointerWriterRole =
       environmentReleasePointerWriterRole;
 

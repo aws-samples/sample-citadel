@@ -88,6 +88,31 @@ export function createAgentEvent(
   };
 }
 
+/**
+ * Release-lifecycle event helper (G5 — RELEASE_POINTER_MOVED). A release
+ * promotion is scoped to an agent target, not a project, so there is no
+ * projectId: the AgentEvent's projectId is intentionally left undefined,
+ * which publishEvent's JSON.stringify drops from the emitted Detail body
+ * (matching the additive/optional-field convention already used for
+ * traceContext). agentId carries the agentTargetId so
+ * EVENTBRIDGE_CATALOG consumers (governance graph snapshot, dashboards)
+ * can key off the same identifier the pointer table uses.
+ */
+export function createReleaseEvent(
+  eventType: string,
+  agentTargetId: string,
+  payload: unknown,
+  correlationId?: string,
+): AgentEvent {
+  return {
+    eventType,
+    agentId: agentTargetId,
+    payload,
+    timestamp: new Date().toISOString(),
+    correlationId,
+  } as AgentEvent;
+}
+
 // Event type constants
 export const EventTypes = {
   PROJECT_CREATED: "project.created",
@@ -109,6 +134,10 @@ export const EventTypes = {
   MODEL_CONFIG_CHANGED: "model.config.changed",
   MODEL_CATALOG_SYNCED: "model.catalog.synced",
   MODEL_CATALOG_SYNC_REQUESTED: "model.catalog.sync_requested",
+  // G5 — environment release pointer moved (dev→staging→prod promotion).
+  // citadel.* namespace via the Source "citadel.backend" set in
+  // publishEvent. Best-effort, emitted POST-commit only (never blocking).
+  RELEASE_POINTER_MOVED: "release.pointer.moved",
 } as const;
 
 export type EventType = (typeof EventTypes)[keyof typeof EventTypes];

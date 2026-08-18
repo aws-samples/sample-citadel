@@ -223,6 +223,13 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   // agentReleasesTable/environmentReleasePointersTable prop doc comment).
   agentReleasesTable: backendStack.agentReleasesTable,
   environmentReleasePointersTable: backendStack.environmentReleasePointersTable,
+  // G3 — named org seam for release-aware dispatch. Operator-provisioned
+  // via env or CDK context (never derived), so a deployment opts its
+  // arbiter into resolving a specific org's pointers. Absent → omitted →
+  // resolve_release falls to NO_POINTER (safe no-op).
+  releaseDefaultOrgId:
+    process.env.RELEASE_DEFAULT_ORG_ID ??
+    (app.node.tryGetContext("releaseDefaultOrgId") as string | undefined),
 });
 
 // Telemetry stack — invocation cost ledger + cost query API/budgets
