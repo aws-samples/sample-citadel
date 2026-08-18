@@ -73,5 +73,16 @@ export const METRIC_RELEASE_DISPATCH_REFUSED = "ReleaseDispatchRefused";
 export const DIMENSION_RELEASE_MODE = "ReleaseDispatchMode";
 export const DIMENSION_RELEASE_OUTCOME = "ReleaseDispatchOutcome";
 
+// ── Canary arm assignment (attribution-only, decision D2) ───────────────
+// Per-dispatch counter of which arm a stickiness key resolved to, so the
+// canary split can be measured. Dimensioned ONLY by low-cardinality keys:
+// WorkflowId (existing) × ReleaseArm (stable|candidate). releaseId is
+// high-cardinality and MUST NOT be a CloudWatch dimension (it lives on the
+// usage row / cost ledger / findings instead) — same rule the module
+// docstring states for executionId/nodeId. Mirrored in the Python arbiter
+// tier's arbiter/common/metrics_constants.py.
+export const METRIC_CANARY_ASSIGNMENT = "CanaryAssignment";
+export const DIMENSION_RELEASE_ARM = "ReleaseArm";
+
 export const DIMENSION_WORKFLOW_ID = "WorkflowId";
 export const DIMENSION_AGENT_ID = "AgentId";

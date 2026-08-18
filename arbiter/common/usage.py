@@ -73,6 +73,8 @@ def build_usage_record(
     captured_at: Optional[str] = None,
     total_tokens: Any = None,
     bedrock_request_id: Optional[str] = None,
+    release_id: Optional[str] = None,
+    release_arm: Optional[str] = None,
 ) -> dict:
     """Build a validated ``UsageRecord`` dict.
 
@@ -114,6 +116,19 @@ def build_usage_record(
 
     if isinstance(bedrock_request_id, str) and bedrock_request_id:
         record["bedrockRequestId"] = bedrock_request_id
+
+    # Canary attribution (decision D2, attribution-only), additive and
+    # omit-when-absent exactly like totalTokens/bedrockRequestId. release_id
+    # is the releaseId the resolved arm points at; release_arm is
+    # "stable"|"candidate". A caller with no canary context passes neither,
+    # so the record is byte-identical to a pre-canary usage row. release_arm
+    # is only written when it is one of the two valid arm literals — a
+    # malformed/unknown arm is dropped rather than persisted, so downstream
+    # per-arm rollups can trust a present value.
+    if isinstance(release_id, str) and release_id:
+        record["releaseId"] = release_id
+    if release_arm in ("stable", "candidate"):
+        record["releaseArm"] = release_arm
 
     return record
 

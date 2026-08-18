@@ -48,6 +48,8 @@ from common.metrics_constants import (
     DIMENSION_WORKFLOW_ID,
     DIMENSION_RELEASE_MODE,
     DIMENSION_RELEASE_OUTCOME,
+    METRIC_CANARY_ASSIGNMENT,
+    DIMENSION_RELEASE_ARM,
 )
 
 # ---------------------------------------------------------------------------
@@ -325,7 +327,34 @@ def _emit_release_dispatch_metric(
         _logger.warning('release-dispatch metric emit failed: %s', exc)
 
 
-def _check_release_gate(agent_id: str, workflow_id: str) -> tuple[bool, str | None]:
+def _emit_canary_assignment_metric(arm: str, workflow_id: str = '') -> None:
+    """Best-effort counter of which canary arm a node dispatch resolved to
+    (decision D2, attribution-only). Low-cardinality dimensions ONLY —
+    WorkflowId x ReleaseArm; releaseId is never a dimension. Never raises.
+    """
+    if arm not in ('stable', 'candidate'):
+        return
+    try:
+        cw = _get_cloudwatch()
+        dimensions = [{'Name': DIMENSION_RELEASE_ARM, 'Value': arm}]
+        if workflow_id:
+            dimensions.append({'Name': DIMENSION_WORKFLOW_ID, 'Value': workflow_id})
+        cw.put_metric_data(
+            Namespace=METRIC_NAMESPACE,
+            MetricData=[{
+                'MetricName': METRIC_CANARY_ASSIGNMENT,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            }],
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must never raise
+        _logger.warning('canary-assignment metric emit failed: %s', exc)
+
+
+def _check_release_gate(
+    agent_id: str, workflow_id: str, execution_id: str = ''
+) -> tuple[bool, str | None]:
     """Evaluates the release-aware dispatch gate for one node dispatch.
 
     Returns ``(refused, refusal_reason)``. ``refused`` is always False
@@ -362,10 +391,16 @@ def _check_release_gate(agent_id: str, workflow_id: str) -> tuple[bool, str | No
         org_id=os.environ.get('RELEASE_DEFAULT_ORG_ID') or '',
         agent_target_id=agent_id,
         environment=release_dispatch_environment,
+        # D1: server-minted stickiness key = executionId (the stepRunner's
+        # equivalent of the supervisor's orchestrationId; server-minted,
+        # never client-supplied). Interim key — no conversationId threading.
+        stickiness_key=execution_id or '',
     )
 
     if release_result.status == ReleaseResolutionStatus.RESOLVED:
         outcome, would_block = 'proceed', False
+        # Attribution-only canary metric (decision D2).
+        _emit_canary_assignment_metric(arm=release_result.arm, workflow_id=workflow_id)
     elif release_result.status == ReleaseResolutionStatus.LOOKUP_FAILED:
         # Assert-or-refuse doctrine — see release_resolution.py's module
         # docstring and supervisor/index.py's identical branch. Never
@@ -554,7 +589,9 @@ def invoke_node(
     # whatever state DAG scheduling left it, and the refusal is observable
     # via the ERROR-level log line and the ReleaseDispatchRefused metric
     # emitted inside _check_release_gate.
-    _release_refused, _release_refusal_reason = _check_release_gate(agent_id, workflow_id)
+    _release_refused, _release_refusal_reason = _check_release_gate(
+        agent_id, workflow_id, execution_id
+    )
     if _release_refused:
         return
 

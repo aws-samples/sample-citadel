@@ -34,7 +34,7 @@ import { ArbiterStack } from "../lib/arbiter-stack";
 type Resources = Record<string, any>;
 
 function buildResources(): Resources {
-  const app = new cdk.App();
+  const app = new cdk.App({ context: { "aws:cdk:bundling-stacks": [] } });
   const backendStack = new cdk.Stack(app, "MockBackendStack", {
     env: { account: "123456789012", region: "us-east-1" },
   });

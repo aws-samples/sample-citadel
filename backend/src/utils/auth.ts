@@ -110,6 +110,12 @@ export function hasPermission(
       // against, so it stays with architect rather than project_manager
       // or developer.
       "release:promote",
+      // Canary releases (decision D6): release:canary authorizes
+      // start/reweight/abort of a canary episode. promoteCanary (→100%)
+      // ALSO requires release:promote — a canary-only grant can never
+      // reach a full cutover on its own. Granted to the same architect
+      // tier as release:promote (admin has all via the bypass above).
+      "release:canary",
     ],
     developer: [
       "project:read",

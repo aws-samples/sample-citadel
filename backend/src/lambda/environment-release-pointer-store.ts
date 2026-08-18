@@ -31,9 +31,11 @@ import {
   TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type {
+  CanaryState,
   EnvironmentLiteral,
   EnvironmentReleasePointer,
   EnvironmentReleasePointerHistoryEntry,
+  PointerTransitionType,
 } from "../types";
 import { historySortKeyPrefix } from "./environment-release-pointer-history-store";
 
@@ -149,6 +151,15 @@ export interface SetEnvironmentReleasePointerParams {
    * null. */
   currentReleaseId?: string | null;
   promotedBy: string;
+  /** Canary state to write onto the pointer (decision D2). Omit or pass
+   * `null` to write NO canary attribute (a plain promotion, or a
+   * CANARY_PROMOTE/ABORT that clears the canary) — such a row resolves
+   * 100% stable, backward-compatible with every pre-canary reader. */
+  canary?: CanaryState | null;
+  /** The transition discriminator recorded on both the pointer and its
+   * history row (I3). Defaults to "PROMOTE" (the pre-canary move) so
+   * existing callers are undisturbed. */
+  transitionType?: PointerTransitionType;
 }
 
 /**
@@ -189,6 +200,8 @@ export async function setEnvironmentReleasePointer(
   const nextVersion = (params.expectedVersion ?? 0) + 1;
   const promotedAt = new Date().toISOString();
   const previousReleaseId = params.currentReleaseId ?? null;
+  const transitionType: PointerTransitionType =
+    params.transitionType ?? "PROMOTE";
 
   const pointer: EnvironmentReleasePointer = {
     orgId: params.orgId,
@@ -199,7 +212,16 @@ export async function setEnvironmentReleasePointer(
     promotedAt,
     promotedBy: params.promotedBy,
     version: nextVersion,
+    transitionType,
   };
+  // Only attach the `canary` attribute when a canary state is actually
+  // present — a null/undefined canary writes NO attribute (DynamoDB
+  // document client rejects undefined), so the resulting row is
+  // byte-identical to a pre-canary pointer and every existing reader
+  // resolves it as 100% stable.
+  if (params.canary) {
+    pointer.canary = params.canary;
+  }
 
   const historyEntry: EnvironmentReleasePointerHistoryEntry = { ...pointer };
   // SK: `${agentTargetId}#${environment}#${promotedAt}#${version}` — the

@@ -65,6 +65,15 @@ export interface PromotionPolicy {
    * gateClass packs). false = NO_BASELINE never passes, no matter how
    * good the absolute scores are. */
   allowNoBaselineOnAbsoluteFloors: boolean;
+  /** Org ceiling (decision D5) on canary blast radius: the maximum
+   * `percentBasisPoints` a startCanary/reweightCanary may request, in
+   * basis points 0..10000. A CEILING that TIGHTENS going up the ladder
+   * (prod ≤ staging, see promotion-ladder.ts's TIGHTENING_CEILING_FIELDS)
+   * so a prod canary can never expose a wider fraction of traffic than
+   * staging. Default 2500 (25%) — a conservative floor an org may raise
+   * explicitly through the existing per-org/per-agent/per-env override
+   * chain. */
+  canaryMaxBasisPoints: number;
 }
 
 /** Dev-calibrated starting points — NOT final SLOs. TUNE with prod
@@ -79,6 +88,7 @@ export const DEFAULT_PROMOTION_POLICY: PromotionPolicy = {
   requiredGateClasses: [],
   maxEvidenceAgeDays: 7,
   allowNoBaselineOnAbsoluteFloors: false,
+  canaryMaxBasisPoints: 2500,
 };
 
 // ─────────────────────────────────────────────────────────────────────────

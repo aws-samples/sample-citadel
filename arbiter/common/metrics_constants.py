@@ -85,3 +85,14 @@ METRIC_RELEASE_DISPATCH_REFUSED = 'ReleaseDispatchRefused'
 
 DIMENSION_RELEASE_MODE = 'ReleaseDispatchMode'
 DIMENSION_RELEASE_OUTCOME = 'ReleaseDispatchOutcome'
+
+# Canary arm assignment (attribution-only, decision D2): per-dispatch
+# counter of which arm a stickiness key resolved to. Dimensioned ONLY by
+# low-cardinality keys — WorkflowId (existing) x ReleaseArm
+# (stable|candidate). releaseId is high-cardinality and MUST NOT be a
+# CloudWatch dimension (it lives on the usage row / cost ledger / findings)
+# per this module's cardinality rule. Mirrors the TS backend tier's
+# METRIC_CANARY_ASSIGNMENT / DIMENSION_RELEASE_ARM in
+# backend/src/utils/metrics-constants.ts.
+METRIC_CANARY_ASSIGNMENT = 'CanaryAssignment'
+DIMENSION_RELEASE_ARM = 'ReleaseArm'

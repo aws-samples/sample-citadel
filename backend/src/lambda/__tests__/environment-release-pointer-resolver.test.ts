@@ -1119,6 +1119,7 @@ describe("validateReleaseGate — decision ada70113 (per-org promotion policy)",
       requiredGateClasses: [],
       maxEvidenceAgeDays: 7,
       allowNoBaselineOnAbsoluteFloors: false,
+      canaryMaxBasisPoints: 2500,
     });
   });
 

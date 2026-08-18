@@ -61,6 +61,8 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from .canary_assignment import assign_arm
+
 _dynamodb = None
 
 
@@ -105,18 +107,39 @@ class ReleaseResolution:
     status: ReleaseResolutionStatus
     release: dict | None = None
     error: str | None = None
+    # Canary attribution (decision D2, attribution-only). The arm a
+    # server-minted stickiness key resolved to ("stable" | "candidate"),
+    # and the releaseId that arm points at. Both default to the stable
+    # arm / stable releaseId for a canary-less pointer, so every existing
+    # (canary-absent) caller reads arm="stable" and resolved_release_id
+    # equal to the stable release — fully backward-compatible.
+    arm: str = "stable"
+    resolved_release_id: str | None = None
 
 
 def resolve_release(
     org_id: str,
     agent_target_id: str,
     environment: str,
+    stickiness_key: str | None = None,
 ) -> ReleaseResolution:
     """Resolve the release currently pointed at for (org_id,
     agent_target_id, environment). Read-only: issues at most one GetItem
     against each of EnvironmentReleasePointersTable and AgentReleasesTable.
     Never raises — every failure mode is captured in the returned
     ``ReleaseResolution.status``.
+
+    Canary (decision D2, attribution-only): when the pointer row carries a
+    ``canary`` object AND a ``stickiness_key`` is supplied, the arm is
+    computed by the PURE ``assign_arm`` (mirrored TS/Python) from the
+    server-minted key, the preserved salt, and the threshold. A
+    ``candidate`` arm resolves ``canary.candidateReleaseId``; a ``stable``
+    arm (or a canary-less pointer, or a missing key) resolves the stable
+    ``releaseId``. The arm and resolved releaseId are returned for
+    ATTRIBUTION ONLY — this function does NOT bind the resolved release to
+    dispatch config (there is no release->config binding yet). A dangling
+    candidate is a data-integrity failure, LOOKUP_FAILED, same as a
+    dangling stable pointer.
     """
     pointer_table_name = _pointer_table_name()
     release_table_name = _release_table_name()
@@ -152,8 +175,8 @@ def resolve_release(
         # (org, agent, environment) triple. Not a failure.
         return ReleaseResolution(status=ReleaseResolutionStatus.NO_POINTER)
 
-    release_id = pointer_item.get("releaseId")
-    if not release_id:
+    stable_release_id = pointer_item.get("releaseId")
+    if not stable_release_id:
         # Malformed pointer row (should be unreachable given the write
         # boundary in environment-release-pointer-store.ts, which always
         # sets releaseId) — treat the same as a lookup failure rather than
@@ -163,9 +186,15 @@ def resolve_release(
             error="pointer row is missing its releaseId field",
         )
 
+    # Canary arm selection (attribution-only). Absent canary -> stable arm,
+    # byte-identical to pre-canary behaviour.
+    arm, resolved_release_id = _select_canary_arm(
+        pointer_item, stable_release_id, stickiness_key
+    )
+
     try:
         release_response = resource.Table(release_table_name).get_item(
-            Key={"releaseId": release_id}
+            Key={"releaseId": resolved_release_id}
         )
     except Exception as exc:  # noqa: BLE001 — any lookup failure is LOOKUP_FAILED
         return ReleaseResolution(
@@ -175,16 +204,52 @@ def resolve_release(
 
     release_item = release_response.get("Item")
     if not release_item:
-        # Dangling pointer: the release table is create-only and rows are
-        # never deleted (release-store.ts), so a pointer whose releaseId
-        # does not resolve indicates a data-integrity problem, not a
-        # normal state. Refuse-worthy, same as any other lookup failure.
+        # Dangling pointer/candidate: the release table is create-only and
+        # rows are never deleted (release-store.ts), so a releaseId that
+        # does not resolve indicates a data-integrity problem, not a normal
+        # state. Refuse-worthy, same as any other lookup failure — covers
+        # both a dangling STABLE pointer and a dangling canary CANDIDATE.
         return ReleaseResolution(
             status=ReleaseResolutionStatus.LOOKUP_FAILED,
-            error=f"dangling pointer: releaseId {release_id!r} has no matching release row",
+            error=f"dangling pointer: releaseId {resolved_release_id!r} has no matching release row",
         )
 
     return ReleaseResolution(
         status=ReleaseResolutionStatus.RESOLVED,
         release=release_item,
+        arm=arm,
+        resolved_release_id=resolved_release_id,
     )
+
+
+def _select_canary_arm(
+    pointer_item: dict,
+    stable_release_id: str,
+    stickiness_key: str | None,
+) -> tuple[str, str]:
+    """Pure-ish arm selection: returns ``(arm, resolved_release_id)``.
+
+    Absent canary, absent/empty stickiness key, or a malformed canary
+    object all resolve the STABLE arm — a choke point that failed to
+    thread a key can never silently route everyone to the candidate
+    (mirrors ``assign_arm``'s empty-key contract). Any exception reading
+    the canary object degrades to the stable arm rather than raising, so a
+    malformed row can never break dispatch.
+    """
+    try:
+        canary = pointer_item.get("canary")
+        if not isinstance(canary, dict):
+            return "stable", stable_release_id
+        if not isinstance(stickiness_key, str) or stickiness_key == "":
+            return "stable", stable_release_id
+        candidate_release_id = canary.get("candidateReleaseId")
+        percent = canary.get("percentBasisPoints")
+        salt = canary.get("salt")
+        if not candidate_release_id or salt is None or percent is None:
+            return "stable", stable_release_id
+        arm = assign_arm(stickiness_key, percent, salt)
+        if arm == "candidate":
+            return "candidate", candidate_release_id
+        return "stable", stable_release_id
+    except Exception:  # noqa: BLE001 — arm selection must never break dispatch
+        return "stable", stable_release_id

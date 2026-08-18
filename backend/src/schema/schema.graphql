@@ -383,6 +383,13 @@ type Mutation {
   # Quality gating is deferred to a later story — see
   # environment-release-pointer-resolver.ts's validateReleaseGate() seam.
   promoteEnvironmentReleasePointer(input: SetEnvironmentReleasePointerInput!): EnvironmentReleasePointer!
+  # Canary agent releases (attribution-only, decision D2). start/reweight/
+  # abort require release:canary; promoteCanary (→100%) ALSO requires
+  # release:promote (decision D6).
+  startCanary(input: StartCanaryInput!): EnvironmentReleasePointer!
+  reweightCanary(input: ReweightCanaryInput!): EnvironmentReleasePointer!
+  promoteCanary(input: CanaryOpInput!): EnvironmentReleasePointer!
+  abortCanary(input: CanaryOpInput!): EnvironmentReleasePointer!
   # Eval baseline comparison + regression (CIT-105). UI: OUT OF SCOPE.
   designateEvalBaseline(input: DesignateEvalBaselineInput!): EvalBaseline!
   computeEvalComparison(input: ComputeEvalComparisonInput!): EvalComparisonVerdict!
@@ -2423,6 +2430,32 @@ type EnvironmentReleasePointer {
   promotedAt: AWSDateTime!
   promotedBy: String!
   version: Int!
+  # Canary state (attribution-only interim — decision D2). Null when no
+  # canary is active (the pointer resolves 100% stable). The internal
+  # salt is deliberately NOT exposed.
+  canary: CanaryState
+  # Why this pointer version was written. Null on pre-canary rows.
+  transitionType: PointerTransitionType
+}
+
+# Canary traffic-split state (attribution-only, decision D2). salt is
+# intentionally NOT exposed (internal to the deterministic assignment).
+type CanaryState {
+  candidateReleaseId: ID!
+  percentBasisPoints: Int!
+  stickiness: CanaryStickiness!
+  startedAt: AWSDateTime!
+  startedBy: String!
+}
+
+enum CanaryStickiness { conversation user }
+
+enum PointerTransitionType {
+  PROMOTE
+  CANARY_START
+  CANARY_REWEIGHT
+  CANARY_PROMOTE
+  CANARY_ABORT
 }
 
 # EnvironmentReleasePointerHistoryEntry — append-only record of one
@@ -2438,12 +2471,37 @@ type EnvironmentReleasePointerHistoryEntry {
   promotedAt: AWSDateTime!
   promotedBy: String!
   version: Int!
+  canary: CanaryState
+  transitionType: PointerTransitionType
 }
 
 input SetEnvironmentReleasePointerInput {
   agentTargetId: String!
   environment: DeploymentEnvironment!
   releaseId: ID!
+  approval: PromotionApproval
+}
+
+# Canary mutation inputs (attribution-only, decision D2). orgId and the
+# operator identity are server-derived, never part of these inputs.
+input StartCanaryInput {
+  agentTargetId: String!
+  environment: DeploymentEnvironment!
+  candidateReleaseId: ID!
+  percentBasisPoints: Int!
+  stickiness: CanaryStickiness!
+  approval: PromotionApproval
+}
+
+input ReweightCanaryInput {
+  agentTargetId: String!
+  environment: DeploymentEnvironment!
+  percentBasisPoints: Int!
+}
+
+input CanaryOpInput {
+  agentTargetId: String!
+  environment: DeploymentEnvironment!
   approval: PromotionApproval
 }
 

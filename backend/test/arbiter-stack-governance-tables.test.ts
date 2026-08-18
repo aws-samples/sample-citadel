@@ -39,7 +39,7 @@ describe("ArbiterStack — US-ARB-002 governance tables (Δ8)", () => {
   let template: Template;
 
   beforeAll(() => {
-    const app = new cdk.App();
+    const app = new cdk.App({ context: { "aws:cdk:bundling-stacks": [] } });
 
     // Minimal mock BackendStack to supply the cross-stack props required
     // by ArbiterStackProps (agentEventBus, agentConfigTable, codeBucket,

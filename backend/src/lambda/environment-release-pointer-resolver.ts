@@ -99,6 +99,7 @@
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { randomUUID } from "crypto";
 import { hasPermission } from "../utils/auth";
 import { extractOrgFromEvent } from "../utils/auth-event";
 import { getGovernanceEnforce } from "../utils/governance-flag";
@@ -123,13 +124,17 @@ import { queryEnvironmentReleasePointerHistory } from "./environment-release-poi
 import type {
   AgentRelease,
   AuthContext,
+  CanaryOpInput,
+  CanaryState,
   EnvironmentLiteral,
   EnvironmentReleasePointer,
   EnvironmentReleasePointerHistoryEntry,
   GovernanceEventIdentity,
   GovernanceResolverEvent,
   PromotionApproval,
+  ReweightCanaryInput,
   SetEnvironmentReleasePointerInput,
+  StartCanaryInput,
 } from "../types";
 
 const dynamoClient = new DynamoDBClient({});
@@ -144,6 +149,51 @@ function requireReleasePromotePermission(authContext: AuthContext): void {
     throw new Error(
       "UnauthorizedError: release:promote permission required to move an environment release pointer",
     );
+  }
+}
+
+/** Decision D6: release:canary authorizes start/reweight/abort of a
+ * canary episode. promoteCanary (→100%) ALSO requires release:promote
+ * (enforced separately in that handler) — a canary-only grant can never
+ * reach a full cutover on its own. */
+function requireReleaseCanaryPermission(authContext: AuthContext): void {
+  if (!hasPermission(authContext, "release:canary")) {
+    throw new Error(
+      "UnauthorizedError: release:canary permission required to start, reweight, or abort a canary",
+    );
+  }
+}
+
+/** Thrown when a requested canary percent exceeds the org's resolved
+ * `canaryMaxBasisPoints` ceiling (decision D5), OR when that ceiling
+ * cannot be resolved (fail-closed: an UNREADABLE policy refuses the
+ * canary rather than assuming an unlimited ceiling — same discipline as
+ * validateReleaseGate's policy branch). Distinct class, like
+ * PromotionLadderError, so callers can surface a precise message. */
+export class CanaryCeilingError extends Error {
+  constructor(
+    public readonly requestedBasisPoints: number,
+    public readonly ceilingBasisPoints: number | null,
+    public readonly reason: "EXCEEDS_CEILING" | "POLICY_UNREADABLE",
+  ) {
+    super(
+      reason === "POLICY_UNREADABLE"
+        ? "CanaryCeilingError: the promotion policy is UNREADABLE — refusing the canary change fail-closed rather than assuming an unlimited ceiling"
+        : `CanaryCeilingError: requested canary percent ${requestedBasisPoints}bp exceeds the org ceiling of ${ceilingBasisPoints}bp (canaryMaxBasisPoints). Lower the percent or raise the org policy ceiling.`,
+    );
+    this.name = "CanaryCeilingError";
+  }
+}
+
+/** Thrown when a canary operation targets an (agent, environment) pair
+ * that has no active canary (reweight/promote/abort) — or, for
+ * startCanary, when the env has no current stable pointer to canary
+ * against. Distinct from ValidationError so callers can tell "there is
+ * no canary here" apart from malformed input. */
+export class CanaryStateError extends Error {
+  constructor(message: string) {
+    super(`CanaryStateError: ${message}`);
+    this.name = "CanaryStateError";
   }
 }
 
@@ -390,6 +440,91 @@ async function getAgentRelease(
 }
 
 /**
+ * G1 ladder adjacency (consensus decision 1; decision D7 reuses it for
+ * canary): promotion INTO a non-DEV environment requires the immediately-
+ * lower env's CURRENT pointer to reference this exact release. DEV is the
+ * ladder entry and is unconstrained. Throws PromotionLadderError on
+ * violation — the SAME rule and error a full promotion uses, so a canary
+ * start (which puts the candidate on real prod traffic) can never be a
+ * side-door around the ladder. Read-only; performs no write, so callers
+ * that run it before the store's conditional write leave the pointer
+ * provably untouched on refusal.
+ */
+async function assertLadderAdjacency(
+  callerOrgId: string,
+  agentTargetId: string,
+  environment: EnvironmentLiteral,
+  releaseId: string,
+): Promise<void> {
+  const predecessor = predecessorEnvironment(environment);
+  if (predecessor === null) return;
+  const predecessorPointer = await getEnvironmentReleasePointer(
+    callerOrgId,
+    agentTargetId,
+    predecessor,
+  );
+  if (!predecessorPointer || predecessorPointer.releaseId !== releaseId) {
+    throw new PromotionLadderError(
+      releaseId,
+      environment,
+      predecessor,
+      predecessorPointer?.releaseId ?? null,
+    );
+  }
+}
+
+/**
+ * Resolve and enforce the org's canary blast-radius ceiling (decision
+ * D5). Fail-closed: an UNREADABLE policy refuses the change rather than
+ * assuming an unlimited ceiling — identical discipline to
+ * validateReleaseGate's policy branch. Throws CanaryCeilingError.
+ */
+async function enforceCanaryCeiling(
+  callerOrgId: string,
+  agentTargetId: string,
+  environment: EnvironmentLiteral,
+  requestedBasisPoints: number,
+): Promise<void> {
+  const policyResolution = await resolvePromotionPolicy(
+    callerOrgId,
+    agentTargetId,
+    environment,
+  );
+  if (!policyResolution.ok) {
+    throw new CanaryCeilingError(
+      requestedBasisPoints,
+      null,
+      "POLICY_UNREADABLE",
+    );
+  }
+  const ceiling = policyResolution.policy.canaryMaxBasisPoints;
+  if (requestedBasisPoints > ceiling) {
+    throw new CanaryCeilingError(
+      requestedBasisPoints,
+      ceiling,
+      "EXCEEDS_CEILING",
+    );
+  }
+}
+
+/** Validate a caller-supplied canary percent is a whole number of basis
+ * points in [0,10000]. The pure assignArm clamps out-of-range values,
+ * but a mutation must reject a malformed request loudly rather than
+ * silently clamp an operator's typo. */
+function validatePercentBasisPoints(percentBasisPoints: number): void {
+  if (
+    typeof percentBasisPoints !== "number" ||
+    !Number.isInteger(percentBasisPoints) ||
+    percentBasisPoints < 0 ||
+    percentBasisPoints > 10000
+  ) {
+    throw new Error(
+      `ValidationError: percentBasisPoints must be an integer in [0,10000], got ${percentBasisPoints}`,
+    );
+  }
+}
+
+/**
  * Interim human-approval seam (decision 8165b7e5 — rides this existing
  * mutation; the CIT-030 approval substrate does not exist).
  *
@@ -520,32 +655,16 @@ export async function promoteEnvironmentReleasePointer(
     );
   }
 
-  // G1 — ladder adjacency (consensus decision 1): promotion INTO a
-  // non-DEV environment requires the immediately-lower env's CURRENT
-  // pointer to reference this exact release. DEV is the ladder entry and
-  // is unconstrained. Positioned AFTER permission/existence/org checks
-  // and BEFORE the quality gate — a ladder violation refuses the
-  // promotion before any evidence read or pointer write (tests assert
-  // zero writes on refusal).
-  const predecessor = predecessorEnvironment(input.environment);
-  if (predecessor !== null) {
-    const predecessorPointer = await getEnvironmentReleasePointer(
-      callerOrgId,
-      input.agentTargetId,
-      predecessor,
-    );
-    if (
-      !predecessorPointer ||
-      predecessorPointer.releaseId !== input.releaseId
-    ) {
-      throw new PromotionLadderError(
-        input.releaseId,
-        input.environment,
-        predecessor,
-        predecessorPointer?.releaseId ?? null,
-      );
-    }
-  }
+  // G1 — ladder adjacency (consensus decision 1). Positioned AFTER
+  // permission/existence/org checks and BEFORE the quality gate — a
+  // ladder violation refuses the promotion before any evidence read or
+  // pointer write (tests assert zero writes on refusal).
+  await assertLadderAdjacency(
+    callerOrgId,
+    input.agentTargetId,
+    input.environment,
+    input.releaseId,
+  );
 
   await validateReleaseGate(
     targetRelease,
@@ -629,6 +748,271 @@ async function emitReleasePointerMovedEvent(
   }
 }
 
+/**
+ * startCanary — begins a canary episode (decision D2, attribution-only).
+ * Runs the IDENTICAL gate chain as a full promotion of the candidate
+ * (ladder adjacency D7 + validateReleaseGate + validatePromotionApproval,
+ * decision D4/D7) because the candidate begins receiving real prod
+ * traffic at start, then writes the canary onto the pointer while keeping
+ * `releaseId` = the current STABLE release. Salt is minted ONCE here and
+ * preserved across reweight (decision D3). One version-gated atomic
+ * pointer+history write (transitionType CANARY_START).
+ */
+export async function startCanary(
+  input: StartCanaryInput,
+  authContext: AuthContext,
+  callerOrgId: string,
+): Promise<EnvironmentReleasePointer> {
+  requireReleaseCanaryPermission(authContext);
+  validatePercentBasisPoints(input.percentBasisPoints);
+
+  const candidate = await getAgentRelease(input.candidateReleaseId);
+  if (!candidate) {
+    throw new Error(
+      `ValidationError: candidate release not found: ${input.candidateReleaseId}`,
+    );
+  }
+  if (candidate.orgId !== callerOrgId) {
+    throw new Error(
+      `SecurityError: release ${input.candidateReleaseId} belongs to a different org — a canary must never point at another org's release`,
+    );
+  }
+
+  // The env must already have a current STABLE pointer to canary against
+  // — a canary splits traffic between the running stable release and the
+  // candidate, so there must be a stable arm.
+  const currentPointer = await getEnvironmentReleasePointer(
+    callerOrgId,
+    input.agentTargetId,
+    input.environment,
+  );
+  if (!currentPointer) {
+    throw new CanaryStateError(
+      `no current release pointer for ${input.agentTargetId}/${input.environment} — promote a stable release before starting a canary`,
+    );
+  }
+  if (currentPointer.canary) {
+    throw new CanaryStateError(
+      `a canary is already active for ${input.agentTargetId}/${input.environment} — reweight, promote, or abort it first`,
+    );
+  }
+
+  // D7: candidate must satisfy the same ladder adjacency as a promotion.
+  await assertLadderAdjacency(
+    callerOrgId,
+    input.agentTargetId,
+    input.environment,
+    input.candidateReleaseId,
+  );
+  // Same quality gate + approval a full promotion faces.
+  await validateReleaseGate(
+    candidate,
+    input.environment,
+    callerOrgId,
+    authContext,
+  );
+  await validatePromotionApproval(
+    candidate,
+    input.environment,
+    callerOrgId,
+    authContext,
+    input.approval,
+  );
+  // D5 org ceiling (fail-closed) — checked BEFORE the write.
+  await enforceCanaryCeiling(
+    callerOrgId,
+    input.agentTargetId,
+    input.environment,
+    input.percentBasisPoints,
+  );
+
+  const canary: CanaryState = {
+    candidateReleaseId: input.candidateReleaseId,
+    percentBasisPoints: input.percentBasisPoints,
+    stickiness: input.stickiness,
+    salt: randomUUID(),
+    startedAt: new Date().toISOString(),
+    startedBy: authContext.userId,
+  };
+
+  return setEnvironmentReleasePointer({
+    orgId: callerOrgId,
+    agentTargetId: input.agentTargetId,
+    environment: input.environment,
+    releaseId: currentPointer.releaseId, // stable arm unchanged
+    expectedVersion: currentPointer.version,
+    currentReleaseId: currentPointer.releaseId,
+    promotedBy: authContext.userId,
+    canary,
+    transitionType: "CANARY_START",
+  });
+}
+
+/**
+ * reweightCanary — moves ONLY the threshold `percentBasisPoints`; the
+ * salt (hence every key's bucket) is preserved verbatim (decision D3), so
+ * only keys the threshold crosses re-bucket. No re-gate (the candidate was
+ * gated at start). One version-gated atomic write (CANARY_REWEIGHT).
+ */
+export async function reweightCanary(
+  input: ReweightCanaryInput,
+  authContext: AuthContext,
+  callerOrgId: string,
+): Promise<EnvironmentReleasePointer> {
+  requireReleaseCanaryPermission(authContext);
+  validatePercentBasisPoints(input.percentBasisPoints);
+
+  const currentPointer = await getEnvironmentReleasePointer(
+    callerOrgId,
+    input.agentTargetId,
+    input.environment,
+  );
+  if (!currentPointer || !currentPointer.canary) {
+    throw new CanaryStateError(
+      `no active canary for ${input.agentTargetId}/${input.environment} to reweight`,
+    );
+  }
+
+  await enforceCanaryCeiling(
+    callerOrgId,
+    input.agentTargetId,
+    input.environment,
+    input.percentBasisPoints,
+  );
+
+  const canary: CanaryState = {
+    ...currentPointer.canary,
+    percentBasisPoints: input.percentBasisPoints, // salt PRESERVED
+  };
+
+  return setEnvironmentReleasePointer({
+    orgId: callerOrgId,
+    agentTargetId: input.agentTargetId,
+    environment: input.environment,
+    releaseId: currentPointer.releaseId,
+    expectedVersion: currentPointer.version,
+    currentReleaseId: currentPointer.releaseId,
+    promotedBy: authContext.userId,
+    canary,
+    transitionType: "CANARY_REWEIGHT",
+  });
+}
+
+/**
+ * promoteCanary — full cutover to the candidate (→100%): sets `releaseId`
+ * = candidate, clears the canary. Maximum blast radius, so decision D4
+ * re-runs the FULL ladder + quality gate + approval on the candidate with
+ * the freshest evidence (predecessor pointer / policy / eval can drift
+ * between start and promote). Decision D6: requires release:canary AND
+ * release:promote. One version-gated atomic write (CANARY_PROMOTE) + a
+ * best-effort RELEASE_POINTER_MOVED emit.
+ */
+export async function promoteCanary(
+  input: CanaryOpInput,
+  authContext: AuthContext,
+  callerOrgId: string,
+): Promise<EnvironmentReleasePointer> {
+  requireReleaseCanaryPermission(authContext);
+  requireReleasePromotePermission(authContext); // D6: →100% needs promote too
+
+  const currentPointer = await getEnvironmentReleasePointer(
+    callerOrgId,
+    input.agentTargetId,
+    input.environment,
+  );
+  if (!currentPointer || !currentPointer.canary) {
+    throw new CanaryStateError(
+      `no active canary for ${input.agentTargetId}/${input.environment} to promote`,
+    );
+  }
+
+  const candidateReleaseId = currentPointer.canary.candidateReleaseId;
+  const candidate = await getAgentRelease(candidateReleaseId);
+  if (!candidate) {
+    throw new Error(
+      `ValidationError: candidate release not found: ${candidateReleaseId}`,
+    );
+  }
+  if (candidate.orgId !== callerOrgId) {
+    throw new Error(
+      `SecurityError: candidate release ${candidateReleaseId} belongs to a different org`,
+    );
+  }
+
+  // D4 — re-run the full promotion gate at the moment of full cutover.
+  await assertLadderAdjacency(
+    callerOrgId,
+    input.agentTargetId,
+    input.environment,
+    candidateReleaseId,
+  );
+  await validateReleaseGate(
+    candidate,
+    input.environment,
+    callerOrgId,
+    authContext,
+  );
+  await validatePromotionApproval(
+    candidate,
+    input.environment,
+    callerOrgId,
+    authContext,
+    input.approval,
+  );
+
+  const moved = await setEnvironmentReleasePointer({
+    orgId: callerOrgId,
+    agentTargetId: input.agentTargetId,
+    environment: input.environment,
+    releaseId: candidateReleaseId, // stable := candidate
+    expectedVersion: currentPointer.version,
+    currentReleaseId: currentPointer.releaseId,
+    promotedBy: authContext.userId,
+    canary: null, // cleared
+    transitionType: "CANARY_PROMOTE",
+  });
+
+  await emitReleasePointerMovedEvent(moved);
+  return moved;
+}
+
+/**
+ * abortCanary — reverts to 0% (stable stays the current stable release),
+ * clears the canary. Always safe (reverting to the already-live stable),
+ * so no gate. Decision D6: release:canary. One version-gated atomic write
+ * (CANARY_ABORT).
+ */
+export async function abortCanary(
+  input: CanaryOpInput,
+  authContext: AuthContext,
+  callerOrgId: string,
+): Promise<EnvironmentReleasePointer> {
+  requireReleaseCanaryPermission(authContext);
+
+  const currentPointer = await getEnvironmentReleasePointer(
+    callerOrgId,
+    input.agentTargetId,
+    input.environment,
+  );
+  if (!currentPointer || !currentPointer.canary) {
+    throw new CanaryStateError(
+      `no active canary for ${input.agentTargetId}/${input.environment} to abort`,
+    );
+  }
+
+  return setEnvironmentReleasePointer({
+    orgId: callerOrgId,
+    agentTargetId: input.agentTargetId,
+    environment: input.environment,
+    releaseId: currentPointer.releaseId, // stable unchanged
+    expectedVersion: currentPointer.version,
+    currentReleaseId: currentPointer.releaseId,
+    promotedBy: authContext.userId,
+    canary: null, // cleared
+    transitionType: "CANARY_ABORT",
+  });
+}
+
 /** Read: the current pointer for one agent+environment. Returns null when
  * nothing has ever been promoted for that pair. */
 export async function getCurrentEnvironmentReleasePointer(
@@ -667,7 +1051,11 @@ export async function getEnvironmentReleasePointerHistory(
 
 /** Merged view of every argument this resolver's fields receive. */
 interface EnvironmentReleasePointerResolverArguments {
-  input: SetEnvironmentReleasePointerInput;
+  input:
+    | SetEnvironmentReleasePointerInput
+    | StartCanaryInput
+    | ReweightCanaryInput
+    | CanaryOpInput;
   agentTargetId: string;
   environment: SetEnvironmentReleasePointerInput["environment"];
   until?: string | null;
@@ -716,7 +1104,59 @@ export const handler = async (
           );
         }
         return await promoteEnvironmentReleasePointer(
-          event.arguments.input,
+          event.arguments.input as SetEnvironmentReleasePointerInput,
+          authContext,
+          callerOrgId,
+        );
+      }
+      case "startCanary": {
+        const callerOrgId = await extractOrgFromEvent(event);
+        if (!callerOrgId) {
+          throw new Error(
+            "ValidationError: caller organization could not be determined",
+          );
+        }
+        return await startCanary(
+          event.arguments.input as StartCanaryInput,
+          authContext,
+          callerOrgId,
+        );
+      }
+      case "reweightCanary": {
+        const callerOrgId = await extractOrgFromEvent(event);
+        if (!callerOrgId) {
+          throw new Error(
+            "ValidationError: caller organization could not be determined",
+          );
+        }
+        return await reweightCanary(
+          event.arguments.input as ReweightCanaryInput,
+          authContext,
+          callerOrgId,
+        );
+      }
+      case "promoteCanary": {
+        const callerOrgId = await extractOrgFromEvent(event);
+        if (!callerOrgId) {
+          throw new Error(
+            "ValidationError: caller organization could not be determined",
+          );
+        }
+        return await promoteCanary(
+          event.arguments.input as CanaryOpInput,
+          authContext,
+          callerOrgId,
+        );
+      }
+      case "abortCanary": {
+        const callerOrgId = await extractOrgFromEvent(event);
+        if (!callerOrgId) {
+          throw new Error(
+            "ValidationError: caller organization could not be determined",
+          );
+        }
+        return await abortCanary(
+          event.arguments.input as CanaryOpInput,
           authContext,
           callerOrgId,
         );
