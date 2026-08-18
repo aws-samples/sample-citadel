@@ -29,6 +29,9 @@ import { aws_appsync as appsyncCfn } from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
+import * as sns from "aws-cdk-lib/aws-sns";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
@@ -108,6 +111,11 @@ export interface GovernanceStackProps extends cdk.StackProps {
   // SEPARATE admin resolver Lambda only.
   promotionPolicyConfigTable: dynamodb.ITable;
   promotionPolicyConfigWriterRole: iam.IRole;
+  /** Shared SLO alarm topic (from BackendStack) — the auto-rollback
+   * evaluator's finding-write-failure alarm (decision D6) posts here so a
+   * committed-but-unrecorded rollback pages. Optional so existing test
+   * scaffolds that omit it still synth. */
+  alarmTopic?: sns.ITopic;
 }
 
 export class GovernanceStack extends cdk.Stack {
@@ -1301,6 +1309,167 @@ exports.handler = async (event) => {
         resources: [props.agentReleasesTable.tableArn],
       }),
     );
+
+    // ========================================================================
+    // Auto-rollback evaluator (decisions D1–D9) — scheduled 1-minute poll
+    // (D2: poll ONLY in v1; no SNS/alarm subscription for TRIGGERING). Homed
+    // here alongside the pointer resolver because it needs the pointer table
+    // (+ its ActiveCanaryIndex GSI), the history table (written atomically on
+    // the abort), the promotion-policy table (rollbackPolicy sub-object, D1),
+    // the governance ledger (finding, D6), and the cost ledger (per-arm cost
+    // + latency, D3). The cost/governance ledgers are referenced by
+    // deterministic ARN string — same cycle-free indirection this stack uses
+    // for GOVERNANCE_LEDGER_TABLE (their owning stacks instantiate after this
+    // one).
+    const governanceLedgerTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-governance-ledger-${props.environment}`;
+    const costLedgerTableName = `citadel-cost-ledger-${props.environment}`;
+    const costLedgerTableArn = `arn:aws:dynamodb:${this.region}:${this.account}:table/${costLedgerTableName}`;
+
+    // Dedicated least-privilege role (INV-1: the auto-actor has NO promote
+    // path). DynamoDB IAM cannot express "only abort-shaped writes", so the
+    // pointer PutItem grant below is the minimal DynamoDB action needed for
+    // the conditional TransactWrite; the abort-ONLY bound is enforced in code
+    // by the shared store helper performAutoAbortCanary, which mints
+    // AUTO_ABORT_CANARY + the system principal server-side and never touches
+    // the stable releaseId. No release-promotion resolver or mutation is
+    // reachable from this role.
+    const rollbackEvaluatorRole = new iam.Role(
+      this,
+      "AgentReleaseRollbackEvaluatorRole",
+      { assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com") },
+    );
+    rollbackEvaluatorRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName(
+        "service-role/AWSLambdaBasicExecutionRole",
+      ),
+    );
+    // Pointer table: Query (enumerate via ActiveCanaryIndex + base) + PutItem
+    // (the conditional abort TransactWrite). No DeleteItem/UpdateItem.
+    rollbackEvaluatorRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:Query", "dynamodb:PutItem"],
+        resources: [
+          props.environmentReleasePointersTable.tableArn,
+          `${props.environmentReleasePointersTable.tableArn}/index/ActiveCanaryIndex`,
+        ],
+      }),
+    );
+    // History table: PutItem only (the atomic history row of the abort).
+    rollbackEvaluatorRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [environmentReleasePointerHistoryTable.tableArn],
+      }),
+    );
+    // Promotion-policy table: GetItem only (rollbackPolicy read, D1).
+    rollbackEvaluatorRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [props.promotionPolicyConfigTable.tableArn],
+      }),
+    );
+    // Cost ledger: Query only (per-arm cost/latency window read, D3). Never
+    // Scan, never write.
+    rollbackEvaluatorRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:Query"],
+        resources: [costLedgerTableArn],
+      }),
+    );
+    // Governance ledger: PutItem only (write-once finding, D6). Explicit
+    // statement, not grantWriteData (no Update/Delete/BatchWrite widening).
+    rollbackEvaluatorRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [governanceLedgerTableArn],
+      }),
+    );
+
+    const agentReleaseRollbackEvaluatorFunction = new lambda.Function(
+      this,
+      "AgentReleaseRollbackEvaluatorFunction",
+      {
+        functionName: `citadel-agent-release-rollback-evaluator-${props.environment}`,
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "agent-release-rollback-evaluator.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        role: rollbackEvaluatorRole,
+        timeout: cdk.Duration.minutes(1),
+        environment: {
+          ENVIRONMENT_RELEASE_POINTERS_TABLE:
+            props.environmentReleasePointersTable.tableName,
+          ENVIRONMENT_RELEASE_POINTER_HISTORY_TABLE:
+            environmentReleasePointerHistoryTable.tableName,
+          PROMOTION_POLICY_CONFIG_TABLE:
+            props.promotionPolicyConfigTable.tableName,
+          COST_LEDGER_TABLE: costLedgerTableName,
+          GOVERNANCE_LEDGER_TABLE: `citadel-governance-ledger-${props.environment}`,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          ENVIRONMENT: props.environment,
+        },
+        logGroup: new logs.LogGroup(
+          this,
+          "AgentReleaseRollbackEvaluatorFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+    // Best-effort governance.release.auto_rollback emit target (D6/§7).
+    props.agentEventBus.grantPutEventsTo(agentReleaseRollbackEvaluatorFunction);
+
+    // D2 — scheduled 1-minute poll (the ONLY trigger in v1; no SNS/alarm
+    // subscription). Tight cycle satisfies "roll back within one evaluation
+    // cycle".
+    const rollbackEvaluatorScheduleRule = new events.Rule(
+      this,
+      "AgentReleaseRollbackEvaluatorScheduleRule",
+      {
+        description:
+          "1-minute poll for the agent-release auto-rollback evaluator (canary breach → AUTO_ABORT_CANARY)",
+        schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
+      },
+    );
+    rollbackEvaluatorScheduleRule.addTarget(
+      new targets.LambdaFunction(agentReleaseRollbackEvaluatorFunction),
+    );
+
+    // D6 — alarmable metric: a post-commit finding-write failure emits the
+    // EMF metric Citadel/Governance AutoRollbackFindingWriteFailure so a
+    // committed-but-unrecorded rollback pages rather than passing silently.
+    const autoRollbackFindingFailureAlarm = new cloudwatch.Alarm(
+      this,
+      "AutoRollbackFindingWriteFailureAlarm",
+      {
+        alarmName: `citadel-auto-rollback-finding-write-failure-${props.environment}`,
+        alarmDescription:
+          "An auto-rollback pointer move committed but its GovernanceFinding write failed — the move is audited via the history row, but the analyst-facing finding is missing. See docs/RELEASE_RUNBOOK.md (auto-rollback).",
+        metric: new cloudwatch.Metric({
+          namespace: "Citadel/Governance",
+          metricName: "AutoRollbackFindingWriteFailure",
+          dimensionsMap: { Environment: props.environment },
+          statistic: "Sum",
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    if (props.alarmTopic) {
+      autoRollbackFindingFailureAlarm.addAlarmAction(
+        new cw_actions.SnsAction(props.alarmTopic),
+      );
+    }
 
     const environmentReleasePointerDataSourceRole = new iam.Role(
       this,

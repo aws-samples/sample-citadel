@@ -78,6 +78,16 @@ export interface UsageRecord {
   source?: "worker" | "supervisor" | "intake" | "workflow_node";
   /** Additive, nullable: only present when the SDK reported a request id. Never fabricated. */
   bedrockRequestId?: string;
+  /** Canary attribution (decision D2/D3), additive and omit-when-absent —
+   * the TS mirror of the `releaseId`/`releaseArm` keys usage.py writes onto
+   * its usage record. Propagated verbatim onto the ledger row below so the
+   * auto-rollback evaluator can compute per-arm cost-per-invocation and
+   * model-call latency from the ledger (the ONLY per-arm-attributable
+   * signal today). `releaseArm` is validated to one of the two arm
+   * literals on the ledger row; a malformed value is dropped, never
+   * persisted. */
+  releaseId?: string;
+  releaseArm?: unknown;
 }
 
 interface TaskCompletionDetail {
@@ -231,6 +241,17 @@ interface LedgerRow {
   ingestedAt: string;
   /** Additive, nullable: only present when the usage record carried one. Enables Tier-B matching. */
   bedrockRequestId?: string;
+  /** Canary attribution (decision D2/D3), additive/omit-when-absent —
+   * copied from the usage record. `releaseId` is the release the resolved
+   * arm points at; `releaseArm` is "stable"|"candidate". Consumed by the
+   * auto-rollback evaluator (rollback-metrics-reader.ts) to derive per-arm
+   * cost-per-invocation + model-call latency. A malformed/unknown arm is
+   * dropped (never persisted) so a present value can be trusted. No new
+   * GSI this pass — the evaluator reads the base-table window Query and
+   * filters by releaseId/releaseArm in memory (the same window
+   * cost-budget-evaluator.ts already scans). */
+  releaseId?: string;
+  releaseArm?: "stable" | "candidate";
   /** Additive, nullable (Pass 1, decision f1cbd5ef): server-minted correlation id, copied from detail.runId when present. No new GSI this pass. */
   runId?: string;
   /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag,
@@ -337,6 +358,18 @@ async function buildLedgerRow(
 
   if (typeof usage.bedrockRequestId === "string" && usage.bedrockRequestId) {
     row.bedrockRequestId = usage.bedrockRequestId;
+  }
+
+  // Canary attribution (D2/D3), additive/omit-when-absent — copied from the
+  // usage record so a pre-canary usage row produces a byte-identical ledger
+  // row. releaseArm is written ONLY when it is one of the two valid arm
+  // literals (a malformed/unknown arm is dropped, never persisted), so the
+  // per-arm rollback reader can trust a present value.
+  if (typeof usage.releaseId === "string" && usage.releaseId) {
+    row.releaseId = usage.releaseId;
+  }
+  if (usage.releaseArm === "stable" || usage.releaseArm === "candidate") {
+    row.releaseArm = usage.releaseArm;
   }
 
   if (dims.projectId) {

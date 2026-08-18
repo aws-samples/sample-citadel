@@ -186,6 +186,10 @@ const governanceStack = new GovernanceStack(
     promotionPolicyConfigTable: backendStack.promotionPolicyConfigTable,
     promotionPolicyConfigWriterRole:
       backendStack.promotionPolicyConfigWriterRole,
+    // D6 — the auto-rollback evaluator's finding-write-failure alarm posts
+    // to the shared SLO alarm topic so a committed-but-unrecorded rollback
+    // pages.
+    alarmTopic: backendStack.alarmTopic,
   },
 );
 

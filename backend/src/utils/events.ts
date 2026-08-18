@@ -138,6 +138,12 @@ export const EventTypes = {
   // citadel.* namespace via the Source "citadel.backend" set in
   // publishEvent. Best-effort, emitted POST-commit only (never blocking).
   RELEASE_POINTER_MOVED: "release.pointer.moved",
+  // Auto-rollback (D6): emitted best-effort POST-commit by the
+  // agent-release-rollback-evaluator after an AUTO_ABORT_CANARY. The
+  // evaluator emits through emitGovernanceEvent (notifier-base.ts) under
+  // the governance.* detail-type so the existing governance notifier
+  // relays it; this constant records the semantic event for the catalog.
+  RELEASE_AUTO_ROLLBACK: "governance.release.auto_rollback",
 } as const;
 
 export type EventType = (typeof EventTypes)[keyof typeof EventTypes];

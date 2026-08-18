@@ -46,6 +46,30 @@ function tableName(): string {
   return process.env.ENVIRONMENT_RELEASE_POINTERS_TABLE!;
 }
 
+/** Sparse ActiveCanaryIndex GSI (decision D8) — enumerates every pointer
+ * that currently carries a canary, so the auto-rollback evaluator never
+ * Scans the pointer table. Mirrors the BudgetIndex sparse-GSI precedent
+ * (cost-budget-evaluator.ts): the marker attributes below are written ONLY
+ * when a canary is present, so a pointer with no canary is absent from the
+ * index. Because every pointer write is a full-item Put, clearing the
+ * canary (promote/abort) overwrites the item WITHOUT the marker attrs,
+ * which removes it from the index in the SAME atomic write — there is no
+ * window where the index disagrees with pointer state (security invariant
+ * INV: marker maintained inside the sole writer's atomic Put). */
+export const ACTIVE_CANARY_GSI = "ActiveCanaryIndex";
+export const ACTIVE_CANARY_PK_ATTR = "activeCanaryPk";
+export const ACTIVE_CANARY_SK_ATTR = "activeCanarySk";
+/** Constant partition for the sparse index — one hot-but-tiny partition of
+ * ONLY the currently-active canaries (there are very few at a time). */
+export const ACTIVE_CANARY_PK = "CANARY_ACTIVE";
+
+/** SECURITY (must-fix): the fixed server principal minted for every
+ * automated pointer move. Kept in lock-step with
+ * auto-rollback-finding-writer.ts's RELEASE_ROLLBACK_DECIDED_BY. Never
+ * accepted from caller input on the auto path. */
+export const RELEASE_ROLLBACK_SYSTEM_ACTOR =
+  "system:release-rollback-evaluator";
+
 function historyTableName(): string {
   return process.env.ENVIRONMENT_RELEASE_POINTER_HISTORY_TABLE!;
 }
@@ -249,6 +273,19 @@ export async function setEnvironmentReleasePointer(
                   params.agentTargetId,
                   params.environment,
                 ),
+                // D8 sparse ActiveCanaryIndex marker — written ONLY when a
+                // canary is present. A canary-clearing write (promote/abort)
+                // overwrites the item without these attrs, dropping it from
+                // the index in the same atomic Put.
+                ...(params.canary
+                  ? {
+                      [ACTIVE_CANARY_PK_ATTR]: ACTIVE_CANARY_PK,
+                      [ACTIVE_CANARY_SK_ATTR]: `${params.orgId}#${sortKey(
+                        params.agentTargetId,
+                        params.environment,
+                      )}`,
+                    }
+                  : {}),
               },
               ConditionExpression: conditionExpression,
               ExpressionAttributeNames:
@@ -284,4 +321,86 @@ export async function setEnvironmentReleasePointer(
     }
     throw err;
   }
+}
+
+/**
+ * Enumerate every pointer that currently carries a canary, via the sparse
+ * ActiveCanaryIndex GSI (decision D8). NEVER a Scan — the constant PK
+ * partition holds only the handful of active canaries. Paginated for
+ * safety though the working set is tiny. The GSI projects ALL attributes,
+ * so each returned row is a full EnvironmentReleasePointer (version,
+ * releaseId, canary) the evaluator can act on without a second read.
+ */
+export async function queryActiveCanaries(): Promise<
+  EnvironmentReleasePointer[]
+> {
+  const rows: EnvironmentReleasePointer[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: tableName(),
+        IndexName: ACTIVE_CANARY_GSI,
+        KeyConditionExpression: `${ACTIVE_CANARY_PK_ATTR} = :pk`,
+        ExpressionAttributeValues: { ":pk": ACTIVE_CANARY_PK },
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
+    rows.push(
+      ...((res.Items as EnvironmentReleasePointer[] | undefined) ?? []),
+    );
+    exclusiveStartKey = res.LastEvaluatedKey as
+      Record<string, unknown> | undefined;
+  } while (exclusiveStartKey);
+  return rows;
+}
+
+export interface PerformAutoAbortCanaryParams {
+  orgId: string;
+  agentTargetId: string;
+  environment: EnvironmentLiteral;
+  /** The current stable releaseId — UNCHANGED by the abort (the candidate
+   * arm is zeroed, stable stays put, so the move can never cross the
+   * floor). */
+  releaseId: string;
+  /** The pointer version the evaluator last read — enforced via the
+   * store's version ConditionExpression, which is what makes the rollback
+   * exactly-once under concurrent evaluators (the loser gets
+   * ConcurrentPromotionError). */
+  expectedVersion: number;
+}
+
+/**
+ * D5 shared STORE-path helper the auto-rollback evaluator calls DIRECTLY
+ * (it must NOT go through the resolver — the gate/authz stay resolver-side;
+ * the auto-actor's authority is bounded to this single zeroing primitive).
+ *
+ * SECURITY (must-fix): `promotedBy` and `transitionType` are MINTED HERE,
+ * server-side, and are NEVER read from the caller. The floor derivation
+ * (rollback-floor.ts) keys on human-vs-system via transitionType, so a
+ * caller-supplied principal or transition would be a floor-spoofing
+ * vector. Only the safe LOCATING fields (org/agent/env/releaseId/version)
+ * are taken from `params`; even a caller that casts a wider object with
+ * `promotedBy`/`transitionType` set cannot influence what is persisted,
+ * because those two fields are assigned from the module constant /
+ * literal here, after — and independent of — anything in `params`.
+ *
+ * This mints AUTO_ABORT_CANARY (decision D4 — the only auto action in v1):
+ * canary is cleared, `releaseId` stays the current stable, so the pointer
+ * cannot move below the last human-promoted baseline.
+ */
+export async function performAutoAbortCanary(
+  params: PerformAutoAbortCanaryParams,
+): Promise<EnvironmentReleasePointer> {
+  return setEnvironmentReleasePointer({
+    orgId: params.orgId,
+    agentTargetId: params.agentTargetId,
+    environment: params.environment,
+    releaseId: params.releaseId, // stable unchanged — cannot cross the floor
+    expectedVersion: params.expectedVersion,
+    currentReleaseId: params.releaseId,
+    promotedBy: RELEASE_ROLLBACK_SYSTEM_ACTOR, // minted, never from caller
+    canary: null, // zero the candidate
+    transitionType: "AUTO_ABORT_CANARY", // minted, never from caller
+  });
 }

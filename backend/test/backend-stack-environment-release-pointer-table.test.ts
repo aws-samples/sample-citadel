@@ -375,4 +375,20 @@ describe("BackendStack — G5/G6 writer-role grants (history table + event bus)"
     });
     expect(grantsPutEvents).toBe(true);
   });
+
+  test("D8: defines the sparse ActiveCanaryIndex GSI (PK activeCanaryPk, SK activeCanarySk, projection ALL)", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "citadel-environment-release-pointers-test",
+      GlobalSecondaryIndexes: Match.arrayWith([
+        Match.objectLike({
+          IndexName: "ActiveCanaryIndex",
+          KeySchema: [
+            { AttributeName: "activeCanaryPk", KeyType: "HASH" },
+            { AttributeName: "activeCanarySk", KeyType: "RANGE" },
+          ],
+          Projection: { ProjectionType: "ALL" },
+        }),
+      ]),
+    });
+  });
 });

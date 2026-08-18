@@ -107,6 +107,13 @@ export const GOVERNANCE_DETAIL_TYPES = [
   // most one per blocked suite per invocation — never emitted for the
   // ordinary already-current skip case.
   "governance.eval.seed.heal.blocked",
+  // Auto-rollback (decision D6/§7): emitted best-effort POST-commit by the
+  // agent-release-rollback-evaluator after an AUTO_ABORT_CANARY move is
+  // durably committed + its finding written. Relayed by governance-notifier
+  // to the admin onGovernanceEvent subscription. Best-effort — the ledger
+  // finding is the durable record; a delivery failure never rolls back the
+  // committed move.
+  "governance.release.auto_rollback",
 ] as const;
 
 export type GovernanceDetailType = (typeof GOVERNANCE_DETAIL_TYPES)[number];
@@ -374,6 +381,24 @@ export interface GovernancePayloadMap {
     reason: "not_draft" | "referenced" | "not_draft_and_referenced";
     seedVersion: number;
     attemptedSeedVersion: number;
+  };
+  // Auto-rollback (D6/§7): payload for governance.release.auto_rollback.
+  // Carries the same machine-readable rollback evidence the ledger finding
+  // records, so a subscriber sees metric/arm/observed-vs-threshold without
+  // a ledger read.
+  "governance.release.auto_rollback": {
+    orgId: string;
+    agentTargetId: string;
+    environment: string;
+    action: string;
+    metric: string;
+    observedValue: number;
+    threshold: number;
+    sampleCount: number;
+    fromReleaseId: string;
+    toReleaseId: string;
+    candidateReleaseId: string;
+    fromVersion: number;
   };
 }
 
