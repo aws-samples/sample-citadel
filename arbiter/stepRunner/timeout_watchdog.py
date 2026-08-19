@@ -1,23 +1,33 @@
-"""Watchdog module — scheduled sweep that fails stuck workflow executions.
+"""Watchdog module — scheduled sweep that reconciles lost node-completed events.
 
 A self-contained Lambda handler, run on an EventBridge schedule, that scans the
 executions table for executions still in the ``running`` state whose
 ``startedAt`` is older than a configurable timeout (env
-``WORKFLOW_TIMEOUT_SECONDS``, default 1 hour). Each stuck execution is marked
+``WORKFLOW_TIMEOUT_SECONDS``, default 1 hour). Each stuck execution is
+reconciled: the watchdog shares the executor's schedule_frontier as the single
+dispatch serialization point, re-evaluates frontier readiness (schedule-triggered
+read-mostly operation), and dispatches ready nodes atomically. Nodes that have
+been completed but whose event was lost recover via their durable checkpoint
+(``EXECUTIONS_TABLE.nodeResults[nodeId]`` persisted by the Worker before event
+emission). If reconciliation finds no recoverable nodes, the execution is marked
 ``failed`` — idempotently, via a conditional update guarding
 ``status == 'running'`` — and a ``workflow.failed`` event is emitted through the
 shared events module so the rest of the system (fan-out, UI, metrics) reacts to
 the timeout exactly as it would to any other terminal failure.
 
-Design constraints:
-  * Self-contained: talks ONLY to the executions table (read via Scan +
-    conditional write) and the events module. It deliberately does NOT import
-    the executor's mutating internals — the sweep is independent of the DAG
-    advance logic and must not couple to it.
-  * Idempotent: the conditional update means a concurrent sweep, a redelivered
-    schedule tick, or a race with the executor moving the execution out of
-    ``running`` all resolve to a no-op (no duplicate workflow.failed).
-  * Best-effort telemetry: a CloudWatch metric of the number of timed-out
+Design contract (Decision O4):
+  * Shared executor internals: imports and reuses schedule_frontier as the single
+    dispatch serialization point. Reconcile-or-fail semantics ensure a lost
+    node-completed event is recovered within one watchdog cycle without doubling
+    dispatch.
+  * Scoped read-mostly grants: once schedule_frontier is evaluated, the
+    watchdog operates schedule-triggered (read-only probe of frontier state;
+    write only on final failure). No mutual-exclusion coupling — executor may
+    advance concurrently; frontier evaluation is atomic per execution.
+  * Idempotent: the conditional update (status == 'running' guard) means a
+    concurrent sweep, a redelivered schedule tick, or a race with the executor
+    advancing the execution all resolve to a no-op (no duplicate workflow.failed).
+  * Best-effort telemetry: a CloudWatch metric of the number of reconciled
     executions is emitted per sweep but never allowed to break the sweep.
 
 All timestamps are ISO 8601 UTC, matching the executor's ``startedAt`` writes.

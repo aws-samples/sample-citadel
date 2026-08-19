@@ -757,6 +757,7 @@ The consumer's write semantics make the family safe under duplicates, retries, a
 | `StepRunnerNodeCompletedRule` | detailType: `workflow.node.completed` | Step Runner Lambda |
 | `StepRunnerNodeFailedRule` | detailType: `workflow.node.failed` | Step Runner Lambda |
 | `StepRunnerCancelRule` | detailType: `execution.cancel.requested` | Step Runner Lambda |
+| `StepRunnerResumeRule` | detailType: `execution.resume.requested` | Step Runner Lambda |
 | `WorkflowProgressFanoutRule` | source: `citadel.workflows`, 7 detail types | Fan-out Lambda |
 
 ### ServicesStack Rules
