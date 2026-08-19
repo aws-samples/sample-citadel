@@ -436,6 +436,13 @@ export class ArbiterStack extends cdk.Stack {
           CREDENTIAL_VENDER_FUNCTION: credentialVenderLambda.functionName,
           // QT3-6: dispatch-time spec status validation.
           EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
+          // Write-then-signal (decision O2): the worker persists a completed
+          // node's result to the executions table BEFORE emitting
+          // workflow.node.completed. Env is set only when the executions table
+          // is wired; the worker no-ops the durable write when it is absent.
+          ...(props.executionsTable && {
+            EXECUTIONS_TABLE: props.executionsTable.tableName,
+          }),
           ...(props.registryId && { REGISTRY_ID: props.registryId }),
           ...(props.registryId && { REGISTRY_ENABLED: "true" }),
         },
@@ -470,6 +477,46 @@ export class ArbiterStack extends cdk.Stack {
     // read-only access to ExecutionSpecifications for dispatch-time
     // status checks. Never written to from the worker.
     props.executionSpecificationsTable.grantReadData(workerAgentWrapperLambda);
+
+    // Write-then-signal durable write (decision O2, HARD GATE). The worker's
+    // access to the executions table is deliberately NOT a bare
+    // grantWriteData (which would grant Put/Delete/BatchWrite on every
+    // attribute — a full multi-tenant read/write/delete blast radius if the
+    // worker, which runs untrusted/semi-trusted agent bodies, is compromised).
+    // Instead it is:
+    //   * ACTION-SCOPED to dynamodb:UpdateItem ONLY (no Put/Delete/BatchWrite).
+    //   * ATTRIBUTE-SCOPED via FGAC (dynamodb:Attributes) to the nodeResults
+    //     map + the executionId key. nodeResults is a TOP-LEVEL attribute and
+    //     DynamoDB FGAC scopes at the top level, so this STRUCTURALLY prevents
+    //     the worker from ever writing execution-level status / orgId / output
+    //     / error / runId — even a fully compromised worker cannot flip an
+    //     execution's status or cross into another tenant's execution fields.
+    //   * ReturnValues-restricted so the worker cannot exfiltrate other
+    //     attributes via ALL_OLD/ALL_NEW.
+    // The application-level ConditionExpression (status <> completed) is a
+    // correctness first-write-wins guard, NOT a security boundary (a
+    // compromised worker can omit it) — the IAM narrowing above is the boundary.
+    // Residual (accepted, documented): the worker can still write SOME node's
+    // nodeResults on any execution (item-level LeadingKeys pinning is not
+    // possible since it handles arbitrary executions); a per-dispatch scoped
+    // STS session keyed to the executionId is the follow-up to close that.
+    if (props.executionsTable) {
+      workerAgentWrapperLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:UpdateItem"],
+          resources: [props.executionsTable.tableArn],
+          conditions: {
+            "ForAllValues:StringEquals": {
+              "dynamodb:Attributes": ["nodeResults", "executionId"],
+            },
+            StringEqualsIfExists: {
+              "dynamodb:ReturnValues": ["NONE", "UPDATED_NEW", "UPDATED_OLD"],
+            },
+          },
+        }),
+      );
+    }
 
     // The worker emits best-effort node-level metrics (NodeDurationMs /
     // NodeFailure) into the Citadel/Workflows namespace after running each
@@ -1058,6 +1105,24 @@ export class ArbiterStack extends cdk.Stack {
         },
       );
       stepRunnerCancelRule.addTarget(
+        new targets.LambdaFunction(stepRunnerFunction),
+      );
+
+      // Advance-only resume (durable-execution-resume): route
+      // execution.resume.requested (emitted by the resumeExecution resolver)
+      // to the step runner, which re-derives the frontier from persisted
+      // state and dispatches only the pending-ready nodes.
+      const stepRunnerResumeRule = new events.Rule(
+        this,
+        "StepRunnerResumeRule",
+        {
+          eventBus: props.agentEventBus,
+          eventPattern: {
+            detailType: ["execution.resume.requested"],
+          },
+        },
+      );
+      stepRunnerResumeRule.addTarget(
         new targets.LambdaFunction(stepRunnerFunction),
       );
 

@@ -5,6 +5,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 import boto3
+from botocore.exceptions import ClientError
 
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
 # import BEFORE any boto3 client is constructed below so patch_all()
@@ -54,6 +55,29 @@ except ImportError: # pragma: no cover — Lambda bundle path before follow-up
             return [entry for entry in raw if isinstance(entry, dict)]
         except Exception: # noqa: BLE001 — boundary sanitizer must never raise
             return []
+
+# aggregate_usage: same deferred-bundling fallback contract. Used by the
+# write-then-signal node-completion persist to record per-node usageTotals in
+# the SAME shape the stepRunner writes, so the persisted node is identical
+# regardless of which writer wins first-write-wins.
+try:
+    from common.usage import aggregate_usage # noqa: E402
+except ImportError: # pragma: no cover — Lambda bundle path before follow-up
+    def aggregate_usage(records): # type: ignore[no-redef]
+        totals = {'inputTokens': 0, 'outputTokens': 0, 'totalTokens': 0, 'callCount': 0}
+        try:
+            for entry in records or []:
+                if not isinstance(entry, dict):
+                    continue
+                i = int(entry.get('inputTokens', 0) or 0)
+                o = int(entry.get('outputTokens', 0) or 0)
+                totals['inputTokens'] += i
+                totals['outputTokens'] += o
+                totals['totalTokens'] += i + o
+                totals['callCount'] += 1
+        except Exception: # noqa: BLE001 — boundary sanitizer must never raise
+            return {'inputTokens': 0, 'outputTokens': 0, 'totalTokens': 0, 'callCount': 0}
+        return totals
 
 # Shared CloudWatch metric constants (same deferred-bundling situation as
 # workflow_contract/common.usage above). A missing import must NOT break
@@ -540,6 +564,112 @@ def post_task_complete(response, agent_use_id, agent_name, orchestration_id, *, 
     print(f"event posted: {response}")
     return f"event posted: {event}"
 
+def _persist_node_completion(msg, *, output, usage):
+    """Durably persist a completed node's result to EXECUTIONS_TABLE BEFORE the
+    worker emits ``workflow.node.completed`` (write-then-signal, decision O2).
+
+    Conditional first-write-wins (``ConditionExpression: status <> completed``)
+    so a duplicate or re-dispatched worker cannot overwrite an existing
+    completion — whoever writes first wins; a later write is a benign no-op.
+    Writes the same five nodeResults attributes the stepRunner does
+    (status/completedAt/output/usage/usageTotals) so the persisted node shape
+    is identical regardless of which writer wins.
+
+    IAM (decision O2, HARD GATE): the worker's grant on EXECUTIONS_TABLE is
+    ``dynamodb:UpdateItem`` ONLY, further restricted by FGAC
+    (``dynamodb:Attributes`` = nodeResults, executionId) — NEVER a bare
+    ``grantWriteData`` (which would grant Put/Delete and every attribute). See
+    backend/lib/arbiter-stack.ts. The ConditionExpression here is a CORRECTNESS
+    guard (first-write-wins), NOT a security boundary — a compromised worker
+    can omit it; the IAM attribute-scope is what structurally prevents it from
+    writing execution-level status/orgId/output.
+
+    EXACTLY-ONCE LIMIT (decision O7): this guarantees the RECORDED-STATE
+    invariant only — exactly one ``completed`` result is recorded per node
+    (first-write-wins drops any second write). It does NOT provide agent-side
+    exactly-once: if the watchdog re-dispatches a node whose original worker
+    was merely slow (not dead), the agent BODY runs twice and only the first
+    recorded completion survives. Downstream agent bodies must therefore be
+    designed idempotent. A dispatch-generation/lease token would be required
+    for true agent-side once and is deferred (see docs/EVENTBRIDGE_CATALOG.md
+    and docs/TRACING_RUNBOOK.md).
+
+    Defensive: when ``EXECUTIONS_TABLE`` is unset (a pre-feature deploy or a
+    unit path) the durable write is skipped — the stepRunner's own conditional
+    completion write remains the backstop; emission is never blocked on a
+    missing table binding. A non-conditional DynamoDB error is logged and
+    RE-RAISED so the signal is NOT emitted for an unpersisted completion (SQS
+    redelivery + first-write-wins recover it), preserving the
+    signal-only-after-durable-write invariant.
+    """
+    table_name = os.environ.get('EXECUTIONS_TABLE')
+    if not table_name:
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'WorkerWrapper',
+            'action': 'node_completion_persist_skipped_no_table',
+            'executionId': msg.execution_id,
+            'nodeId': msg.node_id,
+        }))
+        return
+
+    sanitized_usage = parse_usage_array(usage or [])
+    usage_totals = aggregate_usage(sanitized_usage)
+    now = _now_iso()
+    try:
+        _get_dynamodb().Table(table_name).update_item(
+            Key={'executionId': msg.execution_id},
+            UpdateExpression=(
+                'SET nodeResults.#nid.#status = :status, '
+                'nodeResults.#nid.#completedAt = :completedAt, '
+                'nodeResults.#nid.#output = :output, '
+                'nodeResults.#nid.#usage = :usage, '
+                'nodeResults.#nid.#usageTotals = :usageTotals'
+            ),
+            ConditionExpression='nodeResults.#nid.#status <> :completed',
+            ExpressionAttributeNames={
+                '#nid': msg.node_id,
+                '#status': 'status',
+                '#completedAt': 'completedAt',
+                '#output': 'output',
+                '#usage': 'usage',
+                '#usageTotals': 'usageTotals',
+            },
+            ExpressionAttributeValues={
+                ':status': 'completed',
+                ':completedAt': now,
+                ':output': output,
+                ':usage': sanitized_usage,
+                ':usageTotals': usage_totals,
+                ':completed': 'completed',
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            # Node already completed (duplicate / re-dispatch) — benign
+            # first-write-wins loss. Proceed to signal (advancement is
+            # idempotent).
+            print(json.dumps({
+                'level': 'INFO',
+                'component': 'WorkerWrapper',
+                'action': 'node_completion_already_persisted',
+                'executionId': msg.execution_id,
+                'nodeId': msg.node_id,
+            }))
+            return
+        # A real write error — never swallow, and never emit an unpersisted
+        # completion. Re-raise so the Lambda invocation fails and SQS
+        # redelivers the dispatch (first-write-wins makes the retry safe).
+        print(json.dumps({
+            'level': 'ERROR',
+            'component': 'WorkerWrapper',
+            'action': 'node_completion_persist_failed',
+            'executionId': msg.execution_id,
+            'nodeId': msg.node_id,
+            'error': str(exc),
+        }))
+        raise
+
 def _emit_node_result(
     msg, *, status, output=None, error=None, usage=None, trace_context=None,
     worker_started_at=None,
@@ -796,6 +926,16 @@ def _process_workflow_node(event, message_attributes=None):
         'workflowId': msg.workflow_id,
         'agentId': msg.agent_id,
     }))
+    # Write-then-signal (decision O2): persist this node's completed result to
+    # EXECUTIONS_TABLE.nodeResults[nodeId] BEFORE emitting the signal, so a lost
+    # event leaves a durable, reconcilable checkpoint (never a
+    # signaled-but-unpersisted black hole). The signal below is emitted only
+    # after this durable write commits.
+    _persist_node_completion(
+        msg,
+        output={'response': response, 'usage': usage_sink},
+        usage=usage_sink,
+    )
     _emit_node_result(
         msg,
         status=workflow_contract.STATUS_COMPLETED,

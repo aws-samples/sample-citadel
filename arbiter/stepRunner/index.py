@@ -1,6 +1,12 @@
 """Step Runner Lambda handler — routes EventBridge events to executor functions."""
 
-from executor import start_execution, handle_node_completion, handle_node_failure, cancel_execution
+from executor import (
+    start_execution,
+    handle_node_completion,
+    handle_node_failure,
+    cancel_execution,
+    resume_execution,
+)
 from common.tracing import annotate_from_carried, extract_carried
 
 
@@ -38,5 +44,10 @@ def handler(event, context):
         handle_node_failure(detail['executionId'], detail['nodeId'], detail.get('error', ''))
     elif detail_type == 'execution.cancel.requested':
         cancel_execution(detail['executionId'])
+    elif detail_type == 'execution.resume.requested':
+        # Advance-only resume (decisions O1/O5). Only executionId is consumed;
+        # the server re-derives the frontier from persisted state, never from
+        # the event payload (SECURITY: server-side frontier re-derivation).
+        resume_execution(detail['executionId'])
 
     return {'statusCode': 200}

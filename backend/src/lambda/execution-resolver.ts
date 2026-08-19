@@ -259,6 +259,8 @@ export const handler: AppSyncResolverHandler<
         return await startExecution(args.workflowId, args.input, userId, event);
       case "cancelExecution":
         return await cancelExecution(args.executionId, userId, event);
+      case "resumeExecution":
+        return await resumeExecution(args.executionId, userId, event);
       case "publishWorkflowProgress":
         // IAM-signed fan-out mutation: echo the input so AppSync delivers it
         // to onWorkflowProgress subscribers.
@@ -455,6 +457,46 @@ async function cancelExecution(
   });
 
   return result.Attributes;
+}
+
+async function resumeExecution(
+  executionId: string,
+  userId: string,
+  event: ExecutionResolverEvent,
+): Promise<unknown> {
+  // 1. Load execution + verify org access. getExecution enforces the org
+  //    IDOR check (throws "Access denied" when the target's orgId != caller
+  //    org), so a caller cannot resume another org's execution by guessing
+  //    its id. This runs BEFORE any event is emitted. RBAC parity with
+  //    startExecution/cancelExecution: same default Cognito auth surface
+  //    (resume re-drives real dispatch, so it is write-equivalent and must
+  //    not be reachable by a read-only principal).
+  const existing = await getExecution(executionId, userId, event);
+  if (!existing) {
+    throw new Error("Execution not found");
+  }
+
+  // 2. Reject terminal states (decision O5): completed/cancelled/failed are
+  //    not resumable. No event emitted; return the row unchanged.
+  const status = existing.status;
+  if (status === "completed" || status === "cancelled" || status === "failed") {
+    throw new Error(`Cannot resume execution in terminal state: ${status}`);
+  }
+
+  // 3. Publish execution.resume.requested. The payload carries ONLY locating
+  //    ids + the server-validated orgId (defense-in-depth so the Python
+  //    consumer re-checks org ownership) — NEVER a caller-supplied node list
+  //    or status. The step runner re-derives the entire frontier from the
+  //    persisted EXECUTIONS_TABLE row, so any extra payload fields would be
+  //    ignored regardless.
+  await emitEvent("execution.resume.requested", {
+    executionId,
+    workflowId: existing.workflowId,
+    orgId: existing.orgId,
+    ...(existing.runId ? { runId: existing.runId } : {}),
+  });
+
+  return existing;
 }
 
 async function emitEvent(eventType: string, detail: unknown): Promise<void> {

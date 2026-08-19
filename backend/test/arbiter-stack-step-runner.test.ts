@@ -229,6 +229,14 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
         },
       });
     });
+
+    test("StepRunnerResumeRule matches execution.resume.requested", () => {
+      template.hasResourceProperties("AWS::Events::Rule", {
+        EventPattern: {
+          "detail-type": ["execution.resume.requested"],
+        },
+      });
+    });
   });
 
   // --- WorkflowProgressFanoutRule ---
@@ -416,6 +424,52 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       expect(resources.some((r) => r.includes("inference-profile/"))).toBe(
         true,
       );
+    });
+  });
+
+  describe("Worker executions-table write is UpdateItem-only + FGAC (decision O2)", () => {
+    // Find the worker statement(s) granting dynamodb:UpdateItem and return
+    // their condition blocks, so we can assert the attribute-scope FGAC.
+    function workerUpdateItemConditions(): any[] {
+      const policies = template.findResources("AWS::IAM::Policy");
+      const out: any[] = [];
+      for (const p of Object.values(policies) as any[]) {
+        const roles = p.Properties?.Roles || [];
+        if (
+          !roles.some((r: any) => (r?.Ref || "").includes("WorkerAgentWrapper"))
+        )
+          continue;
+        for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+          const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+          if (acts.includes("dynamodb:UpdateItem")) out.push(s.Condition);
+        }
+      }
+      return out;
+    }
+
+    test("worker has dynamodb:UpdateItem but NOT Put/Delete/BatchWrite on any table", () => {
+      const actions = actionsForRole("WorkerAgentWrapper");
+      expect(actions.has("dynamodb:UpdateItem")).toBe(true);
+      // Bare grantWriteData would have added these — it must NOT be used.
+      expect(actions.has("dynamodb:PutItem")).toBe(false);
+      expect(actions.has("dynamodb:DeleteItem")).toBe(false);
+      expect(actions.has("dynamodb:BatchWriteItem")).toBe(false);
+    });
+
+    test("the UpdateItem grant is FGAC-restricted to the nodeResults/executionId attributes", () => {
+      const conditions = workerUpdateItemConditions();
+      expect(conditions.length).toBeGreaterThan(0);
+      const hasFgac = conditions.some((c) => {
+        const attrs = c?.["ForAllValues:StringEquals"]?.["dynamodb:Attributes"];
+        return (
+          Array.isArray(attrs) &&
+          attrs.includes("nodeResults") &&
+          attrs.includes("executionId") &&
+          !attrs.includes("status") &&
+          !attrs.includes("orgId")
+        );
+      });
+      expect(hasFgac).toBe(true);
     });
   });
 

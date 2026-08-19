@@ -331,6 +331,11 @@ type Mutation {
   revokeAppAccess(appId: ID!, userId: String!): RegistryAgentRecord
   startExecution(workflowId: ID!, input: AWSJSON): Execution
   cancelExecution(executionId: ID!): Execution
+  # Advance-only resume of a stuck execution (durable-execution-resume).
+  # Same auth surface as startExecution/cancelExecution (default Cognito user
+  # pool + editor/owner org-scope; NOT reachable by read-only). Accepts ONLY
+  # executionId — the server re-derives the frontier from persisted state.
+  resumeExecution(executionId: ID!): Execution
   publishWorkflowProgress(input: WorkflowProgressInput!): WorkflowProgressEvent @aws_iam
 
   # ── Intake post-fabrication orchestration (IAM-only) ──────────────────
