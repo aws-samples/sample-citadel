@@ -2944,6 +2944,13 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
+    executionLambdaDataSource.createResolver("ResumeExecutionResolver", {
+      typeName: "Mutation",
+      fieldName: "resumeExecution",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
     // publishWorkflowProgress — IAM-only mutation called by fan-out Lambda
     executionLambdaDataSource.createResolver(
       "PublishWorkflowProgressResolver",
