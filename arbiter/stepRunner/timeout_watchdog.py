@@ -24,6 +24,7 @@ All timestamps are ISO 8601 UTC, matching the executor's ``startedAt`` writes.
 """
 
 import boto3
+import json
 import logging
 import os
 from datetime import datetime, timezone, timedelta
@@ -40,8 +41,19 @@ import common.tracing as tracing  # import activates tracing as a side effect
 
 import events
 
+# Decision O4: the watchdog is no longer "executions-table + events only".
+# It now READS the workflows table and SHARES the executor's re-entry
+# primitive (schedule_frontier) + failure path, so reconcile/re-dispatch use
+# exactly one implementation of ready-set + conditional-dispatch logic
+# (build-once, never a parallel reconcile impl). This is a deliberate revision
+# of the old "no executor coupling" constraint, justified by the acceptance
+# target "a lost node-completed event reconciles within one watchdog cycle".
+import executor
+from dag import find_ready_nodes
+
 # DynamoDB table name from environment (same convention as executor.py).
 EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'citadel-executions-dev')
+WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'citadel-workflows-dev')
 
 # Shared workflow metric namespace — kept in sync with the fan-out Lambda and
 # the arbiter node-metric emitters so all workflow telemetry lands in one place.
@@ -52,9 +64,18 @@ TIMEOUT_METRIC_NAME = 'WorkflowTimedOut'
 # almost certainly stuck (a lost node-completed event, a crashed worker, etc.).
 DEFAULT_TIMEOUT_SECONDS = 3600
 
+# Per-node stall detection (decisions O6). A node still 'running' with no
+# persisted completion after NODE_STALL_TIMEOUT_SECONDS * NODE_STALL_FACTOR is
+# treated as stalled (worker crashed / dispatch lost). Default 900s (the
+# worker Lambda's 15-min ceiling) * 2. Clamped per-node overrides are DEFERRED
+# (decision O6) — a workflow definition cannot set a per-node timeout yet.
+DEFAULT_NODE_STALL_TIMEOUT_SECONDS = 900
+DEFAULT_NODE_STALL_FACTOR = 2
+
 # DynamoDB resource (constructed at import; neutralised by boto3 stubs in tests).
 _dynamodb = boto3.resource('dynamodb')
 _executions_table = _dynamodb.Table(EXECUTIONS_TABLE)
+_workflows_table = _dynamodb.Table(WORKFLOWS_TABLE)
 
 # Lazy CloudWatch client — constructed on first use so module import never
 # resolves credentials (same lazy pattern the executor uses for SQS).
@@ -211,32 +232,212 @@ def _emit_metric(timed_out_count: int) -> None:
         _logger.warning('watchdog: metric emit failed: %s', exc)
 
 
-def handler(event, context):
-    """Scheduled entry point: fail every stuck running execution.
+def _node_stall_seconds() -> int:
+    """Resolve the per-node stall threshold: NODE_STALL_TIMEOUT_SECONDS *
+    NODE_STALL_FACTOR, each falling back to its default on unset/invalid/non-
+    positive values (a misconfigured value must never make the watchdog
+    re-dispatch or fail nodes aggressively)."""
+    def _pos(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
 
-    Returns a small summary dict (scanned / timed_out) for observability in the
-    Lambda invocation result and step-through logs.
+    return _pos('NODE_STALL_TIMEOUT_SECONDS', DEFAULT_NODE_STALL_TIMEOUT_SECONDS) * \
+        _pos('NODE_STALL_FACTOR', DEFAULT_NODE_STALL_FACTOR)
+
+
+def _load_workflow(workflow_id: str) -> dict:
+    """Load a workflow row (read-only GetItem). Returns {} when absent."""
+    if not workflow_id:
+        return {}
+    resp = _workflows_table.get_item(Key={'workflowId': workflow_id})
+    return resp.get('Item') or {}
+
+
+def _definition_nodes_edges(workflow: dict) -> tuple[list, list]:
+    definition = workflow.get('definition', '{}')
+    if isinstance(definition, str):
+        try:
+            definition = json.loads(definition)
+        except ValueError:
+            definition = {}
+    return definition.get('nodes', []) or [], definition.get('edges', []) or []
+
+
+def _has_reconcilable_frontier(execution: dict, nodes: list, edges: list) -> bool:
+    """True when persisted state shows a lost-event frontier to re-drive: a
+    pending node whose predecessors are all terminal (its dispatch signal was
+    lost), OR all nodes terminal while the execution is still 'running' (a lost
+    finalize). This is checked BEFORE any fail path so a lost event never fails
+    a healthy run."""
+    node_results = execution.get('nodeResults', {})
+    status_map = {n['id']: node_results.get(n['id'], {}).get('status', 'pending') for n in nodes}
+    if find_ready_nodes(nodes, edges, status_map):
+        return True
+    if nodes and all(
+        status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed') for n in nodes
+    ):
+        return execution.get('status') == 'running'
+    return False
+
+
+def _find_stalled_node(execution: dict, now: datetime, node_stall: int):
+    """Return the id of a node 'running' past the node-stall threshold with no
+    persisted completion, else None. Absence of a parseable startedAt means the
+    node's age can't be judged — skip it conservatively (never re-dispatch/fail
+    on unknown age)."""
+    cutoff = now - timedelta(seconds=node_stall)
+    for nid, nr in (execution.get('nodeResults') or {}).items():
+        if nr.get('status') != 'running':
+            continue
+        started = _parse_iso(nr.get('startedAt', ''))
+        if started is not None and started <= cutoff:
+            return nid
+    return None
+
+
+def _reconcile_or_fail_node(execution: dict, workflow: dict, node_id: str) -> str:
+    """A stalled node: re-dispatch if retries remain (a stall is a transient
+    infra/timeout condition), else drive it (and the execution) to terminal
+    failure via the executor's own failure path.
+
+    Re-dispatch flips the node running->pending under a conditional guard
+    (status = running) so if the original worker completed in the meantime the
+    flip is a no-op; the executor's shared schedule_frontier then re-dispatches
+    it via the conditional pending->running guard. First-write-wins on the
+    completion means a late original completion + the re-dispatch converge to a
+    single recorded completion (recorded-state exactly-once; agent body may run
+    twice — decision O7)."""
+    execution_id = execution['executionId']
+    nodes, _edges = _definition_nodes_edges(workflow)
+    node_def = next((n for n in nodes if n['id'] == node_id), None)
+    retry_policy = (node_def or {}).get('data', {}).get('retryPolicy', {}) if node_def else {}
+    max_retries = retry_policy.get('maxRetries', 0)
+    retry_count = execution.get('nodeResults', {}).get(node_id, {}).get('retryCount', 0)
+
+    if retry_count < max_retries:
+        try:
+            _executions_table.update_item(
+                Key={'executionId': execution_id},
+                UpdateExpression='SET nodeResults.#nid.#status = :pending, nodeResults.#nid.#rc = :rc',
+                ConditionExpression='nodeResults.#nid.#status = :running',
+                ExpressionAttributeNames={'#nid': node_id, '#status': 'status', '#rc': 'retryCount'},
+                ExpressionAttributeValues={
+                    ':pending': 'pending', ':running': 'running', ':rc': retry_count + 1,
+                },
+            )
+        except ClientError as exc:
+            if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+                # The node left 'running' meanwhile (worker completed / another
+                # sweep acted) — benign, nothing to re-dispatch.
+                return 'node_progressed'
+            _logger.error('watchdog: stall re-dispatch flip failed for %s/%s: %s',
+                          execution_id, node_id, exc)
+            raise
+        fresh = executor._load_execution(execution_id) or execution
+        executor.schedule_frontier(fresh, workflow)
+        _logger.warning('watchdog: re-dispatched stalled node executionId=%s nodeId=%s (retry %d/%d)',
+                        execution_id, node_id, retry_count + 1, max_retries)
+        return 're_dispatched'
+
+    # Retries exhausted (or none configured) -> terminal via the executor's
+    # failure path (marks node + execution failed, emits workflow.failed).
+    executor.handle_node_failure(
+        execution_id, node_id,
+        'Node execution stalled and exceeded the node stall timeout',
+    )
+    _logger.warning('watchdog: failed stalled node (retries exhausted) executionId=%s nodeId=%s',
+                    execution_id, node_id)
+    return 'node_failed'
+
+
+def _reconcile(execution: dict, workflow: dict) -> str:
+    """Re-drive a lost-event frontier: repair any false-branch skip lost to a
+    crash, then re-derive + dispatch/finalize via the shared schedule_frontier.
+    Idempotent (conditional dispatch/finalize guards)."""
+    execution_id = execution['executionId']
+    executor._reconcile_completed_edges(execution, workflow)
+    fresh = executor._load_execution(execution_id) or execution
+    executor.schedule_frontier(fresh, workflow)
+    _logger.info('watchdog: reconciled lost-event frontier executionId=%s', execution_id)
+    return 'reconciled'
+
+
+def _process_execution(execution: dict, now: datetime, exec_timeout: int, node_stall: int) -> str:
+    """Give one running execution a DEFINITE disposition (never silence a stuck
+    run). Ordered: reconcile lost-event frontier BEFORE any fail path, then
+    stalled-node reconcile-or-fail, then the execution-level backstop.
+
+    Returns one of: reconciled, re_dispatched, node_progressed, node_failed,
+    execution_failed, healthy, skipped, race_noop."""
+    node_results = execution.get('nodeResults') or {}
+
+    # Per-node reconcile/stall only when we have per-node state AND a workflow
+    # to read the graph from. (Executions without nodeResults fall straight to
+    # the execution-level backstop.)
+    if node_results:
+        workflow = _load_workflow(execution.get('workflowId', ''))
+        if workflow:
+            nodes, edges = _definition_nodes_edges(workflow)
+            if _has_reconcilable_frontier(execution, nodes, edges):
+                return _reconcile(execution, workflow)
+            stalled = _find_stalled_node(execution, now, node_stall)
+            if stalled is not None:
+                return _reconcile_or_fail_node(execution, workflow, stalled)
+
+    # Execution-level backstop (preserved original behavior): fail an execution
+    # with no reconcilable/stalled state that is older than the exec timeout.
+    started = _parse_iso(execution.get('startedAt', ''))
+    if started is None:
+        _logger.info(
+            'watchdog: execution executionId=%s has no parseable startedAt; skipping',
+            execution.get('executionId'),
+        )
+        return 'skipped'
+    if started <= now - timedelta(seconds=exec_timeout):
+        return 'execution_failed' if _fail_stuck(execution, now, exec_timeout) else 'race_noop'
+    return 'healthy'
+
+
+def handler(event, context):
+    """Scheduled entry point: reconcile or fail every stuck running execution.
+
+    Ordered per execution (never silence a stuck run): reconcile a lost-event
+    frontier, else reconcile-or-fail a stalled node, else fail the execution at
+    the execution-level backstop. Returns a small summary dict for
+    observability.
     """
     now = _now()
     timeout = _timeout_seconds()
-    cutoff = now - timedelta(seconds=timeout)
+    node_stall = _node_stall_seconds()
 
     scanned = 0
     timed_out = 0
+    reconciled = 0
+    re_dispatched = 0
+    node_failed = 0
     for execution in _scan_running():
         scanned += 1
-        started = _parse_iso(execution.get('startedAt', ''))
-        if started is None:
-            # No usable startedAt — cannot judge age. Skip conservatively rather
-            # than fail a possibly-healthy execution.
-            _logger.info(
-                'watchdog: execution executionId=%s has no parseable startedAt; skipping',
-                execution.get('executionId'),
-            )
-            continue
-        if started <= cutoff:
-            if _fail_stuck(execution, now, timeout):
-                timed_out += 1
+        disposition = _process_execution(execution, now, timeout, node_stall)
+        if disposition == 'execution_failed':
+            timed_out += 1
+        elif disposition == 'reconciled':
+            reconciled += 1
+        elif disposition == 're_dispatched':
+            re_dispatched += 1
+        elif disposition == 'node_failed':
+            node_failed += 1
 
     _emit_metric(timed_out)
-    return {'scanned': scanned, 'timedOut': timed_out}
+    return {
+        'scanned': scanned,
+        'timedOut': timed_out,
+        'reconciled': reconciled,
+        'reDispatched': re_dispatched,
+        'nodeFailed': node_failed,
+    }

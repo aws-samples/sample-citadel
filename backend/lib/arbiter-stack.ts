@@ -1152,12 +1152,15 @@ export class ArbiterStack extends cdk.Stack {
         );
       }
 
-      // --- Workflow Timeout Watchdog (self-contained) ---
-      // A scheduled sweep that fails executions stuck in the 'running' state
-      // past a configurable timeout, emitting workflow.failed via the events
-      // module so the rest of the system reacts as it would to any terminal
-      // failure. It shares the stepRunner asset but uses its own handler and
-      // talks only to the executions table + event bus (no executor coupling).
+      // --- Workflow Timeout Watchdog (reconcile-or-fail) ---
+      // A scheduled sweep that gives every stuck 'running' execution a definite
+      // disposition: reconcile a lost-event frontier (re-derive + dispatch via
+      // the executor's shared schedule_frontier), reconcile-or-fail a stalled
+      // node, else fail the execution at the execution-level backstop. It
+      // shares the stepRunner asset AND (decision O4) now reads the workflows
+      // table + reuses the executor's re-entry primitive — a deliberate
+      // revision of the former "no executor coupling" constraint, with the IAM
+      // widening below kept strictly resource-scoped.
       const workflowTimeoutWatchdogFunction = new lambda.Function(
         this,
         "WorkflowTimeoutWatchdogFunction",
@@ -1170,28 +1173,56 @@ export class ArbiterStack extends cdk.Stack {
           memorySize: 256,
           environment: {
             EXECUTIONS_TABLE: props.executionsTable.tableName,
+            WORKFLOWS_TABLE: props.workflowsTable.tableName,
             EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+            // Re-dispatch of a stalled node goes to the shared worker queue via
+            // the executor's invoke_node.
+            WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
             // Executions still 'running' after this many seconds are considered
             // stuck and failed by the sweep. Default 1 hour.
             WORKFLOW_TIMEOUT_SECONDS: "3600",
+            // Per-node stall threshold = NODE_STALL_TIMEOUT_SECONDS *
+            // NODE_STALL_FACTOR (decision O6; 900s worker ceiling * 2).
+            NODE_STALL_TIMEOUT_SECONDS: "900",
+            NODE_STALL_FACTOR: "2",
           },
         },
       );
 
-      // Least-privilege: the watchdog only Scans for running executions and
-      // conditionally UpdateItems the stuck ones to failed (timeout_watchdog.py
-      // _scan_running + _fail_stuck). It never reads by key, puts, or deletes,
-      // so grant exactly dynamodb:Scan + dynamodb:UpdateItem on the base table
-      // ARN rather than full read/write (grantReadWriteData). PutEvents on the
-      // shared bus (workflow.failed) and PutMetricData for the best-effort
-      // timeout metric (Citadel/Workflows namespace) follow below.
+      // Least-privilege (decision O4 — resource-scoped, no wildcards). The
+      // watchdog now:
+      //   * Scans + reads-by-key (GetItem/Query) the executions table and
+      //     conditionally UpdateItems it (reconcile writes go through the
+      //     executor's conditional guards; the watchdog itself fails stuck
+      //     executions).
+      //   * Reads the workflows table (GetItem/Query ONLY — never Scan/write)
+      //     to know the DAG graph for reconcile.
+      //   * SendMessage to the worker queue ARN to re-dispatch a stalled node.
+      //   * PutEvents on the shared bus (workflow.failed / workflow.completed)
+      //     and PutMetricData for the best-effort timeout metric (below).
+      // It remains a distinct, higher-trust role than the worker (which is
+      // UpdateItem-only + FGAC) and is triggered ONLY by its EventBridge
+      // schedule — never externally invokable.
       workflowTimeoutWatchdogFunction.addToRolePolicy(
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
-          actions: ["dynamodb:Scan", "dynamodb:UpdateItem"],
+          actions: [
+            "dynamodb:Scan",
+            "dynamodb:GetItem",
+            "dynamodb:Query",
+            "dynamodb:UpdateItem",
+          ],
           resources: [props.executionsTable.tableArn],
         }),
       );
+      workflowTimeoutWatchdogFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:GetItem", "dynamodb:Query"],
+          resources: [props.workflowsTable.tableArn],
+        }),
+      );
+      workerAgentQueue.grantSendMessages(workflowTimeoutWatchdogFunction);
       props.agentEventBus.grantPutEventsTo(workflowTimeoutWatchdogFunction);
       workflowTimeoutWatchdogFunction.addToRolePolicy(
         new iam.PolicyStatement({
