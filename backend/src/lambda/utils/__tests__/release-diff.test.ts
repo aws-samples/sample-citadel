@@ -99,10 +99,7 @@ const agentReleaseConstituentsArb: fc.Arbitrary<AgentReleaseConstituents> =
     evalEvidence: evalEvidenceArb,
   });
 
-function swap<T>(
-  change: ReleaseDiffChange,
-  field: "before" | "after",
-): unknown {
+function swap(change: ReleaseDiffChange, field: "before" | "after"): unknown {
   return change[field];
 }
 
