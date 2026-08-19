@@ -118,9 +118,9 @@ describe("notifier-base emitGovernanceEvent", () => {
     expect(detail.sizeBytes).toBe(5242880);
   });
 
-  test("GOVERNANCE_DETAIL_TYPES contains exactly 25 values", () => {
-    expect(GOVERNANCE_DETAIL_TYPES).toHaveLength(25);
-    expect(new Set(GOVERNANCE_DETAIL_TYPES).size).toBe(25);
+  test("GOVERNANCE_DETAIL_TYPES contains exactly 26 values", () => {
+    expect(GOVERNANCE_DETAIL_TYPES).toHaveLength(26);
+    expect(new Set(GOVERNANCE_DETAIL_TYPES).size).toBe(26);
   });
 
   test("GovernanceDetailType union matches GOVERNANCE_DETAIL_TYPES array", () => {
@@ -150,6 +150,7 @@ describe("notifier-base emitGovernanceEvent", () => {
       "governance.eval.baseline.designated",
       "governance.eval.comparison.completed",
       "governance.eval.seed.heal.blocked",
+      "governance.release.auto_rollback",
     ];
     expect([...GOVERNANCE_DETAIL_TYPES].sort()).toEqual([...expected].sort());
   });

@@ -69,6 +69,11 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { DEFAULT_PROMOTION_POLICY, type PromotionPolicy } from "./release-gate";
+import {
+  DEFAULT_ROLLBACK_POLICY,
+  type RollbackAction,
+  type RollbackPolicy,
+} from "./rollback-policy";
 import type { EnvironmentLiteral } from "../../types";
 
 const dynamoClient = new DynamoDBClient({});
@@ -89,6 +94,15 @@ export interface PromotionPolicyConfigRow {
   // authoritative when gating a promotion INTO that env. Same shape and
   // same field-level fail-closed discipline as perAgentPolicyOverrides.
   perEnvironmentPolicyOverrides?: Record<string, Partial<PromotionPolicy>>;
+  // Decision D1 (auto-rollback): the post-deploy rollback kill-switch is a
+  // DISTINCT sub-object on the SAME row (never overloaded onto
+  // PromotionPolicy keys — post-deploy runtime thresholds are semantically
+  // separate from pre-deploy eval floors). Resolved by resolveRollbackPolicy
+  // below, reusing the identical DEFAULT ← org ← agent ← env field-level
+  // merge + fail-closed discipline. Same shape as the promotion overrides.
+  rollbackPolicy?: Partial<RollbackPolicy>;
+  perAgentRollbackOverrides?: Record<string, Partial<RollbackPolicy>>;
+  perEnvironmentRollbackOverrides?: Record<string, Partial<RollbackPolicy>>;
   updatedAt?: string;
   updatedBy?: string;
 }
@@ -362,5 +376,197 @@ export async function resolvePromotionPolicy(
   // per-agent ← per-environment. envOverride is undefined when no
   // environment was supplied, preserving the pre-G2 merge exactly.
   const merged = mergePolicyFields([row.policy, agentOverride, envOverride]);
+  return { ok: true, policy: merged };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Rollback policy resolution (decision D1) — a DISTINCT sub-object on the
+// SAME row, resolved with the SAME field-level merge + fail-closed
+// discipline as the promotion policy above, but self-contained so a
+// malformed rollbackPolicy field can never make resolvePromotionPolicy
+// UNREADABLE (blast-radius containment: the two policies fail independently).
+//
+// FAIL-SAFE DIRECTION differs from promotion: an UNREADABLE rollback policy
+// resolves to ok:false and the evaluator then does NOTHING (auto-rollback is
+// the mutating action, so an untrustworthy policy must never trigger it) —
+// the opposite of promotion's "never fall back to a weaker default", but the
+// same "never treat an unreadable governance record as safe to act on"
+// doctrine.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** A nullable threshold: null (not evaluated) OR a valid rate 0..1. */
+function isSaneNullableRate(v: unknown): v is number | null {
+  return v === null || isSaneRate(v);
+}
+
+/** A nullable magnitude: null (not evaluated) OR a non-negative finite. */
+function isSaneNullableNonNegative(v: unknown): v is number | null {
+  return v === null || isSaneNonNegative(v);
+}
+
+function isRollbackAction(v: unknown): v is RollbackAction {
+  return v === "ABORT_CANARY" || v === "ROLLBACK_STABLE" || v === "BOTH";
+}
+
+/** Field-by-field validators for RollbackPolicy — same discipline as
+ * FIELD_VALIDATORS, keyed to the full RollbackPolicy field set (compile
+ * error if a field is added without a validator). */
+const ROLLBACK_FIELD_VALIDATORS: {
+  [K in keyof RollbackPolicy]: (v: unknown) => v is RollbackPolicy[K];
+} = {
+  enabled: isSaneBoolean,
+  errorRateMax: isSaneNullableRate,
+  latencyP95MaxMs: isSaneNullableNonNegative,
+  policyViolationFindingRateMax: isSaneNullableRate,
+  costPerInvocationMaxMicros: isSaneNullableNonNegative,
+  driftScoreMax: isSaneNullableRate,
+  minSampleCount: isSaneNonNegative,
+  evaluationWindowMinutes: isSaneNonNegative,
+  action: isRollbackAction,
+};
+
+/** Primitive-TYPE-only checks — distinguish "wrong primitive type"
+ * (whole rollback sub-object UNREADABLE) from "correct type but out of
+ * range" (per-field drop). A nullable threshold accepts null or number. */
+const ROLLBACK_FIELD_TYPE_GUARDS: {
+  [K in keyof RollbackPolicy]: (v: unknown) => boolean;
+} = {
+  enabled: (v) => typeof v === "boolean",
+  errorRateMax: (v) => v === null || typeof v === "number",
+  latencyP95MaxMs: (v) => v === null || typeof v === "number",
+  policyViolationFindingRateMax: (v) => v === null || typeof v === "number",
+  costPerInvocationMaxMicros: (v) => v === null || typeof v === "number",
+  driftScoreMax: (v) => v === null || typeof v === "number",
+  minSampleCount: (v) => typeof v === "number",
+  evaluationWindowMinutes: (v) => typeof v === "number",
+  action: (v) => typeof v === "string",
+};
+
+const ROLLBACK_FIELDS = Object.keys(
+  ROLLBACK_FIELD_VALIDATORS,
+) as (keyof RollbackPolicy)[];
+
+function hasWrongTypeRollbackField(
+  container: Record<string, unknown>,
+): boolean {
+  for (const field of ROLLBACK_FIELDS) {
+    const value = container[field];
+    if (value === undefined) continue;
+    if (!ROLLBACK_FIELD_TYPE_GUARDS[field](value)) return true;
+  }
+  return false;
+}
+
+function mergeRollbackFields(
+  sources: (Partial<RollbackPolicy> | undefined)[],
+): RollbackPolicy {
+  const result = { ...DEFAULT_ROLLBACK_POLICY };
+  for (const field of ROLLBACK_FIELDS) {
+    const validate = ROLLBACK_FIELD_VALIDATORS[field];
+    for (const source of sources) {
+      if (!source) continue;
+      const candidate = source[field];
+      if (candidate === undefined) continue;
+      if (validate(candidate as never)) {
+        (result as Record<string, unknown>)[field] = candidate;
+      }
+    }
+  }
+  return result;
+}
+
+export type RollbackPolicyResolutionResult =
+  { ok: true; policy: RollbackPolicy } | { ok: false; reason: "UNREADABLE" };
+
+/** True if the rollback sub-object containers on the row are shape-valid
+ * (a present-but-non-object container, or a present field of the wrong
+ * PRIMITIVE TYPE inside any of them, is UNREADABLE — range-only problems
+ * are per-field drops, not shape violations). */
+function areRollbackContainersReadable(row: PromotionPolicyConfigRow): boolean {
+  if (row.rollbackPolicy !== undefined) {
+    if (!isPlainObject(row.rollbackPolicy)) return false;
+    if (hasWrongTypeRollbackField(row.rollbackPolicy)) return false;
+  }
+  for (const container of [
+    row.perAgentRollbackOverrides,
+    row.perEnvironmentRollbackOverrides,
+  ]) {
+    if (container === undefined) continue;
+    if (!isPlainObject(container)) return false;
+    for (const override of Object.values(container)) {
+      if (!isPlainObject(override)) return false;
+      if (hasWrongTypeRollbackField(override)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Resolves the effective RollbackPolicy for (orgId, agentTargetId,
+ * environment) from the SAME PROMOTION_POLICY_CONFIG_TABLE row (decision
+ * D1). Precedence low→high, field-level merge:
+ *   DEFAULT_ROLLBACK_POLICY ← row.rollbackPolicy
+ *     ← perAgentRollbackOverrides[agent] ← perEnvironmentRollbackOverrides[env]
+ *
+ * ok:true, policy=DEFAULT_ROLLBACK_POLICY (enabled:false) — no row / no
+ *   rollback config authored yet (never auto-rolls — opt-in).
+ * ok:true, policy=<merged> — readable row; invalid individual fields fall
+ *   through per-field.
+ * ok:false, reason:'UNREADABLE' — thrown GetItem, or a schema-invalid
+ *   rollback container / wrong-primitive-type rollback field. The
+ *   evaluator treats this fail-SAFE: it does NOTHING (no auto-rollback on
+ *   an untrustworthy policy).
+ */
+export async function resolveRollbackPolicy(
+  orgId: string,
+  agentTargetId: string,
+  environment?: EnvironmentLiteral,
+): Promise<RollbackPolicyResolutionResult> {
+  let row: PromotionPolicyConfigRow | undefined;
+  try {
+    row = await getPromotionPolicyConfigRow(orgId);
+  } catch (err: unknown) {
+    console.error(
+      "promotion-policy-store: resolveRollbackPolicy GetItem failed — UNREADABLE (fail-safe: evaluator will not auto-rollback)",
+      {
+        orgId,
+        agentTargetId,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+    return { ok: false, reason: "UNREADABLE" };
+  }
+
+  if (row === undefined) {
+    return { ok: true, policy: { ...DEFAULT_ROLLBACK_POLICY } };
+  }
+
+  // orgId shape guard mirrors resolvePromotionPolicy's row check.
+  if (typeof row.orgId !== "string" || !row.orgId) {
+    console.error(
+      "promotion-policy-store: resolveRollbackPolicy encountered a schema-invalid row — UNREADABLE",
+      { orgId, agentTargetId },
+    );
+    return { ok: false, reason: "UNREADABLE" };
+  }
+
+  if (!areRollbackContainersReadable(row)) {
+    console.error(
+      "promotion-policy-store: resolveRollbackPolicy encountered a schema-invalid rollback sub-object — UNREADABLE",
+      { orgId, agentTargetId },
+    );
+    return { ok: false, reason: "UNREADABLE" };
+  }
+
+  const agentOverride = row.perAgentRollbackOverrides?.[agentTargetId];
+  const envOverride =
+    environment !== undefined
+      ? row.perEnvironmentRollbackOverrides?.[environment]
+      : undefined;
+  const merged = mergeRollbackFields([
+    row.rollbackPolicy,
+    agentOverride,
+    envOverride,
+  ]);
   return { ok: true, policy: merged };
 }

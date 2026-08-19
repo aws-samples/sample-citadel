@@ -1012,7 +1012,18 @@ export type PointerTransitionType =
   | "CANARY_START"
   | "CANARY_REWEIGHT"
   | "CANARY_PROMOTE"
-  | "CANARY_ABORT";
+  | "CANARY_ABORT"
+  // Auto (non-human) transitions minted SERVER-SIDE by the release-
+  // rollback evaluator (never accepted from caller input — the floor
+  // derivation keys on human-vs-system, so a spoofable transition would
+  // let a buggy/compromised caller forge a human baseline). AUTO_ABORT_CANARY
+  // is the v1 action: zero the candidate arm, leave the human-promoted
+  // stable `releaseId` untouched — by construction it can never cross the
+  // floor. AUTO_ROLLBACK (flip stable → previousReleaseId) is reserved for
+  // the floor logic and a future action scope; the v1 evaluator never
+  // mints it (decision D4: ABORT_CANARY-only).
+  | "AUTO_ABORT_CANARY"
+  | "AUTO_ROLLBACK";
 
 /** Canary traffic-split state carried on the pointer row (decision D2:
  * ATTRIBUTION-ONLY — there is no release→config binding yet, so both arms

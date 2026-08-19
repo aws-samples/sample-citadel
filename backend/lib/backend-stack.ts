@@ -3407,9 +3407,28 @@ export class BackendStack extends cdk.Stack {
       },
     );
 
-    // IAM floor — a SEPARATE role from agentReleaseWriterRole above, on
-    // purpose (see the invariant called out on the table's own doc
-    // comment and on the class field declaration). PutItem/GetItem/Query
+    // Sparse ActiveCanaryIndex GSI (decision D8) — the auto-rollback
+    // evaluator enumerates active canaries via this index instead of a
+    // Scan. The marker attributes (activeCanaryPk / activeCanarySk) are
+    // written by the sole pointer writer ONLY when a canary is present
+    // (environment-release-pointer-store.ts), so a pointer with no canary
+    // is absent from the index; clearing the canary (promote/abort)
+    // overwrites the item without the marker in the SAME atomic Put,
+    // removing it from the index. Projection ALL so the evaluator reads a
+    // full pointer (version/releaseId/canary) without a second GetItem.
+    // NOTE (runbook): this is a sparse marker maintained going forward —
+    // canaries already active at deploy time have no marker until their
+    // next pointer write; a deploy-time backfill gap is documented in
+    // docs/RELEASE_RUNBOOK.md.
+    this.environmentReleasePointersTable.addGlobalSecondaryIndex({
+      indexName: "ActiveCanaryIndex",
+      partitionKey: {
+        name: "activeCanaryPk",
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: { name: "activeCanarySk", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
     // ONLY, granted against ONLY this table's ARN + index ARNs — never
     // co-listed as a resource alongside AgentReleasesTable in the same
     // statement, and never DeleteItem, anywhere. There is no UpdateItem

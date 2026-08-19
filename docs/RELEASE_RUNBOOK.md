@@ -199,6 +199,11 @@ release is intentionally blocked by `PromotionLadderError`; a break-glass
 rollback path is a separate operation and is **not** part of
 `promoteEnvironmentReleasePointer`.
 
+For a **canary**, the rollback IS built: the manual surface is the
+existing `abortCanary` (decision D5), and an automated, metric-driven
+`AUTO_ABORT_CANARY` is performed by the auto-rollback evaluator (§17).
+Full-release (stable-pointer) automated rollback remains deferred (D4).
+
 ## 14. Incident triage
 
 | Symptom | Likely cause / action |
@@ -293,3 +298,132 @@ staging. An UNREADABLE policy refuses the canary change fail-closed —
 | `CanaryStateError` | No active canary for that `(agent, env)` (reweight/promote/abort), or no stable pointer to canary against (start). |
 | `PromotionLadderError` at start/promote | Predecessor env's current pointer ≠ candidate (D7/D4). Promote the lower env first. |
 | Everyone on stable despite a canary | The choke point failed to thread a server-minted stickiness key — the safe degradation. Check `orchestrationId`/`executionId` presence. |
+
+
+## 17. Automated metric-driven rollback (auto-rollback evaluator)
+
+A scheduled evaluator can automatically **abort a breaching canary** —
+zeroing the candidate arm back to the human-promoted stable release —
+without an operator in the loop. It is **opt-in, fail-safe, and
+canary-abort-only** in v1.
+
+### What it does (and does NOT do)
+
+- **Action scope (decision D4): `AUTO_ABORT_CANARY` ONLY.** The evaluator
+  can only zero a candidate arm (leaving the stable `releaseId`
+  untouched). It has **no promote path and cannot flip the stable
+  pointer** — by construction it can never move the pointer *below* the
+  last human-promoted stable (the "floor"). Its IAM role grants no
+  promote capability; the abort-only bound is additionally enforced in
+  code by the shared store helper `performAutoAbortCanary`, which mints
+  the `promotedBy = "system:release-rollback-evaluator"` principal and the
+  `AUTO_ABORT_CANARY` transition **server-side** (caller-supplied values
+  are never honored).
+- **Metric scope (decision D3): cost-per-invocation + model-call p95
+  latency ONLY.** These are the only two signals with per-arm attribution
+  today (via the cost ledger's `releaseId` + `releaseArm`, written from
+  the arbiter usage rows). `errorRateMax`, `policyViolationFindingRateMax`,
+  and `driftScoreMax` are accepted as **policy fields** but always resolve
+  to `INSUFFICIENT_DATA` and **never trigger** until their per-arm
+  attribution lands (finding-rate is an E12 follow-up; drift is gated on
+  prod-sample arm attribution that does not exist yet). Missing data
+  **never** rolls back.
+- **Fail-safe everywhere.** Auto-rollback is off unless an org sets
+  `rollbackPolicy.enabled = true` AND authors a threshold. A `null`
+  threshold is "not evaluated". A candidate arm with fewer than
+  `minSampleCount` samples yields `INSUFFICIENT_DATA` (no action). An
+  UNREADABLE policy → the evaluator does nothing.
+
+### Configuring it
+
+`rollbackPolicy` is a distinct sub-object on the **same**
+`PROMOTION_POLICY_CONFIG_TABLE` row as the promotion policy (decision D1),
+with the identical `DEFAULT ← org ← per-agent ← per-env` field-level merge
+and admin authz. Example (per-env):
+
+```
+perEnvironmentRollbackOverrides: {
+  staging: {
+    enabled: true,
+    costPerInvocationMaxMicros: 1500,   // candidate-arm ceiling, micros
+    latencyP95MaxMs: 6000,              // candidate-arm model-call p95 ceiling
+    minSampleCount: 20,                 // below this → INSUFFICIENT_DATA
+    evaluationWindowMinutes: 15,
+    action: "ABORT_CANARY"
+  }
+}
+```
+
+### Trigger cadence + detection latency (be honest about lag)
+
+The evaluator runs on a **1-minute scheduled poll ONLY** (decision D2 — no
+SNS/alarm subscription in v1). "Rolls back within one evaluation cycle"
+therefore means **within roughly one minute of the metric being
+observable** — NOT one minute from the bad request. The true
+detection-to-action latency is:
+
+```
+poll interval (≤1 min)
+  + cost-ledger WRITE LAG (a candidate-arm invocation is not queryable
+    until its usage row has been ingested into the cost ledger — this is
+    an eventually-consistent, event-driven path, not synchronous)
+  + evaluationWindowMinutes (the lookback the p95/cost is computed over,
+    default 15 min, must accumulate ≥ minSampleCount candidate samples)
+```
+
+So a freshly-started canary that is bad from the first request will not
+auto-abort until enough attributed ledger rows exist in the window to meet
+`minSampleCount`. This is deliberate (thin data must never trigger); tune
+`minSampleCount` / `evaluationWindowMinutes` against your traffic rate. Do
+not expect sub-minute reaction — the ledger write lag alone can exceed the
+poll interval.
+
+### Enumeration + the deploy-time GSI backfill gap
+
+Active canaries are enumerated via the sparse **`ActiveCanaryIndex`** GSI
+on the pointer table (decision D8 — never a Scan). The index marker
+(`activeCanaryPk`/`activeCanarySk`) is written by the sole pointer writer
+**only when a canary is present**, inside the same atomic Put; clearing
+the canary removes it from the index in the same write.
+
+> **BACKFILL GAP (operational):** the marker is maintained **going
+> forward**. A canary that was **already active at the moment this feature
+> deployed** has **no marker yet**, so the evaluator will not see it until
+> its **next pointer write** (a reweight, or any move) re-materializes the
+> item with the marker. To force-materialize markers for pre-existing
+> canaries after deploy, reweight each active canary to its current
+> percent (a no-op-percent reweight still rewrites the pointer and writes
+> the marker). Audit active canaries via `environmentReleasePointerHistory`
+> and reweight any that predate the deploy.
+
+### Every auto-rollback is an audited finding (decision D6)
+
+On a breach the evaluator: captures evidence → does the **version-gated**
+abort write (the commit; its gap-free history row is the atomic legal
+record) → writes a **write-once** `GovernanceFinding`
+(`category: "auto-rollback"`, keyed `sha256(org#agent#env#fromVersion#action)`)
+carrying the `rollback_evidence` (metric, arm, observed vs threshold,
+sample count, window, from/to release) → best-effort emits
+`governance.release.auto_rollback`.
+
+**Exactly-once under concurrent evaluators** is the pointer's version
+`ConditionExpression`: two evaluators racing the same version both attempt
+the write, DynamoDB lets exactly one win, the loser gets
+`ConcurrentPromotionError` and no-ops.
+
+**If the finding write fails after the committed move**, the evaluator
+emits the CloudWatch metric **`Citadel/Governance /
+AutoRollbackFindingWriteFailure`** (alarm:
+`citadel-auto-rollback-finding-write-failure-<env>`, wired to the SLO
+alarm topic) so a committed-but-unrecorded rollback **pages** — the move
+is still audited via the history row, and the deterministic finding id
+lets a later run re-write the finding idempotently.
+
+### Triage
+
+| Symptom | Likely cause / action |
+|---|---|
+| Bad canary not auto-aborting | Check `rollbackPolicy.enabled`, a non-null threshold, and that the candidate arm has ≥ `minSampleCount` attributed ledger rows in the window. Remember the cost-ledger write lag + window. |
+| Canary active before deploy never evaluated | Deploy-time GSI backfill gap — reweight it once to materialize the `ActiveCanaryIndex` marker (see above). |
+| `AutoRollbackFindingWriteFailure` alarm firing | An abort committed but its ledger finding write failed. The move is audited via history; re-drive the finding (idempotent id) or investigate the governance-ledger write path. |
+| Auto-rollback fired but stable changed | Should be impossible in v1 (abort-only leaves stable untouched). If observed, treat as a security incident — the auto path must only mint `AUTO_ABORT_CANARY`. |

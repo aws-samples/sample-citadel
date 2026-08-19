@@ -110,8 +110,8 @@ function makeEvent(
 // ---------------------------------------------------------------------------
 
 describe("governance-notifier — detail-type catalogue invariant", () => {
-  test("GOVERNANCE_DETAIL_TYPES has exactly 25 entries (canonical list, CIT-103 adds governance.eval.case.completed/judge.requested/judged; Phase 2 adds governance.eval.sample.captured; CIT-105 adds governance.eval.baseline.designated/comparison.completed/eval.seed.heal.blocked)", () => {
-    expect(GOVERNANCE_DETAIL_TYPES).toHaveLength(25);
+  test("GOVERNANCE_DETAIL_TYPES has exactly 26 entries (canonical list, CIT-103 adds governance.eval.case.completed/judge.requested/judged; Phase 2 adds governance.eval.sample.captured; CIT-105 adds governance.eval.baseline.designated/comparison.completed/eval.seed.heal.blocked; auto-rollback adds governance.release.auto_rollback)", () => {
+    expect(GOVERNANCE_DETAIL_TYPES).toHaveLength(26);
   });
 
   test('every entry begins with the "governance." namespace prefix', () => {
