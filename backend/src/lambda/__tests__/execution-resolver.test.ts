@@ -459,6 +459,85 @@ describe("execution-resolver", () => {
     });
   });
 
+  // ─── resumeExecution ───────────────────────────────────────────
+
+  describe("resumeExecution", () => {
+    test("emits execution.resume.requested with only locating ids + server orgId", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          executionId: "exec-1",
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "running",
+          runId: "run-abc",
+        },
+      });
+
+      const result = await invoke(
+        makeEvent("resumeExecution", { executionId: "exec-1" }),
+      );
+      expect((result as { status: string }).status).toBe("running");
+
+      const ebCalls = ebMock.commandCalls(PutEventsCommand);
+      expect(ebCalls).toHaveLength(1);
+      const entry = ebCalls[0].args[0].input.Entries![0];
+      expect(entry.Source).toBe("citadel.workflows");
+      expect(entry.DetailType).toBe("execution.resume.requested");
+      const detail = JSON.parse(entry.Detail!);
+      // Server-derived frontier: payload carries ONLY locating ids + orgId,
+      // never a node list / status override.
+      expect(detail).toEqual({
+        executionId: "exec-1",
+        workflowId: "wf-1",
+        orgId: "org-1",
+        runId: "run-abc",
+      });
+    });
+
+    test.each(["completed", "cancelled", "failed"])(
+      "rejects terminal state %s without emitting an event (O5)",
+      async (terminal) => {
+        ddbMock.on(GetCommand).resolves({
+          Item: {
+            executionId: "exec-t",
+            workflowId: "wf-1",
+            orgId: "org-1",
+            status: terminal,
+          },
+        });
+
+        await expect(
+          invoke(makeEvent("resumeExecution", { executionId: "exec-t" })),
+        ).rejects.toThrow(/terminal state/);
+        expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(0);
+      },
+    );
+
+    test("cross-org resume is denied (IDOR) before any event is emitted", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          executionId: "exec-other",
+          workflowId: "wf-1",
+          orgId: "org-other",
+          status: "running",
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("resumeExecution", { executionId: "exec-other" })),
+      ).rejects.toThrow("Access denied");
+      expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(0);
+    });
+
+    test("missing execution throws before emit", async () => {
+      ddbMock.on(GetCommand).resolves({});
+      await expect(
+        invoke(makeEvent("resumeExecution", { executionId: "nope" })),
+      ).rejects.toThrow("Execution not found");
+      expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(0);
+    });
+  });
+
   // ─── publishWorkflowProgress ───────────────────────────────────
 
   describe("publishWorkflowProgress", () => {

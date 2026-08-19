@@ -15,6 +15,8 @@ import os
 import sys
 from datetime import datetime, timezone
 
+from botocore.exceptions import ClientError
+
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
 # import BEFORE any boto3 client this module (or its `events` sibling)
 # constructs, so patch_all() instruments botocore ahead of client creation.
@@ -607,17 +609,52 @@ def invoke_node(
         agentId=agent_id or None,
     )
 
-    # Update node status to running
-    _executions_table.update_item(
-        Key={'executionId': execution_id},
-        UpdateExpression='SET nodeResults.#nid.#status = :status, nodeResults.#nid.#startedAt = :startedAt',
-        ExpressionAttributeNames={
-            '#nid': node_id,
-            '#status': 'status',
-            '#startedAt': 'startedAt',
-        },
-        ExpressionAttributeValues={':status': 'running', ':startedAt': now},
-    )
+    # Exactly-once dispatch guard (conditional pending->running write). The
+    # transition only commits while the node is still 'pending', so when two
+    # concurrent predecessor-completions both compute a convergence node
+    # "ready" (or a resume/watchdog re-drive races a live advance) exactly one
+    # writer wins the pending->running flip and sends the SQS message; every
+    # other dispatcher's conditional write raises ConditionalCheckFailedException
+    # and is a no-op here. This is THE single serialization point that makes
+    # node dispatch exactly-once regardless of which path (root dispatch,
+    # completion-advance, resume, or watchdog reconcile) drives it — replacing
+    # the previous unconditional SET, which let both racing dispatchers send
+    # (latent double-dispatch of convergence nodes).
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression='SET nodeResults.#nid.#status = :status, nodeResults.#nid.#startedAt = :startedAt',
+            ConditionExpression='nodeResults.#nid.#status = :pending',
+            ExpressionAttributeNames={
+                '#nid': node_id,
+                '#status': 'status',
+                '#startedAt': 'startedAt',
+            },
+            ExpressionAttributeValues={
+                ':status': 'running',
+                ':startedAt': now,
+                ':pending': 'pending',
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            # Another dispatcher already moved this node out of 'pending' —
+            # dispatch is exactly-once, so skip the node.started event and the
+            # SQS send entirely. Not an error: this is the guard doing its job.
+            _log_event(
+                'node_dispatch_skipped_not_pending',
+                executionId=execution_id,
+                workflowId=workflow_id,
+                nodeId=node_id,
+            )
+            return
+        # Any other DynamoDB error is unexpected — never swallow a DB write
+        # error; surface it so the dispatch failure is observable.
+        _logger.error(
+            'invoke_node: conditional dispatch write failed for execution=%s node=%s: %s',
+            execution_id, node_id, exc,
+        )
+        raise
 
     # Publish node.started event
     events.publish_node_started(
@@ -726,17 +763,10 @@ def handle_node_completion(
     edges = definition.get('edges', [])
     node_results = execution.get('nodeResults', {})
 
-    # Find the completed node's agent ID
+    # Completed node's prior recorded data. Under write-then-signal (decision
+    # O2) this is already 'completed' — the worker persisted it BEFORE emitting
+    # the event this handler consumes.
     node_data = node_results.get(node_id, {})
-
-    # Idempotency guard against duplicate deliveries. At-least-once transports
-    # (SQS / EventBridge) can redeliver the same node-completed event. If the
-    # persisted node status is already the terminal 'completed', this is a
-    # replay — return without re-updating state, re-advancing the DAG,
-    # re-invoking downstream nodes, or re-emitting the terminal
-    # workflow.completed event.
-    if node_data.get('status') == 'completed':
-        return
 
     now = _now_iso()
 
@@ -748,35 +778,59 @@ def handle_node_completion(
     sanitized_usage = parse_usage_array(usage if usage is not None else output.get('usage', []))
     node_usage_totals = aggregate_usage(sanitized_usage)
 
-    # Update node to completed. The usage + usageTotals SET rides in the SAME
-    # update_item call as status/completedAt/output — never a second call,
-    # never an ADD — so reprocessing (if the guard above were ever bypassed)
-    # writes the identical bytes under the same nodeResults[node_id] key.
-    _executions_table.update_item(
-        Key={'executionId': execution_id},
-        UpdateExpression=(
-            'SET nodeResults.#nid.#status = :status, '
-            'nodeResults.#nid.#completedAt = :completedAt, '
-            'nodeResults.#nid.#output = :output, '
-            'nodeResults.#nid.#usage = :usage, '
-            'nodeResults.#nid.#usageTotals = :usageTotals'
-        ),
-        ExpressionAttributeNames={
-            '#nid': node_id,
-            '#status': 'status',
-            '#completedAt': 'completedAt',
-            '#output': 'output',
-            '#usage': 'usage',
-            '#usageTotals': 'usageTotals',
-        },
-        ExpressionAttributeValues={
-            ':status': 'completed',
-            ':completedAt': now,
-            ':output': output,
-            ':usage': sanitized_usage,
-            ':usageTotals': node_usage_totals,
-        },
-    )
+    # First-write-wins completion (decision O3, conditional write #2). Under
+    # write-then-signal (decision O2) the WORKER persists status=completed +
+    # output to nodeResults[nodeId] BEFORE emitting workflow.node.completed, so
+    # in production this conditional write is a NO-OP — its ConditionExpression
+    # (status <> completed) fails against the worker's already-committed
+    # completion — and the event serves purely as a DAG-advance signal.
+    #
+    # It is KEPT (not removed) as a first-write-wins backstop so a direct
+    # invocation, an in-flight pre-feature event whose producer did not write,
+    # or a lost worker write still records the completion here; whoever writes
+    # first wins and a duplicate is a no-op. The old status-read early-return
+    # (``if node_data.status == 'completed': return``) is DELETED: under
+    # write-then-signal the node is already 'completed' when this handler runs,
+    # so an early-return would swallow every advance. Idempotency now rests on
+    # the conditional dispatch/finalize guards below, which absorb repeated
+    # advancement (design decision O3).
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET nodeResults.#nid.#status = :status, '
+                'nodeResults.#nid.#completedAt = :completedAt, '
+                'nodeResults.#nid.#output = :output, '
+                'nodeResults.#nid.#usage = :usage, '
+                'nodeResults.#nid.#usageTotals = :usageTotals'
+            ),
+            ConditionExpression='nodeResults.#nid.#status <> :completed',
+            ExpressionAttributeNames={
+                '#nid': node_id,
+                '#status': 'status',
+                '#completedAt': 'completedAt',
+                '#output': 'output',
+                '#usage': 'usage',
+                '#usageTotals': 'usageTotals',
+            },
+            ExpressionAttributeValues={
+                ':status': 'completed',
+                ':completedAt': now,
+                ':output': output,
+                ':usage': sanitized_usage,
+                ':usageTotals': node_usage_totals,
+                ':completed': 'completed',
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') != 'ConditionalCheckFailedException':
+            _logger.error(
+                'handle_node_completion: completion write failed for execution=%s node=%s: %s',
+                execution_id, node_id, exc,
+            )
+            raise
+        # Already completed (the worker's write-then-signal write, or a
+        # duplicate delivery) — benign; fall through to idempotent advancement.
 
     # Best-effort telemetry (WF-053). A metric or log failure must never break
     # DAG advancement, so both are wrapped / fire-and-forget.
@@ -806,71 +860,239 @@ def handle_node_completion(
     # re-emitting it would self-trigger an infinite loop. We only advance the
     # DAG below and emit the terminal workflow.completed when all nodes finish.
 
-    # Update local state for ready-node calculation
+    # Reflect this completion in the local view for edge-eval + frontier.
     node_results[node_id] = {**node_data, 'status': 'completed', 'output': output}
 
-    # Evaluate outgoing edges from this node
-    outgoing_edges = [e for e in edges if e['source'] == node_id]
-    for edge in outgoing_edges:
+    # Evaluate this node's outgoing conditional edges (mark + persist skips of
+    # false-branch targets), then advance via the shared re-entry primitive.
+    _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_results)
+
+    # Advance-only via schedule_frontier: dispatch pending-ready nodes
+    # (conditional) and finalize when all nodes are terminal (conditional). The
+    # SAME primitive is reused verbatim by resume_execution and the watchdog
+    # reconciler (build-once re-entry, design §1).
+    execution_view = {**execution, 'nodeResults': node_results}
+    schedule_frontier(execution_view, workflow, default_input=output)
+
+
+def _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_results):
+    """Evaluate a completed node's outgoing conditional edges and mark every
+    false-branch target 'skipped' (both in the passed local ``node_results``
+    view and persisted to DynamoDB).
+
+    Extracted from handle_node_completion so the resume/reconcile paths can
+    re-run edge evaluation for a completed node whose conditional successors
+    are still 'pending' — the §6 edge-case where a lost signal stranded a
+    false branch. Idempotent: re-marking a 'skipped' node writes the identical
+    value (skipped is terminal, never re-dispatched).
+    """
+    for edge in [e for e in edges if e.get('source') == node_id]:
         condition = edge.get('condition')
-        if condition:
-            if not evaluate_condition(condition, output):
-                # Condition false → skip the target node
-                target_id = edge['target']
-                node_results[target_id] = {**node_results.get(target_id, {}), 'status': 'skipped'}
-                _executions_table.update_item(
-                    Key={'executionId': execution_id},
-                    UpdateExpression='SET nodeResults.#nid.#status = :status',
-                    ExpressionAttributeNames={'#nid': target_id, '#status': 'status'},
-                    ExpressionAttributeValues={':status': 'skipped'},
-                )
+        if condition and not evaluate_condition(condition, output):
+            target_id = edge['target']
+            node_results[target_id] = {**node_results.get(target_id, {}), 'status': 'skipped'}
+            _executions_table.update_item(
+                Key={'executionId': execution_id},
+                UpdateExpression='SET nodeResults.#nid.#status = :status',
+                ExpressionAttributeNames={'#nid': target_id, '#status': 'status'},
+                ExpressionAttributeValues={':status': 'skipped'},
+            )
 
-    # Build node list with current statuses for find_ready_nodes
-    nodes_with_status = []
-    for n in nodes:
-        nid = n['id']
-        status = node_results.get(nid, {}).get('status', 'pending')
-        nodes_with_status.append(n)
-        node_results.setdefault(nid, {})['status'] = status
 
-    status_map = {nid: nr.get('status', 'pending') for nid, nr in node_results.items()}
+def _finalize_execution(execution, output) -> bool:
+    """Conditionally finalize an execution (running->completed) and emit the
+    terminal workflow.completed event (decision O3, conditional write #3).
 
-    # Find ready nodes
+    The ConditionExpression (status = running) ensures exactly one advancement
+    finalizes even under concurrent tail completions or a resume/reconcile
+    racing a live advance. Returns True if THIS call finalized, False if the
+    execution had already left 'running'. Never emits a duplicate event.
+    """
+    execution_id = execution['executionId']
+    now = _now_iso()
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression='SET #status = :status, #completedAt = :completedAt',
+            ConditionExpression='#status = :running',
+            ExpressionAttributeNames={'#status': 'status', '#completedAt': 'completedAt'},
+            ExpressionAttributeValues={
+                ':status': 'completed',
+                ':completedAt': now,
+                ':running': 'running',
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            return False
+        _logger.error(
+            '_finalize_execution: conditional finalize failed for execution=%s: %s',
+            execution_id, exc,
+        )
+        raise
+    events.publish_workflow_completed(
+        execution_id=execution_id,
+        workflow_id=execution.get('workflowId', ''),
+        completed_at=now,
+        output=output or {},
+        eval_run_id=execution.get('evalRunId'),
+    )
+    return True
+
+
+def schedule_frontier(execution, workflow, *, default_input=None) -> list:
+    """Shared, idempotent DAG re-entry primitive (design §1).
+
+    Re-derives the ready frontier purely from the persisted node statuses on
+    the passed execution row, conditionally dispatches every ready node, and
+    finalizes the execution when all nodes are terminal. It reads status ONLY
+    from the row (never a caller-supplied node list), so completion-advance,
+    resume, and the watchdog reconciler all reuse it verbatim.
+
+    Idempotent by construction: the conditional pending->running dispatch guard
+    in ``invoke_node`` absorbs repeated/racing dispatch of the same node, and
+    ``_finalize_execution``'s conditional running->completed guard makes
+    finalize exactly-once. A lost signal (0 runs) and a duplicate/replayed
+    signal (N runs) therefore both converge to one dispatch per node and one
+    finalize per execution.
+
+    ``default_input`` is the input handed to each freshly dispatched ready node
+    — the completing node's output for completion-advance; ``{}`` for resume /
+    reconcile (matching a fresh root dispatch, where no single triggering
+    output exists). Returns the list of node_ids dispatched this pass.
+    """
+    execution_id = execution['executionId']
+    workflow_id = execution.get('workflowId', '')
+    definition = _parse_definition(workflow)
+    nodes = definition.get('nodes', [])
+    edges = definition.get('edges', [])
+    node_results = execution.get('nodeResults', {})
+
+    status_map = {
+        n['id']: node_results.get(n['id'], {}).get('status', 'pending') for n in nodes
+    }
+
     ready_ids = find_ready_nodes(nodes, edges, status_map)
 
     configuration = workflow.get('configuration', '{}')
     if isinstance(configuration, str):
         configuration = json.loads(configuration)
 
+    input_data = default_input if default_input is not None else {}
+    dispatched = []
     for ready_id in ready_ids:
         node = next((n for n in nodes if n['id'] == ready_id), None)
         if node:
             # Per-node configuration overrides workflow-level per-key
             # (decision 59376546) — same merge as the root-dispatch site.
-            invoke_node(execution_id, execution.get('workflowId', ''), node, output,
+            invoke_node(execution_id, workflow_id, node, input_data,
                         merge_node_configuration(configuration, node),
                         run_id=execution.get('runId'))
+            dispatched.append(ready_id)
 
-    # Check if all nodes are terminal (completed, skipped, or failed)
-    all_terminal = all(
+    all_terminal = bool(nodes) and all(
         status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed')
         for n in nodes
     )
-
     if all_terminal:
-        _executions_table.update_item(
-            Key={'executionId': execution_id},
-            UpdateExpression='SET #status = :status, #completedAt = :completedAt',
-            ExpressionAttributeNames={'#status': 'status', '#completedAt': 'completedAt'},
-            ExpressionAttributeValues={':status': 'completed', ':completedAt': now},
-        )
-        events.publish_workflow_completed(
-            execution_id=execution_id,
-            workflow_id=execution.get('workflowId', ''),
-            completed_at=now,
-            output=output,
-            eval_run_id=execution.get('evalRunId'),
-        )
+        _finalize_execution(execution, input_data)
+
+    return dispatched
+
+
+def _reconcile_completed_edges(execution, workflow) -> None:
+    """Re-evaluate outgoing conditional edges of every already-'completed'
+    node whose targets may still be un-pruned (design §6 edge-case).
+
+    On resume/reconcile a completion whose stepRunner crashed before persisting
+    a false-branch skip would otherwise strand that target 'pending' forever.
+    Re-running edge evaluation for completed nodes (using each node's persisted
+    output) is idempotent and repairs that gap before the frontier is scheduled.
+    """
+    definition = _parse_definition(workflow)
+    edges = definition.get('edges', [])
+    node_results = execution.get('nodeResults', {})
+    execution_id = execution['executionId']
+    for nid, nr in list(node_results.items()):
+        if nr.get('status') == 'completed':
+            _evaluate_and_persist_skips(
+                execution_id, nid, nr.get('output', {}) or {}, edges, node_results,
+            )
+
+
+def resume_execution(execution_id: str) -> None:
+    """Advance-only resume of a stuck execution (decisions O1 + O5).
+
+    SECURITY: the caller supplies ONLY ``executionId``; the server re-derives
+    the entire frontier from the persisted EXECUTIONS_TABLE row via
+    ``schedule_frontier`` — never from a caller-provided node list or status
+    override (the ``execution.resume.requested`` event carries no frontier
+    data; any extra fields are ignored). This prevents a caller from forcing
+    dispatch of arbitrary nodes, resurrecting skipped/false-branch nodes, or
+    replaying completed side-effecting nodes.
+
+    Contract:
+      * running   -> allowed, idempotent. Re-derives the frontier and dispatches
+                     only pending-ready nodes; NEVER re-dispatches a 'running'
+                     node (decision O1 — re-driving a possibly-live worker is the
+                     watchdog stall-detector's job, gated by the stall threshold
+                     + first-write-wins). Concurrency-safe: every dispatch funnels
+                     through the conditional pending->running guard, so a resume
+                     racing a live advance or a watchdog sweep converges to one
+                     dispatch per node.
+      * pending   -> allowed, equivalent to (re)start: flip to running, then
+                     schedule roots.
+      * completed / cancelled / failed -> REJECTED (decision O5): terminal,
+                     nothing to resume; no event/dispatch, returns unchanged.
+    """
+    execution = _load_execution(execution_id)
+    if not execution:
+        _log_event('resume_execution_not_found', executionId=execution_id)
+        return
+
+    status = execution.get('status')
+    if status in ('completed', 'cancelled', 'failed'):
+        # O5: terminal states are not resumable. Idempotent reject — no event,
+        # no dispatch.
+        _log_event('resume_execution_rejected_terminal', executionId=execution_id, status=status)
+        return
+
+    workflow = _load_workflow(execution.get('workflowId', ''))
+    if not workflow:
+        _log_event('resume_execution_workflow_missing', executionId=execution_id)
+        return
+
+    if status == 'pending':
+        # Equivalent to (re)start: flip pending->running (conditional) so the
+        # frontier + finalize guard operate on a 'running' row. A concurrent
+        # real start winning the flip just means we reload and advance.
+        now = _now_iso()
+        try:
+            _executions_table.update_item(
+                Key={'executionId': execution_id},
+                UpdateExpression='SET #status = :running, #startedAt = :startedAt',
+                ConditionExpression='#status = :pending',
+                ExpressionAttributeNames={'#status': 'status', '#startedAt': 'startedAt'},
+                ExpressionAttributeValues={
+                    ':running': 'running',
+                    ':pending': 'pending',
+                    ':startedAt': now,
+                },
+            )
+            execution['status'] = 'running'
+        except ClientError as exc:
+            if exc.response.get('Error', {}).get('Code') != 'ConditionalCheckFailedException':
+                raise
+            execution = _load_execution(execution_id) or execution
+
+    _log_event('resume_execution', executionId=execution_id, workflowId=execution.get('workflowId', ''))
+
+    # Repair any false-branch skip lost to a crash (§6), then re-derive and
+    # advance the frontier from persisted state. Reload after the skip writes
+    # so schedule_frontier sees the freshest statuses.
+    _reconcile_completed_edges(execution, workflow)
+    execution = _load_execution(execution_id) or execution
+    schedule_frontier(execution, workflow)
 
 
 def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:

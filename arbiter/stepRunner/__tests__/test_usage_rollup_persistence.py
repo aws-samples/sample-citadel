@@ -30,6 +30,65 @@ import pytest
 from unittest.mock import patch, MagicMock
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from botocore.exceptions import ClientError
+
+
+def _apply_set_expression(item, expr, names, values):
+    body = expr.strip()[4:]
+    for assignment in body.split(','):
+        lhs, rhs = assignment.split('=')
+        resolved = [names[s.strip()] if s.strip().startswith('#') else s.strip()
+                    for s in lhs.strip().split('.')]
+        target = item
+        for seg in resolved[:-1]:
+            target = target.setdefault(seg, {})
+        target[resolved[-1]] = values[rhs.strip()]
+
+
+def _eval_condition_expression(item, expr, names, values):
+    expr = expr.strip()
+    op = '<>' if '<>' in expr else '='
+    lhs, rhs = expr.split(op, 1)
+    resolved = [names[s.strip()] if s.strip().startswith('#') else s.strip()
+                for s in lhs.strip().split('.')]
+    target, found = item, True
+    for seg in resolved:
+        if isinstance(target, dict) and seg in target:
+            target = target[seg]
+        else:
+            found, target = False, None
+            break
+    expected = values[rhs.strip()]
+    return (found and target == expected) if op == '=' else ((not found) or target != expected)
+
+
+class StatefulConditionalTable:
+    """Stateful boto3 Table stand-in honoring ConditionExpression, so the
+    write-then-signal first-write-wins completion guard is genuinely exercised
+    for duplicate deliveries (a non-stateful MagicMock cannot)."""
+
+    def __init__(self, items, key_name='executionId'):
+        self._items = {k: copy.deepcopy(v) for k, v in items.items()}
+        self._key = key_name
+
+    def get_item(self, Key):  # noqa: N803
+        item = self._items.get(Key[self._key])
+        return {'Item': copy.deepcopy(item)} if item is not None else {}
+
+    def update_item(self, Key, UpdateExpression, ConditionExpression=None,  # noqa: N803
+                    ExpressionAttributeNames=None, ExpressionAttributeValues=None):
+        names, values = ExpressionAttributeNames or {}, ExpressionAttributeValues or {}
+        item = self._items.setdefault(Key[self._key], {self._key: Key[self._key]})
+        if ConditionExpression is not None and not _eval_condition_expression(
+                item, ConditionExpression, names, values):
+            raise ClientError(
+                {'Error': {'Code': 'ConditionalCheckFailedException', 'Message': 'failed'}},
+                'UpdateItem',
+            )
+        _apply_set_expression(item, UpdateExpression, names, values)
+
+    def current(self, val):
+        return copy.deepcopy(self._items[val])
 
 
 CHAIN_WORKFLOW = {
@@ -198,37 +257,39 @@ class TestDuplicateDeliveryUsageIdempotency:
         return side_effect
 
     def test_duplicate_completion_leaves_persisted_usage_totals_unchanged(self, mock_exec, monkeypatch):
-        """With the status guard intact, a redelivered node-completed event
-        (with usage) is a full no-op on the second call — the completed
-        update_item (and thus its usage write) fires exactly once."""
+        """A redelivered node-completed event (with usage) commits the usage +
+        usageTotals exactly once: the second delivery's first-write-wins
+        completion guard (status <> completed) no-ops, leaving the persisted
+        totals unchanged."""
         import executor
 
         monkeypatch.delenv('WORKER_QUEUE_URL', raising=False)
+        table = StatefulConditionalTable({'exec-chain': copy.deepcopy(CHAIN_EXEC)})
         mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(CHAIN_WORKFLOW)}
-        mock_exec['executions_table'].get_item.side_effect = \
-            self._exec_get_item_first_running_then('completed', 'n0', CHAIN_EXEC)
 
         usage = [{'inputTokens': 10, 'outputTokens': 5}]
-        executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'}, usage)
-        executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'}, usage)  # duplicate
+        with patch.object(executor, '_executions_table', table):
+            executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'}, usage)
+            executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'}, usage)  # duplicate
 
-        calls = _completed_update_calls(mock_exec['executions_table'])
-        assert len(calls) == 1  # guard short-circuits the second delivery entirely
+        n0 = table.current('exec-chain')['nodeResults']['n0']
+        assert n0['status'] == 'completed'
+        assert n0['usage'] == usage
+        assert n0['usageTotals'] == {
+            'inputTokens': 10, 'outputTokens': 5, 'totalTokens': 15, 'callCount': 1,
+        }
 
     def test_guard_bypass_write_is_still_idempotent_last_write_wins(self, mock_exec, monkeypatch):
-        """Even if the guard were bypassed (never returns early), calling the
-        completed-update path twice with identical usage writes byte-identical
-        SET values both times — last-write-wins, no drift."""
+        """Even if the conditional guard were bypassed (both calls see the node
+        still 'running'), the completed-update path writes byte-identical SET
+        values both times — last-write-wins, no drift."""
         import executor
 
         monkeypatch.delenv('WORKER_QUEUE_URL', raising=False)
         mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(CHAIN_WORKFLOW)}
         # Always return a FRESH deep copy of the node as 'running' so the
-        # guard never short-circuits on either call — this exercises the
-        # write's own idempotency, not the guard's, and avoids the executor's
-        # in-place node_results mutation leaking between calls (which would
-        # otherwise make the second call see 'completed' via the SAME dict
-        # object returned by a plain .return_value).
+        # conditional completion guard never fires on either call — this
+        # exercises the write's own idempotency, not the guard's.
         mock_exec['executions_table'].get_item.side_effect = \
             lambda **kwargs: {'Item': copy.deepcopy(CHAIN_EXEC)}
 
@@ -245,19 +306,17 @@ class TestDuplicateDeliveryUsageIdempotency:
     @settings(max_examples=20, deadline=None)
     def test_any_number_of_duplicates_leave_usage_totals_stable(self, dup_count):
         """Property: 1 real completion + N duplicates ⇒ the persisted usage
-        totals are identical to the single-delivery case (guard intact)."""
+        totals are identical to the single-delivery case (first-write-wins)."""
         import executor
 
         wf_table = MagicMock()
-        exec_table = MagicMock()
+        table = StatefulConditionalTable({'exec-chain': copy.deepcopy(CHAIN_EXEC)})
         ev = MagicMock()
         wf_table.get_item.return_value = {'Item': copy.deepcopy(CHAIN_WORKFLOW)}
-        exec_table.get_item.side_effect = \
-            self._exec_get_item_first_running_then('completed', 'n0', CHAIN_EXEC)
 
         usage = [{'inputTokens': 7, 'outputTokens': 2}]
         with patch.object(executor, '_workflows_table', wf_table), \
-             patch.object(executor, '_executions_table', exec_table), \
+             patch.object(executor, '_executions_table', table), \
              patch.object(executor, 'events', ev), \
              patch.object(executor, '_get_sqs_client', return_value=MagicMock()), \
              patch.dict(os.environ, {}, clear=False):
@@ -265,9 +324,7 @@ class TestDuplicateDeliveryUsageIdempotency:
             for _ in range(1 + dup_count):
                 executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'}, usage)
 
-        calls = _completed_update_calls(exec_table)
-        assert len(calls) == 1
-        assert calls[0]['ExpressionAttributeValues'][':usageTotals'] == {
+        assert table.current('exec-chain')['nodeResults']['n0']['usageTotals'] == {
             'inputTokens': 7, 'outputTokens': 2, 'totalTokens': 9, 'callCount': 1,
         }
 

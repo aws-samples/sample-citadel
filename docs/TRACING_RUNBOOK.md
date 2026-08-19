@@ -534,3 +534,42 @@ reuses `aws_cost_api_url` — see `docs/OBSERVABILITY.md`). The viewer page
 links from an execution detail sheet or a project conversation, or — for
 admins only — a raw trace-id lookup input, consistent with the
 admin-only gate on `/traces/{traceId}` above.
+
+
+## Durable execution resume & the exactly-once limit (decision O7)
+
+Workflow node execution is durable across lost events and worker crashes via
+three conditional DynamoDB writes plus a write-then-signal worker:
+
+1. **Dispatch guard** — a node is flipped `pending→running` only while still
+   `pending` (`ConditionExpression: nodeResults.#nid.#status = :pending`), so
+   concurrent predecessor completions, a resume, and a watchdog sweep converge
+   to exactly one dispatch per node.
+2. **Worker first-write-wins completion** — the Worker persists the completed
+   result to `EXECUTIONS_TABLE.nodeResults[nodeId]` (`status <> :completed`)
+   BEFORE emitting `workflow.node.completed`. A lost event therefore leaves a
+   durable, reconcilable checkpoint, not a lost result.
+3. **Finalize guard** — the execution flips `running→completed` only while
+   still `running`, so finalize + the terminal event fire exactly once.
+
+`resumeExecution(executionId)` is **advance-only**: the server re-derives the
+frontier from the persisted row (never a caller node list), dispatches only
+`pending`-ready nodes, and NEVER re-dispatches a `running` node. Re-driving a
+possibly-live worker is the watchdog stall-detector's job, gated by the stall
+threshold + first-write-wins.
+
+### The agent-side exactly-once limit (READ THIS)
+
+The guarantees above are **recorded-state** exactly-once ONLY — exactly one
+recorded completion, one dispatch, one finalize. They do **NOT** guarantee that
+an agent body executes at most once. If the watchdog re-dispatches a node whose
+original worker was merely slow (not dead), or SQS redelivers a dispatch after
+a persist error, **the agent body runs more than once** and first-write-wins
+simply drops the later recorded result.
+
+Operational consequence: **workflow agent bodies must be idempotent** — a node
+that provisions IAM, calls an external SaaS integration, or vends credentials
+must tolerate being run twice without duplicating the side effect. True
+agent-side exactly-once requires a dispatch-generation/lease token (the worker
+echoes a monotonic `dispatchGen`; the completion write rejects a stale
+generation) and is a deferred fast-follow, NOT provided by this slice.

@@ -42,6 +42,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 # --- Import the real modules under test -------------------------------------
 # Mirror the sibling stepRunner tests: put stepRunner/ first so executor/events/
@@ -112,6 +113,32 @@ def _apply_set_expression(item, expr, names, values):
         target[resolved[-1]] = value
 
 
+def _eval_condition_expression(item, expr, names, values):
+    """Evaluate a minimal DynamoDB ConditionExpression of the form
+    ``PATH = :val`` or ``PATH <> :val`` (PATH may be a dotted, #name-aliased
+    attribute path). Mirrors the conditional-write semantics the executor and
+    worker rely on: the equality gate for exactly-once dispatch/finalize and
+    the inequality gate for worker first-write-wins. True => write allowed.
+    """
+    expr = expr.strip()
+    op = '<>' if '<>' in expr else '='
+    lhs, rhs = expr.split(op, 1)
+    segments = [seg.strip() for seg in lhs.strip().split('.')]
+    resolved = [names[seg] if seg.startswith('#') else seg for seg in segments]
+    target = item
+    found = True
+    for seg in resolved:
+        if isinstance(target, dict) and seg in target:
+            target = target[seg]
+        else:
+            found, target = False, None
+            break
+    expected = values[rhs.strip()]
+    if op == '=':
+        return found and target == expected
+    return (not found) or target != expected
+
+
 class FakeTable:
     """Minimal stateful stand-in for a boto3 DynamoDB Table."""
 
@@ -125,13 +152,20 @@ class FakeTable:
         return {'Item': copy.deepcopy(item)} if item is not None else {}
 
     def update_item(self, Key, UpdateExpression,  # noqa: N803 — boto3 kwarg names
+                    ConditionExpression=None,
                     ExpressionAttributeNames=None, ExpressionAttributeValues=None):
+        names = ExpressionAttributeNames or {}
+        values = ExpressionAttributeValues or {}
         val = Key[self._key_name]
         item = self._items.setdefault(val, {self._key_name: val})
-        _apply_set_expression(
-            item, UpdateExpression,
-            ExpressionAttributeNames or {}, ExpressionAttributeValues or {},
-        )
+        if ConditionExpression is not None and not _eval_condition_expression(
+                item, ConditionExpression, names, values):
+            raise ClientError(
+                {'Error': {'Code': 'ConditionalCheckFailedException',
+                           'Message': 'The conditional request failed'}},
+                'UpdateItem',
+            )
+        _apply_set_expression(item, UpdateExpression, names, values)
 
     def current(self, val):
         return copy.deepcopy(self._items[val])

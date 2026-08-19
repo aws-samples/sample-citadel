@@ -229,6 +229,14 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
         },
       });
     });
+
+    test("StepRunnerResumeRule matches execution.resume.requested", () => {
+      template.hasResourceProperties("AWS::Events::Rule", {
+        EventPattern: {
+          "detail-type": ["execution.resume.requested"],
+        },
+      });
+    });
   });
 
   // --- WorkflowProgressFanoutRule ---
@@ -419,6 +427,52 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
     });
   });
 
+  describe("Worker executions-table write is UpdateItem-only + FGAC (decision O2)", () => {
+    // Find the worker statement(s) granting dynamodb:UpdateItem and return
+    // their condition blocks, so we can assert the attribute-scope FGAC.
+    function workerUpdateItemConditions(): any[] {
+      const policies = template.findResources("AWS::IAM::Policy");
+      const out: any[] = [];
+      for (const p of Object.values(policies) as any[]) {
+        const roles = p.Properties?.Roles || [];
+        if (
+          !roles.some((r: any) => (r?.Ref || "").includes("WorkerAgentWrapper"))
+        )
+          continue;
+        for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+          const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+          if (acts.includes("dynamodb:UpdateItem")) out.push(s.Condition);
+        }
+      }
+      return out;
+    }
+
+    test("worker has dynamodb:UpdateItem but NOT Put/Delete/BatchWrite on any table", () => {
+      const actions = actionsForRole("WorkerAgentWrapper");
+      expect(actions.has("dynamodb:UpdateItem")).toBe(true);
+      // Bare grantWriteData would have added these — it must NOT be used.
+      expect(actions.has("dynamodb:PutItem")).toBe(false);
+      expect(actions.has("dynamodb:DeleteItem")).toBe(false);
+      expect(actions.has("dynamodb:BatchWriteItem")).toBe(false);
+    });
+
+    test("the UpdateItem grant is FGAC-restricted to the nodeResults/executionId attributes", () => {
+      const conditions = workerUpdateItemConditions();
+      expect(conditions.length).toBeGreaterThan(0);
+      const hasFgac = conditions.some((c) => {
+        const attrs = c?.["ForAllValues:StringEquals"]?.["dynamodb:Attributes"];
+        return (
+          Array.isArray(attrs) &&
+          attrs.includes("nodeResults") &&
+          attrs.includes("executionId") &&
+          !attrs.includes("status") &&
+          !attrs.includes("orgId")
+        );
+      });
+      expect(hasFgac).toBe(true);
+    });
+  });
+
   describe("Seed S3 write least-privilege", () => {
     test("seed PutObject is path-scoped to agents/*, not the whole bucket", () => {
       const resources = s3PutResourcesForRole("SeedAgentConfig");
@@ -457,22 +511,64 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       });
     });
 
-    test("watchdog DynamoDB grant is least-privilege: Scan + UpdateItem only, not full read/write", () => {
+    test("watchdog DynamoDB grant is resource-scoped: reconcile reads/writes executions, reads workflows (decision O4)", () => {
       const actions = actionsForRole("WorkflowTimeoutWatchdog");
-      // The watchdog only Scans for running executions and conditionally
-      // UpdateItems the stuck ones to failed (timeout_watchdog.py).
+      // Reconcile needs to Scan for running execs, read a single exec/workflow
+      // by key (GetItem/Query), and conditionally UpdateItem (fail/reconcile).
       expect(actions.has("dynamodb:Scan")).toBe(true);
+      expect(actions.has("dynamodb:GetItem")).toBe(true);
+      expect(actions.has("dynamodb:Query")).toBe(true);
       expect(actions.has("dynamodb:UpdateItem")).toBe(true);
-      // grantReadWriteData artifacts must be gone — no put/delete/batch, and no
-      // read-by-key (the watchdog never GetItems; it reads startedAt off Scan).
+      // No table-wide write blast radius — never Put/Delete/BatchWrite.
       expect(actions.has("dynamodb:PutItem")).toBe(false);
       expect(actions.has("dynamodb:DeleteItem")).toBe(false);
       expect(actions.has("dynamodb:BatchWriteItem")).toBe(false);
-      expect(actions.has("dynamodb:GetItem")).toBe(false);
-      expect(actions.has("dynamodb:BatchGetItem")).toBe(false);
-      // Unchanged grants remain.
+      // Re-dispatch of a stalled node + terminal/finalize events + metric.
+      expect(actions.has("sqs:SendMessage")).toBe(true);
       expect(actions.has("events:PutEvents")).toBe(true);
       expect(actions.has("cloudwatch:PutMetricData")).toBe(true);
+    });
+
+    test("watchdog workflows-table grant is read-only (GetItem/Query, never write/Scan)", () => {
+      // Find the statement(s) on the watchdog role that grant a dynamodb read
+      // and assert none of them grant a write on the same statement — the
+      // workflows read grant is [GetItem, Query] with no UpdateItem/Put/Delete.
+      const policies = template.findResources("AWS::IAM::Policy");
+      let sawWorkflowsReadOnly = false;
+      for (const p of Object.values(policies) as any[]) {
+        const roles = p.Properties?.Roles || [];
+        if (
+          !roles.some((r: any) =>
+            (r?.Ref || "").includes("WorkflowTimeoutWatchdog"),
+          )
+        )
+          continue;
+        for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+          const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+          const isReadOnly =
+            acts.includes("dynamodb:GetItem") &&
+            acts.includes("dynamodb:Query") &&
+            !acts.includes("dynamodb:UpdateItem") &&
+            !acts.includes("dynamodb:Scan") &&
+            !acts.includes("dynamodb:PutItem") &&
+            !acts.includes("dynamodb:DeleteItem");
+          if (isReadOnly) sawWorkflowsReadOnly = true;
+        }
+      }
+      // The dedicated read-only statement (workflows table) must exist.
+      expect(sawWorkflowsReadOnly).toBe(true);
+    });
+
+    test("watchdog carries the reconcile env (workflows table, worker queue, node-stall)", () => {
+      const fns = template.findResources("AWS::Lambda::Function", {
+        Properties: { Handler: "timeout_watchdog.handler" },
+      });
+      const fn = Object.values(fns)[0] as any;
+      const env = fn.Properties.Environment.Variables;
+      expect(env.WORKFLOWS_TABLE).toBeDefined();
+      expect(env.WORKER_QUEUE_URL).toBeDefined();
+      expect(env.NODE_STALL_TIMEOUT_SECONDS).toBe("900");
+      expect(env.NODE_STALL_FACTOR).toBe("2");
     });
   });
 

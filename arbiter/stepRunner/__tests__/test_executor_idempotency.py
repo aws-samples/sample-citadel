@@ -29,6 +29,74 @@ import pytest
 from unittest.mock import patch, MagicMock
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from botocore.exceptions import ClientError
+
+
+# ---------------------------------------------------------------------------
+# Stateful, conditional-aware DynamoDB Table stand-in.
+# ---------------------------------------------------------------------------
+# Under write-then-signal the completion early-return is gone; duplicate-
+# delivery idempotency now rests on the conditional dispatch/completion/finalize
+# writes. Exercising that requires a STATEFUL table that honors
+# ConditionExpression (a non-stateful MagicMock cannot). The SQS client stays a
+# plain MagicMock (dispatch count is what these tests assert), so idempotency is
+# proven by the conditional guards actually biting.
+
+
+def _apply_set_expression(item, expr, names, values):
+    body = expr.strip()[4:]  # drop leading 'SET '
+    for assignment in body.split(','):
+        lhs, rhs = assignment.split('=')
+        segments = [s.strip() for s in lhs.strip().split('.')]
+        resolved = [names[s] if s.startswith('#') else s for s in segments]
+        target = item
+        for seg in resolved[:-1]:
+            target = target.setdefault(seg, {})
+        target[resolved[-1]] = values[rhs.strip()]
+
+
+def _eval_condition_expression(item, expr, names, values):
+    expr = expr.strip()
+    op = '<>' if '<>' in expr else '='
+    lhs, rhs = expr.split(op, 1)
+    resolved = [names[s.strip()] if s.strip().startswith('#') else s.strip()
+                for s in lhs.strip().split('.')]
+    target, found = item, True
+    for seg in resolved:
+        if isinstance(target, dict) and seg in target:
+            target = target[seg]
+        else:
+            found, target = False, None
+            break
+    expected = values[rhs.strip()]
+    return (found and target == expected) if op == '=' else ((not found) or target != expected)
+
+
+class StatefulConditionalTable:
+    """Stateful boto3 Table stand-in honoring ConditionExpression."""
+
+    def __init__(self, items, key_name='executionId'):
+        self._items = {k: copy.deepcopy(v) for k, v in items.items()}
+        self._key = key_name
+
+    def get_item(self, Key):  # noqa: N803
+        item = self._items.get(Key[self._key])
+        return {'Item': copy.deepcopy(item)} if item is not None else {}
+
+    def update_item(self, Key, UpdateExpression, ConditionExpression=None,  # noqa: N803
+                    ExpressionAttributeNames=None, ExpressionAttributeValues=None):
+        names, values = ExpressionAttributeNames or {}, ExpressionAttributeValues or {}
+        item = self._items.setdefault(Key[self._key], {self._key: Key[self._key]})
+        if ConditionExpression is not None and not _eval_condition_expression(
+                item, ConditionExpression, names, values):
+            raise ClientError(
+                {'Error': {'Code': 'ConditionalCheckFailedException', 'Message': 'failed'}},
+                'UpdateItem',
+            )
+        _apply_set_expression(item, UpdateExpression, names, values)
+
+    def current(self, val):
+        return copy.deepcopy(self._items[val])
 
 
 # ---------------------------------------------------------------------------
@@ -137,34 +205,40 @@ class TestDuplicateCompletion:
         assert body['node_id'] == 'n1'
 
     def test_duplicate_completion_does_not_reinvoke_downstream(self, mock_exec, monkeypatch):
-        """A duplicate node-completed delivery must not dispatch n1 twice."""
+        """A duplicate node-completed delivery must not dispatch n1 twice.
+
+        Idempotency now comes from the stateful conditional guards: delivery 1
+        marks n0 completed and flips n1 pending->running; delivery 2's
+        completion write no-ops (n0 already completed) and n1 is no longer
+        pending, so the conditional dispatch guard blocks a second send."""
         import executor
 
         monkeypatch.setenv('WORKER_QUEUE_URL', 'https://sqs.fake/worker-queue')
+        table = StatefulConditionalTable({'exec-chain': copy.deepcopy(CHAIN_EXEC)})
         mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(CHAIN_WORKFLOW)}
-        mock_exec['executions_table'].get_item.side_effect = \
-            _exec_get_item_first_running_then('completed', 'n0', CHAIN_EXEC)
-
-        executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'})
-        executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'})  # duplicate
+        with patch.object(executor, '_executions_table', table):
+            executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'})
+            executor.handle_node_completion('exec-chain', 'n0', {'result': 'done'})  # duplicate
 
         # Downstream n1 dispatched exactly once across both deliveries.
         assert mock_exec['sqs'].send_message.call_count == 1
         assert mock_exec['events'].publish_node_started.call_count == 1
+        assert table.current('exec-chain')['nodeResults']['n1']['status'] == 'running'
 
     def test_duplicate_completion_of_last_node_completes_execution_once(self, mock_exec, monkeypatch):
         """A duplicate completion of the terminal node emits workflow.completed once."""
         import executor
 
         monkeypatch.delenv('WORKER_QUEUE_URL', raising=False)
+        table = StatefulConditionalTable({'exec-single': copy.deepcopy(SINGLE_EXEC)})
         mock_exec['workflows_table'].get_item.return_value = {'Item': copy.deepcopy(SINGLE_WORKFLOW)}
-        mock_exec['executions_table'].get_item.side_effect = \
-            _exec_get_item_first_running_then('completed', 'n0', SINGLE_EXEC)
+        with patch.object(executor, '_executions_table', table):
+            executor.handle_node_completion('exec-single', 'n0', {'ok': True})
+            executor.handle_node_completion('exec-single', 'n0', {'ok': True})  # duplicate
 
-        executor.handle_node_completion('exec-single', 'n0', {'ok': True})
-        executor.handle_node_completion('exec-single', 'n0', {'ok': True})  # duplicate
-
+        # The conditional running->completed finalize guard emits exactly once.
         mock_exec['events'].publish_workflow_completed.assert_called_once()
+        assert table.current('exec-single')['status'] == 'completed'
 
     @given(dup_count=st.integers(min_value=0, max_value=5))
     @settings(max_examples=25, deadline=None)
@@ -173,15 +247,13 @@ class TestDuplicateCompletion:
         import executor
 
         wf_table = MagicMock()
-        exec_table = MagicMock()
+        table = StatefulConditionalTable({'exec-chain': copy.deepcopy(CHAIN_EXEC)})
         ev = MagicMock()
         sqs = MagicMock()
         wf_table.get_item.return_value = {'Item': copy.deepcopy(CHAIN_WORKFLOW)}
-        exec_table.get_item.side_effect = \
-            _exec_get_item_first_running_then('completed', 'n0', CHAIN_EXEC)
 
         with patch.object(executor, '_workflows_table', wf_table), \
-             patch.object(executor, '_executions_table', exec_table), \
+             patch.object(executor, '_executions_table', table), \
              patch.object(executor, 'events', ev), \
              patch.object(executor, '_get_sqs_client', return_value=sqs), \
              patch.dict(os.environ, {'WORKER_QUEUE_URL': 'https://sqs.fake/q'}):

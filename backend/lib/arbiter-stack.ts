@@ -436,6 +436,13 @@ export class ArbiterStack extends cdk.Stack {
           CREDENTIAL_VENDER_FUNCTION: credentialVenderLambda.functionName,
           // QT3-6: dispatch-time spec status validation.
           EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
+          // Write-then-signal (decision O2): the worker persists a completed
+          // node's result to the executions table BEFORE emitting
+          // workflow.node.completed. Env is set only when the executions table
+          // is wired; the worker no-ops the durable write when it is absent.
+          ...(props.executionsTable && {
+            EXECUTIONS_TABLE: props.executionsTable.tableName,
+          }),
           ...(props.registryId && { REGISTRY_ID: props.registryId }),
           ...(props.registryId && { REGISTRY_ENABLED: "true" }),
         },
@@ -470,6 +477,46 @@ export class ArbiterStack extends cdk.Stack {
     // read-only access to ExecutionSpecifications for dispatch-time
     // status checks. Never written to from the worker.
     props.executionSpecificationsTable.grantReadData(workerAgentWrapperLambda);
+
+    // Write-then-signal durable write (decision O2, HARD GATE). The worker's
+    // access to the executions table is deliberately NOT a bare
+    // grantWriteData (which would grant Put/Delete/BatchWrite on every
+    // attribute — a full multi-tenant read/write/delete blast radius if the
+    // worker, which runs untrusted/semi-trusted agent bodies, is compromised).
+    // Instead it is:
+    //   * ACTION-SCOPED to dynamodb:UpdateItem ONLY (no Put/Delete/BatchWrite).
+    //   * ATTRIBUTE-SCOPED via FGAC (dynamodb:Attributes) to the nodeResults
+    //     map + the executionId key. nodeResults is a TOP-LEVEL attribute and
+    //     DynamoDB FGAC scopes at the top level, so this STRUCTURALLY prevents
+    //     the worker from ever writing execution-level status / orgId / output
+    //     / error / runId — even a fully compromised worker cannot flip an
+    //     execution's status or cross into another tenant's execution fields.
+    //   * ReturnValues-restricted so the worker cannot exfiltrate other
+    //     attributes via ALL_OLD/ALL_NEW.
+    // The application-level ConditionExpression (status <> completed) is a
+    // correctness first-write-wins guard, NOT a security boundary (a
+    // compromised worker can omit it) — the IAM narrowing above is the boundary.
+    // Residual (accepted, documented): the worker can still write SOME node's
+    // nodeResults on any execution (item-level LeadingKeys pinning is not
+    // possible since it handles arbitrary executions); a per-dispatch scoped
+    // STS session keyed to the executionId is the follow-up to close that.
+    if (props.executionsTable) {
+      workerAgentWrapperLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:UpdateItem"],
+          resources: [props.executionsTable.tableArn],
+          conditions: {
+            "ForAllValues:StringEquals": {
+              "dynamodb:Attributes": ["nodeResults", "executionId"],
+            },
+            StringEqualsIfExists: {
+              "dynamodb:ReturnValues": ["NONE", "UPDATED_NEW", "UPDATED_OLD"],
+            },
+          },
+        }),
+      );
+    }
 
     // The worker emits best-effort node-level metrics (NodeDurationMs /
     // NodeFailure) into the Citadel/Workflows namespace after running each
@@ -1061,6 +1108,24 @@ export class ArbiterStack extends cdk.Stack {
         new targets.LambdaFunction(stepRunnerFunction),
       );
 
+      // Advance-only resume (durable-execution-resume): route
+      // execution.resume.requested (emitted by the resumeExecution resolver)
+      // to the step runner, which re-derives the frontier from persisted
+      // state and dispatches only the pending-ready nodes.
+      const stepRunnerResumeRule = new events.Rule(
+        this,
+        "StepRunnerResumeRule",
+        {
+          eventBus: props.agentEventBus,
+          eventPattern: {
+            detailType: ["execution.resume.requested"],
+          },
+        },
+      );
+      stepRunnerResumeRule.addTarget(
+        new targets.LambdaFunction(stepRunnerFunction),
+      );
+
       // WorkflowProgressFanoutRule — matches workflow.* events → FanoutFunction
       if (props.fanoutFunction) {
         const workflowProgressFanoutRule = new events.Rule(
@@ -1087,12 +1152,15 @@ export class ArbiterStack extends cdk.Stack {
         );
       }
 
-      // --- Workflow Timeout Watchdog (self-contained) ---
-      // A scheduled sweep that fails executions stuck in the 'running' state
-      // past a configurable timeout, emitting workflow.failed via the events
-      // module so the rest of the system reacts as it would to any terminal
-      // failure. It shares the stepRunner asset but uses its own handler and
-      // talks only to the executions table + event bus (no executor coupling).
+      // --- Workflow Timeout Watchdog (reconcile-or-fail) ---
+      // A scheduled sweep that gives every stuck 'running' execution a definite
+      // disposition: reconcile a lost-event frontier (re-derive + dispatch via
+      // the executor's shared schedule_frontier), reconcile-or-fail a stalled
+      // node, else fail the execution at the execution-level backstop. It
+      // shares the stepRunner asset AND (decision O4) now reads the workflows
+      // table + reuses the executor's re-entry primitive — a deliberate
+      // revision of the former "no executor coupling" constraint, with the IAM
+      // widening below kept strictly resource-scoped.
       const workflowTimeoutWatchdogFunction = new lambda.Function(
         this,
         "WorkflowTimeoutWatchdogFunction",
@@ -1105,28 +1173,56 @@ export class ArbiterStack extends cdk.Stack {
           memorySize: 256,
           environment: {
             EXECUTIONS_TABLE: props.executionsTable.tableName,
+            WORKFLOWS_TABLE: props.workflowsTable.tableName,
             EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+            // Re-dispatch of a stalled node goes to the shared worker queue via
+            // the executor's invoke_node.
+            WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
             // Executions still 'running' after this many seconds are considered
             // stuck and failed by the sweep. Default 1 hour.
             WORKFLOW_TIMEOUT_SECONDS: "3600",
+            // Per-node stall threshold = NODE_STALL_TIMEOUT_SECONDS *
+            // NODE_STALL_FACTOR (decision O6; 900s worker ceiling * 2).
+            NODE_STALL_TIMEOUT_SECONDS: "900",
+            NODE_STALL_FACTOR: "2",
           },
         },
       );
 
-      // Least-privilege: the watchdog only Scans for running executions and
-      // conditionally UpdateItems the stuck ones to failed (timeout_watchdog.py
-      // _scan_running + _fail_stuck). It never reads by key, puts, or deletes,
-      // so grant exactly dynamodb:Scan + dynamodb:UpdateItem on the base table
-      // ARN rather than full read/write (grantReadWriteData). PutEvents on the
-      // shared bus (workflow.failed) and PutMetricData for the best-effort
-      // timeout metric (Citadel/Workflows namespace) follow below.
+      // Least-privilege (decision O4 — resource-scoped, no wildcards). The
+      // watchdog now:
+      //   * Scans + reads-by-key (GetItem/Query) the executions table and
+      //     conditionally UpdateItems it (reconcile writes go through the
+      //     executor's conditional guards; the watchdog itself fails stuck
+      //     executions).
+      //   * Reads the workflows table (GetItem/Query ONLY — never Scan/write)
+      //     to know the DAG graph for reconcile.
+      //   * SendMessage to the worker queue ARN to re-dispatch a stalled node.
+      //   * PutEvents on the shared bus (workflow.failed / workflow.completed)
+      //     and PutMetricData for the best-effort timeout metric (below).
+      // It remains a distinct, higher-trust role than the worker (which is
+      // UpdateItem-only + FGAC) and is triggered ONLY by its EventBridge
+      // schedule — never externally invokable.
       workflowTimeoutWatchdogFunction.addToRolePolicy(
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
-          actions: ["dynamodb:Scan", "dynamodb:UpdateItem"],
+          actions: [
+            "dynamodb:Scan",
+            "dynamodb:GetItem",
+            "dynamodb:Query",
+            "dynamodb:UpdateItem",
+          ],
           resources: [props.executionsTable.tableArn],
         }),
       );
+      workflowTimeoutWatchdogFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:GetItem", "dynamodb:Query"],
+          resources: [props.workflowsTable.tableArn],
+        }),
+      );
+      workerAgentQueue.grantSendMessages(workflowTimeoutWatchdogFunction);
       props.agentEventBus.grantPutEventsTo(workflowTimeoutWatchdogFunction);
       workflowTimeoutWatchdogFunction.addToRolePolicy(
         new iam.PolicyStatement({

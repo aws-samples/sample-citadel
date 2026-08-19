@@ -120,7 +120,7 @@ These events are published by the Step Runner via `arbiter/stepRunner/events.py`
 |------------|----------|----------|-------------|
 | `workflow.started` | executor.start_execution | Fan-out Lambda | Execution transitioned pending → running |
 | `workflow.node.started` | executor.invoke_node | Fan-out Lambda | Node began execution |
-| `workflow.node.completed` | Worker Wrapper | Step Runner, Fan-out Lambda | Node completed successfully |
+| `workflow.node.completed` | Worker Wrapper | Step Runner, Fan-out Lambda | Node completed successfully. **Write-then-signal (decision O2):** the Worker persists the node's `completed` status + output to `EXECUTIONS_TABLE.nodeResults[nodeId]` (conditional first-write-wins) BEFORE emitting this event, so the event is now purely a DAG-advance *signal*. A lost event leaves a durable, reconcilable checkpoint (the watchdog reconciles it within one sweep), never a signaled-but-unpersisted black hole. No wire-schema change. |
 | `workflow.node.failed` | Worker Wrapper | Step Runner, Fan-out Lambda | Node execution failed |
 | `workflow.node.retrying` | executor.handle_node_failure | Fan-out Lambda | Node scheduled for retry |
 | `workflow.completed` | executor.handle_node_completion | Fan-out Lambda | All nodes completed |
@@ -570,6 +570,45 @@ These events control workflow execution lifecycle. They are published by the Exe
 |------------|----------|----------|-------------|
 | `execution.start.requested` | execution-resolver, app-invoke-handler | Step Runner | Start a new workflow execution |
 | `execution.cancel.requested` | execution-resolver | Step Runner | Cancel a running execution |
+| `execution.resume.requested` | execution-resolver | Step Runner (`StepRunnerResumeRule`) | Advance-only resume of a stuck execution — re-derive the frontier from persisted state and dispatch pending-ready nodes |
+
+#### execution.resume.requested
+
+Emitted by the `resumeExecution` GraphQL mutation after an org-scoped IDOR
+check and terminal-state rejection (completed/cancelled/failed are not
+resumable, decision O5). The Step Runner re-derives the entire frontier from
+the persisted `EXECUTIONS_TABLE` row; the payload carries ONLY locating ids +
+the server-validated `orgId` (the consumer re-checks org ownership,
+defense-in-depth) — never a caller-supplied node list or status override.
+Resume is advance-only: it dispatches `pending`-ready nodes and NEVER
+re-dispatches a `running` node (decision O1 — re-driving a possibly-live worker
+is the watchdog stall-detector's job).
+
+```json
+{
+  "source": "citadel.workflows",
+  "detail-type": "execution.resume.requested",
+  "detail": {
+    "executionId": "string",
+    "workflowId": "string",
+    "orgId": "string",
+    "runId": "string (optional)"
+  }
+}
+```
+
+### Exactly-once guarantee and its agent-side limit (decision O7)
+
+The durable-execution machinery guarantees exactly-once at the **recorded-state**
+level only: exactly one `completed` result is recorded per node (worker
+first-write-wins), exactly one dispatch per node (conditional `pending→running`
+guard), and exactly one finalize per execution (conditional `running→completed`
+guard). It does **NOT** provide agent-side exactly-once: if the watchdog
+re-dispatches a node whose original worker was merely slow (not dead), the agent
+**body runs twice** and only the first recorded completion survives. Downstream
+agent bodies must therefore be designed idempotent. A dispatch-generation/lease
+token would be required for true agent-side once and is deferred (see
+docs/TRACING_RUNBOOK.md).
 
 ## Task Orchestration Events
 
@@ -718,6 +757,7 @@ The consumer's write semantics make the family safe under duplicates, retries, a
 | `StepRunnerNodeCompletedRule` | detailType: `workflow.node.completed` | Step Runner Lambda |
 | `StepRunnerNodeFailedRule` | detailType: `workflow.node.failed` | Step Runner Lambda |
 | `StepRunnerCancelRule` | detailType: `execution.cancel.requested` | Step Runner Lambda |
+| `StepRunnerResumeRule` | detailType: `execution.resume.requested` | Step Runner Lambda |
 | `WorkflowProgressFanoutRule` | source: `citadel.workflows`, 7 detail types | Fan-out Lambda |
 
 ### ServicesStack Rules
