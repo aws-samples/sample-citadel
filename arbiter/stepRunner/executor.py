@@ -15,6 +15,8 @@ import os
 import sys
 from datetime import datetime, timezone
 
+from botocore.exceptions import ClientError
+
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
 # import BEFORE any boto3 client this module (or its `events` sibling)
 # constructs, so patch_all() instruments botocore ahead of client creation.
@@ -607,17 +609,52 @@ def invoke_node(
         agentId=agent_id or None,
     )
 
-    # Update node status to running
-    _executions_table.update_item(
-        Key={'executionId': execution_id},
-        UpdateExpression='SET nodeResults.#nid.#status = :status, nodeResults.#nid.#startedAt = :startedAt',
-        ExpressionAttributeNames={
-            '#nid': node_id,
-            '#status': 'status',
-            '#startedAt': 'startedAt',
-        },
-        ExpressionAttributeValues={':status': 'running', ':startedAt': now},
-    )
+    # Exactly-once dispatch guard (conditional pending->running write). The
+    # transition only commits while the node is still 'pending', so when two
+    # concurrent predecessor-completions both compute a convergence node
+    # "ready" (or a resume/watchdog re-drive races a live advance) exactly one
+    # writer wins the pending->running flip and sends the SQS message; every
+    # other dispatcher's conditional write raises ConditionalCheckFailedException
+    # and is a no-op here. This is THE single serialization point that makes
+    # node dispatch exactly-once regardless of which path (root dispatch,
+    # completion-advance, resume, or watchdog reconcile) drives it — replacing
+    # the previous unconditional SET, which let both racing dispatchers send
+    # (latent double-dispatch of convergence nodes).
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression='SET nodeResults.#nid.#status = :status, nodeResults.#nid.#startedAt = :startedAt',
+            ConditionExpression='nodeResults.#nid.#status = :pending',
+            ExpressionAttributeNames={
+                '#nid': node_id,
+                '#status': 'status',
+                '#startedAt': 'startedAt',
+            },
+            ExpressionAttributeValues={
+                ':status': 'running',
+                ':startedAt': now,
+                ':pending': 'pending',
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            # Another dispatcher already moved this node out of 'pending' —
+            # dispatch is exactly-once, so skip the node.started event and the
+            # SQS send entirely. Not an error: this is the guard doing its job.
+            _log_event(
+                'node_dispatch_skipped_not_pending',
+                executionId=execution_id,
+                workflowId=workflow_id,
+                nodeId=node_id,
+            )
+            return
+        # Any other DynamoDB error is unexpected — never swallow a DB write
+        # error; surface it so the dispatch failure is observable.
+        _logger.error(
+            'invoke_node: conditional dispatch write failed for execution=%s node=%s: %s',
+            execution_id, node_id, exc,
+        )
+        raise
 
     # Publish node.started event
     events.publish_node_started(
@@ -858,12 +895,35 @@ def handle_node_completion(
     )
 
     if all_terminal:
-        _executions_table.update_item(
-            Key={'executionId': execution_id},
-            UpdateExpression='SET #status = :status, #completedAt = :completedAt',
-            ExpressionAttributeNames={'#status': 'status', '#completedAt': 'completedAt'},
-            ExpressionAttributeValues={':status': 'completed', ':completedAt': now},
-        )
+        # Finalize guard (conditional running->completed write). Under
+        # concurrent tail completions two advancements can both observe
+        # all-terminal; the ConditionExpression ensures exactly one flips the
+        # execution to 'completed' and emits the terminal workflow.completed
+        # event. A losing advancement raises ConditionalCheckFailedException
+        # and is a no-op (never a duplicate finalize / duplicate event).
+        try:
+            _executions_table.update_item(
+                Key={'executionId': execution_id},
+                UpdateExpression='SET #status = :status, #completedAt = :completedAt',
+                ConditionExpression='#status = :running',
+                ExpressionAttributeNames={'#status': 'status', '#completedAt': 'completedAt'},
+                ExpressionAttributeValues={
+                    ':status': 'completed',
+                    ':completedAt': now,
+                    ':running': 'running',
+                },
+            )
+        except ClientError as exc:
+            if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+                # Execution already left 'running' (a concurrent advancement
+                # finalized it, or it was cancelled/failed). Do not re-emit the
+                # terminal event.
+                return
+            _logger.error(
+                'handle_node_completion: conditional finalize failed for execution=%s: %s',
+                execution_id, exc,
+            )
+            raise
         events.publish_workflow_completed(
             execution_id=execution_id,
             workflow_id=execution.get('workflowId', ''),
