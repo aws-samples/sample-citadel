@@ -427,3 +427,69 @@ lets a later run re-write the finding idempotently.
 | Canary active before deploy never evaluated | Deploy-time GSI backfill gap — reweight it once to materialize the `ActiveCanaryIndex` marker (see above). |
 | `AutoRollbackFindingWriteFailure` alarm firing | An abort committed but its ledger finding write failed. The move is audited via history; re-drive the finding (idempotent id) or investigate the governance-ledger write path. |
 | Auto-rollback fired but stable changed | Should be impossible in v1 (abort-only leaves stable untouched). If observed, treat as a security incident — the auto path must only mint `AUTO_ABORT_CANARY`. |
+
+## 18. Release diff (`releaseDiff`)
+
+`releaseDiff(releaseIdA: ID!, releaseIdB: ID!): ReleaseDiff!` (Query,
+`release-diff-resolver.ts` / `release-diff.ts`) computes a **per-constituent
+semantic diff** between two immutable `AgentRelease` bundles: `agentConfig`,
+one entry per prompt name, `execSpec`, one entry per model slot, `tools`
+(list ±), `policy` (field-level delta), `evalEvidence` (pointer delta), and
+`scoreVector` (per-dimension before→after movement, resolved from each
+side's `EvalRun.scoreAggregates`). **Only changed constituents appear** —
+an unchanged constituent is omitted entirely, never returned as a
+zero-delta entry.
+
+```graphql
+query {
+  releaseDiff(releaseIdA: "release-abc", releaseIdB: "release-xyz") {
+    releaseIdA
+    releaseIdB
+    changes {
+      kind        # agentConfig | prompt | execSpec | model | tools | policy | evalEvidence | scoreVector
+      key         # constituent identity within kind (prompt name, model slot, ...)
+      before
+      after
+      lineDiff    # prompt only
+      fieldChanges # policy only
+      movements   # scoreVector only
+      truncated
+    }
+  }
+}
+```
+
+**Authz.** Read-only, org-scoped like every other release read in this
+codebase — there is no `release:read` permission (none of
+`getCurrentEnvironmentReleasePointer` / `listEnvironmentReleasePointers` /
+`environmentReleasePointerHistory` have one either); both releases must
+belong to the caller's own org or the query throws (`ReleaseNotFoundError`
+/ a distinct cross-org rejection).
+
+**Size safety.** Each changed constituent is independently capped
+(`MAX_CONSTITUENT_DIFF_BYTES`, 256KB) — an oversized constituent (e.g. a
+huge prompt) is replaced with a `truncated: true` byte-count summary
+instead of failing the query. The query itself never throws because a
+diff is large.
+
+**Embedded in the promotion approval finding, additively.** At approval
+time (§7), `validatePromotionApproval` best-effort computes
+`releaseDiff(currentStableReleaseId, candidateReleaseId)` and attaches it
+as an additive `diff` field on the `release-promotion-approval` governance
+finding, so the human approving a promotion sees the delta inline with the
+decision. This is **the only eager releaseDiff call site** in the
+codebase — every other use is on-demand via the query above. It is
+defense-in-depth size-capped a second time over the *whole* serialized
+diff (`MAX_APPROVAL_DIFF_BYTES`, 256KB, distinct from the per-constituent
+cap) and is **never blocking**: no current stable pointer yet (first
+promotion), the stable release already being the candidate (no delta), or
+any read/compute failure all resolve to simply omitting the `diff` field —
+the approval decision and its finding are recorded identically either way.
+
+**UI — API-only interim.** No release-detail surface exists in
+`frontend/src` today (grep confirms it — same interim-pattern acknowledged
+elsewhere in this epic for canary/auto-rollback: ship the API, defer the
+UI). Until a release-detail view is built, consumers read `releaseDiff`
+directly (GraphQL Explorer, or by reading the embedded `diff` field on the
+`release-promotion-approval` finding via the governance UI's existing
+finding views) rather than a dedicated diff screen.
