@@ -114,6 +114,7 @@ import {
 } from "./utils/promotion-ladder";
 import { writeReleaseGateFinding } from "./utils/release-gate-finding-writer";
 import { writeReleasePromotionApprovalFinding } from "./utils/release-promotion-approval-writer";
+import { releaseDiff } from "./release-diff-resolver";
 import { publishEvent, createReleaseEvent, EventTypes } from "../utils/events";
 import {
   getEnvironmentReleasePointer,
@@ -143,6 +144,15 @@ const docClient = DynamoDBDocumentClient.from(dynamoClient);
 function agentReleasesTable(): string {
   return process.env.AGENT_RELEASES_TABLE!;
 }
+
+/** Size cap on the FULLY serialized candidate-vs-stable diff embedded
+ * into a promotion approval finding — mirrors eval-resolver.ts's /
+ * eval-comparison-resolver.ts's MAX_JSON_FIELD_BYTES precedent (256KB),
+ * reused verbatim. Distinct from release-diff.ts's own
+ * MAX_CONSTITUENT_DIFF_BYTES (per-constituent), since this cap is over
+ * the WHOLE diff payload after every constituent has already been
+ * individually truncated. */
+const MAX_APPROVAL_DIFF_BYTES = 256 * 1024;
 
 function requireReleasePromotePermission(authContext: AuthContext): void {
   if (!hasPermission(authContext, "release:promote")) {
@@ -559,6 +569,93 @@ function validatePercentBasisPoints(percentBasisPoints: number): void {
  * threading it through validateReleaseGate's return value, so
  * validateReleaseGate's existing signature and tests are undisturbed.
  */
+/**
+ * Best-effort candidate-vs-current-target-env-stable releaseDiff,
+ * embedded into the promotion approval finding at creation time (task
+ * spec: "Embed the diff (candidate vs current target-env stable) in
+ * the promotion approval request payload at creation"). This is the
+ * ONLY call site in the codebase that computes a releaseDiff eagerly
+ * rather than on-demand via the releaseDiff query — it exists purely to
+ * give the approving human the delta inline with the decision they're
+ * being asked to make.
+ *
+ * ADDITIVE AND NEVER BLOCKING (task spec: "approval must never fail
+ * because a diff is large" — generalized here to "for any reason at
+ * all"): every failure mode — no current stable pointer yet (first-ever
+ * promotion to this environment), the stable release row missing,
+ * EvalRun reads failing, or the diff computation itself throwing —
+ * resolves to `undefined` (diff omitted) rather than propagating. The
+ * approval finding write proceeds identically either way; only the
+ * (optional) `diff` field differs. release-diff.ts's own per-constituent
+ * MAX_CONSTITUENT_DIFF_BYTES truncation already defends against a
+ * single oversized constituent; this function ALSO caps the fully
+ * serialized diff (defense in depth against many-small-changes bloat)
+ * before returning it, again resolving to `undefined` rather than
+ * throwing if even the size check fails unexpectedly.
+ */
+async function resolveCandidateVsStableDiff(
+  candidate: AgentRelease,
+  environment: EnvironmentLiteral,
+  callerOrgId: string,
+): Promise<unknown> {
+  try {
+    const currentPointer = await getEnvironmentReleasePointer(
+      callerOrgId,
+      candidate.agentTargetId,
+      environment,
+    );
+    if (!currentPointer) {
+      // No current stable release for this (org, agent, environment) —
+      // e.g. the very first promotion. Nothing to diff against.
+      return undefined;
+    }
+    if (currentPointer.releaseId === candidate.releaseId) {
+      // Re-approving the release already stable here (e.g. a canary
+      // full-cutover of the release that IS the current stable) — no
+      // delta to show.
+      return undefined;
+    }
+
+    const result = await releaseDiff(
+      currentPointer.releaseId,
+      candidate.releaseId,
+      callerOrgId,
+    );
+
+    // Defense-in-depth size cap on the FULLY serialized diff, on top of
+    // release-diff.ts's own per-constituent truncation — mirrors this
+    // module's own MAX_APPROVAL_DIFF_BYTES doctrine rather than
+    // reusing release-diff.ts's per-constituent constant, since this
+    // cap is over the WHOLE payload, not one constituent.
+    const serialized = JSON.stringify(result);
+    if (
+      serialized !== undefined &&
+      Buffer.byteLength(serialized, "utf8") > MAX_APPROVAL_DIFF_BYTES
+    ) {
+      return {
+        releaseIdA: result.releaseIdA,
+        releaseIdB: result.releaseIdB,
+        truncated: true,
+      };
+    }
+    return result;
+  } catch (err: unknown) {
+    // Best-effort: a diff-computation failure must never abort or even
+    // slow-path the approval decision itself. Logged for observability,
+    // then swallowed.
+    console.error(
+      "environment-release-pointer-resolver: best-effort candidate-vs-stable releaseDiff failed — omitting diff from the approval finding, continuing",
+      {
+        agentTargetId: candidate.agentTargetId,
+        environment,
+        candidateReleaseId: candidate.releaseId,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
+    return undefined;
+  }
+}
+
 export async function validatePromotionApproval(
   release: AgentRelease,
   environment: EnvironmentLiteral,
@@ -585,6 +682,11 @@ export async function validatePromotionApproval(
 
   const decision: "permit" | "deny" = approval.approved ? "permit" : "deny";
   const traceContext = getActiveTraceContext();
+  const diff = await resolveCandidateVsStableDiff(
+    release,
+    environment,
+    callerOrgId,
+  );
 
   if (!approval.approved) {
     // Record the denial finding BEFORE throwing (strict) — fail-closed:
@@ -599,6 +701,7 @@ export async function validatePromotionApproval(
       decision,
       justification: approval.justification,
       ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
+      ...(diff !== undefined ? { diff } : {}),
     });
 
     if (disposition.block) {
@@ -618,6 +721,7 @@ export async function validatePromotionApproval(
     decision,
     justification: approval.justification,
     ...(traceContext?.traceId ? { traceId: traceContext.traceId } : {}),
+    ...(diff !== undefined ? { diff } : {}),
   });
 }
 

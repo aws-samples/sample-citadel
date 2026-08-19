@@ -1735,6 +1735,324 @@ describe("promoteEnvironmentReleasePointer — approval wiring (decision 8165b7e
   });
 });
 
+describe("validatePromotionApproval — candidate-vs-stable diff embedding (additive)", () => {
+  const architect = authContextFor("architect");
+
+  test("embeds a diff when a current stable pointer exists and differs from the candidate", async () => {
+    ddbMock.reset();
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({
+        Item: {
+          orgId: "org-1",
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-stable",
+          previousReleaseId: null,
+          promotedAt: "2026-01-01T00:00:00.000Z",
+          promotedBy: "user-1",
+          version: 1,
+        },
+      });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-agent-releases-test",
+        Key: { releaseId: "release-stable" },
+      })
+      .resolves({
+        Item: release({ releaseId: "release-stable", execSpecVersion: 1 }),
+      });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-agent-releases-test",
+        Key: { releaseId: "release-candidate" },
+      })
+      .resolves({
+        Item: release({ releaseId: "release-candidate", execSpecVersion: 2 }),
+      });
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-eval-runs-test" })
+      .resolves({ Item: undefined });
+
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    let captured: unknown;
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockImplementation(async (input) => {
+        captured = input;
+      });
+
+    await validatePromotionApproval(
+      release({ releaseId: "release-candidate", execSpecVersion: 2 }),
+      "PROD",
+      "org-1",
+      architect,
+      { approved: true },
+    );
+
+    expect(captured).toMatchObject({ decision: "permit" });
+    const diff = (
+      captured as {
+        diff?: { releaseIdA: string; releaseIdB: string; changes: unknown[] };
+      }
+    ).diff;
+    expect(diff).toBeDefined();
+    expect(diff!.releaseIdA).toBe("release-stable");
+    expect(diff!.releaseIdB).toBe("release-candidate");
+    expect(diff!.changes.length).toBeGreaterThan(0);
+  });
+
+  test("omits the diff field (never throws) when there is no current stable pointer yet", async () => {
+    ddbMock.reset();
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({ Item: undefined });
+
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    let captured: unknown;
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockImplementation(async (input) => {
+        captured = input;
+      });
+
+    await expect(
+      validatePromotionApproval(
+        release({ releaseId: "release-candidate" }),
+        "PROD",
+        "org-1",
+        architect,
+        { approved: true },
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(captured).not.toHaveProperty("diff");
+  });
+
+  test("omits the diff field when the current stable pointer already IS the candidate (no delta)", async () => {
+    ddbMock.reset();
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({
+        Item: {
+          orgId: "org-1",
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-candidate",
+          previousReleaseId: null,
+          promotedAt: "2026-01-01T00:00:00.000Z",
+          promotedBy: "user-1",
+          version: 1,
+        },
+      });
+
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    let captured: unknown;
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockImplementation(async (input) => {
+        captured = input;
+      });
+
+    await validatePromotionApproval(
+      release({ releaseId: "release-candidate" }),
+      "PROD",
+      "org-1",
+      architect,
+      { approved: true },
+    );
+
+    expect(captured).not.toHaveProperty("diff");
+  });
+
+  test("a diff-computation failure never blocks or fails the approval write", async () => {
+    ddbMock.reset();
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({
+        Item: {
+          orgId: "org-1",
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-stable",
+          previousReleaseId: null,
+          promotedAt: "2026-01-01T00:00:00.000Z",
+          promotedBy: "user-1",
+          version: 1,
+        },
+      });
+    // Simulate an infra failure resolving the stable release row itself.
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .rejects(new Error("DynamoDB unavailable"));
+
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    let captured: unknown;
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockImplementation(async (input) => {
+        captured = input;
+      });
+
+    await expect(
+      validatePromotionApproval(
+        release({ releaseId: "release-candidate" }),
+        "PROD",
+        "org-1",
+        architect,
+        { approved: true },
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(captured).not.toHaveProperty("diff");
+    expect(captured).toMatchObject({ decision: "permit" });
+  });
+
+  // Feedback-round-1 finding: the whole-payload MAX_APPROVAL_DIFF_BYTES
+  // (256KB) cap at environment-release-pointer-resolver.ts's
+  // resolveCandidateVsStableDiff was applied but never exercised by a
+  // test — the truncated-stub branch was uncovered.
+  test("caps an oversized serialized diff at the whole-payload boundary and embeds the truncated stub", async () => {
+    ddbMock.reset();
+    // A huge prompt (well past release-diff.ts's own per-constituent
+    // MAX_CONSTITUENT_DIFF_BYTES) drives the FULLY SERIALIZED diff past
+    // this resolver's independent 256KB whole-payload cap even after
+    // per-constituent truncation kicks in, because releaseDiff still
+    // enumerates one changed constituent with a truncated summary —
+    // this test asserts the resolver's OWN cap, not release-diff.ts's.
+    // To be certain the whole-payload cap (not just the per-constituent
+    // one) is what's under test, spread the size across many small
+    // changed prompts instead of one giant one: each prompt is small
+    // enough to dodge per-constituent truncation, but hundreds of them
+    // blow the whole-payload cap.
+    const manyPrompts: Record<
+      string,
+      { sourceId: string; content: string; digest: string }
+    > = {};
+    const manyPromptsAfter: Record<
+      string,
+      { sourceId: string; content: string; digest: string }
+    > = {};
+    for (let i = 0; i < 2000; i++) {
+      manyPrompts[`prompt-${i}`] = {
+        sourceId: `src-${i}`,
+        content: `before-${i}`,
+        digest: `d-before-${i}`,
+      };
+      manyPromptsAfter[`prompt-${i}`] = {
+        sourceId: `src-${i}`,
+        content: `after-${i}-${"x".repeat(80)}`,
+        digest: `d-after-${i}`,
+      };
+    }
+
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-environment-release-pointers-test",
+      })
+      .resolves({
+        Item: {
+          orgId: "org-1",
+          agentTargetId: "agent-1",
+          environment: "PROD",
+          releaseId: "release-stable",
+          previousReleaseId: null,
+          promotedAt: "2026-01-01T00:00:00.000Z",
+          promotedBy: "user-1",
+          version: 1,
+        },
+      });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-agent-releases-test",
+        Key: { releaseId: "release-stable" },
+      })
+      .resolves({
+        Item: release({
+          releaseId: "release-stable",
+          promptVersions: manyPrompts,
+        }),
+      });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-agent-releases-test",
+        Key: { releaseId: "release-candidate" },
+      })
+      .resolves({
+        Item: release({
+          releaseId: "release-candidate",
+          promptVersions: manyPromptsAfter,
+        }),
+      });
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-eval-runs-test" })
+      .resolves({ Item: undefined });
+
+    jest
+      .spyOn(governanceFlag, "getGovernanceEnforce")
+      .mockResolvedValue("strict");
+    let captured: unknown;
+    jest
+      .spyOn(
+        releasePromotionApprovalWriter,
+        "writeReleasePromotionApprovalFinding",
+      )
+      .mockImplementation(async (input) => {
+        captured = input;
+      });
+
+    await expect(
+      validatePromotionApproval(
+        release({
+          releaseId: "release-candidate",
+          promptVersions: manyPromptsAfter,
+        }),
+        "PROD",
+        "org-1",
+        architect,
+        { approved: true },
+      ),
+    ).resolves.toBeUndefined();
+
+    // Approval write must succeed regardless of diff size.
+    expect(captured).toMatchObject({ decision: "permit" });
+    const diff = (captured as { diff?: unknown }).diff;
+    expect(diff).toEqual({
+      releaseIdA: "release-stable",
+      releaseIdB: "release-candidate",
+      truncated: true,
+    });
+  });
+});
+
 describe("promoteEnvironmentReleasePointer — ladder adjacency (G1, consensus decision 1)", () => {
   const architect = authContextFor("architect");
 

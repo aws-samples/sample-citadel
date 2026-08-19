@@ -94,6 +94,12 @@ type Query {
   # D". Oldest→newest; `until` (ISO-8601) bounds to promotedAt <= D. orgId
   # is the caller's own org, resolved server-side.
   environmentReleasePointerHistory(agentTargetId: ID!, environment: DeploymentEnvironment!, until: AWSDateTime): [EnvironmentReleasePointerHistoryEntry!]!
+  # releaseDiff — read-only, org-scoped semantic diff between two
+  # immutable AgentRelease bundles (release-diff-resolver.ts). Both
+  # releases must belong to the caller's own org (server-derived, not a
+  # client-supplied value). Per-constituent changes only; unchanged
+  # constituents are omitted (see ReleaseDiff type doc).
+  releaseDiff(releaseIdA: ID!, releaseIdB: ID!): ReleaseDiff!
   getEvalComparison(comparisonId: ID!): EvalComparisonVerdict
   listEvalComparisons(orgId: ID!, suiteId: ID): [EvalComparisonVerdict!]!
   getEvalComparisonThresholdConfig(orgId: ID!, suiteId: ID!): EvalComparisonThresholdConfig
@@ -2404,6 +2410,43 @@ input CutAgentReleaseInput {
   gitSha: String!
   region: String!
   runId: String!
+}
+
+# ReleaseDiff (releaseDiff query, release-diff-resolver.ts /
+# release-diff.ts) — per-constituent semantic diff between two
+# immutable AgentRelease bundles. Only CHANGED constituents appear in
+# `changes`; unchanged constituents are omitted entirely (never a
+# zero-delta entry). `before`/`after` are AWSJSON — their shape varies
+# by `kind` (see release-diff.ts's ReleaseDiffChange doc for the exact
+# per-kind payload: ContentSnapshot for agentConfig/prompt, a
+# {execSpecId, execSpecVersion} pair for execSpec, ModelConfigSnapshot
+# for model, a symmetric {onlyHere, changed} breakdown for tools, the
+# full PolicySnapshot for policy, the evalEvidence pointer for
+# evalEvidence, and a DimensionAggregate[] per side for scoreVector).
+# Either field may be null when the constituent is absent on that side
+# (added/removed wholesale, e.g. a new prompt or tool). `lineDiff`
+# (kind "prompt" only), `fieldChanges` (kind "policy" only), and
+# `movements` (kind "scoreVector" only) carry the precise structured
+# delta for those constituent kinds — all AWSJSON, all null for every
+# other kind. `truncated` is true when a constituent's payload exceeded
+# the size cap and was replaced with a byte-count-only summary — a
+# large diff can truncate individual constituents but never fails the
+# whole query.
+type ReleaseDiffChange {
+  kind: String!
+  key: String!
+  before: AWSJSON
+  after: AWSJSON
+  lineDiff: AWSJSON
+  fieldChanges: AWSJSON
+  movements: AWSJSON
+  truncated: Boolean
+}
+
+type ReleaseDiff {
+  releaseIdA: ID!
+  releaseIdB: ID!
+  changes: [ReleaseDiffChange!]!
 }
 
 # Reuses the CDK deploy-stage literal already threaded through this

@@ -72,6 +72,19 @@ export interface ReleasePromotionApprovalInput {
   justification?: string | null;
   traceId?: string;
   runId?: string;
+  /**
+   * ADDITIVE field (grounded feature: candidate-vs-current-target-env-
+   * stable releaseDiff, embedded at approval-request creation time —
+   * see environment-release-pointer-resolver.ts's
+   * resolveCandidateVsStableDiff). Deliberately OPTIONAL and NEVER
+   * required: the call site computes this best-effort and omits it
+   * entirely on any failure (no current stable pointer yet, EvalRun
+   * read failure, etc.) rather than ever failing the approval write
+   * because a diff could not be computed. Already size-capped by
+   * release-diff.ts's own per-constituent truncation before it reaches
+   * this writer — this field is stored as-is, never re-capped here.
+   */
+  diff?: unknown;
 }
 
 function findingIdFor(input: ReleasePromotionApprovalInput): string {
@@ -135,6 +148,9 @@ export async function writeReleasePromotionApprovalFinding(
   }
   if (input.runId !== undefined) {
     item.runId = input.runId;
+  }
+  if (input.diff !== undefined) {
+    item.diff = input.diff;
   }
 
   try {

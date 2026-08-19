@@ -1186,6 +1186,91 @@ exports.handler = async (event) => {
     cutAgentReleaseResolver.addResourceDependency(agentReleaseLambdaDataSource);
 
     // ============================================================
+    // ReleaseDiff Resolver (releaseDiff query — read-only)
+    // ============================================================
+    //
+    // Deliberately its OWN function, OWN least-privilege role, and OWN
+    // AppSync data source — never reuses agentReleaseWriterRole (that
+    // role's Put/Get/Query-only floor is scoped to being the SOLE
+    // *writer* for AgentReleasesTable per release-store.ts's choke-point
+    // doctrine; a read-only diff query has no business assuming a writer
+    // role) and never reuses environmentReleasePointerWriterRole either
+    // (that role's grant surface is scoped to promotion/canary
+    // mutations, not an arbitrary two-release read). This function's
+    // role carries GetItem-ONLY on AgentReleasesTable and EvalRunsTable
+    // — release-diff-resolver.ts never issues any other DynamoDB action.
+    const releaseDiffResolverFunction = new lambda.Function(
+      this,
+      "ReleaseDiffResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "release-diff-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
+          EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(this, "ReleaseDiffResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    releaseDiffResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [props.agentReleasesTable.tableArn],
+      }),
+    );
+    releaseDiffResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [props.evalRunsTable.tableArn],
+      }),
+    );
+
+    const releaseDiffDataSourceRole = new iam.Role(
+      this,
+      "ReleaseDiffDataSourceRole",
+      {
+        assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
+      },
+    );
+    releaseDiffResolverFunction.grantInvoke(releaseDiffDataSourceRole);
+
+    const releaseDiffLambdaDataSource = new appsyncCfn.CfnDataSource(
+      this,
+      "ReleaseDiffLambdaDataSource",
+      {
+        apiId: props.appSyncApi.apiId,
+        name: "ReleaseDiffLambdaDataSource",
+        type: "AWS_LAMBDA",
+        serviceRoleArn: releaseDiffDataSourceRole.roleArn,
+        lambdaConfig: {
+          lambdaFunctionArn: releaseDiffResolverFunction.functionArn,
+        },
+      },
+    );
+
+    const releaseDiffResolver = new appsyncCfn.CfnResolver(
+      this,
+      "ReleaseDiffResolver",
+      {
+        apiId: props.appSyncApi.apiId,
+        typeName: "Query",
+        fieldName: "releaseDiff",
+        dataSourceName: releaseDiffLambdaDataSource.attrName,
+        requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+        responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+      },
+    );
+    releaseDiffResolver.addResourceDependency(releaseDiffLambdaDataSource);
+
+    // ============================================================
     // Environment Release Pointer Resolver (mutable per-environment cursor)
     // ============================================================
     //
@@ -1279,6 +1364,13 @@ exports.handler = async (event) => {
           // writer role's PutEvents grant on this bus is added in
           // backend-stack.ts (bus is BackendStack-owned).
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          // Additive candidate-vs-stable diff embedding
+          // (resolveCandidateVsStableDiff in
+          // environment-release-pointer-resolver.ts calls into
+          // release-diff-resolver.ts's releaseDiff, which resolves each
+          // side's score vector from EvalRunsTable). GetItem-only grant
+          // below — the diff path never writes to this table.
+          EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(
@@ -1307,6 +1399,18 @@ exports.handler = async (event) => {
         effect: iam.Effect.ALLOW,
         actions: ["dynamodb:GetItem"],
         resources: [props.agentReleasesTable.tableArn],
+      }),
+    );
+
+    // Additive: resolveCandidateVsStableDiff's best-effort releaseDiff
+    // call reads EvalRunsTable (to resolve each side's score vector) —
+    // GetItem-only, same narrow-statement convention as the
+    // AgentReleasesTable grant directly above.
+    environmentReleasePointerResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
+        resources: [props.evalRunsTable.tableArn],
       }),
     );
 
