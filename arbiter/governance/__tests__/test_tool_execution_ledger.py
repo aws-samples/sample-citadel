@@ -15,6 +15,7 @@ import sys
 
 import pytest
 from botocore.exceptions import ClientError
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 _PROJECT_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..")
@@ -141,6 +142,13 @@ def _table(fake) -> FakeTable:
 
 def _key():
     return build_key("orgA", "exec1", "node1", 0, "createTicket", {"subject": "hi"})
+
+
+# Module-level alias: a dunder-prefixed name referenced bare inside a class
+# body is name-mangled by Python (e.g. `__reset_ledger_client_for_test()` in
+# a method becomes `_ClassName__reset_ledger_client_for_test`). Binding it to
+# a plain-named module attribute here lets the property test call it safely.
+_reset_ledger_client_for_test = __reset_ledger_client_for_test
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +351,86 @@ class TestBypassPath:
         execute_idempotent(pk=pk, sk=sk, tool_name="t", mode=MODE_BYPASS, run_tool=adapter)
         assert calls["n"] == 2                      # no dedupe (read-only tool)
         assert _table(_fake_ddb).store == {}        # NO ledger row written
+
+
+# ---------------------------------------------------------------------------
+# Property: execute_idempotent never repeats the side effect (any JSON args)
+# ---------------------------------------------------------------------------
+
+_json_scalars = st.one_of(
+    st.none(),
+    st.booleans(),
+    st.integers(min_value=-(2**53), max_value=2**53),
+    st.floats(allow_nan=False, allow_infinity=False, width=32),
+    st.text(max_size=20),
+)
+_json_values = st.recursive(
+    _json_scalars,
+    lambda children: st.one_of(
+        st.lists(children, max_size=5),
+        st.dictionaries(st.text(min_size=1, max_size=8), children, max_size=5),
+    ),
+    max_leaves=15,
+)
+# str-keyed JSON-serializable "args" object, as build_key's tool_input.
+_tool_args = st.dictionaries(st.text(min_size=1, max_size=8), _json_values, max_size=6)
+
+
+class TestExecuteIdempotentProperty:
+    """The mandated execution-level property test (checker finding).
+
+    Drives ``execute_idempotent`` itself (not just canonicalization) under
+    Hypothesis: for ANY str-keyed JSON-serializable args, calling it twice
+    against a freshly derived key must invoke the adapter exactly once and
+    leave exactly one completed ledger row — never zero, never two.
+    """
+
+    @settings(
+        max_examples=100,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(_tool_args)
+    def test_double_call_executes_adapter_exactly_once_per_example(self, tool_args):
+        # Fresh FakeTable + fresh counter + fresh ledger client cache for
+        # EVERY generated example — no state leaks across examples, so the
+        # assertion holds independently per example rather than only in
+        # aggregate.
+        _reset_ledger_client_for_test()
+        os.environ["TOOL_EXECUTION_LEDGER_TABLE"] = TABLE_NAME
+        fake = FakeResource()
+        original_get_resource = ledger._get_dynamodb_resource
+        ledger._get_dynamodb_resource = lambda: fake
+        try:
+            pk, sk = build_key("orgProp", "execProp", "nodeProp", 0, "createTicket", tool_args)
+
+            calls = {"n": 0}
+
+            def counting_adapter():
+                calls["n"] += 1
+                return {"status": "success", "ticketId": "T-prop"}
+
+            r1 = execute_idempotent(
+                pk=pk, sk=sk, tool_name="createTicket", mode=MODE_LEDGER,
+                run_tool=counting_adapter,
+            )
+            r2 = execute_idempotent(
+                pk=pk, sk=sk, tool_name="createTicket", mode=MODE_LEDGER,
+                run_tool=counting_adapter,
+            )
+
+            assert calls["n"] == 1, f"adapter invoked {calls['n']} times for args={tool_args!r}"
+            completed_rows = [
+                v for v in _table(fake).store.values() if v.get("status") == ledger.STATUS_COMPLETED
+            ]
+            assert len(completed_rows) == 1, (
+                f"expected exactly one completed ledger row for args={tool_args!r}, "
+                f"got {len(completed_rows)}"
+            )
+            assert r1 == r2 == {"status": "success", "ticketId": "T-prop"}
+        finally:
+            ledger._get_dynamodb_resource = original_get_resource
+            _reset_ledger_client_for_test()
 
 
 # ---------------------------------------------------------------------------
