@@ -813,6 +813,43 @@ def _extract_worker_trace_context(event, message_attributes):
         pass
     return extract_carried(event)
 
+def _resolve_execution_org_id(execution_id: str) -> str:
+    """Resolve an execution's ``orgId`` SERVER-SIDE from the execution row.
+
+    Tool-call idempotency (PR1) org-scoping: ``orgId`` is the ledger PK prefix
+    and provides structural cross-org isolation, so it MUST come from a
+    trusted server-side source — the ``EXECUTIONS_TABLE`` row keyed by
+    ``executionId`` — and NEVER from a subprocess-supplied payload that could
+    be spoofed to cross orgs.
+
+    Best-effort and non-fatal: returns ``''`` when the table binding is
+    absent, the row/attribute is missing, or the read fails. An empty orgId is
+    safe — ``executionId`` is globally unique, so the ledger key stays unique;
+    the org prefix is defense-in-depth, not the uniqueness guarantee. Falls
+    back to ``RELEASE_DEFAULT_ORG_ID`` (the same trusted env the release path
+    uses) before ``''``. Never raises — org resolution must not fail a node.
+    """
+    table_name = os.environ.get('EXECUTIONS_TABLE')
+    if table_name and execution_id:
+        try:
+            resp = _get_dynamodb().Table(table_name).get_item(
+                Key={'executionId': execution_id}
+            )
+            org_id = (resp.get('Item') or {}).get('orgId')
+            if isinstance(org_id, str) and org_id:
+                return org_id
+        except Exception as exc:  # noqa: BLE001 — org resolution is best-effort
+            print(json.dumps({
+                'level': 'WARN',
+                'component': 'WorkerWrapper',
+                'action': 'idempotency_org_resolve_failed',
+                'executionId': execution_id,
+                'error': str(exc),
+            }))
+    fallback = os.environ.get('RELEASE_DEFAULT_ORG_ID')
+    return fallback if isinstance(fallback, str) and fallback else ''
+
+
 def _process_workflow_node(event, message_attributes=None):
     """Run the agent for a dispatched workflow node and emit its result.
 
@@ -890,6 +927,14 @@ def _process_workflow_node(event, message_attributes=None):
             model_override=model_override,
             agent_id=msg.agent_id,
             workflow_id=msg.execution_id,
+            # Tool-call idempotency (PR1) context. orgId is resolved
+            # SERVER-SIDE from the execution row (never trusted from the
+            # dispatch payload); executionId/nodeId come from the validated
+            # node-dispatch message. When these are threaded, agent_runner
+            # installs the idempotency hook in the subprocess.
+            execution_id=msg.execution_id,
+            node_id=msg.node_id,
+            org_id=_resolve_execution_org_id(msg.execution_id),
         )
 
         usage_sink: list = []

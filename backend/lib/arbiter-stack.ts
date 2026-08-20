@@ -418,6 +418,28 @@ export class ArbiterStack extends cdk.Stack {
       },
     );
 
+    // Tool-call idempotency ledger (PR1). Org-scoped, TTL'd operational
+    // dedupe table — NOT an audit artifact (distinct from the 90-day
+    // governance ledger). PK = orgId#executionId, SK =
+    // nodeId#callIndex#toolName#argsHash. TTL (attribute `ttl`) is 48h,
+    // derived server-side at write time by the worker; it exists to bound
+    // storage, not to retain accountability records. Encrypted at rest with
+    // an AWS-managed KMS key and PITR on.
+    const toolExecutionLedgerTable = new dynamodb.Table(
+      this,
+      "ToolExecutionLedgerTable",
+      {
+        tableName: `citadel-tool-execution-ledger-${props.environment}`,
+        partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
+        sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        timeToLiveAttribute: "ttl",
+        encryption: dynamodb.TableEncryption.AWS_MANAGED,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      },
+    );
+
     const workerAgentWrapperLambda = new PythonFunction(
       this,
       "WorkerAgentWrapper",
@@ -443,6 +465,11 @@ export class ArbiterStack extends cdk.Stack {
           ...(props.executionsTable && {
             EXECUTIONS_TABLE: props.executionsTable.tableName,
           }),
+          // Tool-call idempotency (PR1): the ledger the worker reserves/
+          // finalizes tool executions against. Always wired; the worker's
+          // idempotency hook is itself gated on per-node execution/node
+          // context, so a missing key context is a back-compat no-op.
+          TOOL_EXECUTION_LEDGER_TABLE: toolExecutionLedgerTable.tableName,
           ...(props.registryId && { REGISTRY_ID: props.registryId }),
           ...(props.registryId && { REGISTRY_ENABLED: "true" }),
         },
@@ -517,6 +544,24 @@ export class ArbiterStack extends cdk.Stack {
         }),
       );
     }
+
+    // Tool-call idempotency (PR1): least-privilege grant on the tool-execution
+    // ledger. The worker reserves (conditional PutItem), reads recorded
+    // results (GetItem), and finalizes/releases/reclaims (UpdateItem). It is
+    // DELIBERATELY NOT grantReadWriteData: no dynamodb:DeleteItem (release is a
+    // status transition, not a delete) and no dynamodb:Scan/Query (all access
+    // is by exact key). Scoped to this one table ARN.
+    workerAgentWrapperLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+        ],
+        resources: [toolExecutionLedgerTable.tableArn],
+      }),
+    );
 
     // The worker emits best-effort node-level metrics (NodeDurationMs /
     // NodeFailure) into the Citadel/Workflows namespace after running each

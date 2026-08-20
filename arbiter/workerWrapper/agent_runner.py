@@ -390,6 +390,76 @@ def _install_governed_tool_handler():
     return True
 
 
+def _install_idempotency_hook():
+    """Patch ``strands.Agent.__init__`` to attach an idempotency HookProvider.
+
+    Tool-call idempotency (PR1). Uses the ONLY tool-call extension surface the
+    pinned ``strands-agents==1.30.0`` actually exposes: the hooks system
+    (``Agent(hooks=[...])`` + ``BeforeToolCallEvent``). Verified against the
+    1.30.0 source — that release has NO ``strands.handlers.tool_handler``
+    /``AgentToolHandler`` and ``Agent.__init__`` accepts neither
+    ``tool_handler`` nor ``**kwargs``; it does accept ``hooks``. We therefore
+    APPEND an ``IdempotencyToolHook`` to whatever ``hooks`` list the caller
+    passed (never clobbering caller-supplied hooks).
+
+    No-op unless BOTH ``CITADEL_EXECUTION_ID`` and ``CITADEL_NODE_ID`` are set
+    (back-compat: an agent run outside the idempotency envelope is unchanged).
+    ``CITADEL_ORG_ID`` is optional (empty -> shared org prefix; executionId is
+    still globally unique) and is read ONLY from the trusted subprocess env
+    that the worker set server-side, never from tool/agent input.
+
+    Graceful degrade (WARN, return False) when strands or the hook module
+    cannot be imported — a missing idempotency layer must never halt an
+    otherwise-valid agent.
+
+    Returns True when the patch was installed, False otherwise.
+    """
+    if not (os.environ.get('CITADEL_EXECUTION_ID') and os.environ.get('CITADEL_NODE_ID')):
+        return False
+
+    try:
+        import strands  # type: ignore[import-not-found]
+    except ImportError as exc:
+        sys.stderr.write(
+            f'[agent_runner] WARN idempotency hook skipped — '
+            f'strands unavailable: {exc}\n'
+        )
+        return False
+
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+
+    try:
+        from tool_idempotency_hook import IdempotencyToolHook
+    except ImportError as exc:
+        sys.stderr.write(
+            f'[agent_runner] WARN idempotency hook skipped — '
+            f'tool_idempotency_hook unavailable: {exc}\n'
+        )
+        return False
+
+    original_init = strands.Agent.__init__
+
+    def _idempotent_init(self, *args, **kwargs):
+        hook = IdempotencyToolHook(
+            org_id=os.environ.get('CITADEL_ORG_ID', ''),
+            execution_id=os.environ.get('CITADEL_EXECUTION_ID', ''),
+            node_id=os.environ.get('CITADEL_NODE_ID', ''),
+        )
+        existing = kwargs.get('hooks')
+        if existing is None:
+            kwargs['hooks'] = [hook]
+        elif isinstance(existing, list):
+            kwargs['hooks'] = [*existing, hook]
+        # If a caller passed a non-list hooks value we leave it untouched —
+        # strands will validate it; we never overwrite caller intent.
+        return original_init(self, *args, **kwargs)
+
+    strands.Agent.__init__ = _idempotent_init
+    return True
+
+
 def _install_model_override():
     """Patch ``strands.models.BedrockModel.__init__`` to force ``model_id``.
 
@@ -451,6 +521,10 @@ def main():
     # construction in the loaded module picks it up. Safe no-op when the
     # subprocess env lacks CITADEL_AGENT_ID (backward compatible).
     _install_governed_tool_handler()
+
+    # Install the tool-call idempotency hook (PR1) via the strands hooks
+    # system — no-op unless CITADEL_EXECUTION_ID + CITADEL_NODE_ID are set.
+    _install_idempotency_hook()
 
     # Overrides the model id for operator-selected per-agent overrides;
     # no-op unless MODEL_OVERRIDE is set in the subprocess environment.

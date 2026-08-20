@@ -169,10 +169,16 @@ class TestEmptyAndUnknownConfiguration:
         mock_run, mock_events, agent_cfg = _run_node({})
 
         extra_env = _extract_extra_env(mock_run.call_args)
-        # Byte-identical to the pre-feature env: governance triplet only.
+        # Governance triplet PLUS the tool-call idempotency context (PR1):
+        # the workflow-node path threads executionId/nodeId so the subprocess
+        # can build ledger keys. orgId is resolved server-side and omitted
+        # here (no EXECUTIONS_TABLE / RELEASE_DEFAULT_ORG_ID in this test env),
+        # which is a legal empty-org case (executionId is globally unique).
         assert extra_env == {
             'CITADEL_AGENT_ID': 'agent-A',
             'CITADEL_WORKFLOW_ID': 'exec-1',
+            'CITADEL_EXECUTION_ID': 'exec-1',
+            'CITADEL_NODE_ID': 'n0',
         }
         assert agent_cfg['config']['description'] == 'Base agent.'
         # Node completed normally.
