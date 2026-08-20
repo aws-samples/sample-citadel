@@ -447,13 +447,37 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       return out;
     }
 
-    test("worker has dynamodb:UpdateItem but NOT Put/Delete/BatchWrite on any table", () => {
+    test("worker DDB writes stay least-privilege: executions is UpdateItem-only, ledger is Put/Get/Update, no Delete/BatchWrite anywhere", () => {
       const actions = actionsForRole("WorkerAgentWrapper");
       expect(actions.has("dynamodb:UpdateItem")).toBe(true);
-      // Bare grantWriteData would have added these — it must NOT be used.
-      expect(actions.has("dynamodb:PutItem")).toBe(false);
+      // Bare grantWriteData would have added these on the executions table —
+      // it must NOT be used, on the executions table or anywhere else.
       expect(actions.has("dynamodb:DeleteItem")).toBe(false);
       expect(actions.has("dynamodb:BatchWriteItem")).toBe(false);
+      // PutItem is now present, but ONLY in the tool-execution-ledger grant
+      // (PR1): the sole statement carrying PutItem must be exactly the
+      // ledger's Put/Get/Update trio (no Delete/Scan/Query, no FGAC-condition
+      // executions statement leaking Put). Scope the assertion to that
+      // statement rather than the whole role.
+      const policies = template.findResources("AWS::IAM::Policy");
+      const putStatements: any[] = [];
+      for (const p of Object.values(policies) as any[]) {
+        const roles = p.Properties?.Roles || [];
+        if (
+          !roles.some((r: any) => (r?.Ref || "").includes("WorkerAgentWrapper"))
+        )
+          continue;
+        for (const s of p.Properties?.PolicyDocument?.Statement || []) {
+          const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+          if (acts.includes("dynamodb:PutItem")) putStatements.push(acts);
+        }
+      }
+      expect(putStatements.length).toBe(1);
+      expect(putStatements[0]).toEqual([
+        "dynamodb:PutItem",
+        "dynamodb:GetItem",
+        "dynamodb:UpdateItem",
+      ]);
     });
 
     test("the UpdateItem grant is FGAC-restricted to the nodeResults/executionId attributes", () => {

@@ -57,6 +57,11 @@ SK_ATTR = "sk"           # nodeId#callIndex#toolName#argsHash
 STATUS_IN_FLIGHT = "in_flight"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
+# A reservation whose side effect provably did NOT happen is transitioned to
+# 'released' (NOT deleted) so the worker IAM grant stays Put/Get/Update only
+# (no dynamodb:DeleteItem — least privilege, per the design's IAM scope). A
+# released row is re-reservable via a conditional CAS in reserve().
+STATUS_RELEASED = "released"
 
 # --- Tunables (env-overridable) ---------------------------------------------
 
@@ -286,6 +291,34 @@ def _reclaim_stale(pk: str, sk: str, *, seen_created_at: Any, now: float) -> boo
         raise LedgerError(f"ledger reclaim transport error for {pk!r}/{sk!r}: {exc}") from exc
 
 
+def _reclaim_released(pk: str, sk: str, *, now: float) -> bool:
+    """Re-reserve a ``released`` row via a conditional CAS on the status.
+
+    ``released -> in_flight`` guarded by ``status = released`` so two racing
+    re-reservers cannot both win. Returns True when this caller won.
+    """
+    try:
+        _table().update_item(
+            Key={PK_ATTR: pk, SK_ATTR: sk},
+            UpdateExpression="SET #s = :inflight, createdAt = :now, updatedAt = :now, ttl = :ttl",
+            ConditionExpression="#s = :released",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":inflight": STATUS_IN_FLIGHT,
+                ":released": STATUS_RELEASED,
+                ":now": now,
+                ":ttl": int(now) + ttl_seconds(),
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise LedgerError(f"ledger re-reserve failed for {pk!r}/{sk!r}: {exc}") from exc
+    except BotoCoreError as exc:
+        raise LedgerError(f"ledger re-reserve transport error for {pk!r}/{sk!r}: {exc}") from exc
+
+
 def reserve(pk: str, sk: str, *, tool_name: str, now: float | None = None) -> ReserveResult:
     """Attempt to reserve a tool execution with a conditional first-write-wins.
 
@@ -332,6 +365,12 @@ def reserve(pk: str, sk: str, *, tool_name: str, now: float | None = None) -> Re
         return ReserveResult(ReserveOutcome.HIT_COMPLETED, row=row)
     if status == STATUS_FAILED:
         return ReserveResult(ReserveOutcome.HIT_FAILED, row=row)
+    if status == STATUS_RELEASED:
+        # A prior attempt released the reservation (provably no side effect);
+        # re-reserve via conditional CAS so exactly one re-reserver wins.
+        if _reclaim_released(pk, sk, now=now):
+            return ReserveResult(ReserveOutcome.WON, reclaimed=True)
+        return ReserveResult(ReserveOutcome.IN_FLIGHT, row=row)
     # in_flight — reclaim if the holder looks dead, else report live.
     created_at = row.get("createdAt")
     if isinstance(created_at, (int, float)) and (now - float(created_at)) > lease_seconds():
@@ -445,16 +484,25 @@ def finalize_failure(
 def release(pk: str, sk: str) -> None:
     """Release a reservation whose side effect provably did NOT happen.
 
-    Conditional delete guarded by ``status = in_flight`` so a completed/failed
-    record is never destroyed. Lets the next attempt re-reserve and execute
-    (retryable-no-side-effect branch of the failure matrix).
+    Transitions ``in_flight -> released`` (NOT a delete — the worker IAM grant
+    is Put/Get/Update only, no ``dynamodb:DeleteItem``, per least privilege).
+    A released row is re-reservable by the next attempt via a conditional CAS
+    in :func:`reserve` (retryable-no-side-effect branch of the failure
+    matrix). Guarded by ``status = in_flight`` so a completed/failed record is
+    never clobbered.
     """
+    now = time.time()
     try:
-        _table().delete_item(
+        _table().update_item(
             Key={PK_ATTR: pk, SK_ATTR: sk},
+            UpdateExpression="SET #s = :released, updatedAt = :now",
             ConditionExpression="#s = :inflight",
             ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":inflight": STATUS_IN_FLIGHT},
+            ExpressionAttributeValues={
+                ":released": STATUS_RELEASED,
+                ":inflight": STATUS_IN_FLIGHT,
+                ":now": now,
+            },
         )
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":

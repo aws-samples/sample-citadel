@@ -290,8 +290,9 @@ class TestFailureMatrix:
 
         with pytest.raises(RetryableNoExecutionError):
             execute_idempotent(pk=pk, sk=sk, tool_name="t", mode=MODE_LEDGER, run_tool=adapter)
-        # Reservation was released -> next attempt re-reserves (WON) and runs.
-        assert (pk, sk) not in _table(_fake_ddb).store
+        # Reservation released (status transition, not a delete) -> next
+        # attempt re-reserves (WON via conditional CAS) and may execute.
+        assert _table(_fake_ddb).store[(pk, sk)]["status"] == "released"
         assert reserve(pk, sk, tool_name="t").outcome == ReserveOutcome.WON
 
     def test_unknown_outcome_is_fail_safe_indeterminate_never_reexec(self, _fake_ddb):
