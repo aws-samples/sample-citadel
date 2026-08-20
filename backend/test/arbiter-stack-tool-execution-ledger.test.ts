@@ -164,4 +164,102 @@ describe("ArbiterStack — tool-execution idempotency ledger (PR1)", () => {
       }
     }
   });
+
+  // --- PR2: oversized-result S3 offload (SSE-KMS, org-prefixed, no Delete) ---
+
+  test("offload bucket is CMK-encrypted, block-public, and TLS-only", () => {
+    template.hasResourceProperties("AWS::S3::Bucket", {
+      BucketName: "citadel-tool-results-test-123456789012-us-east-1",
+      BucketEncryption: {
+        ServerSideEncryptionConfiguration: Match.arrayWith([
+          Match.objectLike({
+            ServerSideEncryptionByDefault: Match.objectLike({
+              SSEAlgorithm: "aws:kms",
+            }),
+          }),
+        ]),
+      },
+      PublicAccessBlockConfiguration: {
+        BlockPublicAcls: true,
+        BlockPublicPolicy: true,
+        IgnorePublicAcls: true,
+        RestrictPublicBuckets: true,
+      },
+    });
+  });
+
+  test("offload bucket policy DENIES non-KMS puts", () => {
+    template.hasResourceProperties("AWS::S3::BucketPolicy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Deny",
+            Action: "s3:PutObject",
+            Condition: {
+              StringNotEquals: {
+                "s3:x-amz-server-side-encryption": "aws:kms",
+              },
+            },
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("worker S3 grant is Put/Get on the tool-results/* prefix only — no Delete", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    let found = false;
+    for (const policy of Object.values(policies) as any[]) {
+      for (const stmt of policy.Properties.PolicyDocument.Statement) {
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        const resStr = JSON.stringify(stmt.Resource ?? "");
+        if (
+          actions.includes("s3:PutObject") &&
+          resStr.includes("tool-results/*")
+        ) {
+          found = true;
+          expect(actions).toEqual(
+            expect.arrayContaining(["s3:PutObject", "s3:GetObject"]),
+          );
+          expect(actions).not.toContain("s3:DeleteObject");
+          expect(actions).not.toContain("s3:*");
+        }
+      }
+    }
+    expect(found).toBe(true);
+  });
+
+  // --- PR2: dispatch-generation fence ConditionCheck on the executions row ---
+
+  test("worker has dynamodb:ConditionCheckItem on the executions table (fence)", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: "dynamodb:ConditionCheckItem",
+            Condition: Match.objectLike({
+              "ForAllValues:StringEquals": {
+                "dynamodb:Attributes": ["nodeResults", "executionId"],
+              },
+            }),
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("worker env wires the offload bucket + CMK", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "index.lambda_handler",
+      Environment: {
+        Variables: Match.objectLike({
+          TOOL_RESULT_BUCKET: Match.anyValue(),
+          TOOL_RESULT_KMS_KEY_ID: Match.anyValue(),
+        }),
+      },
+    });
+  });
 });
