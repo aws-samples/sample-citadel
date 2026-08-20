@@ -172,6 +172,9 @@ def build_subprocess_env(
     workflow_id: str | None = None,
     denied_tools: list[str] | None = None,
     eval_run_id: str | None = None,
+    execution_id: str | None = None,
+    node_id: str | None = None,
+    org_id: str | None = None,
 ) -> dict:
     """Build the subprocess environment with governance and config overrides.
 
@@ -262,5 +265,23 @@ def build_subprocess_env(
     # CIT-102 Pass B: additive eval-run correlation id.
     if isinstance(eval_run_id, str) and eval_run_id:
         env['CITADEL_EVAL_RUN_ID'] = eval_run_id
+
+    # Tool-call idempotency (PR1): the execution/node/org context threaded to
+    # the worker subprocess, consumed by
+    # agent_runner._install_idempotency_hook to build the ledger key
+    # (orgId#executionId, nodeId#...). All three are additive and optional:
+    # when any is absent the hook is a back-compat no-op (idempotency
+    # disabled, pure pre-feature behavior preserved). ``org_id`` MUST be
+    # resolved server-side by the caller (execution row / trusted env) — this
+    # function only serializes whatever trusted value it is given, and NEVER
+    # reads it from a subprocess-supplied payload. An empty org_id is allowed
+    # (executionId is globally unique, so the key stays unique; the org prefix
+    # is defense-in-depth cross-org isolation).
+    if isinstance(execution_id, str) and execution_id:
+        env['CITADEL_EXECUTION_ID'] = execution_id
+    if isinstance(node_id, str) and node_id:
+        env['CITADEL_NODE_ID'] = node_id
+    if isinstance(org_id, str) and org_id:
+        env['CITADEL_ORG_ID'] = org_id
 
     return env
