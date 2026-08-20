@@ -35,6 +35,21 @@ from botocore.exceptions import ClientError
 
 def _apply_set_expression(item, expr, names, values):
     body = expr.strip()[4:]
+    # PR2 dispatch-generation fence: strip + apply an optional trailing ADD
+    # clause (per-node counter) before parsing the SET assignments.
+    _ai = body.upper().find(' ADD ')
+    if _ai != -1:
+        _add_body = body[_ai + 5:]
+        body = body[:_ai]
+        for _clause in _add_body.split(','):
+            _parts = _clause.split()
+            _segs = [s.strip() for s in _parts[0].split('.')]
+            _res = [names[s] if s.startswith('#') else s for s in _segs]
+            _delta = values[_parts[1]]
+            _t = item
+            for _s in _res[:-1]:
+                _t = _t.setdefault(_s, {})
+            _t[_res[-1]] = _t.get(_res[-1], 0) + _delta
     for assignment in body.split(','):
         lhs, rhs = assignment.split('=')
         resolved = [names[s.strip()] if s.strip().startswith('#') else s.strip()
@@ -76,7 +91,7 @@ class StatefulConditionalTable:
         return {'Item': copy.deepcopy(item)} if item is not None else {}
 
     def update_item(self, Key, UpdateExpression, ConditionExpression=None,  # noqa: N803
-                    ExpressionAttributeNames=None, ExpressionAttributeValues=None):
+                    ExpressionAttributeNames=None, ExpressionAttributeValues=None, **_kw):
         names, values = ExpressionAttributeNames or {}, ExpressionAttributeValues or {}
         item = self._items.setdefault(Key[self._key], {self._key: Key[self._key]})
         if ConditionExpression is not None and not _eval_condition_expression(
@@ -215,6 +230,14 @@ class TestUsagePersistedInSameUpdateCall:
 
         for call in mock_exec['executions_table'].update_item.call_args_list:
             expr = call.kwargs.get('UpdateExpression', '')
+            # The successor-node dispatch (schedule_frontier -> invoke_node)
+            # DOES use ` ADD nodeResults.#nid.#dispatchGeneration :one` — an
+            # intentional per-node dispatch counter (PR2 fence). Exempt that
+            # specific write; the guard here is about the USAGE/completion
+            # write staying a per-node SET (never an ADD) for idempotent
+            # duplicate delivery.
+            if 'dispatchGeneration' in (call.kwargs.get('ExpressionAttributeNames') or {}).values():
+                continue
             # 'ADD' as a distinct clause keyword, not a substring of e.g. an
             # attribute name — every clause in this codebase starts with SET.
             assert not expr.strip().upper().startswith('ADD ')

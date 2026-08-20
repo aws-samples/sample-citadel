@@ -28,9 +28,13 @@ logic to the real Strands seam; it degrades to a no-op import when
 ``strands`` is unavailable (dev/CI), mirroring ``governed_tool_handler.py``.
 
 Scope note (honesty requirement): this delivers exactly-once WITHIN an
-attempt + reservation-race safety. Exactly-once across nondeterministic
-re-dispatch needs the worker ``dispatchGeneration`` fence, which is DEFERRED
-to PR2 and REQUIRED for the complete guarantee.
+attempt + reservation-race safety, AND — for a workflow-node tool call carrying
+a ``dispatch_generation`` — exactly-once ACROSS a watchdog re-dispatch, because
+the reserve is fenced against the execution row's current generation (a stale
+re-dispatched-away worker is refused before any side effect). A supervisor task
+call or a ``bypass`` tool carries no generation and is unfenced (exactly-once
+within an attempt only). This hook also injects an optional server-side
+client-idempotency token (post-canonicalization) for targets that support one.
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ if _PROJECT_ROOT not in sys.path:
 from arbiter.governance import tool_execution_ledger as ledger  # noqa: E402
 from arbiter.workerWrapper.tool_idempotency import (  # noqa: E402
     MODE_LEDGER,
+    build_client_token,
     build_key,
     classify_idempotency_mode,
 )
@@ -83,7 +88,9 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
     path applies the identical failure matrix over the same primitives).
     """
 
-    def __init__(self, inner: Any, pk: str, sk: str, tool_name: str, mode: str):
+    def __init__(self, inner: Any, pk: str, sk: str, tool_name: str, mode: str,
+                 *, dispatch_generation: int | None = None,
+                 execution_id: str = "", node_id: str = ""):
         try:
             super().__init__()
         except TypeError:  # pragma: no cover — base signature drift
@@ -93,6 +100,9 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
         self._sk = sk
         self._tool_name = tool_name
         self._mode = mode
+        self._dispatch_generation = dispatch_generation
+        self._execution_id = execution_id
+        self._node_id = node_id
 
     # --- AgentTool interface delegation --------------------------------------
     @property
@@ -115,10 +125,27 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
 
         tool_use_id = str(tool_use.get("toolUseId", "")) if hasattr(tool_use, "get") else ""
 
-        reservation = ledger.reserve(self._pk, self._sk, tool_name=self._tool_name)
+        try:
+            reservation = ledger.reserve(
+                self._pk, self._sk, tool_name=self._tool_name,
+                dispatch_generation=self._dispatch_generation,
+                execution_id=self._execution_id or None,
+                node_id=self._node_id or None,
+            )
+        except ledger.StaleWorkerFencedError:
+            # This worker was re-dispatched away (its generation is stale). It
+            # is refused at the reserve fence BEFORE any side effect — a newer
+            # worker owns the node. Surface as an error ToolResult; the tool
+            # never ran.
+            yield ToolResultEvent(_error_result(
+                tool_use_id,
+                "tool execution refused: worker fenced by a newer dispatch "
+                "generation (no side effect performed)",
+            ))
+            return
 
         if reservation.outcome == ledger.ReserveOutcome.HIT_COMPLETED:
-            yield ToolResultEvent(ledger._recorded_result(reservation.row or {}))
+            yield ToolResultEvent(ledger._recorded_result(reservation.row or {}, self._pk))
             return
         if reservation.outcome == ledger.ReserveOutcome.HIT_FAILED:
             yield ToolResultEvent(_error_result(tool_use_id, "prior terminal failure (idempotent replay)"))
@@ -126,7 +153,7 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
         if reservation.outcome == ledger.ReserveOutcome.IN_FLIGHT:
             settled = ledger.wait_for_terminal(self._pk, self._sk)
             if settled is not None and settled.get("status") == ledger.STATUS_COMPLETED:
-                yield ToolResultEvent(ledger._recorded_result(settled))
+                yield ToolResultEvent(ledger._recorded_result(settled, self._pk))
                 return
             # Concurrent loser (or terminal-failed winner): retryable, no
             # execution. Surface as an error ToolResult — we NEVER ran the tool.
@@ -180,11 +207,15 @@ class IdempotencyToolHook:
         execution_id: str,
         node_id: str,
         mode_resolver: Callable[[str], str] | None = None,
+        dispatch_generation: int | None = None,
+        client_token_param_resolver: Callable[[str], str | None] | None = None,
     ):
         self._org_id = org_id or ""
         self._execution_id = execution_id or ""
         self._node_id = node_id or ""
         self._mode_resolver = mode_resolver
+        self._dispatch_generation = dispatch_generation
+        self._client_token_param_resolver = client_token_param_resolver
         self._call_index = 0
 
     @property
@@ -239,7 +270,34 @@ class IdempotencyToolHook:
             event.selected_tool = _KeyDerivationFailedTool(selected)
             return
 
-        event.selected_tool = _IdempotentToolWrapper(selected, pk, sk, tool_name, mode)
+        # Client-token passthrough (PR2): for a target that supports an
+        # end-to-end idempotency token, inject it SERVER-SIDE now — AFTER
+        # build_key has already hashed the ORIGINAL input, so the token never
+        # perturbs the argsHash — and OVERWRITE any model-supplied value so the
+        # model cannot inject its own token (which could impersonate another
+        # org's idempotency namespace). Only when the per-tool config declares
+        # a clientTokenParam AND the tool input is a mutable mapping.
+        token_param = self._resolve_client_token_param(tool_name)
+        if token_param and isinstance(tool_input, dict):
+            tool_input[token_param] = build_client_token(pk, sk)
+
+        event.selected_tool = _IdempotentToolWrapper(
+            selected, pk, sk, tool_name, mode,
+            dispatch_generation=self._dispatch_generation,
+            execution_id=self._execution_id,
+            node_id=self._node_id,
+        )
+
+    def _resolve_client_token_param(self, tool_name: str) -> str | None:
+        """Resolve the per-tool client-token param name, or None. Fail-safe:
+        any resolver error yields None (no token injected)."""
+        if self._client_token_param_resolver is None:
+            return None
+        try:
+            param = self._client_token_param_resolver(tool_name)
+        except Exception:  # noqa: BLE001 — resolver failure must not break the call
+            return None
+        return param if isinstance(param, str) and param else None
 
 
 class _KeyDerivationFailedTool(AgentTool):  # type: ignore[misc]

@@ -8,19 +8,40 @@ reserve -> execute -> finalize protocol against them.
 
 Guarantee (state it precisely — do NOT collapse to a bare "exactly-once"):
 
-* **Exactly-once execution of the side effect is a GUARANTEE for calls that
+* **Exactly-once execution of the side effect is GUARANTEED for calls that
   resolve to the same key** — redelivery, same-attempt SDK/Strands retries,
   and concurrent split-brain with identical keys. The reservation's
   conditional write is what provides it: exactly one caller wins the reserve
   and executes; every other caller is absorbed (recorded result) or bounced
   with a retryable no-execution error, and NEVER executes.
-* It is **best-effort across nondeterministic re-dispatch** (different keys),
-  which is closed only by the worker ``dispatchGeneration`` fence — DEFERRED
-  to PR2 and REQUIRED for the complete guarantee. Nothing here is the complete
-  guarantee on its own.
+* **Exactly-once across a watchdog re-dispatch is GUARANTEED for
+  workflow-node tool calls once the ``dispatchGeneration`` fence is engaged
+  (PR2, landed).** When the step runner re-dispatches a node it increments a
+  per-node ``dispatchGeneration`` on the execution row; each worker carries
+  the generation it was dispatched under, and the fence — evaluated as a
+  ``ConditionCheck`` inside the SAME ``TransactWriteItems`` that performs the
+  reserve (no read-then-check TOCTOU window) — REFUSES a stale worker
+  (:class:`StaleWorkerFencedError`) before any side effect. So a
+  stalled-but-alive original worker (H2 split-brain) and a nondeterministic
+  re-dispatch body (H1) can no longer both reach an adapter: only the current
+  generation's worker executes.
+* **Residual (still best-effort):** a tool call that runs OUTSIDE the fence
+  envelope — a supervisor task (no execution/node/generation context) or a
+  tool flagged ``idempotency.mode='bypass'`` (skips the ledger, and therefore
+  the fence) — is NOT generation-fenced. For those the guarantee remains
+  exactly-once-within-attempt + reservation-race safety only. The fence is a
+  JOINT property of (reserve-before-execute atomic seam) ∧ (no bypass path)
+  ∧ (a generation was threaded); it does not cover paths that opt out of the
+  ledger.
 * Concurrent-loser *result delivery* is best-effort (a slow/dead holder may
   yield a retryable error instead of the recorded result); side-effect
   *execution* remains exactly-once.
+
+Oversized results are OFFLOADED to a CMK-encrypted, org-prefixed S3 object
+(PR2, landed) so a deduped caller receives the FULL recorded result — a
+faithful replay. The stored ``resultRef`` is re-checked against the caller's
+org/execution prefix on read (:class:`CrossOrgResultRefError`), so a forged or
+confused-deputy ref cannot cross orgs.
 
 NOT an audit artifact: TTL is 48h operational (server-write-time based),
 distinct from the 90-day ``arbiter/governance/ledger.py`` accountability
@@ -39,10 +60,13 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
+from numbers import Number
 from typing import Any, Callable
 
 import boto3
+from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import BotoCoreError, ClientError
 
 from arbiter.workerWrapper.tool_idempotency import MODE_BYPASS
@@ -145,6 +169,34 @@ class RecordedToolFailure(LedgerError):
         self.recorded = recorded or {}
 
 
+class StaleWorkerFencedError(LedgerError):
+    """A re-dispatched-away (stale) worker was refused at the reserve fence.
+
+    The worker carries a ``dispatchGeneration`` older than the execution row's
+    current generation for this node — its node was re-dispatched by the
+    watchdog, so a newer worker owns it. The fence (a ``ConditionCheck`` inside
+    the SAME ``TransactWriteItems`` as the reserve) rejects it atomically
+    BEFORE any adapter call, so no side effect occurred. Non-retryable for THIS
+    worker: its generation can never become current again, and the current
+    generation's worker will perform (and record) the call.
+    """
+
+    retryable = False
+
+
+class CrossOrgResultRefError(LedgerError):
+    """A stored ``resultRef`` does not belong to the reading caller's org.
+
+    Defense-in-depth on the S3 offload read path: the offloaded object key is
+    org/execution-prefixed (``tool-results/{orgId}/{executionId}/…``) and is
+    re-validated on read against the org/execution derived from the ledger PK
+    the caller located the row by. A ref that points outside that prefix (a
+    forged or confused-deputy pointer) is refused rather than fetched.
+    """
+
+    retryable = False
+
+
 class ToolOutcomeError(Exception):
     """Adapter-raised classification of a failed tool call.
 
@@ -218,33 +270,139 @@ def _table() -> Any:
 
 def __reset_ledger_client_for_test() -> None:
     """Test-only: clear the cached boto3 resource."""
-    global _ddb_resource
+    global _ddb_resource, _s3_client
     _ddb_resource = None
+    _s3_client = None
 
 
-# --- Result preparation (inline only in PR1; S3 offload is PR2) -------------
+# --- Lazy DynamoDB client (fenced reserve uses TransactWriteItems) -----------
+
+_serializer = TypeSerializer()
 
 
-def _prepare_result(result: Any) -> tuple[Any, bool, str | None]:
-    """Return ``(inline_result_json, truncated, marker)`` for a tool result.
+def _get_dynamodb_client() -> Any:
+    """The low-level DynamoDB client backing the resource.
 
-    Inline results only in PR1. When the serialized result exceeds
-    ``max_inline_bytes`` it is NOT stored inline and is NOT truncated into a
-    partial body (a partial replay would be unfaithful); instead we record a
-    deterministic content marker (``sha256`` of the canonical JSON) and set
-    ``truncated=True``. Faithful large-result replay via S3 offload is PR2 —
-    do NOT build it here. A caller that gets a truncated record must treat the
-    dedupe hit as "known-completed, body unavailable inline".
+    ``TransactWriteItems`` (the fenced reserve) is a client-level operation
+    with no resource-Table equivalent. Reusing ``resource.meta.client`` keeps
+    a single credential/config source and lets a test that patches
+    :func:`_get_dynamodb_resource` reach a fake client through ``.meta.client``
+    with no second seam.
+    """
+    return _get_dynamodb_resource().meta.client
+
+
+def _to_ddb_number_safe(obj: Any) -> Any:
+    """Recursively convert ``float`` to ``Decimal`` so ``TypeSerializer`` (which
+    rejects floats) can marshal a ledger item for the client-level transaction.
+    Ints/strings/None/bools/containers pass through unchanged."""
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {k: _to_ddb_number_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_ddb_number_safe(v) for v in obj]
+    return obj
+
+
+def _marshal(mapping: dict[str, Any]) -> dict[str, Any]:
+    """Marshal a plain dict to DynamoDB AttributeValue JSON for the client API."""
+    safe = _to_ddb_number_safe(mapping)
+    return {k: _serializer.serialize(v) for k, v in safe.items()}
+
+
+# --- Lazy S3 client (oversized-result offload) -------------------------------
+
+_s3_client: Any = None
+
+
+def _get_s3_client() -> Any:
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client("s3")
+    return _s3_client
+
+
+def _result_bucket() -> str | None:
+    bucket = os.environ.get("TOOL_RESULT_BUCKET")
+    return bucket or None
+
+
+def _result_kms_key_id() -> str | None:
+    key_id = os.environ.get("TOOL_RESULT_KMS_KEY_ID")
+    return key_id or None
+
+
+def _split_pk(pk: str) -> tuple[str, str]:
+    """Split a ledger PK ``orgId#executionId`` into ``(orgId, executionId)``.
+
+    ``orgId`` may legitimately be empty (executionId alone is globally unique);
+    the org prefix is defense-in-depth, not the uniqueness guarantee.
+    """
+    org_id, sep, execution_id = pk.partition("#")
+    return (org_id, execution_id if sep else "")
+
+
+def _result_object_key(pk: str, sk: str) -> str:
+    """Org/execution-prefixed S3 key for an offloaded result.
+
+    ``tool-results/{orgId}/{executionId}/{sha256(sk)}.json`` — the org prefix
+    gives structural cross-org isolation and is re-validated on read.
+    """
+    org_id, execution_id = _split_pk(pk)
+    digest = hashlib.sha256(sk.encode("utf-8")).hexdigest()
+    return f"tool-results/{org_id}/{execution_id}/{digest}.json"
+
+
+# --- Result preparation (inline, else CMK-encrypted org-prefixed S3 offload) -
+
+
+def _prepare_result(result: Any, *, pk: str, sk: str) -> tuple[Any, dict[str, Any] | None]:
+    """Return ``(inline_result_json_or_None, result_ref_or_None)`` for a result.
+
+    Small results are stored inline. When the serialized result exceeds
+    ``max_inline_bytes`` it is OFFLOADED to S3 — NOT truncated (a partial
+    replay would be unfaithful) — and a ``resultRef`` pointer is returned so a
+    redelivered caller receives the FULL recorded body. The object is written
+    with SSE-KMS (CMK) under an org/execution-prefixed key
+    (``tool-results/{orgId}/{executionId}/…``); the bucket policy additionally
+    DENIES any non-KMS put, so a mis-encrypted write fails closed.
+
+    Fails closed: if the result is oversized but no ``TOOL_RESULT_BUCKET`` is
+    configured, we raise rather than silently truncate.
     """
     try:
         serialized = json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
     except (TypeError, ValueError) as exc:
         raise LedgerError(f"tool result is not JSON-serializable: {exc}") from exc
     encoded = serialized.encode("utf-8")
-    if len(encoded) > max_inline_bytes():
-        marker = hashlib.sha256(encoded).hexdigest()
-        return None, True, marker
-    return serialized, False, None
+    if len(encoded) <= max_inline_bytes():
+        return serialized, None
+
+    bucket = _result_bucket()
+    if not bucket:
+        raise LedgerError(
+            "tool result exceeds the inline cap but TOOL_RESULT_BUCKET is not "
+            "configured — refusing to truncate (fail-closed); S3 offload is required"
+        )
+    key = _result_object_key(pk, sk)
+    put_kwargs: dict[str, Any] = {
+        "Bucket": bucket,
+        "Key": key,
+        "Body": encoded,
+        "ContentType": "application/json",
+        "ServerSideEncryption": "aws:kms",
+    }
+    kms_key_id = _result_kms_key_id()
+    if kms_key_id:
+        put_kwargs["SSEKMSKeyId"] = kms_key_id
+    try:
+        _get_s3_client().put_object(**put_kwargs)
+    except (ClientError, BotoCoreError) as exc:
+        raise LedgerError(f"tool result S3 offload failed for {key!r}: {exc}") from exc
+    return None, {"bucket": bucket, "key": key, "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
 # --- Reserve / get / finalize ------------------------------------------------
@@ -319,46 +477,18 @@ def _reclaim_released(pk: str, sk: str, *, now: float) -> bool:
         raise LedgerError(f"ledger re-reserve transport error for {pk!r}/{sk!r}: {exc}") from exc
 
 
-def reserve(pk: str, sk: str, *, tool_name: str, now: float | None = None) -> ReserveResult:
-    """Attempt to reserve a tool execution with a conditional first-write-wins.
+def _resolve_existing(pk: str, sk: str, now: float) -> ReserveResult:
+    """Resolve the outcome when a reservation row already exists.
 
-    Returns a :class:`ReserveResult`:
-
-    * ``WON`` — this caller holds the reservation and MUST proceed to execute
-      then :func:`finalize_success` / :func:`finalize_failure`.
-    * ``HIT_COMPLETED`` / ``HIT_FAILED`` — a prior terminal record exists;
-      return it, do NOT execute.
-    * ``IN_FLIGHT`` — a live concurrent holder; the caller should poll
-      (:func:`wait_for_terminal`) then raise :class:`RetryableNoExecutionError`
-      without executing. A *stale* in-flight row is reclaimed here (returns
-      ``WON`` with ``reclaimed=True``).
+    Shared by the fenced and non-fenced reserve paths: reads the current row
+    and maps it to HIT_COMPLETED / HIT_FAILED / a released- or stale-reclaim
+    WON / IN_FLIGHT.
     """
-    now = time.time() if now is None else now
-    item = {
-        PK_ATTR: pk,
-        SK_ATTR: sk,
-        "status": STATUS_IN_FLIGHT,
-        "toolName": tool_name,
-        "createdAt": now,
-        "updatedAt": now,
-        # TTL derived from SERVER write-time (not a producer clock), so a
-        # skewed/malicious producer cannot force early expiry.
-        "ttl": int(now) + ttl_seconds(),
-    }
-    try:
-        _table().put_item(Item=item, ConditionExpression=f"attribute_not_exists({PK_ATTR})")
-        return ReserveResult(ReserveOutcome.WON)
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
-            raise LedgerError(f"ledger reserve failed for {pk!r}/{sk!r}: {exc}") from exc
-    except BotoCoreError as exc:
-        raise LedgerError(f"ledger reserve transport error for {pk!r}/{sk!r}: {exc}") from exc
-
-    # Reservation exists — resolve its current status.
     row = get(pk, sk)
     if row is None:
-        # Vanished between our failed put and this read (TTL/reclaim race);
-        # treat as retryable rather than executing unprotected.
+        # Vanished between the failed conditional write and this read
+        # (TTL/reclaim race); treat as retryable rather than executing
+        # unprotected.
         return ReserveResult(ReserveOutcome.IN_FLIGHT)
     status = row.get("status")
     if status == STATUS_COMPLETED:
@@ -373,10 +503,157 @@ def reserve(pk: str, sk: str, *, tool_name: str, now: float | None = None) -> Re
         return ReserveResult(ReserveOutcome.IN_FLIGHT, row=row)
     # in_flight — reclaim if the holder looks dead, else report live.
     created_at = row.get("createdAt")
-    if isinstance(created_at, (int, float)) and (now - float(created_at)) > lease_seconds():
+    if isinstance(created_at, (int, float, Decimal)) and (now - float(created_at)) > lease_seconds():
         if _reclaim_stale(pk, sk, seen_created_at=created_at, now=now):
             return ReserveResult(ReserveOutcome.WON, reclaimed=True)
     return ReserveResult(ReserveOutcome.IN_FLIGHT, row=row)
+
+
+def _reserve_fenced(
+    item: dict[str, Any],
+    *,
+    pk: str,
+    sk: str,
+    execution_id: str,
+    node_id: str,
+    dispatch_generation: int,
+    now: float,
+) -> ReserveResult:
+    """Reserve with the dispatch-generation fence in ONE atomic transaction.
+
+    Security condition C2: the generation guard is a ``ConditionCheck`` on the
+    execution row evaluated INSIDE the SAME ``TransactWriteItems`` that performs
+    the reserve ``Put`` — never a separate read-then-check (which would
+    reintroduce a TOCTOU window a re-dispatch could slip through). Either both
+    the reserve and the fence commit, or neither does:
+
+    * fence ``ConditionCheck`` (``nodeResults.<nodeId>.dispatchGeneration =
+      :gen``) fails  -> the worker is stale -> :class:`StaleWorkerFencedError`,
+      no side effect;
+    * reserve ``Put`` (``attribute_not_exists``) fails -> the key already
+      exists for the CURRENT generation -> resolve the existing row (dedupe
+      hit / in-flight / reclaim), exactly as the non-fenced path.
+    """
+    ledger_table = os.environ.get("TOOL_EXECUTION_LEDGER_TABLE")
+    exec_table = os.environ.get("EXECUTIONS_TABLE")
+    if not ledger_table:
+        raise LedgerError(
+            "TOOL_EXECUTION_LEDGER_TABLE not configured — cannot reserve (fail-closed)"
+        )
+    if not exec_table:
+        # A generation was threaded but there is no execution table to fence
+        # against — fail closed rather than silently downgrade to unfenced.
+        raise LedgerError(
+            "dispatch fence requested but EXECUTIONS_TABLE not configured — "
+            "cannot evaluate the generation guard (fail-closed)"
+        )
+    transact_items = [
+        {
+            "Put": {
+                "TableName": ledger_table,
+                "Item": _marshal(item),
+                "ConditionExpression": f"attribute_not_exists({PK_ATTR})",
+            }
+        },
+        {
+            "ConditionCheck": {
+                "TableName": exec_table,
+                "Key": _marshal({"executionId": execution_id}),
+                "ConditionExpression": "nodeResults.#nid.#gen = :gen",
+                "ExpressionAttributeNames": {"#nid": node_id, "#gen": "dispatchGeneration"},
+                "ExpressionAttributeValues": {":gen": _serializer.serialize(int(dispatch_generation))},
+            }
+        },
+    ]
+    try:
+        _get_dynamodb_client().transact_write_items(TransactItems=transact_items)
+        return ReserveResult(ReserveOutcome.WON)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code != "TransactionCanceledException":
+            raise LedgerError(f"ledger fenced reserve failed for {pk!r}/{sk!r}: {exc}") from exc
+        reasons = exc.response.get("CancellationReasons") or []
+        fence_failed = len(reasons) > 1 and reasons[1].get("Code") == "ConditionalCheckFailed"
+        put_failed = len(reasons) > 0 and reasons[0].get("Code") == "ConditionalCheckFailed"
+        if fence_failed:
+            raise StaleWorkerFencedError(
+                f"worker dispatchGeneration {dispatch_generation} is stale for node "
+                f"{node_id!r} (execution {execution_id!r}); refused at reserve fence "
+                "before any side effect"
+            ) from exc
+        if put_failed:
+            return _resolve_existing(pk, sk, now)
+        raise LedgerError(
+            f"ledger fenced reserve cancelled for {pk!r}/{sk!r}: {reasons}"
+        ) from exc
+    except BotoCoreError as exc:
+        raise LedgerError(f"ledger fenced reserve transport error for {pk!r}/{sk!r}: {exc}") from exc
+
+
+def reserve(
+    pk: str,
+    sk: str,
+    *,
+    tool_name: str,
+    dispatch_generation: int | None = None,
+    execution_id: str | None = None,
+    node_id: str | None = None,
+    now: float | None = None,
+) -> ReserveResult:
+    """Attempt to reserve a tool execution with a conditional first-write-wins.
+
+    Returns a :class:`ReserveResult`:
+
+    * ``WON`` — this caller holds the reservation and MUST proceed to execute
+      then :func:`finalize_success` / :func:`finalize_failure`.
+    * ``HIT_COMPLETED`` / ``HIT_FAILED`` — a prior terminal record exists;
+      return it, do NOT execute.
+    * ``IN_FLIGHT`` — a live concurrent holder; the caller should poll
+      (:func:`wait_for_terminal`) then raise :class:`RetryableNoExecutionError`
+      without executing. A *stale* in-flight row is reclaimed here (returns
+      ``WON`` with ``reclaimed=True``).
+
+    When ``dispatch_generation`` is provided (a workflow-node tool call), the
+    reserve is fenced: the generation guard is evaluated in the SAME atomic
+    transaction as the reserve (see :func:`_reserve_fenced`), and a stale
+    worker raises :class:`StaleWorkerFencedError`. When it is ``None`` (a
+    supervisor task, or a pre-feature caller) the reserve is the unfenced
+    conditional ``PutItem`` — exactly-once-within-attempt only.
+    """
+    now = time.time() if now is None else now
+    item = {
+        PK_ATTR: pk,
+        SK_ATTR: sk,
+        "status": STATUS_IN_FLIGHT,
+        "toolName": tool_name,
+        "createdAt": now,
+        "updatedAt": now,
+        # TTL derived from SERVER write-time (not a producer clock), so a
+        # skewed/malicious producer cannot force early expiry.
+        "ttl": int(now) + ttl_seconds(),
+    }
+    if dispatch_generation is not None:
+        if not (execution_id and node_id):
+            raise LedgerError(
+                "dispatch_generation requires execution_id and node_id to locate "
+                "the fence row (fail-closed)"
+            )
+        item["dispatchGeneration"] = int(dispatch_generation)
+        return _reserve_fenced(
+            item, pk=pk, sk=sk, execution_id=execution_id, node_id=node_id,
+            dispatch_generation=int(dispatch_generation), now=now,
+        )
+    try:
+        _table().put_item(Item=item, ConditionExpression=f"attribute_not_exists({PK_ATTR})")
+        return ReserveResult(ReserveOutcome.WON)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise LedgerError(f"ledger reserve failed for {pk!r}/{sk!r}: {exc}") from exc
+    except BotoCoreError as exc:
+        raise LedgerError(f"ledger reserve transport error for {pk!r}/{sk!r}: {exc}") from exc
+
+    # Reservation exists — resolve its current status.
+    return _resolve_existing(pk, sk, now)
 
 
 def wait_for_terminal(
@@ -446,12 +723,18 @@ def _finalize(pk: str, sk: str, *, attributes: dict[str, Any], now: float) -> No
 
 
 def finalize_success(pk: str, sk: str, *, result: Any, now: float | None = None) -> None:
-    """Record a successful execution result (in_flight -> completed)."""
+    """Record a successful execution result (in_flight -> completed).
+
+    Small results are stored inline; an oversized result is offloaded to S3
+    (CMK-encrypted, org-prefixed) and only a ``resultRef`` pointer is stored,
+    so a redelivered caller can fetch the FULL body (faithful replay).
+    """
     now = time.time() if now is None else now
-    inline, truncated, marker = _prepare_result(result)
-    attrs: dict[str, Any] = {"status": STATUS_COMPLETED, "resultTruncated": truncated}
-    if truncated:
-        attrs["resultMarker"] = marker
+    inline, result_ref = _prepare_result(result, pk=pk, sk=sk)
+    attrs: dict[str, Any] = {"status": STATUS_COMPLETED, "resultTruncated": False}
+    if result_ref is not None:
+        attrs["resultRef"] = result_ref
+        attrs["resultOffloaded"] = True
     else:
         attrs["result"] = inline
     _finalize(pk, sk, attributes=attrs, now=now)
@@ -512,16 +795,57 @@ def release(pk: str, sk: str) -> None:
         raise LedgerError(f"ledger release transport error for {pk!r}/{sk!r}: {exc}") from exc
 
 
-def _recorded_result(row: dict[str, Any]) -> Any:
-    """Extract the recorded result from a completed row (parse inline JSON)."""
-    if row.get("resultTruncated"):
-        return {
-            "status": "success",
-            "idempotent": True,
-            "resultTruncated": True,
-            "resultMarker": row.get("resultMarker"),
-            "note": "result body exceeded inline cap; faithful replay via S3 is PR2",
-        }
+def _fetch_result_ref(pk: str, result_ref: dict[str, Any]) -> Any:
+    """Fetch an offloaded result from S3 after re-checking its org prefix.
+
+    Defense-in-depth (security condition C3): the stored key MUST live under
+    the ``tool-results/{orgId}/{executionId}/`` prefix derived from the ledger
+    PK the caller located this row by. A ref pointing outside that prefix — a
+    forged or confused-deputy pointer — is refused (:class:`CrossOrgResultRefError`)
+    rather than fetched, so one org can never read another org's object even
+    if a ref were tampered with.
+    """
+    if not isinstance(result_ref, dict):
+        raise CrossOrgResultRefError(f"malformed resultRef on ledger row: {result_ref!r}")
+    key = result_ref.get("key")
+    bucket = result_ref.get("bucket")
+    if not isinstance(key, str) or not isinstance(bucket, str) or not key or not bucket:
+        raise CrossOrgResultRefError(f"incomplete resultRef on ledger row: {result_ref!r}")
+    org_id, execution_id = _split_pk(pk)
+    expected_prefix = f"tool-results/{org_id}/{execution_id}/"
+    if not key.startswith(expected_prefix):
+        raise CrossOrgResultRefError(
+            f"resultRef key {key!r} is outside the caller's org/execution prefix "
+            f"{expected_prefix!r}; refusing cross-org result read"
+        )
+    try:
+        resp = _get_s3_client().get_object(Bucket=bucket, Key=key)
+        body = resp["Body"].read()
+    except (ClientError, BotoCoreError, KeyError) as exc:
+        raise LedgerError(f"offloaded result fetch failed for {key!r}: {exc}") from exc
+    try:
+        return json.loads(body)
+    except (ValueError, TypeError) as exc:
+        raise LedgerError(f"offloaded result at {key!r} is not valid JSON: {exc}") from exc
+
+
+def _recorded_result(row: dict[str, Any], pk: str | None = None) -> Any:
+    """Extract the recorded result from a completed row.
+
+    An offloaded result (``resultRef``) is fetched from S3 with an org-prefix
+    re-check; an inline result is parsed from JSON. ``pk`` is required to fetch
+    an offloaded ref (it carries the org/execution prefix to validate against);
+    if a ref is present but no ``pk`` was supplied, we fail closed rather than
+    trust the ref.
+    """
+    result_ref = row.get("resultRef")
+    if result_ref is not None:
+        if pk is None:
+            raise LedgerError(
+                "cannot resolve an offloaded resultRef without the ledger PK "
+                "for the org-prefix re-check (fail-closed)"
+            )
+        return _fetch_result_ref(pk, result_ref)
     raw = row.get("result")
     if isinstance(raw, str):
         try:
@@ -538,6 +862,9 @@ def execute_idempotent(
     tool_name: str,
     mode: str,
     run_tool: Callable[[], Any],
+    dispatch_generation: int | None = None,
+    execution_id: str | None = None,
+    node_id: str | None = None,
     now: float | None = None,
     wait_kwargs: dict[str, Any] | None = None,
 ) -> Any:
@@ -551,15 +878,23 @@ def execute_idempotent(
     is written and ``run_tool`` runs directly. Any other mode is
     ledger-protected (fail-safe default lives in
     ``tool_idempotency.classify_idempotency_mode``).
+
+    When ``dispatch_generation`` is provided the reserve is FENCED against the
+    execution row's current generation (see :func:`reserve`); a stale
+    re-dispatched-away worker raises :class:`StaleWorkerFencedError` and NEVER
+    executes.
     """
     if mode == MODE_BYPASS:
         return run_tool()
 
     now = time.time() if now is None else now
-    reservation = reserve(pk, sk, tool_name=tool_name, now=now)
+    reservation = reserve(
+        pk, sk, tool_name=tool_name, dispatch_generation=dispatch_generation,
+        execution_id=execution_id, node_id=node_id, now=now,
+    )
 
     if reservation.outcome == ReserveOutcome.HIT_COMPLETED:
-        return _recorded_result(reservation.row or {})
+        return _recorded_result(reservation.row or {}, pk)
     if reservation.outcome == ReserveOutcome.HIT_FAILED:
         row = reservation.row or {}
         raise RecordedToolFailure(
@@ -571,7 +906,7 @@ def execute_idempotent(
     if reservation.outcome == ReserveOutcome.IN_FLIGHT:
         settled = wait_for_terminal(pk, sk, **(wait_kwargs or {}))
         if settled is not None and settled.get("status") == STATUS_COMPLETED:
-            return _recorded_result(settled)
+            return _recorded_result(settled, pk)
         if settled is not None and settled.get("status") == STATUS_FAILED:
             raise RecordedToolFailure(
                 f"tool {tool_name!r} failed terminally on the winning attempt",

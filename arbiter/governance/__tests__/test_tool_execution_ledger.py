@@ -217,7 +217,7 @@ class TestConcurrentRace:
             calls["n"] += 1
             return {"status": "success", "ticketId": f"T-{calls['n']}"}
 
-        def nonconditional_reserve(_pk, _sk, *, tool_name, now=None):
+        def nonconditional_reserve(_pk, _sk, *, tool_name, now=None, **_kw):
             _table(_fake_ddb).store[(_pk, _sk)] = {
                 ledger.PK_ATTR: _pk, ledger.SK_ATTR: _sk, "status": "in_flight",
             }

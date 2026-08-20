@@ -935,6 +935,12 @@ def _process_workflow_node(event, message_attributes=None):
             execution_id=msg.execution_id,
             node_id=msg.node_id,
             org_id=_resolve_execution_org_id(msg.execution_id),
+            # PR2 dispatch-generation fence: carried on the validated
+            # node-dispatch message (server-minted by the step runner's
+            # dispatch guard). When present, agent_runner fences the tool-call
+            # reserve against it; when None (pre-fence dispatch) the reserve is
+            # unfenced, preserving back-compat.
+            dispatch_generation=msg.dispatch_generation,
         )
 
         usage_sink: list = []

@@ -89,6 +89,15 @@ class NodeDispatchMessage:
     # for any pre-runId dispatcher, a pre-runId execution row, or a
     # malformed wire value — best-effort, never fabricated.
     run_id: Optional[str] = None
+    # Additive (PR2 dispatch-generation fence): the per-node dispatch
+    # generation the step runner incremented on this node's pending->running
+    # transition. Carried to the worker so its tool-call reserve can be fenced
+    # against the execution row's current generation — a stale
+    # (re-dispatched-away) worker is refused before any side effect. None for a
+    # pre-fence dispatcher or a malformed wire value; when None the worker's
+    # reserve is unfenced (exactly-once-within-attempt only), preserving
+    # back-compat.
+    dispatch_generation: Optional[int] = None
 
 
 @dataclass
@@ -155,6 +164,7 @@ def build_node_dispatch_message(
     trace_context: Optional[dict[str, Any]] = None,
     dispatched_at: Optional[str] = None,
     run_id: Optional[str] = None,
+    dispatch_generation: Optional[int] = None,
 ) -> dict:
     """Build a JSON-serializable node-dispatch message for the worker queue.
 
@@ -206,6 +216,12 @@ def build_node_dispatch_message(
         raise ValueError(
             "node-dispatch message: 'run_id' must be a string when present"
         )
+    if dispatch_generation is not None and (
+        not isinstance(dispatch_generation, int) or isinstance(dispatch_generation, bool)
+    ):
+        raise ValueError(
+            "node-dispatch message: 'dispatch_generation' must be an int when present"
+        )
 
     message: dict[str, Any] = {
         'message_type': MESSAGE_TYPE_WORKFLOW_NODE,
@@ -224,6 +240,8 @@ def build_node_dispatch_message(
         message['dispatchedAt'] = dispatched_at
     if isinstance(run_id, str) and run_id:
         message['runId'] = run_id
+    if dispatch_generation is not None:
+        message['dispatch_generation'] = dispatch_generation
     return message
 
 
@@ -278,6 +296,12 @@ def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:
         # mirrors dispatched_at's malformed-wire-value degradation above.
         run_id = None
 
+    dispatch_generation = body.get('dispatch_generation')
+    if isinstance(dispatch_generation, bool) or not isinstance(dispatch_generation, int):
+        # Best-effort, never gates parsing (PR2 fence): a malformed/absent
+        # generation degrades to None -> the worker's reserve is unfenced.
+        dispatch_generation = None
+
     return NodeDispatchMessage(
         execution_id=execution_id,
         node_id=node_id,
@@ -288,6 +312,7 @@ def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:
         correlation_id=correlation_id,
         dispatched_at=dispatched_at,
         run_id=run_id,
+        dispatch_generation=dispatch_generation,
     )
 
 
