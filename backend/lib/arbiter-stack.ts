@@ -1189,36 +1189,56 @@ export class ArbiterStack extends cdk.Stack {
         },
       );
 
-      // Least-privilege (decision O4 — resource-scoped, no wildcards). The
-      // watchdog now:
-      //   * Scans + reads-by-key (GetItem/Query) the executions table and
-      //     conditionally UpdateItems it (reconcile writes go through the
-      //     executor's conditional guards; the watchdog itself fails stuck
-      //     executions).
-      //   * Reads the workflows table (GetItem/Query ONLY — never Scan/write)
-      //     to know the DAG graph for reconcile.
-      //   * SendMessage to the worker queue ARN to re-dispatch a stalled node.
-      //   * PutEvents on the shared bus (workflow.failed / workflow.completed)
-      //     and PutMetricData for the best-effort timeout metric (below).
-      // It remains a distinct, higher-trust role than the worker (which is
-      // UpdateItem-only + FGAC) and is triggered ONLY by its EventBridge
-      // schedule — never externally invokable.
+      // Least-privilege (decision O4/a41e12a6, reconciled — finding d037634b,
+      // superseding a41e12a6's original text). SendMessage to the worker
+      // queue ARN re-dispatches a stalled node; PutEvents on the shared bus
+      // emits workflow.failed/workflow.completed; PutMetricData (below) is
+      // the best-effort timeout metric. Distinct, higher-trust role than the
+      // worker (UpdateItem-only + FGAC); triggered ONLY by its EventBridge
+      // schedule, never externally invokable.
+      //
+      // DynamoDB grants verified against every call reachable from the
+      // watchdog's own code path (timeout_watchdog.py + the shared
+      // executor.py primitives it calls: _load_execution, invoke_node,
+      // _reconcile_or_fail_node, handle_node_failure, _finalize_execution):
+      //   * dynamodb:Scan — PRE-EXISTING (predates the durable-execution
+      //     work at c991af7). Load-bearing: the executions table's only
+      //     index is WorkflowIndex (workflowId/startedAt); there is no
+      //     status index, so `_scan_running()`'s filtered Scan for
+      //     status == 'running' is the only viable access pattern for this
+      //     low-frequency sweep (see that function's own docstring).
+      //   * dynamodb:GetItem — added by c991af7 (durable-execution work).
+      //     Load-bearing: `executor._load_execution` reads a single
+      //     execution row by key when reconciling/re-dispatching.
+      //   * dynamodb:UpdateItem — PRE-EXISTING. Load-bearing: `_fail_stuck`,
+      //     `invoke_node`'s conditional pending->running dispatch,
+      //     `_reconcile_or_fail_node`'s stall re-dispatch flip,
+      //     `handle_node_failure`, and `_finalize_execution` all write
+      //     through this table via conditional-guarded UpdateItem calls
+      //     (never a bare write — see executor.py's own ConditionExpression
+      //     guards).
+      //   * dynamodb:Query — REMOVED. Added by c991af7 alongside GetItem but
+      //     never actually called: no function reachable from the watchdog
+      //     (including the shared executor.py primitives above) issues a
+      //     Query against this table. Confirmed by direct grep of the
+      //     watchdog + executor + dag modules for `.query(`.
       workflowTimeoutWatchdogFunction.addToRolePolicy(
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
-          actions: [
-            "dynamodb:Scan",
-            "dynamodb:GetItem",
-            "dynamodb:Query",
-            "dynamodb:UpdateItem",
-          ],
+          actions: ["dynamodb:Scan", "dynamodb:GetItem", "dynamodb:UpdateItem"],
           resources: [props.executionsTable.tableArn],
         }),
       );
+      // Workflows table: GetItem-only (read-only, no write). PRE-EXISTING
+      // GetItem (via `executor._load_workflow`, called to read the DAG graph
+      // for reconcile — see `_load_workflow`'s docstring: "read-only
+      // GetItem"). dynamodb:Query REMOVED for the identical reason as above
+      // — never called; the workflows table is looked up by its partition
+      // key (workflowId) only, never queried.
       workflowTimeoutWatchdogFunction.addToRolePolicy(
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
-          actions: ["dynamodb:GetItem", "dynamodb:Query"],
+          actions: ["dynamodb:GetItem"],
           resources: [props.workflowsTable.tableArn],
         }),
       );

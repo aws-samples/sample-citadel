@@ -192,6 +192,7 @@ describe("BackendStack — Workflow/App/Execution Lambda functions and AppSync w
     const executionMutationFields = [
       "startExecution",
       "cancelExecution",
+      "resumeExecution",
       "publishWorkflowProgress",
     ];
 

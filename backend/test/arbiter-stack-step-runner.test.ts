@@ -511,14 +511,18 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       });
     });
 
-    test("watchdog DynamoDB grant is resource-scoped: reconcile reads/writes executions, reads workflows (decision O4)", () => {
+    test("watchdog DynamoDB grant is resource-scoped: reconcile reads/writes executions, reads workflows (decision a41e12a6, reconciled — finding d037634b)", () => {
       const actions = actionsForRole("WorkflowTimeoutWatchdog");
-      // Reconcile needs to Scan for running execs, read a single exec/workflow
-      // by key (GetItem/Query), and conditionally UpdateItem (fail/reconcile).
+      // Reconcile needs to Scan for running execs (no status index exists —
+      // see arbiter-stack.ts's grant-site comment), GetItem a single exec by
+      // key, and conditionally UpdateItem (fail/reconcile). dynamodb:Query is
+      // deliberately NOT granted: no function reachable from the watchdog
+      // (timeout_watchdog.py or the shared executor.py primitives it calls)
+      // ever issues a Query against this table.
       expect(actions.has("dynamodb:Scan")).toBe(true);
       expect(actions.has("dynamodb:GetItem")).toBe(true);
-      expect(actions.has("dynamodb:Query")).toBe(true);
       expect(actions.has("dynamodb:UpdateItem")).toBe(true);
+      expect(actions.has("dynamodb:Query")).toBe(false);
       // No table-wide write blast radius — never Put/Delete/BatchWrite.
       expect(actions.has("dynamodb:PutItem")).toBe(false);
       expect(actions.has("dynamodb:DeleteItem")).toBe(false);
@@ -529,10 +533,12 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       expect(actions.has("cloudwatch:PutMetricData")).toBe(true);
     });
 
-    test("watchdog workflows-table grant is read-only (GetItem/Query, never write/Scan)", () => {
+    test("watchdog workflows-table grant is read-only (GetItem-only, never Query/write/Scan)", () => {
       // Find the statement(s) on the watchdog role that grant a dynamodb read
       // and assert none of them grant a write on the same statement — the
-      // workflows read grant is [GetItem, Query] with no UpdateItem/Put/Delete.
+      // workflows read grant is [GetItem] only (no Query — never called by
+      // `executor._load_workflow`, which reads by key only — and no
+      // UpdateItem/Put/Delete).
       const policies = template.findResources("AWS::IAM::Policy");
       let sawWorkflowsReadOnly = false;
       for (const p of Object.values(policies) as any[]) {
@@ -547,7 +553,7 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
           const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
           const isReadOnly =
             acts.includes("dynamodb:GetItem") &&
-            acts.includes("dynamodb:Query") &&
+            !acts.includes("dynamodb:Query") &&
             !acts.includes("dynamodb:UpdateItem") &&
             !acts.includes("dynamodb:Scan") &&
             !acts.includes("dynamodb:PutItem") &&
