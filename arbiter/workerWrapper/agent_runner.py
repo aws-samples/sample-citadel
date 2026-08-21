@@ -390,6 +390,22 @@ def _install_governed_tool_handler():
     return True
 
 
+def _read_dispatch_generation():
+    """Parse ``CITADEL_DISPATCH_GENERATION`` to an int, or None when unset/invalid.
+
+    The step runner sets this only for a fenced workflow-node dispatch. A
+    missing/non-integer value degrades to None -> the tool-call reserve is
+    unfenced (exactly-once-within-attempt only), preserving back-compat for
+    the supervisor task path and pre-fence dispatchers."""
+    raw = os.environ.get('CITADEL_DISPATCH_GENERATION')
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _install_idempotency_hook():
     """Patch ``strands.Agent.__init__`` to attach an idempotency HookProvider.
 
@@ -446,6 +462,7 @@ def _install_idempotency_hook():
             org_id=os.environ.get('CITADEL_ORG_ID', ''),
             execution_id=os.environ.get('CITADEL_EXECUTION_ID', ''),
             node_id=os.environ.get('CITADEL_NODE_ID', ''),
+            dispatch_generation=_read_dispatch_generation(),
         )
         existing = kwargs.get('hooks')
         if existing is None:

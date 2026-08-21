@@ -175,6 +175,7 @@ def build_subprocess_env(
     execution_id: str | None = None,
     node_id: str | None = None,
     org_id: str | None = None,
+    dispatch_generation: int | None = None,
 ) -> dict:
     """Build the subprocess environment with governance and config overrides.
 
@@ -283,5 +284,14 @@ def build_subprocess_env(
         env['CITADEL_NODE_ID'] = node_id
     if isinstance(org_id, str) and org_id:
         env['CITADEL_ORG_ID'] = org_id
+
+    # PR2 dispatch-generation fence: the per-node generation this dispatch was
+    # written under. Consumed by agent_runner._install_idempotency_hook and
+    # passed to the ledger reserve so a stale (re-dispatched-away) worker is
+    # refused before any side effect. Additive and optional — absent (or a
+    # bool, which is not a valid generation) leaves the reserve unfenced
+    # (exactly-once-within-attempt only), preserving back-compat.
+    if isinstance(dispatch_generation, int) and not isinstance(dispatch_generation, bool):
+        env['CITADEL_DISPATCH_GENERATION'] = str(dispatch_generation)
 
     return env

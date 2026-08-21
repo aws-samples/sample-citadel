@@ -14,6 +14,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
+from numbers import Number
 
 from botocore.exceptions import ClientError
 
@@ -194,6 +195,25 @@ def _get_cloudwatch_client():
 def _now_iso() -> str:
     """Return current UTC time as ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _extract_dispatch_generation(update_response, node_id: str):
+    """Read the post-increment ``dispatchGeneration`` from an UPDATED_NEW
+    update_item response, or None when unavailable/unparseable.
+
+    Defensive by contract: a MagicMock (unit tests that don't model the
+    response), a pre-fence row, or a non-numeric value all degrade to None, in
+    which case the dispatch message carries no generation and the worker's
+    reserve stays unfenced (back-compat). DynamoDB returns numbers as Decimal;
+    both Decimal and int are coerced to int."""
+    try:
+        node = ((update_response.get('Attributes') or {}).get('nodeResults') or {}).get(node_id) or {}
+        gen = node.get('dispatchGeneration')
+    except Exception:  # noqa: BLE001 — a mock/None response must never break dispatch
+        return None
+    if isinstance(gen, bool) or not isinstance(gen, Number):
+        return None
+    return int(gen)
 
 
 def _log_event(action: str, **fields) -> None:
@@ -621,20 +641,36 @@ def invoke_node(
     # the previous unconditional SET, which let both racing dispatchers send
     # (latent double-dispatch of convergence nodes).
     try:
-        _executions_table.update_item(
+        _dispatch_write = _executions_table.update_item(
             Key={'executionId': execution_id},
-            UpdateExpression='SET nodeResults.#nid.#status = :status, nodeResults.#nid.#startedAt = :startedAt',
+            UpdateExpression=(
+                'SET nodeResults.#nid.#status = :status, '
+                'nodeResults.#nid.#startedAt = :startedAt '
+                'ADD nodeResults.#nid.#gen :one'
+            ),
             ConditionExpression='nodeResults.#nid.#status = :pending',
             ExpressionAttributeNames={
                 '#nid': node_id,
                 '#status': 'status',
                 '#startedAt': 'startedAt',
+                # PR2 dispatch-generation fence: a per-node monotonic counter
+                # incremented on EVERY conditional pending->running transition
+                # (first dispatch: 0->1; each watchdog re-dispatch: +1). The
+                # worker carries the resulting value; its tool-call reserve is
+                # fenced against it (same-transaction ConditionCheck), so a
+                # stale re-dispatched-away worker is refused before any side
+                # effect. Incremented INSIDE this exactly-once dispatch guard
+                # so the counter advances once per real dispatch, never on a
+                # lost race.
+                '#gen': 'dispatchGeneration',
             },
             ExpressionAttributeValues={
                 ':status': 'running',
                 ':startedAt': now,
                 ':pending': 'pending',
+                ':one': 1,
             },
+            ReturnValues='UPDATED_NEW',
         )
     except ClientError as exc:
         if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
@@ -692,6 +728,12 @@ def invoke_node(
         # "now" reading — dispatch and node.started are the same instant for
         # this purpose.
         dispatched_at=now,
+        # PR2 dispatch-generation fence: carry the generation this dispatch
+        # just wrote so the worker's tool-call reserve can be fenced against
+        # the execution row's current generation. None (omitted) when the
+        # response did not surface a parseable generation, keeping the message
+        # byte-identical to a pre-fence dispatch.
+        dispatch_generation=_extract_dispatch_generation(_dispatch_write, node_id),
         **_run_id_kwargs,
     )
 

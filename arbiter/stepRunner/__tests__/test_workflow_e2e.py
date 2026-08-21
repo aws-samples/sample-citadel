@@ -102,6 +102,21 @@ def _apply_set_expression(item, expr, names, values):
     body = expr.strip()
     assert body.upper().startswith('SET '), f"unsupported expression: {expr!r}"
     body = body[4:]
+    # PR2 dispatch-generation fence: strip and apply an optional trailing ADD
+    # clause (a per-node counter increment) before parsing SET assignments.
+    _ai = body.upper().find(' ADD ')
+    if _ai != -1:
+        _add_body = body[_ai + 5:]
+        body = body[:_ai]
+        for _clause in _add_body.split(','):
+            _parts = _clause.split()
+            _segs = [s.strip() for s in _parts[0].split('.')]
+            _res = [names[s] if s.startswith('#') else s for s in _segs]
+            _delta = values[_parts[1]]
+            _t = item
+            for _s in _res[:-1]:
+                _t = _t.setdefault(_s, {})
+            _t[_res[-1]] = _t.get(_res[-1], 0) + _delta
     for assignment in body.split(','):
         lhs, rhs = assignment.split('=')
         segments = [seg.strip() for seg in lhs.strip().split('.')]
@@ -153,7 +168,7 @@ class FakeTable:
 
     def update_item(self, Key, UpdateExpression,  # noqa: N803 — boto3 kwarg names
                     ConditionExpression=None,
-                    ExpressionAttributeNames=None, ExpressionAttributeValues=None):
+                    ExpressionAttributeNames=None, ExpressionAttributeValues=None, **_kw):
         names = ExpressionAttributeNames or {}
         values = ExpressionAttributeValues or {}
         val = Key[self._key_name]

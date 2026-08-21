@@ -440,6 +440,77 @@ export class ArbiterStack extends cdk.Stack {
       },
     );
 
+    // Tool-result offload (PR2). Oversized tool results (> inline cap) are
+    // offloaded here instead of being truncated, so a deduped/replayed caller
+    // receives the FULL recorded body. Security condition C3: a dedicated CMK
+    // (SSE-KMS enforced, non-KMS + wrong-key puts DENIED by the bucket policy
+    // below, mirroring the governance-transcripts precedent), block-public,
+    // TLS-only. Object keys are org/execution-prefixed
+    // (tool-results/{orgId}/{executionId}/…) and the worker's grant is
+    // prefix-scoped with NO cross-org path and NO DeleteObject; the stored
+    // resultRef is additionally re-checked against the caller's org prefix on
+    // read in tool_execution_ledger._fetch_result_ref. A short TTL keeps this
+    // an operational store, not an audit artifact (matches the ledger table).
+    const toolResultsKey = new kms.Key(this, "ToolResultsKey", {
+      description: "Citadel tool-result offload bucket encryption key",
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      alias: `alias/citadel-tool-results-${props.environment}`,
+    });
+    const toolResultsBucket = new Bucket(this, "ToolResultsBucket", {
+      bucketName: `citadel-tool-results-${props.environment}-${this.account}-${this.region}`,
+      encryption: cdk.aws_s3.BucketEncryption.KMS,
+      encryptionKey: toolResultsKey,
+      bucketKeyEnabled: true,
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      lifecycleRules: [
+        {
+          id: "tool-results-operational-ttl",
+          enabled: true,
+          expiration: cdk.Duration.days(7),
+        },
+      ],
+    });
+    // Deny any PutObject that is not SSE-KMS encrypted.
+    toolResultsBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["s3:PutObject"],
+        resources: [toolResultsBucket.arnForObjects("*")],
+        conditions: {
+          StringNotEquals: { "s3:x-amz-server-side-encryption": "aws:kms" },
+        },
+      }),
+    );
+    // Deny any PutObject that uses a different KMS key than our CMK.
+    toolResultsBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ["s3:PutObject"],
+        resources: [toolResultsBucket.arnForObjects("*")],
+        conditions: {
+          StringNotEqualsIfExists: {
+            "s3:x-amz-server-side-encryption-aws-kms-key-id":
+              toolResultsKey.keyArn,
+          },
+        },
+      }),
+    );
+    NagSuppressions.addResourceSuppressions(toolResultsBucket, [
+      {
+        id: "AwsSolutions-S1",
+        reason:
+          "Operational, short-TTL tool-result offload bucket (not an audit " +
+          "artifact); server-access logging is not wired in the arbiter stack " +
+          "(no shared access-logs bucket prop). Access is loopback of the " +
+          "worker role only, prefix-scoped, and object keys are org-isolated.",
+      },
+    ]);
+
     const workerAgentWrapperLambda = new PythonFunction(
       this,
       "WorkerAgentWrapper",
@@ -470,6 +541,11 @@ export class ArbiterStack extends cdk.Stack {
           // idempotency hook is itself gated on per-node execution/node
           // context, so a missing key context is a back-compat no-op.
           TOOL_EXECUTION_LEDGER_TABLE: toolExecutionLedgerTable.tableName,
+          // Tool-result offload (PR2): oversized results are written here
+          // (SSE-KMS, org-prefixed) instead of being truncated; the worker
+          // no-ops offload when unset and small results always stay inline.
+          TOOL_RESULT_BUCKET: toolResultsBucket.bucketName,
+          TOOL_RESULT_KMS_KEY_ID: toolResultsKey.keyArn,
           ...(props.registryId && { REGISTRY_ID: props.registryId }),
           ...(props.registryId && { REGISTRY_ENABLED: "true" }),
         },
@@ -543,6 +619,27 @@ export class ArbiterStack extends cdk.Stack {
           },
         }),
       );
+      // PR2 dispatch-generation fence: the tool-call reserve is a
+      // TransactWriteItems that Puts the ledger row AND performs a
+      // ConditionCheck on this execution row's
+      // nodeResults.<nodeId>.dispatchGeneration in the SAME atomic write
+      // (security condition C2 — the guard is in the reserve's condition, no
+      // read-then-check TOCTOU window). ConditionCheck is a read-only
+      // condition (no write), scoped to the same nodeResults/executionId
+      // attributes as the UpdateItem grant above — it does not widen the
+      // worker's write surface.
+      workerAgentWrapperLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:ConditionCheckItem"],
+          resources: [props.executionsTable.tableArn],
+          conditions: {
+            "ForAllValues:StringEquals": {
+              "dynamodb:Attributes": ["nodeResults", "executionId"],
+            },
+          },
+        }),
+      );
     }
 
     // Tool-call idempotency (PR1): least-privilege grant on the tool-execution
@@ -562,6 +659,23 @@ export class ArbiterStack extends cdk.Stack {
         resources: [toolExecutionLedgerTable.tableArn],
       }),
     );
+
+    // Tool-result offload (PR2), least-privilege: PutObject + GetObject on the
+    // tool-results/* prefix ONLY — no DeleteObject, no cross-bucket, no
+    // ListBucket. Per-org isolation is by the org/execution key prefix plus
+    // the read-time resultRef org re-check in the ledger; a per-dispatch scoped
+    // STS session pinning a single org prefix is the follow-up to close the
+    // residual (mirrors the executions-table item-level pinning note above).
+    workerAgentWrapperLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:PutObject", "s3:GetObject"],
+        resources: [toolResultsBucket.arnForObjects("tool-results/*")],
+      }),
+    );
+    // SSE-KMS on the offload bucket needs GenerateDataKey (put) + Decrypt (get)
+    // on the CMK. grantEncryptDecrypt covers both; scoped to this one key.
+    toolResultsKey.grantEncryptDecrypt(workerAgentWrapperLambda);
 
     // The worker emits best-effort node-level metrics (NodeDurationMs /
     // NodeFailure) into the Citadel/Workflows namespace after running each
@@ -584,6 +698,26 @@ export class ArbiterStack extends cdk.Stack {
             "worker narrows the call to the Citadel/Workflows namespace " +
             "(node duration/failure metrics).",
           appliesTo: ["Resource::*"],
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "Tool-result offload (PR2): the worker Put/Get is scoped to the " +
+            "tool-results/* key prefix of the dedicated offload bucket only " +
+            "(no DeleteObject, no ListBucket, no cross-bucket). The object-path " +
+            "prefix wildcard (Resource::<bucket.Arn>/tool-results/*) is " +
+            "suppressed at the app level (bin/app.ts appLambdaSuppressions); " +
+            "per-org isolation is enforced by the org key prefix plus the " +
+            "read-time resultRef org re-check.",
+          appliesTo: ["Action::s3:GetObject", "Action::s3:PutObject"],
+        },
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "SSE-KMS on the tool-results offload bucket requires the AWS SDK " +
+            "GenerateDataKey*/ReEncrypt* wildcard actions on the single " +
+            "dedicated CMK (grantEncryptDecrypt), scoped to that key only.",
+          appliesTo: ["Action::kms:GenerateDataKey*", "Action::kms:ReEncrypt*"],
         },
       ],
       true,

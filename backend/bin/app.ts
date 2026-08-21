@@ -554,6 +554,7 @@ if (app.node.tryGetContext("nag") !== "false") {
             "/^Resource::arn:aws:secretsmanager:.*:.*:secret:bedrock-agentcore-identity!.+\\*$/g",
         },
         { regex: "/^Resource::<.+\\.Arn>\\/\\*$/g" },
+        { regex: "/^Resource::<.+\\.Arn>\\/tool-results\\/\\*$/g" },
         {
           regex:
             "/^Resource::arn:aws:bedrock-agentcore:.*:.*:workload-identity-directory\\/.+-\\*$/g",

@@ -14,12 +14,14 @@ consensus, do NOT collapse it to a bare "exactly-once"):
   produced on *this* attempt. Two byte-identical (post-canonicalization)
   re-issues of the same logical call within one attempt collapse to the same
   key → exactly-once within an attempt, plus reservation-race safety.
-* It does **NOT** provide exactly-once across nondeterministic re-dispatch
-  (a watchdog re-dispatch runs a fresh LLM body whose calls may reorder or
-  reword → different keys). Closing that requires the worker
-  ``dispatchGeneration`` fence, which is **deferred to PR2** and is REQUIRED
-  for the complete guarantee. Nothing here should be read as the complete
-  guarantee.
+* It does **NOT**, on its own, provide exactly-once across nondeterministic
+  re-dispatch (a watchdog re-dispatch runs a fresh LLM body whose calls may
+  reorder or reword → different keys). That is by design: the key stays
+  attempt-scoped. Cross-re-dispatch exactly-once is closed SEPARATELY by the
+  worker ``dispatchGeneration`` fence (landed), which refuses a stale
+  re-dispatched-away worker at the ledger reserve — NOT by putting the
+  generation in the key (that would mint a fresh key per re-dispatch and
+  guarantee duplicates). See ``tool_execution_ledger.reserve``.
 
 Why not just ``json.dumps(sort_keys=True)``? Two flagged determinism traps
 that raw ``dumps`` gets wrong (both are property-tested):
@@ -56,6 +58,7 @@ __all__ = [
     "build_partition_key",
     "build_sort_key",
     "build_key",
+    "build_client_token",
     "classify_idempotency_mode",
     "detect_write_verbs",
     "check_bypass_classification",
@@ -187,6 +190,22 @@ def build_key(
         build_partition_key(org_id, execution_id),
         build_sort_key(node_id, call_index, tool_name, hash_hex),
     )
+
+
+def build_client_token(pk: str, sk: str) -> str:
+    """Derive a stable, org-scoped client-idempotency token from the ledger key.
+
+    Injected SERVER-SIDE into a tool call (for a target that supports an
+    end-to-end idempotency token) AFTER canonicalization, so it never perturbs
+    the ``argsHash``. Because it is a hash of the ledger key — whose partition
+    key is ``orgId#executionId`` — the token is deterministic per logical call
+    (a retry of the SAME call re-derives the SAME token, letting the target
+    dedupe end-to-end) and cannot collide across orgs (a different ``orgId``
+    yields a different ``pk`` -> a different token), so a model can never use it
+    to impersonate another org's idempotency namespace. 64 hex chars, within
+    the length most idempotency-key APIs accept.
+    """
+    return hashlib.sha256(f"{pk}|{sk}".encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
