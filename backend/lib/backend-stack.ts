@@ -1544,6 +1544,13 @@ export class BackendStack extends cdk.Stack {
     seedOrganizationsResource.node.addDependency(organisationTable);
 
     // Seed Blueprints Custom Resource
+    // Idempotency-seam smoke fixture (see backend/lib/arbiter-stack.ts for
+    // the paired smoke agent + table): gated on the stack's own
+    // `props.environment`, independently of ArbiterStack, since the two
+    // stacks are not cross-wired for this flag. Non-prod only — a prod
+    // deploy never sets SMOKE_FIXTURES_ENABLED, so seed-blueprints/index.ts
+    // never appends the smoke workflow to what it seeds.
+    const isNonProdSmokeEnv = props.environment !== "prod";
     const seedBlueprintsLambda = new lambda.Function(
       this,
       "SeedBlueprintsFunction",
@@ -1554,6 +1561,7 @@ export class BackendStack extends cdk.Stack {
         timeout: cdk.Duration.seconds(30),
         environment: {
           WORKFLOWS_TABLE: this.workflowsTable.tableName,
+          ...(isNonProdSmokeEnv && { SMOKE_FIXTURES_ENABLED: "true" }),
         },
         logGroup: new logs.LogGroup(this, "SeedBlueprintsFunctionLogs", {
           retention: logs.RetentionDays.ONE_WEEK,
@@ -1564,17 +1572,15 @@ export class BackendStack extends cdk.Stack {
 
     this.workflowsTable.grantWriteData(seedBlueprintsLambda);
 
-    // Bumped Version v1.1.0 → v1.2.0 so the CFN Update event re-fires on the
-    // next deploy: the seed lambda's seedVersion-aware upsert then heals
-    // pre-existing envelope-less seeded rows (bare {nodes,edges} definitions)
-    // to the full canvas-shape WorkflowDefinition envelope.
+    // Bumped Version v1.2.0 → v1.3.0 so the CFN Update event re-fires on the
+    // next non-prod deploy and seeds the new Idempotency Smoke Workflow row.
     const seedBlueprintsResource = new cdk.CustomResource(
       this,
       "SeedBlueprintsResource",
       {
         serviceToken: seedBlueprintsLambda.functionArn,
         properties: {
-          Version: "v1.2.0",
+          Version: "v1.3.0",
         },
       },
     );

@@ -454,11 +454,11 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       // it must NOT be used, on the executions table or anywhere else.
       expect(actions.has("dynamodb:DeleteItem")).toBe(false);
       expect(actions.has("dynamodb:BatchWriteItem")).toBe(false);
-      // PutItem is now present, but ONLY in the tool-execution-ledger grant
-      // (PR1): the sole statement carrying PutItem must be exactly the
-      // ledger's Put/Get/Update trio (no Delete/Scan/Query, no FGAC-condition
-      // executions statement leaking Put). Scope the assertion to that
-      // statement rather than the whole role.
+      // PutItem is now present in TWO statements: the tool-execution-ledger
+      // grant (PR1, Put/Get/Update trio) and the idempotency-seam smoke
+      // fixture's grant (this task, non-prod only, PutItem-ONLY on its own
+      // dedicated table). Neither may leak Delete/Scan/Query, and the smoke
+      // statement must never widen beyond a single PutItem action.
       const policies = template.findResources("AWS::IAM::Policy");
       const putStatements: any[] = [];
       for (const p of Object.values(policies) as any[]) {
@@ -472,12 +472,15 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
           if (acts.includes("dynamodb:PutItem")) putStatements.push(acts);
         }
       }
-      expect(putStatements.length).toBe(1);
-      expect(putStatements[0]).toEqual([
+      expect(putStatements.length).toBe(2);
+      const ledgerStatement = putStatements.find((acts) => acts.length === 3);
+      const smokeStatement = putStatements.find((acts) => acts.length === 1);
+      expect(ledgerStatement).toEqual([
         "dynamodb:PutItem",
         "dynamodb:GetItem",
         "dynamodb:UpdateItem",
       ]);
+      expect(smokeStatement).toEqual(["dynamodb:PutItem"]);
     });
 
     test("the UpdateItem grant is FGAC-restricted to the nodeResults/executionId attributes", () => {

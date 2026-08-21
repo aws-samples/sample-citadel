@@ -19,9 +19,32 @@ DEMO_ECHO_AGENT_ID = 'demo-echo-agent'
 DEMO_ECHO_MODULE_FILENAME = 'demo_echo_agent.py'
 DEMO_ECHO_DESCRIPTION = 'Demo agent that echoes its input back as output.'
 
+# ---------------------------------------------------------------------------
+# Idempotency-seam smoke agent — DIAGNOSTIC FIXTURE, never a product agent.
+#
+# Seeded ONLY when SMOKE_FIXTURES_ENABLED is set (CDK sets this exclusively
+# in non-production environments — see backend/lib/arbiter-stack.ts). A
+# production deploy leaves this env var unset, so this whole block is a
+# no-op there: no agent config row, no registry record, no module upload.
+# See _seed_smoke_idempotency_agent below.
+# ---------------------------------------------------------------------------
+SMOKE_IDEMPOTENCY_AGENT_ID = 'smoke-idempotency-agent'
+SMOKE_IDEMPOTENCY_MODULE_FILENAME = 'smoke_idempotency_agent.py'
+SMOKE_IDEMPOTENCY_DESCRIPTION = (
+    'DIAGNOSTIC FIXTURE — exercises the tool-call idempotency seam via one '
+    'harmless side-effecting tool call. Non-prod only. Not a product agent.'
+)
+SMOKE_FIXTURES_ENABLED = bool(os.environ.get('SMOKE_FIXTURES_ENABLED'))
 
-def _seed_demo_agent_registry_record(worker_queue_url):
-    """Create the demo agent's AgentCore Registry record (dual-store seam).
+
+def _seed_agent_registry_record(agent_id, description, module_filename, worker_queue_url):
+    """Create an agent's AgentCore Registry record (dual-store seam).
+
+    Generalized from the original demo-echo-only helper so the same
+    dual-store contract (DDB row for worker dispatch + AgentCore Registry
+    record for the app-publish readiness gate) can be reused for any
+    seeded worker agent — currently ``demo-echo-agent`` and the
+    diagnostic ``smoke-idempotency-agent`` fixture.
 
     The DDB AGENT_CONFIG_TABLE row alone is not enough for the out-of-box
     demo flow: app publish gates on the agent BINDING flipping DESIGN→READY,
@@ -31,8 +54,8 @@ def _seed_demo_agent_registry_record(worker_queue_url):
     helper mirrors the fabricator's ``store_agent_config_registry`` payload
     (arbiter/fabricator/index.py): a CUSTOM-descriptor record whose
     inlineContent carries categories/icon/state/manifest/config/createdBy/
-    orgId. Deliberate deviation: ``state`` is 'active' (the demo agent is
-    seeded immediately runnable, matching its DDB row) where fabricated
+    orgId. Deliberate deviation: ``state`` is 'active' (these agents are
+    seeded immediately runnable, matching their DDB rows) where fabricated
     agents land 'inactive' pending activation. Like the fabricator, the
     record is left in its post-create DRAFT status — no
     UpdateRegistryRecordStatus/Submit call (the registry rejects a
@@ -46,15 +69,15 @@ def _seed_demo_agent_registry_record(worker_queue_url):
         importable — the shared catalog Lambda layer is required for the
         idempotency lookup; DDB-only envs must keep seeding.
       - IDEMPOTENT: mirrors the fabricator's lookup-first behavior — when a
-        record named ``demo-echo-agent`` already exists, CreateRegistryRecord
-        is skipped so CFN re-runs never create duplicates.
+        record with this name already exists, CreateRegistryRecord is
+        skipped so CFN re-runs never create duplicates.
     """
     registry_id = os.environ.get('REGISTRY_ID')
     registry_enabled = os.environ.get('REGISTRY_ENABLED')
     if not registry_id or not registry_enabled:
         print(
             'Registry not configured (REGISTRY_ID/REGISTRY_ENABLED unset) — '
-            f'skipping {DEMO_ECHO_AGENT_ID} registry record seed'
+            f'skipping {agent_id} registry record seed'
         )
         return
 
@@ -66,17 +89,16 @@ def _seed_demo_agent_registry_record(worker_queue_url):
     except ImportError:
         print(
             'WARNING: catalog.registry_client unavailable (catalog layer '
-            f'not attached?) — skipping {DEMO_ECHO_AGENT_ID} registry '
-            'record seed'
+            f'not attached?) — skipping {agent_id} registry record seed'
         )
         return
 
     # Idempotency lookup first (mirrors the fabricator's
     # _find_existing_record_id): exact name match on the record name.
     for record in list_agent_records(registry_id):
-        if isinstance(record, dict) and record.get('name') == DEMO_ECHO_AGENT_ID:
+        if isinstance(record, dict) and record.get('name') == agent_id:
             print(
-                f"Registry record '{DEMO_ECHO_AGENT_ID}' already exists "
+                f"Registry record '{agent_id}' already exists "
                 f"(recordId={record.get('recordId')}); skipping create"
             )
             return
@@ -84,8 +106,8 @@ def _seed_demo_agent_registry_record(worker_queue_url):
     # Fabricator-shaped executable config + manifest + custom metadata
     # (see store_agent_config_registry in arbiter/fabricator/index.py).
     config = {
-        'name': DEMO_ECHO_AGENT_ID,
-        'filename': DEMO_ECHO_MODULE_FILENAME,
+        'name': agent_id,
+        'filename': module_filename,
         'schema': {
             'type': 'object',
             'properties': {
@@ -97,15 +119,15 @@ def _seed_demo_agent_registry_record(worker_queue_url):
             'required': []
         },
         'version': 1,
-        'description': DEMO_ECHO_DESCRIPTION,
+        'description': description,
         'action': {
             'type': 'sqs',
             'target': worker_queue_url,
         },
     }
     manifest = {
-        'name': DEMO_ECHO_AGENT_ID,
-        'description': DEMO_ECHO_DESCRIPTION,
+        'name': agent_id,
+        'description': description,
         'version': 1,
         'tools': [],
     }
@@ -122,8 +144,8 @@ def _seed_demo_agent_registry_record(worker_queue_url):
     client = boto3.client('bedrock-agentcore-control')
     response = client.create_registry_record(
         registryId=registry_id,
-        name=DEMO_ECHO_AGENT_ID,
-        description=DEMO_ECHO_DESCRIPTION,
+        name=agent_id,
+        description=description,
         descriptorType='CUSTOM',
         descriptors={
             'custom': {
@@ -132,9 +154,93 @@ def _seed_demo_agent_registry_record(worker_queue_url):
         },
     )
     print(
-        f"Created registry record for {DEMO_ECHO_AGENT_ID} "
+        f"Created registry record for {agent_id} "
         f"(status={response.get('status')}); leaving it in its post-create "
         'DRAFT status like fabricator-created records'
+    )
+
+
+def _seed_demo_agent_registry_record(worker_queue_url):
+    """Backward-compatible wrapper around the generalized registry seeder,
+    kept so the demo-echo-agent call site (and its existing tests) do not
+    need to change shape."""
+    _seed_agent_registry_record(
+        DEMO_ECHO_AGENT_ID, DEMO_ECHO_DESCRIPTION, DEMO_ECHO_MODULE_FILENAME,
+        worker_queue_url,
+    )
+
+
+def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
+    """Seed the diagnostic smoke-idempotency agent (DDB row + module upload
+    + registry record) — a NON-PROD-ONLY fixture, gated on
+    ``SMOKE_FIXTURES_ENABLED``.
+
+    Mirrors the demo-echo-agent seeding block exactly (same dual-store
+    contract, same idempotent plain-``put_item``/``put_object`` semantics),
+    parameterized so it can be called only when smoke fixtures are enabled.
+    Never called at all in a production deploy — see ``SMOKE_FIXTURES_ENABLED``
+    and ``backend/lib/arbiter-stack.ts`` for how CDK withholds the env var
+    (and therefore the table/grant this agent's tool needs) in prod.
+    """
+    smoke_agent = {
+        'agentId': SMOKE_IDEMPOTENCY_AGENT_ID,
+        'config': {
+            'name': SMOKE_IDEMPOTENCY_AGENT_ID,
+            'filename': SMOKE_IDEMPOTENCY_MODULE_FILENAME,
+            'description': SMOKE_IDEMPOTENCY_DESCRIPTION,
+            'schema': {
+                'type': 'object',
+                'properties': {
+                    'note': {
+                        'type': 'string',
+                        'description': (
+                            'Optional free-text note echoed into the '
+                            'written smoke row.'
+                        ),
+                    }
+                },
+                'required': []
+            },
+            'version': '1',
+            'action': {
+                'type': 'sqs',
+                'target': worker_queue_url,
+            },
+        },
+        'state': 'active',
+        'categories': ['built-in', 'worker', 'smoke', 'diagnostic'],
+    }
+    table.put_item(Item=smoke_agent)
+    print(
+        f"Seeded agent: {SMOKE_IDEMPOTENCY_AGENT_ID} (smoke fixture) with "
+        f"queue: {worker_queue_url}"
+    )
+
+    if agent_bucket:
+        module_path = os.path.join(
+            os.path.dirname(__file__), SMOKE_IDEMPOTENCY_MODULE_FILENAME
+        )
+        with open(module_path, 'rb') as module_file:
+            module_body = module_file.read()
+        s3 = boto3.client('s3')
+        s3.put_object(
+            Bucket=agent_bucket,
+            Key=f'agents/{SMOKE_IDEMPOTENCY_MODULE_FILENAME}',
+            Body=module_body,
+        )
+        print(
+            f"Uploaded smoke-idempotency module to "
+            f"s3://{agent_bucket}/agents/{SMOKE_IDEMPOTENCY_MODULE_FILENAME}"
+        )
+    else:
+        print(
+            "WARNING: AGENT_BUCKET_NAME not set — skipping smoke-idempotency "
+            "module upload (partial deploy?). Agent config still seeded."
+        )
+
+    _seed_agent_registry_record(
+        SMOKE_IDEMPOTENCY_AGENT_ID, SMOKE_IDEMPOTENCY_DESCRIPTION,
+        SMOKE_IDEMPOTENCY_MODULE_FILENAME, worker_queue_url,
     )
 
 
@@ -254,6 +360,22 @@ def handler(event, context):
         # gate (agent binding DESIGN→READY) resolves by name. Guarded +
         # idempotent — see the helper docstring.
         _seed_demo_agent_registry_record(worker_queue_url)
+
+        # ------------------------------------------------------------------
+        # Idempotency-seam smoke agent — DIAGNOSTIC FIXTURE, non-prod only.
+        # ------------------------------------------------------------------
+        # Gated on SMOKE_FIXTURES_ENABLED, which CDK sets exclusively for
+        # non-production stacks (backend/lib/arbiter-stack.ts). A production
+        # deploy never sets this var, so this whole block — and the smoke
+        # table/grant it depends on — simply do not exist there. Idempotent
+        # by the same plain-put_item/put_object semantics as the echo agent.
+        if SMOKE_FIXTURES_ENABLED:
+            _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket)
+        else:
+            print(
+                "SMOKE_FIXTURES_ENABLED unset — skipping smoke-idempotency "
+                "agent seed (expected in production)"
+            )
 
         # ------------------------------------------------------------------
         # US-ARB-011: seed governance corpus
