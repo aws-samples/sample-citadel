@@ -695,6 +695,25 @@ export class ArbiterStack extends cdk.Stack {
           },
         }),
       );
+      // Tool-call idempotency (PR1) server-side org resolution: the worker
+      // reads the execution row (exact-key GetItem on executionId) to resolve
+      // orgId SERVER-SIDE — the ledger PK prefix and cross-org isolation seam,
+      // which the design REQUIRES be read from the trusted row and NEVER taken
+      // from the subprocess-supplied dispatch payload (see
+      // _resolve_execution_org_id in arbiter/workerWrapper/index.py). Without
+      // this the read AccessDenied'd (idempotency_org_resolve_failed in the
+      // first real smoke run). This is a DISTINCT, READ-ONLY statement scoped
+      // to this one table ARN — it deliberately does NOT touch, widen, or
+      // relax the UpdateItem / ConditionCheckItem FGAC statements above (which
+      // remain attribute-scoped to nodeResults/executionId). No wildcard, no
+      // Query/Scan — exact-key GetItem only, the minimum org resolution needs.
+      workerAgentWrapperLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:GetItem"],
+          resources: [props.executionsTable.tableArn],
+        }),
+      );
     }
 
     // Tool-call idempotency (PR1): least-privilege grant on the tool-execution

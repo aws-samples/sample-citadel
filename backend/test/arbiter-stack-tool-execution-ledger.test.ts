@@ -262,4 +262,89 @@ describe("ArbiterStack — tool-execution idempotency ledger (PR1)", () => {
       },
     });
   });
+
+  // --- Server-side orgId resolution: dynamodb:GetItem on the executions row ---
+
+  test("worker has dynamodb:GetItem on the executions table for org resolution", () => {
+    // The worker reads the execution row server-side to resolve orgId (the
+    // ledger PK prefix / cross-org seam) — never trusting a subprocess payload.
+    // The executions table is owned by another stack, so it is referenced by a
+    // cross-stack ARN token, not a local logical id; assert the bare
+    // single-action GetItem grant exists (this file's precedent matches IAM
+    // statements by Action, cf. the ConditionCheckItem test).
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: "dynamodb:GetItem",
+          }),
+        ]),
+      },
+    });
+
+    // Least-privilege guard: every bare ``dynamodb:GetItem``-only statement
+    // must be scoped to a concrete table ARN (never "*") and must NOT carry
+    // the FGAC dynamodb:Attributes condition (that belongs only to the
+    // write/ConditionCheck statements — the GetItem grant must not touch it).
+    const policies = template.findResources("AWS::IAM::Policy");
+    let sawBareGetItem = false;
+    for (const policy of Object.values(policies) as any[]) {
+      for (const stmt of policy.Properties.PolicyDocument.Statement) {
+        if (stmt.Action === "dynamodb:GetItem") {
+          sawBareGetItem = true;
+          const resStr = JSON.stringify(stmt.Resource ?? "");
+          expect(resStr).not.toContain('"*"');
+          const condStr = JSON.stringify(stmt.Condition ?? {});
+          expect(condStr).not.toContain("dynamodb:Attributes");
+        }
+      }
+    }
+    expect(sawBareGetItem).toBe(true);
+  });
+
+  test("FGAC UpdateItem statement on the executions table is unchanged", () => {
+    // Regression guard: the new GetItem grant must NOT weaken or widen the
+    // pre-existing attribute-scoped UpdateItem grant. Assert the exact FGAC
+    // shape (UpdateItem + nodeResults/executionId attribute scope +
+    // ReturnValues restriction) still exists verbatim.
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: "dynamodb:UpdateItem",
+            Condition: {
+              "ForAllValues:StringEquals": {
+                "dynamodb:Attributes": ["nodeResults", "executionId"],
+              },
+              StringEqualsIfExists: {
+                "dynamodb:ReturnValues": ["NONE", "UPDATED_NEW", "UPDATED_OLD"],
+              },
+            },
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("FGAC ConditionCheckItem statement on the executions table is unchanged", () => {
+    // Regression guard (paired with the GetItem addition): the fence
+    // ConditionCheckItem grant keeps its exact attribute scope.
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: "dynamodb:ConditionCheckItem",
+            Condition: {
+              "ForAllValues:StringEquals": {
+                "dynamodb:Attributes": ["nodeResults", "executionId"],
+              },
+            },
+          }),
+        ]),
+      },
+    });
+  });
 });
