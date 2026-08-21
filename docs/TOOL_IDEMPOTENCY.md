@@ -145,18 +145,31 @@ A dedicated, non-prod-only diagnostic fixture closes that gap:
 
 ### Procedure
 
-1. In a **non-production** environment, open the Workflows tab and Run
-   "Idempotency Smoke Workflow" (it will already be published — seeded
-   `PUBLISHED`, matching the Echo Demo Workflow's seed pattern).
-2. **Check the `WorkerAgentWrapper` CloudWatch log group** for the one node's
+The seeded row is a **catalog blueprint** (`orgId = 'system'`,
+`isBlueprint = 'true'`, `appId = null`), so it does not appear on any app's
+Workflows tab and cannot be run directly — import it into an app first,
+mirroring the Echo Demo Workflow worked example in
+`docs/WORKFLOW_USER_GUIDE.md`:
+
+1. In the blueprint catalog of a **non-production** environment, find
+   "Idempotency Smoke Workflow" (category `smoke`) and click "Use in App".
+   Any app works as the target — a `DRAFT` app is fine (app status does not
+   gate running a workflow).
+2. The import creates a `DRAFT` copy in that app carrying **your orgId** —
+   this is what satisfies the backend org check; the seeded catalog row is
+   `orgId = 'system'` and would be org-denied if run directly.
+3. In the app's Workflows tab, click Publish on the imported copy's card —
+   Run is disabled until its status is `PUBLISHED`.
+4. Click Run.
+5. **Check the `WorkerAgentWrapper` CloudWatch log group** for the one node's
    invocation. You should see the idempotency hook's reserve→execute→finalize
    pair for the `smoke_write_marker` tool call — no `StaleWorkerFencedError`,
    no `RetryableNoExecutionError`, one `finalize_success`.
-3. **Check the tool-execution ledger table**
+6. **Check the tool-execution ledger table**
    (`citadel-tool-execution-ledger-{env}`) for exactly **one** row keyed by
    this execution/node/call-index/tool-name/argsHash, `status = completed`,
    with a `ttl` attribute set (48h out).
-4. **Check the smoke table** (`citadel-smoke-idempotency-{env}`) for exactly
+7. **Check the smoke table** (`citadel-smoke-idempotency-{env}`) for exactly
    **one** row — a fresh `markerId` uuid, `orgId`, `writtenAt`, and `ttl` (24h
    out). One row = the fence held for a normal, non-retried run.
 
