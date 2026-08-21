@@ -124,6 +124,46 @@ EXECUTION_SPECS_TABLE = os.environ.get('EXECUTION_SPECS_TABLE')
 CREDENTIAL_VENDER_FUNCTION = os.environ.get('CREDENTIAL_VENDER_FUNCTION')
 AGENT_RUNNER_PATH = os.path.join(os.path.dirname(__file__), 'agent_runner.py')
 
+# Structural agent-body failure marker (finding 56d763d4). Imported from
+# agent_runner (the PRODUCER of the envelope) so producer and consumer stay in
+# lockstep. Defensive fallback to the literal keeps the consumer working even
+# if the co-bundled module can't be imported (mirrors this file's
+# deferred-bundling pattern); a parity test pins the fallback to agent_runner's
+# constant.
+try:
+    from agent_runner import AGENT_EXECUTION_FAILURE_MARKER  # noqa: E402
+except ImportError:  # pragma: no cover — co-bundled with index.py; fallback only
+    AGENT_EXECUTION_FAILURE_MARKER = 'agentExecutionFailed'
+
+
+class AgentExecutionError(RuntimeError):
+    """An agent execution failed and must surface as a FAILED node result
+    (finding 56d763d4).
+
+    Carries the exception CLASS name (``error_class``) so the step runner's
+    retry.py failure-class logic (``should_retry``: ``error_type in
+    retryableErrors``) can classify it, alongside the human-readable
+    ``message`` diagnostic. Raised by ``run_agent_in_subprocess`` /
+    ``_interpret_agent_result`` whenever the subprocess stdout carries the
+    agent-body failure marker (REGARDLESS of exit code) or, with
+    ``raise_on_error=True``, on any non-zero exit without a marker.
+    """
+
+    def __init__(self, error_class, message):
+        self.error_class = error_class or 'AgentExecutionError'
+        self.message = message or self.error_class
+        super().__init__(self.message)
+
+
+# Canned supervisor-path fallback for a subprocess-level crash WITHOUT a
+# failure marker (OOM/timeout kill/runner import crash) when raise_on_error is
+# False. Unchanged pre-fix string — the supervisor path intentionally degrades
+# for infra-level subprocess failures (an agent-body exception, by contrast,
+# always raises via the marker; see _interpret_agent_result).
+_SUBPROCESS_FALLBACK_RESPONSE = (
+    "The task could not be completed, this agent has issues, please ignore for now."
+)
+
 # QB-013-1: lazy boto3 client construction. Keeps the module importable
 # without AWS credentials in the local dev env. Matches the pattern used
 # by arbiter/governance/ledger.py and arbiter/fabricator/tools_config.py.
@@ -511,30 +551,81 @@ def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extr
     if result.stderr:
         print(f"[agent stderr] {result.stderr}")
 
-    if result.returncode!= 0:
-        print(f"Agent subprocess exited with code {result.returncode}")
-        if raise_on_error:
-            raise RuntimeError(
-                f"Agent subprocess exited with code {result.returncode}"
-            )
-        return "The task could not be completed, this agent has issues, please ignore for now."
+    return _interpret_agent_result(
+        result.returncode, result.stdout,
+        raise_on_error=raise_on_error, usage_sink=usage_sink,
+    )
 
-    # Parse the response from stdout
+
+def _extend_usage_sink(usage_sink, parsed) -> None:
+    """Extend ``usage_sink`` from a parsed stdout envelope's ``usage`` array.
+
+    Best-effort and never raises into dispatch — a malformed usage value
+    degrades to no extension (``parse_usage_array`` returns ``[]``).
+    """
+    if usage_sink is None or not isinstance(parsed, dict):
+        return
     try:
-        output = json.loads(result.stdout.strip())
-        if usage_sink is not None:
-            try:
-                usage_sink.extend(parse_usage_array(output.get('usage', [])))
-            except Exception as exc:  # noqa: BLE001 — usage parsing must never break dispatch
-                print(json.dumps({
-                    'level': 'WARN',
-                    'component': 'WorkerWrapper',
-                    'action': 'usage_sink_extend_failed',
-                    'error': str(exc),
-                }))
-        return output.get('response', result.stdout.strip())
-    except json.JSONDecodeError:
-        return result.stdout.strip() or "Agent produced no output"
+        usage_sink.extend(parse_usage_array(parsed.get('usage', [])))
+    except Exception as exc:  # noqa: BLE001 — usage parsing must never break dispatch
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'WorkerWrapper',
+            'action': 'usage_sink_extend_failed',
+            'error': str(exc),
+        }))
+
+
+def _interpret_agent_result(returncode, stdout, *, raise_on_error=False, usage_sink=None):
+    """Pure result-builder mapping a subprocess ``(returncode, stdout)`` to a
+    success response string OR an ``AgentExecutionError`` (finding 56d763d4).
+
+    STRUCTURAL INVARIANT: a stdout envelope carrying the agent-body failure
+    marker (``AGENT_EXECUTION_FAILURE_MARKER``) ALWAYS raises
+    ``AgentExecutionError`` — for ANY ``returncode`` and ANY
+    ``raise_on_error`` — carrying the exception CLASS and diagnostic. No caller
+    can turn a marked (crashed) payload into a completed / success result; this
+    is the single choke point both the workflow-node and supervisor paths flow
+    through, so the "crash recorded as success" defect cannot recur on any
+    path.
+
+    Non-marker outcomes preserve the pre-fix contract exactly:
+      * non-zero exit + raise_on_error=True  -> raise (node path -> node.failed)
+      * non-zero exit + raise_on_error=False -> canned fallback (supervisor path)
+      * zero exit                            -> parsed 'response' (or raw stdout)
+    """
+    text = (stdout or '').strip()
+    parsed = None
+    if text:
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+
+    # Usage is captured even on failure (harmless — dropped for failed nodes).
+    _extend_usage_sink(usage_sink, parsed)
+
+    # Structural guard: a failure-marked envelope can NEVER be a success. This
+    # precedes the returncode/raise_on_error branches deliberately.
+    if isinstance(parsed, dict) and parsed.get(AGENT_EXECUTION_FAILURE_MARKER) is True:
+        raise AgentExecutionError(
+            parsed.get('errorClass'),
+            parsed.get('error'),
+        )
+
+    if returncode != 0:
+        print(f"Agent subprocess exited with code {returncode}")
+        if raise_on_error:
+            raise AgentExecutionError(
+                'AgentSubprocessError',
+                f"Agent subprocess exited with code {returncode}",
+            )
+        return _SUBPROCESS_FALLBACK_RESPONSE
+
+    # Parse the response from stdout (success path).
+    if isinstance(parsed, dict):
+        return parsed.get('response', text)
+    return text or "Agent produced no output"
 
 def post_task_complete(response, agent_use_id, agent_name, orchestration_id, *, usage=None):
     """Publish the supervisor-task completion event.
@@ -949,6 +1040,20 @@ def _process_workflow_node(event, message_attributes=None):
             usage_sink=usage_sink,
         )
     except Exception as exc:  # noqa: BLE001 — any failure becomes node.failed
+        # finding 56d763d4: carry the exception CLASS as the node-result error
+        # so the step runner's retry.py failure-class logic (should_retry:
+        # ``error_type in retryableErrors``) can act on it. An
+        # AgentExecutionError from run_agent_in_subprocess carries the
+        # agent-body class (e.g. 'TypeError' for the ground-truth
+        # "'dict' object can't be awaited"); any other exception (config /
+        # module / credential error) uses its own type name. The full
+        # human-readable diagnostic is preserved in the ERROR log below — a
+        # failed node has no ``output`` to carry the message, and the
+        # node-result ``error`` field is the retry classification KEY, so it
+        # must be the class, not the free-form message (which would never match
+        # a retryableErrors entry).
+        error_class = getattr(exc, 'error_class', None) or type(exc).__name__
+        diagnostic = getattr(exc, 'message', None) or str(exc)
         print(json.dumps({
             'level': 'ERROR',
             'component': 'WorkerWrapper',
@@ -957,12 +1062,13 @@ def _process_workflow_node(event, message_attributes=None):
             'nodeId': msg.node_id,
             'workflowId': msg.workflow_id,
             'agentId': msg.agent_id,
-            'error': str(exc),
+            'errorClass': error_class,
+            'error': diagnostic,
         }))
         _emit_node_result(
             msg,
             status=workflow_contract.STATUS_FAILED,
-            error=str(exc) or 'agent execution failed',
+            error=error_class,
             trace_context=carried_ctx,
             worker_started_at=worker_started_at,
         )

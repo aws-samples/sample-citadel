@@ -84,8 +84,13 @@ class TestAgentRunnerMain:
 
     @given(request=request_dicts)
     @settings(max_examples=30)
-    def test_handler_exception_produces_error_response(self, request):
-        """When handler raises, output still contains a 'response' key."""
+    def test_handler_exception_produces_failure_envelope_and_nonzero_exit(self, request):
+        """finding 56d763d4: when the agent body raises, agent_runner must NOT
+        launder the exception into a successful ``response`` string. It emits a
+        FAILURE-MARKED envelope carrying the exception CLASS + diagnostic and
+        exits non-zero, so the parent can never record a crash as completed."""
+        import io
+
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False
         ) as f:
@@ -101,19 +106,28 @@ class TestAgentRunnerMain:
                 "request": request,
             })
 
-            captured_output = []
-
+            fake_stdout = io.StringIO()
             with patch("sys.stdin") as mock_stdin, \
-                 patch("builtins.print", side_effect=lambda s: captured_output.append(s)):
+                 patch("sys.stdout", fake_stdout):
                 mock_stdin.read.return_value = payload
 
-                from agent_runner import main
-                main()
+                import agent_runner
+                with pytest.raises(SystemExit) as excinfo:
+                    agent_runner.main()
 
-            assert len(captured_output) == 1
-            parsed = json.loads(captured_output[0])
-            assert "response" in parsed
-            assert "failed" in parsed["response"].lower() or "error" in parsed["response"].lower()
+            # Non-zero exit is the failure signal.
+            assert excinfo.value.code != 0
+
+            parsed = json.loads(fake_stdout.getvalue())
+            # Structural failure marker present; NO success 'response' key.
+            assert parsed[agent_runner.AGENT_EXECUTION_FAILURE_MARKER] is True
+            assert "response" not in parsed
+            # The exception CLASS is carried for retry.py's failure-class logic.
+            assert parsed["errorClass"] == "RuntimeError"
+            # The human diagnostic is preserved in the envelope.
+            assert "test error" in parsed["error"]
+            # usage remains an (additive) list even on failure.
+            assert isinstance(parsed["usage"], list)
         finally:
             os.unlink(module_path)
 
