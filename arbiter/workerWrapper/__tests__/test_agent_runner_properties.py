@@ -473,3 +473,83 @@ class TestAgentRunnerModelOverride:
         from agent_runner import _install_model_override
 
         assert _install_model_override() is False
+
+
+# ---------------------------------------------------------------------------
+# Fail-loud idempotency install + best-effort governance guard.
+#
+# The idempotency hook is a fail-closed security control: inside an active
+# idempotency envelope (CITADEL_EXECUTION_ID + CITADEL_NODE_ID set) a hook
+# that cannot install must ABORT the node — never degrade to a warning — so it
+# can never be mistaken for protected. Governance injection, by contrast, is
+# best-effort AND its tool_handler seam is absent on strands 1.30.0, so it must
+# skip (not crash the agent) when the seam is unavailable.
+# ---------------------------------------------------------------------------
+
+import types
+
+
+def _fresh_agent_runner():
+    sys.modules.pop("agent_runner", None)
+    import agent_runner
+    return agent_runner
+
+
+class TestIdempotencyHookFailsLoud:
+    def test_backcompat_noop_when_envelope_absent(self, monkeypatch):
+        """No envelope (no execution/node id) → silent no-op, never raises,
+        even with strands unavailable. Preserves agents run outside the
+        idempotency envelope."""
+        monkeypatch.delenv("CITADEL_EXECUTION_ID", raising=False)
+        monkeypatch.delenv("CITADEL_NODE_ID", raising=False)
+        monkeypatch.setitem(sys.modules, "strands", None)  # import strands -> ImportError
+        agent_runner = _fresh_agent_runner()
+        assert agent_runner._install_idempotency_hook() is False
+
+    def test_raises_when_envelope_active_and_strands_unavailable(self, monkeypatch):
+        """Envelope active + strands not importable → RAISE (fail the node),
+        never a silent warn/return-False."""
+        monkeypatch.setenv("CITADEL_EXECUTION_ID", "exec-1")
+        monkeypatch.setenv("CITADEL_NODE_ID", "node-1")
+        monkeypatch.setitem(sys.modules, "strands", None)
+        agent_runner = _fresh_agent_runner()
+        with pytest.raises(RuntimeError, match="idempotency hook REQUIRED"):
+            agent_runner._install_idempotency_hook()
+
+    def test_raises_when_envelope_active_and_hook_module_unimportable(self, monkeypatch):
+        """Envelope active, strands present, but the hook module can't be
+        imported (simulating a packaging/bundle regression) → RAISE with a
+        diagnostic naming the likely packaging cause."""
+        monkeypatch.setenv("CITADEL_EXECUTION_ID", "exec-1")
+        monkeypatch.setenv("CITADEL_NODE_ID", "node-1")
+        monkeypatch.setitem(sys.modules, "strands", types.ModuleType("strands"))
+        # Force `from tool_idempotency_hook import ...` to fail deterministically.
+        monkeypatch.setitem(sys.modules, "tool_idempotency_hook", None)
+        agent_runner = _fresh_agent_runner()
+        with pytest.raises(RuntimeError, match="tool_idempotency_hook"):
+            agent_runner._install_idempotency_hook()
+
+
+class TestGovernanceInjectionBestEffortGuard:
+    def test_skips_without_crashing_when_agent_lacks_tool_handler_seam(self, monkeypatch):
+        """strands 1.30.0's Agent.__init__ accepts neither ``tool_handler`` nor
+        **kwargs. Injecting a tool_handler kwarg would raise TypeError at every
+        Agent construction. The installer must detect the missing seam and skip
+        (return False, no patch) rather than break agent construction."""
+        monkeypatch.setenv("CITADEL_AGENT_ID", "agent-1")
+
+        fake_strands = types.ModuleType("strands")
+
+        class _FakeAgent:
+            # Mirrors strands 1.30.0: no tool_handler, no **kwargs.
+            def __init__(self, model=None, tools=None, hooks=None):
+                self.tools = tools
+
+        fake_strands.Agent = _FakeAgent
+        monkeypatch.setitem(sys.modules, "strands", fake_strands)
+
+        agent_runner = _fresh_agent_runner()
+        original_init = _FakeAgent.__init__
+        assert agent_runner._install_governed_tool_handler() is False
+        # The installer must NOT have patched Agent.__init__.
+        assert _FakeAgent.__init__ is original_init

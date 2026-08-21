@@ -69,8 +69,6 @@ import boto3
 from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import BotoCoreError, ClientError
 
-from arbiter.workerWrapper.tool_idempotency import MODE_BYPASS
-
 logger = logging.getLogger(__name__)
 
 # --- Attribute + status constants -------------------------------------------
@@ -884,6 +882,17 @@ def execute_idempotent(
     re-dispatched-away worker raises :class:`StaleWorkerFencedError` and NEVER
     executes.
     """
+    # Lazy import (deployed convention): ``MODE_BYPASS`` lives in the worker
+    # bundle's ``tool_idempotency`` module, which sits at the worker Lambda's
+    # task root (and is wired onto sys.path by arbiter/conftest.py under
+    # pytest). This ``governance`` module ships in the SHARED ArbiterCatalogLayer;
+    # importing the worker-only ``tool_idempotency`` at module load would make
+    # the whole layer unimportable by any other carrier Lambda (and used an
+    # ``arbiter.*`` prefix that does not exist in the deployed bundle — the
+    # "No module named arbiter" class of failure). Deferring it here keeps the
+    # layer self-contained while still resolving in the worker at call time.
+    from tool_idempotency import MODE_BYPASS
+
     if mode == MODE_BYPASS:
         return run_tool()
 

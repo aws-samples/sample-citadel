@@ -492,6 +492,24 @@ def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extr
     if extra_env:
         child_env.update(extra_env)
 
+    # Propagate THIS (parent) Lambda process's import roots to the child so the
+    # agent_runner subprocess can import the shared arbiter packages the
+    # ``ArbiterCatalogLayer`` delivers at ``/opt/python`` (``governance`` /
+    # ``common`` / ``catalog``) and the bundle-root sibling modules at the task
+    # root (``tool_idempotency_hook`` / ``tool_idempotency`` /
+    # ``governed_tool_handler``). The Lambda runtime adds these to the PARENT's
+    # ``sys.path`` via its bootstrap but does NOT export them on ``PYTHONPATH``,
+    # so a fresh ``sys.executable`` child does NOT inherit them — which is why
+    # the idempotency/governance hooks failed to install ("No module named
+    # arbiter/common") in the first real smoke run. Prepend the parent roots
+    # (deduped, order-preserving) ahead of any inherited PYTHONPATH.
+    _parent_roots = [p for p in sys.path if p]
+    _inherited_pp = child_env.get('PYTHONPATH', '')
+    if _inherited_pp:
+        _parent_roots.append(_inherited_pp)
+    if _parent_roots:
+        child_env['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(_parent_roots))
+
     # Prepare the payload for the runner script
     runner_input = json.dumps({
         'modulePath': '/tmp/loaded_module.py',
