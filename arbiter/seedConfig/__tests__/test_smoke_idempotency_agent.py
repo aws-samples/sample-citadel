@@ -96,7 +96,8 @@ class _FakeBoto3Module(types.ModuleType):
 
 
 class _FakeAgentTool:
-    """Stand-in for ``strands.Agent().tool`` exposing async tool callables."""
+    """Stand-in for ``strands.Agent().tool`` exposing synchronous tool
+    callables (matches strands 1.30.0's direct-call surface)."""
 
     def __init__(self, tools_by_name):
         for name, fn in tools_by_name.items():
@@ -104,9 +105,13 @@ class _FakeAgentTool:
 
 
 class _FakeStrandsAgent:
-    """Minimal Agent stand-in: exposes ``.tool.<name>(...)`` returning an
-    awaitable, mirroring the real Strands async tool-invocation surface
-    closely enough for this module's ``asyncio.run`` call site."""
+    """Minimal Agent stand-in: exposes ``.tool.<name>(...)`` as a SYNCHRONOUS
+    direct call that returns the tool's result dict — mirroring strands
+    1.30.0's real ``agent.tool.<name>(...)`` surface (it drives the tool
+    executor internally via ``run_async`` and RETURNS the result; it is NOT a
+    coroutine). Faithfully synchronous so a regression that re-adds ``await``
+    to the handler is caught here (awaiting a dict raises TypeError), instead
+    of the old async fake masking it."""
 
     def __init__(self, *args, tools=None, **kwargs):
         self._tools = list(tools or [])
@@ -115,12 +120,12 @@ class _FakeStrandsAgent:
             name = getattr(fn, "__name__", None) or getattr(
                 fn, "tool_name", "tool"
             )
-            tools_by_name[name] = self._make_async_wrapper(fn)
+            tools_by_name[name] = self._make_sync_wrapper(fn)
         self.tool = _FakeAgentTool(tools_by_name)
 
     @staticmethod
-    def _make_async_wrapper(fn):
-        async def _wrapper(**kwargs):
+    def _make_sync_wrapper(fn):
+        def _wrapper(**kwargs):
             return fn(**kwargs)
 
         return _wrapper
@@ -206,6 +211,36 @@ class TestSmokeToolWriteBehavior:
 
         with pytest.raises(RuntimeError):
             module.handler()
+
+    def test_handler_calls_direct_tool_synchronously_never_awaited(self):
+        """Regression guard for the "'dict' object can't be awaited" node
+        failure. strands 1.30.0's ``agent.tool.<name>(...)`` is a SYNCHRONOUS
+        direct call returning a ToolResult dict — awaiting it raises
+        ``TypeError: object dict can't be used in 'await' expression`` and the
+        smoke tool never executes (0 rows). The handler must therefore call it
+        directly, never via ``await``/``asyncio.run``.
+
+        Uses ``ast`` (not a substring scan) so explanatory comments that
+        mention ``await`` don't create false negatives: we assert there is NO
+        ``Await`` node anywhere in the handler's body. The behavioural
+        guarantee is additionally enforced by ``_FakeStrandsAgent`` being
+        synchronous (a re-added ``await`` would fail the write-behaviour tests
+        above by awaiting a plain dict)."""
+        import ast
+        import inspect
+        import textwrap
+
+        module = _load_smoke_agent_module()
+        handler_src = ast.parse(textwrap.dedent(inspect.getsource(module.handler)))
+        await_nodes = [n for n in ast.walk(handler_src) if isinstance(n, ast.Await)]
+        assert await_nodes == [], "handler must not await the synchronous direct tool call"
+
+        # The direct synchronous tool call must be present.
+        calls = [
+            n for n in ast.walk(handler_src)
+            if isinstance(n, ast.Attribute) and n.attr == "smoke_write_marker"
+        ]
+        assert calls, "handler must invoke agent.tool.smoke_write_marker directly"
 
 
 # ---------------------------------------------------------------------------

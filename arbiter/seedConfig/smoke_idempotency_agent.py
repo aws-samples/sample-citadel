@@ -58,7 +58,6 @@ fixture exists to catch. One row after one workflow Run = correct. Two rows
 after a forced retry/re-dispatch = the fence did not hold.
 """
 
-import asyncio
 import os
 import time
 import uuid
@@ -125,7 +124,15 @@ def handler(**kwargs):
     agent = Agent(tools=[smoke_write_marker])
     note = kwargs.get("note", "idempotency-smoke")
 
-    async def _invoke():
-        return await agent.tool.smoke_write_marker(note=note)
-
-    return asyncio.run(_invoke())
+    # strands 1.30.0: ``agent.tool.<name>(...)`` is a SYNCHRONOUS direct tool
+    # call — it drives the tool executor's event loop internally (via
+    # ``run_async``) and RETURNS the resulting ToolResult dict. It is NOT a
+    # coroutine, so it must never be awaited: ``await agent.tool.<name>(...)``
+    # raises ``TypeError: object dict can't be used in 'await' expression`` —
+    # the "'dict' object can't be awaited" node failure the first real smoke
+    # run hit (the tool never executed → 0 smoke rows). The direct-call path
+    # still fires ``BeforeToolCallEvent``, so the idempotency seam installed by
+    # ``agent_runner._install_idempotency_hook`` wraps the tool and its
+    # ledger reserve→execute→finalize runs exactly as under a model-driven
+    # tool call.
+    return agent.tool.smoke_write_marker(note=note)
