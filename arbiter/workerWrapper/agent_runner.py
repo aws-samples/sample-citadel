@@ -344,10 +344,32 @@ def _install_governed_tool_handler():
         )
         return False
 
-    # governed_tool_handler lives alongside this file in
-    # arbiter/workerWrapper/. Its own module-load logic wires the project
-    # root onto sys.path so ``arbiter.governance.*`` imports inside the
-    # handler resolve correctly.
+    # strands 1.30.0 removed the tool_handler seam this injector targets:
+    # Agent.__init__ accepts NEITHER a ``tool_handler`` kwarg NOR **kwargs
+    # (verified against the pinned release). Injecting ``tool_handler=`` into
+    # such an Agent raises TypeError at construction, which would break EVERY
+    # agent in a governed dispatch — a fail-open→fail-the-node regression far
+    # worse than the best-effort skip AC 9.4 mandates. Probe the signature and
+    # skip injection (WARN, no patch) when the seam is absent. Layer-2 tool
+    # governance needs a hooks-based re-port on this strands line (tracked as
+    # the "dead governance tool_handler injection under strands 1.30.0"
+    # finding); this guard makes the module importable without regressing
+    # agent construction.
+    import inspect
+    try:
+        _params = inspect.signature(strands.Agent.__init__).parameters
+        _accepts_tool_handler = ('tool_handler' in _params) or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in _params.values()
+        )
+    except (TypeError, ValueError):
+        _accepts_tool_handler = False
+    if not _accepts_tool_handler:
+        sys.stderr.write(
+            '[agent_runner] WARN governance injection skipped — installed '
+            'strands.Agent does not accept a tool_handler kwarg; layer-2 tool '
+            'governance requires a hooks-based re-port on this version\n'
+        )
+        return False
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:
         sys.path.insert(0, _here)
@@ -433,14 +455,26 @@ def _install_idempotency_hook():
     if not (os.environ.get('CITADEL_EXECUTION_ID') and os.environ.get('CITADEL_NODE_ID')):
         return False
 
+    # FAIL-CLOSED (fail-loud). Inside an ACTIVE idempotency envelope (both
+    # CITADEL_EXECUTION_ID and CITADEL_NODE_ID present ⇒ a workflow-dispatched
+    # node), a hook that cannot install must ABORT the node — it must NEVER
+    # degrade to a warning. The idempotency hook is a fail-closed security
+    # control: silently disabling it would let a node run UNPROTECTED while
+    # looking protected (duplicate side effects across a watchdog
+    # re-dispatch), which is exactly the "idempotency hook skipped … No module
+    # named arbiter ⇒ 0 ledger rows" defect the first real smoke run exposed.
+    # Raising here exits the agent_runner subprocess non-zero, which the
+    # workflow-node dispatch (run_agent_in_subprocess raise_on_error=True)
+    # turns into workflow.node.failed. Diagnostic messages name the likely
+    # packaging cause so a bundle regression is triaged fast.
     try:
         import strands  # type: ignore[import-not-found]
     except ImportError as exc:
-        sys.stderr.write(
-            f'[agent_runner] WARN idempotency hook skipped — '
-            f'strands unavailable: {exc}\n'
-        )
-        return False
+        raise RuntimeError(
+            'idempotency hook REQUIRED but strands is unavailable in the '
+            'agent_runner subprocess while an idempotency envelope is active '
+            f'(CITADEL_EXECUTION_ID/CITADEL_NODE_ID set): {exc}'
+        ) from exc
 
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:
@@ -449,11 +483,15 @@ def _install_idempotency_hook():
     try:
         from tool_idempotency_hook import IdempotencyToolHook
     except ImportError as exc:
-        sys.stderr.write(
-            f'[agent_runner] WARN idempotency hook skipped — '
-            f'tool_idempotency_hook unavailable: {exc}\n'
-        )
-        return False
+        raise RuntimeError(
+            'idempotency hook REQUIRED but tool_idempotency_hook could not be '
+            'imported in the agent_runner subprocess while an idempotency '
+            'envelope is active. This fail-closed security control must not '
+            'silently disable itself — check that the ArbiterCatalogLayer '
+            "'governance'/'common' packages are on the subprocess PYTHONPATH "
+            '(index.py propagates the parent sys.path) and that the worker '
+            f'bundle ships tool_idempotency/tool_idempotency_hook: {exc}'
+        ) from exc
 
     original_init = strands.Agent.__init__
 

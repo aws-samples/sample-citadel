@@ -38,8 +38,8 @@ from governed_tool_handler import (  # noqa: E402
     SCOPE_WORKER_TOOL_HANDLER,
     _parse_denied_tools_env,
 )
-from arbiter.governance.models import ArbitrationDecision  # noqa: E402
-from arbiter.governance.ledger import LedgerWriteError  # noqa: E402
+from governance.models import ArbitrationDecision  # noqa: E402
+from governance.ledger import LedgerWriteError  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

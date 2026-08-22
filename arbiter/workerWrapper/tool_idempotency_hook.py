@@ -45,12 +45,25 @@ import sys
 from typing import Any, Callable
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+# Import convention (DEPLOYED layout). The worker Lambda bundle roots this
+# file's own directory (arbiter/workerWrapper/ → the task root) on sys.path,
+# and the shared ``ArbiterCatalogLayer`` stages ``governance``/``common``/
+# ``catalog`` at ``/opt/python``. So the ledger is imported from the top-level
+# ``governance`` package (layer) and ``tool_idempotency`` as a bundle-root
+# sibling — NEVER via an ``arbiter.*`` prefix, which exists in NEITHER the
+# deployed bundle NOR the layer. The old ``from arbiter.governance import``
+# form is exactly what raised "No module named arbiter" in the first real
+# smoke run, silently disabling the whole idempotency capability. These same
+# names resolve under pytest via ``arbiter/conftest.py`` (which puts the
+# arbiter root and each subdir on sys.path); the deployed subprocess resolves
+# ``governance`` because ``index.py`` propagates the parent's sys.path onto the
+# child's PYTHONPATH. Insert _HERE so the bundle-root sibling resolves even
+# when this module is imported before the caller widens sys.path.
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-from arbiter.governance import tool_execution_ledger as ledger  # noqa: E402
-from arbiter.workerWrapper.tool_idempotency import (  # noqa: E402
+from governance import tool_execution_ledger as ledger  # noqa: E402
+from tool_idempotency import (  # noqa: E402
     MODE_LEDGER,
     build_client_token,
     build_key,

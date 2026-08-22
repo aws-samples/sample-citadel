@@ -511,6 +511,53 @@ export class ArbiterStack extends cdk.Stack {
       },
     ]);
 
+    // ------------------------------------------------------------------
+    // Idempotency-seam smoke fixture — DIAGNOSTIC ONLY, non-prod exclusive.
+    // ------------------------------------------------------------------
+    // No existing conditional-resource-creation-by-environment pattern was
+    // found anywhere in this CDK codebase (see the repo's operational-
+    // lessons note on this task) — every other env-scoped construct here
+    // varies a NAME by `props.environment` but is still created in every
+    // environment. This block introduces the first "absent entirely in
+    // prod" gate, on the stack's own `environment` prop, per this task's
+    // instruction to gate on the stack's environment prop when no existing
+    // pattern exists.
+    //
+    // A dedicated table (not a shared one) so the worker's smoke grant can
+    // be scoped to exactly one ARN with exactly one action
+    // (dynamodb:PutItem) — no Query/Scan/Update/Delete, no wildcard, and no
+    // path that could reach any product table. Org-scoped partition key
+    // (`orgId`) + TTL (`ttl`, 24h) so it self-cleans; this is an operational
+    // smoke fixture, not an audit record (mirrors the tool-execution
+    // ledger's TTL rationale). PAY_PER_REQUEST + DESTROY removal policy:
+    // this table holds no data worth retaining past stack teardown.
+    const isNonProdSmokeEnv = props.environment !== "prod";
+    const smokeIdempotencyTable = isNonProdSmokeEnv
+      ? new dynamodb.Table(this, "SmokeIdempotencyTable", {
+          tableName: `citadel-smoke-idempotency-${props.environment}`,
+          partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+          sortKey: { name: "markerId", type: dynamodb.AttributeType.STRING },
+          billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+          timeToLiveAttribute: "ttl",
+          encryption: dynamodb.TableEncryption.AWS_MANAGED,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        })
+      : undefined;
+    if (smokeIdempotencyTable) {
+      NagSuppressions.addResourceSuppressions(smokeIdempotencyTable, [
+        {
+          id: "AwsSolutions-DDB3",
+          reason:
+            "Diagnostic, 24h-TTL'd smoke fixture holding no data worth " +
+            "recovering (rows are freshly-uuid'd markers written by a " +
+            "manual smoke run, never product data). PITR is unwarranted " +
+            "for a table designed to self-clean; mirrors the accepted " +
+            "tradeoff on the tool-execution ledger's own operational TTL " +
+            "rationale. Non-prod only — never created in production.",
+        },
+      ]);
+    }
+
     const workerAgentWrapperLambda = new PythonFunction(
       this,
       "WorkerAgentWrapper",
@@ -548,6 +595,14 @@ export class ArbiterStack extends cdk.Stack {
           TOOL_RESULT_KMS_KEY_ID: toolResultsKey.keyArn,
           ...(props.registryId && { REGISTRY_ID: props.registryId }),
           ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+          // Idempotency-seam smoke fixture (non-prod only): the worker's
+          // smoke tool refuses to run (raises, never silently no-ops) if
+          // SMOKE_IDEMPOTENCY_TABLE is unset — so a prod deploy, which never
+          // sets this var, structurally cannot write to a smoke table that
+          // does not exist there.
+          ...(smokeIdempotencyTable && {
+            SMOKE_IDEMPOTENCY_TABLE: smokeIdempotencyTable.tableName,
+          }),
         },
         initialPolicy: [
           new PolicyStatement({
@@ -640,6 +695,25 @@ export class ArbiterStack extends cdk.Stack {
           },
         }),
       );
+      // Tool-call idempotency (PR1) server-side org resolution: the worker
+      // reads the execution row (exact-key GetItem on executionId) to resolve
+      // orgId SERVER-SIDE — the ledger PK prefix and cross-org isolation seam,
+      // which the design REQUIRES be read from the trusted row and NEVER taken
+      // from the subprocess-supplied dispatch payload (see
+      // _resolve_execution_org_id in arbiter/workerWrapper/index.py). Without
+      // this the read AccessDenied'd (idempotency_org_resolve_failed in the
+      // first real smoke run). This is a DISTINCT, READ-ONLY statement scoped
+      // to this one table ARN — it deliberately does NOT touch, widen, or
+      // relax the UpdateItem / ConditionCheckItem FGAC statements above (which
+      // remain attribute-scoped to nodeResults/executionId). No wildcard, no
+      // Query/Scan — exact-key GetItem only, the minimum org resolution needs.
+      workerAgentWrapperLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:GetItem"],
+          resources: [props.executionsTable.tableArn],
+        }),
+      );
     }
 
     // Tool-call idempotency (PR1): least-privilege grant on the tool-execution
@@ -673,6 +747,23 @@ export class ArbiterStack extends cdk.Stack {
         resources: [toolResultsBucket.arnForObjects("tool-results/*")],
       }),
     );
+
+    // Idempotency-seam smoke fixture, least-privilege: dynamodb:PutItem
+    // ONLY on the one dedicated smoke table — no GetItem/Query/Scan/
+    // UpdateItem/DeleteItem, no wildcard. The smoke tool never reads back
+    // its own writes (a manual smoke check reads the table via the console/
+    // CLI under an operator's own credentials, never the worker role), so
+    // Put-only is sufficient and strictly narrower than the ledger grant
+    // above. Only wired at all when the table exists (non-prod).
+    if (smokeIdempotencyTable) {
+      workerAgentWrapperLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:PutItem"],
+          resources: [smokeIdempotencyTable.tableArn],
+        }),
+      );
+    }
     // SSE-KMS on the offload bucket needs GenerateDataKey (put) + Decrypt (get)
     // on the CMK. grantEncryptDecrypt covers both; scoped to this one key.
     toolResultsKey.grantEncryptDecrypt(workerAgentWrapperLambda);
@@ -1007,6 +1098,12 @@ export class ArbiterStack extends cdk.Stack {
           // logs and skips the registry write.
           ...(props.registryId && { REGISTRY_ID: props.registryId }),
           ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+          // Idempotency-seam smoke agent (non-prod only): gates whether the
+          // seed writes the diagnostic smoke-idempotency-agent row at all.
+          // A prod deploy leaves this unset, and the seed's own
+          // SMOKE_FIXTURES_ENABLED check (arbiter/seedConfig/index.py) skips
+          // the whole block.
+          ...(isNonProdSmokeEnv && { SMOKE_FIXTURES_ENABLED: "true" }),
         },
       },
     );
@@ -1084,9 +1181,9 @@ export class ArbiterStack extends cdk.Stack {
 
     // Invoke the Custom Resource to seed agent config table
     // This must come after fabricatorQueue is created since we pass its URL.
-    // Bumped Version v1.2.0 → v1.3.0 so the CFN Update event fires on the
-    // next deploy and the demo agent's AgentCore Registry record is seeded
-    // in existing environments (dual-store agent seam).
+    // Bumped Version v1.3.0 → v1.4.0 so the CFN Update event fires on the
+    // next non-prod deploy and the diagnostic smoke-idempotency-agent (gated
+    // on SMOKE_FIXTURES_ENABLED) is seeded in existing non-prod environments.
     const seedAgentConfigResource = new cdk.CustomResource(
       this,
       "SeedAgentConfigResource",
@@ -1094,7 +1191,7 @@ export class ArbiterStack extends cdk.Stack {
         serviceToken: seedAgentConfigLambda.functionArn,
         properties: {
           // O-05: Use content hash instead of Date.now() to avoid unnecessary re-runs
-          Version: "v1.3.0",
+          Version: "v1.4.0",
         },
       },
     );

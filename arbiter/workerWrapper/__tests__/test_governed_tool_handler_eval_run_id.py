@@ -19,7 +19,7 @@ if _WORKER_DIR not in sys.path:
     sys.path.insert(0, _WORKER_DIR)
 
 from governed_tool_handler import GovernedToolHandler  # noqa: E402
-from arbiter.governance.models import ArbitrationDecision  # noqa: E402
+from governance.models import ArbitrationDecision  # noqa: E402
 
 
 def test_ctor_defaults_eval_run_id_to_none():

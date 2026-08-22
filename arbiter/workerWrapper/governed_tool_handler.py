@@ -20,15 +20,18 @@ scope. Fail-closed semantics apply at the supervisor dispatch level
 
 Import path note
 ----------------
-``arbiter/governance/ledger.py`` uses a relative import (``from .models
-import GovernanceFinding``). That means ``ledger`` MUST be loaded as a
-submodule of the ``arbiter.governance`` package — importing it as a
-top-level module (e.g. by inserting ``arbiter/governance`` onto
-``sys.path`` and doing ``from ledger import write_finding``) would break
-its relative import at load time. We therefore place the **project
-root** on ``sys.path`` and import via the fully-qualified
-``arbiter.governance.*`` path, matching the pattern already used by
-``arbiter/governance/__tests__/test_ledger.py``.
+``governance/ledger.py`` uses a relative import (``from .models import
+GovernanceFinding``), so ``ledger`` MUST be loaded as a submodule of the
+``governance`` *package* — never as a bare top-level ``ledger`` module. In
+the DEPLOYED worker Lambda the shared ``ArbiterCatalogLayer`` stages the
+whole ``governance`` package (with its ``__init__.py``) at
+``/opt/python/governance``, so ``from governance.ledger import ...`` resolves
+and its relative ``.models`` import works. We import via the top-level
+``governance`` package — NOT ``arbiter.governance`` — because no ``arbiter``
+package exists in the deployed bundle or the layer (importing via
+``arbiter.*`` is exactly what raised "No module named arbiter" in the first
+real smoke run). The same names resolve under pytest via
+``arbiter/conftest.py`` (which puts the arbiter root on sys.path).
 
 Wiring status
 -------------
@@ -50,21 +53,17 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from typing import Any
 
-# Put the project root on sys.path so ``from arbiter.governance.*`` resolves
-# regardless of how this module is loaded (direct subprocess, Lambda runtime,
-# or pytest under ``arbiter/conftest.py``). The path walk is:
-#     this file   = <root>/arbiter/workerWrapper/governed_tool_handler.py
-#     project root = three levels up.
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, '..', '..'))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-
-from arbiter.governance.models import ArbitrationDecision, GovernanceFinding  # noqa: E402
-from arbiter.governance.ledger import write_finding, LedgerWriteError  # noqa: E402
+# Import convention (DEPLOYED layout): the shared ``ArbiterCatalogLayer``
+# stages the ``governance`` package at ``/opt/python/governance`` and the
+# worker bundle roots this file's directory on sys.path. Import via the
+# top-level ``governance`` package — NEVER ``arbiter.governance`` (no
+# ``arbiter`` package exists in the deployed bundle or the layer). Under
+# pytest, ``arbiter/conftest.py`` puts the arbiter root on sys.path so
+# ``governance`` resolves there too.
+from governance.models import ArbitrationDecision, GovernanceFinding  # noqa: E402
+from governance.ledger import write_finding, LedgerWriteError  # noqa: E402
 
 # Strands imports — these live in the Lambda runtime image but may be
 # absent (or differently namespaced) in local test envs. Fall back to a
