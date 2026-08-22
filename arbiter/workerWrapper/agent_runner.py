@@ -20,6 +20,34 @@ import importlib.util
 # subprocess), so callIndex is a simple monotonic counter starting at 0.
 _CAPTURED_USAGE: list = []
 
+# Structural agent-body failure marker (finding 56d763d4). ``agent_runner``
+# writes this top-level key ONLY when the agent body raises, so a failed run
+# is unambiguously distinguishable from a successful ``{"response": ...}``
+# envelope. The consumer (``index.run_agent_in_subprocess`` /
+# ``index._interpret_agent_result``) raises on its presence REGARDLESS of exit
+# code, so an agent-body exception can never be laundered into a completed
+# node result. Kept in lockstep with the mirror constant + defensive fallback
+# in index.py (a parity test pins them equal).
+AGENT_EXECUTION_FAILURE_MARKER = 'agentExecutionFailed'
+
+
+def build_failure_envelope(exc: BaseException, usage: list) -> dict:
+    """Build the stdout envelope for an agent-body exception (finding 56d763d4).
+
+    Carries the exception CLASS name (``errorClass`` — the key retry.py's
+    failure-class ``should_retry`` matches on) and the human-readable
+    diagnostic (``error``), plus any usage captured before the crash. The
+    presence of the ``AGENT_EXECUTION_FAILURE_MARKER`` top-level key is the
+    structural signal that this is a failure, not a success — it never appears
+    in a successful ``{"response": ...}`` envelope.
+    """
+    return {
+        AGENT_EXECUTION_FAILURE_MARKER: True,
+        'errorClass': type(exc).__name__,
+        'error': str(exc) or type(exc).__name__,
+        'usage': usage if isinstance(usage, list) else [],
+    }
+
 # Ordered candidate method names probed on strands.models.BedrockModel to
 # find the response-producing seam to wrap. Multiple candidates survive a
 # strands rename of the primary method without requiring a code change here.
@@ -598,8 +626,23 @@ def main():
 
     try:
         response = module.handler(**request)
-    except Exception as e:
-        response = f"Agent execution failed: {e}"
+    except Exception as exc:  # noqa: BLE001 — mapped to a failure envelope below
+        # DEFECT FIX (finding 56d763d4): an agent-body exception must NOT be
+        # laundered into a successful ``response`` string. The old code did
+        # ``response = f"Agent execution failed: {e}"`` and fell through to the
+        # success print with exit 0, so the worker recorded a crashed run as
+        # ``node.completed`` and the execution finalized ``completed`` —
+        # starving retry.py's failure-class logic, the durable-execution
+        # watchdog, and every downstream pass/fail consumer.
+        #
+        # Instead emit a FAILURE-MARKED envelope carrying the exception CLASS
+        # (for retry classification) + the diagnostic message, and exit
+        # non-zero. The marker is the structural signal the parent keys on to
+        # raise regardless of raise_on_error, so no caller can turn a marked
+        # payload into a completed result.
+        sys.stdout.write(json.dumps(build_failure_envelope(exc, _CAPTURED_USAGE)))
+        sys.stdout.flush()
+        sys.exit(1)
 
     # Write response as JSON to stdout. 'usage' is additive: an empty list
     # is legal and simply means no BedrockModel call was captured this run.
