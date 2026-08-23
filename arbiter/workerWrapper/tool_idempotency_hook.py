@@ -72,6 +72,61 @@ from tool_idempotency import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Governance / infrastructure REFUSAL sink (finding be80ccd7).
+# ---------------------------------------------------------------------------
+# A ``LedgerError`` raised by the idempotency/ledger gate during a tool call is
+# an INFRASTRUCTURE / GOVERNANCE REFUSAL — the gate itself failed (transport /
+# credential error) or refused; the tool did NOT run under a completed
+# reservation. strands catches a tool exception, converts it to an
+# error-status ToolResult, and lets the agent turn COMPLETE "normally"
+# (returncode 0, no agent-body failure marker). Without capturing it here the
+# worker would emit ``workflow.node.completed`` for a run whose governance gate
+# hard-failed — the exact defect in finding be80ccd7 (the earlier fix, finding
+# 56d763d4, only mapped agent-body EXCEPTIONS, not error-status tool RESULTS).
+#
+# We therefore record such refusals into this per-process sink. ``agent_runner``
+# drains it AFTER the turn and, if non-empty, emits a failure-marked envelope so
+# the node fails with the refusal CLASS fed into retry.py's failure-class logic.
+#
+# DISCRIMINATOR (concrete, uses the EXISTING typed marker the governance layer
+# emits — ``governance.tool_execution_ledger.LedgerError`` and subclasses):
+#   * INFRA/GOVERNANCE REFUSAL -> a LedgerError was raised by reserve/finalize
+#     => recorded here => node FAILS with that class.
+#   * DOMAIN-LEVEL tool error -> the tool ran and returned {"status":"error"},
+#     or the agent handled a tool error and completed its turn. No LedgerError
+#     is raised => nothing recorded => the node COMPLETES. The agent is
+#     expected to handle these; they must NOT blanket-fail the node.
+# CARVE-OUT: ``StaleWorkerFencedError`` is a DESIGNED exactly-once outcome (this
+# worker was re-dispatched away; a NEWER worker owns the node). It is surfaced
+# as an error ToolResult but is NOT recorded as a node-failing refusal —
+# failing here would double-signal a node another worker is completing.
+_GOVERNANCE_REFUSALS: list[dict[str, Any]] = []
+
+
+def drain_governance_refusals() -> list[dict[str, Any]]:
+    """Return and CLEAR the governance/infrastructure refusals recorded during
+    this process's tool calls. Called once by ``agent_runner`` after the turn.
+    Clearing keeps repeated in-process test invocations independent."""
+    drained = list(_GOVERNANCE_REFUSALS)
+    _GOVERNANCE_REFUSALS.clear()
+    return drained
+
+
+def _record_governance_refusal(exc: "ledger.LedgerError") -> None:
+    """Record a LedgerError refusal (class + diagnostic + retryable flag).
+
+    ``retryable`` is read from the LedgerError subclass (the ledger hierarchy
+    already encodes it) and preserved for observability; the node-failure
+    CLASS is what retry.py's ``should_retry`` matches on downstream."""
+    _GOVERNANCE_REFUSALS.append({
+        "errorClass": type(exc).__name__,
+        "error": str(exc) or type(exc).__name__,
+        "retryable": bool(getattr(exc, "retryable", False)),
+    })
+
+
 try:
     from strands.hooks import BeforeToolCallEvent  # type: ignore
     from strands.types.tools import AgentTool  # type: ignore
@@ -149,11 +204,27 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
             # This worker was re-dispatched away (its generation is stale). It
             # is refused at the reserve fence BEFORE any side effect — a newer
             # worker owns the node. Surface as an error ToolResult; the tool
-            # never ran.
+            # never ran. DESIGNED exactly-once outcome, NOT a node-failing
+            # refusal (see the carve-out on _GOVERNANCE_REFUSALS): a newer
+            # worker is completing this node, so we must not double-signal it.
             yield ToolResultEvent(_error_result(
                 tool_use_id,
                 "tool execution refused: worker fenced by a newer dispatch "
                 "generation (no side effect performed)",
+            ))
+            return
+        except ledger.LedgerError as exc:
+            # Infrastructure / governance REFUSAL (finding be80ccd7): the ledger
+            # gate itself FAILED — e.g. the ground-truth "ledger fenced reserve
+            # transport error" that a NoCredentialsError produced. The tool
+            # never ran. Record it so agent_runner fails the node with this
+            # class (fed into retry.py); surface an error ToolResult so the turn
+            # does not crash mid-stream (the node-failure decision is made
+            # uniformly post-turn from the drained refusal sink).
+            _record_governance_refusal(exc)
+            yield ToolResultEvent(_error_result(
+                tool_use_id,
+                f"tool execution refused (governance/infrastructure): {exc}",
             ))
             return
 
@@ -190,10 +261,17 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
             )
             raise
 
-        if isinstance(last_result, dict) and last_result.get("status") == "error":
-            ledger.finalize_failure(self._pk, self._sk, error_type="tool_error_result", retryable=False)
-        elif last_result is not None:
-            ledger.finalize_success(self._pk, self._sk, result=last_result)
+        try:
+            if isinstance(last_result, dict) and last_result.get("status") == "error":
+                ledger.finalize_failure(self._pk, self._sk, error_type="tool_error_result", retryable=False)
+            elif last_result is not None:
+                ledger.finalize_success(self._pk, self._sk, result=last_result)
+        except ledger.LedgerError as exc:
+            # The tool already ran, but the ledger could not durably record its
+            # outcome (infrastructure refusal). Record it so the node fails
+            # (the run's governance state is indeterminate); no ToolResult to
+            # yield here — the tool's own result already streamed.
+            _record_governance_refusal(exc)
 
 
 class IdempotencyToolHook:
@@ -366,6 +444,41 @@ class ComposedToolHook:
         never happened.
     A DENY audit ``GovernanceFinding`` IS still written (that is the governance
     findings ledger, distinct from the idempotency execution ledger).
+
+    NODE-STATUS DECISION (merge of #84 refusal-mapping ⋈ #85 governance seam —
+    the open question "what node status results from a governance DENIAL?"):
+
+      A governance POLICY DENIAL COMPLETES the node; it does NOT fail it. The
+      denial is recorded durably as a DENY ``GovernanceFinding`` (written by
+      ``record_governance_decision`` BEFORE the tool swap) and the agent is
+      handed an "not authorised" error ToolResult it may legitimately handle.
+      A denial is therefore treated as an EXPECTED governed outcome, not an
+      error — and it is deliberately NOT written into the
+      ``_GOVERNANCE_REFUSALS`` sink, so ``agent_runner``'s post-turn drain does
+      not turn it into a failure-marked envelope.
+
+      This is distinct from an INFRASTRUCTURE REFUSAL — a ``LedgerError`` raised
+      by ``reserve``/``finalize`` (the gate itself failing: transport /
+      credential error). That IS recorded in ``_GOVERNANCE_REFUSALS`` and FAILS
+      the node with its LedgerError class fed to retry.py (finding be80ccd7).
+
+      Both invariants of finding be80ccd7 are preserved:
+        * NO UNAUTHORISED SIDE EFFECT — deny-before-reserve: the real tool never
+          runs and no reservation / execution-ledger row is created (``reserve``
+          is unreachable on the deny path).
+        * NO SILENT INVISIBILITY — the DENY ``GovernanceFinding`` is a durable,
+          queryable record of the denial; "completes" does not mean "hidden".
+
+      Rationale for COMPLETE over FAIL: record-and-block eval mode (the
+      ``eval_run_id`` path) depends on the run CONTINUING — the eval sandbox
+      exists to OBSERVE a forbidden action attempt WITHOUT executing it and then
+      watch what the agent does next. Failing the node on the first denial would
+      abort the eval trajectory and defeat the sandbox's purpose. Finding
+      be80ccd7 listed "governance denials" as must-be-visible refusals in the
+      era when the real allow/deny layer was INERT, so the only "refusal" that
+      existed then was the infra-gate LedgerError; now that a live policy layer
+      exists, an intentional policy DENY is a distinct, expected outcome that
+      must be VISIBLE (satisfied by the DENY finding) but need not FAIL the node.
 
     Either collaborator may be ``None``:
       * governance-only (supervisor task path): idempotency=None.
