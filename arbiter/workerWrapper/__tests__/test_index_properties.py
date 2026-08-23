@@ -162,13 +162,21 @@ class TestRunAgentCredentialIsolation:
             assert child_env["AWS_SECRET_ACCESS_KEY"] == secret_key
             assert child_env["AWS_SESSION_TOKEN"] == session_token
 
-    def test_no_credentials_removes_stale_env_vars(self):
-        """Without scoped creds, AWS credential env vars are removed."""
-        # Set stale creds in parent env
+    def test_no_scoped_credentials_propagates_ambient_env(self):
+        """Without scoped creds, the wrapper's ambient credential env is
+        PROPAGATED into the child (finding 9ef192d1).
+
+        Previously this test asserted the vars were REMOVED "so the child uses
+        the Lambda's default IAM role via the metadata service" — but AWS
+        Lambda has no IMDS/metadata service; the execution role is delivered
+        ONLY through these env vars, so stripping them left the child with no
+        credentials at all (NoCredentialsError). The documented backward-compat
+        behavior (docs/AGENT_PERMISSIONS.md §5) — run under the Lambda's
+        ambient role — is only achievable by INHERITING them."""
         with patch.dict(os.environ, {
-            "AWS_ACCESS_KEY_ID": "STALE",
-            "AWS_SECRET_ACCESS_KEY": "STALE",
-            "AWS_SESSION_TOKEN": "STALE",
+            "AWS_ACCESS_KEY_ID": "AMBIENTPARENT",
+            "AWS_SECRET_ACCESS_KEY": "ambient-secret",
+            "AWS_SESSION_TOKEN": "ambient-token",
         }):
             with patch("index.subprocess") as mock_subprocess:
                 mock_result = MagicMock()
@@ -181,9 +189,10 @@ class TestRunAgentCredentialIsolation:
 
                 call_kwargs = mock_subprocess.run.call_args[1]
                 child_env = call_kwargs["env"]
-                assert "AWS_ACCESS_KEY_ID" not in child_env
-                assert "AWS_SECRET_ACCESS_KEY" not in child_env
-                assert "AWS_SESSION_TOKEN" not in child_env
+                # Ambient credentials MUST survive into the child env.
+                assert child_env["AWS_ACCESS_KEY_ID"] == "AMBIENTPARENT"
+                assert child_env["AWS_SECRET_ACCESS_KEY"] == "ambient-secret"
+                assert child_env["AWS_SESSION_TOKEN"] == "ambient-token"
 
     def test_subprocess_timeout_is_840_seconds(self):
         """Subprocess timeout is set to 840s (14 min, under Lambda 15 min)."""

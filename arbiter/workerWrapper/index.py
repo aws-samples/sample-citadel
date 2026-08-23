@@ -518,15 +518,43 @@ def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extr
     child_env = os.environ.copy()
 
     if scoped_credentials:
+        # Scoped STS credentials declared via requiredPermissions: OVERWRITE
+        # the three credential env vars so the child sees ONLY the narrowed
+        # role. boto3's provider chain reads AWS_ACCESS_KEY_ID first, so these
+        # take precedence over any ambient container/role source that remains
+        # in the inherited env — the child never sees the parent's broader
+        # permissions (docs/AGENT_PERMISSIONS.md §"Why Subprocess Isolation").
         child_env['AWS_ACCESS_KEY_ID'] = scoped_credentials['accessKeyId']
         child_env['AWS_SECRET_ACCESS_KEY'] = scoped_credentials['secretAccessKey']
         child_env['AWS_SESSION_TOKEN'] = scoped_credentials['sessionToken']
         print("Subprocess will use scoped credentials")
     else:
-        # Remove any stale credential env vars so the child uses the
-        # Lambda's default IAM role via the metadata service
-        for key in ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN']:
-            child_env.pop(key, None)
+        # No scoped vending for this agent (no requiredPermissions) — the
+        # DOCUMENTED backward-compat path (docs/AGENT_PERMISSIONS.md §5) is for
+        # the agent to run under the wrapper Lambda's ambient IAM role.
+        #
+        # FIX (finding 9ef192d1): the ambient role must be PROPAGATED into the
+        # child, not stripped. In AWS Lambda the execution role is delivered
+        # ONLY through the AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+        # AWS_SESSION_TOKEN environment variables the runtime sets — there is
+        # NO IMDS/metadata service to "fall back" to (that only exists on EC2/
+        # ECS). The previous code popped exactly those three keys, so the child
+        # had no credential source at all and boto3 raised
+        # NoCredentialsError ("Unable to locate credentials"), which the
+        # governance ledger surfaced as a fenced-reserve transport error and
+        # refused the tool fail-closed (dev run 732013d3: 0 ledger rows, 0
+        # smoke rows). ``child_env = os.environ.copy()`` already carries the
+        # parent's credential env, so we simply leave it in place — no pop.
+        #
+        # LEAST-PRIVILEGE TRADEOFF: on this path the child inherits the
+        # wrapper's full role (broader than a scoped vend). This is exactly the
+        # behaviour the design intends for agents without requiredPermissions
+        # ("runs using the Lambda's ambient IAM role"); narrowing still applies
+        # whenever an agent declares requiredPermissions (the branch above).
+        # We are fixing the broken mechanism, not widening privilege beyond the
+        # documented design. AWS_CONTAINER_CREDENTIALS_* (if the deployment
+        # substrate ever sets them) are likewise inherited untouched.
+        pass
 
     # Apply governance and config overrides (stepConstraints, appConfig, modelOverride)
     if extra_env:
