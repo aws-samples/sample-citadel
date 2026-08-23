@@ -7,13 +7,16 @@ generation guard to be evaluated inside the SAME conditional write as the
 reserve — so it is implemented as a ``ConditionCheck`` on the execution row
 inside the reserve's ``TransactWriteItems``.
 
-The fake ``transact_write_items`` here is FAITHFUL: it unmarshals the real
-marshalled TransactItems (exercising ``_marshal``/``TypeSerializer``),
-evaluates BOTH the ledger ``attribute_not_exists`` Put condition and the
-execution-row generation ``ConditionCheck`` against shared state, and raises a
-real ``TransactionCanceledException`` with per-item ``CancellationReasons`` —
-so the differential RED (unfenced double-execute) and the TOCTOU proof
-(a generation bump interleaved at commit time) both bite for the right reason.
+The fake ``transact_write_items`` here mirrors the CORRECTED contract: production
+passes **native** Python values in the ``TransactItems`` (the resource-backed
+client auto-marshals them exactly once), so the fake reads them natively — no
+manual unmarshalling. It evaluates BOTH the ledger ``attribute_not_exists`` Put
+condition and the execution-row generation ``ConditionCheck`` against shared
+state, and raises a real ``TransactionCanceledException`` with per-item
+``CancellationReasons`` — so the differential RED (unfenced double-execute) and
+the TOCTOU proof (a generation bump interleaved at commit time) both bite for
+the right reason. Real-DynamoDB attribute typing / double-marshal regressions
+are covered by the moto contract suite (``test_ledger_contract_moto.py``).
 """
 from __future__ import annotations
 
@@ -22,7 +25,6 @@ import sys
 
 import pytest
 from botocore.exceptions import ClientError
-from boto3.dynamodb.types import TypeDeserializer
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 if _PROJECT_ROOT not in sys.path:
@@ -39,12 +41,6 @@ from arbiter.workerWrapper.tool_idempotency import MODE_LEDGER, build_key  # noq
 
 LEDGER_TABLE = "citadel-tool-execution-ledger-test"
 EXEC_TABLE = "citadel-executions-test"
-
-_deser = TypeDeserializer()
-
-
-def _unmarshal(marshalled: dict) -> dict:
-    return {k: _deser.deserialize(v) for k, v in marshalled.items()}
 
 
 class _FakeLedgerTable:
@@ -117,15 +113,19 @@ class _FakeClient:
     def transact_write_items(self, TransactItems):  # noqa: N803
         put = TransactItems[0]["Put"]
         check = TransactItems[1]["ConditionCheck"]
-        put_item = _unmarshal(put["Item"])
+        # Production passes NATIVE values (the resource-backed client
+        # auto-marshals once); the fake mirrors that. A regression back to
+        # pre-marshalled {"S": ...} maps would make pk/sk dicts here and blow
+        # up — the in-process analogue of DynamoDB's "expected S actual M".
+        put_item = put["Item"]
         put_ok = self._ledger.store.get((put_item[ledger.PK_ATTR], put_item[ledger.SK_ATTR])) is None
 
         if self.pre_eval_hook is not None:
             self.pre_eval_hook()
 
-        check_key = _unmarshal(check["Key"])
+        check_key = check["Key"]
         names = check["ExpressionAttributeNames"]
-        gen_value = _deser.deserialize(check["ExpressionAttributeValues"][":gen"])
+        gen_value = check["ExpressionAttributeValues"][":gen"]
         row = self._exec.get(check_key["executionId"], {})
         node = (row.get("nodeResults") or {}).get(names["#nid"], {})
         current = node.get(names["#gen"])

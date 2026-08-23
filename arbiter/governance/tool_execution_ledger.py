@@ -66,7 +66,6 @@ from numbers import Number
 from typing import Any, Callable
 
 import boto3
-from boto3.dynamodb.types import TypeSerializer
 from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger(__name__)
@@ -275,40 +274,28 @@ def __reset_ledger_client_for_test() -> None:
 
 # --- Lazy DynamoDB client (fenced reserve uses TransactWriteItems) -----------
 
-_serializer = TypeSerializer()
-
 
 def _get_dynamodb_client() -> Any:
-    """The low-level DynamoDB client backing the resource.
+    """The DynamoDB client backing the resource, used for ``TransactWriteItems``.
 
-    ``TransactWriteItems`` (the fenced reserve) is a client-level operation
-    with no resource-Table equivalent. Reusing ``resource.meta.client`` keeps
-    a single credential/config source and lets a test that patches
-    :func:`_get_dynamodb_resource` reach a fake client through ``.meta.client``
-    with no second seam.
+    ``TransactWriteItems`` (the fenced reserve) has no resource-``Table``
+    equivalent, so it must go through a client. We deliberately reuse
+    ``resource.meta.client`` — the SAME client the resource ``Table`` calls sit
+    on — so this module speaks ONE DynamoDB dialect end to end: **native Python
+    values everywhere**. boto3 registers its DynamoDB (un)marshalling transform
+    on that client, so ``transact_write_items`` auto-marshals the native
+    ``TransactItems`` exactly once — identical to what ``Table.put_item`` /
+    ``Table.update_item`` do on the single-item paths.
+
+    Do NOT hand this client pre-marshalled ``{"S": ...}`` AttributeValue maps:
+    the transform would marshal them a SECOND time (``{"M": {"S": {...}}}``),
+    which real DynamoDB rejects with ``Type mismatch for key pk expected: S
+    actual: M``. Keep every value native and let the single transform do the
+    work. (This module previously marshalled by hand AND passed the result to
+    this transform-laden client — the double-marshal that broke the fenced
+    reserve.)
     """
     return _get_dynamodb_resource().meta.client
-
-
-def _to_ddb_number_safe(obj: Any) -> Any:
-    """Recursively convert ``float`` to ``Decimal`` so ``TypeSerializer`` (which
-    rejects floats) can marshal a ledger item for the client-level transaction.
-    Ints/strings/None/bools/containers pass through unchanged."""
-    if isinstance(obj, bool):
-        return obj
-    if isinstance(obj, float):
-        return Decimal(str(obj))
-    if isinstance(obj, dict):
-        return {k: _to_ddb_number_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_to_ddb_number_safe(v) for v in obj]
-    return obj
-
-
-def _marshal(mapping: dict[str, Any]) -> dict[str, Any]:
-    """Marshal a plain dict to DynamoDB AttributeValue JSON for the client API."""
-    safe = _to_ddb_number_safe(mapping)
-    return {k: _serializer.serialize(v) for k, v in safe.items()}
 
 
 # --- Lazy S3 client (oversized-result offload) -------------------------------
@@ -427,14 +414,14 @@ def _reclaim_stale(pk: str, sk: str, *, seen_created_at: Any, now: float) -> boo
     try:
         _table().update_item(
             Key={PK_ATTR: pk, SK_ATTR: sk},
-            UpdateExpression="SET #s = :inflight, createdAt = :now, updatedAt = :now, ttl = :ttl",
+            UpdateExpression="SET #s = :inflight, createdAt = :now, updatedAt = :now, #ttl = :ttl",
             ConditionExpression="#s = :inflight_guard AND createdAt = :seen",
-            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeNames={"#s": "status", "#ttl": "ttl"},
             ExpressionAttributeValues={
                 ":inflight": STATUS_IN_FLIGHT,
                 ":inflight_guard": STATUS_IN_FLIGHT,
                 ":seen": seen_created_at,
-                ":now": now,
+                ":now": int(now),
                 ":ttl": int(now) + ttl_seconds(),
             },
         )
@@ -456,13 +443,13 @@ def _reclaim_released(pk: str, sk: str, *, now: float) -> bool:
     try:
         _table().update_item(
             Key={PK_ATTR: pk, SK_ATTR: sk},
-            UpdateExpression="SET #s = :inflight, createdAt = :now, updatedAt = :now, ttl = :ttl",
+            UpdateExpression="SET #s = :inflight, createdAt = :now, updatedAt = :now, #ttl = :ttl",
             ConditionExpression="#s = :released",
-            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeNames={"#s": "status", "#ttl": "ttl"},
             ExpressionAttributeValues={
                 ":inflight": STATUS_IN_FLIGHT,
                 ":released": STATUS_RELEASED,
-                ":now": now,
+                ":now": int(now),
                 ":ttl": int(now) + ttl_seconds(),
             },
         )
@@ -545,21 +532,25 @@ def _reserve_fenced(
             "dispatch fence requested but EXECUTIONS_TABLE not configured — "
             "cannot evaluate the generation guard (fail-closed)"
         )
+    # Native values ONLY. The resource-backed client (see _get_dynamodb_client)
+    # auto-marshals these exactly once, matching the single-item paths. Passing
+    # pre-marshalled AttributeValue maps here would double-marshal and DynamoDB
+    # would reject the ledger pk as type M (expected S).
     transact_items = [
         {
             "Put": {
                 "TableName": ledger_table,
-                "Item": _marshal(item),
+                "Item": item,
                 "ConditionExpression": f"attribute_not_exists({PK_ATTR})",
             }
         },
         {
             "ConditionCheck": {
                 "TableName": exec_table,
-                "Key": _marshal({"executionId": execution_id}),
+                "Key": {"executionId": execution_id},
                 "ConditionExpression": "nodeResults.#nid.#gen = :gen",
                 "ExpressionAttributeNames": {"#nid": node_id, "#gen": "dispatchGeneration"},
-                "ExpressionAttributeValues": {":gen": _serializer.serialize(int(dispatch_generation))},
+                "ExpressionAttributeValues": {":gen": int(dispatch_generation)},
             }
         },
     ]
@@ -619,16 +610,22 @@ def reserve(
     conditional ``PutItem`` — exactly-once-within-attempt only.
     """
     now = time.time() if now is None else now
+    now_i = int(now)
     item = {
         PK_ATTR: pk,
         SK_ATTR: sk,
         "status": STATUS_IN_FLIGHT,
         "toolName": tool_name,
-        "createdAt": now,
-        "updatedAt": now,
+        # Timestamps stored as INTEGER epoch seconds: boto3's DynamoDB marshaller
+        # (resource Table AND the resource-backed client behind the fenced
+        # transact) rejects native ``float`` ("Float types are not supported");
+        # ints marshal cleanly and second precision is ample for a 48h TTL /
+        # lease window.
+        "createdAt": now_i,
+        "updatedAt": now_i,
         # TTL derived from SERVER write-time (not a producer clock), so a
         # skewed/malicious producer cannot force early expiry.
-        "ttl": int(now) + ttl_seconds(),
+        "ttl": now_i + ttl_seconds(),
     }
     if dispatch_generation is not None:
         if not (execution_id and node_id):
@@ -685,17 +682,23 @@ def wait_for_terminal(
 def _finalize(pk: str, sk: str, *, attributes: dict[str, Any], now: float) -> None:
     """Transition an in-flight row to a terminal state (guarded)."""
     names = {"#s": "status"}
-    values: dict[str, Any] = {":inflight": STATUS_IN_FLIGHT, ":now": now}
+    values: dict[str, Any] = {":inflight": STATUS_IN_FLIGHT, ":now": int(now)}
     set_parts = ["#s = :status", "updatedAt = :now"]
     for i, (key, value) in enumerate(attributes.items()):
+        # 'status' is written via the fixed ``#s = :status`` clause above; it
+        # must NOT also get an ``#a{i}`` name alias, or that alias is declared
+        # in ExpressionAttributeNames but never referenced — which real
+        # DynamoDB rejects ("Value provided in ExpressionAttributeNames unused
+        # in expressions"). Only non-status attributes contribute an aliased
+        # ``#a{i} = :v{i}`` assignment.
+        if key == "status":
+            values[":status"] = value
+            continue
         placeholder = f":v{i}"
         name_placeholder = f"#a{i}"
         names[name_placeholder] = key
         values[placeholder] = value
-        if key == "status":
-            values[":status"] = value
-        else:
-            set_parts.append(f"{name_placeholder} = {placeholder}")
+        set_parts.append(f"{name_placeholder} = {placeholder}")
     if ":status" not in values:
         raise LedgerError("_finalize requires a 'status' attribute")
     try:
@@ -772,7 +775,7 @@ def release(pk: str, sk: str) -> None:
     matrix). Guarded by ``status = in_flight`` so a completed/failed record is
     never clobbered.
     """
-    now = time.time()
+    now = int(time.time())
     try:
         _table().update_item(
             Key={PK_ATTR: pk, SK_ATTR: sk},
