@@ -345,3 +345,66 @@ class _KeyDerivationFailedTool(AgentTool):  # type: ignore[misc]
             "idempotency key could not be derived from tool input; refused "
             "(fail-closed, no side effect performed)",
         ))
+
+
+class ComposedToolHook:
+    """The SINGLE ``BeforeToolCallEvent`` seam that composes layer-2 tool
+    governance with tool-call idempotency (finding 027c4a89).
+
+    Root cause of 027c4a89: governance and idempotency were two INDEPENDENT
+    ``strands.Agent.__init__`` monkeypatches. Idempotency was re-ported to the
+    hooks API; governance still targeted the removed ``tool_handler`` kwarg and
+    silently went inert. Composing both concerns behind ONE callback (this
+    class) removes the ability for them to diverge again.
+
+    Ordering (invariant): a governance DENIAL is applied FIRST, and on denial we
+    RETURN before the idempotency step runs. Therefore a denied tool:
+      * performs no side effect (``selected_tool`` is swapped for a tool that
+        only yields the deny error), AND
+      * creates NO idempotency reservation / execution-ledger row (``reserve``
+        is never reached) — so no ledger row can imply a completed run that
+        never happened.
+    A DENY audit ``GovernanceFinding`` IS still written (that is the governance
+    findings ledger, distinct from the idempotency execution ledger).
+
+    Either collaborator may be ``None``:
+      * governance-only (supervisor task path): idempotency=None.
+      * governance+idempotency (workflow-node path): both present.
+    At least one MUST be non-None (the installer guarantees this); a fully-empty
+    composed hook would be a no-op.
+    """
+
+    def __init__(
+        self,
+        *,
+        governance: Any | None = None,
+        idempotency: "IdempotencyToolHook | None" = None,
+    ):
+        self._governance = governance
+        self._idempotency = idempotency
+
+    @property
+    def governance(self) -> Any | None:  # pragma: no cover — accessor
+        return self._governance
+
+    @property
+    def idempotency(self) -> "IdempotencyToolHook | None":  # pragma: no cover
+        return self._idempotency
+
+    def register_hooks(self, registry: Any, **_kwargs: Any) -> None:
+        if not _STRANDS_AVAILABLE:  # pragma: no cover — dev/CI guard
+            logger.warning("composed tool hook skipped — strands unavailable")
+            return
+        registry.add_callback(BeforeToolCallEvent, self._on_before_tool_call)
+
+    def _on_before_tool_call(self, event: Any) -> None:
+        # 1) Governance decision FIRST. On DENY the evaluator swaps
+        #    ``event.selected_tool`` for a deny-only tool and returns True; we
+        #    then RETURN so idempotency's reserve/wrap never runs (deny before
+        #    reserve — no reservation, no side effect).
+        if self._governance is not None:
+            if self._governance.evaluate(event):
+                return
+        # 2) PERMIT → idempotency reserve/execute/finalize wrapping.
+        if self._idempotency is not None:
+            self._idempotency._on_before_tool_call(event)

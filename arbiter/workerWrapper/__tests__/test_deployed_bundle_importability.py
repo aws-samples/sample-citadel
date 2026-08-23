@@ -47,6 +47,7 @@ _BUNDLE_MODULES = [
     "agent_runner.py",
     "tool_idempotency_hook.py",
     "tool_idempotency.py",
+    "governance_tool_hook.py",
     "governed_tool_handler.py",
     "worker_governance.py",
 ]

@@ -185,21 +185,23 @@ def build_subprocess_env(
     ``None``/empty the corresponding env var is not set — keeps the
     existing callers backward compatible.
 
-    The governance triplet drives ``agent_runner._install_governed_tool_handler``:
+    The governance triplet drives ``agent_runner._install_tool_call_hooks``
+    (which builds the ``GovernanceEvaluator`` on the live BeforeToolCallEvent
+    seam, finding 027c4a89):
       - ``CITADEL_AGENT_ID`` is the trigger. When absent the runner does
-        NOT patch ``strands.Agent``, so legacy callers see no change.
+        NOT install the governance hook, so legacy callers see no change.
       - ``CITADEL_WORKFLOW_ID`` flows into every finding written at scope
         ``'worker-tool-handler'`` for trace correlation.
       - ``DENIED_TOOLS`` is the comma-separated allow-list of tools the
-        handler will deny at preprocess time. Callers are responsible for
+        evaluator will deny at tool-call time. Callers are responsible for
         unioning any per-run forbiddenTools (CIT-102 Pass B) into
         ``denied_tools`` BEFORE calling this function — this function only
         serializes whatever set it is given, it never merges.
 
     ``eval_run_id`` (CIT-102 Pass B) is additive and optional: when a
     non-empty string, sets ``CITADEL_EVAL_RUN_ID`` so
-    ``agent_runner._install_governed_tool_handler`` stamps it on the
-    ``GovernedToolHandler`` it constructs. Omitted entirely when absent —
+    ``agent_runner._install_tool_call_hooks`` stamps it on the
+    ``GovernanceEvaluator`` it constructs. Omitted entirely when absent —
     every non-eval caller (the overwhelming majority) produces a
     byte-identical env dict to the pre-CIT-102 shape.
 

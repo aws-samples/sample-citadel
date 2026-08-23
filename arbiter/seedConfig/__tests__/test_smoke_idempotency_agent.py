@@ -278,13 +278,16 @@ class TestSmokeToolClassification:
         production install call for the idempotency hook never supplies a
         mode_resolver, so IdempotencyToolHook._resolve_mode always returns
         MODE_LEDGER regardless of any tool-level config — the smoke tool
-        included."""
+        included. (Post finding 027c4a89 the install lives in the single
+        composed ``_install_tool_call_hooks`` seam.)"""
         import inspect
 
         from arbiter.workerWrapper import agent_runner
 
-        source = inspect.getsource(agent_runner._install_idempotency_hook)
+        source = inspect.getsource(agent_runner._install_tool_call_hooks)
         assert "mode_resolver" not in source
+        # The idempotency hook is still constructed on the composed seam.
+        assert "IdempotencyToolHook(" in source
 
 
 # ---------------------------------------------------------------------------

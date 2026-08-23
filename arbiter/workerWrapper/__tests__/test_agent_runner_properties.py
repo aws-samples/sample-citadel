@@ -200,11 +200,19 @@ class _FakeStrandsAgent:
 
 
 def _install_fake_strands(monkeypatch):
-    """Install a fake ``strands`` module so agent_runner can patch Agent.__init__."""
+    """Install a fake ``strands`` module so agent_runner can patch Agent.__init__.
+
+    A FRESH ``Agent`` subclass is handed out per call so the ``Agent.__init__``
+    monkeypatch installed by ``_install_tool_call_hooks`` (which mutates the
+    class object, not something monkeypatch auto-restores) never accumulates
+    across tests within this reused worker process."""
     import types
 
+    class _FreshAgent(_FakeStrandsAgent):
+        pass
+
     fake_mod = types.ModuleType("strands")
-    fake_mod.Agent = _FakeStrandsAgent
+    fake_mod.Agent = _FreshAgent
     fake_models = types.ModuleType("strands.models")
 
     class _BedrockModelStub:
@@ -263,21 +271,28 @@ class TestAgentRunnerGovernanceInjection:
         assert parsed["response"] == "tool_handler=None"
 
     def test_injection_when_citadel_agent_id_set(self, monkeypatch):
-        """CITADEL_AGENT_ID set -> every Agent() in loaded module gets a handler."""
+        """CITADEL_AGENT_ID set -> every Agent() in the loaded module gets the
+        composed governance+idempotency hook appended to its hooks list (the
+        re-ported seam; finding 027c4a89). The dead ``tool_handler`` kwarg is
+        no longer used."""
         monkeypatch.setenv("CITADEL_AGENT_ID", "agent-xyz")
         monkeypatch.setenv("CITADEL_WORKFLOW_ID", "wf-42")
         monkeypatch.setenv("DENIED_TOOLS", "tool_a,tool_b")
+        monkeypatch.delenv("CITADEL_EXECUTION_ID", raising=False)
+        monkeypatch.delenv("CITADEL_NODE_ID", raising=False)
         _install_fake_strands(monkeypatch)
 
         module_src = (
             "from strands import Agent\n"
             "def handler(**kwargs):\n"
             "    a = Agent(tools=[])\n"
+            "    hooks = a.kwargs.get('hooks') or []\n"
+            "    h = hooks[0] if hooks else None\n"
             "    return (\n"
-            "        f'injected={a.tool_handler is not None};'\n"
-            "        f'agent_id={getattr(a.tool_handler, \"agent_id\", None)};'\n"
-            "        f'workflow_id={getattr(a.tool_handler, \"workflow_id\", None)};'\n"
-            "        f'denied={sorted(getattr(a.tool_handler, \"denied_tools\", []))}'\n"
+            "        f'count={len(hooks)};'\n"
+            "        f'type={type(h).__name__};'\n"
+            "        f'gov={h.governance is not None};'\n"
+            "        f'idem={h.idempotency is not None}'\n"
             "    )\n"
         )
         captured = []
@@ -286,35 +301,44 @@ class TestAgentRunnerGovernanceInjection:
         assert len(captured) == 1, captured
         parsed = json.loads(captured[0])
         resp = parsed["response"]
-        assert "injected=True" in resp, resp
-        assert "agent_id=agent-xyz" in resp
-        assert "workflow_id=wf-42" in resp
-        assert "denied=['tool_a', 'tool_b']" in resp
+        assert "count=1" in resp, resp
+        assert "type=ComposedToolHook" in resp, resp
+        assert "gov=True" in resp, resp
+        # No idempotency envelope here (supervisor task path) → governance only.
+        assert "idem=False" in resp, resp
 
-    def test_explicit_tool_handler_is_preserved(self, monkeypatch):
-        """When generated code explicitly passes tool_handler=, injector MUST NOT override."""
+    def test_caller_hooks_preserved(self, monkeypatch):
+        """When generated code passes its own hooks=, the composed hook is
+        APPENDED (caller hooks preserved), never clobbered."""
         monkeypatch.setenv("CITADEL_AGENT_ID", "agent-xyz")
-        monkeypatch.setenv("DENIED_TOOLS", "t1")
+        monkeypatch.delenv("CITADEL_EXECUTION_ID", raising=False)
+        monkeypatch.delenv("CITADEL_NODE_ID", raising=False)
         _install_fake_strands(monkeypatch)
 
         module_src = (
             "from strands import Agent\n"
-            "class _MyHandler:\n"
-            "    agent_id = 'custom-caller-handler'\n"
+            "_SENTINEL = object()\n"
             "def handler(**kwargs):\n"
-            "    a = Agent(tools=[], tool_handler=_MyHandler())\n"
-            "    return 'agent_id=' + a.tool_handler.agent_id\n"
+            "    a = Agent(tools=[], hooks=[_SENTINEL])\n"
+            "    hooks = a.kwargs.get('hooks') or []\n"
+            "    return f'count={len(hooks)};first_is_sentinel={hooks[0] is _SENTINEL}'\n"
         )
         captured = []
         _run_runner_with_module(module_src, {}, captured)
 
         assert len(captured) == 1
         parsed = json.loads(captured[0])
-        assert parsed["response"] == "agent_id=custom-caller-handler"
+        resp = parsed["response"]
+        assert "count=2" in resp, resp
+        assert "first_is_sentinel=True" in resp, resp
 
-    def test_injection_skipped_when_strands_unimportable(self, monkeypatch):
-        """Graceful degrade: missing strands -> no crash, runner still works."""
+    def test_install_fails_loud_when_strands_unimportable_in_envelope(self, monkeypatch):
+        """Fail-loud (finding 027c4a89 step 4): with a governance envelope
+        active but strands unimportable, the installer RAISES — the node is
+        never allowed to run unprotected under a silent skip."""
         monkeypatch.setenv("CITADEL_AGENT_ID", "agent-xyz")
+        monkeypatch.delenv("CITADEL_EXECUTION_ID", raising=False)
+        monkeypatch.delenv("CITADEL_NODE_ID", raising=False)
         monkeypatch.delitem(sys.modules, "strands", raising=False)
 
         import builtins
@@ -329,95 +353,32 @@ class TestAgentRunnerGovernanceInjection:
 
         module_src = (
             "def handler(**kwargs):\n"
-            "    return 'ran-without-strands'\n"
+            "    return 'should-not-reach'\n"
         )
         captured = []
-        _run_runner_with_module(module_src, {}, captured)
+        with pytest.raises(RuntimeError, match="governance/idempotency REQUIRED"):
+            _run_runner_with_module(module_src, {}, captured)
 
-        assert len(captured) == 1
-        parsed = json.loads(captured[0])
-        assert parsed["response"] == "ran-without-strands"
-
-    def test_denylisted_tool_never_executes_end_to_end(self, monkeypatch):
-        """US-ARB-012a wiring contract: a denylisted tool call must never
-        reach the underlying tool implementation.
-
-        This exercises the full chain the real subprocess uses: agent_runner
-        installs the patch, the injected GovernedToolHandler's preprocess()
-        DENYs the call, and Strands (simulated here) must short-circuit
-        before invoking the tool function — never call it "just to log",
-        never call it at all.
-        """
-        monkeypatch.setenv("CITADEL_AGENT_ID", "agent-xyz")
-        monkeypatch.setenv("DENIED_TOOLS", "dangerous_tool")
-        fake_mod = _install_fake_strands(monkeypatch)
-
-        # Extend the fake Agent so it actually drives tool_handler.preprocess()
-        # before "calling" a tool, mirroring the real Strands dispatch loop
-        # closely enough to prove the short-circuit contract.
-        class _DrivingAgent(fake_mod.Agent):
-            def dispatch_tool(self, tool_use, executed_log):
-                pre = None
-                if self.tool_handler is not None:
-                    pre = self.tool_handler.preprocess(tool_use)
-                if pre is not None:
-                    return pre  # DENY short-circuit — tool must NOT run.
-                executed_log.append(tool_use["name"])
-                return {"status": "success", "content": [{"text": "ran"}]}
-
-        fake_mod.Agent = _DrivingAgent
+    def test_no_injection_leaves_agent_hooks_absent(self, monkeypatch):
+        """Symmetric control: no envelope → composed hook not installed, so a
+        plain Agent() has no injected hooks."""
+        monkeypatch.delenv("CITADEL_AGENT_ID", raising=False)
+        monkeypatch.delenv("CITADEL_EXECUTION_ID", raising=False)
+        monkeypatch.delenv("CITADEL_NODE_ID", raising=False)
+        _install_fake_strands(monkeypatch)
 
         module_src = (
             "from strands import Agent\n"
             "def handler(**kwargs):\n"
-            "    executed = []\n"
             "    a = Agent(tools=[])\n"
-            "    result = a.dispatch_tool({'name': 'dangerous_tool', 'toolUseId': 'tu-1'}, executed)\n"
-            "    return f'executed={executed};status={result.get(\"status\")}'\n"
+            "    return f'hooks={a.kwargs.get(\"hooks\")}'\n"
         )
         captured = []
         _run_runner_with_module(module_src, {}, captured)
 
         assert len(captured) == 1
         parsed = json.loads(captured[0])
-        resp = parsed["response"]
-        assert "executed=[]" in resp, resp  # tool function never ran
-        assert "status=error" in resp, resp
-
-    def test_permitted_tool_executes_end_to_end(self, monkeypatch):
-        """Symmetric control: a non-denied tool DOES reach execution."""
-        monkeypatch.setenv("CITADEL_AGENT_ID", "agent-xyz")
-        monkeypatch.setenv("DENIED_TOOLS", "dangerous_tool")
-        fake_mod = _install_fake_strands(monkeypatch)
-
-        class _DrivingAgent(fake_mod.Agent):
-            def dispatch_tool(self, tool_use, executed_log):
-                pre = None
-                if self.tool_handler is not None:
-                    pre = self.tool_handler.preprocess(tool_use)
-                if pre is not None:
-                    return pre
-                executed_log.append(tool_use["name"])
-                return {"status": "success", "content": [{"text": "ran"}]}
-
-        fake_mod.Agent = _DrivingAgent
-
-        module_src = (
-            "from strands import Agent\n"
-            "def handler(**kwargs):\n"
-            "    executed = []\n"
-            "    a = Agent(tools=[])\n"
-            "    result = a.dispatch_tool({'name': 'safe_tool', 'toolUseId': 'tu-2'}, executed)\n"
-            "    return f'executed={executed};status={result.get(\"status\")}'\n"
-        )
-        captured = []
-        _run_runner_with_module(module_src, {}, captured)
-
-        assert len(captured) == 1
-        parsed = json.loads(captured[0])
-        resp = parsed["response"]
-        assert "executed=['safe_tool']" in resp, resp
-        assert "status=success" in resp, resp
+        assert parsed["response"] == "hooks=None"
 
 
 # ---------------------------------------------------------------------------
@@ -490,14 +451,14 @@ class TestAgentRunnerModelOverride:
 
 
 # ---------------------------------------------------------------------------
-# Fail-loud idempotency install + best-effort governance guard.
+# Fail-loud composed install (governance + idempotency at one seam).
 #
-# The idempotency hook is a fail-closed security control: inside an active
-# idempotency envelope (CITADEL_EXECUTION_ID + CITADEL_NODE_ID set) a hook
-# that cannot install must ABORT the node — never degrade to a warning — so it
-# can never be mistaken for protected. Governance injection, by contrast, is
-# best-effort AND its tool_handler seam is absent on strands 1.30.0, so it must
-# skip (not crash the agent) when the seam is unavailable.
+# The composed control is fail-closed: inside an ACTIVE envelope (governance =
+# CITADEL_AGENT_ID; idempotency = CITADEL_EXECUTION_ID + CITADEL_NODE_ID) an
+# uninstallable control must ABORT the node — never degrade to a warning — so
+# it can never be mistaken for protected (finding 027c4a89 step 4). Governance
+# now fails loud too, matching the idempotency rule. Outside any envelope the
+# installer is a silent back-compat no-op.
 # ---------------------------------------------------------------------------
 
 import types
@@ -509,61 +470,77 @@ def _fresh_agent_runner():
     return agent_runner
 
 
-class TestIdempotencyHookFailsLoud:
-    def test_backcompat_noop_when_envelope_absent(self, monkeypatch):
-        """No envelope (no execution/node id) → silent no-op, never raises,
-        even with strands unavailable. Preserves agents run outside the
-        idempotency envelope."""
-        monkeypatch.delenv("CITADEL_EXECUTION_ID", raising=False)
-        monkeypatch.delenv("CITADEL_NODE_ID", raising=False)
+class TestComposedInstallFailsLoud:
+    def test_backcompat_noop_when_no_envelope(self, monkeypatch):
+        """No envelope → silent no-op, never raises, even with strands
+        unavailable. Preserves agents run outside any envelope."""
+        for v in ("CITADEL_AGENT_ID", "CITADEL_EXECUTION_ID", "CITADEL_NODE_ID"):
+            monkeypatch.delenv(v, raising=False)
         monkeypatch.setitem(sys.modules, "strands", None)  # import strands -> ImportError
         agent_runner = _fresh_agent_runner()
-        assert agent_runner._install_idempotency_hook() is False
+        assert agent_runner._install_tool_call_hooks() is False
 
-    def test_raises_when_envelope_active_and_strands_unavailable(self, monkeypatch):
-        """Envelope active + strands not importable → RAISE (fail the node),
-        never a silent warn/return-False."""
+    def test_raises_when_idempotency_envelope_active_and_strands_unavailable(self, monkeypatch):
+        """Idempotency envelope active + strands not importable → RAISE."""
+        monkeypatch.setenv("CITADEL_AGENT_ID", "agent-1")
         monkeypatch.setenv("CITADEL_EXECUTION_ID", "exec-1")
         monkeypatch.setenv("CITADEL_NODE_ID", "node-1")
         monkeypatch.setitem(sys.modules, "strands", None)
         agent_runner = _fresh_agent_runner()
-        with pytest.raises(RuntimeError, match="idempotency hook REQUIRED"):
-            agent_runner._install_idempotency_hook()
+        with pytest.raises(RuntimeError, match="governance/idempotency REQUIRED"):
+            agent_runner._install_tool_call_hooks()
 
-    def test_raises_when_envelope_active_and_hook_module_unimportable(self, monkeypatch):
-        """Envelope active, strands present, but the hook module can't be
-        imported (simulating a packaging/bundle regression) → RAISE with a
-        diagnostic naming the likely packaging cause."""
+    def test_raises_when_governance_envelope_active_and_strands_unavailable(self, monkeypatch):
+        """Governance envelope active (no idempotency) + strands not importable
+        → RAISE. Governance is now fail-loud, not a warning (the 027c4a89 fix)."""
+        monkeypatch.setenv("CITADEL_AGENT_ID", "agent-1")
+        monkeypatch.delenv("CITADEL_EXECUTION_ID", raising=False)
+        monkeypatch.delenv("CITADEL_NODE_ID", raising=False)
+        monkeypatch.setitem(sys.modules, "strands", None)
+        agent_runner = _fresh_agent_runner()
+        with pytest.raises(RuntimeError, match="governance/idempotency REQUIRED"):
+            agent_runner._install_tool_call_hooks()
+
+    def test_raises_when_idempotency_hook_module_unimportable(self, monkeypatch):
+        """Idempotency envelope active, strands present, but the hook module
+        can't be imported (packaging/bundle regression) → RAISE naming the
+        likely cause."""
+        monkeypatch.setenv("CITADEL_AGENT_ID", "agent-1")
         monkeypatch.setenv("CITADEL_EXECUTION_ID", "exec-1")
         monkeypatch.setenv("CITADEL_NODE_ID", "node-1")
         monkeypatch.setitem(sys.modules, "strands", types.ModuleType("strands"))
-        # Force `from tool_idempotency_hook import ...` to fail deterministically.
         monkeypatch.setitem(sys.modules, "tool_idempotency_hook", None)
         agent_runner = _fresh_agent_runner()
-        with pytest.raises(RuntimeError, match="tool_idempotency_hook"):
-            agent_runner._install_idempotency_hook()
+        with pytest.raises(RuntimeError, match="idempotency hook REQUIRED"):
+            agent_runner._install_tool_call_hooks()
 
 
-class TestGovernanceInjectionBestEffortGuard:
-    def test_skips_without_crashing_when_agent_lacks_tool_handler_seam(self, monkeypatch):
-        """strands 1.30.0's Agent.__init__ accepts neither ``tool_handler`` nor
-        **kwargs. Injecting a tool_handler kwarg would raise TypeError at every
-        Agent construction. The installer must detect the missing seam and skip
-        (return False, no patch) rather than break agent construction."""
+class TestGovernanceInstallsOnHooksSeam:
+    def test_installs_via_hooks_on_seamless_agent(self, monkeypatch):
+        """strands 1.30.0's Agent.__init__ accepts ``hooks`` but NOT
+        ``tool_handler``. The re-ported installer must INSTALL (patch
+        Agent.__init__ to append the composed hook) — the opposite of the old
+        best-effort skip that left layer-2 inert (finding 027c4a89)."""
         monkeypatch.setenv("CITADEL_AGENT_ID", "agent-1")
+        monkeypatch.delenv("CITADEL_EXECUTION_ID", raising=False)
+        monkeypatch.delenv("CITADEL_NODE_ID", raising=False)
 
         fake_strands = types.ModuleType("strands")
 
         class _FakeAgent:
-            # Mirrors strands 1.30.0: no tool_handler, no **kwargs.
+            # Mirrors strands 1.30.0: hooks accepted, no tool_handler.
             def __init__(self, model=None, tools=None, hooks=None):
-                self.tools = tools
+                self.hooks = hooks
 
         fake_strands.Agent = _FakeAgent
         monkeypatch.setitem(sys.modules, "strands", fake_strands)
 
         agent_runner = _fresh_agent_runner()
         original_init = _FakeAgent.__init__
-        assert agent_runner._install_governed_tool_handler() is False
-        # The installer must NOT have patched Agent.__init__.
-        assert _FakeAgent.__init__ is original_init
+        assert agent_runner._install_tool_call_hooks() is True
+        # The installer MUST have patched Agent.__init__.
+        assert _FakeAgent.__init__ is not original_init
+        # And the composed hook is appended to every constructed Agent.
+        a = _FakeAgent(tools=[])
+        assert isinstance(a.hooks, list) and len(a.hooks) == 1
+        assert type(a.hooks[0]).__name__ == "ComposedToolHook"
