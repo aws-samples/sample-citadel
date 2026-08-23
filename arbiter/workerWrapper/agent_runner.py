@@ -379,109 +379,6 @@ def _install_usage_capture():
     return True
 
 
-def _install_governed_tool_handler():
-    """Patch ``strands.Agent.__init__`` to inject a GovernedToolHandler.
-
-    Runs inside the subprocess before the agent module is exec'd, so every
-    ``Agent(...)`` construction inside the loaded module automatically
-    picks up governance enforcement at tool-call time (QD-5 layer 2,
-    ``scope_evaluated='worker-tool-handler'``).
-
-    No-op when ``CITADEL_AGENT_ID`` is not set in the environment — that
-    preserves backward compatibility with agents running outside the
-    governance envelope (local dev, legacy callers).
-
-    Graceful degrade when ``strands`` or ``governed_tool_handler`` cannot
-    be imported: WARN to stderr and return False. Best-effort semantics
-    (AC 9.4) mean a missing layer-2 handler must not halt execution of
-    an otherwise-valid agent.
-
-    Caller-supplied ``tool_handler=...`` on ``Agent(...)`` always wins —
-    the injector only fills in the default. This preserves the escape
-    hatch for agents that ship their own policy surface.
-
-    Returns True when the patch was installed, False otherwise.
-    """
-    if not os.environ.get('CITADEL_AGENT_ID'):
-        return False
-
-    try:
-        import strands  # type: ignore[import-not-found]
-    except ImportError as exc:
-        sys.stderr.write(
-            f'[agent_runner] WARN governance injection skipped — '
-            f'strands unavailable: {exc}\n'
-        )
-        return False
-
-    # strands 1.30.0 removed the tool_handler seam this injector targets:
-    # Agent.__init__ accepts NEITHER a ``tool_handler`` kwarg NOR **kwargs
-    # (verified against the pinned release). Injecting ``tool_handler=`` into
-    # such an Agent raises TypeError at construction, which would break EVERY
-    # agent in a governed dispatch — a fail-open→fail-the-node regression far
-    # worse than the best-effort skip AC 9.4 mandates. Probe the signature and
-    # skip injection (WARN, no patch) when the seam is absent. Layer-2 tool
-    # governance needs a hooks-based re-port on this strands line (tracked as
-    # the "dead governance tool_handler injection under strands 1.30.0"
-    # finding); this guard makes the module importable without regressing
-    # agent construction.
-    import inspect
-    try:
-        _params = inspect.signature(strands.Agent.__init__).parameters
-        _accepts_tool_handler = ('tool_handler' in _params) or any(
-            p.kind is inspect.Parameter.VAR_KEYWORD for p in _params.values()
-        )
-    except (TypeError, ValueError):
-        _accepts_tool_handler = False
-    if not _accepts_tool_handler:
-        sys.stderr.write(
-            '[agent_runner] WARN governance injection skipped — installed '
-            'strands.Agent does not accept a tool_handler kwarg; layer-2 tool '
-            'governance requires a hooks-based re-port on this version\n'
-        )
-        return False
-    _here = os.path.dirname(os.path.abspath(__file__))
-    if _here not in sys.path:
-        sys.path.insert(0, _here)
-
-    try:
-        from governed_tool_handler import GovernedToolHandler
-    except ImportError as exc:
-        sys.stderr.write(
-            f'[agent_runner] WARN governance injection skipped — '
-            f'governed_tool_handler unavailable: {exc}\n'
-        )
-        return False
-
-    original_init = strands.Agent.__init__
-
-    def _governed_init(self, *args, **kwargs):
-        # Caller-supplied handler always wins — never override an explicit
-        # tool_handler= in generated code.
-        if 'tool_handler' not in kwargs or kwargs['tool_handler'] is None:
-            kwargs['tool_handler'] = GovernedToolHandler(
-                agent_id=os.environ.get('CITADEL_AGENT_ID', 'unknown-agent'),
-                workflow_id=os.environ.get('CITADEL_WORKFLOW_ID', 'unknown-workflow'),
-                # ``denied_tools=None`` lets GovernedToolHandler read
-                # DENIED_TOOLS from env itself, keeping a single source of
-                # truth for env parsing semantics. DENIED_TOOLS itself
-                # already carries the union of static deny-list entries
-                # and any per-run forbiddenTools (CIT-102 Pass B) — see
-                # worker_governance.build_subprocess_env, which merges
-                # them before setting the env var.
-                denied_tools=None,
-                # CIT-102 Pass B: per-run eval-context correlation id.
-                # None (the trigger is absent) for every non-eval
-                # invocation — GovernedToolHandler treats None
-                # byte-identically to its pre-CIT-102 behavior.
-                eval_run_id=os.environ.get('CITADEL_EVAL_RUN_ID') or None,
-            )
-        return original_init(self, *args, **kwargs)
-
-    strands.Agent.__init__ = _governed_init
-    return True
-
-
 def _read_dispatch_generation():
     """Parse ``CITADEL_DISPATCH_GENERATION`` to an int, or None when unset/invalid.
 
@@ -498,90 +395,138 @@ def _read_dispatch_generation():
         return None
 
 
-def _install_idempotency_hook():
-    """Patch ``strands.Agent.__init__`` to attach an idempotency HookProvider.
+def _install_tool_call_hooks():
+    """Install the SINGLE composed ``BeforeToolCallEvent`` seam that applies
+    layer-2 tool governance THEN tool-call idempotency (finding 027c4a89).
 
-    Tool-call idempotency (PR1). Uses the ONLY tool-call extension surface the
-    pinned ``strands-agents==1.30.0`` actually exposes: the hooks system
-    (``Agent(hooks=[...])`` + ``BeforeToolCallEvent``). Verified against the
-    1.30.0 source — that release has NO ``strands.handlers.tool_handler``
-    /``AgentToolHandler`` and ``Agent.__init__`` accepts neither
-    ``tool_handler`` nor ``**kwargs``; it does accept ``hooks``. We therefore
-    APPEND an ``IdempotencyToolHook`` to whatever ``hooks`` list the caller
-    passed (never clobbering caller-supplied hooks).
+    Replaces the two former independent ``strands.Agent.__init__`` patches
+    (``_install_governed_tool_handler`` targeting the removed ``tool_handler``
+    kwarg, and ``_install_idempotency_hook``). Those two installers were the
+    root cause: idempotency was re-ported to the hooks API while governance
+    still targeted the dead kwarg and silently went inert. One installer +
+    one ``ComposedToolHook`` (one callback) makes divergence impossible.
 
-    No-op unless BOTH ``CITADEL_EXECUTION_ID`` and ``CITADEL_NODE_ID`` are set
-    (back-compat: an agent run outside the idempotency envelope is unchanged).
-    ``CITADEL_ORG_ID`` is optional (empty -> shared org prefix; executionId is
-    still globally unique) and is read ONLY from the trusted subprocess env
-    that the worker set server-side, never from tool/agent input.
+    Two independent envelopes:
+      * governance active  ⇔ ``CITADEL_AGENT_ID`` set (both dispatch paths).
+      * idempotency active ⇔ ``CITADEL_EXECUTION_ID`` AND ``CITADEL_NODE_ID``
+        set (workflow-node path). Idempotency-active ⟹ governance-active.
 
-    Graceful degrade (WARN, return False) when strands or the hook module
-    cannot be imported — a missing idempotency layer must never halt an
-    otherwise-valid agent.
+    Back-compat: when NEITHER envelope is present, this is a silent no-op
+    (agents run outside any envelope are unchanged) and returns False.
 
-    Returns True when the patch was installed, False otherwise.
+    FAIL-LOUD (finding 027c4a89 step 4): inside an ACTIVE envelope, a control
+    that cannot install must ABORT the node — never degrade to a warning. A
+    silently-skipped control lets a node run UNPROTECTED while looking
+    protected. This now applies to governance too, matching the rule already
+    enforced for idempotency. Raising exits the subprocess non-zero, which the
+    workflow-node dispatch (``run_agent_in_subprocess`` ``raise_on_error=True``)
+    turns into ``workflow.node.failed``.
+
+    Returns True when the composed hook was installed, False on back-compat
+    no-op.
     """
-    if not (os.environ.get('CITADEL_EXECUTION_ID') and os.environ.get('CITADEL_NODE_ID')):
+    agent_id = os.environ.get('CITADEL_AGENT_ID')
+    execution_id = os.environ.get('CITADEL_EXECUTION_ID')
+    node_id = os.environ.get('CITADEL_NODE_ID')
+    governance_active = bool(agent_id)
+    idempotency_active = bool(execution_id and node_id)
+
+    if not governance_active and not idempotency_active:
         return False
 
-    # FAIL-CLOSED (fail-loud). Inside an ACTIVE idempotency envelope (both
-    # CITADEL_EXECUTION_ID and CITADEL_NODE_ID present ⇒ a workflow-dispatched
-    # node), a hook that cannot install must ABORT the node — it must NEVER
-    # degrade to a warning. The idempotency hook is a fail-closed security
-    # control: silently disabling it would let a node run UNPROTECTED while
-    # looking protected (duplicate side effects across a watchdog
-    # re-dispatch), which is exactly the "idempotency hook skipped … No module
-    # named arbiter ⇒ 0 ledger rows" defect the first real smoke run exposed.
-    # Raising here exits the agent_runner subprocess non-zero, which the
-    # workflow-node dispatch (run_agent_in_subprocess raise_on_error=True)
-    # turns into workflow.node.failed. Diagnostic messages name the likely
-    # packaging cause so a bundle regression is triaged fast.
+    # FAIL-LOUD: strands must be importable to install ANY active control.
     try:
         import strands  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError(
-            'idempotency hook REQUIRED but strands is unavailable in the '
-            'agent_runner subprocess while an idempotency envelope is active '
-            f'(CITADEL_EXECUTION_ID/CITADEL_NODE_ID set): {exc}'
+            'tool-call governance/idempotency REQUIRED but strands is '
+            'unavailable in the agent_runner subprocess while an active '
+            'envelope is present (CITADEL_AGENT_ID and/or CITADEL_EXECUTION_ID'
+            f'/CITADEL_NODE_ID set): {exc}'
         ) from exc
 
     _here = os.path.dirname(os.path.abspath(__file__))
     if _here not in sys.path:
         sys.path.insert(0, _here)
 
+    governance = None
+    if governance_active:
+        # FAIL-LOUD: an uninstallable governance control inside its envelope
+        # aborts the node (never a warning) — this is the finding-027c4a89 fix.
+        try:
+            from governance_tool_hook import GovernanceEvaluator
+        except ImportError as exc:
+            raise RuntimeError(
+                'layer-2 tool governance REQUIRED but governance_tool_hook '
+                'could not be imported in the agent_runner subprocess while a '
+                'governance envelope is active (CITADEL_AGENT_ID set). This '
+                'control must not silently disable itself — check that the '
+                "ArbiterCatalogLayer 'governance'/'common' packages are on the "
+                'subprocess PYTHONPATH (index.py propagates the parent '
+                f'sys.path): {exc}'
+            ) from exc
+        governance = GovernanceEvaluator(
+            agent_id=agent_id or 'unknown-agent',
+            workflow_id=os.environ.get('CITADEL_WORKFLOW_ID', 'unknown-workflow'),
+            # ``denied_tools=None`` → read DENIED_TOOLS from env (single
+            # env-parsing source of truth; the worker already merges static
+            # deny-list + per-run forbiddenTools into DENIED_TOOLS).
+            denied_tools=None,
+            eval_run_id=os.environ.get('CITADEL_EVAL_RUN_ID') or None,
+        )
+
+    idempotency = None
+    if idempotency_active:
+        # FAIL-LOUD idempotency (unchanged intent from the former
+        # _install_idempotency_hook): a fail-closed security control that
+        # silently degrades would let a node duplicate side effects across a
+        # watchdog re-dispatch while looking protected.
+        try:
+            from tool_idempotency_hook import IdempotencyToolHook
+        except ImportError as exc:
+            raise RuntimeError(
+                'idempotency hook REQUIRED but tool_idempotency_hook could not '
+                'be imported in the agent_runner subprocess while an '
+                'idempotency envelope is active. This fail-closed security '
+                'control must not silently disable itself — check that the '
+                "ArbiterCatalogLayer 'governance'/'common' packages are on the "
+                'subprocess PYTHONPATH (index.py propagates the parent '
+                'sys.path) and that the worker bundle ships '
+                f'tool_idempotency/tool_idempotency_hook: {exc}'
+            ) from exc
+        idempotency = IdempotencyToolHook(
+            org_id=os.environ.get('CITADEL_ORG_ID', ''),
+            execution_id=execution_id or '',
+            node_id=node_id or '',
+            dispatch_generation=_read_dispatch_generation(),
+        )
+
+    # The composed hook lives with the idempotency seam so both concerns share
+    # one module and one BeforeToolCallEvent callback.
     try:
-        from tool_idempotency_hook import IdempotencyToolHook
+        from tool_idempotency_hook import ComposedToolHook
     except ImportError as exc:
         raise RuntimeError(
-            'idempotency hook REQUIRED but tool_idempotency_hook could not be '
-            'imported in the agent_runner subprocess while an idempotency '
-            'envelope is active. This fail-closed security control must not '
-            'silently disable itself — check that the ArbiterCatalogLayer '
-            "'governance'/'common' packages are on the subprocess PYTHONPATH "
-            '(index.py propagates the parent sys.path) and that the worker '
-            f'bundle ships tool_idempotency/tool_idempotency_hook: {exc}'
+            'composed tool hook REQUIRED but tool_idempotency_hook could not '
+            'be imported in the agent_runner subprocess while an active '
+            f'envelope is present: {exc}'
         ) from exc
+
+    composed = ComposedToolHook(governance=governance, idempotency=idempotency)
 
     original_init = strands.Agent.__init__
 
-    def _idempotent_init(self, *args, **kwargs):
-        hook = IdempotencyToolHook(
-            org_id=os.environ.get('CITADEL_ORG_ID', ''),
-            execution_id=os.environ.get('CITADEL_EXECUTION_ID', ''),
-            node_id=os.environ.get('CITADEL_NODE_ID', ''),
-            dispatch_generation=_read_dispatch_generation(),
-        )
+    def _hooked_init(self, *args, **kwargs):
         existing = kwargs.get('hooks')
         if existing is None:
-            kwargs['hooks'] = [hook]
+            kwargs['hooks'] = [composed]
         elif isinstance(existing, list):
-            kwargs['hooks'] = [*existing, hook]
-        # If a caller passed a non-list hooks value we leave it untouched —
-        # strands will validate it; we never overwrite caller intent.
+            kwargs['hooks'] = [*existing, composed]
+        # A non-list caller hooks value is left untouched — strands validates
+        # it; we never overwrite caller intent.
         return original_init(self, *args, **kwargs)
 
-    strands.Agent.__init__ = _idempotent_init
+    strands.Agent.__init__ = _hooked_init
     return True
 
 
@@ -665,19 +610,36 @@ def main():
     # 0-based callIndex sequence each time rather than accumulating state.
     _CAPTURED_USAGE.clear()
 
-    # Reset the per-process governance-refusal sink for the same reason
-    # (repeated in-process main() calls in tests must start clean). In the real
-    # Lambda subprocess this is a no-op (one exec per process).
+    # Reset the per-process governance/infrastructure REFUSAL sink (finding
+    # be80ccd7) so repeated in-process main() calls in tests start clean, and
+    # so the post-turn drain below only ever observes THIS run's refusals. In
+    # the real one-exec-per-process Lambda subprocess this is a no-op. Kept from
+    # #84 because #84's post-turn refusal-drain machinery (build_refusal_envelope
+    # + the drain block after module.handler) is part of this merged file.
     _drain_governance_refusals()
 
-    # Install governance patch BEFORE exec_module so every Agent(...)
-    # construction in the loaded module picks it up. Safe no-op when the
-    # subprocess env lacks CITADEL_AGENT_ID (backward compatible).
-    _install_governed_tool_handler()
-
-    # Install the tool-call idempotency hook (PR1) via the strands hooks
-    # system — no-op unless CITADEL_EXECUTION_ID + CITADEL_NODE_ID are set.
-    _install_idempotency_hook()
+    # Install the SINGLE composed tool-call seam (finding 027c4a89): layer-2
+    # tool governance THEN tool-call idempotency, at one BeforeToolCallEvent
+    # callback, patched onto strands.Agent.__init__ BEFORE exec_module so every
+    # Agent(...) in the loaded module picks it up. No-op when neither the
+    # governance envelope (CITADEL_AGENT_ID) nor the idempotency envelope
+    # (CITADEL_EXECUTION_ID + CITADEL_NODE_ID) is present. FAIL-LOUD (raises)
+    # when an active envelope's control cannot install.
+    #
+    # MERGE (#84 ⋈ #85): this REPLACES the two former independent installers
+    # (_install_governed_tool_handler + _install_idempotency_hook) that #84
+    # called here. #85 removed those functions entirely: governance targeted the
+    # strands 1.30.0-removed ``tool_handler`` kwarg and silently went inert,
+    # which is the very defect finding 027c4a89 fixes. The refusal machinery
+    # #84 added (build_refusal_envelope, the LedgerError catch in
+    # tool_idempotency_hook, the post-turn drain) is ORTHOGONAL to which
+    # installer runs and is preserved unchanged — an infrastructure LedgerError
+    # from reserve/finalize still fails the node, while an intentional
+    # governance POLICY denial (deny-before-reserve, no LedgerError, no ledger
+    # row) completes the node with a durable DENY GovernanceFinding. See the
+    # node-status decision documented on ComposedToolHook in
+    # tool_idempotency_hook.py.
+    _install_tool_call_hooks()
 
     # Overrides the model id for operator-selected per-agent overrides;
     # no-op unless MODEL_OVERRIDE is set in the subprocess environment.

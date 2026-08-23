@@ -35,16 +35,21 @@ real smoke run). The same names resolve under pytest via
 
 Wiring status
 -------------
-Wired. ``arbiter/workerWrapper/agent_runner.py`` installs a
-``strands.Agent.__init__`` patch (``_install_governed_tool_handler``) before
-the agent module is exec'd inside the subprocess, so every ``Agent(...)``
-constructed by the loaded module automatically receives a
-``GovernedToolHandler`` instance as its ``tool_handler`` — unless the caller
-explicitly passes its own, which always wins. The patch is a no-op when
-``CITADEL_AGENT_ID`` is unset in the subprocess environment (back-compat with
-agents run outside the governance envelope). See
-``arbiter/workerWrapper/__tests__/test_agent_runner_properties.py`` for the
-injection-contract tests.
+The ``strands.Agent(tool_handler=...)`` seam this class was written for was
+REMOVED in ``strands-agents==1.30.0`` (``Agent.__init__`` accepts neither
+``tool_handler`` nor ``**kwargs``), which left layer-2 governance INERT at
+runtime (finding 027c4a89). Governance was re-ported onto the live hooks seam:
+``arbiter/workerWrapper/governance_tool_hook.py`` (``GovernanceEvaluator`` /
+``GovernanceToolHook``), composed with tool-call idempotency behind ONE
+``BeforeToolCallEvent`` callback (``tool_idempotency_hook.ComposedToolHook``),
+installed by ``agent_runner._install_tool_call_hooks``.
+
+The DECISION itself (deny-list lookup + audit finding) lives in the shared
+``record_governance_decision`` / ``build_governance_finding`` helpers in this
+module — the SINGLE source of truth both the (now legacy) ``preprocess`` path
+and the live hooks path call, so the two can never diverge again. This
+``GovernedToolHandler`` class is retained for the legacy ``AgentToolHandler``
+interface but is no longer installed on strands 1.30.0.
 
 Spec: arbiter-governance-engine/requirements.md Requirement 9.1–9.5.
 """
@@ -107,6 +112,95 @@ def _parse_denied_tools_env() -> set[str]:
     """
     raw = os.environ.get('DENIED_TOOLS', '')
     return {t.strip() for t in raw.split(',') if t.strip()}
+
+
+def _deny_error_result(tool_use_id: str, tool_name: str) -> dict:
+    """The ToolResult-shaped error dict returned when a tool is denied.
+
+    Strands accepts duck-typed dicts; the same shape is used whether the
+    decision fires from the legacy ``preprocess`` path or the hooks-based
+    ``GovernanceToolHook`` path — a single source of truth for the message
+    the model sees on a denial.
+    """
+    return {
+        'toolUseId': tool_use_id,
+        'status': 'error',
+        'content': [
+            {'text': f"Tool '{tool_name}' is not authorised for this agent."}
+        ],
+    }
+
+
+def build_governance_finding(
+    tool_name: str,
+    denied: bool,
+    *,
+    agent_id: str,
+    workflow_id: str,
+    eval_run_id: str | None = None,
+) -> GovernanceFinding:
+    """Build the worker-tool-handler-scope ``GovernanceFinding`` for one tool
+    call. Shared by the legacy ``GovernedToolHandler.preprocess`` and the
+    hooks-based ``GovernanceToolHook`` so both layers emit byte-identical
+    findings (QD-5: scope ``worker-tool-handler``, distinct from
+    ``worker-pre-filter``). PERMIT and DENY both produce a finding."""
+    decision = ArbitrationDecision.DENY if denied else ArbitrationDecision.PERMIT
+    return GovernanceFinding.create(
+        workflow_id=workflow_id,
+        decision=decision,
+        requesting_agent=agent_id,
+        target_agent=f'tool:{tool_name}',
+        reason=(
+            f'tool_denied:explicit_deny_list:{tool_name}'
+            if denied
+            else f'tool_permitted:not_on_deny_list:{tool_name}'
+        ),
+        scope_evaluated=SCOPE_WORKER_TOOL_HANDLER,
+        contract_evaluated=None,
+        eval_run_id=eval_run_id,
+    )
+
+
+def record_governance_decision(
+    tool_name: str,
+    tool_use_id: str,
+    *,
+    agent_id: str,
+    workflow_id: str,
+    denied_tools: set[str],
+    eval_run_id: str | None = None,
+) -> tuple[bool, dict | None]:
+    """Evaluate the deny-list decision, write the audit finding, and return
+    ``(denied, error_result_or_None)``.
+
+    THE single source of truth for the layer-2 tool-call governance decision.
+    Both the legacy ``GovernedToolHandler.preprocess`` (strands ``tool_handler``
+    seam, dead on 1.30.0) and the live ``GovernanceToolHook`` (BeforeToolCallEvent
+    seam) call this — so the two can never diverge (the exact root cause of
+    finding 027c4a89 was two decision surfaces, one live and one dead).
+
+    A finding is written on BOTH permit and deny (full audit trail). Ledger
+    write failure is best-effort at this scope (AC 9.4): WARN + continue — the
+    denial itself is NEVER weakened by a ledger outage. The DENY short-circuit
+    (returning an error ToolResult) is independent of whether the finding
+    persisted.
+    """
+    denied = tool_name in denied_tools
+    finding = build_governance_finding(
+        tool_name, denied,
+        agent_id=agent_id, workflow_id=workflow_id, eval_run_id=eval_run_id,
+    )
+    try:
+        write_finding(finding)
+    except LedgerWriteError as exc:
+        logger.warning(
+            'governance ledger write failed at worker-tool-handler '
+            'finding_id=%s tool=%s: %s',
+            finding.finding_id, tool_name, exc,
+        )
+    if denied:
+        return True, _deny_error_result(tool_use_id, tool_name)
+    return False, None
 
 
 class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]
@@ -178,45 +272,15 @@ class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]
             tool_name = getattr(tool, 'name', '') or ''
             tool_use_id = getattr(tool, 'toolUseId', '') or ''
 
-        denied = tool_name in self.denied_tools
-        decision = ArbitrationDecision.DENY if denied else ArbitrationDecision.PERMIT
-
-        finding = GovernanceFinding.create(
+        # Delegate to the shared decision (single source of truth, also used by
+        # the live BeforeToolCallEvent seam in governance_tool_hook.py).
+        _denied, error_result = record_governance_decision(
+            tool_name, tool_use_id,
+            agent_id=self.agent_id,
             workflow_id=self.workflow_id,
-            decision=decision,
-            requesting_agent=self.agent_id,
-            target_agent=f'tool:{tool_name}',
-            reason=(
-                f'tool_denied:explicit_deny_list:{tool_name}'
-                if denied
-                else f'tool_permitted:not_on_deny_list:{tool_name}'
-            ),
-            scope_evaluated=SCOPE_WORKER_TOOL_HANDLER,
-            contract_evaluated=None,
+            denied_tools=self.denied_tools,
             eval_run_id=self.eval_run_id,
         )
-
-        try:
-            write_finding(finding)
-        except LedgerWriteError as exc:
-            # Best-effort at worker-tool-handler scope per AC 9.4.
-            # Fail-closed semantics belong at supervisor dispatch
-            # (US-ARB-008), not here — logging + continue is correct.
-            logger.warning(
-                'governance ledger write failed at worker-tool-handler '
-                'finding_id=%s tool=%s: %s',
-                finding.finding_id, tool_name, exc,
-            )
-
-        if denied:
-            # ToolResult-shaped dict; Strands accepts duck-typed dicts.
-            return {
-                'toolUseId': tool_use_id,
-                'status': 'error',
-                'content': [
-                    {'text': f"Tool '{tool_name}' is not authorised for this agent."}
-                ],
-            }
-
-        # PERMIT → fall through to default handler.
-        return None
+        # error_result is the ToolResult-shaped deny dict on DENY, else None
+        # (PERMIT → fall through to the default handler).
+        return error_result

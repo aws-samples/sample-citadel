@@ -423,3 +423,101 @@ class _KeyDerivationFailedTool(AgentTool):  # type: ignore[misc]
             "idempotency key could not be derived from tool input; refused "
             "(fail-closed, no side effect performed)",
         ))
+
+
+class ComposedToolHook:
+    """The SINGLE ``BeforeToolCallEvent`` seam that composes layer-2 tool
+    governance with tool-call idempotency (finding 027c4a89).
+
+    Root cause of 027c4a89: governance and idempotency were two INDEPENDENT
+    ``strands.Agent.__init__`` monkeypatches. Idempotency was re-ported to the
+    hooks API; governance still targeted the removed ``tool_handler`` kwarg and
+    silently went inert. Composing both concerns behind ONE callback (this
+    class) removes the ability for them to diverge again.
+
+    Ordering (invariant): a governance DENIAL is applied FIRST, and on denial we
+    RETURN before the idempotency step runs. Therefore a denied tool:
+      * performs no side effect (``selected_tool`` is swapped for a tool that
+        only yields the deny error), AND
+      * creates NO idempotency reservation / execution-ledger row (``reserve``
+        is never reached) — so no ledger row can imply a completed run that
+        never happened.
+    A DENY audit ``GovernanceFinding`` IS still written (that is the governance
+    findings ledger, distinct from the idempotency execution ledger).
+
+    NODE-STATUS DECISION (merge of #84 refusal-mapping ⋈ #85 governance seam —
+    the open question "what node status results from a governance DENIAL?"):
+
+      A governance POLICY DENIAL COMPLETES the node; it does NOT fail it. The
+      denial is recorded durably as a DENY ``GovernanceFinding`` (written by
+      ``record_governance_decision`` BEFORE the tool swap) and the agent is
+      handed an "not authorised" error ToolResult it may legitimately handle.
+      A denial is therefore treated as an EXPECTED governed outcome, not an
+      error — and it is deliberately NOT written into the
+      ``_GOVERNANCE_REFUSALS`` sink, so ``agent_runner``'s post-turn drain does
+      not turn it into a failure-marked envelope.
+
+      This is distinct from an INFRASTRUCTURE REFUSAL — a ``LedgerError`` raised
+      by ``reserve``/``finalize`` (the gate itself failing: transport /
+      credential error). That IS recorded in ``_GOVERNANCE_REFUSALS`` and FAILS
+      the node with its LedgerError class fed to retry.py (finding be80ccd7).
+
+      Both invariants of finding be80ccd7 are preserved:
+        * NO UNAUTHORISED SIDE EFFECT — deny-before-reserve: the real tool never
+          runs and no reservation / execution-ledger row is created (``reserve``
+          is unreachable on the deny path).
+        * NO SILENT INVISIBILITY — the DENY ``GovernanceFinding`` is a durable,
+          queryable record of the denial; "completes" does not mean "hidden".
+
+      Rationale for COMPLETE over FAIL: record-and-block eval mode (the
+      ``eval_run_id`` path) depends on the run CONTINUING — the eval sandbox
+      exists to OBSERVE a forbidden action attempt WITHOUT executing it and then
+      watch what the agent does next. Failing the node on the first denial would
+      abort the eval trajectory and defeat the sandbox's purpose. Finding
+      be80ccd7 listed "governance denials" as must-be-visible refusals in the
+      era when the real allow/deny layer was INERT, so the only "refusal" that
+      existed then was the infra-gate LedgerError; now that a live policy layer
+      exists, an intentional policy DENY is a distinct, expected outcome that
+      must be VISIBLE (satisfied by the DENY finding) but need not FAIL the node.
+
+    Either collaborator may be ``None``:
+      * governance-only (supervisor task path): idempotency=None.
+      * governance+idempotency (workflow-node path): both present.
+    At least one MUST be non-None (the installer guarantees this); a fully-empty
+    composed hook would be a no-op.
+    """
+
+    def __init__(
+        self,
+        *,
+        governance: Any | None = None,
+        idempotency: "IdempotencyToolHook | None" = None,
+    ):
+        self._governance = governance
+        self._idempotency = idempotency
+
+    @property
+    def governance(self) -> Any | None:  # pragma: no cover — accessor
+        return self._governance
+
+    @property
+    def idempotency(self) -> "IdempotencyToolHook | None":  # pragma: no cover
+        return self._idempotency
+
+    def register_hooks(self, registry: Any, **_kwargs: Any) -> None:
+        if not _STRANDS_AVAILABLE:  # pragma: no cover — dev/CI guard
+            logger.warning("composed tool hook skipped — strands unavailable")
+            return
+        registry.add_callback(BeforeToolCallEvent, self._on_before_tool_call)
+
+    def _on_before_tool_call(self, event: Any) -> None:
+        # 1) Governance decision FIRST. On DENY the evaluator swaps
+        #    ``event.selected_tool`` for a deny-only tool and returns True; we
+        #    then RETURN so idempotency's reserve/wrap never runs (deny before
+        #    reserve — no reservation, no side effect).
+        if self._governance is not None:
+            if self._governance.evaluate(event):
+                return
+        # 2) PERMIT → idempotency reserve/execute/finalize wrapping.
+        if self._idempotency is not None:
+            self._idempotency._on_before_tool_call(event)
