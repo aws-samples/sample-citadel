@@ -635,6 +635,19 @@ def _interpret_agent_result(returncode, stdout, *, raise_on_error=False, usage_s
     through, so the "crash recorded as success" defect cannot recur on any
     path.
 
+    This guard now covers TWO producers of the marker in ``agent_runner``, both
+    of which must fail the node and can never complete it (finding be80ccd7
+    extends finding 56d763d4 from the exception path to the tool-result path):
+      1. An agent-body EXCEPTION (``build_failure_envelope``) — errorClass is
+         the raised exception type.
+      2. A governance / infrastructure REFUSAL during a turn that otherwise
+         COMPLETED normally (``build_refusal_envelope``) — a ``LedgerError``
+         from the idempotency/ledger gate that strands swallowed into an
+         error-status ToolResult; errorClass is the LedgerError subclass. A
+         DOMAIN-level tool error (the tool ran and returned status=error, or
+         the agent handled it) records NO refusal and produces a normal success
+         envelope, so it is NOT blanket-failed here.
+
     Non-marker outcomes preserve the pre-fix contract exactly:
       * non-zero exit + raise_on_error=True  -> raise (node path -> node.failed)
       * non-zero exit + raise_on_error=False -> canned fallback (supervisor path)

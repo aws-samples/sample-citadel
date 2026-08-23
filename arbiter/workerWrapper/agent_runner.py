@@ -48,6 +48,48 @@ def build_failure_envelope(exc: BaseException, usage: list) -> dict:
         'usage': usage if isinstance(usage, list) else [],
     }
 
+
+# Governance/infrastructure refusal marker (finding be80ccd7). Distinct
+# observability key so a governance-refusal failure envelope is
+# distinguishable from an agent-body crash envelope — but it ALSO carries the
+# shared AGENT_EXECUTION_FAILURE_MARKER, so the SAME structural guard in
+# index._interpret_agent_result raises on it. That is how the "no
+# completed-with-failure" guard is EXTENDED from the exception path to the
+# tool-result path: a completed turn that hid a governance/infrastructure
+# refusal is turned into a failure-marked envelope here and can never be
+# laundered into a node.completed.
+GOVERNANCE_REFUSAL_MARKER = 'governanceRefused'
+
+
+def build_refusal_envelope(refusals: list, usage: list) -> dict:
+    """Build the stdout failure envelope for governance/infrastructure refusals
+    recorded during a turn that otherwise COMPLETED normally (finding
+    be80ccd7).
+
+    The envelope carries the SAME ``AGENT_EXECUTION_FAILURE_MARKER`` as an
+    agent-body crash (so index._interpret_agent_result's structural guard
+    raises regardless of exit code), plus:
+      * ``errorClass`` — the FIRST refusal's LedgerError subclass name, the key
+        retry.py's ``should_retry`` matches on. (First is deterministic and
+        sufficient; a run is failed by the first gate refusal it hit.)
+      * ``error`` — the refusal diagnostic(s).
+      * ``GOVERNANCE_REFUSAL_MARKER`` — True, for observability.
+
+    The caller must only invoke this when ``refusals`` is non-empty.
+    """
+    first = refusals[0]
+    diagnostics = '; '.join(
+        str(r.get('error') or r.get('errorClass') or 'governance refusal')
+        for r in refusals
+    )
+    return {
+        AGENT_EXECUTION_FAILURE_MARKER: True,
+        GOVERNANCE_REFUSAL_MARKER: True,
+        'errorClass': first.get('errorClass') or 'LedgerError',
+        'error': diagnostics or 'governance/infrastructure refusal',
+        'usage': usage if isinstance(usage, list) else [],
+    }
+
 # Ordered candidate method names probed on strands.models.BedrockModel to
 # find the response-producing seam to wrap. Multiple candidates survive a
 # strands rename of the primary method without requiring a code change here.
@@ -585,6 +627,29 @@ def _install_model_override():
     return True
 
 
+def _drain_governance_refusals() -> list:
+    """Drain the tool-call governance/infrastructure refusal sink (finding
+    be80ccd7).
+
+    The refusals are recorded by ``tool_idempotency_hook`` when the ledger gate
+    raises a ``LedgerError`` during a tool call (strands swallows it into an
+    error ToolResult, so the turn completes normally). Imported defensively:
+    if the hook module is unavailable in this environment there can be no
+    recorded refusals, so degrade to an empty list rather than failing the run.
+    """
+    try:
+        from tool_idempotency_hook import drain_governance_refusals
+    except ImportError:
+        return []
+    try:
+        return drain_governance_refusals()
+    except Exception as exc:  # noqa: BLE001 — draining must never break dispatch
+        sys.stderr.write(
+            f'[agent_runner] WARN governance-refusal drain failed: {exc}\n'
+        )
+        return []
+
+
 def main():
     # Read input from stdin (single JSON line)
     raw = sys.stdin.read()
@@ -599,6 +664,11 @@ def main():
     # repeatedly within one interpreter (or re-run this module) get a fresh
     # 0-based callIndex sequence each time rather than accumulating state.
     _CAPTURED_USAGE.clear()
+
+    # Reset the per-process governance-refusal sink for the same reason
+    # (repeated in-process main() calls in tests must start clean). In the real
+    # Lambda subprocess this is a no-op (one exec per process).
+    _drain_governance_refusals()
 
     # Install governance patch BEFORE exec_module so every Agent(...)
     # construction in the loaded module picks it up. Safe no-op when the
@@ -641,6 +711,20 @@ def main():
         # raise regardless of raise_on_error, so no caller can turn a marked
         # payload into a completed result.
         sys.stdout.write(json.dumps(build_failure_envelope(exc, _CAPTURED_USAGE)))
+        sys.stdout.flush()
+        sys.exit(1)
+
+    # The turn COMPLETED normally, but a tool call may have hit a governance /
+    # infrastructure REFUSAL (a LedgerError from the idempotency/ledger gate)
+    # that strands swallowed into an error-status ToolResult (finding
+    # be80ccd7). Drain the refusal sink and, if any were recorded, emit a
+    # failure-marked envelope INSTEAD of the success response so the node fails
+    # with the refusal class (fed to retry.py) rather than being laundered into
+    # node.completed. Domain-level tool errors record NO refusal and fall
+    # through to the normal success envelope below.
+    refusals = _drain_governance_refusals()
+    if refusals:
+        sys.stdout.write(json.dumps(build_refusal_envelope(refusals, _CAPTURED_USAGE)))
         sys.stdout.flush()
         sys.exit(1)
 
