@@ -1918,6 +1918,37 @@ export class ArbiterStack extends cdk.Stack {
     );
     const governanceLedgerTable = this.governanceLedgerTable;
 
+    // ============================================================
+    // Governance legibility wiring for WorkerAgentWrapper (Bug C)
+    // ============================================================
+    // WorkerAgentWrapper is declared far earlier in this constructor (before
+    // the governance ledger table construct exists), so — like
+    // SeedAgentConfigFunction above — its governance-ledger env var and grant
+    // are patched in here now that `governanceLedgerTable` is defined.
+    //
+    // Without GOVERNANCE_LEDGER_TABLE on the worker's env, the governed tool
+    // path's write-once legibility record (arbiter/governance/ledger.py) fails
+    // CLOSED on EVERY tool call ("GOVERNANCE_LEDGER_TABLE not configured —
+    // cannot produce legibility record") — a missing legibility record means
+    // the decision cannot be honoured (Article 3), so no governed tool runs.
+    //
+    // The grant is deliberately dynamodb:PutItem ONLY on the single ledger
+    // table ARN — the ledger is write-once (a conditional
+    // attribute_not_exists(findingId) PutItem), so no UpdateItem/DeleteItem/
+    // Query/Scan and no wildcard, matching the least-privilege shape of the
+    // sibling governance writers and this worker's own tool-ledger grant.
+    workerAgentWrapperLambda.addEnvironment(
+      "GOVERNANCE_LEDGER_TABLE",
+      governanceLedgerTable.tableName,
+    );
+    workerAgentWrapperLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [governanceLedgerTable.tableArn],
+      }),
+    );
+
     governanceLedgerTable.addGlobalSecondaryIndex({
       indexName: "workflow-index",
       partitionKey: { name: "workflowId", type: dynamodb.AttributeType.STRING },
