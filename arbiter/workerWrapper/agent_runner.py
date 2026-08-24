@@ -90,6 +90,44 @@ def build_refusal_envelope(refusals: list, usage: list) -> dict:
         'usage': usage if isinstance(usage, list) else [],
     }
 
+
+# Tool-execution CRASH marker (finding 4595b730) — third arm of the failure
+# discriminator. Distinct observability key so a tool-crash failure envelope is
+# distinguishable from an infra/governance refusal (build_refusal_envelope) and
+# an agent-body crash (build_failure_envelope), while ALSO carrying the shared
+# AGENT_EXECUTION_FAILURE_MARKER so the SAME structural guard in
+# index._interpret_agent_result raises regardless of exit code. This is how the
+# "no completed-with-failure" guard is EXTENDED to a tool that RAISED (an
+# exception escaped it) — as opposed to a tool that RETURNED a structured
+# {"status":"error"} payload, which records nothing and completes the node.
+TOOL_CRASH_MARKER = 'toolExecutionCrashed'
+
+
+def build_tool_crash_envelope(crashes: list, usage: list) -> dict:
+    """Build the stdout failure envelope for tool crashes recorded during a
+    turn that otherwise COMPLETED normally (finding 4595b730).
+
+    Same structural shape as ``build_refusal_envelope`` (carries
+    ``AGENT_EXECUTION_FAILURE_MARKER`` so the parent's guard raises, plus the
+    FIRST crash's exception class as the retry.py classification key and the
+    joined diagnostics), but flagged with ``TOOL_CRASH_MARKER`` rather than
+    ``GOVERNANCE_REFUSAL_MARKER`` so the three failure classes stay distinct in
+    observability. The caller must only invoke this when ``crashes`` is
+    non-empty.
+    """
+    first = crashes[0]
+    diagnostics = '; '.join(
+        str(c.get('error') or c.get('errorClass') or 'tool execution crash')
+        for c in crashes
+    )
+    return {
+        AGENT_EXECUTION_FAILURE_MARKER: True,
+        TOOL_CRASH_MARKER: True,
+        'errorClass': first.get('errorClass') or 'ToolExecutionError',
+        'error': diagnostics or 'tool execution crashed',
+        'usage': usage if isinstance(usage, list) else [],
+    }
+
 # Ordered candidate method names probed on strands.models.BedrockModel to
 # find the response-producing seam to wrap. Multiple candidates survive a
 # strands rename of the primary method without requiring a code change here.
@@ -595,6 +633,26 @@ def _drain_governance_refusals() -> list:
         return []
 
 
+def _drain_tool_crashes() -> list:
+    """Drain the tool-execution CRASH sink (finding 4595b730).
+
+    Populated by ``tool_idempotency_hook`` when an exception ESCAPES the real
+    tool's ``stream()`` (a crash, distinct from a tool-RETURNED structured
+    error). Imported defensively: if the hook module is unavailable there can be
+    no recorded crashes, so degrade to an empty list rather than failing."""
+    try:
+        from tool_idempotency_hook import drain_tool_crashes
+    except ImportError:
+        return []
+    try:
+        return drain_tool_crashes()
+    except Exception as exc:  # noqa: BLE001 — draining must never break dispatch
+        sys.stderr.write(
+            f'[agent_runner] WARN tool-crash drain failed: {exc}\n'
+        )
+        return []
+
+
 def main():
     # Read input from stdin (single JSON line)
     raw = sys.stdin.read()
@@ -617,6 +675,10 @@ def main():
     # #84 because #84's post-turn refusal-drain machinery (build_refusal_envelope
     # + the drain block after module.handler) is part of this merged file.
     _drain_governance_refusals()
+    # Reset the tool-execution CRASH sink too (finding 4595b730) — same
+    # per-process hygiene so a prior in-process test run's crash can't leak into
+    # this turn's post-turn drain.
+    _drain_tool_crashes()
 
     # Install the SINGLE composed tool-call seam (finding 027c4a89): layer-2
     # tool governance THEN tool-call idempotency, at one BeforeToolCallEvent
@@ -687,6 +749,19 @@ def main():
     refusals = _drain_governance_refusals()
     if refusals:
         sys.stdout.write(json.dumps(build_refusal_envelope(refusals, _CAPTURED_USAGE)))
+        sys.stdout.flush()
+        sys.exit(1)
+
+    # Third discriminator arm (finding 4595b730): a tool that RAISED (an
+    # exception escaped it) is recorded in the crash sink. Drained AFTER the
+    # refusal sink (infra/governance refusal is the more fundamental failure and
+    # takes envelope priority); a bare tool crash still fails the node with the
+    # crash CLASS fed to retry.py. A tool that RETURNED a structured
+    # {"status":"error"} payload records nothing here and falls through to the
+    # normal success envelope below (node COMPLETES).
+    crashes = _drain_tool_crashes()
+    if crashes:
+        sys.stdout.write(json.dumps(build_tool_crash_envelope(crashes, _CAPTURED_USAGE)))
         sys.stdout.flush()
         sys.exit(1)
 

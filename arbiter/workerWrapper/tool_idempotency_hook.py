@@ -127,6 +127,51 @@ def _record_governance_refusal(exc: "ledger.LedgerError") -> None:
     })
 
 
+# ---------------------------------------------------------------------------
+# Tool-CRASH sink — third arm of the failure discriminator (finding 4595b730).
+# ---------------------------------------------------------------------------
+# STRUCTURAL basis (never message matching): the two node-failing arms are
+# distinguished by SHAPE, not text.
+#   * INFRA/GOVERNANCE REFUSAL -> a LedgerError raised by reserve/finalize (the
+#     gate itself failed / refused) -> _GOVERNANCE_REFUSALS -> node FAILS.
+#   * TOOL UNHANDLED EXCEPTION  -> an exception ESCAPED the real tool's stream()
+#     -> recorded HERE -> node FAILS. A crash is NOT a business outcome: strands
+#     converts a tool exception into an error-status ToolResult and lets the
+#     turn COMPLETE normally, so without capturing it the worker would emit
+#     workflow.node.completed for a run whose tool crashed. This sink is what
+#     the third discriminator arm keys on.
+#   * TOOL-RETURNED STRUCTURED DOMAIN ERROR ({"status":"error"}) records NOTHING
+#     in either sink -> node COMPLETES (the tool ran and reported a handled
+#     outcome; the agent is expected to deal with it).
+# ``agent_runner`` drains this sink AFTER the turn (alongside the refusal sink)
+# and, if non-empty, emits a failure-marked envelope so the node fails with the
+# crash CLASS fed into retry.py.
+_TOOL_CRASHES: list[dict[str, Any]] = []
+
+
+def drain_tool_crashes() -> list[dict[str, Any]]:
+    """Return and CLEAR the tool-execution crashes recorded during this
+    process's tool calls. Called once by ``agent_runner`` after the turn;
+    clearing keeps repeated in-process test invocations independent."""
+    drained = list(_TOOL_CRASHES)
+    _TOOL_CRASHES.clear()
+    return drained
+
+
+def _record_tool_crash(exc: BaseException) -> None:
+    """Record that an exception ESCAPED the real tool's ``stream()``.
+
+    Structural signal (not message matching): we are inside the wrapper's
+    ``except`` for ``self._inner.stream(...)``, so an exception provably escaped
+    the tool. ``retryable`` is read from a classified ``ToolOutcomeError`` when
+    present (else False); the crash CLASS is what retry.py matches on."""
+    _TOOL_CRASHES.append({
+        "errorClass": type(exc).__name__,
+        "error": str(exc) or type(exc).__name__,
+        "retryable": bool(getattr(exc, "retryable", False)),
+    })
+
+
 try:
     from strands.hooks import BeforeToolCallEvent  # type: ignore
     from strands.types.tools import AgentTool  # type: ignore
@@ -248,23 +293,66 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
             return
 
         # WON — execute the real tool under the reservation.
+        #
+        # THREE-WAY FAILURE DISCRIMINATOR (finding 4595b730), decided on a
+        # STRUCTURAL basis — an exception ESCAPING the tool vs the tool
+        # RETURNING an error payload — never on error-message matching:
+        #   * TOOL UNHANDLED EXCEPTION (anything escaping self._inner.stream)
+        #     -> a crash is NOT a business outcome -> finalize the reservation
+        #        FAILED + _record_tool_crash -> node FAILS.
+        #   * TOOL-RETURNED STRUCTURED domain error ({"status":"error"})
+        #     -> the tool ran and reported a handled outcome -> finalize the
+        #        reservation FAILED but record NOTHING -> node COMPLETES.
+        #   (INFRA/GOVERNANCE REFUSAL is the LedgerError arm, handled above at
+        #    reserve and below at finalize via _record_governance_refusal.)
         last_result: Any = None
         try:
             async for event in self._inner.stream(tool_use, invocation_state, **kwargs):
                 if isinstance(event, ToolResultEvent):
                     last_result = event.tool_result
                 yield event
-        except Exception as exc:  # noqa: BLE001 — unknown outcome, fail safe
+        except ledger.ToolOutcomeError as exc:
+            # Adapter-CLASSIFIED failure that ESCAPED the tool. Apply the same
+            # failure matrix as the sync execute_idempotent coordinator, then
+            # record a tool crash (an exception escaped -> node FAILS). Only the
+            # genuinely-unknown branch marks the row indeterminate.
+            if exc.side_effect == "not_sent" and exc.retryable:
+                ledger.release(self._pk, self._sk)
+            elif exc.side_effect == "applied":
+                ledger.finalize_failure(
+                    self._pk, self._sk, error_type=exc.error_type, retryable=False,
+                )
+            else:  # 'unknown' — genuinely indeterminate outcome
+                ledger.finalize_failure(
+                    self._pk, self._sk, error_type=exc.error_type,
+                    retryable=False, outcome_indeterminate=True,
+                )
+            _record_tool_crash(exc)
+            raise
+        except Exception as exc:  # noqa: BLE001 — unhandled tool crash
+            # FINALIZE ON RAISE (finding 4595b730): an unclassified exception
+            # escaped the tool. Transition the reservation to FAILED so no row
+            # is left in_flight. Deliberately NOT marked indeterminate —
+            # 'indeterminate' is reserved strictly for a genuinely-unknown
+            # outcome (the ToolOutcomeError 'unknown' branch above); a bare
+            # crash is a determinate node failure retry.py may retry per policy.
             ledger.finalize_failure(
-                self._pk, self._sk, error_type=type(exc).__name__,
-                retryable=False, outcome_indeterminate=True,
+                self._pk, self._sk, error_type=type(exc).__name__, retryable=False,
             )
+            _record_tool_crash(exc)
             raise
 
+        # Tool RETURNED (no exception escaped). Finalize from the returned
+        # payload ALWAYS — so a completed turn can NEVER leave a row in_flight
+        # (finding 4595b730), including the case where the tool streamed no
+        # ToolResultEvent (last_result is None -> finalize completed with null).
         try:
             if isinstance(last_result, dict) and last_result.get("status") == "error":
+                # STRUCTURED domain error: tool ran, reported a handled failure.
+                # Ledger row -> failed, but NO tool crash recorded -> node
+                # COMPLETES (the agent is expected to handle it).
                 ledger.finalize_failure(self._pk, self._sk, error_type="tool_error_result", retryable=False)
-            elif last_result is not None:
+            else:
                 ledger.finalize_success(self._pk, self._sk, result=last_result)
         except ledger.LedgerError as exc:
             # The tool already ran, but the ledger could not durably record its
