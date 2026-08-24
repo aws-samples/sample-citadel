@@ -43,6 +43,15 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from .models import GovernanceFinding
 
+try:
+    # Shared marshalling boundary (finding 96d24639). Deployed at
+    # /opt/python/common via ArbiterCatalogLayer; resolves from the arbiter
+    # root under pytest. Imported at module top (this package is layer-staged,
+    # not a single-file agent, so a top-level import is safe here).
+    from common.ddb_marshalling import marshal_ddb_item, FloatMarshallingError
+except ImportError:  # pragma: no cover — defensive: relative-package fallback
+    from ..common.ddb_marshalling import marshal_ddb_item, FloatMarshallingError
+
 logger = logging.getLogger(__name__)
 
 
@@ -213,7 +222,23 @@ def write_finding(finding: GovernanceFinding, *, ttl_days: int = 90) -> None:
 
     try:
         item = _serialize_finding(finding)
-        item["ttl"] = time.time() + (ttl_days * 86400)
+        # ttl as INT epoch seconds — DynamoDB TTL requires an integer attribute
+        # (a float ttl is exactly what boto3 rejects). Retention counted from
+        # persist time (QT1-10 = 90 days default).
+        item["ttl"] = int(time.time()) + (ttl_days * 86400)
+        # Single marshalling boundary (finding 96d24639): normalize every float
+        # in the item (integral → int, fractional → Decimal, non-finite →
+        # reject) so a native float — e.g. the fractional epoch ``timestamp``
+        # GSI key, or any future float-valued field — can never silently reach
+        # DynamoDB and either crash the write or (worse) be swallowed into a
+        # row that never lands. This is the SAME boundary the smoke tool and
+        # the tool-execution ledger route through.
+        item = marshal_ddb_item(item)
+    except FloatMarshallingError as exc:
+        raise LedgerWriteError(
+            f"GovernanceFinding {finding.finding_id!r} carries an "
+            f"unrepresentable float: {exc}"
+        ) from exc
     except Exception as exc:  # pragma: no cover — defensive, asdict is total
         raise LedgerWriteError(
             f"Failed to serialise GovernanceFinding {finding.finding_id!r}: {exc}"

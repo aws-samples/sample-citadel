@@ -100,19 +100,29 @@ def handler(**kwargs):
         """
         import boto3
 
+        # Single marshalling boundary (finding 96d24639): every DynamoDB item
+        # write on this path goes through common.ddb_marshalling so a native
+        # float can never silently reach DynamoDB. ``writtenAt`` is a genuine
+        # fractional epoch (→ Decimal); ``ttl`` is int epoch seconds (DynamoDB
+        # TTL requires an integer). Imported here (not at module top) to honor
+        # the single-file agent contract — the helper resolves from the shared
+        # ArbiterCatalogLayer (/opt/python/common) in the deployed worker and
+        # from the arbiter root under pytest.
+        from common.ddb_marshalling import marshal_ddb_item
+
         marker_id = str(uuid.uuid4())
         org_id = os.environ.get("CITADEL_ORG_ID") or "unscoped"
         now = time.time()
 
         table = boto3.resource("dynamodb").Table(_table_name())
         table.put_item(
-            Item={
+            Item=marshal_ddb_item({
                 "orgId": org_id,
                 "markerId": marker_id,
                 "note": (note or "")[:200],
                 "writtenAt": now,
                 "ttl": int(now) + SMOKE_TTL_SECONDS,
-            }
+            })
         )
 
         return {
