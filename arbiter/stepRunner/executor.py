@@ -1217,7 +1217,15 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             retryCount=new_retry_count,
         )
     else:
-        # No retry — mark node and execution as failed
+        # No retry — mark node and execution as failed.
+        # The single ``#status`` alias ('status') is reused for BOTH the node
+        # (nodeResults.#nid.#status) and the execution (#status) attributes.
+        # (A leftover ``#nstatus`` alias here was declared but never referenced
+        # in the expression, so DynamoDB rejected the whole UpdateItem with
+        # "Value provided in ExpressionAttributeNames unused in expressions" —
+        # crashing the handler on every retry and stranding the execution in
+        # status=running. Both statuses ARE meant to persist; the alias was the
+        # only defect.)
         _executions_table.update_item(
             Key={'executionId': execution_id},
             UpdateExpression='SET nodeResults.#nid.#status = :nstatus, nodeResults.#nid.#error = :error, #status = :estatus, #failedAt = :failedAt',
@@ -1225,7 +1233,6 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
                 '#nid': node_id,
                 '#status': 'status',
                 '#failedAt': 'failedAt',
-                '#nstatus': 'status',
                 '#error': 'error',
             },
             ExpressionAttributeValues={

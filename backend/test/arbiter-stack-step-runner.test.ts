@@ -454,11 +454,15 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       // it must NOT be used, on the executions table or anywhere else.
       expect(actions.has("dynamodb:DeleteItem")).toBe(false);
       expect(actions.has("dynamodb:BatchWriteItem")).toBe(false);
-      // PutItem is now present in TWO statements: the tool-execution-ledger
-      // grant (PR1, Put/Get/Update trio) and the idempotency-seam smoke
-      // fixture's grant (this task, non-prod only, PutItem-ONLY on its own
-      // dedicated table). Neither may leak Delete/Scan/Query, and the smoke
-      // statement must never widen beyond a single PutItem action.
+      // PutItem is now present in THREE statements: the tool-execution-ledger
+      // grant (PR1, Put/Get/Update trio), the idempotency-seam smoke
+      // fixture's grant (non-prod only, PutItem-ONLY on its own dedicated
+      // table), and the governance-ledger legibility-record grant (this
+      // branch, PutItem-ONLY on the governance ledger table — write-once via
+      // attribute_not_exists(findingId), so no UpdateItem/DeleteItem/Query/
+      // Scan). None may leak Delete/Scan/Query/BatchWrite, and both
+      // single-action statements must never widen beyond PutItem, nor may
+      // either resolve to a wildcard or GSI (/index/*) resource.
       const policies = template.findResources("AWS::IAM::Policy");
       const putStatements: any[] = [];
       for (const p of Object.values(policies) as any[]) {
@@ -469,18 +473,49 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
           continue;
         for (const s of p.Properties?.PolicyDocument?.Statement || []) {
           const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
-          if (acts.includes("dynamodb:PutItem")) putStatements.push(acts);
+          if (acts.includes("dynamodb:PutItem"))
+            putStatements.push({ actions: acts, resources: s.Resource });
         }
       }
-      expect(putStatements.length).toBe(2);
-      const ledgerStatement = putStatements.find((acts) => acts.length === 3);
-      const smokeStatement = putStatements.find((acts) => acts.length === 1);
-      expect(ledgerStatement).toEqual([
+      expect(putStatements.length).toBe(3);
+      const ledgerStatement = putStatements.find((s) => s.actions.length === 3);
+      const singleActionStatements = putStatements.filter(
+        (s) => s.actions.length === 1,
+      );
+      expect(singleActionStatements.length).toBe(2);
+      expect(ledgerStatement.actions).toEqual([
         "dynamodb:PutItem",
         "dynamodb:GetItem",
         "dynamodb:UpdateItem",
       ]);
-      expect(smokeStatement).toEqual(["dynamodb:PutItem"]);
+      for (const s of singleActionStatements) {
+        expect(s.actions).toEqual(["dynamodb:PutItem"]);
+      }
+      // Pin the governance-ledger statement precisely by its resource ARN
+      // (Fn::GetAtt on GovernanceLedgerTable's logical id) so it cannot be
+      // confused with the smoke fixture's own dedicated table — exact
+      // Action AND exact Resource, no wildcard, no /index/* suffix.
+      const governanceLedgerStatement = singleActionStatements.find((s) => {
+        const arn = s.resources?.["Fn::GetAtt"]?.[0];
+        return (
+          typeof arn === "string" && arn.startsWith("GovernanceLedgerTable")
+        );
+      });
+      expect(governanceLedgerStatement).toBeDefined();
+      expect(governanceLedgerStatement.actions).toEqual(["dynamodb:PutItem"]);
+      // Resource must be EXACTLY { "Fn::GetAtt": [<GovernanceLedgerTable logical id>, "Arn"] }
+      // — a bare CFN GetAtt reference to the table's own ARN attribute, not a
+      // string, not an array of resources, and no /index/* GSI suffix.
+      expect(typeof governanceLedgerStatement.resources).toBe("object");
+      expect(Array.isArray(governanceLedgerStatement.resources)).toBe(false);
+      const getAtt = governanceLedgerStatement.resources["Fn::GetAtt"];
+      expect(Array.isArray(getAtt)).toBe(true);
+      expect(getAtt.length).toBe(2);
+      expect(getAtt[0]).toMatch(/^GovernanceLedgerTable/);
+      expect(getAtt[1]).toBe("Arn");
+      expect(Object.keys(governanceLedgerStatement.resources)).toEqual([
+        "Fn::GetAtt",
+      ]);
     });
 
     test("the UpdateItem grant is FGAC-restricted to the nodeResults/executionId attributes", () => {
