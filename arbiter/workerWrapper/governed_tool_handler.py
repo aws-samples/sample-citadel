@@ -12,11 +12,16 @@ Provides a Strands AgentToolHandler subclass whose preprocess() method:
   4. On PERMIT returns None; execution proceeds through the default
      Strands handler.
 
-Best-effort ledger semantics: if ``GOVERNANCE_LEDGER_TABLE`` is unset (e.g.
-local test env), ``write_finding`` raises ``LedgerWriteError``. The worker
-handler catches it and WARN-logs — it does NOT fail closed at this
-scope. Fail-closed semantics apply at the supervisor dispatch level
-(US-ARB-008), not at the per-tool preprocess hook.
+Fail-closed ledger semantics (decision gov-write-fail-closed): if
+``GOVERNANCE_LEDGER_TABLE`` is unset (e.g. local test env) or the write
+otherwise fails, ``write_finding`` raises ``LedgerWriteError``. Both the
+legacy ``preprocess`` path and the hooks-based path route that failure
+through ``record_governance_decision``, which refuses the tool call (an
+unauditable PERMIT/DENY record is never allowed to reach an unprotected
+execution) and records the failure into the shared node-failure sink so the
+node fails post-turn. This REPLACES the former best-effort WARN+continue
+(AC 9.4) and applies at the per-tool preprocess/hook scope itself, not only
+at the supervisor dispatch level.
 
 Import path note
 ----------------

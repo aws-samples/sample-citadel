@@ -68,15 +68,21 @@ from typing import Any, Callable
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
-try:
-    # Single marshalling boundary (finding 96d24639) — same helper the smoke
-    # tool and governance finding write route through. The ledger already
-    # stores int epoch timestamps, so this is the consistency backstop that
-    # keeps ALL item writes on this path float-safe through one choke point.
-    from common.ddb_marshalling import marshal_ddb_item
-except ImportError:  # pragma: no cover — defensive
-    def marshal_ddb_item(item):  # type: ignore[misc]
-        return item
+# Single marshalling boundary (finding 96d24639) — same helper the smoke
+# tool and governance finding write route through. The ledger already
+# stores int epoch timestamps, so this is the consistency backstop that
+# keeps ALL item writes on this path float-safe through one choke point.
+#
+# FAIL LOUD, not soft: an ImportError here means the marshalling module is
+# missing from the deployment (mis-packaged Lambda layer/bundle). There is
+# deliberately NO fallback shim — a prior version of this import silently
+# degraded to an identity no-op on ImportError, which would let a bare float
+# reach DynamoDB and defeats the exact guarantee this boundary exists to
+# provide (a fail-closed control quietly disabling itself, the same failure
+# pattern this module's write paths were hardened against elsewhere). An
+# unimportable marshalling boundary means the module is mis-deployed and
+# must not run, so the ImportError is left to propagate uncaught.
+from common.ddb_marshalling import marshal_ddb_item
 
 logger = logging.getLogger(__name__)
 
