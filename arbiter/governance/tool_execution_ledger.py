@@ -68,6 +68,16 @@ from typing import Any, Callable
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+try:
+    # Single marshalling boundary (finding 96d24639) — same helper the smoke
+    # tool and governance finding write route through. The ledger already
+    # stores int epoch timestamps, so this is the consistency backstop that
+    # keeps ALL item writes on this path float-safe through one choke point.
+    from common.ddb_marshalling import marshal_ddb_item
+except ImportError:  # pragma: no cover — defensive
+    def marshal_ddb_item(item):  # type: ignore[misc]
+        return item
+
 logger = logging.getLogger(__name__)
 
 # --- Attribute + status constants -------------------------------------------
@@ -540,7 +550,7 @@ def _reserve_fenced(
         {
             "Put": {
                 "TableName": ledger_table,
-                "Item": item,
+                "Item": marshal_ddb_item(item),
                 "ConditionExpression": f"attribute_not_exists({PK_ATTR})",
             }
         },
@@ -639,7 +649,7 @@ def reserve(
             dispatch_generation=int(dispatch_generation), now=now,
         )
     try:
-        _table().put_item(Item=item, ConditionExpression=f"attribute_not_exists({PK_ATTR})")
+        _table().put_item(Item=marshal_ddb_item(item), ConditionExpression=f"attribute_not_exists({PK_ATTR})")
         return ReserveResult(ReserveOutcome.WON)
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":

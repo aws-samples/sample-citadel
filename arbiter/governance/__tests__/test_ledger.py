@@ -160,7 +160,7 @@ def test_happy_path_writes_expected_item_shape(
     # Key-schema aliases MUST always be present (table HASH + GSI keys).
     assert item["findingId"] == finding.finding_id
     assert item["workflowId"] == finding.workflow_id
-    assert item["timestamp"] == pytest.approx(finding.timestamp)
+    assert float(item["timestamp"]) == pytest.approx(float(finding.timestamp))
     assert "ttl" in item
     # Flattened dataclass fields are carried on the item as well.
     assert item["requesting_agent"] == "agent-a"
@@ -413,7 +413,10 @@ def test_property_write_finding_always_emits_key_schema_attrs(
     # And they must hold the finding's values, not something else.
     assert item["findingId"] == finding.finding_id
     assert item["workflowId"] == finding.workflow_id
-    assert item["timestamp"] == pytest.approx(float(finding.timestamp))
+    # timestamp is now normalized by the marshalling boundary (finding 96d24639):
+    # integral -> int, fractional -> Decimal. Compare via float() so the type
+    # doesn't matter, only the value.
+    assert float(item["timestamp"]) == pytest.approx(float(finding.timestamp))
     # Decision always serialises to its enum .value, never repr.
     assert item["decision"] == finding.decision.value
 
