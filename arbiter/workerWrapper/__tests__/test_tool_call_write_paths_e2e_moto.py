@@ -354,3 +354,102 @@ class TestStepRunnerWrites:
         )
         row = e2e["resource"].Table(EXEC_TABLE).get_item(Key={"executionId": "exec1"})["Item"]
         assert row["status"] == "failed"
+
+
+# ===========================================================================
+# 8. Single marshalling boundary (finding 96d24639) — floats never reach DDB
+#    silently. These are the two sites that FAILED before the boundary landed.
+# ===========================================================================
+class TestMarshallingBoundary:
+    def test_smoke_marker_stores_int_ttl_and_decimal_writtenat(self, e2e):
+        """The smoke tool wrote a float ``writtenAt`` (time.time()) — before the
+        boundary this raised 'Float types are not supported'. Now: ttl is an
+        INT epoch (DDB TTL requires int), writtenAt a Decimal (fractional)."""
+        import decimal
+        from arbiter.seedConfig import smoke_idempotency_agent as smoke
+
+        smoke.handler(note="marshalling")
+        row = e2e["resource"].Table(SMOKE_TABLE).scan()["Items"][0]
+        assert isinstance(row["ttl"], decimal.Decimal) and row["ttl"] == int(row["ttl"])
+        # boto3's resource layer returns Numbers as Decimal; the stored value
+        # must be a genuine fractional (writtenAt = time.time()).
+        assert isinstance(row["writtenAt"], decimal.Decimal)
+
+    def test_governance_finding_persists_with_numeric_timestamp_and_ttl(self, e2e):
+        """The governance finding wrote a float timestamp + ttl — before the
+        boundary this raised and record_governance_decision SWALLOWED it, so the
+        row silently never landed. Now it persists with numeric key/ttl."""
+        import decimal
+        from arbiter.workerWrapper.governed_tool_handler import build_governance_finding
+        from arbiter.governance.ledger import write_finding
+
+        finding = build_governance_finding(
+            "smoke_write_marker", denied=False,
+            agent_id="smoke-idempotency-agent", workflow_id="wf-smoke",
+        )
+        write_finding(finding)
+        row = _raw(GOV_TABLE, {"findingId": {"S": finding.finding_id}})
+        assert row is not None
+        # timestamp GSI key stored as Number (N); ttl stored as an int epoch.
+        assert set(row["timestamp"].keys()) == {"N"}
+        assert set(row["ttl"].keys()) == {"N"}
+        assert decimal.Decimal(row["ttl"]["N"]) == int(decimal.Decimal(row["ttl"]["N"]))
+
+    def test_boundary_rejects_non_finite_float(self, e2e):
+        from arbiter.governance import tool_execution_ledger as tel
+
+        # A non-finite float can never be a valid DDB Number — the boundary
+        # REJECTS rather than silently corrupts. FloatMarshallingError subclasses
+        # TypeError, so assert on TypeError to stay robust to the common/
+        # arbiter.common dual-import identity trap documented in conftest.
+        with pytest.raises(TypeError):
+            tel.marshal_ddb_item({"pk": "x", "bad": float("inf")})
+
+
+# ===========================================================================
+# 9. FINALIZE ON RAISE (finding 4595b730) — no ledger row remains in_flight
+#    after a terminal outcome, driven against the REAL moto ledger.
+# ===========================================================================
+class TestNoInFlightAfterTerminal:
+    def _key(self, tel, suffix):
+        from arbiter.workerWrapper.tool_idempotency import build_key
+        return build_key("orgA", "exec1", "node1", 0, "smoke_write_marker", {"n": suffix})
+
+    def test_raising_tool_leaves_no_in_flight_row(self, e2e):
+        from arbiter.governance import tool_execution_ledger as tel
+
+        pk, sk = self._key(tel, "raise")
+
+        def boom():
+            raise RuntimeError("tool crashed mid-execution")
+
+        with pytest.raises(tel.OutcomeIndeterminateError):
+            tel.execute_idempotent(
+                pk=pk, sk=sk, tool_name="smoke_write_marker",
+                mode="ledger", run_tool=boom,
+            )
+        row = tel.get(pk, sk)
+        assert row is not None and row["status"] != tel.STATUS_IN_FLIGHT
+        assert row["status"] == tel.STATUS_FAILED
+
+    def test_domain_error_result_leaves_no_in_flight_row(self, e2e):
+        from arbiter.governance import tool_execution_ledger as tel
+
+        pk, sk = self._key(tel, "domain")
+        result = tel.execute_idempotent(
+            pk=pk, sk=sk, tool_name="smoke_write_marker", mode="ledger",
+            run_tool=lambda: {"status": "error", "content": [{"text": "handled"}]},
+        )
+        assert result["status"] == "error"
+        row = tel.get(pk, sk)
+        assert row["status"] == tel.STATUS_FAILED  # terminal, not in_flight
+
+    def test_success_leaves_no_in_flight_row(self, e2e):
+        from arbiter.governance import tool_execution_ledger as tel
+
+        pk, sk = self._key(tel, "ok")
+        tel.execute_idempotent(
+            pk=pk, sk=sk, tool_name="smoke_write_marker", mode="ledger",
+            run_tool=lambda: {"status": "success", "markerId": "m"},
+        )
+        assert tel.get(pk, sk)["status"] == tel.STATUS_COMPLETED
