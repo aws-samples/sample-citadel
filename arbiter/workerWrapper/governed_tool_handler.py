@@ -131,6 +131,48 @@ def _deny_error_result(tool_use_id: str, tool_name: str) -> dict:
     }
 
 
+def _audit_unavailable_result(tool_use_id: str, tool_name: str) -> dict:
+    """ToolResult-shaped error dict returned when the governance legibility
+    write FAILED (fail-closed, decision gov-write-fail-closed).
+
+    Distinct message from a policy denial: the tool was not *denied by policy*,
+    it was blocked because its PERMIT/DENY audit record could not be written and
+    an unauditable tool execution is not permitted (see
+    ``record_governance_decision``)."""
+    return {
+        'toolUseId': tool_use_id,
+        'status': 'error',
+        'content': [
+            {'text': (
+                f"Tool '{tool_name}' execution refused: its governance audit "
+                "record could not be written (fail-closed — an unauditable "
+                "tool execution is not permitted)."
+            )}
+        ],
+    }
+
+
+def _record_audit_write_refusal(exc: Exception) -> None:
+    """Record a governance-finding-WRITE failure into the shared node-failure
+    refusal sink so the node FAILS post-turn (decision gov-write-fail-closed).
+
+    Uses the SAME structural sink (``tool_idempotency_hook._GOVERNANCE_REFUSALS``)
+    that a tool-execution-ledger infra refusal uses, so a governance-write
+    failure and a ledger infra failure fail the node through ONE mechanism
+    (three-way discriminator, finding 4595b730). Lazily imported: the sink lives
+    in the worker bundle, always present in the deployed worker and under
+    pytest; a genuinely-absent sink still leaves the tool blocked (the caller's
+    error ToolResult), it just can't additionally fail the node."""
+    try:
+        from tool_idempotency_hook import _record_governance_refusal
+    except ImportError:  # pragma: no cover — worker-bundle sibling; always present
+        return
+    try:
+        _record_governance_refusal(exc)
+    except Exception as sink_exc:  # noqa: BLE001 — recording must never itself crash
+        logger.error('failed to record governance-write refusal: %s', sink_exc)
+
+
 def build_governance_finding(
     tool_name: str,
     denied: bool,
@@ -171,7 +213,7 @@ def record_governance_decision(
     eval_run_id: str | None = None,
 ) -> tuple[bool, dict | None]:
     """Evaluate the deny-list decision, write the audit finding, and return
-    ``(denied, error_result_or_None)``.
+    ``(denied_or_blocked, error_result_or_None)``.
 
     THE single source of truth for the layer-2 tool-call governance decision.
     Both the legacy ``GovernedToolHandler.preprocess`` (strands ``tool_handler``
@@ -179,11 +221,30 @@ def record_governance_decision(
     seam) call this — so the two can never diverge (the exact root cause of
     finding 027c4a89 was two decision surfaces, one live and one dead).
 
-    A finding is written on BOTH permit and deny (full audit trail). Ledger
-    write failure is best-effort at this scope (AC 9.4): WARN + continue — the
-    denial itself is NEVER weakened by a ledger outage. The DENY short-circuit
-    (returning an error ToolResult) is independent of whether the finding
-    persisted.
+    A finding is written on BOTH permit and deny (full audit trail).
+
+    GOVERNANCE-WRITE POLICY — FAIL-CLOSED (decision gov-write-fail-closed,
+    settling the run-3/run-4 inconsistency of finding 4595b730). A governance
+    legibility write failure is NOT best-effort here: it is treated as an
+    infrastructure refusal. A PERMIT/DENY audit record that cannot be persisted
+    means an UNAUDITABLE tool execution, which is exactly what Citadel's
+    governance guarantee (and Article 3's fail-closed constitutional rule)
+    forbids — the platform's whole value is that every governed action leaves a
+    defensible record. On a ``LedgerWriteError`` we therefore:
+      1. record the failure into the shared node-failure refusal sink so the
+         node FAILS post-turn (same structural mechanism a tool-execution-ledger
+         infra refusal uses — three-way discriminator), and
+      2. return ``(True, audit_unavailable_result)`` so the caller BLOCKS the
+         tool (it never runs unaudited — a DENY is preserved a fortiori).
+    The availability cost (a governance-ledger blip fails the tool call) is the
+    intended tradeoff for an audit platform, and is bounded: the recorded class
+    (``LedgerWriteError``) is a retry.py classification key a node's retry policy
+    can retry, and the single marshalling boundary (finding 96d24639) removes the
+    most common historical cause of these write failures (a native-float item).
+
+    This REPLACES the former best-effort WARN+continue (AC 9.4). The DENY
+    short-circuit is still independent of the write: a denial is never weakened
+    by a ledger outage, and now an unauditable PERMIT is blocked too.
     """
     denied = tool_name in denied_tools
     finding = build_governance_finding(
@@ -193,11 +254,15 @@ def record_governance_decision(
     try:
         write_finding(finding)
     except LedgerWriteError as exc:
-        logger.warning(
-            'governance ledger write failed at worker-tool-handler '
+        # FAIL-CLOSED: unauditable execution is not permitted. Fail the node
+        # (refusal sink) AND block the tool (audit-unavailable error result).
+        logger.error(
+            'governance ledger write FAILED at worker-tool-handler (fail-closed) '
             'finding_id=%s tool=%s: %s',
             finding.finding_id, tool_name, exc,
         )
+        _record_audit_write_refusal(exc)
+        return True, _audit_unavailable_result(tool_use_id, tool_name)
     if denied:
         return True, _deny_error_result(tool_use_id, tool_name)
     return False, None

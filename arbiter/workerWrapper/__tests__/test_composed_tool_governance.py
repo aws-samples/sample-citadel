@@ -51,6 +51,21 @@ from tool_idempotency_hook import ComposedToolHook, IdempotencyToolHook, _Idempo
 ledger = tool_idempotency_hook.ledger  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _governance_writes_succeed(monkeypatch):
+    """These tests exercise the deny/permit ORDERING and stream side-effect
+    boundary, NOT the governance-write policy (that is covered in
+    test_governed_tool_handler.py). Make the audit write succeed so a PERMIT
+    falls through to idempotency rather than being fail-closed-BLOCKED
+    (decision gov-write-fail-closed, finding 4595b730). Drain the shared
+    refusal sink around each test for isolation."""
+    import governed_tool_handler
+    monkeypatch.setattr(governed_tool_handler, "write_finding", lambda *a, **k: None)
+    tool_idempotency_hook.drain_governance_refusals()
+    yield
+    tool_idempotency_hook.drain_governance_refusals()
+
+
 # ---------------------------------------------------------------------------
 # Fakes for the strands seam
 # ---------------------------------------------------------------------------
@@ -132,7 +147,8 @@ class TestDenyBeforeReserve:
         idempotency reserve is NEVER reached (no reservation, no ledger row)."""
         reserve_calls = []
         monkeypatch.setattr(ledger, "reserve", lambda *a, **k: reserve_calls.append((a, k)))
-        # write_finding will raise LedgerWriteError (no table) → caught + WARN.
+        # Audit write succeeds (autouse _governance_writes_succeed) so the DENY
+        # here is a policy denial, not a fail-closed audit block.
 
         inner = _FakeInnerTool("dangerous", [])
         event = _FakeEvent("dangerous", "tu-1", {"x": 1}, inner)

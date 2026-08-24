@@ -101,13 +101,19 @@ def test_preprocess_permit_returns_none_and_writes_permit_finding():
 
 
 # ---------------------------------------------------------------------------
-# AC 9.4 — LedgerWriteError is caught and WARN-logged; preprocess does NOT
-# raise. Covers both DENY and PERMIT paths.
+# GOVERNANCE-WRITE POLICY — FAIL-CLOSED (decision gov-write-fail-closed,
+# finding 4595b730). A LedgerWriteError is NO LONGER best-effort: it BLOCKS the
+# tool (returns an audit-unavailable error ToolResult) and records a refusal in
+# the shared node-failure sink so the node FAILS. An unauditable tool execution
+# is not permitted. Replaces the former AC 9.4 WARN+continue behavior.
 # ---------------------------------------------------------------------------
 
 
-def test_preprocess_ledger_unset_permit_best_effort(monkeypatch, caplog):
-    """PERMIT path: ledger failure is best-effort — warn, return None."""
+def test_preprocess_ledger_unset_permit_fails_closed(monkeypatch, caplog):
+    """PERMIT path: a governance-write failure BLOCKS the tool (fail-closed)
+    and records a node-failure refusal — no longer a best-effort no-op."""
+    import tool_idempotency_hook as hook
+    hook.drain_governance_refusals()  # start clean
     monkeypatch.delenv('GOVERNANCE_LEDGER_TABLE', raising=False)
     handler = GovernedToolHandler(denied_tools=set())
 
@@ -115,19 +121,27 @@ def test_preprocess_ledger_unset_permit_best_effort(monkeypatch, caplog):
         'governed_tool_handler.write_finding',
         side_effect=LedgerWriteError('GOVERNANCE_LEDGER_TABLE not configured'),
     ):
-        with caplog.at_level(logging.WARNING, logger='governed_tool_handler'):
-            result = handler.preprocess({'name': 'safe_tool'})
+        with caplog.at_level(logging.ERROR, logger='governed_tool_handler'):
+            result = handler.preprocess({'name': 'safe_tool', 'toolUseId': 'tu-p'})
 
-    assert result is None  # PERMIT path survives ledger failure
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert 'governance ledger write failed' in warnings[0].getMessage()
+    # Fail-closed: the tool is blocked with an audit-unavailable error result.
+    assert isinstance(result, dict)
+    assert result['status'] == 'error'
+    assert 'audit record could not be written' in result['content'][0]['text']
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert 'fail-closed' in errors[0].getMessage()
+    # The node-failure refusal was recorded (so the node FAILS post-turn).
+    drained = hook.drain_governance_refusals()
+    assert len(drained) == 1
+    assert drained[0]['errorClass'] == 'LedgerWriteError'
 
 
-def test_preprocess_ledger_unset_deny_best_effort(monkeypatch, caplog):
-    """DENY path: ledger failure is best-effort — warn, still return
-    the denial ToolResult (the deny decision itself does NOT depend on
-    the ledger at worker-tool-handler scope per AC 9.4)."""
+def test_preprocess_ledger_unset_deny_fails_closed(monkeypatch, caplog):
+    """DENY path: a governance-write failure still blocks the tool (a denial is
+    preserved a fortiori) AND records a node-failure refusal (fail-closed)."""
+    import tool_idempotency_hook as hook
+    hook.drain_governance_refusals()
     monkeypatch.delenv('GOVERNANCE_LEDGER_TABLE', raising=False)
     handler = GovernedToolHandler(denied_tools={'blocked'})
 
@@ -135,14 +149,17 @@ def test_preprocess_ledger_unset_deny_best_effort(monkeypatch, caplog):
         'governed_tool_handler.write_finding',
         side_effect=LedgerWriteError('GOVERNANCE_LEDGER_TABLE not configured'),
     ):
-        with caplog.at_level(logging.WARNING, logger='governed_tool_handler'):
+        with caplog.at_level(logging.ERROR, logger='governed_tool_handler'):
             result = handler.preprocess({'name': 'blocked', 'toolUseId': 'tu-x'})
 
     assert isinstance(result, dict)
     assert result['status'] == 'error'
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert 'governance ledger write failed' in warnings[0].getMessage()
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert 'fail-closed' in errors[0].getMessage()
+    drained = hook.drain_governance_refusals()
+    assert len(drained) == 1
+    assert drained[0]['errorClass'] == 'LedgerWriteError'
 
 
 # ---------------------------------------------------------------------------
