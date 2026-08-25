@@ -32,7 +32,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from transient_retry import (
     MAX_ATTEMPTS,
-    TRANSIENT_BEDROCK_ERROR_CODES,
     bedrock_error_code,
     calculate_backoff,
     call_with_transient_retry,
@@ -235,7 +234,7 @@ class TestBackoffProperties:
     @given(code=st.text(min_size=1, max_size=40))
     @settings(max_examples=100)
     def test_should_retry_only_listed_codes(self, code):
-        retryable = sorted(TRANSIENT_BEDROCK_ERROR_CODES)
+        retryable = ["internalserverexception", "throttlingexception"]
         if code not in retryable:
             assert should_retry(code, retryable, 0, 3) is False
 
@@ -250,9 +249,6 @@ class TestConflictExceptionIsNotTransient:
     retrying it 92-110× consumed ~825-834s of the 900s Lambda budget. The
     condition never resolves within a run — it must NEVER be classified
     transient here."""
-
-    def test_conflict_exception_not_in_transient_frozenset(self):
-        assert "conflictexception" not in TRANSIENT_BEDROCK_ERROR_CODES
 
     def test_conflict_exception_not_classified_transient(self):
         err = _client_error(

@@ -17,6 +17,8 @@ import threading
 from enum import Enum
 from typing import Any, Callable
 
+from common.failure_taxonomy import classify, is_auto_retryable
+
 
 class CircuitState(Enum):
     CLOSED = "CLOSED"
@@ -37,19 +39,15 @@ class CircuitBreaker:
         max_retries: int = 3,
         base_delay: float = 1.0,
         max_delay: float = 30.0,
-        retryable_errors: tuple = (
-            "ThrottlingException",
-            "ServiceUnavailableException",
-            "ModelTimeoutException",
-            "InternalServerException",
-        ),
     ):
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
-        self.retryable_errors = retryable_errors
+        # NO private retryable set (board task 9099b8cb): retryability is
+        # decided by the unified failure taxonomy (classify + is_auto_retryable),
+        # not a hardcoded tuple that could drift from the other consumers.
 
         self._state = CircuitState.CLOSED
         self._failure_count = 0
@@ -81,9 +79,12 @@ class CircuitBreaker:
                 )
 
     def _is_retryable(self, error: Exception) -> bool:
-        error_code = getattr(error, "response", {}).get("Error", {}).get("Code", "")
-        error_name = type(error).__name__
-        return error_code in self.retryable_errors or error_name in self.retryable_errors
+        """Retryability is the taxonomy's single disposition lookup — the
+        breaker keeps NO private error-code set (board task 9099b8cb).
+        ``classify`` extracts the botocore ``response['Error']['Code']`` first,
+        then the exception type name, so a live Bedrock exception and an
+        ``errorClass`` string on the node path classify identically."""
+        return is_auto_retryable(classify(error))
 
     def _backoff_delay(self, attempt: int) -> float:
         """Exponential backoff with full jitter."""
