@@ -13,8 +13,14 @@ tool-swap, refusal-sink, fail-safe direction). The store's own DynamoDB
 contract — deterministic ids, atomic single-use, int timestamps, expiry — is
 covered end-to-end against moto in ``test_tool_approval_contract_moto.py``.
 
-strands is not installed in this env, so the seam is simulated with the same
-minimal fakes the sibling ``test_composed_tool_governance.py`` uses.
+Most classes below still simulate the strands seam with the minimal fakes
+also used by ``test_composed_tool_governance.py`` (``_FakeInnerTool`` /
+``_FakeEvent`` + a monkeypatched ``strands.types._events``), for environments
+where strands-agents is not installed. ``TestGatedRefusalGenuineRealAgent``
+is additive and does NOT stub the agent boundary: it builds a real
+``strands.Agent`` with a real ``@tool`` and drives it through
+``agent.tool.<name>(...)``, skipping only if strands-agents genuinely isn't
+importable.
 """
 from __future__ import annotations
 
@@ -282,6 +288,109 @@ class TestFailSafe:
         assert _evaluator().evaluate(event) is False
         assert event.selected_tool is inner
         assert called == []
+
+
+# ===========================================================================
+# 3b. GENUINE real-agent proof (finding: the "real-framework" class above
+#     still stubs the agent boundary with _FakeInnerTool/_FakeEvent and a
+#     monkeypatched strands.types._events — exactly the kind of simulated
+#     seam that hid finding ee38af53, where the framework converts a tool
+#     exception into an error-status ToolResult so nothing ever raises. This
+#     class builds a REAL strands ``Agent`` with a REAL ``@tool`` and drives
+#     it through ``agent.tool.<name>(...)`` — the actual framework dispatch
+#     path — with the REAL ``ComposedToolHook`` + REAL ``GovernanceEvaluator``
+#     attached via ``Agent(hooks=[...])``, per the ``BeforeToolCallEvent``
+#     contract documented at the top of ``tool_idempotency_hook.py``. No
+#     fakes, no monkeypatched strands modules. Only the approval STORE
+#     (``governance.tool_approval.read_grant``/``consume``) is monkeypatched,
+#     mirroring every other class in this file and the moto-backed contract
+#     test that separately covers the store itself.
+# ===========================================================================
+try:
+    from strands import Agent, tool  # type: ignore
+
+    _STRANDS_INSTALLED = True
+except ImportError:  # pragma: no cover — dev/CI without strands-agents
+    _STRANDS_INSTALLED = False
+
+
+@pytest.mark.skipif(not _STRANDS_INSTALLED, reason="strands-agents not importable in this env")
+class TestGatedRefusalGenuineRealAgent:
+    """No _FakeInnerTool, no _FakeEvent, no monkeypatched strands.types._events.
+    The tool is a real @tool bound to a real Agent; the hook chain is the real
+    ComposedToolHook/GovernanceEvaluator attached the way production attaches
+    them (Agent(hooks=[...])). We assert on the returned ToolResult PAYLOAD and
+    the drained refusal SINK — never on a raised exception — because that is
+    precisely the seam finding ee38af53 showed swallows exceptions into an
+    error-status result."""
+
+    def _build_agent(self, executed_log):
+        @tool
+        def gated_tool(x: int) -> str:
+            """A real tool whose execution is observable via a side-effecting log."""
+            executed_log.append(_GATED)
+            return f"ran with x={x}"
+
+        composed = ComposedToolHook(governance=self._evaluator(), idempotency=_idempotency())
+        # Real Agent, real hook attachment — the exact seam production uses
+        # (see tool_idempotency_hook.py module docstring: "attached with
+        # Agent(hooks=[...])"), mirroring the precedent at
+        # arbiter/seedConfig/smoke_idempotency_agent.py:134 (agent = Agent(tools=[...])).
+        agent = Agent(tools=[gated_tool], hooks=[composed])
+        return agent
+
+    @staticmethod
+    def _evaluator():
+        return _evaluator()
+
+    def test_gated_tool_without_approval_never_executes_via_real_agent(
+        self, monkeypatch,
+    ):
+        monkeypatch.setattr(tool_approval, "read_grant", lambda *a, **k: None)
+        consume_calls = []
+        monkeypatch.setattr(tool_approval, "consume", lambda *a, **k: consume_calls.append(a))
+
+        executed: list = []
+        agent = self._build_agent(executed)
+
+        result = agent.tool.gated_tool(x=1)
+
+        # The tool's own side effect never ran — this is the genuine proof
+        # that a real framework dispatch, not a stub, was actually blocked.
+        assert executed == []
+        assert result["status"] == "error"
+        assert "requires a pre-granted approval" in result["content"][0]["text"]
+        assert consume_calls == []
+
+        refusals = tool_idempotency_hook.drain_governance_refusals()
+        assert len(refusals) == 1
+        assert refusals[0]["errorClass"] == "ApprovalRequiredError"
+        assert refusals[0]["retryable"] is False
+
+    def test_gated_tool_with_valid_approval_executes_via_real_agent(
+        self, monkeypatch,
+    ):
+        monkeypatch.setattr(tool_approval, "read_grant", lambda *a, **k: _valid_grant())
+        consumed_calls = []
+
+        def _consume(*a, **k):
+            consumed_calls.append(a)
+            return True  # single-use WON
+
+        monkeypatch.setattr(tool_approval, "consume", _consume)
+        monkeypatch.setattr(ledger, "reserve", lambda *a, **k: ledger.ReserveResult(ledger.ReserveOutcome.WON))
+        monkeypatch.setattr(ledger, "finalize_success", lambda *a, **k: None)
+
+        executed: list = []
+        agent = self._build_agent(executed)
+
+        result = agent.tool.gated_tool(x=7)
+
+        # The tool genuinely ran through the real framework path.
+        assert executed == [_GATED]
+        assert result["status"] == "success"
+        assert consumed_calls  # approval was consumed exactly once
+        assert tool_idempotency_hook.drain_governance_refusals() == []
 
 
 # ===========================================================================
