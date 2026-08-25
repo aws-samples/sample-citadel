@@ -822,19 +822,49 @@ check_tree_state() {
 }
 
 # --- Parse cdk diff output for resource DELETIONS ---
-# CDK renders a removed resource as a line whose first non-whitespace token is
-# the removal marker "[-]", e.g.:
+# CDK renders a REMOVED RESOURCE as a line anchored at column 1 whose marker
+# is immediately followed by a CloudFormation type token, e.g.:
 #   [-] AWS::DynamoDB::Table SmokeTable citadelsmoke0AB12CD3 destroy
+#
+# It ALSO reuses the same "[-]" glyph, indented, for every removed-VALUE line
+# inside an unrelated "[~] <Resource>" (modified) block — property diffs,
+# nested JSON/array fragments (IAM Statement Changes tables render literal
+# `"Resource": {` / `"Fn::ImportValue": ...` / closing `}` lines this way
+# too), Lambda asset .S3Key hash swaps, layer-version ARN bumps, etc. Those
+# are NOT deletions and must never trip this gate (finding: PR #90 shipped
+# `^[[:space:]]*\[-\][[:space:]]`, which matched the indented case and
+# false-positived on every ordinary deploy).
+#
+# Anchor to column 1 AND require a CloudFormation type token
+# ("Namespace::Service::Type", e.g. AWS::DynamoDB::Table or
+# Custom::MyResource) immediately after the marker — that shape only ever
+# appears on cdk's own top-level resource-removal line, never inside a
+# nested property diff. Verified against a live 9-stack diff for this repo
+# (see incident notes) containing zero genuine deletions and dozens of
+# indented [-] property lines: the old pattern matched all of them, this one
+# matches none.
+#
 # Echoes one "<Type> <Name...>" per deleted resource (marker stripped). Emits
 # nothing when there are no deletions.
+#
+# NOTE on the parsing approach itself: `cdk diff` has no machine-readable
+# diff mode (`--json` only affects the printed template, not the diff), so
+# this is inherently regex-over-text and will always be one rendering change
+# away from breaking. The authoritative alternative is a changeset-based
+# gate — synth, `aws cloudformation create-change-set` + `describe-change-
+# set`, and inspect the structured `Changes[].ResourceChange.Action ==
+# "Remove"` list instead of parsing cdk's pretty-printer output. Not built
+# here (out of scope for this fix); the next person hitting a false
+# positive/negative in this function should reach for that instead of
+# patching the regex further.
 extract_cdk_deletions() {
   local diff_text="$1"
   # Strip ANSI colour escapes first (cdk diff colourizes the [-] marker red),
-  # then match lines whose first non-whitespace token is the removal marker.
+  # then match column-1 "[-] <Type>::<Type>::<Type>" resource-removal lines.
   printf '%s\n' "$diff_text" \
     | sed -E 's/\x1b\[[0-9;]*[mK]//g' \
-    | grep -E '^[[:space:]]*\[-\][[:space:]]' \
-    | sed -E 's/^[[:space:]]*\[-\][[:space:]]+//'
+    | grep -E '^\[-\][[:space:]]+[A-Za-z0-9]+::' \
+    | sed -E 's/^\[-\][[:space:]]+//'
 }
 
 # --- Deletion gate (finding 9c92a738) — FAIL CLOSED ---
