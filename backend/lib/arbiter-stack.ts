@@ -24,7 +24,7 @@ import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
-import path = require("path");
+import * as path from "path";
 import * as fs from "fs";
 
 // Resolve the repo-root `arbiter/` directory regardless of whether this
@@ -436,7 +436,19 @@ export class ArbiterStack extends cdk.Stack {
         timeToLiveAttribute: "ttl",
         encryption: dynamodb.TableEncryption.AWS_MANAGED,
         pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        // Deploy-safety (findings 7f42ae86 / 9c92a738): this is an operational
+        // idempotency store (short TTL, not an audit artifact) — but its rows
+        // are LIVE in-flight state, and a divergent-branch deploy that silently
+        // DELETES the whole table would break idempotency guarantees for every
+        // reservation currently inside its TTL window (the finding-9c92a738
+        // DELETE_COMPLETE path). RETAIN + deletionProtection guard the TABLE;
+        // the `ttl` attribute above still expires individual rows, so the
+        // operational self-cleaning this store was designed around is
+        // unchanged. This deliberately reverses the prior DESTROY intent per
+        // the approved finding. Orphaned-table-on-re-add recovery (AlreadyExists
+        // -> import or rename) is documented in docs/DEPLOYMENT.md.
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
       },
     );
 
@@ -464,7 +476,18 @@ export class ArbiterStack extends cdk.Stack {
       bucketKeyEnabled: true,
       blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      // Deploy-safety (findings 7f42ae86 / 9c92a738): oversized tool results
+      // offloaded here are LIVE state referenced by not-yet-expired ledger
+      // rows; a divergent-branch deploy that silently DELETES the bucket would
+      // make those resultRefs unresolvable (the finding-9c92a738 path applied
+      // to a bucket). RETAIN so the bucket survives stack teardown/reconcile.
+      // S3 has no per-bucket deletionProtection flag; the KMS CMK above is
+      // already RETAIN, so the objects stay decryptable. The 7-day lifecycle
+      // rule below still expires individual objects, so this stays an
+      // operational store — RETAIN only blocks silent whole-bucket teardown.
+      // This deliberately reverses the prior DESTROY intent per the approved
+      // finding; orphaned-bucket-on-re-add recovery is in docs/DEPLOYMENT.md.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       lifecycleRules: [
         {
           id: "tool-results-operational-ttl",
@@ -1788,10 +1811,13 @@ export class ArbiterStack extends cdk.Stack {
     //
     // Four governance-critical configuration tables (authority units,
     // composition contracts, case law, constitutional layers) plus one
-    // append-only ledger. The four config tables carry DeletionProtection
-    // and RemovalPolicy.RETAIN so the corpus survives stack deletion; the
-    // ledger uses RemovalPolicy.DESTROY with a 90-day TTL (`ttl` attr)
-    // since its lifecycle is governed by TTL rather than table retention.
+    // append-only ledger. All five carry DeletionProtection and
+    // RemovalPolicy.RETAIN so the corpus AND the accountability ledger
+    // survive stack deletion / divergent-branch reconciliation (findings
+    // 7f42ae86, 9c92a738). The ledger additionally keeps a 90-day TTL
+    // (`ttl` attr): deletionProtection guards the TABLE while the TTL still
+    // expires individual rows, so operational self-cleaning is unchanged —
+    // only silent whole-table teardown is now blocked.
     // All five enable PITR to satisfy AwsSolutions-DDB3 (cdk-nag).
     //
     // Tables are exposed as public readonly fields on ArbiterStack so
@@ -1901,7 +1927,16 @@ export class ArbiterStack extends cdk.Stack {
           type: dynamodb.AttributeType.STRING,
         },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        // Deploy-safety (findings 7f42ae86 / 9c92a738): the governance ledger
+        // is an accountability/audit store. RETAIN + deletionProtection so a
+        // divergent-branch deploy cannot silently DELETE the table (finding
+        // 9c92a738's DELETE_COMPLETE path). The `ttl` attribute still expires
+        // individual rows on its 90-day schedule — deletionProtection guards
+        // the TABLE, not the rows — so operational self-cleaning is unchanged;
+        // only whole-table teardown-by-reconcile is now blocked. Tradeoff:
+        // orphaned-table-on-re-add (AlreadyExists) recovery in docs/DEPLOYMENT.md.
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
         timeToLiveAttribute: "ttl",
         pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
         // Wave 3.C: enable DynamoDB streams so the governance-finding-fanout

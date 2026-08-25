@@ -15,8 +15,6 @@ import { Asset } from "aws-cdk-lib/aws-s3-assets";
 import { CfnGraphQLSchema } from "aws-cdk-lib/aws-appsync";
 import * as path from "path";
 import { Construct } from "constructs";
-import { Provider } from "aws-cdk-lib/custom-resources";
-import { CustomResource, Duration } from "aws-cdk-lib";
 import { NagSuppressions } from "cdk-nag";
 
 interface BackendStackProps extends cdk.StackProps {
@@ -404,7 +402,16 @@ export class BackendStack extends cdk.Stack {
         type: dynamodb.AttributeType.STRING,
       },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      // Deploy-safety (findings 7f42ae86 / 9c92a738): workflow execution
+      // records are data-bearing state, not a disposable fixture. RETAIN +
+      // deletionProtection so a divergent-branch deploy (which reconciles the
+      // environment to the deployed tree) cannot silently DELETE this table
+      // and take live execution history with it. Tradeoff: RETAIN converts a
+      // silent data loss into an ORPHANED table, which then makes a later
+      // deploy that re-adds ExecutionsTable fail LOUDLY with AlreadyExists —
+      // recovery (import or rename) is documented in docs/DEPLOYMENT.md.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      deletionProtection: true,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
@@ -768,7 +775,7 @@ export class BackendStack extends cdk.Stack {
       description: "Full system access",
     });
 
-    const projectManagerGroup = new cognito.CfnUserPoolGroup(
+    const _projectManagerGroup = new cognito.CfnUserPoolGroup(
       this,
       "ProjectManagerGroup",
       {
@@ -778,7 +785,7 @@ export class BackendStack extends cdk.Stack {
       },
     );
 
-    const architectGroup = new cognito.CfnUserPoolGroup(
+    const _architectGroup = new cognito.CfnUserPoolGroup(
       this,
       "ArchitectGroup",
       {
@@ -788,7 +795,7 @@ export class BackendStack extends cdk.Stack {
       },
     );
 
-    const developerGroup = new cognito.CfnUserPoolGroup(
+    const _developerGroup = new cognito.CfnUserPoolGroup(
       this,
       "DeveloperGroup",
       {
