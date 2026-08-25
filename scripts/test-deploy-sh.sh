@@ -586,6 +586,99 @@ else
   fail "expected ANSI deletion to be caught; rc=$ansi_rc output=$ansi_out"
 fi
 
+########################################
+# REGRESSION: finding — extract_cdk_deletions() previously matched INDENTED
+# [-] lines inside [~] modified-resource property diffs (leading
+# `[[:space:]]*` in the old grep), causing hard-refuse false positives on
+# ordinary deploys with zero genuine deletions. Fixtures below are the
+# ACTUAL lines captured from the live citadel-gateway-dev / citadel-backend-
+# dev diff during that incident, used verbatim.
+########################################
+section "extract_cdk_deletions: property-diff false positives are IGNORED (regression)"
+
+# The indented Lambda asset .S3Key hash swap (appeared on ~30 functions).
+ASSET_ZIP_DIFF='[~] AWS::Lambda::Function RegistryProvisionerFunction RegistryProvisionerFunctionE3F562F6
+ └─ [~] Code
+     └─ [~] .S3Key:
+         ├─ [-] 02ad290bbad20c98533eca320b22aa9905aa479f067a0be3b0eb98a5ff39675f.zip
+         └─ [+] 3d75b07052b2d0183a7437a38be7dea763082f4b5a27ea8490cd6c9584a478ae.zip'
+set +e
+assetzip_out=$(extract_cdk_deletions "$ASSET_ZIP_DIFF")
+set -e 2>/dev/null || true
+if [ -z "$assetzip_out" ]; then
+  pass "indented asset-zip .S3Key [-] line is ignored (not a resource deletion)"
+else
+  fail "asset-zip .S3Key line was incorrectly flagged as a deletion: $assetzip_out"
+fi
+
+# The indented layer-version ARN bump (:58 -> :59 shape), plus the raw JSON
+# fragments cdk's IAM Statement Changes table renders as indented [-] lines.
+LAYER_AND_JSON_DIFF='            [-]   "Resource": {
+            [-]     "Fn::ImportValue": "citadel-backend-dev:ExportsOutputFnGetAttExecutionsTableA2EE59C2Arn25D40C91"
+            [-]   }
+ └─ [~] Layers
+     └─ [~] .0:
+         ├─ [-] arn:aws:lambda:us-west-2:257192363080:layer:ArbiterCatalogLayer:58
+         └─ [+] arn:aws:lambda:us-west-2:257192363080:layer:ArbiterCatalogLayer:59'
+set +e
+layerjson_out=$(extract_cdk_deletions "$LAYER_AND_JSON_DIFF")
+set -e 2>/dev/null || true
+if [ -z "$layerjson_out" ]; then
+  pass "indented layer-ARN bump and IAM-table JSON fragments ('\"Resource\": {', 'Fn::ImportValue', closing '}') are all ignored"
+else
+  fail "layer-ARN/JSON fragment lines were incorrectly flagged as deletions: $layerjson_out"
+fi
+
+# Full deploy against these fixtures must PROCEED (deletion_gate returns 0),
+# matching the real incident: zero genuine deletions across all 9 stacks.
+REGRESSION_NO_DELETIONS_DIFF="Stack citadel-gateway-dev
+Resources
+[~] AWS::Lambda::Function AppApiAuthorizer AppApiAuthorizer603DF97E
+ └─ [~] Code
+     └─ [~] .S3Key:
+         ├─ [-] 02ad290bbad20c98533eca320b22aa9905aa479f067a0be3b0eb98a5ff39675f.zip
+         └─ [+] 3d75b07052b2d0183a7437a38be7dea763082f4b5a27ea8490cd6c9584a478ae.zip
+[~] AWS::DynamoDB::Table ExecutionsTable ExecutionsTableA2EE59C2
+ ├─ [+] DeletionProtectionEnabled
+ │   └─ true
+ ├─ [~] DeletionPolicy
+ │   ├─ [-] Delete
+ │   └─ [+] Retain
+ └─ [~] UpdateReplacePolicy
+     ├─ [-] Delete
+     └─ [+] Retain
+            [-]   \"Resource\": {
+            [-]     \"Fn::ImportValue\": \"citadel-backend-dev:ExportsOutputFnGetAttExecutionsTableA2EE59C2Arn25D40C91\"
+            [-]   }"
+set +e
+regr_out=$(deletion_gate "$REGRESSION_NO_DELETIONS_DIFF" "false" "true" 2>&1); regr_rc=$?
+set -e 2>/dev/null || true
+if [ $regr_rc -eq 0 ] && echo "$regr_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -qi "no resource deletions"; then
+  pass "real-incident-shaped diff (asset hashes, DeletionPolicy flip, IAM JSON fragment) now PROCEEDS — false positive fixed"
+else
+  fail "expected the incident-shaped diff to proceed with no deletions; rc=$regr_rc output=$regr_out"
+fi
+
+# --- RED bite proof: a genuine column-1 resource deletion is STILL caught ---
+section "extract_cdk_deletions: genuine column-1 resource deletion still REFUSES (bite proof)"
+GENUINE_DELETION_DIFF="Stack citadel-arbiter-dev
+Resources
+[-] AWS::DynamoDB::Table SmokeTable citadelsmoke0AB12CD3 destroy
+[~] AWS::Lambda::Function RegistryProvisionerFunction RegistryProvisionerFunctionE3F562F6
+ └─ [~] Code
+     └─ [~] .S3Key:
+         ├─ [-] 02ad290bbad20c98533eca320b22aa9905aa479f067a0be3b0eb98a5ff39675f.zip
+         └─ [+] 3d75b07052b2d0183a7437a38be7dea763082f4b5a27ea8490cd6c9584a478ae.zip"
+set +e
+genuine_out=$(deletion_gate "$GENUINE_DELETION_DIFF" "false" "true" 2>&1); genuine_rc=$?
+set -e 2>/dev/null || true
+genuine_plain=$(echo "$genuine_out" | sed 's/\x1b\[[0-9;]*m//g')
+if [ $genuine_rc -ne 0 ] && echo "$genuine_plain" | grep -q "citadelsmoke0AB12CD3"; then
+  pass "RED PROOF: genuine column-1 resource deletion (SmokeTable citadelsmoke0AB12CD3) still REFUSES amid the same property-diff noise — narrowing the match did not blind the gate"
+else
+  fail "narrowed pattern failed to catch a genuine deletion; rc=$genuine_rc output=$genuine_plain"
+fi
+
 # --- provenance manifest: written with the right fields on success ---
 section "write_manifest: writes deployment-manifest.json with required fields"
 reset_fakes
