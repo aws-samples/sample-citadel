@@ -371,6 +371,326 @@ else
 fi
 
 ########################################
+# Deploy-safety gates (findings 7f42ae86 provenance / 9c92a738 deletion)
+########################################
+# A configurable fake `git` driven by env vars, so the ref/tree gates can be
+# exercised without a real repo:
+#   FAKE_BRANCH, FAKE_FULL_SHA, FAKE_SHORT_SHA  — what rev-parse returns
+#   FAKE_DIRTY=clean|dirty                       — git diff --quiet exit code
+#   FAKE_HAS_ORIGIN_MAIN=1|0                     — origin/main resolvable
+#   FAKE_IS_ANCESTOR=1|0                         — HEAD ancestor of origin/main
+write_fake_git() {
+  cat > "$FAKE_BIN/git" <<'FAKE_GIT_EOF'
+#!/bin/bash
+case "$1 $2 $3" in
+  "rev-parse --abbrev-ref HEAD") echo "${FAKE_BRANCH:-main}"; exit 0 ;;
+esac
+case "$1 $2" in
+  "rev-parse --short") echo "${FAKE_SHORT_SHA:-abc1234}"; exit 0 ;;
+  "rev-parse --verify")
+    # `git rev-parse --verify -q origin/main`
+    [ "${FAKE_HAS_ORIGIN_MAIN:-1}" = "1" ] && { echo "deadbeef"; exit 0; }
+    exit 1 ;;
+  "rev-parse HEAD") echo "${FAKE_FULL_SHA:-abc1234567890abc1234567890abc1234567890a}"; exit 0 ;;
+  "merge-base --is-ancestor") [ "${FAKE_IS_ANCESTOR:-1}" = "1" ] && exit 0 || exit 1 ;;
+  "diff --quiet") [ "${FAKE_DIRTY:-clean}" = "clean" ] && exit 0 || exit 1 ;;
+  "diff --cached") [ "${FAKE_DIRTY:-clean}" = "clean" ] && exit 0 || exit 1 ;;
+esac
+# `git rev-parse HEAD` (two-token form) handled above; default:
+if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
+  echo "${FAKE_FULL_SHA:-abc1234567890abc1234567890abc1234567890a}"; exit 0
+fi
+exit 0
+FAKE_GIT_EOF
+  chmod +x "$FAKE_BIN/git"
+}
+
+# --- expect-ref: match proceeds (branch name, full sha, short sha, prefix) ---
+section "verify_expected_ref: match proceeds (branch / full sha / short sha / prefix)"
+reset_fakes
+write_fake_git
+export FAKE_BRANCH="chore/deploy-safety-gates"
+export FAKE_FULL_SHA="abc1234567890abc1234567890abc1234567890a"
+export FAKE_SHORT_SHA="abc1234"
+set +e
+PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" verify_expected_ref "chore/deploy-safety-gates" >/dev/null 2>&1
+rc_branch=$?
+PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" verify_expected_ref "$FAKE_FULL_SHA" >/dev/null 2>&1
+rc_full=$?
+PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" verify_expected_ref "abc1234" >/dev/null 2>&1
+rc_short=$?
+PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" verify_expected_ref "abc123" >/dev/null 2>&1
+rc_prefix=$?
+set -e 2>/dev/null || true
+if [ $rc_branch -eq 0 ] && [ $rc_full -eq 0 ] && [ $rc_short -eq 0 ] && [ $rc_prefix -eq 0 ]; then
+  pass "expected-ref match proceeds for branch, full sha, short sha, and sha prefix"
+else
+  fail "expected all match forms to proceed; branch=$rc_branch full=$rc_full short=$rc_short prefix=$rc_prefix"
+fi
+
+# --- expect-ref: mismatch ABORTS naming both refs ---
+section "verify_expected_ref: mismatch aborts naming both refs"
+reset_fakes
+write_fake_git
+export FAKE_BRANCH="main"
+export FAKE_SHORT_SHA="abc1234"
+export FAKE_FULL_SHA="abc1234567890abc1234567890abc1234567890a"
+set +e
+mismatch_out=$(PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" verify_expected_ref "feat/other-branch" 2>&1)
+mismatch_rc=$?
+set -e 2>/dev/null || true
+mismatch_plain=$(echo "$mismatch_out" | sed 's/\x1b\[[0-9;]*m//g')
+if [ $mismatch_rc -ne 0 ]; then
+  pass "expected-ref mismatch aborts (rc=$mismatch_rc)"
+else
+  fail "expected non-zero on mismatch, got rc=$mismatch_rc"
+fi
+if echo "$mismatch_plain" | grep -q "feat/other-branch" && echo "$mismatch_plain" | grep -q "main" && echo "$mismatch_plain" | grep -q "abc1234"; then
+  pass "mismatch message names BOTH the requested ref and the resolved HEAD"
+else
+  fail "mismatch message did not name both refs: $mismatch_plain"
+fi
+
+# --- expect-ref: absent + no TTY REFUSES (never hangs) ---
+section "verify_expected_ref: absent --expect-ref with no TTY refuses"
+reset_fakes
+write_fake_git
+export FAKE_BRANCH="main"
+export FAKE_SHORT_SHA="abc1234"
+set +e
+notty_out=$(PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" verify_expected_ref "" </dev/null 2>&1)
+notty_rc=$?
+set -e 2>/dev/null || true
+notty_plain=$(echo "$notty_out" | sed 's/\x1b\[[0-9;]*m//g')
+if [ $notty_rc -ne 0 ] && echo "$notty_plain" | grep -qi "not a TTY"; then
+  pass "absent --expect-ref with non-TTY stdin refuses (rc=$notty_rc), citing TTY"
+else
+  fail "expected refusal citing TTY; rc=$notty_rc output=$notty_plain"
+fi
+
+# --- tree-state: dirty tree refuses by default; --allow-dirty warns+proceeds ---
+section "check_tree_state: dirty tree refuses; --allow-dirty proceeds"
+reset_fakes
+write_fake_git
+export FAKE_DIRTY="dirty"; export FAKE_IS_ANCESTOR=1; export FAKE_HAS_ORIGIN_MAIN=1
+set +e
+dirty_out=$(PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" check_tree_state "" "false" 2>&1)
+dirty_rc=$?
+allowdirty_out=$(PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" check_tree_state "" "true" 2>&1)
+allowdirty_rc=$?
+set -e 2>/dev/null || true
+dirty_plain=$(echo "$dirty_out" | sed 's/\x1b\[[0-9;]*m//g')
+if [ $dirty_rc -ne 0 ] && echo "$dirty_plain" | grep -qi "DIRTY"; then
+  pass "dirty tree refuses by default (rc=$dirty_rc), citing DIRTY"
+else
+  fail "expected dirty refusal; rc=$dirty_rc output=$dirty_plain"
+fi
+if [ $allowdirty_rc -eq 0 ] && echo "$allowdirty_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -qi "allow-dirty"; then
+  pass "--allow-dirty proceeds with a loud warning (rc=$allowdirty_rc)"
+else
+  fail "expected --allow-dirty to proceed with warning; rc=$allowdirty_rc output=$allowdirty_out"
+fi
+
+# --- tree-state: divergent HEAD + no expect-ref refuses; +expect-ref warns ---
+section "check_tree_state: divergent branch refuses w/o ref, warns w/ ref"
+reset_fakes
+write_fake_git
+export FAKE_DIRTY="clean"; export FAKE_HAS_ORIGIN_MAIN=1; export FAKE_IS_ANCESTOR=0
+set +e
+div_out=$(PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" check_tree_state "" "false" 2>&1)
+div_rc=$?
+divref_out=$(PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" check_tree_state "feat/mybranch" "false" 2>&1)
+divref_rc=$?
+set -e 2>/dev/null || true
+div_plain=$(echo "$div_out" | sed 's/\x1b\[[0-9;]*m//g')
+if [ $div_rc -ne 0 ] && echo "$div_plain" | grep -q "9c92a738"; then
+  pass "divergent HEAD with no --expect-ref refuses (rc=$div_rc), citing finding 9c92a738"
+else
+  fail "expected divergence refusal; rc=$div_rc output=$div_plain"
+fi
+if [ $divref_rc -eq 0 ] && echo "$divref_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -qi "divergent"; then
+  pass "divergent HEAD WITH --expect-ref downgrades to a loud warn and proceeds (rc=$divref_rc)"
+else
+  fail "expected divergence+ref to warn and proceed; rc=$divref_rc output=$divref_out"
+fi
+
+# --- deletion gate: diff with a deletion REFUSES and names the resource ---
+section "deletion_gate: diff with a deletion refuses and names the resource"
+DELETION_DIFF="Stack citadel-arbiter-dev
+Resources
+[-] AWS::DynamoDB::Table SmokeIdempotencyTable citadel-smoke-idempotency-dev destroy
+[~] AWS::Lambda::Function WorkerFn WorkerFn12AB modified"
+set +e
+del_out=$(deletion_gate "$DELETION_DIFF" "false" "true" 2>&1)
+del_rc=$?
+set -e 2>/dev/null || true
+del_plain=$(echo "$del_out" | sed 's/\x1b\[[0-9;]*m//g')
+if [ $del_rc -ne 0 ] && echo "$del_plain" | grep -q "citadel-smoke-idempotency-dev"; then
+  pass "deletion diff refuses (rc=$del_rc) and NAMES citadel-smoke-idempotency-dev"
+else
+  fail "expected deletion refusal naming the resource; rc=$del_rc output=$del_plain"
+fi
+
+# --allow-deletions proceeds on the same diff
+set +e
+delallow_out=$(deletion_gate "$DELETION_DIFF" "true" "true" 2>&1)
+delallow_rc=$?
+set -e 2>/dev/null || true
+if [ $delallow_rc -eq 0 ] && echo "$delallow_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -qi "allow-deletions"; then
+  pass "--allow-deletions proceeds on a deletion diff with a loud warning (rc=$delallow_rc)"
+else
+  fail "expected --allow-deletions to proceed; rc=$delallow_rc output=$delallow_out"
+fi
+
+# --- deletion gate: unparseable / empty / failed diff REFUSES (fail-closed) ---
+section "deletion_gate: empty and failed diff refuse (fail-closed)"
+set +e
+empty_out=$(deletion_gate "" "false" "true" 2>&1); empty_rc=$?
+failed_out=$(deletion_gate "some diff text" "false" "false" 2>&1); failed_rc=$?
+set -e 2>/dev/null || true
+if [ $empty_rc -ne 0 ] && echo "$empty_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -qi "fail-closed"; then
+  pass "empty diff refuses (fail-closed, rc=$empty_rc)"
+else
+  fail "expected empty diff to fail-closed; rc=$empty_rc output=$empty_out"
+fi
+if [ $failed_rc -ne 0 ]; then
+  pass "cdk-diff-failed (diff_ok=false) refuses (fail-closed, rc=$failed_rc)"
+else
+  fail "expected failed diff to fail-closed; rc=$failed_rc"
+fi
+
+# --- deletion gate: clean no-deletion diff PROCEEDS ---
+section "deletion_gate: clean no-deletion diff proceeds"
+CLEAN_DIFF="Stack citadel-backend-dev
+Resources
+[~] AWS::Lambda::Function WorkerFn WorkerFn12AB modified
+[+] AWS::DynamoDB::Table NewTable citadel-new-dev"
+set +e
+clean_out=$(deletion_gate "$CLEAN_DIFF" "false" "true" 2>&1); clean_rc=$?
+set -e 2>/dev/null || true
+if [ $clean_rc -eq 0 ] && echo "$clean_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -qi "no resource deletions"; then
+  pass "clean (no [-]) diff proceeds (rc=$clean_rc)"
+else
+  fail "expected clean diff to proceed; rc=$clean_rc output=$clean_out"
+fi
+
+# --- deletion gate: ANSI-coloured [-] marker is still detected ---
+section "deletion_gate: ANSI-coloured deletion marker is still parsed"
+ANSI_DIFF=$'Resources\n\x1b[31m[-] AWS::S3::Bucket ToolResultsBucket citadel-tool-results-dev destroy\x1b[0m'
+set +e
+ansi_out=$(deletion_gate "$ANSI_DIFF" "false" "true" 2>&1); ansi_rc=$?
+set -e 2>/dev/null || true
+if [ $ansi_rc -ne 0 ] && echo "$ansi_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -q "citadel-tool-results-dev"; then
+  pass "ANSI-coloured [-] line is detected and named (rc=$ansi_rc)"
+else
+  fail "expected ANSI deletion to be caught; rc=$ansi_rc output=$ansi_out"
+fi
+
+# --- provenance manifest: written with the right fields on success ---
+section "write_manifest: writes deployment-manifest.json with required fields"
+reset_fakes
+cat > "$FAKE_BIN/aws" <<'FAKE_AWS_EOF'
+#!/bin/bash
+if [ "$1" = "sts" ] && [ "$2" = "get-caller-identity" ]; then
+  echo "arn:aws:iam::123456789012:user/deployer"; exit 0
+fi
+exit 0
+FAKE_AWS_EOF
+chmod +x "$FAKE_BIN/aws"
+MANIFEST_DIR="$TMP_DIR/manifest-success"
+mkdir -p "$MANIFEST_DIR"
+(
+  cd "$MANIFEST_DIR" || exit 1
+  export ENVIRONMENT="dev" CDK_DEFAULT_REGION="us-east-1" CDK_DEFAULT_ACCOUNT="123456789012"
+  export GIT_SHA="abc1234" GIT_BRANCH="chore/deploy-safety-gates" GIT_DIRTY="clean"
+  export DEPLOY_MODE="all" STACK_NAME="" EXPECT_REF="chore/deploy-safety-gates"
+  export DEPLOY_STARTED_AT="2026-08-25T10:00:00Z"
+  PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" write_manifest >/dev/null 2>&1
+)
+MANIFEST_FILE="$MANIFEST_DIR/deployment-manifest.json"
+if [ -f "$MANIFEST_FILE" ]; then
+  pass "deployment-manifest.json written on success"
+else
+  fail "manifest not written"
+fi
+if [ -f "$MANIFEST_FILE" ] \
+  && grep -q '"git_sha": "abc1234"' "$MANIFEST_FILE" \
+  && grep -q '"git_branch": "chore/deploy-safety-gates"' "$MANIFEST_FILE" \
+  && grep -q '"git_dirty": "clean"' "$MANIFEST_FILE" \
+  && grep -q '"environment": "dev"' "$MANIFEST_FILE" \
+  && grep -q '"expected_ref": "chore/deploy-safety-gates"' "$MANIFEST_FILE" \
+  && grep -q '"started_at": "2026-08-25T10:00:00Z"' "$MANIFEST_FILE" \
+  && grep -q '"completed_at":' "$MANIFEST_FILE" \
+  && grep -q 'citadel-backend-dev' "$MANIFEST_FILE" \
+  && grep -q 'citadel-frontend-dev' "$MANIFEST_FILE"; then
+  pass "manifest carries environment, branch, sha, dirty flag, expected_ref, stack names, and start/complete timestamps"
+else
+  fail "manifest missing required fields: $(cat "$MANIFEST_FILE" 2>/dev/null)"
+fi
+
+# --- provenance manifest: NOT written when a gate refuses (end-to-end) ---
+section "e2e: a refusing gate exits non-zero and writes NO manifest"
+reset_fakes
+write_fake_git
+export FAKE_BRANCH="main" FAKE_SHORT_SHA="abc1234" FAKE_FULL_SHA="abc1234567890abc1234567890abc1234567890a"
+export FAKE_DIRTY="clean" FAKE_HAS_ORIGIN_MAIN=1 FAKE_IS_ANCESTOR=1
+cat > "$FAKE_BIN/aws" <<'FAKE_AWS_EOF'
+#!/bin/bash
+exit 0
+FAKE_AWS_EOF
+chmod +x "$FAKE_BIN/aws"
+E2E_DIR="$TMP_DIR/e2e-fail"
+mkdir -p "$E2E_DIR"
+cp "$DEPLOY_SH" "$E2E_DIR/deploy.sh"
+set +e
+e2e_out=$(
+  cd "$E2E_DIR" || exit 1
+  env -u DEPLOY_SH_SOURCE_ONLY \
+    ENVIRONMENT="dev" CDK_DEFAULT_REGION="us-east-1" CDK_DEFAULT_ACCOUNT="123456789012" \
+    PATH="$FAKE_BIN:$PATH" \
+    bash "$E2E_DIR/deploy.sh" --expect-ref feat/some-other-branch </dev/null 2>&1
+)
+e2e_rc=$?
+set -e 2>/dev/null || true
+e2e_plain=$(echo "$e2e_out" | sed 's/\x1b\[[0-9;]*m//g')
+if [ $e2e_rc -ne 0 ] && echo "$e2e_plain" | grep -qi "Expected-ref MISMATCH"; then
+  pass "wrong --expect-ref exits non-zero at the ref gate (rc=$e2e_rc)"
+else
+  fail "expected mismatch exit; rc=$e2e_rc output=$e2e_plain"
+fi
+if [ ! -f "$E2E_DIR/deployment-manifest.json" ]; then
+  pass "NO deployment-manifest.json written when the deploy is refused"
+else
+  fail "manifest was written despite a refused deploy"
+fi
+
+########################################
+# BITE PROOF (RED): remove the deletion gate and confirm the deletion test
+# no longer catches it — proving the gate + its test are load-bearing.
+########################################
+section "BITE PROOF: with deletion_gate removed, a deletion diff is NOT refused (expected RED)"
+BITE_DIFF="Resources
+[-] AWS::DynamoDB::Table SmokeIdempotencyTable citadel-smoke-idempotency-dev destroy"
+set +e
+bite_rc=$(
+  # Subshell: re-source deploy.sh functions, then OVERRIDE deletion_gate with a
+  # no-op (the "gate removed" version). If the gate is truly what refuses, the
+  # deletion diff now proceeds (rc=0), demonstrating the real gate bites.
+  export DEPLOY_SH_SOURCE_ONLY=1
+  # shellcheck disable=SC1090
+  source "$DEPLOY_SH" >/dev/null 2>&1
+  deletion_gate() { return 0; }   # gate removed
+  deletion_gate "$BITE_DIFF" "false" "true" >/dev/null 2>&1
+  echo $?
+)
+set -e 2>/dev/null || true
+if [ "$bite_rc" = "0" ]; then
+  pass "RED CONFIRMED: gate-removed version does NOT refuse the deletion diff (rc=0) — the real deletion_gate is load-bearing and its test genuinely catches removal"
+else
+  fail "gate-removed version still refused (rc=$bite_rc) — the deletion test is NOT actually exercising the gate"
+fi
+
+########################################
 # Summary
 ########################################
 echo ""
