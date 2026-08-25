@@ -7,6 +7,8 @@ All functions are pure (no side effects, no AWS calls).
 
 import random
 
+from common.failure_taxonomy import is_retry_forbidden_by_taxonomy
+
 
 def calculate_backoff(attempt: int, base: float, max_delay: float) -> float:
     """Exponential backoff with full jitter: uniform(0, min(base * 2^attempt, max_delay)).
@@ -34,7 +36,17 @@ def should_retry(error_type: str, retryable_errors: list[str], attempt: int, max
 
     Returns:
         True if the error is retryable and attempts are not exhausted.
+
+    Authority (843a959e): the unified failure taxonomy is AUTHORITATIVE over the
+    author-supplied ``retryable_errors`` list. If ``error_type`` classifies to a
+    recognised never-retry class (validation / policy-denied / authz /
+    indeterminate / approval-absent), retry is refused REGARDLESS of the list —
+    a stored definition can NARROW retries but can never WIDEN a never-retry
+    class. An unrecognised error is not vetoed here, so the list still governs
+    it (see ``failure_taxonomy.is_retry_forbidden_by_taxonomy``).
     """
     if attempt >= max_retries:
+        return False
+    if is_retry_forbidden_by_taxonomy(error_type):
         return False
     return error_type in retryable_errors

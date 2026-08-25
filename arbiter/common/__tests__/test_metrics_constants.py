@@ -18,6 +18,10 @@ def test_metric_names_are_pinned():
     assert mc.METRIC_NODE_COLD_START == 'NodeColdStart'
 
 
+def test_retry_governance_smell_metric_is_pinned():
+    assert mc.METRIC_RETRY_GOVERNANCE_SMELL == 'RetryGovernanceSmell'
+
+
 def test_units_are_pinned():
     assert mc.UNIT_MILLISECONDS == 'Milliseconds'
     assert mc.UNIT_COUNT == 'Count'

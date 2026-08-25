@@ -19,12 +19,23 @@ deliberately NOT re-retried here.
 
 ``calculate_backoff`` and ``should_retry`` are copied verbatim from
 ``arbiter/stepRunner/retry.py`` — each arbiter module bundles as a separate
-Lambda, so a cross-module import would couple packaging.
+Lambda, so a cross-module import would couple packaging. Per decision
+5ac980e0 these full-jitter copies are intentionally NOT deduplicated; a
+parity test asserts they stay numerically equivalent.
+
+Transient classification is NO LONGER a private frozenset (board task
+9099b8cb): it delegates to the unified failure taxonomy
+(``common.failure_taxonomy``) — the single source of truth every retry
+consumer reads — so this helper can never drift from the circuit breaker or
+the step runner. The taxonomy resolves in the deployed fabricator bundle via
+the shared ``ArbiterCatalogLayer`` (``common`` staged at ``/opt/python``).
 """
 
 import logging
 import random
 import time
+
+from common.failure_taxonomy import classify, is_auto_retryable
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +44,6 @@ MAX_ATTEMPTS = 3
 # Full-jitter exponential backoff ceilings between attempts: ~1s, ~2s.
 BASE_DELAY_SECONDS = 1.0
 MAX_DELAY_SECONDS = 8.0
-
-# Transient Bedrock fault codes, lowercased. Comparison is case-insensitive
-# because Bedrock reports request-level faults in CamelCase
-# (ThrottlingException) and mid-stream event faults in camelCase
-# (throttlingException, modelStreamErrorException).
-TRANSIENT_BEDROCK_ERROR_CODES = frozenset({
-    "internalserverexception",
-    "serviceunavailableexception",
-    "throttlingexception",
-    "modelstreamerrorexception",
-})
 
 
 # --- copied verbatim from arbiter/stepRunner/retry.py (pure functions) ------
@@ -101,9 +101,15 @@ def bedrock_error_code(exc: BaseException) -> str | None:
 
 
 def is_transient_bedrock_error(exc: BaseException) -> bool:
-    """True only for the four transient Bedrock fault codes (any casing)."""
-    code = bedrock_error_code(exc)
-    return code is not None and code.lower() in TRANSIENT_BEDROCK_ERROR_CODES
+    """True iff the fault is AUTO-retryable per the unified failure taxonomy.
+
+    Delegates to ``is_auto_retryable(classify(exc))`` — no private code set.
+    ``classify`` reads the botocore ``response['Error']['Code']`` (covering
+    ``ClientError`` and its mid-stream ``EventStreamError`` subclass, any
+    casing) then the exception type name; a code that maps to throttle /
+    transient / timeout is auto-retryable, everything else (validation, authz,
+    unrecognised) is not."""
+    return is_auto_retryable(classify(exc))
 
 
 def call_with_transient_retry(
@@ -152,8 +158,11 @@ def call_with_transient_retry(
         try:
             return operation()
         except Exception as exc:  # noqa: BLE001 — classified below; re-raised unless transient
-            code = (bedrock_error_code(exc) or "").lower()
-            if not should_retry(code, TRANSIENT_BEDROCK_ERROR_CODES, attempt, max_attempts - 1):
+            code = bedrock_error_code(exc)
+            # Taxonomy is the single classifier (board task 9099b8cb): fail fast
+            # on the last attempt OR any non-auto-retryable fault (validation,
+            # authz, unrecognised). No private code set.
+            if attempt >= max_attempts - 1 or not is_transient_bedrock_error(exc):
                 raise
             delay = calculate_backoff(attempt, base_delay, max_delay)
             if deadline is not None and not deadline.can_fit(delay):

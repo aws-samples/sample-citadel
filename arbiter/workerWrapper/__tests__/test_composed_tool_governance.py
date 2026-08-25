@@ -281,6 +281,57 @@ class TestGovernanceRemovalRedProof:
 
 
 # ---------------------------------------------------------------------------
+# DENY is classified never-retry by the unified taxonomy (board task 9099b8cb)
+# ---------------------------------------------------------------------------
+
+
+class TestDenyIsNeverRetriedAndNoStorm:
+    """Through the REAL BeforeToolCallEvent seam (no agent-boundary stub — that
+    stub hid finding ee38af53): a governance DENY runs the inner tool NEVER,
+    creates NO idempotency reservation (never-retried at the tool level), and
+    writes the DENY GovernanceFinding EXACTLY ONCE (no storm). The taxonomy
+    independently classifies a settled DENY as never-retry, so even if the
+    class reached the node-retry path it could not be widened."""
+
+    def test_deny_never_runs_reserves_or_storms_and_taxonomy_forbids_retry(
+        self, monkeypatch, fake_tool_result_event
+    ):
+        from common import failure_taxonomy as ft
+
+        # Taxonomy: a settled DENY is never-retry and cannot be widened.
+        assert ft.classify(ft.POLICY_DENIED_CLASS) is ft.FailureClass.POLICY_DENIED
+        assert ft.disposition(ft.classify(ft.POLICY_DENIED_CLASS)) is ft.RetryDisposition.NEVER
+        assert ft.is_retry_forbidden_by_taxonomy(ft.POLICY_DENIED_CLASS) is True
+
+        # Count DENY findings written through the REAL decision path.
+        import governed_tool_handler
+        finding_writes = []
+        monkeypatch.setattr(
+            governed_tool_handler, "write_finding",
+            lambda *a, **k: finding_writes.append((a, k)),
+        )
+        reserve_calls = []
+        monkeypatch.setattr(ledger, "reserve", lambda *a, **k: reserve_calls.append((a, k)))
+
+        executed: list = []
+        inner = _FakeInnerTool("dangerous", executed)
+        event = _FakeEvent("dangerous", "tu-1", {"x": 1}, inner)
+        ComposedToolHook(
+            governance=_evaluator(), idempotency=_idempotency()
+        )._on_before_tool_call(event)
+
+        # Drive the deny tool's stream through the real seam.
+        events = _drain(event.selected_tool.stream(event.tool_use, {}))
+
+        assert isinstance(event.selected_tool, _GovernanceDeniedTool)
+        assert executed == []            # inner tool NEVER ran (never-retried)
+        assert reserve_calls == []       # no idempotency reservation
+        assert len(events) == 1 and events[0].tool_result["status"] == "error"
+        # No storm: the DENY audit finding is written exactly once.
+        assert len(finding_writes) == 1
+
+
+# ---------------------------------------------------------------------------
 # Single installer — envelopes + fail-loud
 # ---------------------------------------------------------------------------
 

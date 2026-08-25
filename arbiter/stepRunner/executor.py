@@ -36,12 +36,14 @@ from dag import (
 from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
+from common import failure_taxonomy
 from common.usage import aggregate_usage, parse_usage_array
 from common.metrics_constants import (
     METRIC_NAMESPACE,
     METRIC_NODE_DURATION_MS,
     METRIC_NODE_FAILURE,
     METRIC_NODE_QUEUE_WAIT_MS,
+    METRIC_RETRY_GOVERNANCE_SMELL,
     METRIC_UNSTAMPED_DISPATCH,
     METRIC_RELEASE_DISPATCH_EVALUATED,
     METRIC_RELEASE_DISPATCH_WOULD_BLOCK,
@@ -1181,6 +1183,34 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
     backoff_max = retry_policy.get('backoffMax', 60.0)
 
     now = _now_iso()
+
+    # Governance-smell backstop (board task 9099b8cb, decision 843a959e /
+    # design storm-proof path). A SETTLED denial (policy-denied / authz) is
+    # never-retry; if a stale or tampered per-node ``retryableErrors`` lists
+    # such a class, that is an attempt to WIDEN a never-retry governance class —
+    # the taxonomy refuses the retry (should_retry vetoes below), and reaching
+    # this decision at all is the signal to file. Storm-proof BY CONSTRUCTION:
+    # a never-retry class fails the node immediately (no node.retrying
+    # scheduled), and the terminal-status idempotency guard above returns on a
+    # duplicate delivery — so at most ONE smell is emitted per node-failure.
+    failure_class = failure_taxonomy.classify(error)
+    if (
+        error in retryable_errors
+        and failure_taxonomy.is_governance_smell_on_retry(failure_class)
+    ):
+        _log_event(
+            'retry_governance_smell',
+            executionId=execution_id,
+            workflowId=execution.get('workflowId', ''),
+            nodeId=node_id,
+            agentId=agent_id or None,
+            errorClass=error,
+            failureClass=failure_class.value,
+        )
+        _emit_metric(
+            METRIC_RETRY_GOVERNANCE_SMELL, 1.0, UNIT_COUNT,
+            workflow_id=execution.get('workflowId', ''),
+        )
 
     if should_retry(error, retryable_errors, retry_count, max_retries):
         # Retry the node
