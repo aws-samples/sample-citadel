@@ -153,3 +153,33 @@ describe("release:promote (environment release pointer)", () => {
     expect(hasPermission(ctx([]), "release:promote")).toBe(false);
   });
 });
+
+describe("tool:approve (approval-required tool gating, finding c947aa77)", () => {
+  const architect = ctx(["architect"]);
+  const developer = ctx(["developer"]);
+  const pm = ctx(["project_manager"]);
+  const admin = ctx(["admin"]);
+
+  // Same governance-grade tier as release:promote — pre-granting a single-use
+  // approval for a gated side-effecting tool is a deliberate, attributable
+  // authorization, kept off broad roles (least privilege).
+  test("architect has tool:approve", () => {
+    expect(hasPermission(architect, "tool:approve")).toBe(true);
+  });
+
+  test("developer does NOT have tool:approve", () => {
+    expect(hasPermission(developer, "tool:approve")).toBe(false);
+  });
+
+  test("project_manager does NOT have tool:approve", () => {
+    expect(hasPermission(pm, "tool:approve")).toBe(false);
+  });
+
+  test("admin bypass grants tool:approve", () => {
+    expect(hasPermission(admin, "tool:approve")).toBe(true);
+  });
+
+  test("no role + no admin denies tool:approve", () => {
+    expect(hasPermission(ctx([]), "tool:approve")).toBe(false);
+  });
+});

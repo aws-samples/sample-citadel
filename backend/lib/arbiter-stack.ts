@@ -1937,14 +1937,46 @@ export class ArbiterStack extends cdk.Stack {
     // attribute_not_exists(findingId) PutItem), so no UpdateItem/DeleteItem/
     // Query/Scan and no wildcard, matching the least-privilege shape of the
     // sibling governance writers and this worker's own tool-ledger grant.
+    //
+    // Approval-required tool gating (finding c947aa77) adds a DISTINCT
+    // dynamodb:GetItem statement below: the worker READS the pre-granted
+    // approval row (a GetItem on the sole findingId HASH key — never a Query)
+    // and WRITES the single-use consumption marker + the always-visible
+    // APPROVAL finding (both conditional attribute_not_exists PutItems, already
+    // covered by the PutItem statement). The read grant is kept a SEPARATE
+    // statement so the write-once PutItem shape stays pinned on its own.
     workerAgentWrapperLambda.addEnvironment(
       "GOVERNANCE_LEDGER_TABLE",
       governanceLedgerTable.tableName,
+    );
+    // OPT-IN approval-required tool set (finding c947aa77), delivered on the
+    // server-assembled dispatch path exactly like DENIED_TOOLS — NEVER via
+    // the S3 tool module (finding 588c7fb8, which runs stale). Empty by
+    // default (no tool gated); operators enable via CDK context
+    // `approvalRequiredTools` (comma-separated tool names).
+    workerAgentWrapperLambda.addEnvironment(
+      "APPROVAL_REQUIRED_TOOLS",
+      (this.node.tryGetContext("approvalRequiredTools") as string) ?? "",
     );
     workerAgentWrapperLambda.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ["dynamodb:PutItem"],
+        resources: [governanceLedgerTable.tableArn],
+      }),
+    );
+    // Approval-required tool gating (finding c947aa77): a DISTINCT read-only
+    // GetItem statement (never folded into the write-once PutItem statement
+    // above — a new read grant stays its own least-privilege statement so the
+    // write-once shape is pinned separately). The worker READS a pre-granted
+    // approval row by its deterministic findingId (a GetItem on the sole HASH
+    // key — never a Query); the consumption marker + APPROVAL finding writes
+    // reuse the PutItem grant. No UpdateItem/DeleteItem/Query/Scan, no
+    // wildcard, no /index/* — scoped to the single ledger table ARN.
+    workerAgentWrapperLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem"],
         resources: [governanceLedgerTable.tableArn],
       }),
     );
@@ -2400,6 +2432,102 @@ export class ArbiterStack extends cdk.Stack {
     // actually wired. Existing arbiter-stack-*.test.ts paths construct the
     // stack without an API, and that should remain a valid synthesis.
     if (props.appSyncApi) {
+      // ============================================================
+      // Approval-required tool gating (finding c947aa77) — decideToolApproval
+      // ============================================================
+      // A dedicated resolver Lambda + data source for the ONE Mutation field
+      // that PRE-GRANTS a single-use tool approval into GOVERNANCE_LEDGER_TABLE
+      // (write-once conditional PutItem via tool-approval-grant-writer.ts).
+      // Homed in THIS stack because the ledger table lives here; wired to the
+      // BackendStack-owned API by apiId string token (same one-way-dependency
+      // technique as the governance UI resolver above — no stack cycle).
+      const toolApprovalResolverFn = new lambda.Function(
+        this,
+        "ToolApprovalResolverFn",
+        {
+          runtime: lambda.Runtime.NODEJS_24_X,
+          handler: "tool-approval-resolver.handler",
+          code: lambda.Code.fromAsset("dist/lambda"),
+          timeout: cdk.Duration.seconds(30),
+          environment: {
+            ENVIRONMENT: props.environment,
+            GOVERNANCE_LEDGER_TABLE: this.governanceLedgerTable.tableName,
+            // extractOrgFromEvent prefers the `custom:organization` JWT claim;
+            // USER_POOL_ID enables the AdminGetUser fallback during the token-
+            // refresh transition window. Derived from the pool ARN when wired.
+            ...(props.userPoolArn && {
+              USER_POOL_ID: cdk.Fn.select(
+                1,
+                cdk.Fn.split("/", props.userPoolArn),
+              ),
+            }),
+          },
+          logGroup: new logs.LogGroup(this, "ToolApprovalResolverFnLogs", {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          }),
+        },
+      );
+      // Least privilege: the resolver only WRITES the write-once grant row
+      // (conditional attribute_not_exists PutItem). No Get/Update/Delete/
+      // Query/Scan, no wildcard — the worker (not this resolver) reads/consumes.
+      toolApprovalResolverFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:PutItem"],
+          resources: [this.governanceLedgerTable.tableArn],
+        }),
+      );
+      // Cognito AdminGetUser for the org-claim fallback (mirror the governance
+      // UI resolver's scoping: precise ARN when supplied, else userpool/*).
+      toolApprovalResolverFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["cognito-idp:AdminGetUser"],
+          resources: [
+            props.userPoolArn ??
+              `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/*`,
+          ],
+        }),
+      );
+
+      const toolApprovalDataSourceRole = new iam.Role(
+        this,
+        "ToolApprovalDataSourceRole",
+        { assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com") },
+      );
+      toolApprovalResolverFn.grantInvoke(toolApprovalDataSourceRole);
+
+      const toolApprovalLambdaDataSource = new appsyncCfn.CfnDataSource(
+        this,
+        "ToolApprovalLambdaDataSource",
+        {
+          apiId: props.appSyncApi.apiId,
+          name: "ToolApprovalLambdaDataSource",
+          type: "AWS_LAMBDA",
+          serviceRoleArn: toolApprovalDataSourceRole.roleArn,
+          lambdaConfig: {
+            lambdaFunctionArn: toolApprovalResolverFn.functionArn,
+          },
+        },
+      );
+
+      const decideToolApprovalResolver = new appsyncCfn.CfnResolver(
+        this,
+        "ToolApproval_decideToolApproval_Resolver",
+        {
+          apiId: props.appSyncApi.apiId,
+          typeName: "Mutation",
+          fieldName: "decideToolApproval",
+          dataSourceName: toolApprovalLambdaDataSource.attrName,
+          requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+          responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+        },
+      );
+      decideToolApprovalResolver.addResourceDependency(
+        toolApprovalLambdaDataSource,
+      );
+
       const governanceUiDataSourceRole = new iam.Role(
         this,
         "GovernanceUiDataSourceRole",
