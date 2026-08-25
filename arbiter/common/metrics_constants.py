@@ -52,6 +52,15 @@ METRIC_NODE_COLD_START = 'NodeColdStart'
 # constant at the emission call site, never hand-type the string literal.
 METRIC_UNSTAMPED_DISPATCH = 'UnstampedDispatch'
 
+# Governance-smell backstop (board task 9099b8cb, failure taxonomy): emitted
+# WARN-level exactly once when a node-failure retry decision is reached for a
+# SETTLED denial (policy-denied / authz) — i.e. a stale/tampered per-node
+# retryableErrors tried to WIDEN a never-retry governance class. Observability
+# only; the taxonomy already refuses the retry (fail-closed). Low-cardinality
+# (WorkflowId dimension only), pinned by literal-value tests — never hand-type
+# the string at the emission site.
+METRIC_RETRY_GOVERNANCE_SMELL = 'RetryGovernanceSmell'
+
 # --- Units ---------------------------------------------------------------
 
 UNIT_MILLISECONDS = 'Milliseconds'
