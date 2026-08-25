@@ -215,6 +215,13 @@ cdk_diff() {
     last_error=$(echo "$diff_output" | grep -v '^[[:space:]]*$' | tail -1)
     warn "cdk diff unavailable: $last_error"
   fi
+  # Expose the captured diff to the deletion gate (finding 9c92a738). These
+  # globals let the main flow parse the SAME diff text for resource deletions
+  # without re-invoking cdk. CDK_DIFF_RC=0 means the diff succeeded and its
+  # output can be trusted; non-zero means the gate must fail closed.
+  CDK_DIFF_OUTPUT="$diff_output"
+  CDK_DIFF_RC="$diff_rc"
+  export CDK_DIFF_OUTPUT CDK_DIFF_RC
   popd > /dev/null
 }
 
@@ -653,25 +660,246 @@ health_check() {
 }
 
 # --- Write deployment manifest ---
+# Provenance record (finding 7f42ae86): after a successful run, capture what
+# is actually running so it can be READ rather than recalled from scrollback.
+# Written to deployment-manifest.json at the repo root; that path is gitignored
+# via the `deployment-*.json` rule in .gitignore, so it never gets committed.
 write_manifest() {
   local manifest_file="deployment-manifest.json"
   local deployer
   deployer=$(aws sts get-caller-identity --query 'Arn' --output text ${AWS_PROFILE:+--profile $AWS_PROFILE} 2>/dev/null || echo "unknown")
 
+  # Build a JSON array of the concrete stack names this run targeted.
+  local stacks_json="[]"
+  local names
+  names=$(resolve_deployed_stack_names)
+  if [ -n "$names" ]; then
+    stacks_json=$(printf '%s\n' "$names" | awk 'NF{printf "%s\"%s\"", (c++?",":""), $0} END{print ""}')
+    stacks_json="[${stacks_json}]"
+  fi
+
+  local expected_ref_json="null"
+  [ -n "${EXPECT_REF:-}" ] && expected_ref_json="\"${EXPECT_REF}\""
+
   cat > "$manifest_file" <<EOF
 {
-  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "started_at": "${DEPLOY_STARTED_AT:-unknown}",
+  "completed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "environment": "$ENVIRONMENT",
   "region": "$CDK_DEFAULT_REGION",
   "account": "$CDK_DEFAULT_ACCOUNT",
   "git_sha": "$GIT_SHA",
   "git_branch": "$GIT_BRANCH",
   "git_dirty": "$GIT_DIRTY",
+  "expected_ref": ${expected_ref_json},
   "deployer": "$deployer",
-  "stacks_deployed": "$DEPLOY_MODE"
+  "deploy_mode": "$DEPLOY_MODE",
+  "stacks": ${stacks_json}
 }
 EOF
-  ok "Deployment manifest written to $manifest_file"
+  ok "Deployment manifest written to $manifest_file (gitignored)"
+}
+
+# --- Expected-ref gate (finding 7f42ae86 — provenance) ---
+# Cross-checks the ref the operator INTENDED against the ref actually resolved
+# from HEAD, so a deploy from the wrong clone/branch cannot proceed silently.
+#   - EXPECT_REF set: accept a branch name, a full sha, or a short/prefix sha;
+#     normalise, compare, and ABORT (naming both) on mismatch.
+#   - EXPECT_REF empty: print the resolved branch+short sha BEFORE any CDK work
+#     and require an interactive y/N confirmation. If stdin is NOT a TTY (an
+#     unattended run), REFUSE rather than hang — an unattended deploy must never
+#     silently proceed without the operator having named the intended ref.
+verify_expected_ref() {
+  local expected="${1:-}"
+  local branch full_sha short_sha
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  full_sha=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+  short_sha=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+  if [ -n "$expected" ]; then
+    # Normalise a fully-qualified ref down to its short name for comparison.
+    local norm="${expected#refs/heads/}"
+    norm="${norm#refs/tags/}"
+    if [ "$norm" = "$branch" ] || [ "$norm" = "$full_sha" ] || [ "$norm" = "$short_sha" ]; then
+      ok "Expected-ref check passed: HEAD is ${branch}@${short_sha} (matches --expect-ref '${expected}')"
+      return 0
+    fi
+    # Allow an abbreviated/extended sha: expected is a case-insensitive prefix
+    # of the full sha (and looks like a hex sha of at least 4 chars).
+    if [[ "$norm" =~ ^[0-9a-fA-F]{4,40}$ ]]; then
+      local norm_lc full_lc
+      norm_lc=$(printf '%s' "$norm" | tr 'A-F' 'a-f')
+      full_lc=$(printf '%s' "$full_sha" | tr 'A-F' 'a-f')
+      if [ "${full_lc#"$norm_lc"}" != "$full_lc" ]; then
+        ok "Expected-ref check passed (sha prefix): HEAD ${short_sha} matches --expect-ref '${expected}'"
+        return 0
+      fi
+    fi
+    err "Expected-ref MISMATCH — refusing to deploy."
+    err "  --expect-ref requested: ${expected}"
+    err "  resolved HEAD:          ${branch}@${short_sha} (${full_sha})"
+    err "This clone's HEAD is not the ref you intended to deploy (finding 7f42ae86). Check out the intended ref, or correct --expect-ref."
+    return 1
+  fi
+
+  # No --expect-ref supplied.
+  warn "No --expect-ref supplied. Resolved deploy target: ${branch}@${short_sha}"
+  if [ -t 0 ]; then
+    printf 'Proceed deploying %s@%s to environment "%s"? [y/N] ' "$branch" "$short_sha" "${ENVIRONMENT:-?}"
+    local reply=""
+    read -r reply || true
+    case "$reply" in
+      y|Y|yes|YES|Yes)
+        ok "Operator confirmed deploy of ${branch}@${short_sha}"
+        return 0
+        ;;
+      *)
+        err "Operator declined confirmation — aborting."
+        return 1
+        ;;
+    esac
+  fi
+  err "No --expect-ref and stdin is not a TTY — refusing to deploy unattended (finding 7f42ae86)."
+  err "Re-run with --expect-ref ${branch} (or --expect-ref ${short_sha}) to name the intended ref explicitly."
+  return 1
+}
+
+# --- Tree-state gate (dirty / divergence) ---
+# Two distinct checks, each with an explicit refuse-vs-warn rationale:
+#   1. DIRTY working tree -> REFUSE (override: --allow-dirty -> loud WARN).
+#      Why refuse: a dirty tree corresponds to NO commit, so the git_sha the
+#      success banner and provenance manifest record would misrepresent what is
+#      actually running (finding 7f42ae86). --allow-dirty proceeds but the
+#      manifest records git_dirty=dirty so the lie is at least on the record.
+#   2. HEAD is NOT an ancestor of origin/main AND no --expect-ref -> REFUSE.
+#      Why refuse: this is the exact finding-9c92a738 shape — deploying a
+#      divergent branch can silently reconcile away stateful resources added on
+#      OTHER unmerged branches. Supplying --expect-ref is the operator
+#      explicitly asserting "yes, deploy this divergent ref on purpose", which
+#      downgrades it to a loud WARN (the deletion gate remains the backstop).
+check_tree_state() {
+  local expected="${1:-}"
+  local allow_dirty="${2:-false}"
+
+  local dirty="clean"
+  if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    dirty="dirty"
+  fi
+
+  if [ "$dirty" = "dirty" ]; then
+    if [ "$allow_dirty" = "true" ]; then
+      warn "Working tree is DIRTY and --allow-dirty was supplied — proceeding; provenance manifest will record git_dirty=dirty."
+    else
+      err "Working tree is DIRTY — refusing to deploy."
+      err "A dirty tree corresponds to no commit, so the recorded provenance sha would misrepresent what is running (finding 7f42ae86)."
+      err "Commit or stash your changes, or pass --allow-dirty to deploy anyway (recorded as dirty)."
+      return 1
+    fi
+  fi
+
+  # Divergence check: only meaningful if origin/main is resolvable.
+  local divergent="false"
+  if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
+    if ! git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+      divergent="true"
+    fi
+  else
+    warn "origin/main not resolvable — skipping divergence (ancestry) check."
+  fi
+
+  if [ "$divergent" = "true" ]; then
+    if [ -n "$expected" ]; then
+      warn "HEAD is NOT an ancestor of origin/main (divergent branch), but --expect-ref '${expected}' was supplied — proceeding on an explicit ref."
+      warn "Divergent-branch deploys can reconcile away stateful resources added on OTHER unmerged branches (finding 9c92a738); the deletion gate is your backstop."
+    else
+      err "HEAD is NOT an ancestor of origin/main (divergent branch) and no --expect-ref was supplied — refusing."
+      err "This is the finding-9c92a738 shape: deploying a divergent branch can silently DELETE stateful resources added on other unmerged branches."
+      err "If this divergent deploy is intentional, re-run with --expect-ref <branch|sha> to assert it explicitly."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# --- Parse cdk diff output for resource DELETIONS ---
+# CDK renders a removed resource as a line whose first non-whitespace token is
+# the removal marker "[-]", e.g.:
+#   [-] AWS::DynamoDB::Table SmokeTable citadelsmoke0AB12CD3 destroy
+# Echoes one "<Type> <Name...>" per deleted resource (marker stripped). Emits
+# nothing when there are no deletions.
+extract_cdk_deletions() {
+  local diff_text="$1"
+  # Strip ANSI colour escapes first (cdk diff colourizes the [-] marker red),
+  # then match lines whose first non-whitespace token is the removal marker.
+  printf '%s\n' "$diff_text" \
+    | sed -E 's/\x1b\[[0-9;]*[mK]//g' \
+    | grep -E '^[[:space:]]*\[-\][[:space:]]' \
+    | sed -E 's/^[[:space:]]*\[-\][[:space:]]+//'
+}
+
+# --- Deletion gate (finding 9c92a738) — FAIL CLOSED ---
+# Args: <diff_text> <allow_deletions:true|false> <diff_ok:true|false>
+# REFUSES (return 1) when the diff shows resource deletions and --allow-deletions
+# was not passed. If the diff is empty or cdk diff failed (diff_ok!=true), also
+# REFUSES: we cannot PROVE the deploy performs no deletions, so we fail closed
+# rather than assume none.
+deletion_gate() {
+  local diff_text="$1"
+  local allow_deletions="${2:-false}"
+  local diff_ok="${3:-true}"
+
+  local stripped="${diff_text//[[:space:]]/}"
+  if [ "$diff_ok" != "true" ] || [ -z "$stripped" ]; then
+    err "Deletion gate: cdk diff output is empty or could not be parsed — refusing (fail-closed)."
+    err "Cannot prove this deploy performs no resource deletions; re-run once 'cdk diff' succeeds with parseable output."
+    return 1
+  fi
+
+  local deletions
+  deletions=$(extract_cdk_deletions "$diff_text")
+  if [ -z "$deletions" ]; then
+    ok "Deletion gate: cdk diff shows no resource deletions."
+    return 0
+  fi
+
+  err "Deletion gate: this deploy will DELETE the following resource(s):"
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && err "  DELETE → ${line}"
+  done <<< "$deletions"
+
+  if [ "$allow_deletions" = "true" ]; then
+    warn "--allow-deletions supplied — proceeding despite the deletions listed above."
+    return 0
+  fi
+  err "Refusing. If these deletions are intended, re-run with --allow-deletions."
+  err "Finding 9c92a738: a divergent-branch deploy can silently reconcile away stateful resources — confirm every name above is truly disposable first."
+  return 1
+}
+
+# --- Resolve the concrete stack names this run will deploy ---
+# Mirrors the DEPLOY_MODE switch in main so the provenance manifest records
+# WHICH stacks were targeted, not just the mode string.
+resolve_deployed_stack_names() {
+  local env="$ENVIRONMENT"
+  case "$DEPLOY_MODE" in
+    all)
+      printf '%s\n' "${KNOWN_STACKS[@]/%/-$env}"
+      ;;
+    backend)
+      local s
+      for s in "${KNOWN_STACKS[@]}"; do
+        [ "$s" = "citadel-frontend" ] && continue
+        printf '%s\n' "${s}-${env}"
+      done
+      ;;
+    frontend)
+      printf '%s\n' "citadel-frontend-${env}"
+      ;;
+    single)
+      printf '%s\n' "$STACK_NAME"
+      ;;
+  esac
 }
 
 # --- Help ---
@@ -689,6 +917,9 @@ show_help() {
   echo "  --profile <name>     Use specific AWS profile"
   echo "  --dry-run            Preview changes only (cdk diff)"
   echo "  --no-verify          Skip post-deploy health checks"
+  echo "  --expect-ref <ref>   Abort unless HEAD resolves to <ref> (branch name, full or short sha)"
+  echo "  --allow-deletions    Proceed even if cdk diff shows resource DELETIONS (default: refuse)"
+  echo "  --allow-dirty        Proceed even if the working tree is dirty (default: refuse)"
   echo "  --admin-email <addr> Admin email for initial user (overrides ADMIN_EMAIL env var)"
   echo "  --help               Show this help message"
   exit 0
@@ -714,6 +945,10 @@ SKIP_BACKEND_BUILD=false
 DRY_RUN=false
 NO_VERIFY=false
 ADMIN_EMAIL_ARG=""
+EXPECT_REF=""
+ALLOW_DELETIONS=false
+ALLOW_DIRTY=false
+DEPLOY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -726,6 +961,9 @@ while [[ $# -gt 0 ]]; do
     --profile)        AWS_PROFILE="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=true; shift ;;
     --no-verify)      NO_VERIFY=true; shift ;;
+    --expect-ref)     EXPECT_REF="$2"; shift 2 ;;
+    --allow-deletions) ALLOW_DELETIONS=true; shift ;;
+    --allow-dirty)    ALLOW_DIRTY=true; shift ;;
     --admin-email)    ADMIN_EMAIL_ARG="$2"; shift 2 ;;
     *)
       if [ -z "$STACK_NAME" ]; then
@@ -742,6 +980,17 @@ header "Citadel Deployment"
 load_env "backend/.env"
 validate_env
 capture_git_info
+
+# --- Provenance & divergence gates (findings 7f42ae86, 9c92a738) ---
+# Run BEFORE any expensive build/synth so a wrong-clone / wrong-branch /
+# divergent / dirty deploy fails fast, and so an unattended run without an
+# explicit intended ref can never silently proceed.
+if ! verify_expected_ref "$EXPECT_REF"; then
+  exit 1
+fi
+if ! check_tree_state "$EXPECT_REF" "$ALLOW_DIRTY"; then
+  exit 1
+fi
 
 [ -n "${AWS_PROFILE:-}" ] && { export AWS_PROFILE; ok "AWS Profile: $AWS_PROFILE"; } || unset AWS_PROFILE
 
@@ -833,6 +1082,16 @@ ok "Deploy target: account=$CDK_DEFAULT_ACCOUNT region=$AWS_DEFAULT_REGION"
 if [ "$DRY_RUN" = true ]; then
   ok "Dry run complete — no changes deployed"
   exit 0
+fi
+
+# --- Deletion gate (finding 9c92a738) — FAIL CLOSED ---
+# Parse the cdk diff captured just above for resource DELETIONS and REFUSE
+# (naming each resource) unless --allow-deletions was passed. If the diff is
+# empty or failed, refuse rather than assume no deletions.
+diff_ok="true"
+[ "${CDK_DIFF_RC:-1}" -eq 0 ] || diff_ok="false"
+if ! deletion_gate "${CDK_DIFF_OUTPUT:-}" "$ALLOW_DELETIONS" "$diff_ok"; then
+  exit 1
 fi
 
 # Deploy phase

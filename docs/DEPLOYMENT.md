@@ -170,8 +170,100 @@ The Gateway ID is automatically imported from the Services Stack and passed to t
 | `--profile <name>` | Use specific AWS profile |
 | `--dry-run` | Preview changes only (`cdk diff`) — nothing is deployed |
 | `--no-verify` | Skip post-deploy health checks |
+| `--expect-ref <ref>` | Abort unless HEAD resolves to `<ref>` (branch name, full or short sha). See Deploy Safety Gates. |
+| `--allow-deletions` | Proceed even if `cdk diff` shows resource DELETIONS (default: refuse). |
+| `--allow-dirty` | Proceed even if the working tree is dirty (default: refuse). |
 | `--admin-email <addr>` | Admin email for initial user (overrides `ADMIN_EMAIL` env var) |
 | `--help` | Show help message |
+
+## Deploy Safety Gates
+
+Deploys are **manual** (`./deploy.sh`, never CI) into a **shared** environment,
+so `deploy.sh` runs four safety gates BEFORE any CDK work. They exist because
+of two real incidents:
+
+- **Wrong-ref deploy (provenance).** A run deployed a branch from the wrong
+  clone while the intended work sat elsewhere, and later an operator mistook
+  stale scrollback for a completed deploy.
+- **Divergent-branch deletion.** Deploying a branch that predates another
+  *unmerged* branch made CDK reconcile the environment to the deployed tree and
+  silently **DELETE** stateful resources the other branch had added (a table, a
+  seeded record, an IAM grant, an env var) — all while reporting success.
+
+### 1. Expected-ref gate (`--expect-ref`)
+
+`--expect-ref <ref>` cross-checks the ref you INTENDED against the ref actually
+resolved from `HEAD`. It accepts a branch name, a full sha, or a short/prefix
+sha, normalises, and **ABORTS on mismatch, printing both**. When `--expect-ref`
+is omitted the script prints the resolved branch + short sha and requires an
+interactive confirmation; **if stdin is not a TTY (an unattended run) it refuses
+rather than hang** — an unattended deploy must never silently proceed without a
+named ref.
+
+### 2. Dirty / divergence gates — refuse-vs-warn matrix
+
+| Condition | Behaviour | Why |
+|-----------|-----------|-----|
+| Working tree **dirty** | **REFUSE** (override: `--allow-dirty` → loud warn, manifest records `git_dirty=dirty`) | A dirty tree corresponds to no commit, so the recorded provenance sha would misrepresent what is running. |
+| HEAD **not an ancestor of `origin/main`** AND no `--expect-ref` | **REFUSE** | The divergent-branch shape: an unconfirmed divergent deploy is exactly how stateful resources get silently reconciled away. |
+| HEAD not an ancestor of `origin/main` WITH `--expect-ref` | **WARN** (proceed) | Supplying `--expect-ref` is the operator explicitly asserting the divergent ref is intentional; the deletion gate remains the backstop. |
+| `--expect-ref` mismatch | **REFUSE** (names both refs) | Wrong clone/branch. |
+| No `--expect-ref`, no TTY | **REFUSE** | Unattended run without a named intended ref. |
+
+### 3. Deletion gate — FAIL CLOSED
+
+`deploy.sh` parses its own `cdk diff` for resource **deletions** (lines whose
+first token is the CDK removal marker `[-]`) and **REFUSES**, naming each
+resource (e.g. `this deploy will DELETE citadel-smoke-idempotency-dev`), unless
+you pass `--allow-deletions`. It **fails closed**: if the diff is empty or
+`cdk diff` failed, it refuses rather than assume there are no deletions.
+
+### 4. Provenance record (`deployment-manifest.json`)
+
+After a successful run, `deploy.sh` writes `deployment-manifest.json` at the
+repo root capturing `environment`, `git_branch`, resolved `git_sha`,
+`git_dirty`, `expected_ref`, `deployer`, the concrete `stacks` deployed, and
+`started_at`/`completed_at` timestamps — so what is running can be **read**
+rather than recalled from scrollback. The file is **gitignored** (matched by the
+`deployment-*.json` rule in `.gitignore`), so it is never committed. It is
+written ONLY on a successful run — a refused/failed deploy writes no manifest.
+
+### RETAIN on data-bearing resources — the tradeoff, and recovery
+
+To make the divergent-branch deletion path **loud instead of silent**, the
+data-bearing stores carry `RemovalPolicy.RETAIN` and (for DynamoDB)
+`deletionProtection`:
+
+| Resource | Stack | Protected | Rationale |
+|----------|-------|-----------|-----------|
+| `citadel-executions-*` | backend | RETAIN + deletionProtection | Workflow execution history. |
+| `citadel-governance-ledger-*` | arbiter | RETAIN + deletionProtection (keeps 90-day row TTL) | Accountability/audit ledger. |
+| `citadel-tool-execution-ledger-*` | arbiter | RETAIN + deletionProtection (keeps row TTL) | Live in-flight idempotency state. |
+| `citadel-tool-results-*` (S3) | arbiter | RETAIN (KMS key already RETAIN; 7-day object TTL kept) | Offloaded results referenced by unexpired ledger rows. |
+| `citadel-agent-releases-*`, `citadel-environment-release-pointers-*`, `citadel-environment-release-pointer-history-*`, authority/contracts/case-law/constitutional tables | backend/arbiter/governance | RETAIN + deletionProtection (already) | Release + governance state/history. |
+| **`citadel-smoke-idempotency-*`** | arbiter | **EXCLUDED — stays DESTROY** | Disposable, self-cleaning 24h-TTL smoke fixture holding no data worth recovering. Protecting it would only create an orphan that blocks a later re-add. |
+
+For the two operational stores (tool-execution ledger, tool-results bucket) the
+prior design deliberately chose DESTROY as "operational, not audit". RETAIN
+deliberately reverses that per the approved findings: the row/object TTLs still
+self-expire contents, so only the **silent whole-store teardown** is blocked.
+
+**The tradeoff (must understand before operating):** RETAIN converts a *silent
+data loss* into an **orphaned resource**. The next deploy that re-adds the same
+logical resource then fails **loudly** with `… already exists`
+(`AlreadyExists`). That loud failure replacing a silent one is the entire point.
+
+**Recovery when a re-add hits `AlreadyExists`:**
+
+1. Confirm the orphaned resource genuinely holds data you need
+   (`aws dynamodb scan --max-items 1 …` / `aws s3 ls …`). If it is empty and
+   disposable, delete it manually and redeploy.
+2. Otherwise **import** the orphan back under CloudFormation management:
+   `cdk import <stack>` (map the logical id to the existing physical name), then
+   redeploy — the stack resumes ownership with data intact.
+3. If import is not viable, **rename** the logical resource (new physical name),
+   deploy to create the fresh resource, then migrate/backfill data from the
+   orphan and decommission it.
 
 ## What Gets Deployed
 

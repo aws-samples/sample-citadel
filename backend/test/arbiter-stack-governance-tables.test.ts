@@ -117,7 +117,9 @@ describe("ArbiterStack — US-ARB-002 governance tables (Δ8)", () => {
   });
 
   // ----------------------------------------------------------------
-  // DeletionPolicy: Retain on config tables, Delete on the ledger
+  // DeletionPolicy: Retain on all five governance tables (the four config
+  // tables and the ledger — the ledger was flipped from Delete to Retain by
+  // deploy-safety findings 7f42ae86/9c92a738).
   // ----------------------------------------------------------------
   describe("DeletionPolicy", () => {
     const retainedNames = [
@@ -141,15 +143,25 @@ describe("ArbiterStack — US-ARB-002 governance tables (Δ8)", () => {
       },
     );
 
-    test("ledger table has DeletionPolicy=Delete", () => {
+    test("ledger table has DeletionPolicy=Retain (deploy-safety findings 7f42ae86/9c92a738)", () => {
+      // The governance ledger is an accountability store: RETAIN +
+      // deletionProtection so a divergent-branch deploy cannot silently DELETE
+      // it. The `ttl` attribute still expires individual rows; deletionProtection
+      // guards only the table.
       const tables = template.findResources("AWS::DynamoDB::Table", {
         Properties: { TableName: "citadel-governance-ledger-test" },
       });
       const logicalIds = Object.keys(tables);
       expect(logicalIds).toHaveLength(1);
       const resource = tables[logicalIds[0]];
-      expect(resource.DeletionPolicy).toBe("Delete");
-      expect(resource.UpdateReplacePolicy).toBe("Delete");
+      expect(resource.DeletionPolicy).toBe("Retain");
+      expect(resource.UpdateReplacePolicy).toBe("Retain");
+      expect(resource.Properties.DeletionProtectionEnabled).toBe(true);
+      // TTL is retained for row-level expiry even though the table is now retained.
+      expect(resource.Properties.TimeToLiveSpecification).toEqual({
+        AttributeName: "ttl",
+        Enabled: true,
+      });
     });
   });
 

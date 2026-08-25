@@ -928,8 +928,8 @@
     },
     "ExecutionsTableA2EE59C2": {
       "type": "AWS::DynamoDB::Table",
-      "deletionPolicy": "Delete",
-      "updateReplacePolicy": "Delete",
+      "deletionPolicy": "Retain",
+      "updateReplacePolicy": "Retain",
       "properties": {
         "AttributeDefinitions": [
           {
