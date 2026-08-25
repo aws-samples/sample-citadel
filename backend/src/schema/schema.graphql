@@ -401,6 +401,13 @@ type Mutation {
   reweightCanary(input: ReweightCanaryInput!): EnvironmentReleasePointer!
   promoteCanary(input: CanaryOpInput!): EnvironmentReleasePointer!
   abortCanary(input: CanaryOpInput!): EnvironmentReleasePointer!
+  # Approval-required tool gating (finding c947aa77): PRE-GRANT a single-use
+  # approval for a gated tool on a (org, workflowDefinition, node, tool).
+  # tool:approve-gated in the resolver (schema visibility is not the
+  # enforcement boundary); orgId + decidedBy are server-derived, never from
+  # the input. CHECK-AND-REFUSE v1 — this pre-grants; it is NOT an in-flight
+  # / pause-and-resume approval (docs/APPROVAL_GATING.md).
+  decideToolApproval(input: DecideToolApprovalInput!): ToolApprovalGrant!
   # Eval baseline comparison + regression (CIT-105). UI: OUT OF SCOPE.
   designateEvalBaseline(input: DesignateEvalBaselineInput!): EvalBaseline!
   computeEvalComparison(input: ComputeEvalComparisonInput!): EvalComparisonVerdict!
@@ -2561,6 +2568,31 @@ input CanaryOpInput {
 input PromotionApproval {
   approved: Boolean!
   justification: String
+}
+
+# Approval-required tool gating (finding c947aa77). decidedBy is NEVER part
+# of this input — it is server-derived from the caller's Cognito identity in
+# the resolver, same doctrine as PromotionApproval. orgId is OPTIONAL and,
+# when present, MUST equal the caller's server-derived org (cross-org grants
+# are rejected); the persisted grant's org is always the caller's org.
+input DecideToolApprovalInput {
+  orgId: ID
+  workflowDefinitionId: String!
+  nodeId: String!
+  toolName: String!
+  # Application validity window in seconds (short-lived, clamped 1..86400 in
+  # the resolver). DISTINCT from the row's 90-day audit retention TTL.
+  validitySeconds: Int
+  justification: String
+}
+
+# The result of a granted single-use tool approval. findingId is the
+# deterministic GOVERNANCE_LEDGER_TABLE row id; expiresAt is the APPLICATION
+# validity epoch (NOT the audit retention ttl); decidedBy is server-derived.
+type ToolApprovalGrant {
+  findingId: ID!
+  expiresAt: Int!
+  decidedBy: String!
 }
 
 type EvalRunCaseResult {

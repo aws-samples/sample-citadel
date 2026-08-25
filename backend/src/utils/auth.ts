@@ -116,6 +116,14 @@ export function hasPermission(
       // reach a full cutover on its own. Granted to the same architect
       // tier as release:promote (admin has all via the bypass above).
       "release:canary",
+      // Approval-required tool gating (finding c947aa77): tool:approve
+      // authorizes PRE-GRANTING a single-use approval for a gated tool on
+      // a (org, workflowDefinition, node, tool). Same governance-grade trust
+      // tier as release:promote — a gated side-effecting tool never runs
+      // without a deliberate, attributable human pre-authorization. Admin
+      // has it via the bypass above; NEVER folded into a broad role beyond
+      // architect/admin (least privilege).
+      "tool:approve",
     ],
     developer: [
       "project:read",
