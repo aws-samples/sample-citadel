@@ -107,6 +107,11 @@ logger = logging.getLogger(__name__)
 # reference it symmetrically.
 SCOPE_WORKER_TOOL_HANDLER = 'worker-tool-handler'
 
+# Approval-required tool gating (finding c947aa77) writes its always-visible
+# audit finding at a DISTINCT scope so an approval decision is never conflated
+# with the deny-list decision when querying findings by scope.
+SCOPE_WORKER_TOOL_APPROVAL = 'worker-tool-approval'
+
 
 def _parse_denied_tools_env() -> set[str]:
     """Parse the ``DENIED_TOOLS`` env var.
@@ -117,6 +122,80 @@ def _parse_denied_tools_env() -> set[str]:
     """
     raw = os.environ.get('DENIED_TOOLS', '')
     return {t.strip() for t in raw.split(',') if t.strip()}
+
+
+def _parse_approval_required_tools_env() -> set[str]:
+    """Parse the ``APPROVAL_REQUIRED_TOOLS`` env var — the OPT-IN explicit set
+    of tools that require a pre-granted approval (finding c947aa77).
+
+    Delivered exactly like ``DENIED_TOOLS``: comma-separated, server-assembled
+    on the worker dispatch path (index.py → build_subprocess_env), NEVER via
+    the S3-hosted tool module (finding 588c7fb8, which runs stale). Empty by
+    default (opt-in): a tool is gated iff it appears here."""
+    raw = os.environ.get('APPROVAL_REQUIRED_TOOLS', '')
+    return {t.strip() for t in raw.split(',') if t.strip()}
+
+
+def build_approval_finding(
+    tool_name: str,
+    permitted: bool,
+    reason_code: str,
+    *,
+    agent_id: str,
+    workflow_id: str,
+    eval_run_id: str | None = None,
+) -> GovernanceFinding:
+    """Build the ALWAYS-visible ``worker-tool-approval``-scope finding for an
+    approval decision (decision c0ca4576: an APPROVAL_REQUIRED record is written
+    either way — on a consumed approval AND on a refusal). ``permitted`` maps to
+    PERMIT (approval consumed) vs DENY (approval absent/expired/consumed)."""
+    decision = ArbitrationDecision.PERMIT if permitted else ArbitrationDecision.DENY
+    return GovernanceFinding.create(
+        workflow_id=workflow_id,
+        decision=decision,
+        requesting_agent=agent_id,
+        target_agent=f'tool:{tool_name}',
+        reason=f'{reason_code}:{tool_name}',
+        scope_evaluated=SCOPE_WORKER_TOOL_APPROVAL,
+        contract_evaluated=None,
+        eval_run_id=eval_run_id,
+    )
+
+
+def _approval_required_result(tool_use_id: str, tool_name: str) -> dict:
+    """ToolResult-shaped error dict for a POLICY approval refusal (absent /
+    expired / already-consumed). Mirrors ``_deny_error_result`` — strands
+    converts it to an error-status ToolResult; the tool never runs (finding
+    ee38af53: never a raise)."""
+    return {
+        'toolUseId': tool_use_id,
+        'status': 'error',
+        'content': [
+            {'text': (
+                f"Tool '{tool_name}' requires a pre-granted approval and none "
+                "is valid for this call (approval-required tool gating). "
+                "In-flight approval is unsupported — grant an approval and "
+                "re-run."
+            )}
+        ],
+    }
+
+
+def _approval_unavailable_result(tool_use_id: str, tool_name: str) -> dict:
+    """ToolResult-shaped error dict for an INFRASTRUCTURE approval refusal (the
+    gated set or the approval record could not be read/written). Distinct
+    message from a policy refusal — the node fails loud (infra-refusal path)."""
+    return {
+        'toolUseId': tool_use_id,
+        'status': 'error',
+        'content': [
+            {'text': (
+                f"Tool '{tool_name}' execution refused: its approval record "
+                "could not be read/written (fail-loud — a gated tool never runs "
+                "unapproved)."
+            )}
+        ],
+    }
 
 
 def _deny_error_result(tool_use_id: str, tool_name: str) -> dict:
@@ -271,6 +350,26 @@ def record_governance_decision(
     if denied:
         return True, _deny_error_result(tool_use_id, tool_name)
     return False, None
+
+
+def record_approval_finding(
+    tool_name: str,
+    permitted: bool,
+    reason_code: str,
+    *,
+    agent_id: str,
+    workflow_id: str,
+    eval_run_id: str | None = None,
+) -> None:
+    """Write the ALWAYS-visible ``worker-tool-approval`` audit finding for an
+    approval decision (decision c0ca4576). Uses the module-local ``write_finding``
+    (so the same fail-closed policy + test monkeypatch conventions apply as the
+    deny-list decision). Raises ``LedgerWriteError`` on write failure — the
+    caller treats that as an infrastructure refusal (fail-loud)."""
+    write_finding(build_approval_finding(
+        tool_name, permitted, reason_code,
+        agent_id=agent_id, workflow_id=workflow_id, eval_run_id=eval_run_id,
+    ))
 
 
 class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]

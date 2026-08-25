@@ -511,6 +511,18 @@ def _install_tool_call_hooks():
             # deny-list + per-run forbiddenTools into DENIED_TOOLS).
             denied_tools=None,
             eval_run_id=os.environ.get('CITADEL_EVAL_RUN_ID') or None,
+            # Approval-required tool gating (finding c947aa77). ``None`` →
+            # read the OPT-IN APPROVAL_REQUIRED_TOOLS set from env (assembled
+            # server-side per dispatch, like DENIED_TOOLS — never the S3 tool
+            # module). The grant scope tuple is (org, workflow DEFINITION,
+            # node, tool); executionId is the single-use consumption
+            # attribution. All threaded via CITADEL_* env from
+            # build_subprocess_env / the worker dispatch paths.
+            approval_required_tools=None,
+            org_id=os.environ.get('CITADEL_ORG_ID', ''),
+            workflow_definition_id=os.environ.get('CITADEL_WORKFLOW_DEFINITION_ID', ''),
+            execution_id=os.environ.get('CITADEL_EXECUTION_ID', ''),
+            node_id=os.environ.get('CITADEL_NODE_ID', ''),
         )
 
     idempotency = None

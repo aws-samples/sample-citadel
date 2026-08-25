@@ -174,11 +174,16 @@ class TestEmptyAndUnknownConfiguration:
         # can build ledger keys. orgId is resolved server-side and omitted
         # here (no EXECUTIONS_TABLE / RELEASE_DEFAULT_ORG_ID in this test env),
         # which is a legal empty-org case (executionId is globally unique).
+        # CITADEL_WORKFLOW_DEFINITION_ID (approval-required tool gating, finding
+        # c947aa77) is the reusable workflow-DEFINITION id (msg.workflow_id),
+        # threaded so the gate can locate a (org, workflowDef, node, tool)
+        # grant. APPROVAL_REQUIRED_TOOLS is omitted (opt-in set empty here).
         assert extra_env == {
             'CITADEL_AGENT_ID': 'agent-A',
             'CITADEL_WORKFLOW_ID': 'exec-1',
             'CITADEL_EXECUTION_ID': 'exec-1',
             'CITADEL_NODE_ID': 'n0',
+            'CITADEL_WORKFLOW_DEFINITION_ID': 'wf-1',
         }
         assert agent_cfg['config']['description'] == 'Base agent.'
         # Node completed normally.

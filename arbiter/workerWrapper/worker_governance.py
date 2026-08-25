@@ -176,6 +176,8 @@ def build_subprocess_env(
     node_id: str | None = None,
     org_id: str | None = None,
     dispatch_generation: int | None = None,
+    approval_required_tools: list[str] | None = None,
+    workflow_definition_id: str | None = None,
 ) -> dict:
     """Build the subprocess environment with governance and config overrides.
 
@@ -295,5 +297,24 @@ def build_subprocess_env(
     # (exactly-once-within-attempt only), preserving back-compat.
     if isinstance(dispatch_generation, int) and not isinstance(dispatch_generation, bool):
         env['CITADEL_DISPATCH_GENERATION'] = str(dispatch_generation)
+
+    # Approval-required tool gating (finding c947aa77). The OPT-IN gated set is
+    # serialized to ``APPROVAL_REQUIRED_TOOLS`` exactly like ``DENIED_TOOLS``
+    # (comma-separated, order-preserving, falsy entries stripped) — assembled
+    # server-side per dispatch, NEVER delivered via the S3 tool module (finding
+    # 588c7fb8). ``workflow_definition_id`` is the reusable workflow-DEFINITION
+    # id (the grant scope's third-from-last tuple element, distinct from the
+    # per-run executionId carried in CITADEL_WORKFLOW_ID / CITADEL_EXECUTION_ID)
+    # — the evaluator combines it with CITADEL_ORG_ID / _NODE_ID / _EXECUTION_ID
+    # to locate and single-use-consume the (org, workflowDef, node, tool) grant.
+    # Both additive and optional: absent leaves the pre-feature env untouched
+    # (no tool gated), and the gate is a fail-safe refuse for a gated tool with
+    # an incomplete context.
+    if approval_required_tools:
+        cleaned_approval = [str(t) for t in approval_required_tools if t]
+        if cleaned_approval:
+            env['APPROVAL_REQUIRED_TOOLS'] = ','.join(cleaned_approval)
+    if isinstance(workflow_definition_id, str) and workflow_definition_id:
+        env['CITADEL_WORKFLOW_DEFINITION_ID'] = workflow_definition_id
 
     return env

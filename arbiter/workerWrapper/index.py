@@ -124,6 +124,19 @@ EXECUTION_SPECS_TABLE = os.environ.get('EXECUTION_SPECS_TABLE')
 CREDENTIAL_VENDER_FUNCTION = os.environ.get('CREDENTIAL_VENDER_FUNCTION')
 AGENT_RUNNER_PATH = os.path.join(os.path.dirname(__file__), 'agent_runner.py')
 
+
+def _approval_required_tools() -> list[str]:
+    """Assemble the OPT-IN approval-required tool set SERVER-SIDE from the
+    worker's ``APPROVAL_REQUIRED_TOOLS`` env (finding c947aa77).
+
+    Delivered like ``DENIED_TOOLS`` on the server-assembled dispatch path —
+    NEVER via the S3-hosted tool module (finding 588c7fb8, which runs stale).
+    Comma-separated, whitespace-tolerant, empty by default (opt-in). Returned
+    as a sorted list for deterministic subprocess env serialization; an empty
+    list leaves the pre-feature subprocess env untouched."""
+    raw = os.environ.get('APPROVAL_REQUIRED_TOOLS', '')
+    return sorted({t.strip() for t in raw.split(',') if t.strip()})
+
 # Structural agent-body failure marker (finding 56d763d4). Imported from
 # agent_runner (the PRODUCER of the envelope) so producer and consumer stay in
 # lockstep. Defensive fallback to the literal keeps the consumer working even
@@ -1094,6 +1107,14 @@ def _process_workflow_node(event, message_attributes=None):
             # reserve against it; when None (pre-fence dispatch) the reserve is
             # unfenced, preserving back-compat.
             dispatch_generation=msg.dispatch_generation,
+            # Approval-required tool gating (finding c947aa77). The OPT-IN set
+            # is assembled SERVER-SIDE here (never the S3 tool module). The
+            # grant scope's workflow-DEFINITION id is msg.workflow_id (the
+            # reusable template), distinct from the per-run execution_id above;
+            # the evaluator single-use-consumes the (org, workflowDef, node,
+            # tool) grant against execution_id.
+            approval_required_tools=_approval_required_tools(),
+            workflow_definition_id=msg.workflow_id,
         )
 
         usage_sink: list = []
@@ -1360,6 +1381,13 @@ def process_event(event, context, message_attributes=None):
         workflow_id=orchestration_id,
         denied_tools=sorted(denied_tools_set) if denied_tools_set else None,
         eval_run_id=eval_run_id,
+        # Approval-required tool gating (finding c947aa77). Forward the OPT-IN
+        # set on the supervisor path too: this path carries no workflow
+        # DEFINITION / node / execution context, so a gated tool has no
+        # validatable (org, workflowDef, node, tool) grant and is fail-safe
+        # REFUSED (a gated tool never runs unapproved). Approval gating's
+        # supported, grantable path is the workflow-node dispatch.
+        approval_required_tools=_approval_required_tools(),
     )
 
     print("running agent in isolated subprocess...")

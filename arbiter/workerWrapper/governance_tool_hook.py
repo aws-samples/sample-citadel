@@ -40,7 +40,12 @@ if _HERE not in sys.path:
 
 from governed_tool_handler import (  # noqa: E402
     SCOPE_WORKER_TOOL_HANDLER,  # re-exported for symmetric reference
+    LedgerWriteError,
+    _approval_required_result,
+    _approval_unavailable_result,
+    _parse_approval_required_tools_env,
     _parse_denied_tools_env,
+    record_approval_finding,
     record_governance_decision,
 )
 
@@ -111,6 +116,11 @@ class GovernanceEvaluator:
         workflow_id: str,
         denied_tools: set[str] | None = None,
         eval_run_id: str | None = None,
+        approval_required_tools: set[str] | None = None,
+        org_id: str = "",
+        workflow_definition_id: str = "",
+        execution_id: str = "",
+        node_id: str = "",
     ):
         self._agent_id = agent_id or 'unknown-agent'
         self._workflow_id = workflow_id or 'unknown-workflow'
@@ -120,13 +130,33 @@ class GovernanceEvaluator:
             denied_tools if denied_tools is not None else _parse_denied_tools_env()
         )
         self._eval_run_id = eval_run_id
+        # Approval-required tool gating (finding c947aa77). ``None`` → read the
+        # OPT-IN APPROVAL_REQUIRED_TOOLS set from env (mirrors DENIED_TOOLS);
+        # an explicit (possibly empty) set overrides the env fallback. The
+        # scope tuple for a grant is (org, workflow DEFINITION, node, tool).
+        self._approval_required_tools = (
+            approval_required_tools
+            if approval_required_tools is not None
+            else _parse_approval_required_tools_env()
+        )
+        self._org_id = org_id or ""
+        self._workflow_definition_id = workflow_definition_id or ""
+        self._execution_id = execution_id or ""
+        self._node_id = node_id or ""
 
     @property
     def denied_tools(self) -> set[str]:  # pragma: no cover — trivial accessor
         return self._denied_tools
 
+    @property
+    def approval_required_tools(self) -> set[str]:  # pragma: no cover — accessor
+        return self._approval_required_tools
+
     def evaluate(self, event: Any) -> bool:
-        """Return True if the call was DENIED (and ``selected_tool`` swapped)."""
+        """Return True if the call was REFUSED (and ``selected_tool`` swapped) —
+        by the deny-list decision OR the approval gate. On PERMIT (not denied
+        AND, for a gated tool, a valid approval was consumed) returns False and
+        leaves the event untouched so idempotency wrapping proceeds."""
         tool_use = getattr(event, "tool_use", None)
         selected = getattr(event, "selected_tool", None)
         if tool_use is None or selected is None:
@@ -148,6 +178,118 @@ class GovernanceEvaluator:
         if denied and error_result is not None:
             event.selected_tool = _GovernanceDeniedTool(selected, error_result)
             return True
+        # PERMITTED by the deny-list. Now the approval gate — runs INSIDE the
+        # governance evaluation, BEFORE any idempotency reserve, so a refusal
+        # leaves ZERO ledger reservations (inherits the deny-before-reserve
+        # invariant, finding 027c4a89).
+        return self._evaluate_approval(event, selected, tool_name, tool_use_id)
+
+    def _evaluate_approval(
+        self, event: Any, selected: Any, tool_name: str, tool_use_id: str,
+    ) -> bool:
+        """Approval-required gate (finding c947aa77). Returns True if REFUSED
+        (tool swapped + refusal recorded so the node FAILS), False on PERMIT.
+
+        A tool is gated iff it is in the OPT-IN approval-required set. For a
+        gated tool a valid, unconsumed, pre-granted approval for
+        (org, workflowDef, node, tool) is atomically consumed against this
+        execution; absent/expired/already-consumed ⇒ POLICY refusal (node
+        FAILS, decision c0ca4576); an unreadable set/record ⇒ INFRA refusal
+        (fail-loud). An always-visible APPROVAL finding is written either way."""
+        if tool_name not in self._approval_required_tools:
+            return False  # not gated → permit passthrough
+
+        # Lazy import (avoids a governance_tool_hook ↔ tool_idempotency_hook
+        # import cycle; the refusal sink lives with the idempotency seam).
+        try:
+            from tool_idempotency_hook import _record_governance_refusal
+        except ImportError:  # pragma: no cover — worker-bundle sibling
+            _record_governance_refusal = None  # type: ignore[assignment]
+
+        try:
+            from governance import tool_approval
+        except ImportError:  # pragma: no cover — layer-staged package
+            from arbiter.governance import tool_approval  # type: ignore
+
+        def _refuse(exc: Exception, reason_code: str, infra: bool) -> bool:
+            # Write the always-visible APPROVAL finding (fail-closed). If the
+            # finding write itself fails, that is an infra refusal a fortiori.
+            try:
+                record_approval_finding(
+                    tool_name, permitted=False, reason_code=reason_code,
+                    agent_id=self._agent_id, workflow_id=self._workflow_id,
+                    eval_run_id=self._eval_run_id,
+                )
+            except LedgerWriteError as write_exc:
+                if _record_governance_refusal is not None:
+                    _record_governance_refusal(write_exc)
+            result = (
+                _approval_unavailable_result(tool_use_id, tool_name)
+                if infra
+                else _approval_required_result(tool_use_id, tool_name)
+            )
+            event.selected_tool = _GovernanceDeniedTool(selected, result)
+            if _record_governance_refusal is not None:
+                _record_governance_refusal(exc)
+            return True
+
+        # Fail-safe: a gated tool with an incomplete scope context cannot be
+        # validated against a (org, workflowDef, node, tool) grant ⇒ require
+        # approval (refuse), never run unapproved.
+        if not (self._org_id and self._workflow_definition_id and self._node_id and self._execution_id):
+            return _refuse(
+                tool_approval.ApprovalRequiredError(
+                    f"approval-required tool {tool_name!r} invoked without a "
+                    "complete (org, workflowDef, node, execution) context"
+                ),
+                "approval_required_context_incomplete", infra=False,
+            )
+
+        try:
+            grant = tool_approval.read_grant(
+                self._org_id, self._workflow_definition_id, self._node_id, tool_name,
+            )
+        except tool_approval.ApprovalReadError as exc:
+            return _refuse(exc, "approval_unreadable", infra=True)
+
+        if not tool_approval.grant_is_valid(
+            grant, self._org_id, self._workflow_definition_id, self._node_id, tool_name,
+        ):
+            return _refuse(
+                tool_approval.ApprovalRequiredError(
+                    f"no valid approval for tool {tool_name!r} "
+                    "(absent, expired, or malformed)"
+                ),
+                "approval_required_absent", infra=False,
+            )
+
+        try:
+            won = tool_approval.consume(
+                self._org_id, self._workflow_definition_id, self._node_id, tool_name,
+                self._execution_id,
+            )
+        except tool_approval.ApprovalReadError as exc:
+            return _refuse(exc, "approval_unreadable", infra=True)
+
+        if not won:
+            return _refuse(
+                tool_approval.ApprovalRequiredError(
+                    f"approval for tool {tool_name!r} already consumed "
+                    "(single-use exhausted)"
+                ),
+                "approval_required_already_consumed", infra=False,
+            )
+
+        # PERMIT: valid approval consumed by this execution. Write the visible
+        # PERMIT finding (fail-closed — a failed write is an infra refusal).
+        try:
+            record_approval_finding(
+                tool_name, permitted=True, reason_code="approval_consumed",
+                agent_id=self._agent_id, workflow_id=self._workflow_id,
+                eval_run_id=self._eval_run_id,
+            )
+        except LedgerWriteError as exc:
+            return _refuse(exc, "approval_permit_finding_unwritable", infra=True)
         return False
 
 
