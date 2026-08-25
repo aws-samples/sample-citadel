@@ -21,7 +21,7 @@ jest.mock("../../utils/auth-event", () => ({
 }));
 import { extractOrgFromEvent } from "../../utils/auth-event";
 
-import { handler, decideToolApproval } from "../tool-approval-resolver";
+import { handler } from "../tool-approval-resolver";
 import { grantFindingId } from "../utils/tool-approval-grant-writer";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
