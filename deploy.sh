@@ -894,8 +894,9 @@ deletion_gate() {
   # writer process to receive SIGPIPE, so grep's own status is authoritative.
   #
   # Never reintroduce a ${var//...} (or any other pattern-expansion operator)
-  # over the captured diff — see the audit note above extract_cdk_deletions
-  # and the large-diff performance regression case in
+  # over the captured diff — such patterns degrade pathologically on large diffs
+  # (measured: 100% CPU for 5h17m with no output). Use grep instead; it is
+  # linear and terminates early. See large-diff performance regression case in
   # scripts/test-deploy-sh.sh.
   local has_content=false
   if grep -q '[^[:space:]]' <<< "$diff_text"; then
