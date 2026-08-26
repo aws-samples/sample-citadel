@@ -680,6 +680,97 @@ else
 fi
 
 # --- provenance manifest: written with the right fields on success ---
+########################################
+# PERFORMANCE REGRESSION: deletion_gate() must return a verdict on a realistic
+# large (hundreds-of-KB) cdk diff within a hard timeout. The shipped bug was
+# `local stripped="${diff_text//[[:space:]]/}"` — a global pattern
+# substitution with a character class over the whole diff, which degrades
+# pathologically (measured 100% CPU for 5h17m on a real 9-stack diff; and in
+# this harness the pre-fix expansion does not finish even in 60s on ~300KB).
+# `timeout` makes this case FAIL rather than hang if the cliff ever returns.
+########################################
+section "deletion_gate: large (~300KB) diff returns within a hard timeout (performance regression)"
+
+# Build a realistic large diff into a file: ONE genuine column-1 resource
+# deletion (must still be caught) plus hundreds of indented property [-]
+# lines — the .S3Key hash swaps and env-var churn that must stay ignored.
+PERF_DIFF_FILE="$TMP_DIR/perf-big-diff.txt"
+{
+  printf 'Stack citadel-arbiter-dev\n'
+  printf 'Resources\n'
+  printf '[-] AWS::DynamoDB::Table PerfGenuineTable citadel-perf-genuine-dev destroy\n'
+} > "$PERF_DIFF_FILE"
+perf_i=0
+perf_bytes=0
+while [ "$perf_bytes" -lt 307200 ]; do
+  perf_block="[~] AWS::Lambda::Function PerfFn${perf_i} PerfFn${perf_i}ABCDEF
+ └─ [~] Code
+     └─ [~] .S3Key:
+         ├─ [-] 02ad290bbad20c98533eca320b22aa9905aa479f067a0be3b0eb98a5ff39675f.zip
+         └─ [+] 3d75b07052b2d0183a7437a38be7dea763082f4b5a27ea8490cd6c9584a478ae.zip
+ └─ [~] Environment
+     └─ [~] Variables
+         ├─ [-] OLD_TABLE_ARN: arn:aws:dynamodb:us-east-1:123456789012:table/old-${perf_i}
+         └─ [+] NEW_TABLE_ARN: arn:aws:dynamodb:us-east-1:123456789012:table/new-${perf_i}"
+  printf '%s\n' "$perf_block" >> "$PERF_DIFF_FILE"
+  perf_bytes=$((perf_bytes + ${#perf_block} + 1))
+  perf_i=$((perf_i + 1))
+done
+PERF_SIZE=$(wc -c < "$PERF_DIFF_FILE")
+PERF_NOISE=$(grep -c '\[-\]' "$PERF_DIFF_FILE")
+PERF_TIMEOUT=5
+
+# Run the REAL deletion_gate under `timeout` in a subshell that re-sources
+# deploy.sh (so the timeout can kill a hung process — a function call in this
+# shell could not be interrupted, which is the whole point of the bug).
+set +e
+perf_start=$(date +%s.%N)
+perf_out=$(timeout "$PERF_TIMEOUT" bash -c '
+  export DEPLOY_SH_SOURCE_ONLY=1 ENVIRONMENT=test CDK_DEFAULT_REGION=us-east-1 CDK_DEFAULT_ACCOUNT=123456789012
+  source "$1" >/dev/null 2>&1
+  trap - EXIT
+  diff_text=$(cat "$2")
+  deletion_gate "$diff_text" "false" "true" 2>&1
+' _ "$DEPLOY_SH" "$PERF_DIFF_FILE")
+perf_rc=$?
+perf_end=$(date +%s.%N)
+set -e 2>/dev/null || true
+perf_wall=$(echo "$perf_end - $perf_start" | bc)
+perf_plain=$(echo "$perf_out" | sed 's/\x1b\[[0-9;]*m//g')
+perf_delcount=$(echo "$perf_plain" | grep -c 'DELETE →')
+
+if [ "$perf_rc" = "124" ]; then
+  fail "deletion_gate TIMED OUT (>${PERF_TIMEOUT}s) on a ${PERF_SIZE}-byte diff — the performance cliff is present"
+elif [ "$perf_rc" -eq 1 ] && echo "$perf_plain" | grep -q "citadel-perf-genuine-dev" && [ "$perf_delcount" -eq 1 ]; then
+  pass "large ${PERF_SIZE}-byte diff (${PERF_NOISE} [-] lines) verdict in ${perf_wall}s (< ${PERF_TIMEOUT}s): genuine deletion NAMED, ${PERF_NOISE} noise [-] lines ignored (exactly 1 DELETE reported)"
+else
+  fail "large-diff gate wrong result: rc=$perf_rc delcount=$perf_delcount wall=${perf_wall}s output=$perf_plain"
+fi
+
+########################################
+# PERF BITE PROOF (RED): run the EXACT pre-fix emptiness test — the global
+# pattern substitution `${diff_text//[[:space:]]/}` — against the same large
+# fixture under the same timeout, and confirm it TIMES OUT. This proves the
+# regression case above genuinely catches the hang (a case that passed against
+# both the old and new code would be pinning nothing).
+########################################
+section "PERF BITE PROOF (RED): the pre-fix \${diff_text//[[:space:]]/} expansion hangs on the same large diff"
+set +e
+perf_prefix_rc=$(
+  timeout "$PERF_TIMEOUT" bash -c '
+    diff_text=$(cat "$1")
+    stripped="${diff_text//[[:space:]]/}"   # the exact operation that shipped and hung
+    [ -n "$stripped" ] && printf nonempty
+  ' _ "$PERF_DIFF_FILE" >/dev/null 2>&1
+  echo $?
+)
+set -e 2>/dev/null || true
+if [ "$perf_prefix_rc" = "124" ]; then
+  pass "RED CONFIRMED: the pre-fix \${diff_text//[[:space:]]/} expansion TIMES OUT (rc=124, >${PERF_TIMEOUT}s) on the ${PERF_SIZE}-byte diff — the perf regression case genuinely bites"
+else
+  fail "expected the pre-fix expansion to time out (rc=124); got rc=$perf_prefix_rc — the perf regression case may not actually catch the cliff"
+fi
+
 section "write_manifest: writes deployment-manifest.json with required fields"
 reset_fakes
 cat > "$FAKE_BIN/aws" <<'FAKE_AWS_EOF'
