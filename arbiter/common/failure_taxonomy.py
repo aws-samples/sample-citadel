@@ -75,6 +75,16 @@ class FailureClass(str, Enum):
     AUTHZ = "authz"
     APPROVAL_ABSENT = "approval-absent"  # human-grantable; retry only after a human acts
     INDETERMINATE = "indeterminate"  # un-tokened side effect, unknown outcome — fail-safe
+    # A per-target circuit breaker is OPEN: the target is known-bad, so the call
+    # was fast-failed WITHOUT touching the target (arbiter/governance/
+    # tool_breaker_*). Disposition NEVER — the in-line retry ladder must never
+    # re-hit a known-bad target — but NON-terminality is realised OUT-OF-BAND by
+    # the future recovery queue (re-enqueue on OPEN->HALF_OPEN/CLOSED), NOT by an
+    # in-line retry disposition (which is exactly why a new RETRY_AFTER_RECOVERY
+    # disposition was REJECTED — that would be a second retry concept at the
+    # retry seam). Until that queue lands the node fails terminally for the
+    # attempt, which is the conservative, verifiable-today behaviour (D1).
+    CIRCUIT_OPEN = "circuit-open"
     UNKNOWN = "unknown"  # unrecognised — fail-safe default for the AUTO path
 
 
@@ -98,6 +108,10 @@ DISPOSITION: dict[FailureClass, RetryDisposition] = {
     FailureClass.AUTHZ: RetryDisposition.NEVER,
     FailureClass.APPROVAL_ABSENT: RetryDisposition.RETRY_AFTER_HUMAN,
     FailureClass.INDETERMINATE: RetryDisposition.NEVER,
+    # CIRCUIT_OPEN reuses the EXISTING NEVER disposition (no parallel
+    # disposition): the auto path never re-hits a known-bad target, and a stale
+    # per-node retryableErrors list can never widen it (is_retry_forbidden).
+    FailureClass.CIRCUIT_OPEN: RetryDisposition.NEVER,
     FailureClass.UNKNOWN: RetryDisposition.NEVER,
 }
 
@@ -148,6 +162,14 @@ _CLASSNAME_TO_CLASS: dict[str, FailureClass] = {
     "CrossOrgResultRefError": FailureClass.AUTHZ,
     # --- governance DENY (deny-list) ----------------------------------------
     POLICY_DENIED_CLASS: FailureClass.POLICY_DENIED,
+    # --- per-target circuit breaker (tool_breaker_*) ------------------------
+    # The supervisor in-memory breaker raises ``CircuitBreakerOpen``; the
+    # tool-target breaker fast-fails with a ``ToolTargetCircuitOpen`` /
+    # ``CircuitOpenError`` result. All map to CIRCUIT_OPEN so the exception path
+    # and the errorClass-string path classify identically (cross-runtime parity).
+    "CircuitBreakerOpen": FailureClass.CIRCUIT_OPEN,
+    "CircuitOpenError": FailureClass.CIRCUIT_OPEN,
+    "ToolTargetCircuitOpen": FailureClass.CIRCUIT_OPEN,
 }
 
 # Case-insensitive fallback index. Includes every canonical class-name AND the
