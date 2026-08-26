@@ -97,7 +97,12 @@ function functionEnvKeys(
       `no synthesized function with logical id prefix ${logicalIdPrefix}`,
     );
   }
-  const vars = (match[1] as any).Properties?.Environment?.Variables ?? {};
+  const vars =
+    (
+      match[1] as {
+        Properties?: { Environment?: { Variables?: Record<string, unknown> } };
+      }
+    ).Properties?.Environment?.Variables ?? {};
   return new Set(Object.keys(vars));
 }
 
@@ -149,6 +154,9 @@ const TARGETS: Target[] = [
       "governance/ledger.py",
       // Tool-idempotency ledger the worker reserves/finalizes against.
       "governance/tool_execution_ledger.py",
+      // Per-target circuit breaker store the worker consults at the tool seam
+      // (task 28d624b1). Reads the TOOL_BREAKER_* tunables via BreakerConfig.
+      "governance/tool_breaker_store.py",
     ],
     optional: new Set<string>([
       // Feature-gated / defensive reads (os.environ.get(...) with None/default,
@@ -164,6 +172,15 @@ const TARGETS: Target[] = [
       "TOOL_LEDGER_LEASE_SECONDS",
       "TOOL_LEDGER_POLL_TIMEOUT_SECONDS",
       "TOOL_LEDGER_POLL_INTERVAL_SECONDS",
+      // tool-target breaker (task 28d624b1): TARGETS is subprocess-injected per
+      // dispatch (build_subprocess_env, like DENIED_TOOLS — never a CDK env
+      // var); TTL_SECONDS and OPEN_ON_THROTTLE have defaults (_int_env/_bool_env)
+      // so are not required on the function env. The remaining TOOL_BREAKER_*
+      // (TABLE/THRESHOLD/WINDOW/RECOVERY/PROBE_LEASE/CACHE_TTL) ARE set on the
+      // function env, so parity holds for them.
+      "TOOL_BREAKER_TARGETS",
+      "TOOL_BREAKER_TTL_SECONDS",
+      "TOOL_BREAKER_OPEN_ON_THROTTLE",
       // governance ledger correlation id — best-effort, absent-tolerant:
       "ENVIRONMENT",
     ]),
