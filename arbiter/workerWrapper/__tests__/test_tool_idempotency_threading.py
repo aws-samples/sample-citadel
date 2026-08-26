@@ -42,6 +42,33 @@ class TestSubprocessEnvThreading:
         assert env["CITADEL_NODE_ID"] == "n"
         assert "CITADEL_ORG_ID" not in env
 
+    def test_breaker_targets_serialized_to_json_env(self):
+        # task 28d624b1: the per-dispatch tool NAME -> [kind, id] map is
+        # serialized to TOOL_BREAKER_TARGETS (delivered like DENIED_TOOLS,
+        # NEVER via the S3 tool module).
+        import json
+        env = build_subprocess_env({}, tool_breaker_targets={
+            "remote_tool": ["mcp_server", "mcp-1"],
+            "jira_tool": ("integration", "jira-1"),
+        })
+        parsed = json.loads(env["TOOL_BREAKER_TARGETS"])
+        assert parsed["remote_tool"] == ["mcp_server", "mcp-1"]
+        assert parsed["jira_tool"] == ["integration", "jira-1"]
+
+    def test_breaker_targets_absent_is_backcompat(self):
+        env = build_subprocess_env({}, agent_id="a")
+        assert "TOOL_BREAKER_TARGETS" not in env
+
+    def test_breaker_targets_malformed_entries_dropped(self):
+        import json
+        env = build_subprocess_env({}, tool_breaker_targets={
+            "ok": ["mcp_server", "m1"],
+            "bad_len": ["only-one"],
+            "empty_id": ["mcp_server", ""],
+        })
+        parsed = json.loads(env["TOOL_BREAKER_TARGETS"])
+        assert parsed == {"ok": ["mcp_server", "m1"]}
+
 
 class TestServerSideOrgResolution:
     def _index(self):

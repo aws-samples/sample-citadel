@@ -178,6 +178,7 @@ def build_subprocess_env(
     dispatch_generation: int | None = None,
     approval_required_tools: list[str] | None = None,
     workflow_definition_id: str | None = None,
+    tool_breaker_targets: dict | None = None,
 ) -> dict:
     """Build the subprocess environment with governance and config overrides.
 
@@ -316,5 +317,24 @@ def build_subprocess_env(
             env['APPROVAL_REQUIRED_TOOLS'] = ','.join(cleaned_approval)
     if isinstance(workflow_definition_id, str) and workflow_definition_id:
         env['CITADEL_WORKFLOW_DEFINITION_ID'] = workflow_definition_id
+
+    # Per-target circuit breaker (task 28d624b1). The per-dispatch map of tool
+    # NAME -> [targetKind, targetId] the worker's breaker resolves against.
+    # Assembled server-side (index.py, from each tool config's external
+    # binding) and delivered like DENIED_TOOLS — NEVER via the S3-hosted tool
+    # module (finding 588c7fb8). Additive/optional: absent leaves the
+    # pre-feature env untouched, and a tool with no entry resolves to no target
+    # (breaker skipped for it — local/deterministic tools, D7). The TOOL_BREAKER_*
+    # tunables + TOOL_BREAKER_TABLE are Lambda env vars already present in
+    # ``base_env`` (delivered CDK -> function env), so they propagate to the
+    # subprocess via ``dict(base_env)`` above without explicit threading here.
+    if tool_breaker_targets:
+        cleaned_targets = {
+            str(name): [str(spec[0]), str(spec[1])]
+            for name, spec in tool_breaker_targets.items()
+            if isinstance(spec, (list, tuple)) and len(spec) == 2 and spec[0] and spec[1]
+        }
+        if cleaned_targets:
+            env['TOOL_BREAKER_TARGETS'] = json.dumps(cleaned_targets, sort_keys=True)
 
     return env

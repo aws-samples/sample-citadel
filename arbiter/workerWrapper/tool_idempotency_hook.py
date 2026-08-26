@@ -580,9 +580,11 @@ class ComposedToolHook:
         *,
         governance: Any | None = None,
         idempotency: "IdempotencyToolHook | None" = None,
+        breaker: Any | None = None,
     ):
         self._governance = governance
         self._idempotency = idempotency
+        self._breaker = breaker
 
     @property
     def governance(self) -> Any | None:  # pragma: no cover — accessor
@@ -592,6 +594,10 @@ class ComposedToolHook:
     def idempotency(self) -> "IdempotencyToolHook | None":  # pragma: no cover
         return self._idempotency
 
+    @property
+    def breaker(self) -> Any | None:  # pragma: no cover — accessor
+        return self._breaker
+
     def register_hooks(self, registry: Any, **_kwargs: Any) -> None:
         if not _STRANDS_AVAILABLE:  # pragma: no cover — dev/CI guard
             logger.warning("composed tool hook skipped — strands unavailable")
@@ -599,13 +605,51 @@ class ComposedToolHook:
         registry.add_callback(BeforeToolCallEvent, self._on_before_tool_call)
 
     def _on_before_tool_call(self, event: Any) -> None:
-        # 1) Governance decision FIRST. On DENY the evaluator swaps
-        #    ``event.selected_tool`` for a deny-only tool and returns True; we
-        #    then RETURN so idempotency's reserve/wrap never runs (deny before
-        #    reserve — no reservation, no side effect).
-        if self._governance is not None:
-            if self._governance.evaluate(event):
+        # LEGACY path (no breaker configured): byte-identical to the pre-breaker
+        # behaviour — governance.evaluate() (deny-list THEN approval) then
+        # idempotency. Preserves the finding-027c4a89 / c947aa77 invariants and
+        # the existing composed-governance tests unchanged.
+        if self._breaker is None:
+            if self._governance is not None and self._governance.evaluate(event):
                 return
-        # 2) PERMIT → idempotency reserve/execute/finalize wrapping.
+            if self._idempotency is not None:
+                self._idempotency._on_before_tool_call(event)
+            return
+
+        # BREAKER-ENABLED path. Ordering (task 28d624b1), exactly:
+        #   deny-list → breaker pre-check → approval-consume →
+        #   idempotency reserve/execute/finalize → outermost breaker observer.
+        # A breaker fast-fail happens BEFORE approval-consume and BEFORE the
+        # reserve, so it burns no approval single-use and leaves no reservation.
+
+        # 1) Deny-list phase (mints the opaque approval token on PERMIT).
+        token = None
+        if self._governance is not None:
+            outcome = self._governance.evaluate_denylist(event)
+            if outcome.refused:
+                return  # DENY: no breaker read, no approval, no reserve
+            token = outcome.token
+
+        # 2) Breaker pre-check — BEFORE approval-consume and BEFORE reserve.
+        pre = self._breaker.pre_check(event)
+        if pre is not None and pre.fast_fail:
+            selected = getattr(event, "selected_tool", None)
+            if selected is not None:
+                event.selected_tool = self._breaker.circuit_open_tool(selected, pre)
+            return  # fast-fail: no approval consumed, no reservation
+
+        # 3) Approval-consume phase (requires the deny-list token).
+        if self._governance is not None and token is not None:
+            if self._governance.evaluate_approval(event, token):
+                return
+
+        # 4) Idempotency reserve → execute → finalize (wraps selected_tool).
         if self._idempotency is not None:
             self._idempotency._on_before_tool_call(event)
+
+        # 5) OUTERMOST breaker observer — wraps the (idempotency-wrapped) tool so
+        #    the terminal outcome drives CLOSED→OPEN / HALF_OPEN transitions.
+        if pre is not None and pre.observing:
+            selected = getattr(event, "selected_tool", None)
+            if selected is not None:
+                event.selected_tool = self._breaker.wrap_observer(selected, pre)

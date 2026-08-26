@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +51,50 @@ from governed_tool_handler import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+# --- D2 SECURITY CONDITION: token-gated denylist→approval split --------------
+# Splitting a security control's entry point creates a bypass class where a
+# future caller invokes the approval phase WITHOUT the deny-list phase, silently
+# defeating the deny-list. To make that STRUCTURALLY IMPOSSIBLE, the deny-list
+# phase mints an opaque ``DenylistPassed`` token that the approval phase
+# REQUIRES. The token is not constructible by callers (its ``__init__`` demands
+# a module-private mint key), so ``evaluate_approval`` can only ever run after
+# ``evaluate_denylist`` produced a permit. A regex/naming convention would not
+# be enough; this is a type-level gate.
+_DENYLIST_MINT_KEY = object()
+
+
+class DenylistPassed:
+    """Opaque proof that the deny-list phase PERMITTED a specific tool call.
+
+    Minted ONLY by :meth:`GovernanceEvaluator.evaluate_denylist` (via the
+    module-private mint key). :meth:`GovernanceEvaluator.evaluate_approval`
+    requires an instance, so the approval phase cannot be reached without a
+    deny-list pass having produced one — invoking approval standalone is
+    structurally impossible."""
+
+    __slots__ = ("tool_name", "tool_use_id", "selected")
+
+    def __init__(self, _mint_key: Any, *, tool_name: str, tool_use_id: str, selected: Any):
+        if _mint_key is not _DENYLIST_MINT_KEY:
+            raise TypeError(
+                "DenylistPassed is not constructible by callers; it is minted "
+                "only by GovernanceEvaluator.evaluate_denylist (deny-list phase)"
+            )
+        self.tool_name = tool_name
+        self.tool_use_id = tool_use_id
+        self.selected = selected
+
+
+@dataclass
+class DenylistOutcome:
+    """Result of the deny-list phase. ``refused`` ⇒ the tool was swapped for a
+    deny/audit-unavailable tool and the caller must stop. Otherwise ``token`` is
+    the :class:`DenylistPassed` proof required by the approval phase — or
+    ``None`` when there was no real tool to gate (a no-op passthrough)."""
+
+    refused: bool
+    token: DenylistPassed | None = None
 
 try:
     from strands.hooks import BeforeToolCallEvent  # type: ignore
@@ -156,11 +201,32 @@ class GovernanceEvaluator:
         """Return True if the call was REFUSED (and ``selected_tool`` swapped) —
         by the deny-list decision OR the approval gate. On PERMIT (not denied
         AND, for a gated tool, a valid approval was consumed) returns False and
-        leaves the event untouched so idempotency wrapping proceeds."""
+        leaves the event untouched so idempotency wrapping proceeds.
+
+        ADDITIVE SPLIT (D2, 47b6abac): this keeps its EXACT current
+        denylist-then-approval behaviour — it is the live contract for the
+        standalone supervisor-path ``GovernanceToolHook`` and the existing tests
+        (which must not change). It is now implemented on top of the two public
+        phase methods (:meth:`evaluate_denylist` / :meth:`evaluate_approval`) so
+        the ``ComposedToolHook`` can insert the breaker BETWEEN them; the token
+        gate makes calling approval without the deny-list structurally
+        impossible."""
+        outcome = self.evaluate_denylist(event)
+        if outcome.refused:
+            return True
+        if outcome.token is None:
+            return False  # nothing to gate (no real tool on the event)
+        return self.evaluate_approval(event, outcome.token)
+
+    def evaluate_denylist(self, event: Any) -> DenylistOutcome:
+        """Deny-list phase ONLY. Writes the PERMIT/DENY audit finding and, on
+        DENY (or an audit-write failure), swaps ``selected_tool`` for a
+        deny/audit-unavailable tool. Returns a :class:`DenylistOutcome`: on
+        PERMIT its ``token`` is the opaque proof the approval phase requires."""
         tool_use = getattr(event, "tool_use", None)
         selected = getattr(event, "selected_tool", None)
         if tool_use is None or selected is None:
-            return False
+            return DenylistOutcome(refused=False, token=None)
         if hasattr(tool_use, "get"):
             tool_name = tool_use.get("name", "") or ""
             tool_use_id = tool_use.get("toolUseId", "") or ""
@@ -177,12 +243,29 @@ class GovernanceEvaluator:
         )
         if denied and error_result is not None:
             event.selected_tool = _GovernanceDeniedTool(selected, error_result)
-            return True
-        # PERMITTED by the deny-list. Now the approval gate — runs INSIDE the
-        # governance evaluation, BEFORE any idempotency reserve, so a refusal
-        # leaves ZERO ledger reservations (inherits the deny-before-reserve
-        # invariant, finding 027c4a89).
-        return self._evaluate_approval(event, selected, tool_name, tool_use_id)
+            return DenylistOutcome(refused=True, token=None)
+        # PERMITTED by the deny-list — mint the opaque proof the approval phase
+        # requires (structurally impossible to reach approval without it).
+        token = DenylistPassed(
+            _DENYLIST_MINT_KEY,
+            tool_name=tool_name, tool_use_id=tool_use_id, selected=selected,
+        )
+        return DenylistOutcome(refused=False, token=token)
+
+    def evaluate_approval(self, event: Any, token: DenylistPassed) -> bool:
+        """Approval phase ONLY. REQUIRES the :class:`DenylistPassed` token the
+        deny-list phase minted — passing anything else raises ``TypeError``, so
+        this phase can never run without a deny-list pass (D2 security
+        condition). Returns True if the call was REFUSED by the approval gate."""
+        if not isinstance(token, DenylistPassed):
+            raise TypeError(
+                "evaluate_approval requires the opaque DenylistPassed token from "
+                "evaluate_denylist — the approval phase must never run without "
+                "the deny-list phase (D2 security condition)"
+            )
+        return self._evaluate_approval(
+            event, token.selected, token.tool_name, token.tool_use_id,
+        )
 
     def _evaluate_approval(
         self, event: Any, selected: Any, tool_name: str, tool_use_id: str,

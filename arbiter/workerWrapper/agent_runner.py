@@ -433,6 +433,78 @@ def _read_dispatch_generation():
         return None
 
 
+def _parse_breaker_targets_env():
+    """Parse ``TOOL_BREAKER_TARGETS`` (a JSON object mapping tool NAME ->
+    ``[targetKind, targetId]``) into ``{tool_name: BreakerTarget}``.
+
+    Assembled server-side per dispatch (index.py) and delivered like
+    DENIED_TOOLS — NEVER via the S3-hosted tool module. Fail-safe: any parse
+    error yields an empty map (the breaker then resolves every tool to None and
+    is skipped — the breaker is an availability optimisation, never fail the
+    node on its account)."""
+    raw = os.environ.get('TOOL_BREAKER_TARGETS')
+    if not raw:
+        return {}
+    try:
+        from governance.tool_breaker_logic import BreakerTarget
+    except ImportError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result = {}
+    for name, spec in data.items():
+        if isinstance(spec, (list, tuple)) and len(spec) == 2 and spec[0] and spec[1]:
+            result[str(name)] = BreakerTarget(kind=str(spec[0]), target_id=str(spec[1]))
+    return result
+
+
+def _build_tool_breaker(execution_id, node_id):
+    """Build the per-target ToolBreaker, or None when it is not configured.
+
+    FAIL-OPEN by construction (D7): the breaker is an availability optimisation,
+    not a security control, so — unlike governance/idempotency, which fail LOUD
+    inside their envelope — a missing table, an unimportable breaker module, or
+    an empty target map yields ``None`` (breaker skipped) and NEVER aborts the
+    node."""
+    breaker_table = os.environ.get('TOOL_BREAKER_TABLE')
+    if not breaker_table:
+        return None
+    try:
+        from tool_breaker_hook import ToolBreaker, build_transition_emitter
+        from governance.tool_breaker_store import ToolBreakerStore, BreakerConfig
+    except ImportError as exc:
+        sys.stderr.write(
+            f'[agent_runner] WARN tool breaker skipped (fail-open) — '
+            f'module import failed: {exc}\n'
+        )
+        return None
+    target_map = _parse_breaker_targets_env()
+    if not target_map:
+        return None  # no external-bound tools for this dispatch — nothing to gate
+    org_id = os.environ.get('CITADEL_ORG_ID', '')
+    emitter = build_transition_emitter(
+        org_id=org_id,
+        workflow_id=os.environ.get('CITADEL_WORKFLOW_ID', 'unknown-workflow'),
+        agent_id=os.environ.get('CITADEL_AGENT_ID', 'unknown-agent'),
+        event_bus_name=os.environ.get('COMPLETION_BUS_NAME') or None,
+        eval_run_id=os.environ.get('CITADEL_EVAL_RUN_ID') or None,
+    )
+    store = ToolBreakerStore(
+        table_name=breaker_table, org_id=org_id,
+        config=BreakerConfig.from_env(), on_transition=emitter,
+    )
+    probe_owner = f"{execution_id or ''}#{node_id or ''}"
+    return ToolBreaker(
+        store=store,
+        target_resolver=lambda name: target_map.get(name),
+        probe_owner=probe_owner,
+    )
+
+
 def _install_tool_call_hooks():
     """Install the SINGLE composed ``BeforeToolCallEvent`` seam that applies
     layer-2 tool governance THEN tool-call idempotency (finding 027c4a89).
@@ -562,7 +634,11 @@ def _install_tool_call_hooks():
             f'envelope is present: {exc}'
         ) from exc
 
-    composed = ComposedToolHook(governance=governance, idempotency=idempotency)
+    composed = ComposedToolHook(
+        governance=governance,
+        idempotency=idempotency,
+        breaker=_build_tool_breaker(execution_id, node_id),
+    )
 
     original_init = strands.Agent.__init__
 
