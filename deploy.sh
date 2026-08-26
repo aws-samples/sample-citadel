@@ -878,8 +878,30 @@ deletion_gate() {
   local allow_deletions="${2:-false}"
   local diff_ok="${3:-true}"
 
-  local stripped="${diff_text//[[:space:]]/}"
-  if [ "$diff_ok" != "true" ] || [ -z "$stripped" ]; then
+  # Is the diff effectively empty (whitespace only)? Test it with a single
+  # grep (early-exit) rather than expanding "${diff_text//[[:space:]]/}". That
+  # global pattern substitution with a character class over a large (hundreds-
+  # of-KB) real 9-stack cdk diff degrades pathologically — measured 100% CPU
+  # for 5h17m with no output, and SIGINT could not land because bash only
+  # handles signals between commands. grep is linear and stops at the first
+  # non-whitespace byte.
+  #
+  # Use a here-string, NOT `printf '%s' "$diff_text" | grep -q`: the script
+  # runs under `set -o pipefail`, and grep -q closes the pipe on its first
+  # match, so printf is killed by SIGPIPE (rc 141) and pipefail reports the
+  # whole pipeline as FAILED even though grep matched — which would flip this
+  # test and wrongly fail-close on every non-empty diff. A here-string has no
+  # writer process to receive SIGPIPE, so grep's own status is authoritative.
+  #
+  # Never reintroduce a ${var//...} (or any other pattern-expansion operator)
+  # over the captured diff — see the audit note above extract_cdk_deletions
+  # and the large-diff performance regression case in
+  # scripts/test-deploy-sh.sh.
+  local has_content=false
+  if grep -q '[^[:space:]]' <<< "$diff_text"; then
+    has_content=true
+  fi
+  if [ "$diff_ok" != "true" ] || [ "$has_content" != "true" ]; then
     err "Deletion gate: cdk diff output is empty or could not be parsed — refusing (fail-closed)."
     err "Cannot prove this deploy performs no resource deletions; re-run once 'cdk diff' succeeds with parseable output."
     return 1
