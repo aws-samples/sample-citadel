@@ -452,6 +452,32 @@ export class ArbiterStack extends cdk.Stack {
       },
     );
 
+    // Per-target tool circuit-breaker state (task 28d624b1). One item per
+    // external target (PK = orgId#targetKind#targetId, SK = "STATE"), so each
+    // target is its own partition. Shared across the short-lived worker
+    // subprocesses via conditional writes (single-prober HALF_OPEN lease,
+    // stateVersion-guarded transitions). RETAIN + deletionProtection like the
+    // ledger, but the justification is STRONGER: these rows are LIVE OPEN state
+    // that concurrent workers depend on for the fast-fail — a silent
+    // whole-table delete on a divergent-branch deploy would drop every OPEN
+    // state and let the fleet stampede a known-bad target. The `ttl` attribute
+    // still self-cleans idle rows, so RETAIN only blocks silent teardown, not
+    // operational cleanup.
+    const toolBreakerStateTable = new dynamodb.Table(
+      this,
+      "ToolBreakerStateTable",
+      {
+        tableName: `citadel-tool-breaker-state-${props.environment}`,
+        partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
+        sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        timeToLiveAttribute: "ttl",
+        encryption: dynamodb.TableEncryption.AWS_MANAGED,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+        deletionProtection: true,
+      },
+    );
     // Tool-result offload (PR2). Oversized tool results (> inline cap) are
     // offloaded here instead of being truncated, so a deduped/replayed caller
     // receives the FULL recorded body. Security condition C3: a dedicated CMK
@@ -616,6 +642,21 @@ export class ArbiterStack extends cdk.Stack {
           // no-ops offload when unset and small results always stay inline.
           TOOL_RESULT_BUCKET: toolResultsBucket.bucketName,
           TOOL_RESULT_KMS_KEY_ID: toolResultsKey.keyArn,
+          // Per-target circuit breaker (task 28d624b1). Table + tunables
+          // delivered CDK -> function env -> build_subprocess_env -> worker
+          // subprocess (NEVER the S3 tool module). Always wired; the breaker is
+          // itself gated on a per-dispatch external-binding target map
+          // (TOOL_BREAKER_TARGETS), so a dispatch with only local tools is a
+          // no-op. THROTTLE is excluded from opening by default (D4) — it
+          // surfaces as a distinct metric; TRANSIENT/TIMEOUT are the health
+          // signals. Fail-open: if this table is unreachable the worker
+          // proceeds (a breaker-store outage never becomes a fleet outage).
+          TOOL_BREAKER_TABLE: toolBreakerStateTable.tableName,
+          TOOL_BREAKER_FAILURE_THRESHOLD: "5",
+          TOOL_BREAKER_WINDOW_SECONDS: "60",
+          TOOL_BREAKER_RECOVERY_SECONDS: "30",
+          TOOL_BREAKER_PROBE_LEASE_SECONDS: "30",
+          TOOL_BREAKER_CACHE_TTL_SECONDS: "3",
           ...(props.registryId && { REGISTRY_ID: props.registryId }),
           ...(props.registryId && { REGISTRY_ENABLED: "true" }),
           // Idempotency-seam smoke fixture (non-prod only): the worker's
@@ -754,6 +795,25 @@ export class ArbiterStack extends cdk.Stack {
           "dynamodb:UpdateItem",
         ],
         resources: [toolExecutionLedgerTable.tableArn],
+      }),
+    );
+
+    // Per-target circuit breaker (task 28d624b1): least-privilege grant on the
+    // breaker-state table. The worker reads state (GetItem), and transitions it
+    // via conditional writes (PutItem/UpdateItem). DELIBERATELY NOT
+    // grantReadWriteData: NO dynamodb:DeleteItem (transitions are conditional
+    // updates; the `ttl` attribute handles row expiry, mirroring the ledger
+    // grant) and NO dynamodb:Scan/Query (all access is by exact key). Scoped to
+    // this one table ARN, as a DISTINCT statement.
+    workerAgentWrapperLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+        ],
+        resources: [toolBreakerStateTable.tableArn],
       }),
     );
 

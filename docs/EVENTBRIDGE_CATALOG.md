@@ -888,3 +888,47 @@ Emitted by `backend/src/lambda/cost-budget-evaluator.ts` (hourly `CostBudgetEval
 5. Always include `correlationId` and `timestamp` in the event detail
 6. Use the `IdempotencyGuard` in the consuming Lambda handler
 7. For registry-backed app events, the emission point is `backend/src/lambda/agent-app-shim-resolver.ts::emitEvent` — do not re-introduce legacy `app-resolver.ts` call sites.
+
+## Tool Circuit Breaker Events (source: `citadel.tool.breaker`)
+
+Emitted by the per-target tool circuit breaker at the worker tool-call seam
+(`arbiter/workerWrapper/tool_breaker_hook.py`), exactly once per state
+transition (single-writer conditional write, so these events are storm-proof by
+construction). A companion `GovernanceFinding` at scope `tool-target-breaker` is
+written on the same transitions.
+
+> **Deferred (follow-up):** the console / fleet-view GraphQL surfacing of
+> breaker state (a read-model resolver over the `citadel-tool-breaker-state`
+> table + an AppSync subscription driven by this event) is intentionally OUT OF
+> SCOPE for the initial breaker landing and deferred to a follow-up. Only the
+> EventBridge event and the finding are emitted today. The node-level
+> non-terminality of a `CIRCUIT_OPEN` failure (re-enqueue via a recovery queue)
+> is likewise a separate follow-up; today an OPEN fast-fail fails the node
+> terminally for that attempt.
+
+### Event Types
+
+| detail-type | When |
+| --- | --- |
+| `citadel.tool.breaker.state_changed` | A target breaker transitions CLOSED→OPEN, HALF_OPEN→CLOSED (recovered), or HALF_OPEN→OPEN (re-opened) |
+
+### Event Schema
+
+#### citadel.tool.breaker.state_changed
+
+```json
+{
+  "source": "citadel.tool.breaker",
+  "detail-type": "citadel.tool.breaker.state_changed",
+  "detail": {
+    "orgId": "string (server-resolved; may be empty)",
+    "targetKind": "mcp_server | integration | datastore",
+    "targetId": "string (integration/datastore RECORD id — never an endpoint URL)",
+    "fromState": "CLOSED | OPEN | HALF_OPEN",
+    "toState": "CLOSED | OPEN | HALF_OPEN",
+    "stateVersion": "int (monotonic; dedupe key with targetKind/targetId/toState)",
+    "workflowId": "string",
+    "timestamp": "int (epoch seconds)"
+  }
+}
+```

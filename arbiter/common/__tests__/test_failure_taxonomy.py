@@ -43,6 +43,40 @@ class TestDispositionMatrix:
         assert ft.disposition(FC.INDETERMINATE) is RD.NEVER
 
 
+class TestCircuitOpenClass:
+    """The NEW CIRCUIT_OPEN class (task 28d624b1, D1): disposition NEVER,
+    reusing the existing NEVER disposition (no parallel disposition invented)."""
+
+    def test_circuit_open_is_never_and_not_auto_retryable(self):
+        assert ft.disposition(FC.CIRCUIT_OPEN) is RD.NEVER
+        assert ft.is_auto_retryable(FC.CIRCUIT_OPEN) is False
+
+    def test_circuit_open_is_forbidden_by_taxonomy_cannot_be_widened(self):
+        # A stale per-node retryableErrors list can NEVER widen an OPEN breaker
+        # into an in-line retry against a known-bad target (narrow-only veto).
+        assert ft.is_retry_forbidden_by_taxonomy("CircuitBreakerOpen") is True
+        assert ft.is_retry_forbidden_by_taxonomy("ToolTargetCircuitOpen") is True
+        assert ft.is_retry_forbidden_by_taxonomy("CircuitOpenError") is True
+
+    def test_circuit_open_is_not_a_governance_smell(self):
+        # OPEN is a target-health signal, not a settled denial.
+        assert ft.is_governance_smell_on_retry(FC.CIRCUIT_OPEN) is False
+
+    def test_circuit_open_classnames_and_value_string(self):
+        assert ft.classify("CircuitBreakerOpen") is FC.CIRCUIT_OPEN
+        assert ft.classify("CircuitOpenError") is FC.CIRCUIT_OPEN
+        assert ft.classify("ToolTargetCircuitOpen") is FC.CIRCUIT_OPEN
+        # value string round-trips via the lower index.
+        assert ft.classify("circuit-open") is FC.CIRCUIT_OPEN
+
+    def test_circuit_open_exception_matches_string_parity(self):
+        class CircuitBreakerOpen(Exception):
+            pass
+
+        assert ft.classify(CircuitBreakerOpen("x")) == ft.classify("CircuitBreakerOpen")
+        assert ft.classify(CircuitBreakerOpen("x")) is FC.CIRCUIT_OPEN
+
+
 # ---------------------------------------------------------------------------
 # Every inventory error type maps as decided
 # ---------------------------------------------------------------------------
