@@ -51,6 +51,41 @@ function resolveArbiterRoot(startDir: string): string {
 }
 const ARBITER_ROOT = resolveArbiterRoot(__dirname);
 
+// ---------------------------------------------------------------------------
+// Seed-module content digest (finding 588c7fb8)
+// ---------------------------------------------------------------------------
+// The seed custom resource (SeedAgentConfigResource, below) uploads agent
+// module files from arbiter/seedConfig/ to the code bucket at
+// agents/<filename> — today demo_echo_agent.py AND smoke_idempotency_agent.py
+// (both ride this exact path), plus any future sibling module the seed handler
+// uploads. Historically the custom resource's ONLY change-detection input was
+// a hand-bumped `Version` string, so editing a module's SOURCE changed no
+// custom-resource property: CloudFormation reported the resource unchanged and
+// never re-invoked the handler, so a repository fix to a module never reached
+// S3 (the module stayed at whatever bytes were last uploaded). This is the
+// finding-588c7fb8 defect.
+//
+// Making a content digest of the seed source part of the custom resource's
+// properties forces a re-upload on the next deploy whenever ANY seed source
+// file changes. The digest uses CDK's own source-fingerprint primitive
+// (cdk.FileSystem.fingerprint) — the same content-addressing CDK uses for
+// AssetHashType.SOURCE assets (the established idiom in this stack, used by
+// the PythonFunctions above) — over the WHOLE seedConfig directory, so the
+// digest covers EVERY uploaded module file (not just one entry point) plus the
+// handler itself. __pycache__/__tests__/*.pyc are excluded so byte-compiled
+// caches and local test runs never churn the digest.
+export const SEED_MODULE_FINGERPRINT_EXCLUDES: readonly string[] = [
+  "__pycache__",
+  "__tests__",
+  "*.pyc",
+];
+
+export function computeSeedModuleDigest(seedConfigDir: string): string {
+  return cdk.FileSystem.fingerprint(seedConfigDir, {
+    exclude: [...SEED_MODULE_FINGERPRINT_EXCLUDES],
+  });
+}
+
 interface ArbiterStackProps extends cdk.StackProps {
   agentEventBus: events.EventBus;
   agentConfigTable: dynamodb.Table;
@@ -1267,14 +1302,30 @@ export class ArbiterStack extends cdk.Stack {
     // Bumped Version v1.3.0 → v1.4.0 so the CFN Update event fires on the
     // next non-prod deploy and the diagnostic smoke-idempotency-agent (gated
     // on SMOKE_FIXTURES_ENABLED) is seeded in existing non-prod environments.
+    //
+    // finding 588c7fb8: the change-detection inputs are now TWO levers:
+    //   * `Version` — a manual lever (bump to force a re-seed even when no
+    //     source changed, e.g. to re-run a seed after an out-of-band table
+    //     wipe). Kept for backward-compat with the deploy runbook.
+    //   * `ModuleDigest` — an AUTOMATIC content digest of the seed source
+    //     (every uploaded agent module + the handler). Any source edit changes
+    //     this digest, so CloudFormation re-invokes the seed handler on the
+    //     next deploy and the corrected module bytes actually reach S3. This
+    //     closes the stale-module defect: previously only `Version` gated the
+    //     re-run, so a module source fix that left `Version` untouched never
+    //     re-uploaded. The digest covers EVERY uploaded file (not just one
+    //     entry point) — see computeSeedModuleDigest above.
+    const seedModuleDigest = computeSeedModuleDigest(
+      path.join(ARBITER_ROOT, "seedConfig"),
+    );
     const seedAgentConfigResource = new cdk.CustomResource(
       this,
       "SeedAgentConfigResource",
       {
         serviceToken: seedAgentConfigLambda.functionArn,
         properties: {
-          // O-05: Use content hash instead of Date.now() to avoid unnecessary re-runs
           Version: "v1.4.0",
+          ModuleDigest: seedModuleDigest,
         },
       },
     );
