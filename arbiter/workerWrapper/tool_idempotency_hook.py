@@ -192,6 +192,15 @@ def _error_result(tool_use_id: str, message: str) -> dict[str, Any]:
     }
 
 
+def _event_tool_name(event: Any) -> str:
+    """Best-effort tool name from a BeforeToolCallEvent, for seam logging only
+    (never logs tool input/payload)."""
+    tool_use = getattr(event, "tool_use", None)
+    if tool_use is not None and hasattr(tool_use, "get"):
+        return str(tool_use.get("name", "") or "")
+    return ""
+
+
 class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
     """Wraps a selected tool so its ``stream()`` is ledger-protected.
 
@@ -273,6 +282,14 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
             ))
             return
 
+        # SEAM LOG (finding 1a57e526): reserve outcome. Key + generation only —
+        # never tool input/payload/secrets. pk/sk are identifiers + an args
+        # HASH (not the args), safe to log.
+        logger.info(
+            "tool-ledger reserve outcome=%s pk=%s sk=%s gen=%s",
+            reservation.outcome.value, self._pk, self._sk, self._dispatch_generation,
+        )
+
         if reservation.outcome == ledger.ReserveOutcome.HIT_COMPLETED:
             yield ToolResultEvent(ledger._recorded_result(reservation.row or {}, self._pk))
             return
@@ -306,10 +323,60 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
         #   (INFRA/GOVERNANCE REFUSAL is the LedgerError arm, handled above at
         #    reserve and below at finalize via _record_governance_refusal.)
         last_result: Any = None
+        finalized = False
+
+        def _finalize_return(result: Any) -> None:
+            # Transition the reservation to its terminal state from the tool's
+            # RETURNED payload. A structured domain error ({"status":"error"})
+            # finalizes FAILED (the node COMPLETES; the agent handles it);
+            # anything else finalizes COMPLETED carrying the recorded result.
+            # Raises ledger.LedgerError on an infrastructure failure — the
+            # caller records a governance refusal so the node fails post-turn.
+            if isinstance(result, dict) and result.get("status") == "error":
+                logger.info(
+                    "tool-ledger finalize status=failed(domain_error) pk=%s sk=%s gen=%s",
+                    self._pk, self._sk, self._dispatch_generation,
+                )
+                ledger.finalize_failure(self._pk, self._sk, error_type="tool_error_result", retryable=False)
+            else:
+                logger.info(
+                    "tool-ledger finalize status=completed pk=%s sk=%s gen=%s",
+                    self._pk, self._sk, self._dispatch_generation,
+                )
+                ledger.finalize_success(self._pk, self._sk, result=result)
+
+        # SEAM LOG: about to execute the real tool under the held reservation.
+        logger.info(
+            "tool-ledger execute pk=%s sk=%s gen=%s tool=%s",
+            self._pk, self._sk, self._dispatch_generation, self._tool_name,
+        )
         try:
             async for event in self._inner.stream(tool_use, invocation_state, **kwargs):
                 if isinstance(event, ToolResultEvent):
                     last_result = event.tool_result
+                    # FINALIZE BEFORE YIELDING THE TERMINAL RESULT (finding
+                    # 1a57e526). The strands tool-executor is guaranteed to
+                    # PULL the terminal ToolResultEvent — that is how it obtains
+                    # a tool result — but is NOT guaranteed to RESUME this async
+                    # generator past that yield. Any finalize placed AFTER the
+                    # ``async for`` loop is therefore unreachable in production:
+                    # that is exactly why a SUCCESSFUL call left its ledger row
+                    # in_flight forever (reserve ran pre-loop, the tool ran and
+                    # yielded, then the generator was abandoned at the yield, so
+                    # the completed transition never ran and no result was
+                    # recorded — defeating the retried-COMPLETED-key replay
+                    # guarantee). Finalizing here, immediately BEFORE the yield,
+                    # runs the transition while the runtime is still driving us.
+                    if not finalized:
+                        try:
+                            _finalize_return(last_result)
+                        except ledger.LedgerError as exc:
+                            # The tool ran but its outcome could not be durably
+                            # recorded (infrastructure refusal). Record it so
+                            # the node fails post-turn; still yield the result
+                            # below (the side effect already happened).
+                            _record_governance_refusal(exc)
+                        finalized = True
                 yield event
         except ledger.ToolOutcomeError as exc:
             # Adapter-CLASSIFIED failure that ESCAPED the tool. Apply the same
@@ -342,24 +409,24 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
             _record_tool_crash(exc)
             raise
 
-        # Tool RETURNED (no exception escaped). Finalize from the returned
-        # payload ALWAYS — so a completed turn can NEVER leave a row in_flight
-        # (finding 4595b730), including the case where the tool streamed no
-        # ToolResultEvent (last_result is None -> finalize completed with null).
-        try:
-            if isinstance(last_result, dict) and last_result.get("status") == "error":
-                # STRUCTURED domain error: tool ran, reported a handled failure.
-                # Ledger row -> failed, but NO tool crash recorded -> node
-                # COMPLETES (the agent is expected to handle it).
-                ledger.finalize_failure(self._pk, self._sk, error_type="tool_error_result", retryable=False)
-            else:
-                ledger.finalize_success(self._pk, self._sk, result=last_result)
-        except ledger.LedgerError as exc:
-            # The tool already ran, but the ledger could not durably record its
-            # outcome (infrastructure refusal). Record it so the node fails
-            # (the run's governance state is indeterminate); no ToolResult to
-            # yield here — the tool's own result already streamed.
-            _record_governance_refusal(exc)
+        # FALLBACK for a tool that streamed NO ToolResultEvent (last_result is
+        # None): with no terminal event to stop at, the runtime DID exhaust us,
+        # so this post-loop code runs. Finalize completed-with-null so a
+        # completed turn can NEVER leave a row in_flight (finding 4595b730),
+        # even in that shape. Guarded by ``finalized`` so the normal path — where
+        # we already finalized before yielding the terminal result — is not
+        # double-written (a second finalize_success would re-offload a large
+        # result to S3 before the conditional no-op).
+        if not finalized:
+            try:
+                _finalize_return(last_result)
+            except ledger.LedgerError as exc:
+                # The tool already ran, but the ledger could not durably record
+                # its outcome (infrastructure refusal). Record it so the node
+                # fails (the run's governance state is indeterminate); no
+                # ToolResult to yield here — the tool's own result already
+                # streamed.
+                _record_governance_refusal(exc)
 
 
 class IdempotencyToolHook:
@@ -610,8 +677,11 @@ class ComposedToolHook:
         # idempotency. Preserves the finding-027c4a89 / c947aa77 invariants and
         # the existing composed-governance tests unchanged.
         if self._breaker is None:
-            if self._governance is not None and self._governance.evaluate(event):
-                return
+            if self._governance is not None:
+                if self._governance.evaluate(event):
+                    logger.info("tool-governance decision=deny tool=%s", _event_tool_name(event))
+                    return
+                logger.info("tool-governance decision=permit tool=%s", _event_tool_name(event))
             if self._idempotency is not None:
                 self._idempotency._on_before_tool_call(event)
             return
@@ -627,7 +697,9 @@ class ComposedToolHook:
         if self._governance is not None:
             outcome = self._governance.evaluate_denylist(event)
             if outcome.refused:
+                logger.info("tool-governance decision=deny tool=%s", _event_tool_name(event))
                 return  # DENY: no breaker read, no approval, no reserve
+            logger.info("tool-governance decision=permit tool=%s", _event_tool_name(event))
             token = outcome.token
 
         # 2) Breaker pre-check — BEFORE approval-consume and BEFORE reserve.
