@@ -10,10 +10,80 @@ Writes the agent response as a JSON line to stdout.
 """
 
 import json
+import logging
 import sys
 import os
 import time
 import importlib.util
+
+# Valid stdlib logging level names accepted from AGENT_LOG_LEVEL. Restricted to
+# the standard named levels (never a bare numeric string) so an operator typo
+# fails closed to the default rather than silently no-op'ing logging.
+_VALID_LOG_LEVEL_NAMES = frozenset({
+    'CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG', 'NOTSET',
+})
+_DEFAULT_LOG_LEVEL_NAME = 'INFO'
+
+
+def _resolve_log_level() -> int:
+    """Resolve the effective logging level from ``AGENT_LOG_LEVEL``.
+
+    Defensive by contract: an unset, blank, or unrecognized value falls back
+    to ``INFO`` rather than raising — a malformed operator-supplied value must
+    never crash the agent subprocess (finding: tool-seam INFO logs never
+    reached CloudWatch because nothing in this process configured a logging
+    level, so Python's implicit root-logger default of WARNING silently
+    dropped every INFO record from tool_idempotency_hook / governance_tool_hook
+    / worker_governance).
+    """
+    raw = os.environ.get('AGENT_LOG_LEVEL', _DEFAULT_LOG_LEVEL_NAME)
+    name = (raw or '').strip().upper()
+    if name not in _VALID_LOG_LEVEL_NAMES:
+        name = _DEFAULT_LOG_LEVEL_NAME
+    return getattr(logging, name)
+
+
+def _configure_logging() -> None:
+    """Configure the subprocess's root logger so INFO records emitted by
+    ``logging.getLogger(__name__)`` callers (tool_idempotency_hook.py,
+    governance_tool_hook.py, worker_governance.py, ...) actually reach the
+    parent's captured output — and, from there, CloudWatch.
+
+    Root cause: this subprocess (launched by
+    ``index.run_agent_in_subprocess`` via ``subprocess.run``) never called
+    ``logging.basicConfig``/``setLevel`` anywhere, so every ``logger.info(...)``
+    call across the tool-call seam was silently dropped by Python's implicit
+    root-logger default (WARNING) — the log statements and their levels are
+    NOT the bug and are deliberately left unchanged here.
+
+    Writes to ``sys.stderr`` explicitly (never ``sys.stdout``, which is
+    reserved for exactly one JSON response line consumed by
+    ``index._interpret_agent_result``) so records land where
+    ``index.run_agent_in_subprocess`` already reads and forwards subprocess
+    output (``result.stderr`` -> ``print(f"[agent stderr] {result.stderr}")``,
+    itself captured as the parent Lambda's stdout -> CloudWatch).
+
+    Level is driven by ``AGENT_LOG_LEVEL`` (default ``INFO``), parsed
+    defensively via ``_resolve_log_level`` so a bad value degrades to the
+    default instead of raising. Idempotent: safe if ``main()`` is invoked more
+    than once in the same interpreter (tests) — clears any handlers this
+    function previously added instead of accumulating duplicates.
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if getattr(handler, '_citadel_agent_log_handler', False):
+            root.removeHandler(handler)
+
+    handler = logging.StreamHandler(stream=sys.stderr)
+    handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s %(name)s %(message)s'
+    ))
+    handler._citadel_agent_log_handler = True  # marks ours for idempotent reconfig
+
+    level = _resolve_log_level()
+    root.addHandler(handler)
+    root.setLevel(level)
+
 
 # Module-global sink for usage records captured during this subprocess's
 # lifetime. Reset per-process (one agent_runner.main() invocation == one
@@ -742,6 +812,13 @@ def _drain_tool_crashes() -> list:
 
 
 def main():
+    # Configure logging FIRST, before anything else in this subprocess emits
+    # a log record (in particular before _install_tool_call_hooks() below,
+    # which constructs the tool_idempotency_hook / governance_tool_hook
+    # loggers). See _configure_logging's docstring for the root-cause and
+    # why stderr is the correct destination.
+    _configure_logging()
+
     # Read input from stdin (single JSON line)
     raw = sys.stdin.read()
     payload = json.loads(raw)
