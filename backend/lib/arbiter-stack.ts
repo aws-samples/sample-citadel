@@ -2104,6 +2104,22 @@ export class ArbiterStack extends cdk.Stack {
       "APPROVAL_REQUIRED_TOOLS",
       (this.node.tryGetContext("approvalRequiredTools") as string) ?? "",
     );
+    // Agent-subprocess logging level: the tool-seam INFO log lines
+    // (tool_idempotency_hook.py, governance_tool_hook.py, worker_governance.py)
+    // never reached CloudWatch because nothing in the agent_runner subprocess
+    // configured a logging level, so Python's implicit root-logger default
+    // (WARNING) silently dropped every INFO record. Delivered SERVER-SIDE on
+    // the static function env (never via the S3 tool module, never via the
+    // per-dispatch build_subprocess_env path) so it is present for every
+    // subprocess launch regardless of dispatch shape. Defaults to INFO;
+    // operators can raise it via CDK context `agentLogLevel` (e.g. "WARNING"
+    // to silence the seam again without a code change). agent_runner.py
+    // parses this defensively — an invalid value falls back to INFO rather
+    // than crashing the subprocess.
+    workerAgentWrapperLambda.addEnvironment(
+      "AGENT_LOG_LEVEL",
+      (this.node.tryGetContext("agentLogLevel") as string) ?? "INFO",
+    );
     workerAgentWrapperLambda.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,

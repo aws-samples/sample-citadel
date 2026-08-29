@@ -292,4 +292,26 @@ describe("ArbiterStack — handler env-var parity (deployment contract)", () => 
     const provided = functionEnvKeys(template, "WorkerAgentWrapper");
     expect(provided.has("GOVERNANCE_LEDGER_TABLE")).toBe(true);
   });
+
+  test("AGENT_LOG_LEVEL is wired on the worker (agent-subprocess log-level fix)", () => {
+    // The tool-seam INFO log lines (tool_idempotency_hook.py et al.) never
+    // reached CloudWatch because nothing configured a logging level in the
+    // agent_runner subprocess. Delivered server-side on the static function
+    // env — pinned here so a future edit that drops it fails loudly.
+    const fns = template.findResources("AWS::Lambda::Function");
+    const match = Object.entries(fns).find(([id]) =>
+      id.startsWith("WorkerAgentWrapper"),
+    );
+    expect(match).toBeDefined();
+    const vars =
+      (
+        match![1] as {
+          Properties?: {
+            Environment?: { Variables?: Record<string, unknown> };
+          };
+        }
+      ).Properties?.Environment?.Variables ?? {};
+    expect(vars).toHaveProperty("AGENT_LOG_LEVEL");
+    expect(vars.AGENT_LOG_LEVEL).toBe("INFO");
+  });
 });
