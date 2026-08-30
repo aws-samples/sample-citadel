@@ -3,9 +3,15 @@
  * from bin/app.ts reaches attachAlarmDelivery inside the topic-owning stacks.
  *
  * ArbiterStack is the KMS-critical path (its escalation topic is
- * CMK-encrypted), so email mode here must both create an email subscription
- * AND grant sns.amazonaws.com decrypt on the escalation CMK. BackendStack's
- * alarm topic is plaintext, so it only needs the subscription.
+ * CMK-encrypted). Two KMS grants on that CMK are UNCONDITIONAL — present in
+ * every alarmDelivery mode, including `none`:
+ *   - cloudwatch.amazonaws.com (grantCloudWatchAlarmPublish, wired at
+ *     topic-construction time in arbiter-stack.ts) — required for the
+ *     OffFrontierEscalation alarm action to publish to the topic at all.
+ *   - sns.amazonaws.com (grantSnsDeliveryDecrypt, wired by
+ *     attachAlarmDelivery) — required for SNS to decrypt+fan out to any
+ *     subscriber protocol.
+ * BackendStack's alarm topic is plaintext, so it needs neither grant.
  */
 import * as cdk from "aws-cdk-lib";
 import { Template, Match } from "aws-cdk-lib/assertions";
@@ -86,15 +92,21 @@ function buildArbiter(alarmDelivery: AlarmDeliveryConfig): Template {
 }
 
 describe("ArbiterStack escalation topic — alarmDelivery prop wiring", () => {
-  test("email: email subscription on the escalation topic + sns.amazonaws.com CMK decrypt grant", () => {
-    const template = buildArbiter({
-      mode: "email",
-      email: "oncall@citadel.io",
+  function expectCloudWatchAlarmPublishGrant(template: Template): void {
+    template.hasResourceProperties("AWS::KMS::Key", {
+      KeyPolicy: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Principal: { Service: "cloudwatch.amazonaws.com" },
+            Action: Match.arrayWith(["kms:GenerateDataKey*", "kms:Decrypt"]),
+          }),
+        ]),
+      },
     });
-    template.hasResourceProperties("AWS::SNS::Subscription", {
-      Protocol: "email",
-      Endpoint: "oncall@citadel.io",
-    });
+  }
+
+  function expectSnsDeliveryDecryptGrant(template: Template): void {
     template.hasResourceProperties("AWS::KMS::Key", {
       KeyPolicy: {
         Statement: Match.arrayWith([
@@ -106,9 +118,22 @@ describe("ArbiterStack escalation topic — alarmDelivery prop wiring", () => {
         ]),
       },
     });
+  }
+
+  test("email: email subscription on the escalation topic + BOTH cloudwatch.amazonaws.com and sns.amazonaws.com CMK grants", () => {
+    const template = buildArbiter({
+      mode: "email",
+      email: "oncall@citadel.io",
+    });
+    template.hasResourceProperties("AWS::SNS::Subscription", {
+      Protocol: "email",
+      Endpoint: "oncall@citadel.io",
+    });
+    expectCloudWatchAlarmPublishGrant(template);
+    expectSnsDeliveryDecryptGrant(template);
   });
 
-  test("slack: a Chatbot Slack config and NO email subscription", () => {
+  test("slack: a Chatbot Slack config, NO email subscription, and BOTH CMK grants still present", () => {
     const template = buildArbiter({
       mode: "slack",
       workspaceId: "T012ABC",
@@ -122,9 +147,11 @@ describe("ArbiterStack escalation topic — alarmDelivery prop wiring", () => {
       template.findResources("AWS::SNS::Subscription"),
     ).filter((s) => s.Properties?.Protocol === "email");
     expect(emailSubs).toHaveLength(0);
+    expectCloudWatchAlarmPublishGrant(template);
+    expectSnsDeliveryDecryptGrant(template);
   });
 
-  test("none: escalation topic keeps no external subscriber, alarms still actioned", () => {
+  test("none: escalation topic keeps no external subscriber, alarms still actioned, and BOTH CMK grants are still present", () => {
     const template = buildArbiter({ mode: "none" });
     const emailSubs = Object.values(
       template.findResources("AWS::SNS::Subscription"),
@@ -137,6 +164,11 @@ describe("ArbiterStack escalation topic — alarmDelivery prop wiring", () => {
     for (const a of Object.values(alarms)) {
       expect((a.Properties?.AlarmActions ?? []).length).toBeGreaterThan(0);
     }
+    // The whole point of this finding: CloudWatch's own publish grant must
+    // be present even when NO external destination is configured, because
+    // it is what lets the alarm action deliver to the topic at all.
+    expectCloudWatchAlarmPublishGrant(template);
+    expectSnsDeliveryDecryptGrant(template);
   });
 });
 

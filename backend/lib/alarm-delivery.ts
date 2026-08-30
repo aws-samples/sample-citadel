@@ -16,10 +16,13 @@ import { NagSuppressions } from "cdk-nag";
  * env/CDK-context and subscribes the given topic(s) to it:
  *
  *   - `email`  — an SNS EMAIL subscription on each topic. Delivery from a
- *                CMK-encrypted topic ALSO requires the `sns.amazonaws.com`
+ *                CMK-encrypted topic requires the `sns.amazonaws.com`
  *                service principal to hold `kms:Decrypt` + `kms:GenerateDataKey*`
  *                on the topic's CMK, or SNS drops the notification SILENTLY.
- *                This module adds that grant for every encrypted topic.
+ *                This module adds that grant for every encrypted topic,
+ *                UNCONDITIONALLY (see below), because SNS must decrypt the
+ *                message internally before fanning it out through ANY
+ *                protocol, not just email.
  *   - `slack`  — an AWS Chatbot Slack channel configuration (the STABLE
  *                `aws-cdk-lib/aws-chatbot` `SlackChannelConfiguration` L2 —
  *                promoted out of alpha; no `@aws-cdk/aws-chatbot-alpha`
@@ -30,6 +33,28 @@ import { NagSuppressions } from "cdk-nag";
  *                id is what `ALARM_SLACK_WORKSPACE_ID` carries.
  *   - `none`   — no subscription (alarms stay wired to their topic, but no
  *                external destination). The explicit opt-out.
+ *
+ * ## KMS grants are unconditional, not gated on delivery mode
+ *
+ * Two distinct KMS grants are required for a CMK-encrypted alarm topic, and
+ * BOTH are added unconditionally — for every topic passed in, in every
+ * delivery mode, including `none`:
+ *
+ *   - `cloudwatch.amazonaws.com` (`grantCloudWatchAlarmPublish`, added by the
+ *     stack at topic-construction time, alongside the CMK — see
+ *     arbiter-stack.ts) needs `kms:GenerateDataKey*` + `kms:Decrypt` to
+ *     publish the alarm notification onto the topic AT ALL. Without it the
+ *     alarm action fails silently regardless of what (if anything) is
+ *     subscribed downstream.
+ *   - `sns.amazonaws.com` (`grantSnsDeliveryDecrypt`, added by
+ *     `attachAlarmDelivery` below) needs the same actions because SNS must
+ *     decrypt a message internally before it can deliver it through ANY
+ *     subscription protocol — email, an AWS Chatbot subscription, or a
+ *     future PagerDuty/HTTPS bridge. It is not specific to `email` mode.
+ *
+ * Both are must-fix regardless of `mode`, because CloudWatch's publish (the
+ * first grant) is what puts the message on the topic before any downstream
+ * mode-specific branching happens.
  *
  * ## Unconfigured-case policy (decision)
  *
@@ -272,6 +297,39 @@ export function grantSnsDeliveryDecrypt(key: kms.IKey): void {
   );
 }
 
+/**
+ * Grant the CloudWatch service principal `kms:GenerateDataKey*` +
+ * `kms:Decrypt` on a topic CMK so a CloudWatch alarm action can publish to
+ * the encrypted topic at all.
+ *
+ * Unlike {@link grantSnsDeliveryDecrypt} (which only matters for the
+ * SNS-native `email` delivery path), this grant is required
+ * UNCONDITIONALLY, for every alarm-delivery mode (including `slack` and
+ * `none`) — CloudWatch's own publish to the topic is what puts the
+ * notification ON the topic in the first place; every downstream
+ * subscriber (email, Chatbot, a future PagerDuty bridge) depends on that
+ * publish having succeeded. Missing this grant makes the alarm action fail
+ * SILENTLY: the alarm state still transitions in the console, but no
+ * message is ever delivered to the topic, so no subscriber — present or
+ * future — ever sees it.
+ *
+ * Must be called for every CMK-encrypted SNS topic that any CloudWatch
+ * alarm targets, regardless of whether an external destination is
+ * currently configured.
+ */
+export function grantCloudWatchAlarmPublish(key: kms.IKey): void {
+  key.addToResourcePolicy(
+    new iam.PolicyStatement({
+      sid: "AllowCloudWatchAlarmPublish",
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.ServicePrincipal("cloudwatch.amazonaws.com")],
+      actions: ["kms:GenerateDataKey*", "kms:Decrypt"],
+      resources: ["*"],
+    }),
+    /* allowNoOp */ true,
+  );
+}
+
 export interface AttachAlarmDeliveryOptions {
   readonly config: AlarmDeliveryConfig;
   readonly environment: string;
@@ -289,6 +347,22 @@ export function attachAlarmDelivery(
 ): void {
   const { config, environment, topics } = opts;
 
+  // The sns.amazonaws.com decrypt grant is required for EVERY encrypted
+  // topic regardless of delivery mode: SNS must decrypt the published
+  // message internally before it can fan it out through ANY protocol —
+  // email, an AWS Chatbot subscription, or a future PagerDuty/HTTPS
+  // bridge. It is not specific to the `email` branch below (a prior
+  // version of this function only added it there, which meant Slack mode
+  // and any topic reachable only through `mode: 'none'`'s no-op path never
+  // got the grant even though CloudWatch's own publish — see
+  // grantCloudWatchAlarmPublish — deposits messages on the topic in every
+  // mode). Grant it here, unconditionally, before branching on mode.
+  for (const t of topics) {
+    if (t.encryptionKey) {
+      grantSnsDeliveryDecrypt(t.encryptionKey);
+    }
+  }
+
   if (config.mode === "none") {
     return;
   }
@@ -298,9 +372,6 @@ export function attachAlarmDelivery(
       t.topic.addSubscription(
         new subscriptions.EmailSubscription(config.email),
       );
-      if (t.encryptionKey) {
-        grantSnsDeliveryDecrypt(t.encryptionKey);
-      }
     }
     return;
   }

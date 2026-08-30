@@ -18,6 +18,7 @@ import * as kms from "aws-cdk-lib/aws-kms";
 import {
   resolveAlarmDeliveryConfig,
   attachAlarmDelivery,
+  grantCloudWatchAlarmPublish,
   isPlaceholderValue,
   isProdLikeEnvironment,
   type AlarmDeliveryConfig,
@@ -249,6 +250,20 @@ describe("attachAlarmDelivery — slack mode", () => {
     );
     expect(emailSubs).toHaveLength(0);
   });
+
+  test("STILL grants sns.amazonaws.com decrypt + GenerateDataKey on the CMK (unconditional, not email-only)", () => {
+    template.hasResourceProperties("AWS::KMS::Key", {
+      KeyPolicy: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Principal: { Service: "sns.amazonaws.com" },
+            Action: Match.arrayWith(["kms:Decrypt", "kms:GenerateDataKey*"]),
+          }),
+        ]),
+      },
+    });
+  });
 });
 
 describe("attachAlarmDelivery — none mode", () => {
@@ -264,5 +279,40 @@ describe("attachAlarmDelivery — none mode", () => {
 
   test("the topics themselves still synth", () => {
     template.resourceCountIs("AWS::SNS::Topic", 2);
+  });
+
+  test("STILL grants sns.amazonaws.com decrypt + GenerateDataKey on the CMK even with no external destination", () => {
+    template.hasResourceProperties("AWS::KMS::Key", {
+      KeyPolicy: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Principal: { Service: "sns.amazonaws.com" },
+            Action: Match.arrayWith(["kms:Decrypt", "kms:GenerateDataKey*"]),
+          }),
+        ]),
+      },
+    });
+  });
+});
+
+describe("grantCloudWatchAlarmPublish", () => {
+  test("grants cloudwatch.amazonaws.com decrypt + GenerateDataKey on the key", () => {
+    const app = new cdk.App();
+    const stack = new cdk.Stack(app, "CwGrantTestStack");
+    const key = new kms.Key(stack, "Key", { enableKeyRotation: true });
+    grantCloudWatchAlarmPublish(key);
+    const template = Template.fromStack(stack);
+    template.hasResourceProperties("AWS::KMS::Key", {
+      KeyPolicy: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Principal: { Service: "cloudwatch.amazonaws.com" },
+            Action: Match.arrayWith(["kms:GenerateDataKey*", "kms:Decrypt"]),
+          }),
+        ]),
+      },
+    });
   });
 });
