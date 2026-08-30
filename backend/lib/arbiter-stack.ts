@@ -26,6 +26,7 @@ import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
 import {
   attachAlarmDelivery,
+  grantCloudWatchAlarmPublish,
   type AlarmDeliveryConfig,
 } from "./alarm-delivery";
 import * as path from "path";
@@ -1914,6 +1915,16 @@ export class ArbiterStack extends cdk.Stack {
         "should investigate why an agent escalated and whether the underlying " +
         "task belongs on the AI-analytical frontier.",
     }).addAlarmAction(new cw_actions.SnsAction(escalationTopic));
+
+    // CloudWatch itself must be able to publish to this CMK-encrypted
+    // topic, or the alarm action above fails SILENTLY (the alarm still
+    // transitions state; no message ever reaches the topic, so no
+    // subscriber — email, Chatbot, or any future destination — ever sees
+    // it). This is UNCONDITIONAL — not gated on alarmDelivery mode —
+    // because CloudWatch's publish is what puts the notification on the
+    // topic in the first place, before any downstream delivery-mode
+    // branching in attachAlarmDelivery even runs. Scoped to this key only.
+    grantCloudWatchAlarmPublish(escalationTopicKey);
 
     // Expose the topic ARN to both Lambdas that can legitimately emit
     // escalations in the future (today only the worker emits via the
