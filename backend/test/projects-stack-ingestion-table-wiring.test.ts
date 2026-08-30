@@ -28,6 +28,7 @@ import * as appsync from "aws-cdk-lib/aws-appsync";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
+import * as sns from "aws-cdk-lib/aws-sns";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
@@ -153,6 +154,9 @@ describe("ProjectsStack — document-upload resolver jobs-table read path", () =
       executionSpecificationsTable,
       agentDesignAssessmentsTable,
       userPool,
+      alarmTopic: new sns.Topic(backendStack, "AlarmTopic", {
+        topicName: "citadel-alarms-test",
+      }),
     });
     template = Template.fromStack(stack);
   });
@@ -184,13 +188,19 @@ describe("ProjectsStack — document-upload resolver jobs-table read path", () =
 
   test("document-upload resolver jobs-table policy grants NO write actions (least privilege)", () => {
     const policies = template.findResources("AWS::IAM::Policy");
-    const hasWriteOnJobsTable = Object.values(policies).some((policy: any) =>
-      (policy.Properties.PolicyDocument.Statement as any[]).some((stmt) => {
+    type PolicyStmtLike = { Action?: string | string[]; Resource?: unknown };
+    type CfnPolicyLike = {
+      Properties?: { PolicyDocument?: { Statement?: PolicyStmtLike[] } };
+    };
+    const hasWriteOnJobsTable = Object.values(policies).some((policy) =>
+      (
+        (policy as CfnPolicyLike).Properties?.PolicyDocument?.Statement ?? []
+      ).some((stmt) => {
         const resourceStr = JSON.stringify(stmt.Resource ?? "");
         if (!resourceStr.includes(tableName)) return false;
         const actions: string[] = Array.isArray(stmt.Action)
           ? stmt.Action
-          : [stmt.Action];
+          : [stmt.Action ?? ""];
         return actions.some((a) =>
           [
             "dynamodb:PutItem",

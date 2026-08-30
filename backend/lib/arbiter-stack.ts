@@ -24,6 +24,10 @@ import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
+import {
+  attachAlarmDelivery,
+  type AlarmDeliveryConfig,
+} from "./alarm-delivery";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -145,6 +149,22 @@ interface ArbiterStackProps extends cdk.StackProps {
   // RELEASE_DEFAULT_ORG_ID is omitted and every resolve_release lookup
   // falls to NO_POINTER (see release_resolution.py) — never a crash.
   releaseDefaultOrgId?: string;
+  /**
+   * Shared platform alarm topic (`citadel-alarms-<env>`, owned by
+   * BackendStack). The six operational Lambda/DLQ alarms below (Step Runner,
+   * timeout watchdog, worker DLQ depth, supervisor, fabricator, worker error
+   * rate) page to it. Optional so test paths that construct ArbiterStack in
+   * isolation still synth; when absent, those alarms fall back to the
+   * in-stack CMK-encrypted escalation topic so no alarm is ever left muted.
+   */
+  alarmTopic?: sns.ITopic;
+  /**
+   * Resolved alarm-delivery destination (email | slack | none) for the
+   * CMK-encrypted escalation topic, resolved ONCE in bin/app.ts and passed
+   * down (same pattern as BackendStack). Optional so tests synth without it;
+   * absent is treated as 'none'.
+   */
+  alarmDelivery?: AlarmDeliveryConfig;
 }
 
 export class ArbiterStack extends cdk.Stack {
@@ -1370,6 +1390,11 @@ export class ArbiterStack extends cdk.Stack {
     agentActivateRule.addTarget(new targets.LambdaFunction(activatorLambda));
 
     // --- Step Runner Lambda (Task 1.6) ---
+    // Collects every operational Lambda/DLQ alarm in this stack so they can
+    // all be actioned to a single destination topic once it is resolved
+    // below (Step Runner + watchdog alarms are declared inside the guard
+    // block; DLQ/supervisor/fabricator/worker alarms unconditionally).
+    const operationalAlarms: cloudwatch.Alarm[] = [];
     if (
       props.workflowsTable &&
       props.executionsTable &&
@@ -1696,18 +1721,23 @@ export class ArbiterStack extends cdk.Stack {
       // Supervisor/Fabricator pattern: Errors metric, 5-minute period,
       // NOT_BREACHING, threshold 3 (the Step Runner is invoked on every
       // workflow lifecycle event, so a burst of errors is the signal).
-      new cloudwatch.Alarm(this, "StepRunnerErrorAlarm", {
-        alarmName: `citadel-step-runner-errors-${props.environment}`,
-        metric: stepRunnerFunction.metricErrors({
-          period: cdk.Duration.minutes(5),
-        }),
-        threshold: 3,
-        evaluationPeriods: 1,
-        comparisonOperator:
-          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-        alarmDescription: "Step Runner Lambda error rate exceeded threshold",
-      });
+      const stepRunnerErrorAlarm = new cloudwatch.Alarm(
+        this,
+        "StepRunnerErrorAlarm",
+        {
+          alarmName: `citadel-step-runner-errors-${props.environment}`,
+          metric: stepRunnerFunction.metricErrors({
+            period: cdk.Duration.minutes(5),
+          }),
+          threshold: 3,
+          evaluationPeriods: 1,
+          comparisonOperator:
+            cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+          alarmDescription: "Step Runner Lambda error rate exceeded threshold",
+        },
+      );
+      operationalAlarms.push(stepRunnerErrorAlarm);
 
       // Error-rate alarm for the workflow timeout watchdog. Threshold is 1
       // (not 3 like the request-driven Lambdas): the watchdog runs once per
@@ -1715,19 +1745,24 @@ export class ArbiterStack extends cdk.Stack {
       // period could never be reached and the alarm would be dead. A single
       // failed sweep means stuck executions aren't being reaped, which is
       // itself worth paging on. Same Errors metric / NOT_BREACHING pattern.
-      new cloudwatch.Alarm(this, "WorkflowTimeoutWatchdogErrorAlarm", {
-        alarmName: `citadel-workflow-timeout-watchdog-errors-${props.environment}`,
-        metric: workflowTimeoutWatchdogFunction.metricErrors({
-          period: cdk.Duration.minutes(5),
-        }),
-        threshold: 1,
-        evaluationPeriods: 1,
-        comparisonOperator:
-          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-        alarmDescription:
-          "Workflow timeout watchdog Lambda error rate exceeded threshold",
-      });
+      const workflowTimeoutWatchdogErrorAlarm = new cloudwatch.Alarm(
+        this,
+        "WorkflowTimeoutWatchdogErrorAlarm",
+        {
+          alarmName: `citadel-workflow-timeout-watchdog-errors-${props.environment}`,
+          metric: workflowTimeoutWatchdogFunction.metricErrors({
+            period: cdk.Duration.minutes(5),
+          }),
+          threshold: 1,
+          evaluationPeriods: 1,
+          comparisonOperator:
+            cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+          treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+          alarmDescription:
+            "Workflow timeout watchdog Lambda error rate exceeded threshold",
+        },
+      );
+      operationalAlarms.push(workflowTimeoutWatchdogErrorAlarm);
     }
 
     // O-03: Enable X-Ray active tracing on all Lambda functions
@@ -1745,45 +1780,51 @@ export class ArbiterStack extends cdk.Stack {
     });
 
     // O-01: CloudWatch alarms for DLQ depth and critical Lambda errors
-    new cloudwatch.Alarm(this, "WorkerDLQDepthAlarm", {
-      alarmName: `citadel-worker-dlq-depth-${props.environment}`,
-      metric: workerAgentDLQ.metricApproximateNumberOfMessagesVisible({
-        period: cdk.Duration.minutes(5),
+    operationalAlarms.push(
+      new cloudwatch.Alarm(this, "WorkerDLQDepthAlarm", {
+        alarmName: `citadel-worker-dlq-depth-${props.environment}`,
+        metric: workerAgentDLQ.metricApproximateNumberOfMessagesVisible({
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription:
+          "Worker agent DLQ has messages — indicates failed processing",
       }),
-      threshold: 1,
-      evaluationPeriods: 1,
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription:
-        "Worker agent DLQ has messages — indicates failed processing",
-    });
+    );
 
-    new cloudwatch.Alarm(this, "SupervisorErrorAlarm", {
-      alarmName: `citadel-supervisor-errors-${props.environment}`,
-      metric: supervisorLambda.metricErrors({
-        period: cdk.Duration.minutes(5),
+    operationalAlarms.push(
+      new cloudwatch.Alarm(this, "SupervisorErrorAlarm", {
+        alarmName: `citadel-supervisor-errors-${props.environment}`,
+        metric: supervisorLambda.metricErrors({
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 3,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: "Supervisor Lambda error rate exceeded threshold",
       }),
-      threshold: 3,
-      evaluationPeriods: 1,
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: "Supervisor Lambda error rate exceeded threshold",
-    });
+    );
 
-    new cloudwatch.Alarm(this, "FabricatorErrorAlarm", {
-      alarmName: `citadel-fabricator-errors-${props.environment}`,
-      metric: fabricatorLambda.metricErrors({
-        period: cdk.Duration.minutes(5),
+    operationalAlarms.push(
+      new cloudwatch.Alarm(this, "FabricatorErrorAlarm", {
+        alarmName: `citadel-fabricator-errors-${props.environment}`,
+        metric: fabricatorLambda.metricErrors({
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 3,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: "Fabricator Lambda error rate exceeded threshold",
       }),
-      threshold: 3,
-      evaluationPeriods: 1,
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: "Fabricator Lambda error rate exceeded threshold",
-    });
+    );
 
     // Worker agent Lambda error-rate alarm (workflow dispatch path). Mirrors
     // the Supervisor/Fabricator pattern: Errors metric, 5-minute period,
@@ -1791,18 +1832,20 @@ export class ArbiterStack extends cdk.Stack {
     // separately by WorkerDLQDepthAlarm; this alarm surfaces in-invocation
     // failures (bad dispatch payload, agent crash) that are retried and may
     // never reach the DLQ.
-    new cloudwatch.Alarm(this, "WorkerErrorAlarm", {
-      alarmName: `citadel-worker-errors-${props.environment}`,
-      metric: workerAgentWrapperLambda.metricErrors({
-        period: cdk.Duration.minutes(5),
+    operationalAlarms.push(
+      new cloudwatch.Alarm(this, "WorkerErrorAlarm", {
+        alarmName: `citadel-worker-errors-${props.environment}`,
+        metric: workerAgentWrapperLambda.metricErrors({
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 3,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: "Worker agent Lambda error rate exceeded threshold",
       }),
-      threshold: 3,
-      evaluationPeriods: 1,
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription: "Worker agent Lambda error rate exceeded threshold",
-    });
+    );
 
     // ============================================================
     // Jagged-Frontier escalation alarm (follow-up #8)
@@ -1915,6 +1958,41 @@ export class ArbiterStack extends cdk.Stack {
       kmsPublishSuppression,
       true,
     );
+
+    // ============================================================
+    // Alarm delivery — action the operational alarms + subscribe topics
+    // ============================================================
+    // The six operational Lambda/DLQ alarms are infrastructure-health
+    // signals, not governance escalations, so they page to the shared
+    // platform alarm topic (`citadel-alarms-<env>`, BackendStack) when it is
+    // wired through props. In an isolated ArbiterStack (test paths that omit
+    // alarmTopic) they fall back to the in-stack escalation topic so no
+    // alarm is ever left actionless. The OffFrontierEscalation alarm stays
+    // on the escalation topic — its audience (governance/on-call for agents
+    // stepping off the AI-analytical frontier) is distinct from ops health.
+    const operationalAlarmTopic: sns.ITopic =
+      props.alarmTopic ?? escalationTopic;
+    for (const alarm of operationalAlarms) {
+      alarm.addAlarmAction(new cw_actions.SnsAction(operationalAlarmTopic));
+    }
+
+    // Subscribe the CMK-encrypted escalation topic to the configurable
+    // external destination (email | slack | none). Email delivery from a
+    // CMK-encrypted topic requires the sns.amazonaws.com decrypt grant that
+    // attachAlarmDelivery adds via the escalationTopicKey passed here — miss
+    // it and delivery fails silently. Unconfigured case is env-scoped (throw
+    // for staging/prod, no-op for dev/test/CI) — see alarm-delivery.ts.
+    attachAlarmDelivery(this, {
+      config: props.alarmDelivery ?? { mode: "none" },
+      environment: props.environment,
+      topics: [
+        {
+          topic: escalationTopic,
+          nameHint: "escalation",
+          encryptionKey: escalationTopicKey,
+        },
+      ],
+    });
 
     // ============================================================
     // Governance authority/ledger tables (Δ8)

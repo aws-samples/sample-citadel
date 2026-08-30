@@ -41,6 +41,8 @@ import * as appsync from "aws-cdk-lib/aws-appsync";
 // pattern, applied there to the governance domain).
 import { aws_appsync as appsyncCfn } from "aws-cdk-lib";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
+import * as sns from "aws-cdk-lib/aws-sns";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
@@ -66,6 +68,13 @@ export interface ProjectsStackProps extends cdk.StackProps {
   executionSpecificationsTable: dynamodb.ITable;
   agentDesignAssessmentsTable: dynamodb.ITable;
   userPool: cognito.IUserPool;
+  /**
+   * Shared platform alarm topic (`citadel-alarms-<env>`, owned by
+   * BackendStack). The two ProjectResolver operational alarms below page to
+   * it — they moved out of BackendStack with the resolver but their SNS
+   * action did not follow until now.
+   */
+  alarmTopic: sns.ITopic;
 }
 
 export class ProjectsStack extends cdk.Stack {
@@ -885,7 +894,7 @@ export class ProjectsStack extends cdk.Stack {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       alarmDescription: "ProjectResolver Lambda error rate exceeded threshold",
-    });
+    }).addAlarmAction(new cw_actions.SnsAction(props.alarmTopic));
 
     new cloudwatch.Alarm(this, "ProjectResolverThrottleAlarm", {
       alarmName: `citadel-ProjectResolver-throttles-${props.environment}`,
@@ -899,7 +908,7 @@ export class ProjectsStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       alarmDescription:
         "ProjectResolver Lambda throttle rate exceeded threshold",
-    });
+    }).addAlarmAction(new cw_actions.SnsAction(props.alarmTopic));
 
     // cdk-nag suppressions for this stack's IAM4/IAM5 findings are applied
     // centrally in bin/app.ts via the shared `appLambdaSuppressions` stack
