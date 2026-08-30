@@ -9,7 +9,12 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
+import {
+  attachAlarmDelivery,
+  type AlarmDeliveryConfig,
+} from "./alarm-delivery";
 import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3";
 import { Asset } from "aws-cdk-lib/aws-s3-assets";
 import { CfnGraphQLSchema } from "aws-cdk-lib/aws-appsync";
@@ -19,6 +24,13 @@ import { NagSuppressions } from "cdk-nag";
 
 interface BackendStackProps extends cdk.StackProps {
   environment: string;
+  /**
+   * Resolved alarm-delivery destination (email | slack | none) for the
+   * shared alarm topic, resolved ONCE in bin/app.ts from backend/.env / CDK
+   * context and passed down (same pattern as the resolved frontendOrigin).
+   * Optional so tests synth without it; absent is treated as 'none'.
+   */
+  alarmDelivery?: AlarmDeliveryConfig;
 }
 
 export class BackendStack extends cdk.Stack {
@@ -1977,22 +1989,28 @@ export class BackendStack extends cdk.Stack {
 
     // Alarm on the fan-out publish-failure metric so GraphQL-level publish
     // errors (which return HTTP 200) surface, not just Lambda-level exceptions.
-    new cloudwatch.Alarm(this, "WorkflowProgressFanoutFailureAlarm", {
-      alarmName: `citadel-workflow-fanout-publish-failure-${props.environment}`,
-      metric: new cloudwatch.Metric({
-        namespace: "Citadel/Workflows",
-        metricName: "FanoutPublishFailure",
-        period: cdk.Duration.minutes(5),
-        statistic: "Sum",
-      }),
-      threshold: 1,
-      evaluationPeriods: 1,
-      comparisonOperator:
-        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      alarmDescription:
-        "Workflow progress fan-out failed to publish to AppSync (transport or GraphQL error).",
-    });
+    // Actioned to the shared alarm topic below, once it is constructed (the
+    // topic is created later in this stack, near the other O-01 alarms).
+    const workflowProgressFanoutFailureAlarm = new cloudwatch.Alarm(
+      this,
+      "WorkflowProgressFanoutFailureAlarm",
+      {
+        alarmName: `citadel-workflow-fanout-publish-failure-${props.environment}`,
+        metric: new cloudwatch.Metric({
+          namespace: "Citadel/Workflows",
+          metricName: "FanoutPublishFailure",
+          period: cdk.Duration.minutes(5),
+          statistic: "Sum",
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription:
+          "Workflow progress fan-out failed to publish to AppSync (transport or GraphQL error).",
+      },
+    );
 
     // Lambda function for handling agent messages
     const agentMessageHandlerFunction = new lambda.Function(
@@ -3024,7 +3042,7 @@ export class BackendStack extends cdk.Stack {
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
         alarmDescription: `${name} Lambda error rate exceeded threshold`,
-      });
+      }).addAlarmAction(new cw_actions.SnsAction(this.alarmTopic));
 
       new cloudwatch.Alarm(this, `${name}ThrottleAlarm`, {
         alarmName: `citadel-${name}-throttles-${props.environment}`,
@@ -3035,7 +3053,7 @@ export class BackendStack extends cdk.Stack {
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
         alarmDescription: `${name} Lambda throttle rate exceeded threshold`,
-      });
+      }).addAlarmAction(new cw_actions.SnsAction(this.alarmTopic));
     }
 
     // DynamoDB throttle alarms for critical tables
@@ -3058,7 +3076,7 @@ export class BackendStack extends cdk.Stack {
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
         alarmDescription: `${name} DynamoDB read throttles exceeded threshold`,
-      });
+      }).addAlarmAction(new cw_actions.SnsAction(this.alarmTopic));
     }
 
     // AppSync 4xx/5xx alarms
@@ -3077,6 +3095,25 @@ export class BackendStack extends cdk.Stack {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       alarmDescription: "AppSync 4xx error rate exceeded threshold",
+    }).addAlarmAction(new cw_actions.SnsAction(this.alarmTopic));
+
+    // Wire the earlier-declared fan-out publish-failure alarm to the topic
+    // now that the topic exists (the alarm is constructed near the workflow
+    // fan-out Lambda, well before this O-01 block).
+    workflowProgressFanoutFailureAlarm.addAlarmAction(
+      new cw_actions.SnsAction(this.alarmTopic),
+    );
+
+    // Configurable external destination (email | slack | none) for the
+    // shared alarm topic. `citadel-alarms-<env>` is NOT CMK-encrypted (no
+    // masterKey on the Topic above), so no KMS grant is required here — only
+    // the CMK-encrypted escalation topic in ArbiterStack needs that. The
+    // unconfigured case is env-scoped: throws for staging/prod, no-op for
+    // dev/test/CI (see alarm-delivery.ts).
+    attachAlarmDelivery(this, {
+      config: props.alarmDelivery ?? { mode: "none" },
+      environment: props.environment,
+      topics: [{ topic: this.alarmTopic, nameHint: "backend" }],
     });
 
     // AppSync 5xx alarm intentionally removed from here — TelemetryStack's

@@ -31,6 +31,7 @@ import {
   resolveFrontendOrigin,
   shouldWarnOnPlaceholder,
 } from "../lib/frontend-origin";
+import { resolveAlarmDeliveryConfig } from "../lib/alarm-delivery";
 
 const app = new cdk.App();
 
@@ -51,10 +52,24 @@ const stackProps = {
   environment: environment,
 };
 
+// Alarm-delivery destination (email | slack | none) resolved ONCE here from
+// backend/.env (loaded above) / CDK context, then passed down to the two
+// alarm-topic-owning stacks — same "resolve in app, pass as prop" shape as
+// frontendOrigin below. Resolution THROWS for staging/prod when the
+// destination is unset/placeholder (a muted alarm must not ship silently);
+// for dev/test/CI an unset destination degrades to 'none' so this dev clone
+// and CI (which have no/placeholder .env) still synth cleanly. The explicit
+// ALARM_DELIVERY=none opt-out is honoured everywhere.
+const alarmDelivery = resolveAlarmDeliveryConfig({
+  environment,
+  context: (key) => app.node.tryGetContext(key),
+});
+
 // Backend infrastructure stack (deployed first)
 const backendStack = new BackendStack(app, `citadel-backend-${environment}`, {
   ...stackProps,
   description: `Backend infrastructure for Citadel - ${environment}`,
+  alarmDelivery,
 });
 
 // Projects satellite stack — backend-stack-split phase 1 (decision 30e6d067).
@@ -80,6 +95,10 @@ const projectsStack = new ProjectsStack(
     executionSpecificationsTable: backendStack.executionSpecificationsTable,
     agentDesignAssessmentsTable: backendStack.agentDesignAssessmentsTable,
     userPool: backendStack.userPool,
+    // Actionless-alarm wiring: the two ProjectResolver operational alarms
+    // (moved here with the resolver) page to BackendStack's shared alarm
+    // topic.
+    alarmTopic: backendStack.alarmTopic,
   },
 );
 projectsStack.addStackDependency(backendStack);
@@ -247,6 +266,13 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   releaseDefaultOrgId:
     process.env.RELEASE_DEFAULT_ORG_ID ??
     (app.node.tryGetContext("releaseDefaultOrgId") as string | undefined),
+  // Actionless-alarm wiring: the six operational Lambda/DLQ alarms page to
+  // BackendStack's shared alarm topic (the escalation topic keeps only the
+  // governance OffFrontierEscalation alarm).
+  alarmTopic: backendStack.alarmTopic,
+  // Configurable external destination for the CMK-encrypted escalation topic
+  // (resolved once above; see BackendStack for the same prop).
+  alarmDelivery,
 });
 
 // Telemetry stack — invocation cost ledger + cost query API/budgets
