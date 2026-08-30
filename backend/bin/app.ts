@@ -1,5 +1,18 @@
 #!/usr/bin/env node
 import "source-map-support/register";
+import * as path from "path";
+import { loadDotenvIfPresent } from "../lib/load-dotenv";
+
+// Load backend/.env BEFORE any stack is constructed. Bundling (e.g. the
+// arbiter's PythonFunction) runs inside this CDK app process — aws-cdk-lib
+// invokes the container CLI from here — so CDK_DOCKER must be in
+// process.env before that happens. A single-stack `cdk diff`/`synth` still
+// synthesizes the whole app, so this must run unconditionally at module
+// load, not per-stack. Load-if-absent only: never overrides a variable an
+// operator or deploy.sh already exported. A missing file is a silent
+// no-op (e.g. CI has no backend/.env).
+loadDotenvIfPresent(path.join(__dirname, "..", "..", ".env"));
+
 import * as cdk from "aws-cdk-lib";
 // (Aspects accessed via cdk.Aspects)
 import { AwsSolutionsChecks, NagSuppressions } from "cdk-nag";
