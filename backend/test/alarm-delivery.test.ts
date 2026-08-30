@@ -134,6 +134,26 @@ describe("resolveAlarmDeliveryConfig", () => {
     expect(isPlaceholderValue("your-channel-id")).toBe(true);
     expect(isPlaceholderValue("oncall@citadel.io")).toBe(false);
   });
+
+  // Boundary-anchored domain matching (CodeQL js/incomplete-url-substring-
+  // sanitization, alert #49): equality or subdomain of a reserved RFC 2606
+  // documentation domain is a placeholder; a domain that merely CONTAINS the
+  // reserved token as a substring is a legitimate, non-placeholder domain.
+  test.each([
+    ["admin@example.com", true],
+    ["admin@mail.example.com", true],
+    ["admin@example.net", true],
+    ["admin@example.org", true],
+    ["admin@deep.sub.example.com", true],
+    ["someone@notexample.community", false],
+    ["someone@example.com.attacker.io", false],
+    ["oncall@citadel.io", false],
+  ])(
+    "isPlaceholderValue(%s) classifies as placeholder=%s",
+    (email, expected) => {
+      expect(isPlaceholderValue(email)).toBe(expected);
+    },
+  );
 });
 
 // A representative two-topic setup: one CMK-encrypted (the escalation-topic

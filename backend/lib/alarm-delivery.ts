@@ -72,28 +72,63 @@ export function isProdLikeEnvironment(environment: string): boolean {
 }
 
 /**
+ * RFC 2606-reserved documentation domains. Any of these, or a subdomain of
+ * one, is a placeholder — never a real delivery destination.
+ */
+const RESERVED_EXAMPLE_DOMAINS = ["example.com", "example.net", "example.org"];
+
+/**
+ * True when `domain` (already lowercased) IS one of the reserved
+ * documentation domains, or is a subdomain of one (e.g. `mail.example.com`).
+ * Boundary-anchored: uses equality or a `.`-prefixed suffix match, so
+ * `notexample.community` and `example.com.attacker.io` — which merely
+ * CONTAIN the reserved token as a substring — are correctly NOT matched.
+ */
+function isReservedExampleDomain(domain: string): boolean {
+  return RESERVED_EXAMPLE_DOMAINS.some(
+    (reserved) => domain === reserved || domain.endsWith(`.${reserved}`),
+  );
+}
+
+/**
  * Heuristic placeholder detector. A value is a placeholder (treated as
- * "unset") when it is empty/whitespace or contains a well-known scaffold
- * token. Keeps `backend/.env.example`'s commented sample values and the
- * common `example.com` / `your-...` shapes from being mistaken for a real
+ * "unset") when it is empty/whitespace, contains a well-known scaffold
+ * token, or — for email-shaped values — has a domain equal to (or a
+ * subdomain of) an RFC 2606-reserved documentation domain
+ * (example.com/.net/.org). Keeps `backend/.env.example`'s commented sample
+ * values and the common `your-...` shapes from being mistaken for a real
  * destination.
+ *
+ * The domain check is boundary-anchored (equality or `.`-suffix) rather than
+ * a raw substring match, so it only matches the reserved domain itself or a
+ * genuine subdomain — not a domain that merely contains "example.com" as a
+ * substring (e.g. `example.com.attacker.io`, `notexample.community`), which
+ * CodeQL rule js/incomplete-url-substring-sanitization flags substring
+ * matching for.
  */
 export function isPlaceholderValue(value: string | undefined): boolean {
   if (value === undefined) return true;
   const v = value.trim();
   if (v === "") return true;
   const lower = v.toLowerCase();
-  return (
+  if (
     lower.includes("your-") ||
     lower.includes("your_") ||
     lower.includes("changeme") ||
-    lower.includes("example.com") ||
     lower.includes("workspace-id") ||
     lower.includes("channel-id") ||
     lower === "xxxx" ||
     lower === "todo" ||
     lower === "placeholder"
-  );
+  ) {
+    return true;
+  }
+  const atIndex = lower.lastIndexOf("@");
+  if (atIndex !== -1) {
+    const domain = lower.slice(atIndex + 1);
+    if (isReservedExampleDomain(domain)) return true;
+  }
+  return false;
 }
 
 export interface ResolveAlarmDeliveryOptions {
