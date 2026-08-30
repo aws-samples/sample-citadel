@@ -18,6 +18,7 @@ import * as appsync from "aws-cdk-lib/aws-appsync";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
+import * as sns from "aws-cdk-lib/aws-sns";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
@@ -25,6 +26,14 @@ import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 
 import { ProjectsStack } from "../lib/projects-stack";
+
+// Minimal CloudFormation resource shapes for template assertions (avoids
+// explicit `any` — enforced by lint-staged's --max-warnings 0).
+type PolicyStmtLike = { Action?: string | string[]; Resource?: unknown };
+type CfnPolicyLike = {
+  Properties?: { PolicyDocument?: { Statement?: PolicyStmtLike[] } };
+};
+type CfnRoleLike = { Properties?: { ManagedPolicyArns?: unknown } };
 
 function createFixture(app: cdk.App) {
   const backendStack = new cdk.Stack(app, "MockBackendStack", {
@@ -126,6 +135,10 @@ function createFixture(app: cdk.App) {
     userPoolName: "citadel-test-pool",
   });
 
+  const alarmTopic = new sns.Topic(backendStack, "AlarmTopic", {
+    topicName: "citadel-alarms-test",
+  });
+
   return {
     appSyncApi,
     agentEventBus,
@@ -138,6 +151,7 @@ function createFixture(app: cdk.App) {
     executionSpecificationsTable,
     agentDesignAssessmentsTable,
     userPool,
+    alarmTopic,
   };
 }
 
@@ -243,11 +257,12 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
     const matches = Object.values(policies);
     expect(matches.length).toBeGreaterThan(0);
     for (const policy of matches) {
-      const statements = (policy as any).Properties.PolicyDocument.Statement;
+      const statements =
+        (policy as CfnPolicyLike).Properties?.PolicyDocument?.Statement ?? [];
       const cognitoStmt = statements.find(
-        (s: any) => s.Action === "cognito-idp:AdminGetUser",
+        (s) => s.Action === "cognito-idp:AdminGetUser",
       );
-      expect(cognitoStmt.Resource).not.toBe("*");
+      expect(cognitoStmt?.Resource).not.toBe("*");
     }
   });
 
@@ -269,7 +284,8 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   test("no IAM policy statement grants a full-service wildcard action (iam:*, dynamodb:*, or s3:*)", () => {
     const policies = template.findResources("AWS::IAM::Policy");
     for (const policy of Object.values(policies)) {
-      const statements = (policy as any).Properties?.PolicyDocument?.Statement;
+      const statements = (policy as CfnPolicyLike).Properties?.PolicyDocument
+        ?.Statement;
       if (!Array.isArray(statements)) continue;
       for (const stmt of statements) {
         const actions = Array.isArray(stmt.Action)
@@ -315,7 +331,7 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
     const lambdaRoles = Object.values(roles);
     expect(lambdaRoles.length).toBeGreaterThan(0);
     for (const role of lambdaRoles) {
-      const managedArns = (role as any).Properties.ManagedPolicyArns;
+      const managedArns = (role as CfnRoleLike).Properties?.ManagedPolicyArns;
       expect(Array.isArray(managedArns)).toBe(true);
     }
   });
