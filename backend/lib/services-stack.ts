@@ -835,6 +835,19 @@ def handler(event, context):
     );
 
     // poller: scheduled detection of INDEXED/FAILED + exactly-once trigger.
+    // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
+    // Function-level Lambda DeadLetterConfig, matching governance-notifier's
+    // established shape — catches handler-throw drops that Lambda's
+    // internal async retry exhausts, which an EventBridge target-level DLQ
+    // cannot see. Every consumer Lambda defined in THIS stack sets
+    // `deadLetterQueue: servicesAsyncDlq`.
+    const servicesAsyncDlq = new cdk.aws_sqs.Queue(this, "ServicesAsyncDlq", {
+      queueName: `citadel-services-async-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: cdk.aws_sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+    });
+
     const ingestPollerFunction = new lambda.Function(
       this,
       "DocumentIngestPollerFunction",
@@ -858,6 +871,8 @@ def handler(event, context):
         timeout: cdk.Duration.minutes(2),
         memorySize: 256,
         tracing: lambda.Tracing.ACTIVE,
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: servicesAsyncDlq,
       },
     );
 
@@ -927,6 +942,8 @@ def handler(event, context):
         timeout: cdk.Duration.minutes(5),
         memorySize: 256,
         tracing: lambda.Tracing.ACTIVE,
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: servicesAsyncDlq,
       },
     );
 

@@ -23,6 +23,7 @@
 import { AllowlistEntry } from "./rails/rail1-removals-only";
 import { MovedLambdaMapping } from "./rails/rail6-iam-equivalence";
 import { MovedResolverMapping } from "./rails/rail7-resolver-equivalence";
+import { NormalizedPolicyStatement } from "./types";
 
 /** Logical IDs the removals-only diff (rail 1) is allowed to see disappear from backend, with justification. */
 export const REMOVAL_ALLOWLIST: AllowlistEntry[] = [
@@ -1505,3 +1506,103 @@ export const SATELLITE_STACK_NAMES: string[] = [
   "citadel-projects-dev",
   "citadel-registry-dev",
 ];
+
+/**
+ * CIT-125 slice A — the one deliberate, justified addition to the backend
+ * template this stage allows: the shared per-stack async DLQ
+ * (`BackendAsyncDlq`) and its auto-generated `QueuePolicy`. Every other new
+ * logical ID added to citadel-backend-<env> still fails rail 1
+ * (removals-only guarantee preserved). Logical IDs below are the CDK
+ * auto-generated construct IDs for `new sqs.Queue(this, "BackendAsyncDlq",
+ * ...)` in backend-stack.ts — re-derive from a fresh synth diff if the
+ * construct ID or its position in the construct tree ever changes.
+ */
+export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
+  {
+    logicalId: "BackendAsyncDlqB9955E40",
+    justification:
+      "CIT-125 slice A: shared per-stack async DLQ (function-level " +
+      "DeadLetterConfig) for the 7 previously-unprotected backend " +
+      "EventBridge Lambda consumers. Additive-only — no existing " +
+      "resource changes. Logical ID confirmed via `cdk synth " +
+      "citadel-backend-dev` (backend-stack.ts's `new sqs.Queue(this, " +
+      '"BackendAsyncDlq", ...)`).',
+  },
+  {
+    logicalId: "BackendAsyncDlqPolicy30F9D1E2",
+    justification:
+      "Auto-generated SQS QueuePolicy for BackendAsyncDlq (enforceSSL); " +
+      "moves with the queue. Logical ID confirmed via the same synth.",
+  },
+];
+
+/**
+ * CIT-125 slice A — per-satellite-Lambda allowed ADDED policy statements
+ * for rail 6. Each of the 6 moved Lambdas below (4 in citadel-projects-dev,
+ * 2 in citadel-registry-dev) gained exactly one new statement this slice:
+ * `sqs:SendMessage` on its stack's own shared async DLQ (a resource that
+ * does not exist in the backend baseline at all, so it can never be
+ * "covered by baseline" — it must be allowlisted here instead). Any OTHER
+ * broadening on these Lambdas still fails rail 6. Keyed by the exact Lambda
+ * function logical ID (matching how `buildBaseline`'s
+ * `lambdaRolePolicies` map is keyed); the resource string is the exact
+ * `GETATT:<logicalId>:Arn` normalized form `template-utils.ts` produces for
+ * a same-stack `Fn::GetAtt` reference (NOT a physical queue name — rail 6
+ * compares normalized IAM statements, not ARNs). Both the satellite DLQ
+ * logical IDs and the exact normalized form were confirmed via `cdk synth
+ * citadel-projects-dev citadel-registry-dev` + a live `npm run split:gates`
+ * run, not hand-typed.
+ */
+export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
+  string,
+  NormalizedPolicyStatement[]
+> = {
+  ChatterPublisherFunction40B50CEA: [
+    {
+      effect: "Allow",
+      actions: ["sqs:SendMessage"],
+      resources: ["GETATT:ProjectsAsyncDlq002366D5:Arn"],
+      conditionKeys: [],
+    },
+  ],
+  ProjectProgressUpdater66E18062: [
+    {
+      effect: "Allow",
+      actions: ["sqs:SendMessage"],
+      resources: ["GETATT:ProjectsAsyncDlq002366D5:Arn"],
+      conditionKeys: [],
+    },
+  ],
+  AssessmentCompletionNotifierF2243F8D: [
+    {
+      effect: "Allow",
+      actions: ["sqs:SendMessage"],
+      resources: ["GETATT:ProjectsAsyncDlq002366D5:Arn"],
+      conditionKeys: [],
+    },
+  ],
+  DesignProgressNotifier61A5E671: [
+    {
+      effect: "Allow",
+      actions: ["sqs:SendMessage"],
+      resources: ["GETATT:ProjectsAsyncDlq002366D5:Arn"],
+      conditionKeys: [],
+    },
+  ],
+  AgentImportManifestResultHandlerAC7A0B8E: [
+    {
+      effect: "Allow",
+      actions: ["sqs:SendMessage"],
+      resources: ["GETATT:RegistryAsyncDlq778E7865:Arn"],
+      conditionKeys: [],
+    },
+  ],
+  FabricationEventHandlerFunctionA425E3C0: [
+    {
+      effect: "Allow",
+      actions: ["sqs:SendMessage"],
+      resources: ["GETATT:RegistryAsyncDlq778E7865:Arn"],
+      conditionKeys: [],
+    },
+  ],
+};

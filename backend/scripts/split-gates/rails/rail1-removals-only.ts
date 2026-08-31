@@ -4,7 +4,10 @@
  * Compares a fresh backend template against the committed baseline:
  *   - no NEW logical IDs are allowed unless explicitly allowlisted with a
  *     justification (a split stage never adds resources to the backend
- *     stack; satellites carry new resources, backend only loses them).
+ *     stack; satellites carry new resources, backend only loses them) —
+ *     CIT-125 slice A introduces the first such allowlisted addition (the
+ *     shared backend async DLQ + its auto QueuePolicy), via
+ *     `additionAllowlist`.
  *   - REMOVED logical IDs must all be in `allowlist` (the move manifest the
  *     later move stages maintain) and NEVER a stateful type.
  *   - RETAINED logical IDs (present in both) must be byte-identical on
@@ -29,9 +32,11 @@ export function runRemovalsOnlyDiff(
   baseline: CfnTemplate,
   fresh: CfnTemplate,
   allowlist: AllowlistEntry[] = [],
+  additionAllowlist: AllowlistEntry[] = [],
 ): RailResult {
   const violations: RailViolation[] = [];
   const allowedIds = new Set(allowlist.map((e) => e.logicalId));
+  const allowedAdditionIds = new Set(additionAllowlist.map((e) => e.logicalId));
   const baselineIds = new Set(Object.keys(baseline.Resources));
   const freshIds = new Set(Object.keys(fresh.Resources));
 
@@ -40,6 +45,11 @@ export function runRemovalsOnlyDiff(
   const retained = [...baselineIds].filter((id) => freshIds.has(id));
 
   for (const id of added) {
+    // CIT-125 slice A: the backend shared async DLQ (+ its auto
+    // QueuePolicy) is the one deliberate, justified addition this stage
+    // allows — see move-manifest.ts's ADDITION_ALLOWLIST. Anything else
+    // added and NOT in this allowlist still violates (guarantee preserved).
+    if (allowedAdditionIds.has(id)) continue;
     violations.push({
       rail: "rail1",
       logicalId: id,

@@ -29,6 +29,8 @@ import { runResolverEquivalence } from "./rails/rail7-resolver-equivalence";
 import type { SatelliteResolverSnapshot } from "./rails/rail7-resolver-equivalence";
 import {
   REMOVAL_ALLOWLIST,
+  ADDITION_ALLOWLIST,
+  ALLOWED_SATELLITE_ADDED_STATEMENTS,
   MOVED_RESOLVERS,
   MOVED_LAMBDA_ROLES,
   SATELLITE_STACK_NAMES,
@@ -140,6 +142,7 @@ function main(): void {
     baselineAsTemplate,
     freshTemplate,
     REMOVAL_ALLOWLIST,
+    ADDITION_ALLOWLIST,
   );
 
   const satelliteTemplates: NamedTemplate[] = SATELLITE_STACK_NAMES.map(
@@ -196,6 +199,7 @@ function main(): void {
     baseline,
     satelliteLambdaPolicies,
     MOVED_LAMBDA_ROLES,
+    ALLOWED_SATELLITE_ADDED_STATEMENTS,
   );
   const rail7 = runResolverEquivalence(
     baseline,

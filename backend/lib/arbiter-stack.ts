@@ -256,6 +256,23 @@ export class ArbiterStack extends cdk.Stack {
         "grandfathering for release-aware dispatch).",
     });
 
+    // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
+    // Function-level Lambda DeadLetterConfig, matching governance-notifier's
+    // established shape — catches handler-throw drops that Lambda's
+    // internal async retry exhausts, which an EventBridge target-level DLQ
+    // cannot see. Every consumer Lambda defined in THIS stack sets
+    // `deadLetterQueue: arbiterAsyncDlq`. Raw EventBridge envelope lands on
+    // the queue so a redrive can re-publish it verbatim
+    // (docs/runbooks/DLQ_REDRIVE.md, slice C). Declared before the first
+    // consumer (supervisorLambda) since deadLetterQueue is a construction
+    // prop, not settable post-construction.
+    const arbiterAsyncDlq = new Queue(this, "ArbiterAsyncDlq", {
+      queueName: `citadel-arbiter-async-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: cdk.aws_sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+    });
+
     const supervisorLambda = new PythonFunction(this, "SupervisorAgent", {
       runtime: lambda.Runtime.PYTHON_3_14,
       // Widened to the arbiter/ root (rather than arbiter/supervisor/) so
@@ -341,6 +358,8 @@ export class ArbiterStack extends cdk.Stack {
           ],
         }),
       ],
+      deadLetterQueueEnabled: true,
+      deadLetterQueue: arbiterAsyncDlq,
     });
 
     this.orchestrationTable.grantReadWriteData(supervisorLambda);
@@ -412,8 +431,23 @@ export class ArbiterStack extends cdk.Stack {
       },
     });
 
-    taskRequestRule.addTarget(new targets.LambdaFunction(supervisorLambda));
-    completionRule.addTarget(new targets.LambdaFunction(supervisorLambda));
+    taskRequestRule.addTarget(
+      new targets.LambdaFunction(supervisorLambda, {
+        // CIT-125 slice A: without retryProps, an undeliverable event sits
+        // in EventBridge's default 24h/185-attempt retry storm before
+        // ever reaching the DLQ. 2 attempts / 2h mirrors the cost-ledger
+        // writer's retryProps (telemetry-stack.ts) — the same "reach the
+        // DLQ in minutes, not a day" rationale, now applied to supervisor.
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
+    completionRule.addTarget(
+      new targets.LambdaFunction(supervisorLambda, {
+        retryAttempts: 2,
+        maxEventAge: cdk.Duration.hours(2),
+      }),
+    );
 
     // Dead letter queue for failed worker messages
     const workerAgentDLQ = new Queue(this, `workerAgentDLQ`, {
@@ -1380,6 +1414,8 @@ export class ArbiterStack extends cdk.Stack {
       environment: {
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
       },
+      deadLetterQueueEnabled: true,
+      deadLetterQueue: arbiterAsyncDlq,
     });
 
     props.agentConfigTable.grantReadWriteData(activatorLambda);
@@ -1443,6 +1479,8 @@ export class ArbiterStack extends cdk.Stack {
               RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId,
             }),
           },
+          deadLetterQueueEnabled: true,
+          deadLetterQueue: arbiterAsyncDlq,
         },
       );
 
@@ -1622,6 +1660,8 @@ export class ArbiterStack extends cdk.Stack {
             NODE_STALL_TIMEOUT_SECONDS: "900",
             NODE_STALL_FACTOR: "2",
           },
+          deadLetterQueueEnabled: true,
+          deadLetterQueue: arbiterAsyncDlq,
         },
       );
 
@@ -3150,6 +3190,8 @@ export class ArbiterStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: arbiterAsyncDlq,
       },
     );
 
@@ -3552,6 +3594,8 @@ export class ArbiterStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: arbiterAsyncDlq,
       },
     );
 
