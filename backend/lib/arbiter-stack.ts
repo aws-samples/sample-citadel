@@ -380,6 +380,26 @@ export class ArbiterStack extends cdk.Stack {
     modelConfigTable.grantReadData(supervisorLambda);
     modelCatalogTable.grantReadData(supervisorLambda);
 
+    // CIT-125 slice B: event.id dedupe (at-least-once delivery + DLQ
+    // redrive safety). Reuses the existing shared idempotency table
+    // (BackendStack, `citadel-idempotency-${env}`, PK `eventId`, TTL attr
+    // `ttl`) — no new table. Referenced by NAME (fromTableName), same
+    // no-cross-stack-construct-dependency pattern as the model tables
+    // immediately above, since ArbiterStack already depends on ServicesStack
+    // which depends on BackendStack. Least privilege: RW only on this table
+    // (PutItem for the claim, GetItem/UpdateItem not needed by the
+    // supervisor's single-claim guard).
+    const supervisorIdempotencyTable = dynamodb.Table.fromTableName(
+      this,
+      "SupervisorIdempotencyTableRef",
+      `citadel-idempotency-${props.environment}`,
+    );
+    supervisorIdempotencyTable.grantReadWriteData(supervisorLambda);
+    supervisorLambda.addEnvironment(
+      "IDEMPOTENCY_TABLE",
+      `citadel-idempotency-${props.environment}`,
+    );
+
     // Grant Supervisor read-only access to Registry APIs so it can
     // resolve agent/app identifiers during orchestration. Full CRUD
     // stays on the Fabricator per least-privilege.
@@ -1140,6 +1160,25 @@ export class ArbiterStack extends cdk.Stack {
     );
     fabricatorModelConfigTable.grantReadData(fabricatorLambda);
     fabricatorModelCatalogTable.grantReadData(fabricatorLambda);
+
+    // CIT-125 slice B: dedupe on message id (at-least-once delivery + DLQ
+    // redrive safety). Reuses the same shared idempotency table as the
+    // supervisor (BackendStack, `citadel-idempotency-${env}`) — no new
+    // table. Referenced by NAME, construct id Fabricator-prefixed so it
+    // doesn't collide with SupervisorIdempotencyTableRef. Least privilege:
+    // RW only on this table — the fabricator's two-phase claim needs
+    // PutItem (claim), GetItem (resolve PENDING vs DONE on a duplicate),
+    // and UpdateItem (promote to DONE).
+    const fabricatorIdempotencyTable = dynamodb.Table.fromTableName(
+      this,
+      "FabricatorIdempotencyTableRef",
+      `citadel-idempotency-${props.environment}`,
+    );
+    fabricatorIdempotencyTable.grantReadWriteData(fabricatorLambda);
+    fabricatorLambda.addEnvironment(
+      "IDEMPOTENCY_TABLE",
+      `citadel-idempotency-${props.environment}`,
+    );
 
     // PutItem/UpdateItem on the durable fabrication-jobs table (owned by
     // BackendStack) so the consumer can upsert PROCESSING/COMPLETED/FAILED

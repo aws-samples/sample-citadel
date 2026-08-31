@@ -8,6 +8,7 @@ import logging
 import sys
 from typing import Any
 import boto3
+from botocore.exceptions import ClientError
 import os
 
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
@@ -211,6 +212,14 @@ MODEL_ID = load_model_id(
 EVENT_BUS_NAME = os.environ.get('EVENT_BUS_NAME')
 ORCHESTRATION_TABLE = os.environ.get('ORCHESTRATION_TABLE')
 WORKER_STATE_TABLE = os.environ.get('WORKER_STATE_TABLE')
+# CIT-125 slice B: shared idempotency table (backend-stack.ts:178-ish,
+# `citadel-idempotency-${env}`, PK `eventId`, TTL attr `ttl`). Referenced by
+# NAME (Table.fromTableName in arbiter-stack.ts) rather than a cross-stack
+# construct import, so this env var is the only coupling to it.
+IDEMPOTENCY_TABLE = os.environ.get('IDEMPOTENCY_TABLE')
+# Dedupe claims only need to outlive the realistic redrive/triage window,
+# not the full 14-day DLQ retention (design B.1 tradeoff).
+IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60
 
 sqs = boto3.client('sqs')
 dynamodb = boto3.resource('dynamodb')
@@ -1299,9 +1308,60 @@ def send_response(message, callback=None):
         print(f"Unknown callback type: {callback_type}")
 
 
+def _idempotency_table():
+    """Return the shared idempotency table resource (CIT-125 slice B).
+
+    Lazily resolved on each call (not module-level) so tests can patch it
+    without needing IDEMPOTENCY_TABLE bound at import time, mirroring the
+    existing lazy-lookup style used elsewhere in this module (e.g.
+    store_agent_config_dynamo's `boto3.resource('dynamodb')` call).
+    """
+    return dynamodb.Table(IDEMPOTENCY_TABLE)
+
+
+def _claim_event_id(event_id: str, consumer: str = "supervisor") -> bool:
+    """Conditionally claim `event_id` in the shared idempotency table.
+
+    Mirrors the cost-ledger-writer pattern (backend/src/lambda/
+    cost-ledger-writer.ts): a single conditional PutItem keyed on the
+    EventBridge envelope id, which is stable across EB delivery retries AND
+    a DLQ redrive (design B.1). Returns True on first sight (proceed),
+    False when the id was already claimed (duplicate — no-op). Any other
+    ClientError (e.g. throttling) is rethrown so the message is redelivered/
+    DLQ'd rather than silently treated as success or duplicate.
+    """
+    now = int(time.time())
+    try:
+        _idempotency_table().put_item(
+            Item={
+                "eventId": event_id,
+                "ttl": now + IDEMPOTENCY_TTL_SECONDS,
+                "consumer": consumer,
+                "claimedAt": now,
+            },
+            ConditionExpression="attribute_not_exists(eventId)",
+        )
+        return True
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
 def handler(event, lambda_context):
     print(f"Received event: {json.dumps(event)}")
-    
+
+    # CIT-125 slice B: dedupe on the EventBridge envelope id before any
+    # side-effecting work. At-least-once EB delivery and a DLQ redrive both
+    # redeliver the SAME event id, so a duplicate delivery must not
+    # double-dispatch (task.request) or double-continue (task.completion).
+    # Events without an `id` (defensive: should not occur on the real EB
+    # path) are NOT deduped — fail open rather than silently dropping work.
+    event_id = event.get('id')
+    if event_id and not _claim_event_id(event_id):
+        print(f"Duplicate event id={event_id}; already claimed, skipping")
+        return
+
     # Check if this is a task completion event from a worker agent
     if 'source' in event and event['source'] == 'task.completion':
         orchestration_id = event['detail']['orchestration_id']
