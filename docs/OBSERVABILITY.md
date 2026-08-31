@@ -262,7 +262,7 @@ BackendStack, so this added zero new stack edges.
 | A1 | `citadel-workflow-node-failure-${env}` | Metrics Insights `SUM(NodeFailure)` across `WorkflowId`/`AgentId` | ≥ 1 | 5m × 3 (1) | `notBreaching` | Trace viewer + DLQ check |
 | A2 | `citadel-workflow-queue-wait-${env}` | Metrics Insights `MAX(NodeQueueWaitMs)` | > 30000 ms | 5m × 3 (3) | `notBreaching` | Worker concurrency/throttles |
 | A3 | `citadel-appsync-5xx-${env}` | `AWS/AppSync 5XXError` (dim `GraphQLAPIId`) | ≥ 5 | 5m × 1 (1) | `notBreaching` | Resolver logs / X-Ray |
-| A4 | `citadel-dlq-not-empty-${env}` | Metrics Insights `MAX(ApproximateNumberOfMessagesVisible)` WHERE `QueueName LIKE 'citadel-%dlq%'` | ≥ 1 | 5m × 1 (1) | `notBreaching` | Identify queue, redrive |
+| A4 | `citadel-dlq-not-empty-${env}` | Math expression: sum of `ApproximateNumberOfMessagesVisible` (Maximum) across the explicit, test-drift-guarded list of every `citadel-*dlq*` queue (CloudWatch rejects an Insights `LIKE` filter at alarm create) | ≥ 1 | 5m × 1 (1) | `notBreaching` | Identify queue, redrive |
 | A5 | `citadel-cost-reconciler-stalled-${env}` | `Citadel/CostReconciler WindowsReconciled` (dim `Environment`) | < 1 | 1h × 3 (3) | **`breaching`** — absence IS the failure | Check reconciler Lambda/schedule |
 | A6 | `citadel-cost-drift-high-${env}` | `Citadel/CostReconciler AbsEstimateDriftPct` (dim `Environment`) | > 25% | 1h × 3 (3) | `notBreaching` | Pricing catalog freshness |
 
@@ -296,6 +296,27 @@ primary, CI-enforced proof that each alarm is wired correctly.
 **Operational** (manual, one-time-per-environment sign-off — supplements,
 does not replace, the unit assertions above):
 
+**Prerequisite — configure alarm delivery first.** The alarms publish to
+the `citadel-alarms-${env}` SNS topic, but no human subscriber exists unless
+`ALARM_DELIVERY` (one of `email | slack | none`, in `backend/.env`) was set
+when the environment was deployed — see `backend/.env.example` for the full
+explanation, including the one-time Slack/Chatbot OAuth console step. Without
+that configuration the alarms fire into a topic with no subscriber: the state
+transition and the SNS publish still succeed, and nobody is notified. For
+`email` mode, delivery also requires the recipient to click the confirmation
+link SNS sends — a `PendingConfirmation` subscription looks present in the
+console but delivers nothing. Verify both before proceeding:
+
+```bash
+TOPIC_ARN=$(aws sns list-topics --region "$REGION" \
+  --query "Topics[?ends_with(TopicArn, ':citadel-alarms-${ENV}')].TopicArn" --output text)
+aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN" --region "$REGION" \
+  --query 'Subscriptions[].[Endpoint,SubscriptionArn]' --output table
+# At least one subscription must be listed, AND its SubscriptionArn must be a
+# real ARN. "PendingConfirmation" means the email confirmation link was never
+# clicked — that subscription is silently equivalent to no subscription.
+```
+
 Datapoint alarms (A1–A4, A6) — publish a synthetic datapoint and confirm the
 alarm actually fires:
 
@@ -316,12 +337,17 @@ directly:
 ```bash
 aws cloudwatch set-alarm-state --alarm-name "citadel-cost-reconciler-stalled-${ENV}" \
   --state-value ALARM --state-reason "fault-injection wiring test" --region "$REGION"
-# confirm the on-call subscriber (email/chatbot) received the notification, then:
+# confirm the configured destination (ALARM_DELIVERY email/Slack — see
+# prerequisite above) received the notification; if nothing arrives, re-check
+# the subscription exists and is not PendingConfirmation, then:
 aws cloudwatch set-alarm-state --alarm-name "citadel-cost-reconciler-stalled-${ENV}" \
   --state-value OK --state-reason "reset" --region "$REGION"
 ```
 
 `put-metric-data` proves the metric → threshold path for datapoint alarms;
-`set-alarm-state` proves the alarm → SNS → notifier path for every alarm,
-including the absence-based one. Both are required before signing off a new
-environment's alarm wiring.
+`set-alarm-state` proves the alarm → SNS → subscriber path for every alarm,
+including the absence-based one — but only if a delivery destination is
+configured and confirmed (the prerequisite above). SNS accepts the publish
+even with zero subscriptions, so an alarm can reach ALARM state "successfully"
+while notifying no one. Both checks, run against a configured destination, are
+required before signing off a new environment's alarm wiring.

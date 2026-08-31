@@ -64,7 +64,9 @@ are in place. Each item is a hard gate — do not skip.
   `CitadelGovernance/OffFrontierEscalations` metric emitted from the
   `escalate` tool (`arbiter/workerWrapper/tools/escalate.py`). This
   alarm publishes to the `citadel-governance-escalations-${env}` SNS
-  topic.
+  topic. Whether that publish reaches a human depends on the configured
+  alarm destination (`ALARM_DELIVERY` — see `backend/.env.example`);
+  unconfigured, the topic has no subscriber.
 
   The gate-decision, workload-identity-mismatch, and registry-sync
   dashboards referenced in earlier drafts of this runbook have **not**
