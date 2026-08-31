@@ -262,9 +262,22 @@ BackendStack, so this added zero new stack edges.
 | A1 | `citadel-workflow-node-failure-${env}` | Metrics Insights `SUM(NodeFailure)` across `WorkflowId`/`AgentId` | ≥ 1 | 5m × 3 (1) | `notBreaching` | Trace viewer + DLQ check |
 | A2 | `citadel-workflow-queue-wait-${env}` | Metrics Insights `MAX(NodeQueueWaitMs)` | > 30000 ms | 5m × 3 (3) | `notBreaching` | Worker concurrency/throttles |
 | A3 | `citadel-appsync-5xx-${env}` | `AWS/AppSync 5XXError` (dim `GraphQLAPIId`) | ≥ 5 | 5m × 1 (1) | `notBreaching` | Resolver logs / X-Ray |
-| A4 | `citadel-dlq-not-empty-${env}` | Math expression: sum of `ApproximateNumberOfMessagesVisible` (Maximum) across the explicit, test-drift-guarded list of every `citadel-*dlq*` queue (CloudWatch rejects an Insights `LIKE` filter at alarm create) | ≥ 1 | 5m × 1 (1) | `notBreaching` | Identify queue, redrive |
+| A4 | `citadel-dlq-not-empty-${env}` (see DLQ-alarm note below) | Math expression: sum of `ApproximateNumberOfMessagesVisible` (Maximum) across the explicit, test-drift-guarded list of every `citadel-*dlq*` queue (CloudWatch rejects an Insights `LIKE` filter at alarm create) | ≥ 1 | 5m × 1 (1) | `notBreaching` | Per-consumer redrive procedure: [runbooks/DLQ_REDRIVE.md](runbooks/DLQ_REDRIVE.md) |
 | A5 | `citadel-cost-reconciler-stalled-${env}` | `Citadel/CostReconciler WindowsReconciled` (dim `Environment`) | < 1 | 1h × 3 (3) | **`breaching`** — absence IS the failure | Check reconciler Lambda/schedule |
 | A6 | `citadel-cost-drift-high-${env}` | `Citadel/CostReconciler AbsEstimateDriftPct` (dim `Environment`) | > 25% | 1h × 3 (3) | `notBreaching` | Pricing catalog freshness |
+
+**DLQ-alarm note (A4):** the shared async-DLQ change (branch
+`feat/eventbridge-shared-dlqs`, unmerged as of 2026-08-31) adds seven
+per-stack Lambda async DLQs (`citadel-<stack>-async-dlq-${env}`) and splits
+DLQ coverage into two alarms to stay under CloudWatch's metric-math operand
+limit: `citadel-dlq-not-empty-${env}` keeps the seven pre-existing
+work/stream/notifier DLQs, and a new `citadel-dlq-not-empty-shared-${env}`
+covers the seven shared async DLQs — both action the same alarm topic. The
+same change replaces the hand-maintained mirror-list drift guard with a
+structural scan (`backend/lib/__tests__/dlq-coverage-structural.test.ts`)
+that discovers every DLQ from the synthesized templates and fails if any is
+unalarmed. Triage and redrive for both alarms:
+[runbooks/DLQ_REDRIVE.md](runbooks/DLQ_REDRIVE.md).
 
 Every alarm carries an in-code comment marking its threshold as a
 **dev-calibrated starting point**. The existing `OffFrontierEscalations`
