@@ -417,7 +417,10 @@ AutoRollbackFindingWriteFailure`** (alarm:
 `citadel-auto-rollback-finding-write-failure-<env>`, wired to the SLO
 alarm topic) so a committed-but-unrecorded rollback **pages** — the move
 is still audited via the history row, and the deterministic finding id
-lets a later run re-write the finding idempotently.
+lets a later run re-write the finding idempotently. Paging assumes the
+environment's alarm delivery destination is configured and confirmed
+(`ALARM_DELIVERY` — see `backend/.env.example`); otherwise the alarm
+fires into a topic with no subscriber.
 
 ### Triage
 
