@@ -3,9 +3,13 @@
  *
  * For every moved resolver-Lambda (satellite construct), the normalized
  * policy statements of its execution role must be a subset-or-equal of the
- * same Lambda's baseline backend-role statements. Prevents a hand-authored
- * satellite role from silently broadening privilege (new Action, widened
- * Resource) relative to what backend granted.
+ * same Lambda's baseline backend-role statements, OR match a per-Lambda
+ * allowed-added statement (CIT-125 slice A: the new sqs:SendMessage grant
+ * on that satellite's shared per-stack async DLQ, keyed by satellite
+ * logical ID in move-manifest.ts's ALLOWED_SATELLITE_ADDED_STATEMENTS).
+ * Prevents a hand-authored satellite role from silently broadening
+ * privilege (new Action, widened Resource) relative to what backend
+ * granted, beyond what's explicitly allowlisted.
  *
  * The manifest is name-mapped (baseline Lambda logical ID -> satellite
  * Lambda logical ID) because recreate-in-satellite drops functionName
@@ -52,6 +56,10 @@ export function runIamEquivalence(
     NormalizedPolicyStatement[]
   >,
   manifest: MovedLambdaMapping[],
+  allowedAddedStatements: Record<
+    string /* satelliteLogicalId */,
+    NormalizedPolicyStatement[]
+  > = {},
 ): RailResult {
   const violations: RailViolation[] = [];
 
@@ -68,9 +76,19 @@ export function runIamEquivalence(
     }
     const satelliteStatements =
       satelliteLambdaPolicies[mapping.satelliteLogicalId] ?? [];
+    // CIT-125 slice A: a moved consumer's new sqs:SendMessage grant on its
+    // stack's shared async DLQ is a deliberate, justified broadening —
+    // covered here per satellite logical ID (move-manifest.ts's
+    // ALLOWED_SATELLITE_ADDED_STATEMENTS), not against the baseline. Any
+    // OTHER broadening still violates (guarantee preserved).
+    const allowedForThisLambda =
+      allowedAddedStatements[mapping.satelliteLogicalId] ?? [];
 
     for (const stmt of satelliteStatements) {
-      if (!isCoveredByAny(stmt, baselineStatements)) {
+      const covered =
+        isCoveredByAny(stmt, baselineStatements) ||
+        isCoveredByAny(stmt, allowedForThisLambda);
+      if (!covered) {
         violations.push({
           rail: "rail6",
           logicalId: mapping.satelliteLogicalId,

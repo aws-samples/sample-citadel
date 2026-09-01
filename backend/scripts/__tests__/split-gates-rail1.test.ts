@@ -56,6 +56,52 @@ describe("rail 1 — removals-only diff (positive)", () => {
     ]);
     expect(result.passed).toBe(true);
   });
+
+  it("CIT-125 slice A: passes when a NEW logical ID is present in additionAllowlist", () => {
+    const baseline = baseTemplate();
+    const fresh = baseTemplate();
+    fresh.Resources.BackendAsyncDlqB9955E40 = {
+      Type: "AWS::SQS::Queue",
+      Properties: { QueueName: "citadel-backend-async-dlq-dev" },
+    };
+    const result = runRemovalsOnlyDiff(
+      baseline,
+      fresh,
+      [],
+      [
+        {
+          logicalId: "BackendAsyncDlqB9955E40",
+          justification: "CIT-125 slice A shared backend async DLQ",
+        },
+      ],
+    );
+    expect(result.passed).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+
+  it("CIT-125 slice A: an addition NOT in additionAllowlist still violates (guarantee preserved)", () => {
+    const baseline = baseTemplate();
+    const fresh = baseTemplate();
+    fresh.Resources.SomeUnlistedNewQueue = {
+      Type: "AWS::SQS::Queue",
+      Properties: { QueueName: "citadel-unlisted-dev" },
+    };
+    const result = runRemovalsOnlyDiff(
+      baseline,
+      fresh,
+      [],
+      [
+        {
+          logicalId: "BackendAsyncDlqB9955E40",
+          justification: "unrelated allowlist entry",
+        },
+      ],
+    );
+    expect(result.passed).toBe(false);
+    expect(
+      result.violations.some((v) => v.logicalId === "SomeUnlistedNewQueue"),
+    ).toBe(true);
+  });
 });
 
 describe("rail 1 — removals-only diff (negative: doctored templates must FAIL correctly)", () => {

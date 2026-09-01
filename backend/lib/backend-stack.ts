@@ -11,6 +11,7 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as sqs from "aws-cdk-lib/aws-sqs";
 import {
   attachAlarmDelivery,
   type AlarmDeliveryConfig,
@@ -518,6 +519,24 @@ export class BackendStack extends cdk.Stack {
     // to CitadelRegistryStack (backend-stack-split phase 2, decision
     // 30e6d067).
 
+    // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
+    // Function-level Lambda DeadLetterConfig, matching governance-notifier's
+    // established shape — catches handler-throw drops that Lambda's
+    // internal async retry exhausts, which an EventBridge target-level DLQ
+    // cannot see. Every consumer Lambda defined in THIS stack sets
+    // `deadLetterQueue: backendAsyncDlq`. Raw EventBridge envelope lands on
+    // the queue so a redrive can re-publish it verbatim
+    // (docs/runbooks/DLQ_REDRIVE.md, slice C). This is the split-gates
+    // rail-1/rail-2 subject (backend-stack.ts §0 of the design): a new
+    // AWS::SQS::Queue + its auto QueuePolicy in citadel-backend-<env>
+    // requires a rail-1 ADDITION_ALLOWLIST entry (see move-manifest.ts).
+    const backendAsyncDlq = new sqs.Queue(this, "BackendAsyncDlq", {
+      queueName: `citadel-backend-async-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+    });
+
     // --- Scheduled AppsTable #META reconciler -------------------------------
     // Runs the existing reconcile-apps-meta logic in --apply mode every 6
     // hours via EventBridge. Mirrors any Registry agent records that don't
@@ -547,6 +566,8 @@ export class BackendStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
           },
         ),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: backendAsyncDlq,
       },
     );
 
@@ -610,6 +631,8 @@ export class BackendStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: backendAsyncDlq,
       },
     );
 
@@ -1239,6 +1262,8 @@ export class BackendStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: backendAsyncDlq,
       },
     );
 
@@ -1796,6 +1821,8 @@ export class BackendStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
           },
         ),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: backendAsyncDlq,
       },
     );
 
@@ -1946,6 +1973,8 @@ export class BackendStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
           },
         ),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: backendAsyncDlq,
       },
     );
 
@@ -2044,6 +2073,8 @@ export class BackendStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: backendAsyncDlq,
       },
     );
 
@@ -2176,6 +2207,8 @@ export class BackendStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: backendAsyncDlq,
       },
     );
 

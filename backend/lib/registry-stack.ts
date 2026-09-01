@@ -196,6 +196,25 @@ export class RegistryStack extends cdk.Stack {
       enforceSSL: true,
     });
 
+    // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
+    // Function-level Lambda DeadLetterConfig, matching governance-notifier's
+    // established shape — catches handler-throw drops that Lambda's
+    // internal async retry exhausts, which an EventBridge target-level DLQ
+    // cannot see. Every consumer Lambda defined in THIS stack sets
+    // `deadLetterQueue: registryAsyncDlq` (registrySyncLambda above keeps
+    // its own dedicated registrySyncDlq — unchanged). Both
+    // agentImportManifestResultHandler and fabricationEventHandlerFunction
+    // are MOVED lambdas (rail-6 subjects): the new sqs:SendMessage grant
+    // this DLQ implies must be allowlisted in move-manifest.ts's
+    // ALLOWED_SATELLITE_ADDED_STATEMENTS or rail 6 flags it as an
+    // unauthorized privilege broadening vs the backend baseline.
+    const registryAsyncDlq = new cdk.aws_sqs.Queue(this, "RegistryAsyncDlq", {
+      queueName: `citadel-registry-async-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: cdk.aws_sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+    });
+
     const registrySyncLambda = new lambda.Function(this, "RegistrySyncLambda", {
       runtime: lambda.Runtime.NODEJS_24_X,
       handler: "registry-sync.handler",
@@ -478,6 +497,8 @@ export class RegistryStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
           },
         ),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: registryAsyncDlq,
       },
     );
 
@@ -802,6 +823,8 @@ export class RegistryStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
           },
         ),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: registryAsyncDlq,
       },
     );
 

@@ -12,6 +12,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
@@ -298,6 +299,21 @@ export class TelemetryStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
+    // Function-level Lambda DeadLetterConfig, matching governance-notifier's
+    // established shape (governance-stack.ts) — catches handler-throw drops
+    // that Lambda's internal async retry exhausts, which an EventBridge
+    // target-level DLQ cannot see. Every consumer Lambda defined in THIS
+    // stack sets `deadLetterQueue: telemetryAsyncDlq`. Raw EventBridge
+    // envelope lands on the queue (no onFailure wrapper) so a redrive can
+    // re-publish it verbatim (docs/runbooks/DLQ_REDRIVE.md, slice C).
+    const telemetryAsyncDlq = new sqs.Queue(this, "TelemetryAsyncDlq", {
+      queueName: `citadel-telemetry-async-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+    });
+
     // --- Writer Lambda -------------------------------------------------
     // Reuses the shared `dist/lambda` asset root every other TS Lambda in
     // this codebase compiles into (backend/src/lambda convention) — no new
@@ -320,6 +336,8 @@ export class TelemetryStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: telemetryAsyncDlq,
       },
     );
 
@@ -443,6 +461,8 @@ export class TelemetryStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: telemetryAsyncDlq,
       },
     );
 
@@ -1070,6 +1090,8 @@ export class TelemetryStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: telemetryAsyncDlq,
       },
     );
 
@@ -1145,6 +1167,8 @@ export class TelemetryStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: telemetryAsyncDlq,
       },
     );
 
@@ -1221,6 +1245,8 @@ export class TelemetryStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: telemetryAsyncDlq,
       },
     );
 
@@ -1291,6 +1317,8 @@ export class TelemetryStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: telemetryAsyncDlq,
       },
     );
 
@@ -1368,6 +1396,8 @@ export class TelemetryStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: telemetryAsyncDlq,
       },
     );
 
@@ -1510,6 +1540,8 @@ export class TelemetryStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: telemetryAsyncDlq,
       },
     );
 
@@ -1551,6 +1583,8 @@ export class TelemetryStack extends cdk.Stack {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
           },
         ),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: telemetryAsyncDlq,
       },
     );
 
@@ -1632,11 +1666,16 @@ export class TelemetryStack extends cdk.Stack {
     // CloudWatch at alarm CREATE with a ValidationException. Sum each
     // queue's ApproximateNumberOfMessagesVisible explicitly instead — a
     // plain MathExpression composed from per-queue Metric objects, no
-    // Insights SELECT involved. DRIFT GUARD: this list is asserted
-    // exhaustive against every `deadLetterQueue` in the synthesized
-    // templates by the "every DLQ appears in DlqNotEmptyAlarm" test in
-    // telemetry-stack.test.ts — a new DLQ added anywhere else MUST be
-    // added here too, or that test fails.
+    // Insights SELECT involved. CIT-125 slice A: this list stayed fixed at
+    // its pre-existing 7 work/stream/notifier DLQs; the 7 NEW per-stack
+    // shared async DLQs (function-level DeadLetterConfig) are alarmed
+    // SEPARATELY below by `DlqNotEmptySharedAlarm` — splitting keeps each
+    // MathExpression under the CloudWatch metric-math operand limit.
+    // Coverage of BOTH lists (this one + the shared one) is asserted
+    // exhaustive against every discovered DLQ in the synthesized templates
+    // by the STRUCTURAL guard in lib/__tests__/dlq-coverage-structural.test.ts
+    // — a new DLQ added anywhere is auto-discovered and must be alarmed by
+    // one of the two alarms, or that test fails. No hand-maintained list.
     const allDlqQueueNames = [
       `citadel-worker-agent-dlq-${props.environment}`,
       `citadel-fabricator-dlq-${props.environment}`,
@@ -2212,6 +2251,60 @@ export class TelemetryStack extends cdk.Stack {
         "queue, read the message, fix the handler, redrive.",
     });
     dlqNotEmptyAlarm.addAlarmAction(new cw_actions.SnsAction(props.alarmTopic));
+
+    // A4b (CIT-125 slice A) — dlq-not-empty-shared: the 7 new per-stack
+    // shared async DLQs (function-level DeadLetterConfig on the 31
+    // previously-unprotected EventBridge Lambda consumers). Split from A4
+    // into its own MathExpression/alarm purely to stay under the
+    // CloudWatch metric-math operand limit (7 + 7 = 14 would risk a single
+    // expression's cap) — same threshold/comparator/action as A4.
+    const sharedDlqQueueNames = [
+      `citadel-arbiter-async-dlq-${props.environment}`,
+      `citadel-backend-async-dlq-${props.environment}`,
+      `citadel-telemetry-async-dlq-${props.environment}`,
+      `citadel-governance-async-dlq-${props.environment}`,
+      `citadel-registry-async-dlq-${props.environment}`,
+      `citadel-projects-async-dlq-${props.environment}`,
+      `citadel-services-async-dlq-${props.environment}`,
+    ];
+    const sharedDlqDepthMetrics: Record<string, cloudwatch.IMetric> = {};
+    sharedDlqQueueNames.forEach((queueName, i) => {
+      sharedDlqDepthMetrics[`sdlq${i}`] = new cloudwatch.Metric({
+        namespace: "AWS/SQS",
+        metricName: "ApproximateNumberOfMessagesVisible",
+        dimensionsMap: { QueueName: queueName },
+        statistic: "Maximum",
+      });
+    });
+    const sharedDlqDepthSumExpression = Object.keys(sharedDlqDepthMetrics).join(
+      " + ",
+    );
+    const dlqNotEmptySharedAlarm = new cloudwatch.Alarm(
+      this,
+      "DlqNotEmptySharedAlarm",
+      {
+        alarmName: `citadel-dlq-not-empty-shared-${props.environment}`,
+        metric: new cloudwatch.MathExpression({
+          expression: sharedDlqDepthSumExpression,
+          usingMetrics: sharedDlqDepthMetrics,
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1, // dev-calibrated; TUNE with prod baseline
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription:
+          "A message landed in a shared per-stack citadel-*-async-dlq-*. " +
+          "Runbook: docs/runbooks/DLQ_REDRIVE.md — identify the owning " +
+          "consumer from the raw event envelope, check the per-consumer " +
+          "SAFE/NEEDS-RECONCILE matrix, then redrive.",
+      },
+    );
+    dlqNotEmptySharedAlarm.addAlarmAction(
+      new cw_actions.SnsAction(props.alarmTopic),
+    );
 
     // A5 — reconciler-stalled: the hourly reconciler emits 1 datapoint per
     // run; 3 empty hours means it's broken. Absence IS the failure here, so

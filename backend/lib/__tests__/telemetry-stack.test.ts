@@ -1030,9 +1030,10 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
   test("alarm count is existing (Off-frontier is in arbiter-stack, none pre-existing here) + 6 platform-health + 1 eval-drift (Phase 3)", () => {
     const { template } = buildStack();
     // TelemetryStack itself has zero pre-existing alarms — 6 are the
-    // decision ab73ae1b platform-health alarms; the 7th (EvalDriftAlarm)
-    // is Phase 3's drift-detection alarm, added independently.
-    template.resourceCountIs("AWS::CloudWatch::Alarm", 7);
+    // decision ab73ae1b platform-health alarms, the 7th (EvalDriftAlarm)
+    // is Phase 3's drift-detection alarm (added independently), and the
+    // 8th (DlqNotEmptySharedAlarm) is CIT-125 slice A's shared-DLQ alarm.
+    template.resourceCountIs("AWS::CloudWatch::Alarm", 8);
   });
 
   test("A1 node-failure: name, threshold, comparison, periods, datapoints, treatMissingData", () => {
@@ -1095,57 +1096,35 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
     expect(expr).not.toMatch(/\bLIKE\b/i);
   });
 
-  test("DRIFT GUARD: every known DLQ physical name is represented as a QueueName dimension in DlqNotEmptyAlarm's metric set", () => {
-    // Independently-sourced (not imported from telemetry-stack.ts) list of
-    // every `deadLetterQueue`-backed SQS queue's exact `queueName:` template
-    // string, per `git grep -ni deadLetterQueue backend/lib/` recon:
-    //   arbiter-stack.ts:291,491,2348,2764 · governance-stack.ts:376,<EvalDispatchDLQ> ·
-    //   registry-stack.ts:194
-    // If a new DLQ is added anywhere and NOT added to telemetry-stack.ts's
-    // `allDlqQueueNames`, this test fails — a DLQ can no longer silently
-    // escape the not-empty alarm.
-    const environment = "test";
-    const expectedDlqQueueNames = [
-      `citadel-worker-agent-dlq-${environment}`,
-      `citadel-fabricator-dlq-${environment}`,
-      `citadel-governance-graph-snapshot-on-change-dlq-${environment}`,
-      `citadel-governance-finding-fanout-dlq-${environment}`,
-      `citadel-governance-notifier-dlq-${environment}`,
-      `citadel-registry-sync-dlq-${environment}`,
-      // CIT-102: eval-dispatch DLQ (governance-stack.ts EvalDispatchDLQ).
-      `citadel-eval-dispatch-dlq-${environment}`,
-    ];
+  // CIT-125 slice A: the former hand-maintained mirror-list "DRIFT GUARD"
+  // test lived here. It is replaced by a STRUCTURAL guard —
+  // lib/__tests__/dlq-coverage-structural.test.ts — that discovers every
+  // DLQ directly from synthesized templates (no list to keep in sync) and
+  // asserts each is covered by a DlqNotEmpty* alarm. See that file for the
+  // discovery walk and the negative/orphan controls.
 
+  test("CIT-125 slice A: DlqNotEmptySharedAlarm exists, threshold 1, action alarmTopic, <=10 metrics", () => {
     const { template } = buildStack();
     const alarms = template.findResources("AWS::CloudWatch::Alarm");
-    const dlqAlarm = Object.values(alarms).find(
-      (r) => r.Properties?.AlarmName === "citadel-dlq-not-empty-test",
+    const sharedAlarm = Object.values(alarms).find(
+      (r) => r.Properties?.AlarmName === "citadel-dlq-not-empty-shared-test",
     );
-    expect(dlqAlarm).toBeDefined();
-
-    const metrics = dlqAlarm!.Properties?.Metrics ?? [];
-    // Every usingMetrics sub-metric contributes one MetricStat entry; the
-    // top-level expression entry has no MetricStat.
-    const referencedQueueNames = metrics
-      .map(
-        (m: {
-          MetricStat?: {
-            Metric?: { Dimensions?: Array<{ Name: string; Value: string }> };
-          };
-        }) =>
-          m.MetricStat?.Metric?.Dimensions?.find((d) => d.Name === "QueueName")
-            ?.Value,
-      )
-      .filter((v: string | undefined): v is string => Boolean(v));
-
-    for (const expectedName of expectedDlqQueueNames) {
-      expect(referencedQueueNames).toContain(expectedName);
-    }
-    // Also require no unexpected extras and no duplicate coverage gaps —
-    // the set must match exactly.
-    expect(new Set(referencedQueueNames)).toEqual(
-      new Set(expectedDlqQueueNames),
+    expect(sharedAlarm).toBeDefined();
+    expect(sharedAlarm!.Properties?.Threshold).toBe(1);
+    expect(sharedAlarm!.Properties?.ComparisonOperator).toBe(
+      "GreaterThanOrEqualToThreshold",
     );
+    expect(sharedAlarm!.Properties?.AlarmActions).toBeDefined();
+
+    const metrics = sharedAlarm!.Properties?.Metrics ?? [];
+    // usingMetrics sub-metrics each carry a MetricStat; the top-level
+    // expression entry does not. CloudWatch metric-math caps operands
+    // per expression, so this must stay well under the ~10-operand limit.
+    const subMetricCount = metrics.filter(
+      (m: { MetricStat?: unknown }) => m.MetricStat,
+    ).length;
+    expect(subMetricCount).toBeLessThanOrEqual(10);
+    expect(subMetricCount).toBeGreaterThan(0);
   });
 
   test("A5 reconciler-stalled: name, threshold, comparison, periods, datapoints, treatMissingData (BREACHING)", () => {
@@ -1197,8 +1176,9 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
   test("every new alarm's AlarmActions references props.alarmTopic ARN", () => {
     const { template } = buildStack();
     const alarms = template.findResources("AWS::CloudWatch::Alarm");
-    // 6 platform-health alarms (decision ab73ae1b) + 1 Phase 3 eval-drift alarm.
-    expect(Object.keys(alarms)).toHaveLength(7);
+    // 6 platform-health alarms (decision ab73ae1b) + 1 Phase 3 eval-drift
+    // alarm + 1 CIT-125 slice A shared-DLQ alarm.
+    expect(Object.keys(alarms)).toHaveLength(8);
     for (const [, resource] of Object.entries(alarms)) {
       const actions = resource.Properties?.AlarmActions ?? [];
       expect(actions.length).toBeGreaterThan(0);

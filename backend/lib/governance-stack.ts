@@ -1415,6 +1415,22 @@ exports.handler = async (event) => {
     );
 
     // ========================================================================
+
+    // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
+    // Function-level Lambda DeadLetterConfig, matching governance-notifier's
+    // established shape (governanceNotifierDlq above) — catches
+    // handler-throw drops that Lambda's internal async retry exhausts,
+    // which an EventBridge target-level DLQ cannot see. Every consumer
+    // Lambda defined in THIS stack (excluding governance-notifier and
+    // evalConversationWorker's SQS-ESM, which already have dedicated DLQs)
+    // sets `deadLetterQueue: governanceAsyncDlq`.
+    const governanceAsyncDlq = new sqs.Queue(this, "GovernanceAsyncDlq", {
+      queueName: `citadel-governance-async-dlq-${props.environment}`,
+      retentionPeriod: Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+    });
+
     // Auto-rollback evaluator (decisions D1–D9) — scheduled 1-minute poll
     // (D2: poll ONLY in v1; no SNS/alarm subscription for TRIGGERING). Homed
     // here alongside the pointer resolver because it needs the pointer table
@@ -1524,6 +1540,8 @@ exports.handler = async (event) => {
             removalPolicy: cdk.RemovalPolicy.DESTROY,
           },
         ),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: governanceAsyncDlq,
       },
     );
     // Best-effort governance.release.auto_rollback emit target (D6/§7).
@@ -2039,6 +2057,8 @@ exports.handler = async (event) => {
         retention: logs.RetentionDays.ONE_WEEK,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
       }),
+      deadLetterQueueEnabled: true,
+      deadLetterQueue: governanceAsyncDlq,
     });
 
     props.evalRunsTable.grantReadWriteData(evalRunnerFunction);

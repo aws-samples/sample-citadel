@@ -68,6 +68,72 @@ describe("rail 6 — IAM privilege-equivalence (positive)", () => {
     );
     expect(result.passed).toBe(true);
   });
+
+  it("CIT-125 slice A: passes when the added statement matches an allowed-added-statement entry for that satellite logical ID", () => {
+    const baseline = makeBaseline({
+      DesignProgressNotifier61A5E671: [
+        stmt(["appsync:GraphQL"], ["arn:aws:appsync:*:*:apis/x/types/*"]),
+      ],
+    });
+    const result = runIamEquivalence(
+      baseline,
+      {
+        DesignProgressNotifier61A5E671: [
+          stmt(["appsync:GraphQL"], ["arn:aws:appsync:*:*:apis/x/types/*"]),
+          stmt(["sqs:SendMessage"], ["citadel-projects-async-dlq"]),
+        ],
+      },
+      [
+        {
+          baselineLogicalId: "DesignProgressNotifier61A5E671",
+          satelliteLogicalId: "DesignProgressNotifier61A5E671",
+          satelliteStackName: "citadel-projects-dev",
+        },
+      ],
+      {
+        DesignProgressNotifier61A5E671: [
+          stmt(["sqs:SendMessage"], ["citadel-projects-async-dlq"]),
+        ],
+      },
+    );
+    expect(result.passed).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+
+  it("CIT-125 slice A: any OTHER broadening on an allowlisted satellite still violates", () => {
+    const baseline = makeBaseline({
+      DesignProgressNotifier61A5E671: [
+        stmt(["appsync:GraphQL"], ["arn:aws:appsync:*:*:apis/x/types/*"]),
+      ],
+    });
+    const result = runIamEquivalence(
+      baseline,
+      {
+        DesignProgressNotifier61A5E671: [
+          stmt(["appsync:GraphQL"], ["arn:aws:appsync:*:*:apis/x/types/*"]),
+          stmt(["sqs:SendMessage"], ["citadel-projects-async-dlq"]),
+          // Not allowlisted — an unrelated broadening slipped in.
+          stmt(["dynamodb:DeleteItem"], ["arn:aws:dynamodb:*:*:table/x"]),
+        ],
+      },
+      [
+        {
+          baselineLogicalId: "DesignProgressNotifier61A5E671",
+          satelliteLogicalId: "DesignProgressNotifier61A5E671",
+          satelliteStackName: "citadel-projects-dev",
+        },
+      ],
+      {
+        DesignProgressNotifier61A5E671: [
+          stmt(["sqs:SendMessage"], ["citadel-projects-async-dlq"]),
+        ],
+      },
+    );
+    expect(result.passed).toBe(false);
+    expect(
+      result.violations.some((v) => v.message.includes("dynamodb:DeleteItem")),
+    ).toBe(true);
+  });
 });
 
 describe("rail 6 — IAM privilege-equivalence (negative: doctored broadened statement must FAIL correctly)", () => {

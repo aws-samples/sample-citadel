@@ -505,6 +505,23 @@ export class ProjectsStack extends cdk.Stack {
     // Chatter Publisher + Resolver
     // ============================================================
 
+    // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
+    // Function-level Lambda DeadLetterConfig, matching governance-notifier's
+    // established shape — catches handler-throw drops that Lambda's
+    // internal async retry exhausts, which an EventBridge target-level DLQ
+    // cannot see. Every consumer Lambda defined in THIS stack sets
+    // `deadLetterQueue: projectsAsyncDlq`. All 4 consumers here are MOVED
+    // lambdas (rail-6 subjects): the new sqs:SendMessage grant this DLQ
+    // implies must be allowlisted in move-manifest.ts's
+    // ALLOWED_SATELLITE_ADDED_STATEMENTS or rail 6 flags it as an
+    // unauthorized privilege broadening vs the backend baseline.
+    const projectsAsyncDlq = new cdk.aws_sqs.Queue(this, "ProjectsAsyncDlq", {
+      queueName: `citadel-projects-async-dlq-${props.environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: cdk.aws_sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+    });
+
     const chatterPublisherFunction = new lambda.Function(
       this,
       "ChatterPublisherFunction",
@@ -520,6 +537,8 @@ export class ProjectsStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: projectsAsyncDlq,
       },
     );
 
@@ -598,6 +617,8 @@ export class ProjectsStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: projectsAsyncDlq,
       },
     );
 
@@ -645,6 +666,8 @@ export class ProjectsStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: projectsAsyncDlq,
       },
     );
 
@@ -773,6 +796,8 @@ export class ProjectsStack extends cdk.Stack {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: projectsAsyncDlq,
       },
     );
 
