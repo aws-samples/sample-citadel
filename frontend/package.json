@@ -94,6 +94,7 @@
             "generate-aws-exports": "node scripts/generate-aws-exports.js"
       },
       "overrides": {
+            "browserslist": ">=4.28.8 <5",
             "dompurify": "^3.4.13",
             "form-data": "^4.0.6",
             "js-yaml": "^4.3.0",
