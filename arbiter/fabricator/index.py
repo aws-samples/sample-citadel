@@ -34,6 +34,7 @@ from registry_recovery import (
 )
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from common.region import cross_region_prefix
 from model_config_loader import load_model_id
 
@@ -46,6 +47,18 @@ FABRICATOR_MODEL_ID = load_model_id(
     region=_REGION,
     fallback_model_id=f"{_MODEL_PREFIX}.anthropic.claude-sonnet-4-6",
 )
+
+# CIT-125 slice B: shared idempotency table (backend-stack.ts:178-ish,
+# `citadel-idempotency-${env}`, PK `eventId`, TTL attr `ttl`), referenced by
+# NAME (Table.fromTableName in arbiter-stack.ts) — no new table. DEVIATION
+# from the design's literal "event.id" framing: the fabricator queue has no
+# EventBridge envelope (fabricator-request-resolver.ts / agent-import-
+# resolver.ts both SendMessageCommand directly with a hand-built JSON body,
+# no `id`/`detail` field). The dedupe key used here is the SQS `messageId`
+# instead — stable across at-least-once SQS redelivery and across a DLQ
+# redrive, which is the same guarantee the design relies on for the EB id.
+IDEMPOTENCY_TABLE = os.environ.get('IDEMPOTENCY_TABLE')
+IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60
 
 logger = logging.getLogger(__name__)
 
@@ -2469,9 +2482,95 @@ def process_event(event, context, request_type=None):
     publish_intake_progress(orchestration_id, agent_index, total_agents, agent_use_id)
 
 
+def _idempotency_table():
+    """Return the shared idempotency table resource (CIT-125 slice B).
+
+    Lazily resolved on each call so tests can patch it without needing
+    IDEMPOTENCY_TABLE bound at import time — mirrors the existing lazy
+    `boto3.resource('dynamodb')` call sites already in this module (e.g.
+    store_agent_config_dynamo).
+    """
+    import boto3 as _boto3
+    return _boto3.resource('dynamodb').Table(IDEMPOTENCY_TABLE)
+
+
+def _claim_message_id(message_id: str) -> str:
+    """Two-phase claim on the SQS `messageId` (design B.1, fabricator side).
+
+    A bare single-claim guard (like the supervisor's) is not enough here:
+    fabrication is long-running and partially side-effecting (registers
+    agents/tools, creates roles), so a redelivery arriving WHILE the first
+    attempt is still in flight must be distinguished from a redelivery
+    AFTER it already completed.
+
+    Returns one of:
+      - "CLAIMED": first sight — PENDING record written, proceed with
+        fabrication.
+      - "ALREADY_PENDING": an earlier attempt's PENDING record still
+        exists — do NOT re-enter the fabrication body; route to reconcile
+        (a poisoned-then-fixed message may have partially fabricated).
+      - "ALREADY_DONE": a prior attempt already completed — no-op.
+
+    Any ClientError other than the conditional-check failure on the initial
+    claim PutItem is rethrown so the message is redelivered/DLQ'd rather
+    than silently swallowed.
+    """
+    import time as _time
+    now = int(_time.time())
+    table = _idempotency_table()
+    try:
+        table.put_item(
+            Item={
+                "eventId": message_id,
+                "ttl": now + IDEMPOTENCY_TTL_SECONDS,
+                "consumer": "fabricator",
+                "status": "PENDING",
+                "claimedAt": now,
+            },
+            ConditionExpression="attribute_not_exists(eventId)",
+        )
+        return "CLAIMED"
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+        existing = table.get_item(Key={"eventId": message_id}).get("Item") or {}
+        if existing.get("status") == "DONE":
+            return "ALREADY_DONE"
+        # PENDING (or a legacy/unknown status) — treat as in-flight/for-
+        # reconcile rather than assuming DONE, per design B.1.
+        return "ALREADY_PENDING"
+
+
+def _complete_message_id(message_id: str) -> None:
+    """Promote a claimed message id to DONE after successful fabrication."""
+    _idempotency_table().update_item(
+        Key={"eventId": message_id},
+        UpdateExpression="SET #status = :done",
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={":done": "DONE"},
+    )
+
+
+def _route_to_reconcile(message_id: str) -> None:
+    """Log-and-route hook for a redelivery seen while PENDING (design B.1 /
+    docs/runbooks/DLQ_REDRIVE.md slice C): the runbook, not this handler,
+    owns the manual reconcile procedure. This is deliberately a no-op
+    beyond logging — it exists as a named seam so a future automated
+    reconcile step has a single call site to extend, and so tests can
+    assert the routing decision independently of that future behavior.
+    """
+    logger.warning(
+        "Fabricator message id=%s redelivered while a prior attempt is "
+        "still PENDING; skipping re-fabrication and routing to manual "
+        "reconcile (see docs/runbooks/DLQ_REDRIVE.md)",
+        message_id,
+    )
+
+
 def lambda_handler(event, context):
     print(f"processing event {event}")
     for record in event['Records']:
+        message_id = record.get('messageId')
         message_body = json.loads(record['body'])
         # print(f"Parsed message body: {json.dumps(message_body, indent=2)}")
         
@@ -2480,8 +2579,25 @@ def lambda_handler(event, context):
         if 'messageAttributes' in record and 'requestType' in record['messageAttributes']:
             request_type = record['messageAttributes']['requestType'].get('stringValue')
             print(f"Request type from messageAttributes: {request_type}")
-        
+
+        # CIT-125 slice B: two-phase dedupe on the SQS messageId (see
+        # IDEMPOTENCY_TABLE comment above for why messageId, not event.id).
+        # Records without a messageId (defensive: should not occur on the
+        # real SQS path) are NOT deduped — fail open rather than silently
+        # dropping work.
+        if message_id:
+            claim = _claim_message_id(message_id)
+            if claim == "ALREADY_PENDING":
+                _route_to_reconcile(message_id)
+                continue
+            if claim == "ALREADY_DONE":
+                print(f"Message id={message_id} already fabricated (DONE); skipping")
+                continue
+
         process_event(message_body, context, request_type=request_type)
+
+        if message_id:
+            _complete_message_id(message_id)
 
 if __name__ == "__main__":
     # Grab a record from your lambda and invoke, configuration will vary drastically
