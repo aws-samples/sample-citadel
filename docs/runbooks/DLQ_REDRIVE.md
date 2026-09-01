@@ -11,25 +11,11 @@ list.**
 
 ## 0. Deployment-state legend (read this first)
 
-This runbook is written against the post-hardening state of the DLQ
-substrate. As of 2026-08-31 two of the three changes are on unmerged
-branches; every claim below is tagged:
-
-| Tag | Meaning |
-|---|---|
-| **[TODAY]** | Deployed from `main` now. |
-| **[A]** | Lands with the shared per-stack async DLQs — branch `feat/eventbridge-shared-dlqs` (unmerged as of 2026-08-31). |
-| **[B]** | Lands with supervisor/fabricator dedupe — branch `feat/agent-event-idempotency` (unmerged as of 2026-08-31). |
-
-Until **[A]** merges, most EventBridge Lambda consumers (~31 of 34) have
-**no DLQ on any mechanism**: a handler failure is retried (EventBridge
-delivery retry, then Lambda's internal async retry ×2) and then **silently
-dropped — there is nothing to redrive**. The seven **[TODAY]** DLQs in §2
-are the only queues that can currently hold messages.
-
-> Maintainer note: when the **[A]** / **[B]** branches merge, delete the
-> corresponding tags (the procedures themselves are already written against
-> the merged state).
+This runbook is written against the fully hardened state of the DLQ
+substrate: shared per-stack async DLQs (`feat/eventbridge-shared-dlqs`, PR
+102) and supervisor/fabricator dedupe (`feat/agent-event-idempotency`, PR
+103) have both merged to `main`. All procedures below reflect current
+production state — there is no partial-deployment caveat to track.
 
 ```bash
 export ENV=dev            # or your environment suffix
@@ -41,16 +27,16 @@ export REGION=<region>
 Two paging alarms watch DLQ depth (both `→ citadel-alarms-${ENV}` SNS, see
 §6 for the last-mile caveat):
 
-- `citadel-dlq-not-empty-${ENV}` **[TODAY]** — sum of
+- `citadel-dlq-not-empty-${ENV}` — sum of
   `ApproximateNumberOfMessagesVisible` across the seven pre-existing
   work/stream/notifier DLQs (explicit list in
   `backend/lib/telemetry-stack.ts`; CloudWatch rejects a Metrics-Insights
   `LIKE` filter at alarm create, so the list is explicit and
   drift-guarded).
-- `citadel-dlq-not-empty-shared-${ENV}` **[A]** — same expression over the
-  seven new per-stack shared async DLQs. Split into two alarms to stay
-  within CloudWatch's metric-math operand limit. With **[A]**, the drift
-  guard becomes structural: `backend/lib/__tests__/dlq-coverage-structural.test.ts`
+- `citadel-dlq-not-empty-shared-${ENV}` — same expression over the
+  seven per-stack shared async DLQs. Split into two alarms to stay
+  within CloudWatch's metric-math operand limit. The drift
+  guard is structural: `backend/lib/__tests__/dlq-coverage-structural.test.ts`
   discovers every DLQ from the synthesized templates and fails if any is
   unalarmed.
 
@@ -80,9 +66,9 @@ When either fires:
 3. Identify the owning consumer:
    - **Work-queue DLQs** (worker-agent / fabricator / eval-dispatch): the
      queue itself names the consumer — see §2.
-   - **Function async DLQs [A]**: the message body is the **raw EventBridge
-     envelope** (that is why slice A chose Lambda `DeadLetterConfig` over
-     `onFailure` destinations). Map the envelope's `source` /
+   - **Function async DLQs**: the message body is the **raw EventBridge
+     envelope** (Lambda `DeadLetterConfig` is used rather than `onFailure`
+     destinations). Map the envelope's `source` /
      `detail-type` to the consumer via §2's table. The SQS message
      attributes carry `RequestID` / `ErrorCode` / `ErrorMessage` from the
      failed invocation.
@@ -91,7 +77,7 @@ When either fires:
 
 ## 2. Queue inventory → owning consumer
 
-### Work-queue DLQs (SQS redrive policy) — [TODAY]
+### Work-queue DLQs (SQS redrive policy)
 
 | DLQ (retention 14d) | Source queue | Consumer | Queue config |
 |---|---|---|---|
@@ -99,21 +85,21 @@ When either fires:
 | `citadel-fabricator-dlq-${ENV}` | `citadel-fabricator-queue-${ENV}` | fabricator (`arbiter/fabricator/index.py`) | visibility 90m (6× fn timeout), retention 7d, maxReceiveCount 3 — a poison message needs up to ~4.5h to reach the DLQ (documented tradeoff in `backend/lib/arbiter-stack.ts`, fabricatorQueue) |
 | `citadel-eval-dispatch-dlq-${ENV}` | `citadel-eval-dispatch-${ENV}` | eval-conversation-worker (`backend/src/lambda/eval-conversation-worker.ts`) | visibility 15m, retention 7d, maxReceiveCount 3 |
 
-### Target/function DLQs — [TODAY]
+### Target/function DLQs
 
 | DLQ | Feeds from | Consumer |
 |---|---|---|
 | `citadel-governance-notifier-dlq-${ENV}` | EB target DLQ **and** Lambda async DLQ (both mechanisms) | governance-notifier (`backend/src/lambda/governance-notifier.ts`) |
 | `citadel-registry-sync-dlq-${ENV}` | EB target DLQ + app-level `sendToDlq()` on handler error | registry-sync (`backend/src/lambda/registry-sync.ts`) |
 
-### DynamoDB-stream DLQs (ESM `onFailure`) — [TODAY]
+### DynamoDB-stream DLQs (ESM `onFailure`)
 
 | DLQ | Consumer | Payload type |
 |---|---|---|
 | `citadel-governance-graph-snapshot-on-change-dlq-${ENV}` | governance-graph-snapshot-on-change (4 ESMs over the authority tables) | **shard/sequence pointers — see §3.3** |
 | `citadel-governance-finding-fanout-dlq-${ENV}` | governance-finding-fanout (ledger-table stream) | **pointers — see §3.3** |
 
-### Shared per-stack async DLQs — [A]
+### Shared per-stack async DLQs
 
 One queue per stack (`citadel-<stack>-async-dlq-${ENV}`, 14d retention,
 SQS-managed SSE, enforceSSL); every EventBridge-invoked Lambda in that
@@ -130,8 +116,8 @@ consumer:
 | `citadel-projects-async-dlq-${ENV}` | all-bus chatter ⇒ chatter-publisher; `intake.progress.updated` ⇒ project-progress-updater; assessment/design events ⇒ assessment-completion-notifier, design-progress-notifier |
 | `citadel-services-async-dlq-${ENV}` | 1m schedule ⇒ document-ingest-poller; 15m schedule ⇒ health-monitor |
 
-**[A]** also adds an explicit `RetryPolicy` (2 attempts, 2h max event age)
-to the supervisor's `TaskRequestRule`/`TaskCompletionRule` targets, so a
+The supervisor's `TaskRequestRule`/`TaskCompletionRule` targets also carry
+an explicit `RetryPolicy` (2 attempts, 2h max event age), so a
 failing supervisor event reaches the arbiter DLQ in minutes instead of
 after EventBridge's 24h/185-attempt default retry storm.
 
@@ -144,7 +130,7 @@ Grounding for every verdict is the consumer's own guard, cited by file.
 
 | Consumer | Why redrive is a no-op for already-applied work | Caveat | Verify after redrive |
 |---|---|---|---|
-| cost-ledger-writer | Conditional put `attribute_not_exists(PK)`; ConditionalCheckFailed swallowed (`backend/src/lambda/cost-ledger-writer.ts`) | DLQ for it exists only with **[A]** — today failures are silent drops | Ledger rows present for the redriven window; `citadel-cost-drift-high-${ENV}` stays OK |
+| cost-ledger-writer | Conditional put `attribute_not_exists(PK)`; ConditionalCheckFailed swallowed (`backend/src/lambda/cost-ledger-writer.ts`) | — | Ledger rows present for the redriven window; `citadel-cost-drift-high-${ENV}` stays OK |
 | app-invoke-handler | `event.id` dedupe via `citadel-idempotency-${ENV}` (`backend/src/lambda/app-invoke-handler.ts`) | — | Invocation recorded once; no duplicate app run |
 | project-progress-updater | Idempotency-table guard (`backend/src/lambda/project-progress-updater.ts`) | — | Progress state correct in UI |
 | eval-sampling-selector; eval-case-scorer; eval-sample-scorer; eval-run-aggregator; eval-drift-finding-writer | Shared idempotency guard / single-writer idempotent `SET` / write-once finding (respective files under `backend/src/lambda/`) | — | Eval run/case rows show no double-count |
@@ -158,11 +144,9 @@ Grounding for every verdict is the consumer's own guard, cited by file.
 
 ### 3.2 RECONCILE-FIRST — do the reconcile step BEFORE any redrive
 
-#### supervisor (`task.request` / `task.completion` → `citadel-arbiter-async-dlq-${ENV}` [A])
+#### supervisor (`task.request` / `task.completion` → `citadel-arbiter-async-dlq-${ENV}`)
 
-Without **[B]** the supervisor has **no dedupe at all**: a duplicate
-`task.request` double-dispatches workers, a duplicate `task.completion`
-double-triggers continuation. **[B]** adds a conditional-put claim on the
+The supervisor dedupes via a conditional-put claim on the
 EventBridge envelope `id` (`_claim_event_id` in
 `arbiter/supervisor/index.py`; row `{eventId, consumer: "supervisor", ttl:
 +7d}` in `citadel-idempotency-${ENV}`) at handler entry, **before** any
@@ -203,14 +187,14 @@ fabricatorQueue comment block in `backend/lib/arbiter-stack.ts`), and a
 poisoned-then-fixed message may have **partially fabricated** (registered
 agents/tools, created roles) before failing.
 
-**[B]** adds a **two-phase claim keyed on the SQS `messageId`** (the
+The fabricator uses a **two-phase claim keyed on the SQS `messageId`** (the
 fabricator queue carries hand-built JSON bodies with no EventBridge
 envelope, so there is no `event.id` — see the module comment in
 `arbiter/fabricator/index.py`): `PENDING` written before fabrication,
 promoted to `DONE` after success (`_claim_message_id` /
 `_complete_message_id`).
 
-**Poison messages no longer reach `citadel-fabricator-dlq-${ENV}` [B].**
+**Poison messages no longer reach `citadel-fabricator-dlq-${ENV}`.**
 Lifecycle of a message that crashes *inside* fabrication: receive #1 writes
 `PENDING` and dies → visibility timeout (90m) → receive #2 sees
 `ALREADY_PENDING` → logs a warning ("redelivered while a prior attempt is
@@ -261,7 +245,7 @@ Reconcile, then re-dispatch:
    one set of registry records; no repeat of the reconcile warning in the
    fabricator's log group.
 
-#### gateway-registration-handler (`integration.connect` / `disconnect` → `citadel-backend-async-dlq-${ENV}` [A])
+#### gateway-registration-handler (`integration.connect` / `disconnect` → `citadel-backend-async-dlq-${ENV}`)
 
 Order-sensitive with **no version guard**
 (`backend/src/lambda/gateway-registration-handler.ts` creates/deletes
@@ -277,7 +261,7 @@ after a later `disconnect` **resurrects a removed target**.
    connect/disconnect flow instead.
 3. Verify: gateway target list matches the integration record's status.
 
-#### agent-message-handler (`message.sent_to_agent` → `citadel-backend-async-dlq-${ENV}` [A])
+#### agent-message-handler (`message.sent_to_agent` → `citadel-backend-async-dlq-${ENV}`)
 
 Appends conversation rows and dispatches live agent invocations
 (`backend/src/lambda/agent-message-handler.ts`): a redrive can produce a
@@ -329,7 +313,7 @@ Then delete/purge the pointer messages so the DlqNotEmpty alarm clears.
 
 Applies to the three DLQs fed by an SQS `RedrivePolicy`
 (worker-agent, fabricator, eval-dispatch). It does **not** work for the
-function async DLQs **[A]** — their "source" is a Lambda, not a queue; use
+function async DLQs — their "source" is a Lambda, not a queue; use
 §4.2/§4.3 for those.
 
 ```bash
@@ -351,11 +335,11 @@ aws sqs list-message-move-tasks --source-arn "$DLQ_ARN" --region $REGION \
 subset, receive/inspect/delete the poison ones first, then start the move
 task.
 
-### 4.2 Re-publish a function-DLQ envelope to EventBridge [A]
+### 4.2 Re-publish a function-DLQ envelope to EventBridge
 
 Function async DLQs carry the raw EventBridge envelope, so the redrive is a
 verbatim re-publish to the `citadel-agents-${ENV}` bus. **A re-published
-event gets a NEW envelope `id`** — the [B] supervisor dedupe will not
+event gets a NEW envelope `id`** — the supervisor dedupe will not
 suppress it (that is exactly why §3.2 supervisor is reconcile-first).
 Envelopes with `source: aws.events` (scheduled rules) cannot be re-published
 this way — for sweeps, rely on the next tick (§3.1 last row).
@@ -384,7 +368,7 @@ the §3 row of *each* matching consumer before re-publishing.
 
 ### 4.3 Direct Lambda re-invoke (preserves the original event `id`)
 
-Use when you specifically want the [B] supervisor dedupe to see the
+Use when you specifically want the supervisor dedupe to see the
 **original** envelope `id` (§3.2), or to test a fixed handler against the
 exact failed payload without bus fan-out:
 
@@ -396,7 +380,7 @@ aws lambda invoke --function-name "$FN" --region $REGION \
 
 Delete the DLQ message afterwards (§4.2 last step).
 
-### 4.4 Idempotency-ledger query and row-clean [B]
+### 4.4 Idempotency-ledger query and row-clean
 
 ```bash
 # Was this envelope id / messageId already processed?
@@ -416,9 +400,9 @@ before any redrive.
 
 ### 4.5 Resolving physical Lambda names
 
-No Citadel Lambda sets an explicit `functionName` — physical names are
-CloudFormation-generated. Resolve from the owning stack (stacks:
-`citadel-{backend,arbiter,telemetry,governance,registry,projects,services}-${ENV}`):
+Most Citadel Lambdas leave `functionName` unset — physical names are
+CloudFormation-generated. That's the norm; resolve from the owning stack
+(stacks: `citadel-{backend,arbiter,telemetry,governance,registry,projects,services}-${ENV}`):
 
 ```bash
 aws cloudformation list-stack-resources --stack-name citadel-arbiter-$ENV --region $REGION \
@@ -430,15 +414,36 @@ Supervisor = logical id starting `SupervisorAgent`; fabricator =
 `FabricatorAgent`; watchdog = `WorkflowTimeoutWatchdogFunction`; snapshot =
 `GovernanceGraphSnapshotFn`.
 
+A handful of Lambdas across the backend stacks pin an explicit
+`functionName` (`citadel-<name>-${ENV}`) instead, so their physical name is
+predictable without a stack-resource lookup. Of these, two are referenced
+by consumer name in this runbook: **app-invoke-handler**
+(`citadel-app-invoke-handler-${ENV}`, `backend-stack.ts`) and
+**governance-graph-snapshot-on-change**
+(`citadel-governance-graph-snapshot-on-change-${ENV}`, `arbiter-stack.ts`,
+invoked directly in §3.3). The remaining pinned exceptions:
+cost-ledger-writer, cost-ledger-reconciler, cost-query-handler,
+cost-budget-handler, trace-query-handler, replay-package-handler,
+cost-budget-evaluator, eval-case-scorer, eval-run-aggregator,
+eval-sampling-selector, eval-sample-scorer, eval-sampling-config-resolver,
+eval-drift-detector, eval-drift-finding-writer (all `telemetry-stack.ts`);
+pdf-generator, document-ingest-start, document-ingest-poller,
+health-monitor, tool-sandbox (`services-stack.ts`);
+agent-release-rollback-evaluator (`governance-stack.ts`);
+registry-agent-record-resolver (`registry-stack.ts`);
+app-publish-handler (`gateway-stack.ts`); pre-token-gen (`backend-stack.ts`).
+For any of these, skip the stack-resource lookup and use
+`citadel-<name>-${ENV}` directly.
+
 ## 5. Post-redrive verification (all consumers)
 
 1. DLQ drains: `ApproximateNumberOfMessagesVisible` returns to 0 and
-   `citadel-dlq-not-empty-${ENV}` (and `-shared-` **[A]**) return to OK.
+   `citadel-dlq-not-empty-${ENV}` (and `-shared-`) return to OK.
 2. No boomerang: the redriven messages do not reappear in the DLQ after one
    visibility/retry cycle (if they do, the handler defect is not fixed —
    stop and fix before redriving again).
 3. The consumer-specific "verify" column/step from its §3 row.
-4. For **[B]** consumers, spot-check the ledger (§4.4): supervisor claims
+4. Spot-check the idempotency ledger (§4.4): supervisor claims
    present for processed ids; no fabricator row stuck `PENDING`.
 
 ## 6. SNS last mile — the alarm may be paging nobody
