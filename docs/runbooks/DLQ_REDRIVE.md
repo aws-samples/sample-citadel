@@ -206,6 +206,16 @@ failures **before** the claim — an unparseable body (`json.loads` runs
 before the claim in `lambda_handler`) or sustained Lambda throttling where
 the handler never runs.
 
+**Paging alarm (board 2b52a985):** every ALREADY_PENDING ack also emits one
+`CitadelArbiter/FabricatorStalePendingClaim` CloudWatch metric (Count,
+dimension `Consumer=fabricator`) from `_route_to_reconcile` in
+`arbiter/fabricator/index.py`. `citadel-fabricator-stale-pending-claim-${ENV}`
+(`backend/lib/arbiter-stack.ts`) alarms on `Sum > 0` over a 5-minute period
+and routes through the same operational alarm-delivery path as
+`FabricatorErrorAlarm` (`props.alarmTopic` → `citadel-alarms-${ENV}` SNS).
+This is the paging trigger for the section below — you no longer have to
+notice the stale row on your own; on page, go straight to the scan.
+
 Triage anchor — scan for stale PENDING rows:
 
 ```bash
