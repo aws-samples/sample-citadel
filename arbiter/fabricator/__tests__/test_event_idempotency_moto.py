@@ -50,6 +50,16 @@ try:
 except ImportError:  # pragma: no cover
     pytest.skip("moto not installed", allow_module_level=True)
 
+# The fabricator's index.py imports `strands` at module level, so the
+# `import index` below errors at collection time in environments without
+# the strands SDK. Skip (don't error) there; the suite still EXECUTES
+# wherever strands is installed — CI's arbiter jobs `pip install
+# strands-agents` (see .github/workflows/ci.yml), and local runs use the
+# pinned .venv-check.
+pytest.importorskip(
+    "strands", reason="CI installs strands-agents; local runs use .venv-check"
+)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 os.environ.setdefault("TOOL_CONFIG_TABLE", "fake-tool-table")
