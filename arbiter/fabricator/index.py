@@ -2551,13 +2551,61 @@ def _complete_message_id(message_id: str) -> None:
     )
 
 
+# Board 2b52a985 (slice-B checker advisory): metric namespace/name/dimension
+# for the ALREADY_PENDING poison-ack, pinned here as constants so the
+# CloudWatch alarm math in backend/lib/arbiter-stack.ts is oracle-validatable
+# against the exact literal values this module emits — no hand-retyping the
+# strings at the alarm call site.
+STALE_PENDING_METRIC_NAMESPACE = "CitadelArbiter"
+STALE_PENDING_METRIC_NAME = "FabricatorStalePendingClaim"
+
+_cw_client = None
+
+
+def _cloudwatch():
+    """Lazy boto3 CloudWatch client (module-level cache, first-call
+    construction) — same convention as ``_get_registry_client`` above and
+    ``arbiter/workerWrapper/tools/escalate.py``'s ``_cloudwatch()``.
+    """
+    global _cw_client
+    if _cw_client is None:
+        _cw_client = boto3.client("cloudwatch")
+    return _cw_client
+
+
+def _reset_cloudwatch_client_for_test() -> None:
+    """Test-only hook — forces the next call to rebuild the cached client."""
+    global _cw_client
+    _cw_client = None
+
+
 def _route_to_reconcile(message_id: str) -> None:
     """Log-and-route hook for a redelivery seen while PENDING (design B.1 /
     docs/runbooks/DLQ_REDRIVE.md slice C): the runbook, not this handler,
     owns the manual reconcile procedure. This is deliberately a no-op
-    beyond logging — it exists as a named seam so a future automated
-    reconcile step has a single call site to extend, and so tests can
-    assert the routing decision independently of that future behavior.
+    beyond logging and metric emission — it exists as a named seam so a
+    future automated reconcile step has a single call site to extend, and
+    so tests can assert the routing decision independently of that future
+    behavior.
+
+    Board 2b52a985: this is the ONLY place a poison/wedged fabrication is
+    currently observable — `lambda_handler` acks the SQS message on every
+    ALREADY_PENDING receipt (see its docstring), so the message never
+    accrues the redrive policy's maxReceiveCount and never reaches
+    `citadel-fabricator-dlq-${ENV}`. Emitting a CloudWatch metric here,
+    at the exact moment of poison-consumption, is the cheapest available
+    signal — no new Lambda, no new polling, no new IAM beyond
+    `cloudwatch:PutMetricData` (already used by the worker's `escalate`
+    tool; see that module for the identical put_metric_data shape this
+    mirrors). A stale-PENDING age-scan alarm was the other option
+    considered (a) doesn't require a redelivery to ever occur, so it also
+    catches a crashed fabrication with NO further redelivery — a gap this
+    emit-on-ack metric cannot cover. That is deliberately left to the
+    runbook's existing manual scan for this change: it would need a new
+    scheduled Lambda (extra cost/IAM surface) and is not required to close
+    the specific "poison acks silently" gap this task targets. Additive
+    only — this does not change the ack/no-raise behavior above; a
+    CloudWatch outage must not turn this fail-open path into a failure.
     """
     logger.warning(
         "Fabricator message id=%s redelivered while a prior attempt is "
@@ -2565,6 +2613,26 @@ def _route_to_reconcile(message_id: str) -> None:
         "reconcile (see docs/runbooks/DLQ_REDRIVE.md)",
         message_id,
     )
+    try:
+        _cloudwatch().put_metric_data(
+            Namespace=STALE_PENDING_METRIC_NAMESPACE,
+            MetricData=[
+                {
+                    "MetricName": STALE_PENDING_METRIC_NAME,
+                    "Value": 1,
+                    "Unit": "Count",
+                    # No per-messageId dimension — unbounded cardinality;
+                    # mirrors the low-cardinality-dimension rule in
+                    # arbiter/common/metrics_constants.py.
+                    "Dimensions": [{"Name": "Consumer", "Value": "fabricator"}],
+                }
+            ],
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort: never change ack behavior
+        logger.warning(
+            "Failed to emit %s metric for message id=%s (non-fatal): %s",
+            STALE_PENDING_METRIC_NAME, message_id, type(e).__name__,
+        )
 
 
 def lambda_handler(event, context):
