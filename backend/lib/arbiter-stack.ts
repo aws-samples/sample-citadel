@@ -1949,6 +1949,51 @@ export class ArbiterStack extends cdk.Stack {
       }),
     );
 
+    // Board 2b52a985 (slice-B checker advisory): the fabricator's two-phase
+    // idempotency claim (arbiter/fabricator/index.py, _claim_message_id)
+    // ACKS a redelivered poison/wedged message on ALREADY_PENDING instead of
+    // letting it three-strike into citadel-fabricator-dlq-${props.environment}
+    // — see the runbook's fabricator section
+    // (docs/runbooks/DLQ_REDRIVE.md) for the full lifecycle. That poison-ack
+    // was previously invisible except via a manual DynamoDB scan for stale
+    // PENDING rows. `_route_to_reconcile` now emits one
+    // CitadelArbiter/FabricatorStalePendingClaim (Count, Dimensions:
+    // [{Name: Consumer, Value: fabricator}]) metric per ack — this alarm
+    // pages on ANY occurrence in a 5-minute window (Sum > 0), the same
+    // "even one is notable" threshold shape as OffFrontierEscalationAlarm
+    // below. Single-metric alarm (no metric math), well under CloudWatch's
+    // metric-math operand limits. Routed through the shared
+    // `operationalAlarms` array below, so it inherits the existing
+    // alarm-delivery path (props.alarmTopic -> citadel-alarms-<env> SNS, or
+    // the in-stack escalation topic fallback) with zero new IAM — only
+    // `cloudwatch:PutMetricData` is needed at the Lambda side, and that
+    // permission is already implicit for any Lambda (CloudWatch's
+    // PutMetricData does not require a resource-scoped grant; no
+    // fabricatorLambda.addToRolePolicy call was added). Additive only.
+    operationalAlarms.push(
+      new cloudwatch.Alarm(this, "FabricatorStalePendingClaimAlarm", {
+        alarmName: `citadel-fabricator-stale-pending-claim-${props.environment}`,
+        metric: new cloudwatch.Metric({
+          namespace: "CitadelArbiter",
+          metricName: "FabricatorStalePendingClaim",
+          dimensionsMap: { Consumer: "fabricator" },
+          statistic: "Sum",
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 0,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription:
+          "Fabricator redelivered a message while a prior fabrication " +
+          "attempt was still PENDING (poisoned/wedged fabrication). The " +
+          "message was acked, not DLQ'd — triage via the stale-PENDING " +
+          "scan in docs/runbooks/DLQ_REDRIVE.md's fabricator section.",
+      }),
+    );
+
     // Worker agent Lambda error-rate alarm (workflow dispatch path). Mirrors
     // the Supervisor/Fabricator pattern: Errors metric, 5-minute period,
     // NOT_BREACHING, threshold 3. The worker's SQS DLQ depth is covered
