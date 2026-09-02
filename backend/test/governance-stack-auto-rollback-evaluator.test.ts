@@ -20,6 +20,7 @@ import * as sns from "aws-cdk-lib/aws-sns";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
+import { assertSharedAsyncDlqShape } from "./helpers/shared-dlq-shape";
 
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 
@@ -234,5 +235,19 @@ describe("GovernanceStack — auto-rollback evaluator", () => {
       }
     }
     expect(grantsCostLedgerQuery).toBe(true);
+  });
+});
+
+// CIT-125 slice A follow-up (design A.6 #6, deferred from the feature PR
+// per the slice-A verification advisory): shared async DLQ queue shape,
+// asserted against this file's existing Template.fromStack harness.
+describe("GovernanceStack — CIT-125 slice A shared async DLQ shape", () => {
+  let template: Template;
+  beforeAll(() => {
+    template = createTemplate();
+  });
+
+  test("shared async DLQ carries the design queue shape (14d retention, SQS-managed SSE, enforceSSL policy)", () => {
+    assertSharedAsyncDlqShape(template, "governance");
   });
 });

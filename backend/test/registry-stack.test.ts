@@ -23,6 +23,7 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
+import { assertSharedAsyncDlqShape } from "./helpers/shared-dlq-shape";
 
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 
@@ -432,5 +433,19 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     });
     // 6 data sources => 6 appsync-assumable roles.
     expect(Object.keys(roles)).toHaveLength(6);
+  });
+});
+
+// CIT-125 slice A follow-up (design A.6 #6, deferred from the feature PR
+// per the slice-A verification advisory): shared async DLQ queue shape,
+// asserted against this file's existing Template.fromStack harness.
+describe("RegistryStack — CIT-125 slice A shared async DLQ shape", () => {
+  let template: Template;
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("shared async DLQ carries the design queue shape (14d retention, SQS-managed SSE, enforceSSL policy)", () => {
+    assertSharedAsyncDlqShape(template, "registry");
   });
 });

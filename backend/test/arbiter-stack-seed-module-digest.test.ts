@@ -9,10 +9,17 @@
  * property — CloudFormation reported the resource unchanged and never
  * re-invoked the handler, so the repository fix never reached S3.
  *
- * FIX: a content digest of the seed source (computeSeedModuleDigest, over the
- * whole seedConfig dir via cdk.FileSystem.fingerprint) is now a custom-resource
+ * FIX: a content digest of the seed source (computeSeedModuleDigest — a
+ * content-only sha256 folding each file's relative path + raw bytes over a
+ * sorted, exclusion-filtered walk of seedConfig/) is now a custom-resource
  * property (`ModuleDigest`). Any source edit changes the digest, forcing a
- * re-upload on the next deploy.
+ * re-upload on the next deploy. Deliberately NOT cdk.FileSystem.fingerprint
+ * (the original implementation, replaced under finding b9627d6f): that
+ * primitive memoizes per-file content hashes in an on-disk cache keyed by
+ * `${ino}|${mtimeMs}|${size}`, so a same-length rewrite within one mtime
+ * tick can be served a stale digest — the CI flake this suite's own
+ * mutate-and-recompute tests reproduced. See the IMPLEMENTATION NOTE above
+ * computeSeedModuleDigest in arbiter-stack.ts.
  *
  * WHAT THESE TESTS CATCH / DO NOT CATCH:
  *   - They prove the synthesized template carries a real, source-derived

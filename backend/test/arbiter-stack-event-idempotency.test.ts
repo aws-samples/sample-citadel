@@ -10,6 +10,7 @@ import {
   scaffoldBackendAssetDirs,
   scaffoldArbiterStubs,
 } from "./helpers/scaffold-stub-assets";
+import { assertSharedAsyncDlqShape } from "./helpers/shared-dlq-shape";
 
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 scaffoldArbiterStubs();
@@ -186,5 +187,51 @@ describe("ArbiterStack — CIT-125 slice B event-id/message-id dedupe wiring", (
     }
     // One grant statement per consumer (supervisor + fabricator).
     expect(grantsFound).toBe(2);
+  });
+});
+
+// CIT-125 slice A follow-up (design A.6 #2 and #6, deferred from the
+// feature PR per the slice-A verification advisory): per-stack guards over
+// the supervisor rules' RetryPolicy and the shared async DLQ's queue shape,
+// asserted against the same in-process Template.fromStack harness as the
+// dedupe-wiring tests above.
+describe("ArbiterStack — CIT-125 slice A reliability guards (supervisor retry policy + shared DLQ shape)", () => {
+  let template: Template;
+  beforeAll(() => {
+    template = buildTemplate();
+  });
+
+  test.each([
+    ["TaskRequestRule", "task.request"],
+    ["TaskCompletionRule", "task.completion"],
+  ])(
+    "%s (source %s) targets the supervisor with RetryPolicy {maxEventAge 7200s, retryAttempts 2} (kills the 24h default retry storm)",
+    (rulePrefix, source) => {
+      const rules = template.findResources("AWS::Events::Rule");
+      const ids = Object.keys(rules).filter((id) => id.startsWith(rulePrefix));
+      expect(ids).toHaveLength(1);
+      const rule = rules[ids[0]];
+      // Rule identity: pin the rule to its slice-A event source so the
+      // guard tracks the task.request / task.completion rules themselves,
+      // not merely a construct-ID lookalike.
+      expect(rule.Properties.EventPattern).toEqual({ source: [source] });
+      const targets = rule.Properties.Targets;
+      expect(targets).toHaveLength(1);
+      // Target identity: the supervisor Lambda (GetAtt on the
+      // SupervisorAgent* logical id) — the RetryPolicy pinned below is
+      // provably the SUPERVISOR's, not some other consumer's.
+      expect(JSON.stringify(targets[0].Arn)).toContain("SupervisorAgent");
+      // Exact equality: a widened maxEventAge or extra retry attempts would
+      // silently reintroduce EventBridge's 24h/185-attempt default storm
+      // before events reach the arbiter async DLQ.
+      expect(targets[0].RetryPolicy).toEqual({
+        MaximumEventAgeInSeconds: 7200,
+        MaximumRetryAttempts: 2,
+      });
+    },
+  );
+
+  test("shared async DLQ carries the design queue shape (14d retention, SQS-managed SSE, enforceSSL policy)", () => {
+    assertSharedAsyncDlqShape(template, "arbiter");
   });
 });
