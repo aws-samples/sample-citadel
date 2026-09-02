@@ -201,14 +201,26 @@ describe("ArbiterStack — CIT-125 slice A reliability guards (supervisor retry 
     template = buildTemplate();
   });
 
-  test.each(["TaskRequestRule", "TaskCompletionRule"])(
-    "%s target carries RetryPolicy {maxEventAge 7200s, retryAttempts 2} (kills the 24h default retry storm)",
-    (rulePrefix) => {
+  test.each([
+    ["TaskRequestRule", "task.request"],
+    ["TaskCompletionRule", "task.completion"],
+  ])(
+    "%s (source %s) targets the supervisor with RetryPolicy {maxEventAge 7200s, retryAttempts 2} (kills the 24h default retry storm)",
+    (rulePrefix, source) => {
       const rules = template.findResources("AWS::Events::Rule");
       const ids = Object.keys(rules).filter((id) => id.startsWith(rulePrefix));
       expect(ids).toHaveLength(1);
-      const targets = rules[ids[0]].Properties.Targets;
+      const rule = rules[ids[0]];
+      // Rule identity: pin the rule to its slice-A event source so the
+      // guard tracks the task.request / task.completion rules themselves,
+      // not merely a construct-ID lookalike.
+      expect(rule.Properties.EventPattern).toEqual({ source: [source] });
+      const targets = rule.Properties.Targets;
       expect(targets).toHaveLength(1);
+      // Target identity: the supervisor Lambda (GetAtt on the
+      // SupervisorAgent* logical id) — the RetryPolicy pinned below is
+      // provably the SUPERVISOR's, not some other consumer's.
+      expect(JSON.stringify(targets[0].Arn)).toContain("SupervisorAgent");
       // Exact equality: a widened maxEventAge or extra retry attempts would
       // silently reintroduce EventBridge's 24h/185-attempt default storm
       // before events reach the arbiter async DLQ.
