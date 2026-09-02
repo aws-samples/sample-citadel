@@ -20,6 +20,8 @@ import * as path from "path";
 
 const ENV = process.env.SPLIT_GATES_ENV ?? "dev";
 
+import { guardCdkOutInCi } from "./helpers/cdk-out-guard";
+
 const CDK_OUT = path.resolve(__dirname, "..", "cdk.out");
 
 // Every stack the orchestrator amendment requires EnableLambdaTracing on.
@@ -69,6 +71,7 @@ const allTemplatesPresent = IN_SCOPE_STACKS.every(
 describe("tracing foundation — Aspect stack coverage (orchestrator scope amendment)", () => {
   if (!allTemplatesPresent) {
     const missing = IN_SCOPE_STACKS.filter((s) => loadTemplate(s) === null);
+    guardCdkOutInCi(missing.join(", "), "npm run build && npx cdk synth");
     it.skip(`skipped: fresh templates missing for [${missing.join(", ")}] (run 'npm run build && npx cdk synth' for all stacks first)`, () => {});
     return;
   }

@@ -8,6 +8,7 @@
  */
 import * as fs from "fs";
 import * as path from "path";
+import { guardCdkOutInCi } from "./helpers/cdk-out-guard";
 
 const ENV = process.env.SPLIT_GATES_ENV ?? "dev";
 const STACK_NAME = `citadel-arbiter-${ENV}`;
@@ -30,6 +31,7 @@ const EXPECTED_PYTHON_FUNCTION_MARKERS = [
 
 describe("tracing foundation — citadel-arbiter-<env> stack", () => {
   if (!templateExists) {
+    guardCdkOutInCi(TEMPLATE_PATH, `npm run build && npx cdk synth ${STACK_NAME}`);
     it.skip(`skipped: fresh template missing at ${TEMPLATE_PATH} (run 'npm run build && npx cdk synth ${STACK_NAME}' first)`, () => {});
     return;
   }

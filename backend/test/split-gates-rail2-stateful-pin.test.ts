@@ -18,6 +18,7 @@ import { STATEFUL_KEY_PROPS } from "../scripts/split-gates/types";
 import { keyPropsEqual } from "../scripts/split-gates/template-utils";
 import { buildBaseline } from "../scripts/split-gates/baseline-builder";
 import { CfnTemplate } from "../scripts/split-gates/types";
+import { guardCdkOutInCi } from "./helpers/cdk-out-guard";
 
 const ENV = process.env.SPLIT_GATES_ENV ?? "dev";
 const STACK_NAME = `citadel-backend-${ENV}`;
@@ -39,6 +40,10 @@ const templateExists = fs.existsSync(TEMPLATE_PATH);
 
 describe("rail 2 — stateful logical-ID pin", () => {
   if (!baselineExists || !templateExists) {
+    guardCdkOutInCi(
+      `baseline=${baselineExists} template=${templateExists}`,
+      "split-baseline.ts and cdk synth",
+    );
     it.skip(`skipped: baseline or fresh template missing (run split-baseline.ts and cdk synth first). baseline=${baselineExists} template=${templateExists}`, () => {});
     return;
   }
