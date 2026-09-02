@@ -5,6 +5,7 @@ import {
   scaffoldBackendAssetDirs,
   scaffoldServiceDockerfiles,
 } from "./helpers/scaffold-stub-assets";
+import { assertSharedAsyncDlqShape } from "./helpers/shared-dlq-shape";
 
 // Ensure asset directories exist for CDK synthesis
 scaffoldBackendAssetDirs(["src/schema", "src/lambda/cognito-secret-handler"]);
@@ -46,6 +47,12 @@ describe("ServicesStack", () => {
 
   test("has no duplicate Construct imports (compiles successfully)", () => {
     expect(stack).toBeInstanceOf(ServicesStack);
+  });
+
+  // CIT-125 slice A follow-up (design A.6 #6, deferred from the feature PR
+  // per the slice-A verification advisory): shared async DLQ queue shape.
+  test("shared async DLQ carries the design queue shape (14d retention, SQS-managed SSE, enforceSSL policy)", () => {
+    assertSharedAsyncDlqShape(template, "services");
   });
 
   test("creates OpenSearch Serverless collection for KB", () => {

@@ -16,6 +16,7 @@ for (const dir of assetDirs) {
 }
 
 import { BackendStack } from "../lib/backend-stack";
+import { assertSharedAsyncDlqShape } from "./helpers/shared-dlq-shape";
 
 describe("BackendStack — Workflow/App/Execution Lambda functions and AppSync wiring (Task 1.5)", () => {
   let template: Template;
@@ -27,6 +28,11 @@ describe("BackendStack — Workflow/App/Execution Lambda functions and AppSync w
       env: { account: "123456789012", region: "us-east-1" },
     });
     template = Template.fromStack(stack);
+  });
+
+  // --- CIT-125 slice A follow-up (design A.6 #6): shared async DLQ shape ---
+  test("shared async DLQ carries the design queue shape (14d retention, SQS-managed SSE, enforceSSL policy)", () => {
+    assertSharedAsyncDlqShape(template, "backend");
   });
 
   // --- WorkflowResolverFunction ---

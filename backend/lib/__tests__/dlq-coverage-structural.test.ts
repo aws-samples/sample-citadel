@@ -22,6 +22,18 @@
  * alarmed set. A new DLQ added anywhere is auto-discovered and MUST be
  * alarmed, or this test fails — no list to update.
  *
+ * PER-CONSUMER PIN (coverage-hardening follow-up): the queue-level guard
+ * above only trips when a queue loses ALL of its consumers (total-queue
+ * orphan). Removing ONE consumer's `deadLetterQueue` prop (say, dropping
+ * the supervisor's DeadLetterConfig while the other five arbiter consumers
+ * keep theirs) leaves the queue discovered and alarmed — silent coverage
+ * loss. The `PINNED_COVERED_CONSUMERS` baseline below pins, per stack, the
+ * exact set of consumer→DLQ edges derived from the synthesized templates,
+ * so removing (or silently gaining) a single consumer's dead-letter wiring
+ * fails the pin test. Updating the pin is a deliberate, reviewed act:
+ * re-run `npx cdk synth --all --quiet`, read the failing diff, and move
+ * the baseline only when the coverage change is intentional.
+ *
  * Requires `cdk synth --all` (or `npm run split:gates` / `npm run nag`,
  * which both synth first) to have populated `cdk.out/*.template.json`.
  * Skips (does not fail) when templates are absent, mirroring
@@ -90,6 +102,13 @@ interface DiscoveredDlq {
   stackName: string;
   queueLogicalId: string;
   queueName: string;
+  /**
+   * Logical ID of the resource whose failure path feeds the DLQ: the
+   * Lambda function (DeadLetterConfig), the event source mapping
+   * (OnFailure), the source queue (RedrivePolicy), or the EventBridge
+   * rule (RuleTarget). This is what the per-consumer pin keys on.
+   */
+  consumerLogicalId: string;
   discoveredVia:
     "RedrivePolicy" | "DeadLetterConfig" | "OnFailure" | "RuleTarget";
 }
@@ -112,7 +131,7 @@ function discoverDlqsInStack(
 ): DiscoveredDlq[] {
   const found: DiscoveredDlq[] = [];
 
-  for (const [, res] of Object.entries(template.Resources)) {
+  for (const [consumerLogicalId, res] of Object.entries(template.Resources)) {
     // 1) Work-queue DLQs: AWS::SQS::Queue.RedrivePolicy.deadLetterTargetArn
     if (res.Type === "AWS::SQS::Queue") {
       const redrive = (res.Properties ?? {})["RedrivePolicy"] as
@@ -126,6 +145,7 @@ function discoverDlqsInStack(
             stackName,
             queueLogicalId: targetLogicalId,
             queueName,
+            consumerLogicalId,
             discoveredVia: "RedrivePolicy",
           });
         }
@@ -145,6 +165,7 @@ function discoverDlqsInStack(
             stackName,
             queueLogicalId: targetLogicalId,
             queueName,
+            consumerLogicalId,
             discoveredVia: "DeadLetterConfig",
           });
         }
@@ -166,6 +187,7 @@ function discoverDlqsInStack(
             stackName,
             queueLogicalId: targetLogicalId,
             queueName,
+            consumerLogicalId,
             discoveredVia: "OnFailure",
           });
         }
@@ -194,6 +216,7 @@ function discoverDlqsInStack(
               stackName,
               queueLogicalId: targetLogicalId,
               queueName,
+              consumerLogicalId,
               discoveredVia: "RuleTarget",
             });
           }
@@ -232,6 +255,101 @@ function collectAlarmedQueueNames(telemetryTemplate: CfnTemplate): Set<string> {
     }
   }
   return alarmed;
+}
+
+/**
+ * Canonical, env-independent form of one consumer→DLQ coverage edge:
+ * `<mechanism>:<consumerLogicalId>-><queueName minus the trailing -${ENV}>`.
+ * Logical IDs are env-independent (the CDK path hash does not include the
+ * environment), so the same pin validates dev/staging/prod synth output.
+ */
+function coverageEdge(d: DiscoveredDlq): string {
+  const envSuffix = `-${ENV}`;
+  const queueBase = d.queueName.endsWith(envSuffix)
+    ? d.queueName.slice(0, -envSuffix.length)
+    : d.queueName;
+  return `${d.discoveredVia}:${d.consumerLogicalId}->${queueBase}`;
+}
+
+/**
+ * PER-CONSUMER PINNED BASELINE — derived from `cdk synth --all` output
+ * (all four discovery mechanisms above), NOT hand-authored. 42 edges:
+ * the 32 shared-async-DLQ consumers from CIT-125 slice A plus the 10
+ * pre-existing work-queue / stream / notifier / rule-target edges.
+ *
+ * WHY: the queue-level assertions in this file only fail when a DLQ loses
+ * ALL consumers. This pin fails when ANY single consumer's dead-letter
+ * wiring is removed, renamed, or silently added.
+ *
+ * TO UPDATE (deliberate coverage change only): re-synth, then rebuild the
+ * failing stack's entries from the jest diff — each entry is
+ * `mechanism:consumerLogicalId->queueNameWithoutEnvSuffix`. A hash-suffix
+ * change caused by a construct-path refactor is expected to land here as
+ * a reviewed diff; that is the point of pinning.
+ */
+const PINNED_COVERED_CONSUMERS: Record<string, readonly string[]> = {
+  arbiter: [
+    "DeadLetterConfig:ActivatorAgent74A6D68E->citadel-arbiter-async-dlq",
+    "DeadLetterConfig:GovernanceGraphSnapshotFn8BC19523->citadel-arbiter-async-dlq",
+    "DeadLetterConfig:GovernanceModeRefresherFn8358D228->citadel-arbiter-async-dlq",
+    "DeadLetterConfig:StepRunnerFunctionBE4DB8E6->citadel-arbiter-async-dlq",
+    "DeadLetterConfig:SupervisorAgent7CBC906A->citadel-arbiter-async-dlq",
+    "DeadLetterConfig:WorkflowTimeoutWatchdogFunctionE2172B89->citadel-arbiter-async-dlq",
+    "OnFailure:GovernanceFindingFanoutEventSourceMapping1803FCF3->citadel-governance-finding-fanout-dlq",
+    "OnFailure:GovernanceGraphSnapshotOnChangeAuthorityUnitsESMD2494E8F->citadel-governance-graph-snapshot-on-change-dlq",
+    "OnFailure:GovernanceGraphSnapshotOnChangeCaseLawESM9C755D01->citadel-governance-graph-snapshot-on-change-dlq",
+    "OnFailure:GovernanceGraphSnapshotOnChangeCompositionContractsESM3FDE106E->citadel-governance-graph-snapshot-on-change-dlq",
+    "OnFailure:GovernanceGraphSnapshotOnChangeConstitutionalLayersESME463D395->citadel-governance-graph-snapshot-on-change-dlq",
+    "RedrivePolicy:fabricatorQueue414BE48B->citadel-fabricator-dlq",
+    "RedrivePolicy:workerAgentQueueA757937E->citadel-worker-agent-dlq",
+  ],
+  backend: [
+    "DeadLetterConfig:AgentMessageHandlerFunctionEF15B1DF->citadel-backend-async-dlq",
+    "DeadLetterConfig:AppComponentRegistrationHandlerCD7DC5A3->citadel-backend-async-dlq",
+    "DeadLetterConfig:AppInvokeHandlerFD7933F8->citadel-backend-async-dlq",
+    "DeadLetterConfig:GatewayRegistrationHandler00584901->citadel-backend-async-dlq",
+    "DeadLetterConfig:ModelCatalogSyncFunction25BE66F5->citadel-backend-async-dlq",
+    "DeadLetterConfig:ReconcileAppsMetaScheduledFunction4D0CB960->citadel-backend-async-dlq",
+    "DeadLetterConfig:WorkflowProgressFanoutFunctionB24A2000->citadel-backend-async-dlq",
+  ],
+  telemetry: [
+    "DeadLetterConfig:CostBudgetEvaluator39D4C8D1->citadel-telemetry-async-dlq",
+    "DeadLetterConfig:CostLedgerReconciler2D094117->citadel-telemetry-async-dlq",
+    "DeadLetterConfig:CostLedgerWriter9749D180->citadel-telemetry-async-dlq",
+    "DeadLetterConfig:EvalCaseScorerFunctionE7E10371->citadel-telemetry-async-dlq",
+    "DeadLetterConfig:EvalDriftDetectorFunctionFB431D89->citadel-telemetry-async-dlq",
+    "DeadLetterConfig:EvalDriftFindingWriterFunction99B43D60->citadel-telemetry-async-dlq",
+    "DeadLetterConfig:EvalRunAggregatorFunction0C2BA6F9->citadel-telemetry-async-dlq",
+    "DeadLetterConfig:EvalSampleScorerFunctionFCFB43C5->citadel-telemetry-async-dlq",
+    "DeadLetterConfig:EvalSamplingSelectorFunction221FE615->citadel-telemetry-async-dlq",
+  ],
+  governance: [
+    "DeadLetterConfig:AgentReleaseRollbackEvaluatorFunction1ABEF5A3->citadel-governance-async-dlq",
+    "DeadLetterConfig:EvalRunnerFunction338D3E59->citadel-governance-async-dlq",
+    "DeadLetterConfig:GovernanceNotifierFnAF80559D->citadel-governance-notifier-dlq",
+    "RedrivePolicy:EvalDispatchQueueFD99DE58->citadel-eval-dispatch-dlq",
+    "RuleTarget:GovernanceEventsRuleCAEA7CAA->citadel-governance-notifier-dlq",
+  ],
+  registry: [
+    "DeadLetterConfig:AgentImportManifestResultHandlerAC7A0B8E->citadel-registry-async-dlq",
+    "DeadLetterConfig:FabricationEventHandlerFunctionA425E3C0->citadel-registry-async-dlq",
+    "RuleTarget:RegistrySyncRuleE4DF9965->citadel-registry-sync-dlq",
+  ],
+  projects: [
+    "DeadLetterConfig:AssessmentCompletionNotifierF2243F8D->citadel-projects-async-dlq",
+    "DeadLetterConfig:ChatterPublisherFunction40B50CEA->citadel-projects-async-dlq",
+    "DeadLetterConfig:DesignProgressNotifier61A5E671->citadel-projects-async-dlq",
+    "DeadLetterConfig:ProjectProgressUpdater66E18062->citadel-projects-async-dlq",
+  ],
+  services: [
+    "DeadLetterConfig:DocumentIngestPollerFunction2ED9DA3B->citadel-services-async-dlq",
+    "DeadLetterConfig:HealthMonitorFunctionE81A641C->citadel-services-async-dlq",
+  ],
+};
+
+/** `citadel-arbiter-${ENV}` -> `arbiter` (keys of the pinned baseline). */
+function stackSlug(stackName: string): string {
+  return stackName.replace(/^citadel-/, "").replace(new RegExp(`-${ENV}$`), "");
 }
 
 const loadedTemplates = STACK_NAMES.map((name) => ({
@@ -288,5 +406,33 @@ describe("structural DLQ coverage guard (derived from synthesized templates)", (
       (name) => !discoveredNames.has(name),
     );
     expect(orphaned).toEqual([]);
+  });
+
+  describe("per-stack covered-consumer pin (single-consumer regressions trip here)", () => {
+    // One test per stack so a failure names the stack directly. Sorted
+    // string arrays give a readable jest diff: a MISSING entry means a
+    // consumer lost its dead-letter wiring; an EXTRA entry means new
+    // coverage that must be pinned (and, for shared-DLQ consumers, added
+    // to docs/runbooks/DLQ_REDRIVE.md — see the runbook-completeness
+    // guard in dlq-runbook-completeness.test.ts).
+    it.each(STACK_NAMES)(
+      "%s: covered-consumer set matches the synth-derived baseline",
+      (stackName) => {
+        const slug = stackSlug(stackName);
+        const pinned = PINNED_COVERED_CONSUMERS[slug];
+        expect(pinned).toBeDefined();
+        const discovered = allDiscoveredDlqs
+          .filter((d) => d.stackName === stackName)
+          .map(coverageEdge)
+          .sort();
+        expect(discovered).toEqual([...pinned].sort());
+      },
+    );
+
+    it("pinned baseline covers every synthesized stack (no stack silently dropped from the pin)", () => {
+      expect(Object.keys(PINNED_COVERED_CONSUMERS).sort()).toEqual(
+        STACK_NAMES.map(stackSlug).sort(),
+      );
+    });
   });
 });

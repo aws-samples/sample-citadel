@@ -205,6 +205,7 @@ for (const dir of assetDirs) {
 }
 
 import { TelemetryStack } from "../lib/telemetry-stack";
+import { assertSharedAsyncDlqShape } from "./helpers/shared-dlq-shape";
 
 function createTestStack(): { stack: TelemetryStack; template: Template } {
   const app = new cdk.App();
@@ -1152,5 +1153,19 @@ describe("TelemetryStack — Phase 2 governance.eval.case.judged dual-consumer r
       // citadel.backend, every judge-basis dimension stayed PENDING).
       expect(rule.Properties.EventPattern.source).toEqual(["citadel.backend"]);
     }
+  });
+});
+
+// CIT-125 slice A follow-up (design A.6 #6, deferred from the feature PR
+// per the slice-A verification advisory): shared async DLQ queue shape,
+// asserted against this file's existing Template.fromStack harness.
+describe("TelemetryStack — CIT-125 slice A shared async DLQ shape", () => {
+  let template: Template;
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("shared async DLQ carries the design queue shape (14d retention, SQS-managed SSE, enforceSSL policy)", () => {
+    assertSharedAsyncDlqShape(template, "telemetry");
   });
 });
