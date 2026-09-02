@@ -31,6 +31,7 @@ import {
 } from "./alarm-delivery";
 import * as path from "path";
 import * as fs from "fs";
+import * as crypto from "crypto";
 
 // Resolve the repo-root `arbiter/` directory regardless of whether this
 // module is loaded from source (`backend/lib/`) via ts-jest or from the
@@ -72,23 +73,65 @@ const ARBITER_ROOT = resolveArbiterRoot(__dirname);
 //
 // Making a content digest of the seed source part of the custom resource's
 // properties forces a re-upload on the next deploy whenever ANY seed source
-// file changes. The digest uses CDK's own source-fingerprint primitive
-// (cdk.FileSystem.fingerprint) — the same content-addressing CDK uses for
-// AssetHashType.SOURCE assets (the established idiom in this stack, used by
-// the PythonFunctions above) — over the WHOLE seedConfig directory, so the
-// digest covers EVERY uploaded module file (not just one entry point) plus the
-// handler itself. __pycache__/__tests__/*.pyc are excluded so byte-compiled
+// file changes. __pycache__/__tests__/*.pyc are excluded so byte-compiled
 // caches and local test runs never churn the digest.
+//
+// IMPLEMENTATION NOTE (finding b9627d6f): this used to delegate to CDK's
+// cdk.FileSystem.fingerprint. That primitive is CONTENT-addressed at the
+// hashing layer, but each file's content hash is memoized in an on-disk
+// cache (~/.cdk/cache/fingerprints/<dirHash>.json) keyed by
+// `${ino}|${mtimeMs}|${size}` — not by content. CDK trades correctness for
+// build-speed here: it assumes a file with unchanged (inode, mtime, size)
+// has unchanged content, which is a safe bet for a real deploy's source
+// tree but NOT for a same-length rewrite landing within one mtime tick
+// (coarse filesystem clock resolution, a fast rewrite in a temp dir, or
+// inode reuse after a delete+recreate) — exactly the scenario the test
+// "changing a module source file changes the digest" exercises, and the
+// scenario the CI flake reproduced (attempt 1 stat-collided on a stale
+// cache entry from a prior run against the same resolved directory path;
+// attempt 2 landed on a fresh mtime and passed). We read every file's bytes
+// directly and fold them into a single sha256 — no stat-based cache layer,
+// so the digest can only change when content changes.
 export const SEED_MODULE_FINGERPRINT_EXCLUDES: readonly string[] = [
   "__pycache__",
   "__tests__",
   "*.pyc",
 ];
 
-export function computeSeedModuleDigest(seedConfigDir: string): string {
-  return cdk.FileSystem.fingerprint(seedConfigDir, {
-    exclude: [...SEED_MODULE_FINGERPRINT_EXCLUDES],
+function isExcluded(name: string): boolean {
+  return SEED_MODULE_FINGERPRINT_EXCLUDES.some((pattern) => {
+    if (pattern.startsWith("*.")) {
+      return name.endsWith(pattern.slice(1));
+    }
+    return name === pattern;
   });
+}
+
+/** Recursively lists files under `dir`, skipping excluded names, sorted for determinism. */
+function listSeedFiles(dir: string, root: string): string[] {
+  const out: string[] = [];
+  for (const entry of fs
+    .readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    if (isExcluded(entry.name)) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...listSeedFiles(full, root));
+    } else if (entry.isFile()) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+export function computeSeedModuleDigest(seedConfigDir: string): string {
+  const hash = crypto.createHash("sha256");
+  for (const file of listSeedFiles(seedConfigDir, seedConfigDir)) {
+    const relPath = path.relative(seedConfigDir, file).replace(/\\/g, "/");
+    hash.update(relPath);
+    hash.update(fs.readFileSync(file));
+  }
+  return hash.digest("hex");
 }
 
 interface ArbiterStackProps extends cdk.StackProps {
