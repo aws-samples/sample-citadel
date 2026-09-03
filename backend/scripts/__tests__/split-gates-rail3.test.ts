@@ -129,4 +129,93 @@ describe("rail 3 — resolver parity (negative: doctored templates must FAIL cor
       result.violations.some((v) => v.logicalId === "Query.unexpectedField"),
     ).toBe(true);
   });
+
+  it("FAILS on double-attach even for a field listed in expectedNewFields (the exemption only covers the missing/extra checks, never double-attach)", () => {
+    const baseline = makeBaseline(["Query.getProject"]);
+    const expectedNewFields = [
+      {
+        logicalId: "Mutation.resumeExecution",
+        justification: "test fixture — mirrors EXPECTED_NEW_FIELDS shape",
+      },
+    ];
+    const result = runResolverParity(
+      baseline,
+      [
+        {
+          stackName: "citadel-backend-dev",
+          template: templateWithFields([
+            "Query.getProject",
+            "Mutation.resumeExecution",
+          ]),
+        },
+        {
+          stackName: "citadel-projects-dev",
+          template: templateWithFields(["Mutation.resumeExecution"]),
+        },
+      ],
+      expectedNewFields,
+    );
+    expect(result.passed).toBe(false);
+    expect(
+      result.violations.some(
+        (v) =>
+          v.logicalId === "Mutation.resumeExecution" &&
+          /more than one place/.test(v.message),
+      ),
+    ).toBe(true);
+  });
+
+  it("passes when a field listed in expectedNewFields is present exactly once and not in baseline (the intended, non-vacuous use case)", () => {
+    const baseline = makeBaseline(["Query.getProject"]);
+    const expectedNewFields = [
+      {
+        logicalId: "Mutation.resumeExecution",
+        justification: "test fixture — mirrors EXPECTED_NEW_FIELDS shape",
+      },
+    ];
+    const result = runResolverParity(
+      baseline,
+      [
+        {
+          stackName: "citadel-backend-dev",
+          template: templateWithFields([
+            "Query.getProject",
+            "Mutation.resumeExecution",
+          ]),
+        },
+      ],
+      expectedNewFields,
+    );
+    expect(result.passed).toBe(true);
+  });
+
+  it("STILL FAILS for a MISSING baseline field even though an unrelated field is listed in expectedNewFields (the manifest never weakens the missing-field check)", () => {
+    const baseline = makeBaseline([
+      "Query.getProject",
+      "Mutation.createProject",
+    ]);
+    const expectedNewFields = [
+      {
+        logicalId: "Mutation.resumeExecution",
+        justification: "test fixture — mirrors EXPECTED_NEW_FIELDS shape",
+      },
+    ];
+    const result = runResolverParity(
+      baseline,
+      [
+        {
+          stackName: "citadel-backend-dev",
+          template: templateWithFields([
+            "Query.getProject",
+            "Mutation.resumeExecution",
+          ]),
+        },
+      ],
+      expectedNewFields,
+    );
+    expect(result.passed).toBe(false);
+    expect(
+      result.violations.some((v) => v.logicalId === "Mutation.createProject"),
+    ).toBe(true);
+  });
 });

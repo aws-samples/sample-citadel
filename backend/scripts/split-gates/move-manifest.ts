@@ -642,6 +642,22 @@ export const REMOVAL_ALLOWLIST: AllowlistEntry[] = [
       "Alarm on ProjectResolverFunction; recreated in CitadelProjectsStack as ProjectResolverThrottleAlarm.",
   },
 
+  // --- AppSync 5xx alarm relocation (decision ab73ae1b) ---
+  {
+    logicalId: "AppSync5xxAlarm67B161CE",
+    justification:
+      "Decision ab73ae1b: moved to TelemetryStack (telemetry-stack.ts:2213, " +
+      "platform-health SLO suite) as a strict superset alarm (SNS action, " +
+      "tighter threshold) owning the physical name " +
+      "citadel-appsync-5xx-<env>. Both stacks declaring the identical " +
+      "alarmName broke deploys (AWS::EarlyValidation::ResourceExistenceCheck " +
+      "on second deploy); no monitoring loss, since TelemetryStack's " +
+      "definition is a superset. Guarded by " +
+      "backend/test/duplicate-alarm-name-guard.test.ts. Not a stateful " +
+      "type (CloudWatch::Alarm), so allowlisting fully satisfies rail 1. " +
+      "See backend-stack.ts:3151 for the removal comment.",
+  },
+
   // ═══════════════════════════════════════════════════════════════════════
   // Phase 2 (decision 30e6d067, this stage): the registry / agent-import /
   // fabricator-request / fabricator-queue / fabrication-event / app-CRUD-
@@ -1508,6 +1524,44 @@ export const SATELLITE_STACK_NAMES: string[] = [
 ];
 
 /**
+ * Rail 3 has no addition-allowlist mechanism of its own (unlike rail 1's
+ * `ADDITION_ALLOWLIST`) — resolver-parity baseline drift for legitimate new
+ * fields must be expected explicitly here, mirroring rail 1's allowlist
+ * shape and justification-comment convention. Every field below corresponds
+ * 1:1 to an `ADDITION_ALLOWLIST` resolver entry above (decision 453d1acc:
+ * allowlist route, do not regenerate the baseline). Adding an entry here
+ * does NOT weaken rail 3's other checks — MISSING baseline fields and
+ * DOUBLE-ATTACH still violate; this only exempts the exact field keys
+ * listed from the "extra"/unexpected-new-field check.
+ */
+export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
+  {
+    logicalId: "Mutation.resumeExecution",
+    justification:
+      "StepRunner resume resolver — see ADDITION_ALLOWLIST entry " +
+      "AgenticAIApiResumeExecutionResolver38379257.",
+  },
+  {
+    logicalId: "Mutation.setEvalSamplingConfig",
+    justification:
+      "Decision d36fbbf7: eval-sampling AppSync wiring — see " +
+      "ADDITION_ALLOWLIST entry AgenticAIApiSetEvalSamplingConfigResolver7000B62F.",
+  },
+  {
+    logicalId: "Query.getEvalSamplingConfig",
+    justification:
+      "Decision d36fbbf7: eval-sampling AppSync wiring — see " +
+      "ADDITION_ALLOWLIST entry AgenticAIApiGetEvalSamplingConfigResolver9D568E32.",
+  },
+  {
+    logicalId: "Query.listEvalProdSamples",
+    justification:
+      "Decision d36fbbf7: eval-sampling AppSync wiring — see " +
+      "ADDITION_ALLOWLIST entry AgenticAIApiListEvalProdSamplesResolverFF0E4413.",
+  },
+];
+
+/**
  * CIT-125 slice A — the one deliberate, justified addition to the backend
  * template this stage allows: the shared per-stack async DLQ
  * (`BackendAsyncDlq`) and its auto-generated `QueuePolicy`. Every other new
@@ -1533,6 +1587,181 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
     justification:
       "Auto-generated SQS QueuePolicy for BackendAsyncDlq (enforceSSL); " +
       "moves with the queue. Logical ID confirmed via the same synth.",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CIT-101 — Eval/Release/Promotion platform. 23 legitimate additions
+  // landed on main between the Jul-25 baseline capture and this
+  // reconciliation stage (decision 453d1acc: allowlist route, do not
+  // regenerate the baseline). Construct block backend-stack.ts:3283–3812;
+  // source comments there tag these tables "release evidence, governed
+  // like ExecutionSpecifications: RETAIN + deletionProtection + PITR".
+  // Logical IDs confirmed via a live `cdk synth citadel-backend-dev` +
+  // `npm run split:gates` run, not hand-typed.
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    logicalId: "EvalSuitesTableCD7FA97A",
+    justification: "CIT-101: eval/release platform — EvalSuites table.",
+  },
+  {
+    logicalId: "EvalCasesTable5ACF1009",
+    justification: "CIT-101: eval/release platform — EvalCases table.",
+  },
+  {
+    logicalId: "EvalRunsTable1462273E",
+    justification: "CIT-101: eval/release platform — EvalRuns table.",
+  },
+  {
+    logicalId: "EvalRunCaseResultsTable961B302A",
+    justification:
+      "CIT-101: eval/release platform — EvalRunCaseResults table.",
+  },
+  {
+    logicalId: "EvalBaselinesTable1E81E088",
+    justification: "CIT-101: eval/release platform — EvalBaselines table.",
+  },
+  {
+    logicalId: "EvalComparisonsTableBB147DA7",
+    justification: "CIT-101: eval/release platform — EvalComparisons table.",
+  },
+  {
+    logicalId: "EvalComparisonConfigTable5E04F05F",
+    justification:
+      "CIT-101: eval/release platform — EvalComparisonConfig table.",
+  },
+  {
+    logicalId: "EvalSamplingConfigTable853B8B52",
+    justification:
+      "CIT-101: eval/release platform — EvalSamplingConfig table.",
+  },
+  {
+    logicalId: "EvalProdSamplesTable2B37B8C9",
+    justification: "CIT-101: eval/release platform — EvalProdSamples table.",
+  },
+  {
+    logicalId: "AgentReleasesTable4E094171",
+    justification: "CIT-101: eval/release platform — AgentReleases table.",
+  },
+  {
+    logicalId: "EnvironmentReleasePointersTableFC230B29",
+    justification:
+      "CIT-101: eval/release platform — EnvironmentReleasePointers table.",
+  },
+  {
+    logicalId: "PromotionPolicyConfigTable47D26109",
+    justification:
+      "CIT-101: eval/release platform — PromotionPolicyConfig table.",
+  },
+  {
+    logicalId: "AgentReleaseWriterRole02E9922B",
+    justification:
+      "CIT-101: eval/release platform — writer role for AgentReleasesTable.",
+  },
+  {
+    logicalId: "AgentReleaseWriterRoleDefaultPolicy750604C6",
+    justification: "DefaultPolicy of AgentReleaseWriterRole; added with it.",
+  },
+  {
+    logicalId: "EnvironmentReleasePointerWriterRoleBAD849A2",
+    justification:
+      "CIT-101: eval/release platform — writer role for " +
+      "EnvironmentReleasePointersTable.",
+  },
+  {
+    logicalId: "EnvironmentReleasePointerWriterRoleDefaultPolicy054A5C1E",
+    justification:
+      "DefaultPolicy of EnvironmentReleasePointerWriterRole; added with it.",
+  },
+  {
+    logicalId: "PromotionPolicyConfigWriterRole8A02956B",
+    justification:
+      "CIT-101: eval/release platform — writer role for " +
+      "PromotionPolicyConfigTable.",
+  },
+  {
+    logicalId: "PromotionPolicyConfigWriterRoleDefaultPolicy507FE4A7",
+    justification:
+      "DefaultPolicy of PromotionPolicyConfigWriterRole; added with it.",
+  },
+  {
+    logicalId: "SeedEvalSuitesFunctionEEE6C7BC",
+    justification:
+      "CIT-101: eval/release platform — custom-resource seed Lambda for " +
+      "EvalSuitesTable.",
+  },
+  {
+    logicalId: "SeedEvalSuitesFunctionLogs5595E734",
+    justification: "LogGroup of SeedEvalSuitesFunction; added with it.",
+  },
+  {
+    logicalId: "SeedEvalSuitesFunctionServiceRole8B365008",
+    justification: "Execution role of SeedEvalSuitesFunction; added with it.",
+  },
+  {
+    logicalId: "SeedEvalSuitesFunctionServiceRoleDefaultPolicy7F26E48E",
+    justification:
+      "DefaultPolicy of SeedEvalSuitesFunction's role; added with it.",
+  },
+  {
+    logicalId: "SeedEvalSuitesResource",
+    justification:
+      "CustomResource invoking SeedEvalSuitesFunction on deploy; added with it.",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Eval-sampling AppSync wiring (decision d36fbbf7, "Phase 2 production
+  // sampling"). 6 additions from
+  // `BackendStack.addEvalSamplingConfigResolvers()` (backend-stack.ts:
+  // 3901–3936), called from bin/app.ts:406 with a deterministic ARN of the
+  // TelemetryStack-owned `citadel-eval-sampling-config-resolver-<env>`
+  // Lambda — a cross-stack pattern used to avoid a cyclic stack dependency.
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    logicalId: "AgenticAIApiEvalSamplingConfigLambdaDataSourceD4E6867C",
+    justification:
+      "Decision d36fbbf7: eval-sampling AppSync wiring — Lambda " +
+      "DataSource pointing at TelemetryStack's eval-sampling-config " +
+      "resolver Lambda.",
+  },
+  {
+    logicalId: "AgenticAIApiEvalSamplingConfigLambdaDataSourceServiceRoleFC35DA0E",
+    justification:
+      "Service role of EvalSamplingConfigLambdaDataSource; added with it.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiEvalSamplingConfigLambdaDataSourceServiceRoleDefaultPolicyA14B3695",
+    justification:
+      "DefaultPolicy of EvalSamplingConfigLambdaDataSource's role; added with it.",
+  },
+  {
+    logicalId: "AgenticAIApiSetEvalSamplingConfigResolver7000B62F",
+    justification:
+      "Decision d36fbbf7: eval-sampling AppSync wiring — " +
+      "Mutation.setEvalSamplingConfig resolver.",
+  },
+  {
+    logicalId: "AgenticAIApiGetEvalSamplingConfigResolver9D568E32",
+    justification:
+      "Decision d36fbbf7: eval-sampling AppSync wiring — " +
+      "Query.getEvalSamplingConfig resolver.",
+  },
+  {
+    logicalId: "AgenticAIApiListEvalProdSamplesResolverFF0E4413",
+    justification:
+      "Decision d36fbbf7: eval-sampling AppSync wiring — " +
+      "Query.listEvalProdSamples resolver.",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // StepRunner resume resolver (1 addition).
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    logicalId: "AgenticAIApiResumeExecutionResolver38379257",
+    justification:
+      "StepRunner resume resolver — Mutation.resumeExecution on the " +
+      "existing ExecutionLambdaDataSource (backend-stack.ts:3011); adds " +
+      "workflow-resume capability, no existing resource changes.",
   },
 ];
 
