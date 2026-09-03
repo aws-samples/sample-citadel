@@ -111,11 +111,22 @@ export interface GovernanceStackProps extends cdk.StackProps {
   // SEPARATE admin resolver Lambda only.
   promotionPolicyConfigTable: dynamodb.ITable;
   promotionPolicyConfigWriterRole: iam.IRole;
-  /** Shared SLO alarm topic (from BackendStack) — the auto-rollback
-   * evaluator's finding-write-failure alarm (decision D6) posts here so a
-   * committed-but-unrecorded rollback pages. Optional so existing test
-   * scaffolds that omit it still synth. */
-  alarmTopic?: sns.ITopic;
+  /** Shared SLO alarm topic (from BackendStack). REQUIRED (finding
+   * e396a7ee): the auto-rollback evaluator's finding-write-failure alarm
+   * (decision D6) AND the governance-notifier's durable CRITICAL-event
+   * SNS backstop both post here. Making this required is itself the
+   * regression guard against a future refactor silently reverting the
+   * notifier to WebSocket-only delivery — see
+   * governance-notifier-durable-destination.test.ts R13. A runtime guard
+   * throw backs the type-level requirement so a caller that bypasses
+   * TypeScript (e.g. constructing props as `any`) still fails loudly. */
+  alarmTopic: sns.ITopic;
+  /** Deep-link base URL for the governance-notifier's SNS message body
+   * (finding e396a7ee, design §2/§6) — e.g. `https://<host>`. Threaded
+   * from `HOST_URL`/`FRONTEND_ORIGIN` in bin/app.ts. Optional: absent ⇒
+   * the notifier emits a plain-text "(governance UI URL not configured)"
+   * note instead of a broken/half link — never a hard failure. */
+  governanceUiBaseUrl?: string;
 }
 
 export class GovernanceStack extends cdk.Stack {
@@ -127,6 +138,20 @@ export class GovernanceStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: GovernanceStackProps) {
     super(scope, id, props);
     const accessLogsBucket = props.accessLogsBucket;
+
+    // Runtime guard backing the type-level `alarmTopic: sns.ITopic`
+    // requirement (finding e396a7ee) — a caller that bypasses TypeScript
+    // (e.g. spreading props as `any`, or an older call site not yet
+    // migrated) must still fail loudly at synth time rather than silently
+    // constructing a governance-notifier with no durable SNS backstop.
+    if (!props.alarmTopic) {
+      throw new Error(
+        "GovernanceStack requires props.alarmTopic — the governance-notifier's " +
+          "durable CRITICAL-event SNS backstop (finding e396a7ee) and the " +
+          "auto-rollback finding-write-failure alarm (D6) both depend on it. " +
+          "Pass BackendStack's alarmTopic explicitly.",
+      );
+    }
 
     // ============================================================
     // Cross-stack AppSync pattern — L1 CfnDataSource + CfnResolver
@@ -426,10 +451,46 @@ exports.handler = async (event) => {
     // `publishGovernanceEvent` mutation with SigV4 and AppSync's
     // @aws_subscribe fans out to admin user-pool subscribers.
     //
-    // The 14 detail-types listed below MUST stay in lock-step with
+    // The 15 detail-types listed below MUST stay in lock-step with
     // GOVERNANCE_DETAIL_TYPES in backend/src/utils/notifier-base.ts.
     // The handler also performs a defence-in-depth re-check against
     // that constant.
+    //
+    // Finding e396a7ee (PART B): the WS fanout above is EPHEMERAL — a
+    // zero-subscriber fanout returns HTTP 200 with no error, so a
+    // CRITICAL governance event that no admin UI was open to receive was
+    // previously silent. The notifier now ALSO (a) publishes a
+    // whitelist-projected SNS notification to the existing plaintext
+    // `alarmTopic` for the CRITICAL subset
+    // (CRITICAL_GOVERNANCE_DETAIL_TYPES in notifier-base.ts), and (b)
+    // writes a durable per-attempt outcome row to
+    // NotificationOutcomesTable for EVERY routed event. See
+    // governance-notifier.ts's module comment for the fail-closed /
+    // degrade asymmetry (WS + CRITICAL-SNS failures throw; an
+    // outcome-row write failure degrades via a dedicated CW metric so it
+    // never re-triggers an already-delivered SNS page).
+
+    // Durable per-attempt delivery-outcome audit trail (finding e396a7ee,
+    // design §3). Deliberately a NEW table (not the governance ledger):
+    // this is operational delivery telemetry — TTL'd, DESTROY-on-delete —
+    // semantically distinct from RETAIN-protected governance domain
+    // findings. eventId (EventBridge event.id) is the PK, making the
+    // PutItem idempotent across EventBridge's own retries.
+    const notificationOutcomesTable = new dynamodb.Table(
+      this,
+      "NotificationOutcomesTable",
+      {
+        tableName: `citadel-governance-notification-outcomes-${props.environment}`,
+        partitionKey: { name: "eventId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+        timeToLiveAttribute: "expiresAt",
+        // Operational telemetry, not a governance-domain record — safe to
+        // destroy on stack teardown (contrast with the RETAIN-protected
+        // governance tables owned by BackendStack).
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      },
+    );
 
     // Dead-letter queue for events the Lambda fails to relay after
     // EventBridge async-invoke retries. Inspected by operators when
@@ -457,6 +518,19 @@ exports.handler = async (event) => {
         environment: {
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
           APPSYNC_ENDPOINT: props.appSyncApi.graphqlUrl,
+          ENVIRONMENT: props.environment,
+          // Finding e396a7ee — durable SNS backstop for the CRITICAL
+          // subset. Plaintext topic (no KMS grant needed, see design §1
+          // rationale for choosing this over the CMK-encrypted escalation
+          // topic).
+          ALARM_TOPIC_ARN: props.alarmTopic.topicArn,
+          NOTIFICATION_OUTCOMES_TABLE: notificationOutcomesTable.tableName,
+          // Deep-link base for the SNS message body. Absent-tolerant in
+          // the handler (falls back to a plain-text "not configured"
+          // note) — see design §2.
+          ...(props.governanceUiBaseUrl
+            ? { GOVERNANCE_UI_BASE_URL: props.governanceUiBaseUrl }
+            : {}),
         },
         // EventBridge invokes Lambda async; failed invocations land in
         // the DLQ after the default 2 retries (configurable on the
@@ -482,11 +556,48 @@ exports.handler = async (event) => {
       }),
     );
 
+    // Finding e396a7ee — scoped sns:Publish on the plaintext alarm topic
+    // ONLY (no kms:GenerateDataKey*/Decrypt grant needed; see design §1
+    // for why the CMK-encrypted escalation topic was rejected).
+    governanceNotifierFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["sns:Publish"],
+        resources: [props.alarmTopic.topicArn],
+      }),
+    );
+
+    // PutItem ONLY — a hand-written statement, NOT grantWriteData, which
+    // would over-grant UpdateItem/DeleteItem/BatchWriteItem. The outcome
+    // row is write-once per attempt (eventId PK, idempotent overwrite on
+    // retry) and never updated or deleted by this function.
+    governanceNotifierFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [notificationOutcomesTable.tableArn],
+      }),
+    );
+
+    // Namespace-conditioned PutMetricData for the DEGRADE-path signal
+    // (NotifierOutcomeWriteFailure) — PutMetricData has no resource-level
+    // ARN, so the namespace condition is the least-privilege boundary.
+    governanceNotifierFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: { "cloudwatch:namespace": "Citadel/Governance" },
+        },
+      }),
+    );
+
     new events.Rule(this, "GovernanceEventsRule", {
       eventBus: props.agentEventBus,
       ruleName: `citadel-governance-events-${props.environment}`,
       description:
-        "Routes all 14 governance.* detail-types (the canonical list in " +
+        "Routes all 15 governance.* detail-types (the canonical list in " +
         "GOVERNANCE_DETAIL_TYPES) to the governance-notifier relay Lambda.",
       eventPattern: {
         source: ["citadel.backend"],
@@ -494,6 +605,15 @@ exports.handler = async (event) => {
         // backend/src/utils/notifier-base.ts. The handler also drops
         // unknown detail-types as defence in depth, so the rule
         // expanding ahead of the handler is safe.
+        //
+        // governance.release.auto_rollback (finding 163d4776): added so
+        // the auto-rollback evaluator's best-effort emit actually reaches
+        // the notifier — notifier-base.ts already documented this type
+        // as "Relayed by governance-notifier" before this rule included
+        // it. See the lock-step guard in
+        // governance-notifier-durable-destination.test.ts (every
+        // CRITICAL_GOVERNANCE_DETAIL_TYPES member must appear here AND
+        // in GOVERNANCE_DETAIL_TYPES).
         detailType: [
           "governance.adr.locked",
           "governance.adr.reopen.attempted",
@@ -509,6 +629,7 @@ exports.handler = async (event) => {
           "governance.mode.transition",
           "governance.constitutional.rule.changed",
           "governance.caselaw.changed",
+          "governance.release.auto_rollback",
         ],
       },
       targets: [
@@ -522,6 +643,41 @@ exports.handler = async (event) => {
       ],
     });
 
+    // Finding e396a7ee — DEGRADE-path alarm: a lost outcome-audit row
+    // (DynamoDB PutItem failure AFTER a successful WS/SNS delivery) pages
+    // via this dedicated alarm instead of failing the already-delivered
+    // Lambda invocation (which would otherwise re-trigger a duplicate
+    // SNS page on EventBridge retry — see governance-notifier.ts's
+    // module comment for the full asymmetry rationale).
+    const notifierOutcomeWriteFailureAlarm = new cloudwatch.Alarm(
+      this,
+      "NotifierOutcomeWriteFailureAlarm",
+      {
+        alarmName: `citadel-governance-notifier-outcome-write-failure-${props.environment}`,
+        alarmDescription:
+          "The governance-notifier successfully delivered a governance event " +
+          "(WebSocket and/or the CRITICAL-tier SNS backstop) but failed to " +
+          "write its durable outcome-audit row. Delivery already succeeded — " +
+          "this alarm is for a missing audit record, not a missed event. See " +
+          "docs/RUNBOOK (governance notifier).",
+        metric: new cloudwatch.Metric({
+          namespace: "Citadel/Governance",
+          metricName: "NotifierOutcomeWriteFailure",
+          dimensionsMap: { Environment: props.environment },
+          statistic: "Sum",
+          period: Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    notifierOutcomeWriteFailureAlarm.addAlarmAction(
+      new cw_actions.SnsAction(props.alarmTopic),
+    );
+
     NagSuppressions.addResourceSuppressions(
       governanceNotifierFn,
       [
@@ -531,6 +687,21 @@ exports.handler = async (event) => {
             "AWS Lambda basic-execution managed policy is required for CloudWatch Logs. " +
             "The relay also has a field-scoped appsync:GraphQL grant on the single " +
             "publishGovernanceEvent mutation — no API-wide permissions.",
+        },
+      ],
+      true,
+    );
+
+    NagSuppressions.addResourceSuppressions(
+      governanceNotifierFn.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "notifier narrows the call to the Citadel/Governance namespace " +
+            "in code (NotifierOutcomeWriteFailure DEGRADE-path metric).",
+          appliesTo: ["Resource::*"],
         },
       ],
       true,
@@ -1587,11 +1758,9 @@ exports.handler = async (event) => {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       },
     );
-    if (props.alarmTopic) {
-      autoRollbackFindingFailureAlarm.addAlarmAction(
-        new cw_actions.SnsAction(props.alarmTopic),
-      );
-    }
+    autoRollbackFindingFailureAlarm.addAlarmAction(
+      new cw_actions.SnsAction(props.alarmTopic),
+    );
 
     const environmentReleasePointerDataSourceRole = new iam.Role(
       this,

@@ -118,6 +118,40 @@ export const GOVERNANCE_DETAIL_TYPES = [
 
 export type GovernanceDetailType = (typeof GOVERNANCE_DETAIL_TYPES)[number];
 
+// Finding e396a7ee (PART B) / secondary finding 163d4776: the CRITICAL
+// subset that MUST reach a durable, confirmed-subscriber channel (the
+// plaintext alarmTopic SNS backstop) in addition to the ephemeral WS
+// fanout, because a zero-subscriber WS fanout for these types is
+// unacceptable to miss silently. All routed types still attempt WS +
+// still get a durable outcome row (see governance-notifier.ts); only
+// this subset additionally triggers an SNS publish.
+//
+// Deliberately does NOT include a breaker/circuit-breaker detail-type:
+// per-target breaker state changes have no governance.* EventBridge
+// detail-type today (confirmed by inspection — breaker state is
+// ledger-only, emitted as a GovernanceFinding row, never as a
+// governance.* event). Inventing one here would fabricate a contract
+// this notifier cannot actually observe. If breaker events later gain a
+// governance.* detail-type, add it to both this list AND
+// GOVERNANCE_DETAIL_TYPES/the EventBridge rule in the same change (see
+// the lock-step test in notifier-base.test.ts and
+// governance-notifier-durable-destination.test.ts).
+export const CRITICAL_GOVERNANCE_DETAIL_TYPES = [
+  "governance.offfrontier.escalated",
+  "governance.release.auto_rollback",
+] as const satisfies readonly GovernanceDetailType[];
+
+export type CriticalGovernanceDetailType =
+  (typeof CRITICAL_GOVERNANCE_DETAIL_TYPES)[number];
+
+const CRITICAL_GOVERNANCE_DETAIL_TYPE_SET: ReadonlySet<string> =
+  new Set<string>(CRITICAL_GOVERNANCE_DETAIL_TYPES);
+
+/** True iff `detailType` is in the CRITICAL subset that must SNS-publish. */
+export function isCriticalGovernanceDetailType(detailType: string): boolean {
+  return CRITICAL_GOVERNANCE_DETAIL_TYPE_SET.has(detailType);
+}
+
 // Per-detail-type typed payload map.
 export interface GovernancePayloadMap {
   "governance.adr.locked": {
@@ -470,6 +504,139 @@ function ebClient(): EventBridgeClient {
   return _client;
 }
 
+// ---------------------------------------------------------------------------
+// SNS notification projection (finding e396a7ee, design §2).
+//
+// Pure, unit-testable in isolation from any AWS SDK client. Builds a
+// WHITELIST-projected Subject/Message pair for the CRITICAL subset of
+// governance events — NEVER serialises the raw event.detail. Only the
+// scalar fields explicitly listed per detail-type below are surfaced;
+// any future/unexpected field on the payload (e.g. an accidentally
+// added secret) is structurally excluded, not merely omitted by
+// convention.
+// ---------------------------------------------------------------------------
+
+const SNS_SUBJECT_MAX = 100;
+const SUMMARY_FIELD_MAX = 280;
+
+export interface BuildNotificationMeta {
+  env: string;
+  eventId: string;
+  eventTime: string;
+  correlationId?: string;
+  runId?: string;
+  org?: string;
+  governanceUiBaseUrl?: string;
+}
+
+/** Per-detail-type whitelist of scalar fields safe to surface in an SNS body. */
+const SUMMARY_WHITELIST: Partial<
+  Record<GovernanceDetailType, readonly string[]>
+> = {
+  "governance.offfrontier.escalated": ["projectId", "agentId", "reason"],
+  "governance.release.auto_rollback": [
+    "orgId",
+    "agentTargetId",
+    "environment",
+    "action",
+    "metric",
+    "observedValue",
+    "threshold",
+    "sampleCount",
+    "fromReleaseId",
+    "toReleaseId",
+    "candidateReleaseId",
+    "fromVersion",
+  ],
+};
+
+/** Per-detail-type deep-link route suffix (appended to governanceUiBaseUrl). */
+const DEEP_LINK_ROUTE: Partial<Record<GovernanceDetailType, string>> = {
+  "governance.offfrontier.escalated": "/governance/escalations",
+  "governance.release.auto_rollback": "/governance/findings",
+};
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+/**
+ * Project only the whitelisted scalar fields for `detailType` out of an
+ * arbitrary detail object, sanitised via the same fail-closed tag-stripper
+ * used for EventBridge payloads. Any field NOT in the whitelist (including
+ * one injected by a bug or an attacker) is structurally excluded — this is
+ * a whitelist, not a blacklist.
+ */
+function projectSummaryFields(
+  detailType: GovernanceDetailType,
+  detail: Record<string, unknown>,
+): string {
+  const fields = SUMMARY_WHITELIST[detailType] ?? [];
+  const parts: string[] = [];
+  for (const field of fields) {
+    const raw = detail[field];
+    if (raw === undefined || raw === null) continue;
+    const value =
+      typeof raw === "string"
+        ? truncate(sanitizeString(raw), SUMMARY_FIELD_MAX)
+        : String(raw);
+    parts.push(`${field}=${value}`);
+  }
+  return parts.join(", ");
+}
+
+/**
+ * Build the SNS Subject + Message for a CRITICAL governance event.
+ * Pure function — no AWS SDK calls, no I/O — so it is directly
+ * unit-testable (see notifier-base.test.ts R8).
+ *
+ * NEVER serialises the raw `detail` object into the message; only the
+ * per-detail-type whitelisted scalar fields (plus the always-safe
+ * envelope metadata: detailType/env/org/correlationId/runId/eventId/
+ * eventTime/deep-link) are included.
+ */
+export function buildGovernanceNotification(
+  detailType: GovernanceDetailType,
+  detail: Record<string, unknown>,
+  meta: BuildNotificationMeta,
+): { subject: string; body: string } {
+  const org =
+    meta.org ??
+    (typeof detail.orgId === "string" ? detail.orgId : undefined) ??
+    (typeof detail.org === "string" ? detail.org : undefined);
+
+  const shortLabel = detailType.replace(/^governance\./, "");
+  const subjectRaw = org
+    ? `[Citadel ${meta.env}] ${shortLabel} — ${org}`
+    : `[Citadel ${meta.env}] ${shortLabel}`;
+  const subject = truncate(subjectRaw, SNS_SUBJECT_MAX);
+
+  const route = DEEP_LINK_ROUTE[detailType];
+  const deepLink = meta.governanceUiBaseUrl
+    ? `${meta.governanceUiBaseUrl}${route ?? ""}`
+    : "(governance UI URL not configured)";
+
+  const summary = projectSummaryFields(detailType, detail);
+
+  const lines = [
+    `Governance event: ${detailType}`,
+    `Environment: ${meta.env}`,
+    `Organization: ${org ?? "n/a"}`,
+    `Correlation/runId: ${meta.correlationId ?? meta.runId ?? "n/a"}`,
+    `Time: ${meta.eventTime}`,
+    `Summary: ${summary || "n/a"}`,
+    `Details: ${deepLink}`,
+    `EventId: ${meta.eventId}`,
+  ];
+
+  return { subject, body: lines.join("\n") };
+}
+
+/** Test-only: reset the cached EventBridge client. Do not call from production code. */
+export function __resetGovernanceNotifierForTest(): void {
+  _client = null;
+}
+
 export async function emitGovernanceEvent<D extends GovernanceDetailType>(
   detailType: D,
   detail: DetailPayloadOf<D>,
@@ -493,9 +660,4 @@ export async function emitGovernanceEvent<D extends GovernanceDetailType>(
     ],
   });
   await ebClient().send(command);
-}
-
-/** Test-only: reset the cached EventBridge client. Do not call from production code. */
-export function __resetGovernanceNotifierForTest(): void {
-  _client = null;
 }

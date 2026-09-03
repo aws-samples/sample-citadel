@@ -220,8 +220,14 @@ const governanceStack = new GovernanceStack(
       backendStack.promotionPolicyConfigWriterRole,
     // D6 — the auto-rollback evaluator's finding-write-failure alarm posts
     // to the shared SLO alarm topic so a committed-but-unrecorded rollback
-    // pages.
+    // pages. Now also REQUIRED (finding e396a7ee) — the governance-notifier's
+    // durable CRITICAL-event SNS backstop posts to the same topic.
     alarmTopic: backendStack.alarmTopic,
+    // Finding e396a7ee (design §6) — deep-link base for the notifier's SNS
+    // message body. HOST_URL doubles as the governance UI base URL; absent
+    // ⇒ the notifier degrades to a plain-text "not configured" note rather
+    // than a broken link (never a hard failure).
+    governanceUiBaseUrl: process.env.HOST_URL,
   },
 );
 
