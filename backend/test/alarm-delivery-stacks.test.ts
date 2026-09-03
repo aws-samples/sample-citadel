@@ -34,6 +34,16 @@ scaffoldArbiterStubs();
 import { ArbiterStack } from "../lib/arbiter-stack";
 import { BackendStack } from "../lib/backend-stack";
 
+// This suite performs 4 full CDK synths (ArbiterStack x3, BackendStack x1).
+// Standalone it runs in ~1-2s per test, but under CI/full-suite CPU
+// contention (16+ other CDK-synth suites scheduled concurrently by Jest's
+// slowest-first heuristic under maxWorkers: "50%") a single synth has been
+// measured taking 22.7s vs 849ms standalone — within 1.3x of the global
+// 30s testTimeout in jest.config.js. Raise this suite's own timeout well
+// above that measured worst case rather than the global default, since the
+// slowdown is contention-driven, not a hang (finding 0fe3b82f).
+jest.setTimeout(120000);
+
 function buildArbiter(alarmDelivery: AlarmDeliveryConfig): Template {
   const app = new cdk.App({ context: { "aws:cdk:bundling-stacks": [] } });
   const backend = new cdk.Stack(app, "MockBackend", {
