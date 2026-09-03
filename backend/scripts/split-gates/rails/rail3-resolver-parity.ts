@@ -5,13 +5,23 @@
  * (backend + every satellite, though in this no-move stage the satellite
  * list is empty) and asserts:
  *   - the merged typeName.fieldName set equals the baseline's set exactly
- *     (no field lost, no field gained).
+ *     (no field lost, no field gained) — except fields explicitly listed in
+ *     `expectedNewFields` (mirrors rail 1's `ADDITION_ALLOWLIST` shape and
+ *     justification convention; rail 3 otherwise has no allowlist
+ *     mechanism). This exemption ONLY affects the "extra"/unexpected-new-
+ *     field check below — MISSING baseline fields and DOUBLE-ATTACH are
+ *     evaluated unconditionally and always violate.
  *   - no typeName.fieldName is attached in more than one stack (CFN forbids
  *     double-attaching a resolver to the same field).
  */
 import { CfnTemplate, StackBaseline } from "../types";
 import { extractResolverKeys } from "../template-utils";
 import { RailResult, RailViolation } from "../types";
+
+export interface ExpectedNewFieldEntry {
+  logicalId: string;
+  justification: string;
+}
 
 export interface NamedTemplate {
   stackName: string;
@@ -21,9 +31,13 @@ export interface NamedTemplate {
 export function runResolverParity(
   baseline: StackBaseline,
   stacks: NamedTemplate[],
+  expectedNewFields: ExpectedNewFieldEntry[] = [],
 ): RailResult {
   const violations: RailViolation[] = [];
   const baselineKeys = new Set(Object.keys(baseline.resolvers));
+  const expectedNewFieldKeys = new Set(
+    expectedNewFields.map((e) => e.logicalId),
+  );
 
   // key -> list of stack names that define it (any list of length > 1 = double-attach)
   const mergedOwners = new Map<string, string[]>();
@@ -42,8 +56,12 @@ export function runResolverParity(
 
   const mergedKeys = new Set(mergedOwners.keys());
 
+  // MISSING check is unconditional — never weakened by expectedNewFields.
   const missing = [...baselineKeys].filter((k) => !mergedKeys.has(k));
-  const extra = [...mergedKeys].filter((k) => !baselineKeys.has(k));
+  // "extra" check exempts only the fields explicitly listed as expected.
+  const extra = [...mergedKeys].filter(
+    (k) => !baselineKeys.has(k) && !expectedNewFieldKeys.has(k),
+  );
 
   for (const key of missing) {
     violations.push({
@@ -59,6 +77,8 @@ export function runResolverParity(
       message: `Resolver field "${key}" appears in the merged stack set but was not in the baseline. Unexpected new field.`,
     });
   }
+  // DOUBLE-ATTACH check is unconditional — never weakened by
+  // expectedNewFields, including for fields listed there.
   for (const [key, owners] of mergedOwners) {
     if (owners.length > 1) {
       violations.push({

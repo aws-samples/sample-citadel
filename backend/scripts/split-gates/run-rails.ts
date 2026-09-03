@@ -34,6 +34,7 @@ import {
   MOVED_RESOLVERS,
   MOVED_LAMBDA_ROLES,
   SATELLITE_STACK_NAMES,
+  EXPECTED_NEW_FIELDS,
 } from "./move-manifest";
 import { RailResult, StackBaseline } from "./types";
 
@@ -153,10 +154,11 @@ function main(): void {
       ),
     }),
   );
-  const rail3 = runResolverParity(baseline, [
-    { stackName, template: freshTemplate },
-    ...satelliteTemplates,
-  ]);
+  const rail3 = runResolverParity(
+    baseline,
+    [{ stackName, template: freshTemplate }, ...satelliteTemplates],
+    EXPECTED_NEW_FIELDS,
+  );
 
   // Rails 6/7 need per-satellite Lambda-policy / resolver snapshots — built
   // the same way the baseline was, from each satellite's own template.
