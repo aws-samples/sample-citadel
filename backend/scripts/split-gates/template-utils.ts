@@ -308,6 +308,65 @@ function flattenConditionKeys(condition: Record<string, unknown>): string[] {
   return keys;
 }
 
+/**
+ * Environment-derived tokens that legitimately differ between the host that
+ * captured a committed split-gates baseline and the CI runner that later
+ * re-synthesizes against it (finding: rail 2 red on every PR touching S3
+ * buckets, root cause 389a16a). This project's CDK app constructs bucket
+ * physical names as `<base>-<env>-<account>-<region>` (see
+ * `backend/lib/backend-stack.ts`, e.g. `AccessLogsBucket`,
+ * `DocumentBucket`, `CodeBucket`) — CloudFormation requires bucket names to
+ * be globally unique, so embedding account+region is the standard CDK
+ * pattern, not a project bug. `ci.yml` synthesizes with a fixed sandbox
+ * `CDK_DEFAULT_ACCOUNT=000000000000` / `CDK_DEFAULT_REGION=us-east-1` (no
+ * real AWS credentials in CI), while `split-baseline/citadel-backend-test.json`
+ * was captured on a host with real credentials — account 257192363080,
+ * region us-west-2. No committed baseline can ever byte-match CI for this
+ * prop; the mismatch is structural, not a regression.
+ *
+ * A 12-digit run of digits is normalized to a placeholder (covers any AWS
+ * account id, real or the `000000000000` sandbox value) and each known AWS
+ * region literal is normalized to a placeholder. This intentionally only
+ * touches the account/region segments — a genuine rename of the *base*
+ * bucket name (e.g. `citadel-documents` -> `citadel-docs`) still differs
+ * after normalization and rail 2 correctly goes red (see the "genuine
+ * rename still fails" bite-proof test in
+ * `backend/test/split-gates-rail2-stateful-pin.test.ts`).
+ */
+const ACCOUNT_ID_RE = /\b\d{12}\b/g;
+// Historically stable AWS region literals. New regions are added here as
+// the project adopts them — this is not a general-purpose region parser.
+const REGION_RE =
+  /\b(us|eu|ap|sa|ca|me|af|il)-(north|south|east|west|central|northeast|northwest|southeast|southwest)-\d\b/g;
+
+function normalizeEnvTokens(value: unknown): unknown {
+  if (typeof value === "string") {
+    return value
+      .replace(ACCOUNT_ID_RE, "<ACCOUNT>")
+      .replace(REGION_RE, "<REGION>");
+  }
+  if (Array.isArray(value)) {
+    return value.map(normalizeEnvTokens);
+  }
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(obj)) {
+      out[k] = normalizeEnvTokens(obj[k]);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Top-level property keys whose value legitimately embeds environment
+ * tokens (account id / region) and must be normalized before comparison.
+ * Every other key in `STATEFUL_KEY_PROPS` is compared byte-identically —
+ * this list must stay narrow (see comment above `normalizeEnvTokens`).
+ */
+const ENV_DERIVED_KEYS: ReadonlySet<string> = new Set(["BucketName"]);
+
 /** Deep-equal check restricted to a whitelist of top-level property keys. */
 export function keyPropsEqual(
   a: Record<string, unknown> | undefined,
@@ -318,7 +377,10 @@ export function keyPropsEqual(
   for (const key of keys) {
     const av = a?.[key];
     const bv = b?.[key];
-    if (stableStringify(av) !== stableStringify(bv)) {
+    const [avCmp, bvCmp] = ENV_DERIVED_KEYS.has(key)
+      ? [normalizeEnvTokens(av), normalizeEnvTokens(bv)]
+      : [av, bv];
+    if (stableStringify(avCmp) !== stableStringify(bvCmp)) {
       diffs.push(key);
     }
   }

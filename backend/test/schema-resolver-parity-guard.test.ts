@@ -41,6 +41,7 @@ import {
   loadTemplate,
   extractResolverKeys,
 } from "../scripts/split-gates/template-utils";
+import { guardCdkOutInCi } from "./helpers/cdk-out-guard";
 
 const ENV = process.env.SPLIT_GATES_ENV ?? "dev";
 
@@ -127,6 +128,7 @@ describe("schema <-> AppSync resolver parity guard", () => {
     const missing = RESOLVER_STACK_NAMES.filter(
       (name) => !fs.existsSync(cdkOutTemplatePath(name)),
     );
+    guardCdkOutInCi(missing.join(", "), "cdk synth first");
     it.skip(`skipped: cdk.out template(s) missing (run cdk synth first). missing=${missing.join(", ")}`, () => {});
     return;
   }

@@ -26,6 +26,7 @@
  */
 import * as fs from "fs";
 import * as path from "path";
+import { guardCdkOutInCi } from "../../test/helpers/cdk-out-guard";
 
 const ENV = process.env.SPLIT_GATES_ENV ?? "dev";
 const CDK_OUT = path.resolve(__dirname, "..", "..", "cdk.out");
@@ -142,6 +143,7 @@ describe("DLQ_REDRIVE runbook completeness (every synthesized shared-DLQ consume
       .filter((t) => !t.template)
       .map((t) => t.name)
       .join(", ");
+    guardCdkOutInCi(missing, "cdk synth --all");
     it.skip(
       `skipped: one or more synthesized templates missing under cdk.out/ ` +
         `(run 'cdk synth --all' first). missing=[${missing}]`,

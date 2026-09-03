@@ -30,6 +30,8 @@ import * as path from "path";
 
 const ENV = process.env.SPLIT_GATES_ENV ?? "dev";
 
+import { guardCdkOutInCi } from "./helpers/cdk-out-guard";
+
 const CDK_OUT = path.resolve(__dirname, "..", "cdk.out");
 
 // Every stack the app factory (bin/app.ts) instantiates.
@@ -61,6 +63,7 @@ const allTemplatesPresent = ALL_STACKS.every((s) => loadTemplate(s) !== null);
 describe("duplicate CloudWatch alarm physical-name guard (deploy-blocking regression)", () => {
   if (!allTemplatesPresent) {
     const missing = ALL_STACKS.filter((s) => loadTemplate(s) === null);
+    guardCdkOutInCi(missing.join(", "), "npm run build && npx cdk synth --all");
     it.skip(`skipped: fresh templates missing for [${missing.join(", ")}] (run 'npm run build && npx cdk synth --all' first)`, () => {});
     return;
   }
