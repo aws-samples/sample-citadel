@@ -1,3 +1,172 @@
+// ---------------------------------------------------------------------------
+// R1-R7 — durable SNS delivery + outcome records (finding e396a7ee, PART B).
+// Fail-closed semantics: WS failure throws (pinned above); CRITICAL SNS
+// failure throws (DLQ + alarm); outcome-row write failure DEGRADES (log +
+// metric, no throw) — see design §4 for the asymmetry rationale.
+// ---------------------------------------------------------------------------
+
+function makeAutoRollbackEvent(): EventBridgeEvent<
+  string,
+  Record<string, unknown>
+> {
+  return makeEvent("governance.release.auto_rollback", {
+    orgId: "org_ACME",
+    agentTargetId: "agent-1",
+    environment: "prod",
+    action: "AUTO_ABORT_CANARY",
+    metric: "error_rate",
+    observedValue: 0.42,
+    threshold: 0.05,
+    sampleCount: 500,
+    fromReleaseId: "rel-1",
+    toReleaseId: "rel-2",
+    candidateReleaseId: "rel-2",
+    fromVersion: 3,
+    traceContext: { correlationId: "corr-1" },
+  });
+}
+
+describe("R1: CRITICAL type publishes SNS + writes RELAYED_WS_AND_SNS outcome row", () => {
+  test("publishes to ALARM_TOPIC_ARN with expected Subject/Message and writes an outcome row", async () => {
+    const event = makeAutoRollbackEvent();
+    await handler(event);
+
+    const snsCalls = snsMock.commandCalls(PublishCommand);
+    expect(snsCalls).toHaveLength(1);
+    const snsInput = snsCalls[0].args[0].input;
+    expect(snsInput.TopicArn).toBe(process.env.ALARM_TOPIC_ARN);
+    expect(snsInput.Subject!.length).toBeLessThanOrEqual(100);
+    expect(snsInput.Message).toContain("governance.release.auto_rollback");
+    expect(snsInput.Message).toContain("org_ACME");
+
+    const ddbCalls = ddbMock.commandCalls(PutItemCommand);
+    expect(ddbCalls).toHaveLength(1);
+    const item = ddbCalls[0].args[0].input.Item as Record<
+      string,
+      { S?: string; BOOL?: boolean; N?: string }
+    >;
+    expect(item.eventId?.S).toBe(event.id);
+    expect(item.outcome?.S).toBe("RELAYED_WS_AND_SNS");
+    expect(item.snsRouted?.BOOL).toBe(true);
+    expect(item.snsMessageId?.S).toBe("sns-msg-1");
+  });
+});
+
+describe("R2: INFO-tier type — no SNS publish, RELAYED_WS_ONLY outcome row", () => {
+  test("does not publish to SNS and records RELAYED_WS_ONLY", async () => {
+    const event = makeEvent("governance.round.started", {
+      projectId: "p1",
+      roundN: 1,
+    });
+    await handler(event);
+
+    expect(snsMock.commandCalls(PublishCommand)).toHaveLength(0);
+    const ddbCalls = ddbMock.commandCalls(PutItemCommand);
+    expect(ddbCalls).toHaveLength(1);
+    const item = ddbCalls[0].args[0].input.Item as Record<
+      string,
+      { S?: string; BOOL?: boolean }
+    >;
+    expect(item.outcome?.S).toBe("RELAYED_WS_ONLY");
+    expect(item.snsRouted?.BOOL).toBe(false);
+  });
+});
+
+describe("R3: SNS message body whitelist projection + redaction + Subject cap", () => {
+  test("body contains detailType/org/correlationId/deep-link, excludes non-whitelisted fields, strips <script>, Subject <=100", async () => {
+    const event = makeEvent("governance.offfrontier.escalated", {
+      projectId: "p1",
+      agentId: "agent-1",
+      reason: "drift<script>alert(1)</script>",
+      // Simulated non-whitelisted sensitive field on the raw detail.
+      secretToken: "sk-super-secret-value",
+      traceContext: { correlationId: "corr-9" },
+    });
+    await handler(event);
+
+    const snsCalls = snsMock.commandCalls(PublishCommand);
+    expect(snsCalls).toHaveLength(1);
+    const { Subject, Message } = snsCalls[0].args[0].input;
+    expect(Subject!.length).toBeLessThanOrEqual(100);
+    expect(Message).toContain("governance.offfrontier.escalated");
+    expect(Message).toContain("corr-9");
+    expect(Message).toContain("https://ui.example.com");
+    expect(Message).not.toContain("sk-super-secret-value");
+    expect(Message).not.toContain("<script>");
+  });
+});
+
+describe("R4: CRITICAL SNS publish failure — handler THROWS", () => {
+  test("rethrows when SNS PublishCommand rejects for a CRITICAL type (drives DLQ + alarm)", async () => {
+    snsMock.on(PublishCommand).rejects(new Error("Sns.Throttling"));
+    const event = makeAutoRollbackEvent();
+    await expect(handler(event)).rejects.toThrow();
+  });
+});
+
+describe("R5: AppSync (WS) failure — handler THROWS (regression pin)", () => {
+  test("rethrows when AppSync responds non-OK, unchanged from prior behaviour", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ errors: [{ message: "Server error" }] }),
+      text: async () => "Server error",
+    });
+    const event = makeAutoRollbackEvent();
+    await expect(handler(event)).rejects.toThrow();
+  });
+});
+
+describe("R6: outcome-row write failure DEGRADES (no throw) + emits metric", () => {
+  test("does not throw when PutItem fails after successful WS+SNS delivery; emits NotifierOutcomeWriteFailure metric", async () => {
+    ddbMock
+      .on(PutItemCommand)
+      .rejects(new Error("Ddb.ProvisionedThroughputExceeded"));
+    const event = makeAutoRollbackEvent();
+    await expect(handler(event)).resolves.toBeDefined();
+
+    const cwCalls = cwMock.commandCalls(PutMetricDataCommand);
+    expect(cwCalls.length).toBeGreaterThanOrEqual(1);
+    const metricData = cwCalls[0].args[0].input.MetricData ?? [];
+    expect(
+      metricData.some((m) => m.MetricName === "NotifierOutcomeWriteFailure"),
+    ).toBe(true);
+  });
+
+  test("does not mask a WS delivery failure by throwing an outcome-write error instead", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ errors: [{ message: "boom" }] }),
+      text: async () => "boom",
+    });
+    ddbMock.on(PutItemCommand).rejects(new Error("Ddb.Unavailable"));
+    const event = makeAutoRollbackEvent();
+    // Must throw the ORIGINAL delivery error, not an outcome-write error.
+    await expect(handler(event)).rejects.toThrow(
+      /AppSync|500|Server error|boom/i,
+    );
+  });
+});
+
+describe("R7: idempotency — same event.id twice writes a single overwritten row, no error", () => {
+  test("processing the same eventId twice does not throw and PutItem is called with the same key both times", async () => {
+    const event = makeAutoRollbackEvent();
+    await handler(event);
+    await handler(event);
+
+    const ddbCalls = ddbMock.commandCalls(PutItemCommand);
+    expect(ddbCalls).toHaveLength(2);
+    const firstKey = (
+      ddbCalls[0].args[0].input.Item as Record<string, { S?: string }>
+    ).eventId?.S;
+    const secondKey = (
+      ddbCalls[1].args[0].input.Item as Record<string, { S?: string }>
+    ).eventId?.S;
+    expect(firstKey).toBe(event.id);
+    expect(secondKey).toBe(event.id);
+  });
+});
 /**
  * Tests for governance-notifier Lambda — AppSync subscription relay.
  *
@@ -28,6 +197,13 @@ jest.mock("@aws-sdk/credential-provider-node", () => ({
 }));
 
 import type { EventBridgeEvent } from "aws-lambda";
+import { mockClient } from "aws-sdk-client-mock";
+import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
+import { DynamoDBClient, PutItemCommand } from "@aws-sdk/client-dynamodb";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 import { GOVERNANCE_DETAIL_TYPES } from "../../utils/notifier-base";
 
 // Lazy-import the handler (must come after the env var setup) so the
@@ -38,14 +214,26 @@ import { handler, __resetForTest } from "../governance-notifier";
 const APPSYNC_ENDPOINT_VAL =
   "https://test-api.appsync-api.us-east-1.amazonaws.com/graphql";
 
+const snsMock = mockClient(SNSClient);
+const ddbMock = mockClient(DynamoDBClient);
+const cwMock = mockClient(CloudWatchClient);
+
 beforeAll(() => {
   process.env.APPSYNC_ENDPOINT = APPSYNC_ENDPOINT_VAL;
   process.env.AWS_REGION = "us-east-1";
+  process.env.ALARM_TOPIC_ARN =
+    "arn:aws:sns:us-east-1:123456789012:citadel-alarms-test";
+  process.env.NOTIFICATION_OUTCOMES_TABLE =
+    "citadel-governance-notification-outcomes-test";
+  process.env.GOVERNANCE_UI_BASE_URL = "https://ui.example.com";
 });
 
 beforeEach(() => {
   mockFetch.mockReset();
   mockSign.mockReset();
+  snsMock.reset();
+  ddbMock.reset();
+  cwMock.reset();
   __resetForTest();
   mockSign.mockResolvedValue({
     headers: {
@@ -73,6 +261,9 @@ beforeEach(() => {
       },
     }),
   });
+  snsMock.on(PublishCommand).resolves({ MessageId: "sns-msg-1" });
+  ddbMock.on(PutItemCommand).resolves({});
+  cwMock.on(PutMetricDataCommand).resolves({});
   jest.spyOn(console, "error").mockImplementation(() => {});
   jest.spyOn(console, "log").mockImplementation(() => {});
 });
@@ -85,6 +276,9 @@ afterEach(() => {
 afterAll(() => {
   delete process.env.APPSYNC_ENDPOINT;
   delete process.env.AWS_REGION;
+  delete process.env.ALARM_TOPIC_ARN;
+  delete process.env.NOTIFICATION_OUTCOMES_TABLE;
+  delete process.env.GOVERNANCE_UI_BASE_URL;
 });
 
 function makeEvent(

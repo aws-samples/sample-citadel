@@ -21,6 +21,7 @@ import * as appsync from "aws-cdk-lib/aws-appsync";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as sns from "aws-cdk-lib/aws-sns";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
@@ -246,12 +247,17 @@ function createTestStack(): {
     }),
   );
 
+  const alarmTopic = new sns.Topic(backendStack, "AlarmTopic", {
+    topicName: "citadel-alarms-test-agentrelease",
+  });
+
   const stack = new GovernanceStack(app, "TestGovernanceStackAgentRelease", {
     env: { account: "123456789012", region: "us-east-1" },
     environment: "test",
     appSyncApi,
     agentEventBus,
     accessLogsBucket,
+    alarmTopic,
     adrsTable,
     adrReopenAttemptsTable,
     executionSpecificationsTable,
