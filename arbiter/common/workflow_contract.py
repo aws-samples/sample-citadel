@@ -32,6 +32,7 @@ timestamp, which callers may supply explicitly for full determinism.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -61,6 +62,221 @@ MESSAGE_TYPE_WORKFLOW_NODE = 'workflow_node'
 STATUS_COMPLETED = 'completed'
 STATUS_FAILED = 'failed'
 _VALID_STATUSES = (STATUS_COMPLETED, STATUS_FAILED)
+
+
+# --- Compensation contract (CIT-123 slice 1: data only) ----------------------
+#
+# DATA ONLY. This section declares the optional per-node ``compensation``
+# block and the workflow-level compensation policy shape. It intentionally
+# contains NO executor/worker/dispatch behaviour — see the CIT-123 design
+# (slices 2-5) for the template renderer, unwind orchestration, governed
+# execution, and sink/UI. A node or workflow with no compensation data is
+# byte-identical to pre-feature behaviour: nothing in this module is read by
+# any existing code path yet, and none of the existing dispatch/result
+# builders above are touched.
+#
+# ---------------------------------------------------------------------------
+# OWNER-DECISION DEFAULTS (still open — see CIT-123 design ยง4 "Owner-call
+# summary"). Every default below is deliberately conservative (opt-in / stop
+# on failure) and is declared ONCE, here, so changing an owner's ruling later
+# is a one-line edit in this block rather than a search across call sites.
+# Do not duplicate these literals elsewhere; import the constants.
+# ---------------------------------------------------------------------------
+
+# Workflow-level trigger mode: 'off' (compensation never fires) or
+# 'on_terminal_failure' (fires once, at the no-retry terminal-fail branch).
+# PROVISIONAL DEFAULT: 'off' — compensation is inert until a workflow opts in.
+COMPENSATION_TRIGGER_MODE_DEFAULT = 'off'
+_VALID_COMPENSATION_TRIGGER_MODES = ('off', 'on_terminal_failure')
+
+# Minimum number of completed, side-effecting, compensation-bearing nodes
+# required before an unwind is worth running at all.
+# PROVISIONAL DEFAULT: 0 (always unwind when enabled) — some owners may
+# prefer 1 to skip a no-op unwind ceremony on an early failure.
+COMPENSATION_TRIGGER_MIN_COMPLETED_NODES_DEFAULT = 0
+
+# Behaviour when a single compensation step itself fails mid-unwind:
+# 'stop' (halt the remaining unwind) or 'continue' (best-effort, keep going).
+# PROVISIONAL DEFAULT: 'stop' — later compensations may depend on earlier
+# ones having rolled back; continuing blindly risks a worse inconsistent
+# state. See CIT-123 design D5.
+COMPENSATION_ON_FAILURE_DEFAULT = 'stop'
+_VALID_COMPENSATION_ON_FAILURE = ('stop', 'continue')
+
+# --- Template syntax (D4): restricted ${output.<path>} grammar --------------
+#
+# Slice 1 validates SYNTAX ONLY at parse/normalize time — no resolution
+# against a recorded output (that is the slice-2 renderer). The grammar is a
+# root token ``output`` followed by zero or more ``.<identifier>`` or
+# ``[<int>]`` segments. No function calls, arithmetic, or arbitrary attribute
+# access — this is intentionally NOT eval/format/jinja-compatible so
+# injection-gadget shapes (e.g. ``{0.__class__.__mro__}``) are just inert
+# non-matching literals, never executed.
+_TEMPLATE_TOKEN_RE = re.compile(r'\$\{([^{}]*)\}')
+_TEMPLATE_PATH_RE = re.compile(r'^output(?:\.[A-Za-z_][A-Za-z0-9_]*|\[\d+\])*$')
+
+
+def _validate_template_syntax(value: Any, *, path: str) -> None:
+    """Recursively validate ``${output...}`` token syntax in *value*.
+
+    Only string leaves are inspected; a string is scanned for every
+    ``${...}`` token and each token body must match the restricted
+    ``output`` path grammar. Raises ``ValueError`` (mentioning 'template')
+    on any malformed token. Non-token text (including gadget-shaped
+    literals that are not well-formed ``${...}`` tokens) is left untouched.
+    """
+    if isinstance(value, str):
+        for match in _TEMPLATE_TOKEN_RE.finditer(value):
+            token_body = match.group(1)
+            if not _TEMPLATE_PATH_RE.match(token_body):
+                raise ValueError(
+                    "compensation args: malformed template reference "
+                    f"'${{{token_body}}}' at {path} — expected "
+                    "'output', 'output.<key>', or 'output[<index>]' segments"
+                )
+        # An unmatched literal '${' or stray '}' with no balanced pair is
+        # also malformed template syntax.
+        if value.count('${') != len(list(_TEMPLATE_TOKEN_RE.finditer(value))):
+            raise ValueError(
+                f"compensation args: unbalanced template braces in value at {path}"
+            )
+    elif isinstance(value, dict):
+        for key, nested in value.items():
+            _validate_template_syntax(nested, path=f'{path}.{key}')
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            _validate_template_syntax(nested, path=f'{path}[{index}]')
+    # Other scalar types (int, float, bool, None) carry no template syntax.
+
+
+_COMPENSATION_BLOCK_KEYS = ('tool', 'args', 'sideEffecting')
+
+
+def normalize_compensation_block(node: dict) -> Optional[dict]:
+    """Validate and normalize a node definition's optional ``compensation``
+    block.
+
+    Returns ``None`` when *node* carries no (or a ``None``) ``compensation``
+    key — this is the byte-identical-when-absent path. Returns
+    ``{'tool': str, 'args': dict, 'sideEffecting': bool}`` (defaulting
+    ``sideEffecting`` to ``True``) when a well-formed block is present.
+
+    Raises ``ValueError`` — loudly, never silently coerced — when the block
+    is present but malformed: not an object, an unknown key, a missing/empty
+    ``tool``, a non-object ``args``, a non-bool ``sideEffecting``, or a
+    template-syntax error inside ``args`` (see ``_validate_template_syntax``).
+
+    DATA ONLY: this function performs no I/O, no template resolution, and is
+    not called from any executor/worker/dispatch path in this slice.
+    """
+    if not isinstance(node, dict):
+        raise ValueError("compensation block: node definition must be an object")
+
+    block = node.get('compensation')
+    if block is None:
+        return None
+
+    if not isinstance(block, dict):
+        raise ValueError("compensation block: 'compensation' must be an object when present")
+
+    unknown_keys = set(block.keys()) - set(_COMPENSATION_BLOCK_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            f"compensation block: unknown key(s) {sorted(unknown_keys)}; "
+            f"allowed keys are {_COMPENSATION_BLOCK_KEYS}"
+        )
+
+    tool = block.get('tool')
+    if not isinstance(tool, str) or tool == '':
+        raise ValueError("compensation block: field 'tool' is required and must be a non-empty string")
+
+    args = block.get('args')
+    if not isinstance(args, dict):
+        raise ValueError("compensation block: field 'args' is required and must be an object")
+    _validate_template_syntax(args, path='args')
+
+    side_effecting = block.get('sideEffecting', True)
+    if not isinstance(side_effecting, bool):
+        raise ValueError("compensation block: field 'sideEffecting' must be a boolean when present")
+
+    return {'tool': tool, 'args': args, 'sideEffecting': side_effecting}
+
+
+_COMPENSATION_POLICY_KEYS = ('enabled', 'trigger', 'onFailure')
+_COMPENSATION_TRIGGER_KEYS = ('mode', 'minCompletedNodes')
+
+
+def normalize_compensation_policy(policy: Optional[dict]) -> dict:
+    """Validate and normalize a workflow-level compensation policy block.
+
+    Applies the conservative provisional defaults declared above for any
+    absent field. Accepts ``None`` (workflow carries no compensation policy
+    at all) and returns the fully-defaulted, all-disabled shape — this is
+    the byte-identical-when-absent path for the workflow-level policy.
+
+    Raises ``ValueError`` — loudly — on an unknown top-level or nested
+    ``trigger`` key, a non-bool ``enabled``, an invalid ``trigger.mode``, a
+    negative ``trigger.minCompletedNodes``, or an invalid ``onFailure``.
+
+    DATA ONLY: no trigger evaluation, no executor wiring in this slice.
+    """
+    if policy is None:
+        policy = {}
+    if not isinstance(policy, dict):
+        raise ValueError("compensation policy: 'compensation' policy must be an object")
+
+    unknown_keys = set(policy.keys()) - set(_COMPENSATION_POLICY_KEYS)
+    if unknown_keys:
+        raise ValueError(
+            f"compensation policy: unknown key(s) {sorted(unknown_keys)}; "
+            f"allowed keys are {_COMPENSATION_POLICY_KEYS}"
+        )
+
+    enabled = policy.get('enabled', False)
+    if not isinstance(enabled, bool):
+        raise ValueError("compensation policy: field 'enabled' must be a boolean")
+
+    trigger = policy.get('trigger', {})
+    if not isinstance(trigger, dict):
+        raise ValueError("compensation policy: field 'trigger' must be an object")
+    unknown_trigger_keys = set(trigger.keys()) - set(_COMPENSATION_TRIGGER_KEYS)
+    if unknown_trigger_keys:
+        raise ValueError(
+            f"compensation policy: unknown trigger key(s) {sorted(unknown_trigger_keys)}; "
+            f"allowed keys are {_COMPENSATION_TRIGGER_KEYS}"
+        )
+
+    mode = trigger.get('mode', COMPENSATION_TRIGGER_MODE_DEFAULT)
+    if mode not in _VALID_COMPENSATION_TRIGGER_MODES:
+        raise ValueError(
+            f"compensation policy: trigger 'mode' must be one of "
+            f"{_VALID_COMPENSATION_TRIGGER_MODES}, got {mode!r}"
+        )
+
+    min_completed_nodes = trigger.get(
+        'minCompletedNodes', COMPENSATION_TRIGGER_MIN_COMPLETED_NODES_DEFAULT
+    )
+    if (
+        not isinstance(min_completed_nodes, int)
+        or isinstance(min_completed_nodes, bool)
+        or min_completed_nodes < 0
+    ):
+        raise ValueError(
+            "compensation policy: trigger 'minCompletedNodes' must be a non-negative int"
+        )
+
+    on_failure = policy.get('onFailure', COMPENSATION_ON_FAILURE_DEFAULT)
+    if on_failure not in _VALID_COMPENSATION_ON_FAILURE:
+        raise ValueError(
+            f"compensation policy: 'onFailure' must be one of "
+            f"{_VALID_COMPENSATION_ON_FAILURE}, got {on_failure!r}"
+        )
+
+    return {
+        'enabled': enabled,
+        'trigger': {'mode': mode, 'minCompletedNodes': min_completed_nodes},
+        'onFailure': on_failure,
+    }
 
 
 # --- Typed structures --------------------------------------------------------

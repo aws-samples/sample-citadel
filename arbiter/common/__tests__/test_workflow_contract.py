@@ -727,3 +727,363 @@ class TestNodeResultDetailQueueWaitTimestampsAdditive:
         parsed = parse_node_result_detail(detail)
         assert parsed.dispatched_at is None
         assert parsed.worker_started_at is None
+
+
+# --- Compensation block (CIT-123 slice 1: data only, no executor behaviour) --
+#
+# An optional, additive per-node ``compensation`` block: ``{tool, args,
+# sideEffecting?}``. Validated via ``normalize_compensation_block``. A node
+# with no ``compensation`` key must behave and serialize byte-identically to
+# today. See ``COMPENSATION_TRIGGER_DEFAULTS`` / ``COMPENSATION_ON_FAILURE_DEFAULT``
+# below for the workflow-level policy defaults (owner call, provisional).
+
+
+class TestNormalizeCompensationBlock:
+    """Red-first unit tests for the pure per-node compensation validator."""
+
+    def test_absent_block_returns_none(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        assert normalize_compensation_block({'id': 'n1', 'agentId': 'a1'}) is None
+
+    def test_none_block_returns_none(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        assert normalize_compensation_block({'id': 'n1', 'compensation': None}) is None
+
+    def test_valid_block_roundtrips_with_defaults(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'id': 'n1',
+            'compensation': {
+                'tool': 'close_ticket',
+                'args': {'ticketId': '${output.ticketId}'},
+            },
+        }
+        result = normalize_compensation_block(node)
+        assert result == {
+            'tool': 'close_ticket',
+            'args': {'ticketId': '${output.ticketId}'},
+            'sideEffecting': True,
+        }
+
+    def test_valid_block_preserves_explicit_side_effecting_false(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'compensation': {
+                'tool': 'noop',
+                'args': {},
+                'sideEffecting': False,
+            }
+        }
+        result = normalize_compensation_block(node)
+        assert result == {'tool': 'noop', 'args': {}, 'sideEffecting': False}
+
+    def test_missing_tool_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        with pytest.raises(ValueError, match="'tool'"):
+            normalize_compensation_block({'compensation': {'args': {}}})
+
+    def test_empty_tool_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        with pytest.raises(ValueError, match="'tool'"):
+            normalize_compensation_block({'compensation': {'tool': '', 'args': {}}})
+
+    def test_non_string_tool_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        with pytest.raises(ValueError, match="'tool'"):
+            normalize_compensation_block({'compensation': {'tool': 123, 'args': {}}})
+
+    def test_missing_args_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        with pytest.raises(ValueError, match="'args'"):
+            normalize_compensation_block({'compensation': {'tool': 'close_ticket'}})
+
+    def test_non_object_args_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        with pytest.raises(ValueError, match="'args'"):
+            normalize_compensation_block(
+                {'compensation': {'tool': 'close_ticket', 'args': 'not-a-dict'}}
+            )
+
+    def test_non_object_compensation_block_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        with pytest.raises(ValueError, match='compensation'):
+            normalize_compensation_block({'compensation': 'not-a-dict'})
+
+    def test_unknown_key_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        with pytest.raises(ValueError, match='unknown'):
+            normalize_compensation_block(
+                {
+                    'compensation': {
+                        'tool': 'close_ticket',
+                        'args': {},
+                        'bogusKey': True,
+                    }
+                }
+            )
+
+    def test_non_bool_side_effecting_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        with pytest.raises(ValueError, match="'sideEffecting'"):
+            normalize_compensation_block(
+                {'compensation': {'tool': 'close_ticket', 'args': {}, 'sideEffecting': 'yes'}}
+            )
+
+    def test_node_not_a_dict_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        with pytest.raises(ValueError):
+            normalize_compensation_block('not-a-dict')  # type: ignore[arg-type]
+
+    # --- template-syntax validation at parse time (renderer is slice 2) -----
+    # Only syntactic well-formedness of ``${output....}`` tokens is checked
+    # here: balanced ``${`` / ``}``, and (when present) the token body must
+    # start with ``output`` followed only by ``.<identifier>`` or
+    # ``[<int>]`` segments. Resolving the reference against a recorded
+    # output is explicitly out of scope (slice 2).
+
+    def test_template_syntax_valid_nested_path_accepted(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'compensation': {
+                'tool': 'close_ticket',
+                'args': {'id': '${output.ticket.id}'},
+            }
+        }
+        result = normalize_compensation_block(node)
+        assert result['args'] == {'id': '${output.ticket.id}'}
+
+    def test_template_syntax_valid_array_index_accepted(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'compensation': {
+                'tool': 'close_ticket',
+                'args': {'id': '${output.tickets[0].id}'},
+            }
+        }
+        normalize_compensation_block(node)  # must not raise
+
+    def test_template_syntax_plain_string_without_tokens_accepted(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'compensation': {
+                'tool': 'close_ticket',
+                'args': {'reason': 'manual rollback, no template here'},
+            }
+        }
+        normalize_compensation_block(node)  # must not raise
+
+    def test_template_syntax_unbalanced_brace_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'compensation': {
+                'tool': 'close_ticket',
+                'args': {'id': '${output.ticketId'},
+            }
+        }
+        with pytest.raises(ValueError, match='template'):
+            normalize_compensation_block(node)
+
+    def test_template_syntax_wrong_root_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'compensation': {
+                'tool': 'close_ticket',
+                'args': {'id': '${input.ticketId}'},
+            }
+        }
+        with pytest.raises(ValueError, match='template'):
+            normalize_compensation_block(node)
+
+    def test_template_syntax_empty_token_raises(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'compensation': {
+                'tool': 'close_ticket',
+                'args': {'id': '${}'},
+            }
+        }
+        with pytest.raises(ValueError, match='template'):
+            normalize_compensation_block(node)
+
+    def test_template_syntax_checked_recursively_in_nested_args(self):
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'compensation': {
+                'tool': 'close_ticket',
+                'args': {'nested': {'deep': ['${output.foo}', '${bad syntax']}},
+            }
+        }
+        with pytest.raises(ValueError, match='template'):
+            normalize_compensation_block(node)
+
+    def test_template_syntax_eval_gadget_string_is_inert_literal_not_rejected(self):
+        # Per D4: no eval/format; a gadget-shaped literal that isn't a
+        # well-formed ${output...} token is just an ordinary string value —
+        # NOT a template reference — so it is accepted, not executed.
+        from common.workflow_contract import normalize_compensation_block
+
+        node = {
+            'compensation': {
+                'tool': 'close_ticket',
+                'args': {'payload': '{0.__class__.__mro__}'},
+            }
+        }
+        normalize_compensation_block(node)  # must not raise
+
+
+# --- Absent-block equivalence (byte-identical when no compensation block) ---
+
+
+class TestCompensationAbsentEquivalence:
+    """A workflow/node with no ``compensation`` key must be byte-identical
+    (dispatch message + serialization) to pre-feature behaviour."""
+
+    def test_build_node_dispatch_message_unaffected_by_compensation_feature(self):
+        # No compensation kwarg exists on the dispatch builder (slice 1 keeps
+        # the wire dispatch message untouched per the design note) — this
+        # pins that the dispatch message shape is unchanged.
+        message = build_node_dispatch_message(
+            execution_id='exec-1',
+            node_id='node-1',
+            workflow_id='wf-1',
+            agent_id='agent-1',
+        )
+        assert message == {
+            'message_type': MESSAGE_TYPE_WORKFLOW_NODE,
+            'execution_id': 'exec-1',
+            'node_id': 'node-1',
+            'workflow_id': 'wf-1',
+            'agent_id': 'agent-1',
+            'input': {},
+            'configuration': {},
+        }
+
+    @given(
+        node_dict=st.fixed_dictionaries(
+            {
+                'id': _ids,
+                'agentId': _ids,
+            }
+        )
+    )
+    def test_normalize_compensation_block_is_none_for_any_node_without_the_key(
+        self, node_dict: dict
+    ):
+        from common.workflow_contract import normalize_compensation_block
+
+        # Property: for any node dict that does not carry a 'compensation'
+        # key, the normalizer is a no-op (returns None) regardless of what
+        # other keys/values the node carries.
+        before = json.dumps(node_dict, sort_keys=True)
+        assert normalize_compensation_block(node_dict) is None
+        after = json.dumps(node_dict, sort_keys=True)
+        assert before == after  # normalizer must not mutate its input
+
+
+# --- Workflow-level compensation policy defaults (owner call, provisional) --
+
+
+class TestCompensationPolicyDefaults:
+    """The workflow-level opt-in/policy surface: conservative defaults,
+    declared in one place so the (still-open) owner decision is a one-line
+    change. See the module-level comment above the constants for rationale.
+    """
+
+    def test_defaults_module_constants_exist_and_are_conservative(self):
+        from common.workflow_contract import (
+            COMPENSATION_ON_FAILURE_DEFAULT,
+            COMPENSATION_TRIGGER_MIN_COMPLETED_NODES_DEFAULT,
+            COMPENSATION_TRIGGER_MODE_DEFAULT,
+        )
+
+        # Conservative: disabled unless explicitly opted in.
+        assert COMPENSATION_TRIGGER_MODE_DEFAULT == 'off'
+        assert COMPENSATION_TRIGGER_MIN_COMPLETED_NODES_DEFAULT == 0
+        # Conservative: stop rather than best-effort continue on failure.
+        assert COMPENSATION_ON_FAILURE_DEFAULT == 'stop'
+
+    def test_normalize_compensation_policy_applies_defaults_when_absent(self):
+        from common.workflow_contract import normalize_compensation_policy
+
+        assert normalize_compensation_policy(None) == {
+            'enabled': False,
+            'trigger': {'mode': 'off', 'minCompletedNodes': 0},
+            'onFailure': 'stop',
+        }
+        assert normalize_compensation_policy({}) == {
+            'enabled': False,
+            'trigger': {'mode': 'off', 'minCompletedNodes': 0},
+            'onFailure': 'stop',
+        }
+
+    def test_normalize_compensation_policy_roundtrips_explicit_values(self):
+        from common.workflow_contract import normalize_compensation_policy
+
+        policy = {
+            'enabled': True,
+            'trigger': {'mode': 'on_terminal_failure', 'minCompletedNodes': 2},
+            'onFailure': 'continue',
+        }
+        assert normalize_compensation_policy(policy) == policy
+
+    def test_normalize_compensation_policy_rejects_unknown_top_level_key(self):
+        from common.workflow_contract import normalize_compensation_policy
+
+        with pytest.raises(ValueError, match='unknown'):
+            normalize_compensation_policy({'enabled': True, 'bogus': 1})
+
+    def test_normalize_compensation_policy_rejects_unknown_trigger_key(self):
+        from common.workflow_contract import normalize_compensation_policy
+
+        with pytest.raises(ValueError, match='unknown'):
+            normalize_compensation_policy({'trigger': {'mode': 'off', 'bogus': 1}})
+
+    def test_normalize_compensation_policy_rejects_bad_trigger_mode(self):
+        from common.workflow_contract import normalize_compensation_policy
+
+        with pytest.raises(ValueError, match='mode'):
+            normalize_compensation_policy({'trigger': {'mode': 'sometimes'}})
+
+    def test_normalize_compensation_policy_rejects_negative_min_completed_nodes(self):
+        from common.workflow_contract import normalize_compensation_policy
+
+        with pytest.raises(ValueError, match='minCompletedNodes'):
+            normalize_compensation_policy({'trigger': {'minCompletedNodes': -1}})
+
+    def test_normalize_compensation_policy_rejects_bad_on_failure(self):
+        from common.workflow_contract import normalize_compensation_policy
+
+        with pytest.raises(ValueError, match='onFailure'):
+            normalize_compensation_policy({'onFailure': 'retry'})
+
+    def test_normalize_compensation_policy_rejects_non_bool_enabled(self):
+        from common.workflow_contract import normalize_compensation_policy
+
+        with pytest.raises(ValueError, match='enabled'):
+            normalize_compensation_policy({'enabled': 'yes'})
+
+    def test_normalize_compensation_policy_rejects_non_object_policy(self):
+        from common.workflow_contract import normalize_compensation_policy
+
+        with pytest.raises(ValueError, match='compensation'):
+            normalize_compensation_policy('not-a-dict')  # type: ignore[arg-type]
