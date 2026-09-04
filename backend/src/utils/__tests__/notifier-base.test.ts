@@ -1,3 +1,147 @@
+// ---------------------------------------------------------------------------
+// R8 — buildGovernanceNotification: whitelist projection, redaction,
+// Subject length cap, deep-link assembly (finding e396a7ee, design §2).
+// ---------------------------------------------------------------------------
+
+describe("R8: buildGovernanceNotification — whitelist projection + redaction", () => {
+  test("R8a: builds Subject <=100 chars and whitelisted body for governance.release.auto_rollback", () => {
+    const { subject, body } = buildGovernanceNotification(
+      "governance.release.auto_rollback",
+      {
+        orgId: "org_ACME",
+        agentTargetId: "agent-1",
+        environment: "prod",
+        action: "AUTO_ABORT_CANARY",
+        metric: "error_rate",
+        observedValue: 0.42,
+        threshold: 0.05,
+        sampleCount: 500,
+        fromReleaseId: "rel-1",
+        toReleaseId: "rel-2",
+        candidateReleaseId: "rel-2",
+        fromVersion: 3,
+      },
+      {
+        env: "prod",
+        eventId: "evt-1",
+        eventTime: "2026-09-03T00:00:00Z",
+        correlationId: "corr-1",
+        runId: undefined,
+        governanceUiBaseUrl: "https://ui.example.com",
+      },
+    );
+    expect(subject.length).toBeLessThanOrEqual(100);
+    expect(subject).toContain("org_ACME");
+    expect(body).toContain("governance.release.auto_rollback");
+    expect(body).toContain("org_ACME");
+    expect(body).toContain("corr-1");
+    expect(body).toContain("https://ui.example.com");
+    expect(body).toContain("evt-1");
+  });
+
+  test("R8b: NEVER includes a non-whitelisted field injected into detail", () => {
+    const { body } = buildGovernanceNotification(
+      "governance.offfrontier.escalated",
+      {
+        projectId: "p1",
+        agentId: "agent-1",
+        reason: "drifted",
+        // @ts-expect-error — simulating an attacker/bug adding an extra field
+        secretToken: "sk-super-secret-value",
+      },
+      {
+        env: "prod",
+        eventId: "evt-2",
+        eventTime: "2026-09-03T00:00:00Z",
+      },
+    );
+    expect(body).not.toContain("sk-super-secret-value");
+    expect(body).not.toContain("secretToken");
+  });
+
+  test("R8c: strips <script> tags and length-caps free-text fields (e.g. reason)", () => {
+    const longReason = "x".repeat(500) + "<script>alert(1)</script>";
+    const { body } = buildGovernanceNotification(
+      "governance.offfrontier.escalated",
+      {
+        projectId: "p1",
+        agentId: "agent-1",
+        reason: longReason,
+      },
+      {
+        env: "prod",
+        eventId: "evt-3",
+        eventTime: "2026-09-03T00:00:00Z",
+      },
+    );
+    expect(body).not.toContain("<script>");
+    // capped well below the raw 500+26 char input
+    const reasonLine = body
+      .split("\n")
+      .find((l) => l.toLowerCase().includes("summary"));
+    expect(reasonLine).toBeDefined();
+    expect(reasonLine!.length).toBeLessThan(400);
+  });
+
+  test("R8d: omits deep-link URL text gracefully when governanceUiBaseUrl is not configured", () => {
+    const { body } = buildGovernanceNotification(
+      "governance.offfrontier.escalated",
+      { projectId: "p1", agentId: "agent-1", reason: "drift" },
+      { env: "prod", eventId: "evt-4", eventTime: "2026-09-03T00:00:00Z" },
+    );
+    expect(body).toMatch(/governance UI URL not configured/i);
+  });
+
+  test("R8e: Subject truncates to <=100 chars for a long org id", () => {
+    const { subject } = buildGovernanceNotification(
+      "governance.offfrontier.escalated",
+      {
+        projectId: "p1",
+        agentId: "agent-1",
+        reason: "x".repeat(200),
+      },
+      {
+        env: "prod",
+        eventId: "evt-5",
+        eventTime: "2026-09-03T00:00:00Z",
+        org: "org_" + "y".repeat(200),
+      },
+    );
+    expect(subject.length).toBeLessThanOrEqual(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R9 — lock-step: every CRITICAL_GOVERNANCE_DETAIL_TYPES member must be
+// present in GOVERNANCE_DETAIL_TYPES (routing gap guard, finding 163d4776).
+// The rule-list half of the lock-step lives in
+// backend/test/governance-notifier-durable-destination.test.ts (needs a
+// CDK synth of GovernanceEventsRule).
+// ---------------------------------------------------------------------------
+
+describe("R9: CRITICAL_GOVERNANCE_DETAIL_TYPES lock-step with GOVERNANCE_DETAIL_TYPES", () => {
+  test("R9a: every CRITICAL type is a member of GOVERNANCE_DETAIL_TYPES", () => {
+    const all = new Set<string>(GOVERNANCE_DETAIL_TYPES);
+    for (const critical of CRITICAL_GOVERNANCE_DETAIL_TYPES) {
+      expect(all.has(critical)).toBe(true);
+    }
+  });
+
+  test("R9b: CRITICAL_GOVERNANCE_DETAIL_TYPES contains exactly the designed set", () => {
+    expect([...CRITICAL_GOVERNANCE_DETAIL_TYPES].sort()).toEqual(
+      [
+        "governance.offfrontier.escalated",
+        "governance.release.auto_rollback",
+      ].sort(),
+    );
+  });
+
+  test("R9c: CRITICAL_GOVERNANCE_DETAIL_TYPES has no duplicate entries", () => {
+    expect(new Set(CRITICAL_GOVERNANCE_DETAIL_TYPES).size).toBe(
+      CRITICAL_GOVERNANCE_DETAIL_TYPES.length,
+    );
+  });
+});
 import { mockClient } from "aws-sdk-client-mock";
 import {
   EventBridgeClient,
@@ -8,6 +152,8 @@ import {
   emitGovernanceEvent,
   __resetGovernanceNotifierForTest,
   GOVERNANCE_DETAIL_TYPES,
+  CRITICAL_GOVERNANCE_DETAIL_TYPES,
+  buildGovernanceNotification,
   type GovernanceDetailType,
 } from "../notifier-base";
 
