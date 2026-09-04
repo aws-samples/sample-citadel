@@ -93,6 +93,21 @@ export interface NodeResult {
 }
 
 /**
+ * Optional per-node compensation action (CIT-123 slice 1: data/type only).
+ *
+ * DATA ONLY — no renderer/executor behaviour is implied by this type. `args`
+ * may contain `${output.<path>}` template references; syntax (not
+ * resolution) is validated on the Python side by
+ * `normalize_compensation_block` in `arbiter/common/workflow_contract.py`.
+ * `sideEffecting` defaults to `true` when omitted.
+ */
+export interface CompensationBlock {
+  tool: string;
+  args: Record<string, unknown>;
+  sideEffecting?: boolean;
+}
+
+/**
  * Simplified node definition for serialization
  */
 export interface WorkflowNodeDefinition {
@@ -107,6 +122,8 @@ export interface WorkflowNodeDefinition {
   position: { x: number; y: number };
   configuration: Record<string, any>;
   retryPolicy?: RetryPolicy;
+  /** Optional per-node compensation action. See `CompensationBlock`. */
+  compensation?: CompensationBlock;
 }
 
 /**
@@ -222,6 +239,23 @@ export function isWorkflowEdge(edge: any): edge is WorkflowEdge {
 }
 
 /**
+ * Type guard to check if a value is a CompensationBlock.
+ * Slice 1 (data/type only): validates shape, not template resolution.
+ */
+export function isCompensationBlock(value: any): value is CompensationBlock {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    typeof value.tool === 'string' &&
+    value.tool !== '' &&
+    value.args !== null &&
+    typeof value.args === 'object' &&
+    !Array.isArray(value.args) &&
+    (value.sideEffecting === undefined || typeof value.sideEffecting === 'boolean')
+  );
+}
+
+/**
  * Type guard to check if a value is a WorkflowNodeDefinition
  */
 export function isWorkflowNodeDefinition(node: any): node is WorkflowNodeDefinition {
@@ -234,7 +268,8 @@ export function isWorkflowNodeDefinition(node: any): node is WorkflowNodeDefinit
     typeof node.position === 'object' &&
     typeof node.position.x === 'number' &&
     typeof node.position.y === 'number' &&
-    typeof node.configuration === 'object'
+    typeof node.configuration === 'object' &&
+    (node.compensation === undefined || isCompensationBlock(node.compensation))
   );
 }
 
