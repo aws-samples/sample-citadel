@@ -1095,3 +1095,80 @@ class TestCompensationPolicyDefaults:
 
         with pytest.raises(ValueError, match='compensation'):
             normalize_compensation_policy('not-a-dict')  # type: ignore[arg-type]
+
+
+class TestBuildCompensationDispatchMessagePseudoNodeId:
+    """Regression (CIT-123 slice 5, scope A — pre-existing bug on main, not
+    introduced by this slice): ``_dispatch_compensation`` in
+    ``stepRunner/executor.py`` calls
+    ``build_compensation_dispatch_message(node_id=f'{origNodeId}#comp', ...)``
+    by DESIGN (see that function's own docstring: "node_id is the
+    compensation PSEUDO-node id, matching the nodeResults key ... never the
+    original node's own id"). The ``f9ceb38e`` ledger-key-collision fix
+    (commit ecb63b5) tightened the SHARED ``_validate_identity`` helper to
+    reject any identifier containing ``'#'`` — but ``_validate_identity`` is
+    also the helper this same function calls on its OWN ``node_id`` field,
+    so every real compensation dispatch (which always carries the
+    ``'#comp'`` suffix) now raises ``ValueError`` instead of building a
+    message. This broke the entire unwind path the moment a queue URL is
+    configured (verified failing identically on a clean origin/main
+    checkout, not just on this branch).
+
+    The fix must NOT weaken ``_validate_identity``'s guard for the fields
+    that fix actually protects (``execution_id``, ``workflow_id``, ``tool``,
+    and — on the FORWARD dispatch path — ``node_id``, which per that path's
+    own convention never contains ``'#'``). It only needs to stop applying
+    the blanket delimiter rejection to the ONE field whose contract requires
+    the delimiter: the compensation pseudo-node id.
+    """
+
+    def test_build_compensation_dispatch_message_accepts_the_hash_comp_suffix(self):
+        from common.workflow_contract import build_compensation_dispatch_message
+
+        message = build_compensation_dispatch_message(
+            execution_id='exec1', node_id='n0#comp', workflow_id='wf',
+            tool='close_ticket', args={'id': '${output.id}'},
+        )
+        assert message['node_id'] == 'n0#comp'
+        assert message['tool'] == 'close_ticket'
+
+    def test_build_compensation_dispatch_message_still_rejects_hash_in_execution_id(self):
+        """The delimiter guard must still fire for fields where a '#' is
+        never legitimate — this is not a blanket removal of the protection
+        the ledger-key-collision fix added."""
+        from common.workflow_contract import build_compensation_dispatch_message
+
+        with pytest.raises(ValueError, match="execution_id"):
+            build_compensation_dispatch_message(
+                execution_id='exec#1', node_id='n0#comp', workflow_id='wf',
+                tool='close_ticket', args={},
+            )
+
+    def test_build_compensation_dispatch_message_still_rejects_hash_in_tool(self):
+        from common.workflow_contract import build_compensation_dispatch_message
+
+        with pytest.raises(ValueError, match="tool"):
+            build_compensation_dispatch_message(
+                execution_id='exec1', node_id='n0#comp', workflow_id='wf',
+                tool='close#ticket', args={},
+            )
+
+    def test_build_compensation_dispatch_message_rejects_empty_node_id(self):
+        """The pseudo-id field must still reject empty/non-string — only the
+        delimiter character itself is exempted, not type/emptiness checks."""
+        from common.workflow_contract import build_compensation_dispatch_message
+
+        with pytest.raises(ValueError, match="node_id"):
+            build_compensation_dispatch_message(
+                execution_id='exec1', node_id='', workflow_id='wf',
+                tool='close_ticket', args={},
+            )
+
+    def test_build_compensation_dispatch_message_rejects_non_string_node_id(self):
+        from common.workflow_contract import build_compensation_dispatch_message
+
+        with pytest.raises(ValueError, match="node_id"):
+            build_compensation_dispatch_message(
+                execution_id='exec1', node_id=None, workflow_id='wf',  # type: ignore[arg-type]
+                tool='close_ticket', args={},
+            )
