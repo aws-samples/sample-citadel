@@ -251,6 +251,164 @@ describe('workflow-resolver', () => {
     });
   });
 
+  // ─── node id ledger-key delimiter rejection (f9ceb38e TS-side residual) ──
+  // Python message-build path (arbiter/common/workflow_contract.py) already
+  // rejects '#' in execution_id/node_id/workflow_id/agent_id at BUILD time.
+  // This closes the equivalent gap at the workflow-DEFINITION write
+  // boundary: createWorkflow, updateWorkflow, importWorkflow all route
+  // through validateDefinitionStructure, which now rejects '#' in any
+  // nodes[].id before the definition reaches DynamoDB.
+
+  describe('node id ledger-key delimiter rejection', () => {
+    test('createWorkflow rejects a node id containing "#", naming the field/character, and does not persist', async () => {
+      await expect(
+        invoke(
+          makeEvent('createWorkflow', {
+            input: {
+              name: 'Bad Node Id',
+              orgId: 'org-1',
+              definition: JSON.stringify({
+                nodes: [{ id: 'n1#comp', agentId: 'agent-1', type: 'agent' }],
+                edges: [],
+              }),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/Invalid workflow definition.*n1#comp.*reserved delimiter.*'#'/s);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test('updateWorkflow rejects a node id containing "#" on the changed definition and does not persist', async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: 'wf-1',
+          orgId: 'org-1',
+          version: 1,
+          status: 'DRAFT',
+          definition: '{"nodes":[],"edges":[]}',
+          updatedAt: '2024-01-01T00:00:00Z',
+          createdBy: 'user-123',
+        },
+      });
+
+      await expect(
+        invoke(
+          makeEvent('updateWorkflow', {
+            input: {
+              workflowId: 'wf-1',
+              version: 1,
+              definition: JSON.stringify({
+                nodes: [{ id: 'n1#comp', agentId: 'agent-1', type: 'agent' }],
+                edges: [],
+              }),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/Invalid workflow definition.*n1#comp.*reserved delimiter.*'#'/s);
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    });
+
+    test('importWorkflow rejects a node id containing "#" and does not persist', async () => {
+      const workflowJson = JSON.stringify({
+        name: 'Bad Import',
+        definition: JSON.stringify({
+          nodes: [{ id: 'n1#comp', agentId: 'a1', type: 'agent' }],
+          edges: [],
+        }),
+      });
+
+      await expect(
+        invoke(
+          makeEvent('importWorkflow', {
+            input: { orgId: 'org-1', workflowJson },
+          }),
+        ),
+      ).rejects.toThrow(/Invalid workflow definition.*n1#comp.*reserved delimiter.*'#'/s);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test('createWorkflow still accepts a node id with other punctuation (hyphen, underscore, dot)', async () => {
+      ddbMock.on(PutCommand).resolves({});
+
+      const result = await invoke(
+        makeEvent('createWorkflow', {
+          input: {
+            name: 'Legit Punctuation',
+            orgId: 'org-1',
+            definition: JSON.stringify({
+              nodes: [{ id: 'n1-a_b.c', agentId: 'agent-1', type: 'agent' }],
+              edges: [],
+            }),
+          },
+        }),
+      );
+
+      expect(result.status).toBe('DRAFT');
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+
+    test('backward compatibility: an existing stored definition with a legacy "#" node id can still be read', async () => {
+      // Scope decision: rejection applies only to NEW/CHANGED definitions at
+      // the write boundary (create/update/import). Reads of an
+      // already-stored definition are untouched — getWorkflow/exportWorkflow
+      // never call validateDefinitionStructure, so a pre-existing legacy
+      // definition is not bricked.
+      const legacyDefinition = JSON.stringify({
+        nodes: [{ id: 'legacy#node', agentId: 'agent-1', type: 'agent' }],
+        edges: [],
+      });
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: 'wf-legacy',
+          orgId: 'org-1',
+          name: 'Legacy Workflow',
+          definition: legacyDefinition,
+          status: 'DRAFT',
+          version: 1,
+        },
+      });
+
+      const result = await invoke(
+        makeEvent('getWorkflow', { workflowId: 'wf-legacy' }),
+      );
+
+      expect(result.definition).toBe(legacyDefinition);
+    });
+
+    test('backward compatibility: updateWorkflow on an existing "#"-bearing definition succeeds when the definition field itself is not being changed', async () => {
+      // Editing OTHER fields (e.g. name) of a legacy workflow must not be
+      // blocked merely because its stored definition happens to contain
+      // '#' — validateDefinitionStructure only runs when input.definition
+      // is present in the update.
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: 'wf-legacy',
+          orgId: 'org-1',
+          version: 1,
+          status: 'DRAFT',
+          definition: JSON.stringify({
+            nodes: [{ id: 'legacy#node', agentId: 'agent-1', type: 'agent' }],
+            edges: [],
+          }),
+          updatedAt: '2024-01-01T00:00:00Z',
+          createdBy: 'user-123',
+        },
+      });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: { workflowId: 'wf-legacy', orgId: 'org-1', name: 'Renamed', version: 2, status: 'DRAFT' },
+      });
+
+      const result = await invoke(
+        makeEvent('updateWorkflow', {
+          input: { workflowId: 'wf-legacy', name: 'Renamed', version: 1 },
+        }),
+      );
+
+      expect(result.name).toBe('Renamed');
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+    });
+  });
+
   // ─── AWSJSON object normalization ──────────────────────────────
   // AppSync delivers AWSJSON arguments as parsed OBJECTS, not strings.
   // The resolver must accept both and always persist JSON STRINGS.

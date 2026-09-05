@@ -411,9 +411,30 @@ function toJsonString(value: unknown): string | null {
   return JSON.stringify(value);
 }
 
+//: Delimiter reserved for the arbiter's tool-execution ledger sort key
+// (`nodeId#callIndex#toolName#argsHash`, see
+// `arbiter/workerWrapper/tool_idempotency.py::build_sort_key`). A workflow
+// node id containing this character can derive a ledger key
+// indistinguishable from a DIFFERENT node's key (e.g. a node literally
+// named 'n1#comp' collides with the compensation pseudo-node derived from
+// node id 'n1') — see finding f9ceb38e. The Python message-build path
+// (`arbiter/common/workflow_contract.py::_validate_identity`) already
+// rejects '#' in execution_id/node_id/workflow_id/agent_id at message BUILD
+// time; this constant/check is the TS-side residual so a hostile or
+// careless workflow DEFINITION cannot even be STORED with such an id — it
+// would otherwise save successfully here and fail later at dispatch time,
+// a worse failure mode (breaks at runtime instead of at save time).
+// Only `nodes[].id` is checked: that field is the one copied verbatim into
+// the ledger key's nodeId segment. `agentId` and edge ids are not ledger
+// key segments (agentId is validated for existence elsewhere via
+// verifyAgentsExist; edge ids are not used to build ledger keys at all).
+const LEDGER_KEY_DELIMITER = '#';
+
 /**
  * Validates workflow definition structure before persistence (WF-01 AC 12).
- * Lightweight check: valid JSON, has nodes array and edges array.
+ * Lightweight check: valid JSON, has nodes array and edges array, and no
+ * node id contains the reserved ledger-key delimiter '#' (f9ceb38e TS-side
+ * residual — see LEDGER_KEY_DELIMITER doc above).
  * Accepts either a JSON string or an already-parsed object (AppSync AWSJSON).
  * Exported for the intake Python-client contract test (envelope round-trip).
  */
@@ -435,6 +456,15 @@ export function validateDefinitionStructure(definitionValue: unknown): { valid: 
     const candidate = definition as { nodes?: unknown; edges?: unknown };
     if (!Array.isArray(candidate.nodes)) {
       errors.push('Workflow definition must contain a nodes array');
+    } else {
+      for (const node of candidate.nodes) {
+        const nodeId = (node as { id?: unknown } | null)?.id;
+        if (typeof nodeId === 'string' && nodeId.includes(LEDGER_KEY_DELIMITER)) {
+          errors.push(
+            `Node id '${nodeId}' must not contain the reserved delimiter '${LEDGER_KEY_DELIMITER}'`,
+          );
+        }
+      }
     }
     if (!Array.isArray(candidate.edges)) {
       errors.push('Workflow definition must contain an edges array');
@@ -847,6 +877,14 @@ async function importWorkflowFn(input: ImportWorkflowInput, userId: string): Pro
   // Validate the definition exists
   if (!parsed.definition) {
     throw new Error('Imported workflow must contain a definition');
+  }
+
+  // Validate definition structure, incl. no reserved ledger-key delimiter
+  // in node ids (WF-01 AC 12 / f9ceb38e TS-side residual — this write site
+  // previously bypassed validateDefinitionStructure entirely).
+  const importValidation = validateDefinitionStructure(parsed.definition);
+  if (!importValidation.valid) {
+    throw new Error(`Invalid workflow definition: ${importValidation.errors.join('; ')}`);
   }
 
   const now = new Date().toISOString();
