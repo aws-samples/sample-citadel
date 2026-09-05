@@ -123,6 +123,20 @@ def moto_tables(monkeypatch):
 
 
 def _seed_execution_row(resource, execution_id, node_id, generation=1):
+    """Seed the execution row's ``nodeResults[node_id].dispatchGeneration``
+    fence value.
+
+    ``node_id`` here MUST be the ORIGIN node id (e.g. ``"node-a"``), never
+    the ``"node-a#comp"`` wire pseudo-id ``_dispatch()`` below puts on the
+    dispatch's ``node_id`` field. ``execute_compensation`` strips the
+    ``'#comp'`` suffix (via ``_origin_node_id``) before building the
+    ``IdempotencyToolHook``/fenced reserve, so the fence lookup
+    (``nodeResults.<nodeId>.dispatchGeneration``) is keyed by the ORIGIN id —
+    seeding this row under the pseudo id would make every fenced-reserve
+    test below fail closed with a fence-condition mismatch, not the
+    behaviour under test. See ``compensation_executor._origin_node_id`` /
+    ``build_compensation_hook``'s docstring (f9ceb38e fix).
+    """
     resource.Table(EXEC_TABLE).put_item(Item={
         "executionId": execution_id,
         "nodeResults": {node_id: {"dispatchGeneration": generation}},
@@ -246,7 +260,7 @@ class TestGovernanceDeny:
         escalations = []
         monkeypatch.setattr(ce, "_escalate", lambda **kw: escalations.append(kw))
 
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=1)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
 
         result = ce.execute_compensation(
             _dispatch(),
@@ -265,7 +279,7 @@ class TestGovernanceDeny:
         executed = []
         resolver = _resolver(executed, name="close_ticket")
         monkeypatch.setattr(ce, "_escalate", lambda **kw: None)
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=1)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
 
         ce.execute_compensation(
             _dispatch(), recorded_output=_recorded_output(), org_id="org1",
@@ -288,7 +302,7 @@ class TestDoubleDelivery:
         executed = []
         resolver = _resolver(executed, name="close_ticket")
         monkeypatch.setattr(ce, "_escalate", lambda **kw: None)
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=1)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
 
         first = ce.execute_compensation(
             _dispatch(), recorded_output=_recorded_output(), org_id="org1",
@@ -318,7 +332,7 @@ class TestStaleGeneration:
         resolver = _resolver(executed, name="close_ticket")
         monkeypatch.setattr(ce, "_escalate", lambda **kw: None)
         # Execution row fenced at generation 2; dispatch carries stale gen 1.
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=2)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=2)
 
         result = ce.execute_compensation(
             _dispatch(generation=1), recorded_output=_recorded_output(),
@@ -342,7 +356,7 @@ class TestBreakerOpen:
         executed = []
         resolver = _resolver(executed, name="close_ticket")
         monkeypatch.setattr(ce, "_escalate", lambda **kw: None)
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=1)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
 
         target = BreakerTarget(kind="mcp_server", target_id="mcp-1")
         moto_tables.Table(BREAKER_TABLE).put_item(Item={
@@ -378,7 +392,7 @@ class TestOffloadedRehydration:
         executed = []
         resolver = _resolver(executed, name="close_ticket")
         monkeypatch.setattr(ce, "_escalate", lambda **kw: None)
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=1)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
 
         rehydrate_calls = []
 
@@ -410,7 +424,7 @@ class TestFailClosedOutput:
         resolver = _resolver(executed, name="close_ticket")
         escalations = []
         monkeypatch.setattr(ce, "_escalate", lambda **kw: escalations.append(kw))
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=1)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
 
         result = ce.execute_compensation(
             _dispatch(), recorded_output=None, org_id="org1",
@@ -425,7 +439,7 @@ class TestFailClosedOutput:
         executed = []
         resolver = _resolver(executed, name="close_ticket")
         monkeypatch.setattr(ce, "_escalate", lambda **kw: None)
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=1)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
 
         result = ce.execute_compensation(
             _dispatch(), recorded_output={"resultTruncated": True, "ticketId": "T-1"},
@@ -448,7 +462,7 @@ class TestResultContract:
         executed = []
         resolver = _resolver(executed, name="close_ticket")
         monkeypatch.setattr(ce, "_escalate", lambda **kw: None)
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=1)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
 
         result = ce.execute_compensation(
             _dispatch(), recorded_output=_recorded_output(), org_id="org1",
@@ -472,7 +486,7 @@ class TestKeyDerivation:
         executed = []
         resolver = _resolver(executed, name="close_ticket")
         monkeypatch.setattr(ce, "_escalate", lambda **kw: None)
-        _seed_execution_row(moto_tables, "exec-1", "node-a#comp", generation=1)
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
 
         ce.execute_compensation(
             _dispatch(), recorded_output=_recorded_output(), org_id="org1",
@@ -483,5 +497,10 @@ class TestKeyDerivation:
         assert len(rows) == 1
         row = rows[0]
         assert row["pk"] == "org1#exec-1"
-        # sk = origNodeId(#comp already embedded in node_id)#0#tool#argsHash
-        assert row["sk"].startswith("node-a#comp#0#close_ticket#")
+        # sk = originNodeId#callIndex#tool#argsHash#comp — the compensation
+        # marker is appended AFTER the argsHash field (never adjacent to
+        # node_id), so it is collision-free with any original call's key
+        # regardless of node_id's content. See tool_idempotency.
+        # build_sort_key / COMPENSATION_MARKER docstrings (f9ceb38e fix).
+        assert row["sk"].startswith("node-a#0#close_ticket#")
+        assert row["sk"].endswith("#comp")

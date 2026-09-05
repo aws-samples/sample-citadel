@@ -58,6 +58,35 @@ from tool_idempotency import build_key  # noqa: E402
 from tool_idempotency_hook import ComposedToolHook, IdempotencyToolHook  # noqa: E402
 from governance_tool_hook import GovernanceEvaluator  # noqa: E402
 
+#: Wire-contract suffix slice 3's dispatch uses to mint the compensation
+#: PSEUDO-node id (``"{origNodeId}#comp"``) carried in the dispatch's
+#: ``node_id`` field — kept ONLY for stripping it back off below, never used
+#: to derive a ledger key by concatenation again. The actual collision
+#: protection is the ``is_compensation`` STRUCTURAL flag threaded into
+#: ``build_key`` / ``IdempotencyToolHook`` (see ``tool_idempotency.
+#: build_sort_key``'s docstring) — this constant exists so a dispatch's
+#: reporting/escalation messages can keep echoing the wire pseudo-id
+#: unchanged while the ORIGINAL node id (with the suffix stripped) is what
+#: actually reaches key derivation. Stripping is a display/compat nicety on
+#: top of the structural fix, not itself the fix: even if this strip were
+#: wrong or absent, ``is_compensation=True`` alone already guarantees no
+#: collision with any original call's key, because no valid (post-
+#: validation) node id can contain the reserved '#' delimiter this suffix
+#: is built from.
+_COMPENSATION_PSEUDO_ID_SUFFIX = "#comp"
+
+
+def _origin_node_id(pseudo_node_id: str) -> str:
+    """Strip the wire-contract ``'#comp'`` suffix, if present, to recover the
+    original node id for key derivation. A pseudo id missing the suffix
+    (already-bare, or a caller that changes the wire convention later) is
+    returned unchanged — safe either way, since ``is_compensation=True`` is
+    what actually prevents the key collision, not this string surgery.
+    """
+    if pseudo_node_id.endswith(_COMPENSATION_PSEUDO_ID_SUFFIX):
+        return pseudo_node_id[: -len(_COMPENSATION_PSEUDO_ID_SUFFIX)]
+    return pseudo_node_id
+
 try:
     from common.compensation_template import (
         render_compensation_args,
@@ -203,6 +232,16 @@ def build_compensation_hook(
     reserve ordering anywhere else in this module (see the module docstring's
     D2 section) — a structural test asserts this file never defines its own
     ``_on_before_tool_call``.
+
+    ``node_id`` here MUST be the ORIGINAL node id (the caller strips any
+    wire-contract ``'#comp'`` pseudo-id suffix via ``_origin_node_id`` before
+    calling this function) — never a string with a compensation marker
+    concatenated onto it. The ``IdempotencyToolHook`` below is always built
+    with ``is_compensation=True`` (this function is exclusively the
+    compensation-path hook builder), which is what actually makes the
+    resulting ledger key distinct from the SAME node's original-call key —
+    structurally, not by relying on ``node_id`` carrying a distinguishing
+    suffix.
     """
     governance = GovernanceEvaluator(
         agent_id=agent_id or "unknown-agent",
@@ -220,6 +259,7 @@ def build_compensation_hook(
         execution_id=execution_id or "",
         node_id=node_id or "",
         dispatch_generation=compensation_generation,
+        is_compensation=True,
     )
     return ComposedToolHook(governance=governance, idempotency=idempotency, breaker=breaker)
 
@@ -509,7 +549,19 @@ def execute_compensation(
     # inside build_compensation_hook's wrapper (never duplicated here as a
     # second authority). This is purely observability: was a completed row
     # already present before THIS call reserves/executes?
-    pk, sk = build_key(org_id or "", execution_id, node_id, 0, tool_name, rendered.args)
+    #
+    # ``origin_node_id`` strips the wire ``'#comp'`` pseudo-id suffix before
+    # key derivation and ``is_compensation=True`` is passed explicitly — the
+    # structural fix (see ``tool_idempotency.build_sort_key``'s docstring)
+    # that removes this key's correctness from depending on node-id string
+    # hygiene. ``node_id`` (the pseudo id) is still used for the
+    # CompensationResult / escalation messages below — that is a
+    # reporting/wire-contract concern, unrelated to the ledger key.
+    origin_node_id = _origin_node_id(node_id)
+    pk, sk = build_key(
+        org_id or "", execution_id, origin_node_id, 0, tool_name, rendered.args,
+        is_compensation=True,
+    )
     pre_existing_row = None
     try:
         pre_existing_row = ledger.get(pk, sk)
@@ -519,13 +571,13 @@ def execute_compensation(
 
     # --- (c) build the fenced breaker, then the SAME ComposedToolHook seam -
     breaker = _build_breaker(
-        org_id=org_id, execution_id=execution_id, node_id=node_id,
+        org_id=org_id, execution_id=execution_id, node_id=origin_node_id,
         workflow_id=workflow_id, agent_id=agent_id,
         breaker_table=breaker_table, breaker_target_resolver=breaker_target_resolver,
         breaker_clock=breaker_clock,
     )
     hook = build_compensation_hook(
-        org_id=org_id, execution_id=execution_id, node_id=node_id,
+        org_id=org_id, execution_id=execution_id, node_id=origin_node_id,
         agent_id=agent_id, workflow_id=workflow_id,
         compensation_generation=compensation_generation,
         denied_tools=denied_tools, approval_required_tools=approval_required_tools,
