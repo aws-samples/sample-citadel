@@ -275,6 +275,57 @@ class TestGovernanceDeny:
         assert result.escalated is True
         assert len(escalations) == 1
 
+    def test_deny_already_writes_a_governance_finding_via_the_shared_seam(
+        self, moto_tables, fake_tool_result_event, monkeypatch,
+    ):
+        """CIT-123 slice 5 (interim sink, scope A item 3) RECONCILIATION,
+        not a new write: the design calls for 'an escalation ... plus a
+        GovernanceFinding' on a compensation DENY. Auditing what already
+        fires (per the task's explicit instruction to reconcile rather than
+        duplicate): ``build_compensation_hook`` constructs the SAME
+        ``ComposedToolHook`` -> ``GovernanceToolHook.evaluate_denylist`` ->
+        ``governed_tool_handler.record_governance_decision`` ->
+        ``write_finding`` seam every OTHER governed tool call uses (D2,
+        no-bypass by construction) — so the finding is ALREADY written
+        today, for free, by slice 4's own "reuse the identical hook object"
+        design. There is no gap to fill here; this test pins that fact down
+        so a future change to the seam cannot silently drop the finding
+        without failing a compensation-specific test. No new finding-writer
+        is added by this slice (see the sibling structural test in
+        TestNoBypassStructural asserting no second seam exists)."""
+        executed = []
+        resolver = _resolver(executed, name="close_ticket")
+        monkeypatch.setattr(ce, "_escalate", lambda **kw: None)
+        findings_written = []
+        monkeypatch.setattr(
+            governed_tool_handler, "write_finding",
+            lambda finding, **kw: findings_written.append(finding),
+        )
+
+        _seed_execution_row(moto_tables, "exec-1", "node-a", generation=1)
+
+        result = ce.execute_compensation(
+            _dispatch(),
+            recorded_output=_recorded_output(),
+            org_id="org1",
+            denied_tools={"close_ticket"},
+            tool_resolver=resolver,
+            agent_id="agent-1",
+            workflow_definition_id="wf-def-1",
+        )
+
+        assert result.status == "compensation_failed"
+        assert len(findings_written) == 1
+        finding = findings_written[0]
+        assert finding.decision.value == "deny"
+        assert finding.target_agent == "tool:close_ticket"
+        assert finding.requesting_agent == "agent-1"
+        # GovernanceEvaluator is built from the dispatch's own workflow_id
+        # (the per-run execution's workflow), NOT workflow_definition_id
+        # (which only feeds the APPROVAL grant scope) — confirmed by reading
+        # build_compensation_hook's construction below, not assumed.
+        assert finding.workflow_id == "wf-1"
+
     def test_deny_creates_no_ledger_reservation(self, moto_tables, fake_tool_result_event, monkeypatch):
         executed = []
         resolver = _resolver(executed, name="close_ticket")
