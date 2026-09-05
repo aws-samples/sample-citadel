@@ -477,3 +477,217 @@ describe('ExecutionDetailSheet', () => {
     });
   });
 });
+
+// ─── Compensation states (CIT-123 slice 5, scope A/B) ───
+//
+// #comp pseudo-nodes (nodeResults key `${nodeId}#comp`) must never render in
+// the Steps section (they are not real DAG nodes) and must never fall through
+// to the grey STATUS_STYLES.pending style, which would misrepresent an
+// in-flight or completed rollback as "not started". They get their own
+// "Compensations" section, listed in unwind (plan) order, each showing a
+// status dot + text label (never colour alone) so the accessibility rule
+// holds without relying on hue perception.
+
+describe('ExecutionDetailSheet — compensation states', () => {
+  const execWithCompensation = {
+    ...baseExecution,
+    status: 'FAILED',
+    error: 'Node exploded',
+    compensationStatus: 'partial',
+    compensationPlan: ['node-b', 'node-a'],
+    compensationSummary: {
+      completed: ['node-b'],
+      failed: ['node-a'],
+      stoppedAt: 'node-a',
+      reason: 'downstream tool refused',
+      entries: [
+        {
+          nodeId: 'node-a',
+          error: 'downstream tool refused',
+          failureClass: 'policy-denied',
+          recommendedAction: 'escalate_to_human',
+        },
+      ],
+    },
+    nodeResults: JSON.stringify({
+      'node-a': {
+        nodeId: 'node-a',
+        agentId: 'agent-1',
+        status: 'completed',
+        startedAt: '2024-03-01T12:00:00Z',
+        completedAt: '2024-03-01T12:02:00Z',
+        output: '{"step":"one"}',
+        error: null,
+        retryCount: 0,
+      },
+      'node-b': {
+        nodeId: 'node-b',
+        agentId: 'agent-2',
+        status: 'completed',
+        startedAt: '2024-03-01T12:02:00Z',
+        completedAt: '2024-03-01T12:05:00Z',
+        output: '{"step":"two"}',
+        error: null,
+        retryCount: 0,
+      },
+      'node-b#comp': {
+        nodeId: 'node-b#comp',
+        status: 'compensated',
+        startedAt: '2024-03-01T12:06:00Z',
+        completedAt: '2024-03-01T12:06:30Z',
+        output: null,
+        error: null,
+        retryCount: 0,
+      },
+      'node-a#comp': {
+        nodeId: 'node-a#comp',
+        status: 'compensation_failed',
+        startedAt: '2024-03-01T12:06:31Z',
+        completedAt: '2024-03-01T12:07:00Z',
+        output: null,
+        error: 'downstream tool refused',
+        retryCount: 0,
+        failureClass: 'policy-denied',
+        recommendedAction: 'escalate_to_human',
+      },
+    }),
+  };
+
+  it('excludes #comp pseudo-nodes from the Steps section', () => {
+    render(<ExecutionDetailSheet execution={execWithCompensation} open onClose={jest.fn()} />);
+
+    expect(screen.queryByRole('button', { name: /node-b#comp/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /node-a#comp/ })).not.toBeInTheDocument();
+    // Real nodes are still present, scoped to the Steps section (the
+    // Compensations section below also renders a button labelled by the
+    // original node id, so an unscoped query would match both).
+    const stepsSection = screen.getByRole('region', { name: /^steps$/i });
+    expect(within(stepsSection).getByRole('button', { name: /^node-a\b/ })).toBeInTheDocument();
+    expect(within(stepsSection).getByRole('button', { name: /^node-b\b/ })).toBeInTheDocument();
+  });
+
+  it('renders a Compensations section listing #comp entries in unwind (plan) order', () => {
+    render(<ExecutionDetailSheet execution={execWithCompensation} open onClose={jest.fn()} />);
+
+    const section = screen.getByRole('region', { name: /compensations/i });
+    const rowB = within(section).getByRole('button', { name: /node-b/ });
+    const rowA = within(section).getByRole('button', { name: /node-a/ });
+
+    // compensationPlan is ['node-b', 'node-a'] (unwind order) — node-b's
+    // compensation entry must precede node-a's.
+    expect(
+      rowB.compareDocumentPosition(rowA) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('omits the Compensations section entirely when there is no compensation activity', () => {
+    render(<ExecutionDetailSheet execution={baseExecution} open onClose={jest.fn()} />);
+
+    expect(screen.queryByRole('region', { name: /compensations/i })).not.toBeInTheDocument();
+  });
+
+  it("labels a completed compensation with a text label, not colour alone ('compensated')", () => {
+    render(<ExecutionDetailSheet execution={execWithCompensation} open onClose={jest.fn()} />);
+
+    const section = screen.getByRole('region', { name: /compensations/i });
+    expect(within(section).getByText(/compensated/i)).toBeInTheDocument();
+  });
+
+  it("distinguishes a stopped/incomplete compensation ('rollback incomplete') from a fully rolled-back one", () => {
+    render(<ExecutionDetailSheet execution={execWithCompensation} open onClose={jest.fn()} />);
+
+    // Header badge next to the FAILED status badge.
+    expect(screen.getByText(/rollback incomplete/i)).toBeInTheDocument();
+    expect(screen.queryByText(/rolled back/i)).not.toBeInTheDocument();
+  });
+
+  it("shows 'rolled back' badge when compensationStatus is 'completed' (full unwind, no failures)", () => {
+    const exec = {
+      ...execWithCompensation,
+      compensationStatus: 'completed',
+      compensationSummary: {
+        completed: ['node-b', 'node-a'],
+        failed: [],
+      },
+      nodeResults: JSON.stringify({
+        'node-a': {
+          nodeId: 'node-a',
+          status: 'completed',
+          startedAt: '2024-03-01T12:00:00Z',
+          completedAt: '2024-03-01T12:02:00Z',
+        },
+        'node-b': {
+          nodeId: 'node-b',
+          status: 'completed',
+          startedAt: '2024-03-01T12:02:00Z',
+          completedAt: '2024-03-01T12:05:00Z',
+        },
+        'node-b#comp': {
+          nodeId: 'node-b#comp',
+          status: 'compensated',
+          startedAt: '2024-03-01T12:06:00Z',
+          completedAt: '2024-03-01T12:06:30Z',
+        },
+        'node-a#comp': {
+          nodeId: 'node-a#comp',
+          status: 'compensated',
+          startedAt: '2024-03-01T12:06:31Z',
+          completedAt: '2024-03-01T12:07:00Z',
+        },
+      }),
+      compensationPlan: ['node-b', 'node-a'],
+    };
+    render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+    expect(screen.getByText(/failed\s*·\s*rolled back/i)).toBeInTheDocument();
+    expect(screen.queryByText(/rollback incomplete/i)).not.toBeInTheDocument();
+  });
+
+  it('omits the compensation badge when compensationStatus is absent (legacy/non-compensating executions)', () => {
+    render(<ExecutionDetailSheet execution={baseExecution} open onClose={jest.fn()} />);
+
+    expect(screen.queryByText(/rolled back/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/rollback incomplete/i)).not.toBeInTheDocument();
+  });
+
+  it('expands a compensation entry to reveal its error and recommendedAction', () => {
+    render(<ExecutionDetailSheet execution={execWithCompensation} open onClose={jest.fn()} />);
+
+    const section = screen.getByRole('region', { name: /compensations/i });
+    fireEvent.click(within(section).getByRole('button', { name: /node-a/ }));
+
+    expect(within(section).getByText('downstream tool refused')).toBeInTheDocument();
+    expect(within(section).getByText(/escalate_to_human/i)).toBeInTheDocument();
+  });
+
+  it('does not fall through to the grey pending dot style for compensating/compensated/compensation_failed statuses', () => {
+    const compensatingExec = {
+      ...execWithCompensation,
+      compensationStatus: 'running',
+      nodeResults: JSON.stringify({
+        'node-a': {
+          nodeId: 'node-a',
+          status: 'completed',
+          startedAt: '2024-03-01T12:00:00Z',
+          completedAt: '2024-03-01T12:02:00Z',
+        },
+        'node-a#comp': {
+          nodeId: 'node-a#comp',
+          status: 'compensating',
+          startedAt: '2024-03-01T12:06:00Z',
+          completedAt: null,
+        },
+      }),
+      compensationPlan: ['node-a'],
+      compensationSummary: { completed: [], failed: [] },
+    };
+    render(<ExecutionDetailSheet execution={compensatingExec} open onClose={jest.fn()} />);
+
+    const section = screen.getByRole('region', { name: /compensations/i });
+    const dot = within(section).getByRole('button', { name: /node-a/ }).querySelector('[aria-hidden="true"]');
+    // pending's dot class is bg-muted-foreground — compensating must use a
+    // distinct, non-pending style.
+    expect(dot?.className).not.toMatch(/bg-muted-foreground/);
+    expect(within(section).getByText(/compensating/i)).toBeInTheDocument();
+  });
+});

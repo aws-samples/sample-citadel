@@ -1436,12 +1436,101 @@ def _summary_add_completed(summary: dict, node_id: str) -> dict:
     return {**summary, 'completed': summary.get('completed', []) + [node_id]}
 
 
+# --- CIT-123 slice 5 (interim sink, scope A item 2) --------------------------
+#
+# INTERIM CONTRACT, pending CIT-126 (the recovery queue does not exist yet).
+# ``compensationSummary`` is the durable, resumable checkpoint a future
+# CIT-126 consumer will drain — it must carry enough for that consumer to act
+# WITHOUT re-deriving a failure classification from the raw error string a
+# second time (the taxonomy module, ``common/failure_taxonomy.py``, is
+# already the single source of truth for that classification — this reuses
+# it, never re-implements a second classifier).
+#
+# Shape (additive to the existing 'completed'/'failed'/'stoppedAt'/'reason'
+# keys already written by slice 3 — none of those are removed or renamed, so
+# any existing reader of this dict keeps working unchanged):
+#
+#   compensationSummary = {
+#     'completed': [nodeId, ...],       # unchanged (slice 3)
+#     'failed': [nodeId, ...],          # unchanged (slice 3)
+#     'stoppedAt': nodeId,              # unchanged (slice 3) — present only
+#                                       # once the unwind has stopped
+#     'reason': str,                    # unchanged (slice 3) — raw error
+#                                       # string of the stopping compensation
+#     'entries': [                      # NEW, slice 5 — one entry per
+#       {                                #   FAILED compensation, in the
+#         'nodeId': str,                 #   order they failed (currently at
+#         'error': str,                  #   most one, since onFailure='stop'
+#         'failureClass': str,           #   halts the unwind at the first
+#         'recommendedAction': str,      #   failure — the list shape is kept
+#       },                               #   so a future onFailure='continue'
+#       ...                              #   mode can append more without a
+#     ],                                 #   contract change.
+#   }
+#
+# ``failureClass`` is the ``str``-valued ``FailureClass`` member name (e.g.
+# 'policy-denied', 'unknown') — the SAME classification
+# ``_maybe_trigger_compensation_unwind`` already uses to decide whether to
+# compensate at all (CIRCUIT_OPEN/APPROVAL_ABSENT carve-out), so a consumer
+# reading this row sees one consistent vocabulary end to end.
+#
+# ``recommendedAction`` is a FIXED, closed interim vocabulary (never a free
+# string) so CIT-126 can switch on it without NLP/string-matching over
+# ``error``:
+#   * 'escalate_to_human'  — a settled governance DENY (POLICY_DENIED) or an
+#     authorization failure (AUTHZ). Never auto-retryable; a human decision
+#     is required (mirrors D6's "escalate rather than bypass").
+#   * 'retry_after_target_recovery' — the target was known-bad at call time
+#     (CIRCUIT_OPEN) or the call was transient/throttled/timed-out
+#     (TRANSIENT/THROTTLE/TIMEOUT). A future recovery queue would re-drive
+#     these once the target is healthy; today they just stop the unwind.
+#   * 'manual_review_required' — everything else (VALIDATION, APPROVAL_ABSENT,
+#     INDETERMINATE, UNKNOWN, and any tool-crash class the taxonomy has no
+#     specific mapping for). The conservative default: never silently assume
+#     safe-to-retry or safe-to-ignore for an unclassified/ambiguous failure.
+COMPENSATION_RECOMMENDED_ACTIONS = (
+    'escalate_to_human',
+    'retry_after_target_recovery',
+    'manual_review_required',
+)
+
+_FAILURE_CLASS_TO_RECOMMENDED_ACTION = {
+    failure_taxonomy.FailureClass.POLICY_DENIED: 'escalate_to_human',
+    failure_taxonomy.FailureClass.AUTHZ: 'escalate_to_human',
+    failure_taxonomy.FailureClass.CIRCUIT_OPEN: 'retry_after_target_recovery',
+    failure_taxonomy.FailureClass.TRANSIENT: 'retry_after_target_recovery',
+    failure_taxonomy.FailureClass.THROTTLE: 'retry_after_target_recovery',
+    failure_taxonomy.FailureClass.TIMEOUT: 'retry_after_target_recovery',
+}
+
+
+def _recommended_action_for(failure_class: 'failure_taxonomy.FailureClass') -> str:
+    """Map a taxonomy ``FailureClass`` to the fixed interim vocabulary above.
+    Any class with no explicit mapping (VALIDATION, APPROVAL_ABSENT,
+    INDETERMINATE, UNKNOWN, ...) conservatively defaults to
+    'manual_review_required' — never silently assumed retryable or
+    auto-escalated."""
+    return _FAILURE_CLASS_TO_RECOMMENDED_ACTION.get(failure_class, 'manual_review_required')
+
+
 def _summary_mark_stopped(summary: dict, node_id: str, reason: str) -> dict:
+    """Additive: keeps writing the pre-slice-5 'failed'/'stoppedAt'/'reason'
+    keys UNCHANGED (byte-identical for any reader that only looks at those),
+    and appends one classified 'entries' record — the CIT-126-facing interim
+    contract documented above."""
+    failure_class = failure_taxonomy.classify(reason)
+    entry = {
+        'nodeId': node_id,
+        'error': reason,
+        'failureClass': failure_class.value,
+        'recommendedAction': _recommended_action_for(failure_class),
+    }
     return {
         **summary,
         'failed': summary.get('failed', []) + [node_id],
         'stoppedAt': node_id,
         'reason': reason,
+        'entries': summary.get('entries', []) + [entry],
     }
 
 
@@ -1628,11 +1717,18 @@ def handle_compensation_result(
         # STOP the unwind: mark this compensation failed, record the stop
         # point, and never dispatch the remaining plan entries.
         new_summary = _summary_mark_stopped(summary, original_node_id, error or 'compensation_failed')
+        # Mirror the SAME classification the summary entry just computed
+        # (never re-classify) onto the #comp pseudo-node row (design D7),
+        # so a UI or CIT-126 consumer reading either location sees identical
+        # failureClass/recommendedAction values.
+        new_entry = new_summary['entries'][-1]
         _executions_table.update_item(
             Key={'executionId': execution_id},
             UpdateExpression=(
                 'SET nodeResults.#cid.#status = :failed, '
                 'nodeResults.#cid.#error = :error, '
+                'nodeResults.#cid.#failureClass = :failureClass, '
+                'nodeResults.#cid.#recommendedAction = :recommendedAction, '
                 '#compStatus = :partial, #compSummary = :summary'
             ),
             ConditionExpression='nodeResults.#cid.#status = :compensating',
@@ -1640,12 +1736,16 @@ def handle_compensation_result(
                 '#cid': comp_key,
                 '#status': 'status',
                 '#error': 'error',
+                '#failureClass': 'failureClass',
+                '#recommendedAction': 'recommendedAction',
                 '#compStatus': 'compensationStatus',
                 '#compSummary': 'compensationSummary',
             },
             ExpressionAttributeValues={
                 ':failed': 'compensation_failed',
                 ':error': error or 'compensation_failed',
+                ':failureClass': new_entry['failureClass'],
+                ':recommendedAction': new_entry['recommendedAction'],
                 ':partial': 'partial',
                 ':summary': new_summary,
                 ':compensating': 'compensating',
@@ -1657,6 +1757,8 @@ def handle_compensation_result(
             workflowId=workflow_id,
             nodeId=original_node_id,
             error=error,
+            failureClass=new_entry['failureClass'],
+            recommendedAction=new_entry['recommendedAction'],
         )
         return
 

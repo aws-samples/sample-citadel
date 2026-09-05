@@ -41,6 +41,17 @@ try:
 except ImportError: # pragma: no cover — Lambda bundle path before follow-up
     workflow_contract = None # type: ignore[assignment]
 
+# CIT-123 slice 5 (scope A, closing the missing worker-side compensation
+# seam): same deferred-bundling situation as workflow_contract above. A
+# missing import must NOT break the (overwhelmingly common, non-
+# compensation) dispatch path — only a 'workflow_compensation' message
+# needs this module, and process_event checks workflow_contract.
+# is_workflow_compensation_message before ever touching it.
+try:
+    import compensation_executor # noqa: E402
+except ImportError: # pragma: no cover — Lambda bundle path before follow-up
+    compensation_executor = None # type: ignore[assignment]
+
 # Shared usage-record boundary sanitizer (same deferred-bundling situation as
 # workflow_contract above — the worker Lambda bundle currently ships only
 # arbiter/workerWrapper/). A missing import must NOT break dispatch: fall
@@ -1013,6 +1024,198 @@ def _resolve_execution_org_id(execution_id: str) -> str:
     return fallback if isinstance(fallback, str) and fallback else ''
 
 
+#: CIT-123 slice 5 (scope A, interim): a compensation ``tool`` is resolved by
+#: exact name from this REGISTRY, never by loading an agent's S3 module (that
+#: loader resolves tools for an AGENT TURN inside the subprocess — a
+#: compensation call is explicitly LLM-free/agent-free per D2, so it has no
+#: agent config to load tools FROM). No compensation tool is registered here
+#: today: no real compensation tool ships in ``arbiter/workerWrapper/tools/``
+#: yet (only ``escalate.py`` exists there; ``close_ticket``/``release_lock``
+#: are test-only fixtures in ``__tests__/test_compensation_executor.py``).
+#: An unregistered tool name fails CLOSED — ``execute_compensation`` returns
+#: ``compensation_failed`` with ``error_class='ToolNotFound'`` (see that
+#: module) rather than raising, so the sink below still fires. Wiring real
+#: compensation tools into this registry (or replacing it with a proper
+#: resolver over the S3-bundled tool modules) is explicitly deferred; this
+#: dict is the seam a future change plugs into, kept as a module-level
+#: constant so a test can monkeypatch it without touching call sites.
+COMPENSATION_TOOL_REGISTRY: dict = {}
+
+
+def _compensation_tool_resolver(tool_name: str):
+    return COMPENSATION_TOOL_REGISTRY.get(tool_name)
+
+
+#: CIT-123 slice 5 (scope A, interim): the deny-list a compensation call is
+#: evaluated against. The FORWARD agent path derives its denied-tool set from
+#: three layered sources (stepConstraints.allowedTools, binding
+#: toolRestrictions, eval-run forbiddenTools — see the union built earlier in
+#: this file for the agent-turn path). A compensation call has none of that
+#: per-node governance context available at the worker (it is dispatched
+#: LLM-free, outside any agent turn) — so, for this interim slice, the
+#: deny-list is this single flat, module-level set. This is intentionally
+#: the SAME governance primitive (ComposedToolHook's deny-list phase) every
+#: other tool call is evaluated against — see D2 — just sourced more simply
+#: until a compensation-specific governance-context wiring (binding lookup
+#: by tool name) is designed. Test-injectable via monkeypatch, same as
+#: COMPENSATION_TOOL_REGISTRY above.
+COMPENSATION_DENIED_TOOLS: set = set()
+
+
+def _emit_compensation_result(result) -> None:
+    """Publish a compensation-result event for ``result``
+    (a ``compensation_executor.CompensationResult``) onto the SAME
+    EventBridge bus / client ``_emit_node_result`` already uses, so the step
+    runner's ``handle_compensation_result`` (routed via
+    ``stepRunner/index.py``, slice 5) can advance or stop the unwind.
+
+    This is the previously-missing half of the wire slice 3's
+    ``_dispatch_compensation`` docstring anticipated but never built: nothing
+    consumed a compensation's outcome before this function existed (confirmed
+    by inspection — no prior caller of ``execute_compensation`` existed in
+    this file).
+
+    ``error`` on the wire detail prefers ``result.error_class`` (e.g.
+    'GovernanceDenied', 'ToolNotFound', 'StaleWorkerFencedError') over
+    ``result.error`` (a free-form human-readable message) — mirroring the
+    SAME convention ``_process_workflow_node``'s exception handler already
+    documents for the forward path: the executor's
+    ``compensationSummary`` classification
+    (``_summary_mark_stopped`` -> ``failure_taxonomy.classify``) is a
+    CLASS-NAME lookup, so passing the free-form message here would make
+    every compensation failure classify as UNKNOWN regardless of its real
+    cause. The full human-readable message is still preserved in the log
+    line above/below — only the WIRE 'error' field changes."""
+    error_class_or_message = result.error_class or result.error or 'compensation_failed'
+    detail = workflow_contract.build_compensation_result_detail(
+        execution_id=result.execution_id,
+        original_node_id=_origin_node_id_for_wire(result.node_id),
+        workflow_id=result.workflow_id,
+        tool=result.tool,
+        status=(
+            workflow_contract.STATUS_COMPLETED
+            if result.status == compensation_executor.STATUS_COMPENSATED
+            else workflow_contract.STATUS_FAILED
+        ),
+        output=result.result if isinstance(result.result, dict) else None,
+        error=error_class_or_message,
+    )
+    detail_type = (
+        workflow_contract.COMPENSATION_COMPLETED_DETAIL_TYPE
+        if result.status == compensation_executor.STATUS_COMPENSATED
+        else workflow_contract.COMPENSATION_FAILED_DETAIL_TYPE
+    )
+    client = boto3.client('events')
+    entry = {
+        'Source': workflow_contract.WORKFLOW_EVENT_SOURCE,
+        'DetailType': detail_type,
+        'EventBusName': os.environ.get('COMPLETION_BUS_NAME'),
+        'Detail': json.dumps(detail),
+    }
+    print(f"posting compensation-result event: {json.dumps(entry)}")
+    posted = client.put_events(Entries=[entry])
+    print(f"compensation-result event posted: {posted}")
+
+
+def _origin_node_id_for_wire(pseudo_or_origin_node_id: str) -> str:
+    """Strip a ``'#comp'`` wire suffix if present (mirrors
+    ``compensation_executor._origin_node_id``, duplicated here rather than
+    imported to keep this module's only compensation-module dependency the
+    deferred ``compensation_executor`` import above, matching the existing
+    ``workflow_contract`` deferred-import convention)."""
+    suffix = '#comp'
+    if pseudo_or_origin_node_id.endswith(suffix):
+        return pseudo_or_origin_node_id[: -len(suffix)]
+    return pseudo_or_origin_node_id
+
+
+def _process_workflow_compensation(event):
+    """Run ONE governed compensation dispatch and emit its result.
+
+    CIT-123 slice 5 (scope A): closes the gap between slice 4's
+    ``execute_compensation`` (governed, LLM-free execution) and slice 3's
+    ``handle_compensation_result`` (unwind advance/stop) — neither slice
+    wired a caller for the other. ``event`` is the raw compensation-dispatch
+    message body (``workflow_contract.build_compensation_dispatch_message``'s
+    shape); ``recorded_output`` (the compensating node's recorded output,
+    needed to render the template args) is read from the SAME
+    ``EXECUTIONS_TABLE`` row the idempotency fence already reads, under
+    ``nodeResults[originalNodeId].output`` — never re-fetched via a second
+    path.
+
+    Fail-closed, never raises: any exception constructing the call (missing
+    table config, malformed dispatch) is caught and turned into a
+    ``compensation_failed`` result so the sink still fires — mirroring
+    ``_process_workflow_node``'s own try/except-then-emit-failure shape.
+    """
+    execution_id = event.get('execution_id', '')
+    pseudo_node_id = event.get('node_id', '')
+    origin_node_id = _origin_node_id_for_wire(pseudo_node_id)
+    workflow_id = event.get('workflow_id', '')
+    tool_name = event.get('tool', '')
+
+    print(json.dumps({
+        'level': 'INFO', 'component': 'WorkerWrapper',
+        'action': 'workflow_compensation_started',
+        'executionId': execution_id, 'nodeId': origin_node_id, 'tool': tool_name,
+    }))
+
+    try:
+        org_id = _resolve_execution_org_id(execution_id)
+        recorded_output = _load_recorded_node_output(execution_id, origin_node_id)
+        result = compensation_executor.execute_compensation(
+            event,
+            recorded_output=recorded_output,
+            org_id=org_id,
+            denied_tools=COMPENSATION_DENIED_TOOLS,
+            tool_resolver=_compensation_tool_resolver,
+            agent_id='compensation-worker',
+            workflow_definition_id=workflow_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — never let a raise starve the sink
+        print(json.dumps({
+            'level': 'ERROR', 'component': 'WorkerWrapper',
+            'action': 'workflow_compensation_crashed',
+            'executionId': execution_id, 'nodeId': origin_node_id,
+            'error': str(exc), 'errorClass': type(exc).__name__,
+        }))
+        result = compensation_executor.CompensationResult(
+            execution_id=execution_id, node_id=pseudo_node_id, workflow_id=workflow_id,
+            tool=tool_name, status=compensation_executor.STATUS_COMPENSATION_FAILED,
+            error_class=type(exc).__name__, error=str(exc),
+        )
+
+    print(json.dumps({
+        'level': 'INFO' if result.status == compensation_executor.STATUS_COMPENSATED else 'ERROR',
+        'component': 'WorkerWrapper', 'action': 'workflow_compensation_finished',
+        'executionId': execution_id, 'nodeId': origin_node_id, 'status': result.status,
+    }))
+    _emit_compensation_result(result)
+
+
+def _load_recorded_node_output(execution_id: str, original_node_id: str):
+    """Best-effort read of the compensating node's recorded output from
+    EXECUTIONS_TABLE, for template rendering (D4). Returns ``None`` on any
+    lookup failure (missing table config, missing row/key) — the slice-2
+    renderer / rehydration step already fail CLOSED on a ``None``/absent
+    output (see ``compensation_template.render_compensation_args`` and
+    ``compensation_executor._rehydrate_recorded_output``), so this function
+    itself never needs to raise; it only ever narrows what data is available."""
+    table_name = os.environ.get('EXECUTIONS_TABLE')
+    if not table_name:
+        return None
+    try:
+        table = boto3.resource('dynamodb').Table(table_name)
+        row = table.get_item(Key={'executionId': execution_id}).get('Item')
+    except Exception:  # noqa: BLE001 — best-effort read, renderer fails closed on None
+        return None
+    if not row:
+        return None
+    node_results = row.get('nodeResults', {})
+    node_state = node_results.get(original_node_id, {})
+    return node_state.get('output')
+
+
 def _process_workflow_node(event, message_attributes=None):
     """Run the agent for a dispatched workflow node and emit its result.
 
@@ -1192,6 +1395,15 @@ def process_event(event, context, message_attributes=None):
     # execution over the same SQS queue the supervisor uses for task messages.
     # A workflow-node message carries the contract's message_type discriminator;
     # a supervisor task message does not, so it falls through unchanged below.
+    if workflow_contract is not None and workflow_contract.is_workflow_compensation_message(event):
+        # CIT-123 slice 5 (scope A): checked BEFORE is_workflow_node_message —
+        # both discriminators live on the SAME shared queue and are mutually
+        # exclusive by construction (message_type is either
+        # MESSAGE_TYPE_WORKFLOW_NODE or MESSAGE_TYPE_WORKFLOW_COMPENSATION,
+        # never both), so branch order between these two is not itself a
+        # behaviour change for either message type.
+        _process_workflow_compensation(event)
+        return
     if workflow_contract is not None and workflow_contract.is_workflow_node_message(event):
         _process_workflow_node(event, message_attributes=message_attributes)
         return

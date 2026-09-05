@@ -546,13 +546,27 @@ def build_compensation_dispatch_message(
     hasn't adopted the fence.
     """
     args_data = {} if args is None else args
+    # CIT-123 slice 5 fix (justified deviation from slice 3's ecb63b5, see
+    # TestBuildCompensationDispatchMessagePseudoNodeId in
+    # common/__tests__/test_workflow_contract.py for the full regression
+    # writeup): _validate_identity's blanket '#'-delimiter rejection (added
+    # by the f9ceb38e ledger-key-collision fix) is correct for
+    # execution_id/workflow_id/tool, but node_id on THIS message is, by this
+    # function's own docstring, ALWAYS the compensation pseudo-node id
+    # ('{origNodeId}#comp') — so the blanket check made every real
+    # compensation dispatch raise. node_id is validated separately below
+    # with the same non-empty-string requirement, minus the delimiter
+    # rejection that does not apply to it.
     _validate_identity(
         'compensation-dispatch message',
         execution_id=execution_id,
-        node_id=node_id,
         workflow_id=workflow_id,
         tool=tool,
     )
+    if not isinstance(node_id, str) or node_id == '':
+        raise ValueError(
+            "compensation-dispatch message: field 'node_id' is required and must be a non-empty string"
+        )
     if not isinstance(args_data, dict):
         raise ValueError("compensation-dispatch message: 'args' must be an object")
     if compensation_generation is not None and (
@@ -594,6 +608,119 @@ def is_workflow_compensation_message(body: Any) -> bool:
     shared-queue-routing reason.
     """
     return isinstance(body, dict) and body.get('message_type') == MESSAGE_TYPE_WORKFLOW_COMPENSATION
+
+
+# --- Compensation-result event (CIT-123 slice 5, scope A: closes the missing
+#     worker -> step-runner seam) -------------------------------------------
+#
+# Slice 3 (executor.py) writes ``handle_compensation_result`` as the re-entry
+# point that advances/stops the unwind, and slice 4 (compensation_executor.py)
+# writes ``execute_compensation`` as the worker-side governed runner — but
+# nothing between them was ever wired: no event carried a compensation's
+# outcome from the worker back to the step runner, and no Lambda handler
+# routed such an event into ``handle_compensation_result``. Confirmed by
+# inspection (not assumed): neither ``arbiter/stepRunner/index.py`` nor
+# ``arbiter/workerWrapper/index.py`` reference ``execute_compensation`` or
+# ``handle_compensation_result`` before this slice. Every previous test drove
+# ``handle_compensation_result`` directly, standing in for the not-yet-built
+# wire.
+#
+# These two detail-type constants + the builder/parser pair below mirror
+# ``NODE_COMPLETED_DETAIL_TYPE`` / ``NODE_FAILED_DETAIL_TYPE`` and
+# ``build_node_result_detail`` / ``parse_node_result_detail`` exactly, scoped
+# to the compensation-result shape: keyed by the ORIGINAL node id (never the
+# ``'#comp'`` pseudo id — the pseudo id is a nodeResults-key convention
+# internal to the step runner, not a wire concern) plus the
+# ``compensation_generation`` fence value so a stale delivery can be
+# recognised at the SAME point ``handle_compensation_result`` already
+# fences on.
+COMPENSATION_COMPLETED_DETAIL_TYPE = 'workflow.compensation.completed'
+COMPENSATION_FAILED_DETAIL_TYPE = 'workflow.compensation.failed'
+
+
+def build_compensation_result_detail(
+    *,
+    execution_id: str,
+    original_node_id: str,
+    workflow_id: str,
+    tool: str,
+    status: str,
+    output: Optional[dict[str, Any]] = None,
+    error: Optional[str] = None,
+    compensation_generation: Optional[int] = None,
+    timestamp: Optional[str] = None,
+) -> dict:
+    """Build the EventBridge detail body for a compensation-result event.
+
+    ``status`` must be ``completed`` or ``failed`` (reusing
+    ``STATUS_COMPLETED`` / ``STATUS_FAILED`` — never a third, parallel status
+    vocabulary). ``original_node_id`` is the node whose compensation ran —
+    never the ``'#comp'``-suffixed pseudo id (that suffix is derived
+    step-runner-side by ``_comp_key`` from this same id).
+    """
+    if not isinstance(original_node_id, str) or original_node_id == '':
+        raise ValueError(
+            "compensation-result event: field 'original_node_id' is required and must be a non-empty string"
+        )
+    _validate_identity(
+        'compensation-result event',
+        execution_id=execution_id,
+        workflow_id=workflow_id,
+        tool=tool,
+    )
+    if status not in _VALID_STATUSES:
+        raise ValueError(
+            f"compensation-result event: 'status' must be one of {_VALID_STATUSES}, got {status!r}"
+        )
+    ts = timestamp if timestamp is not None else datetime.now(timezone.utc).isoformat()
+
+    detail: dict[str, Any] = {
+        'executionId': execution_id,
+        'originalNodeId': original_node_id,
+        'workflowId': workflow_id,
+        'tool': tool,
+        'status': status,
+        'timestamp': ts,
+    }
+    if status == STATUS_COMPLETED:
+        detail['output'] = output if isinstance(output, dict) else {}
+    else:
+        if not isinstance(error, str) or error == '':
+            raise ValueError(
+                "compensation-result event: a 'failed' result requires a non-empty 'error' string"
+            )
+        detail['error'] = error
+    if compensation_generation is not None:
+        detail['compensationGeneration'] = compensation_generation
+    return detail
+
+
+def parse_compensation_result_detail(detail: Any) -> dict:
+    """Parse a compensation-result event detail body into the keyword
+    arguments ``executor.handle_compensation_result`` accepts directly —
+    returned as a plain dict (not a dataclass) since the step runner's
+    handler already takes keyword args, not an object; this avoids adding a
+    parallel dataclass nothing else needs to construct.
+    """
+    if not isinstance(detail, dict):
+        raise ValueError('compensation-result event: detail must be an object')
+    execution_id = detail.get('executionId')
+    original_node_id = detail.get('originalNodeId')
+    status = detail.get('status')
+    if not isinstance(execution_id, str) or execution_id == '':
+        raise ValueError("compensation-result event: field 'executionId' is required")
+    if not isinstance(original_node_id, str) or original_node_id == '':
+        raise ValueError("compensation-result event: field 'originalNodeId' is required")
+    if status not in _VALID_STATUSES:
+        raise ValueError(f"compensation-result event: 'status' must be one of {_VALID_STATUSES}")
+    return {
+        'execution_id': execution_id,
+        'original_node_id': original_node_id,
+        'success': status == STATUS_COMPLETED,
+        'output': detail.get('output') if status == STATUS_COMPLETED else None,
+        'error': detail.get('error') if status == STATUS_FAILED else None,
+        'compensation_generation': detail.get('compensationGeneration'),
+    }
 
 
 def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:

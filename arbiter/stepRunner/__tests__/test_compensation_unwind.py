@@ -527,6 +527,60 @@ class TestSequentialDriveAndStateModel:
         assert row['compensationSummary']['stoppedAt'] == 'n1'
         assert row['compensationSummary']['failed'] == ['n1']
 
+    def test_compensation_failure_summary_carries_failure_class_and_recommended_action(self, monkeypatch):
+        """CIT-123 slice 5 (interim sink, scope A item 2): a compensation
+        failure's ``compensationSummary`` entry must carry a
+        ``failureClass`` (from the SAME ``failure_taxonomy.classify`` slice 3
+        already imports — never a second ad hoc classifier) and a
+        ``recommendedAction`` drawn from the fixed interim vocabulary, so a
+        FUTURE CIT-126 recovery queue can drain this row without
+        re-deriving either value from the raw error string."""
+        nodes, edges = _chain([('n0', 'close_ticket'), ('n1', None)])
+        wf = _wf(nodes, edges, compensation_policy=ENABLED_POLICY)
+        ex = _exec_row('exec1', {
+            'n0': {'status': 'completed', 'output': {'id': '0'}},
+            'n1': {'status': 'running'},
+        })
+        with _wire(wf, ex, monkeypatch) as (ex_table, wf_table, sqs, ev):
+            executor.handle_node_failure('exec1', 'n1', 'ValidationException')
+            executor.handle_compensation_result(
+                'exec1', 'n0', success=False, error='ToolBoomError',
+            )
+
+        row = ex_table.current('exec1')
+        summary = row['compensationSummary']
+        assert summary['stoppedAt'] == 'n0'
+        entries = summary['entries']
+        assert entries[-1]['nodeId'] == 'n0'
+        assert entries[-1]['failureClass'] == 'unknown'  # ToolBoomError is unmapped -> UNKNOWN
+        assert entries[-1]['recommendedAction'] in executor.COMPENSATION_RECOMMENDED_ACTIONS
+        # Same value is mirrored onto the #comp pseudo-node row so a UI/queue
+        # reading either location sees a consistent classification.
+        assert row['nodeResults']['n0#comp']['failureClass'] == 'unknown'
+        assert row['nodeResults']['n0#comp']['recommendedAction'] == entries[-1]['recommendedAction']
+
+    def test_compensation_governance_denied_failure_class_recommends_escalation(self, monkeypatch):
+        """A compensation stopped by a governance DENY (the worker's
+        ``GovernanceDenied`` error class, per compensation_executor.py)
+        classifies as POLICY_DENIED and MUST recommend ``escalate_to_human``
+        — never ``retry`` — since a settled DENY is never auto-retryable."""
+        nodes, edges = _chain([('n0', 'close_ticket'), ('n1', None)])
+        wf = _wf(nodes, edges, compensation_policy=ENABLED_POLICY)
+        ex = _exec_row('exec1', {
+            'n0': {'status': 'completed', 'output': {'id': '0'}},
+            'n1': {'status': 'running'},
+        })
+        with _wire(wf, ex, monkeypatch) as (ex_table, wf_table, sqs, ev):
+            executor.handle_node_failure('exec1', 'n1', 'ValidationException')
+            executor.handle_compensation_result(
+                'exec1', 'n0', success=False, error='GovernanceDenied',
+            )
+
+        row = ex_table.current('exec1')
+        entry = row['compensationSummary']['entries'][-1]
+        assert entry['failureClass'] == 'policy-denied'
+        assert entry['recommendedAction'] == 'escalate_to_human'
+
     def test_idempotent_result_delivery_does_not_re_advance(self, monkeypatch):
         """A duplicate compensation-result delivery for an already-terminal
         #comp pseudo-node must be a no-op — no double dispatch of the next
