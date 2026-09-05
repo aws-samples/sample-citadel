@@ -4,9 +4,11 @@ from executor import (
     start_execution,
     handle_node_completion,
     handle_node_failure,
+    handle_compensation_result,
     cancel_execution,
     resume_execution,
 )
+from common import workflow_contract
 from common.tracing import annotate_from_carried, extract_carried
 
 
@@ -42,6 +44,18 @@ def handler(event, context):
         )
     elif detail_type == 'workflow.node.failed':
         handle_node_failure(detail['executionId'], detail['nodeId'], detail.get('error', ''))
+    elif detail_type in (
+        workflow_contract.COMPENSATION_COMPLETED_DETAIL_TYPE,
+        workflow_contract.COMPENSATION_FAILED_DETAIL_TYPE,
+    ):
+        # CIT-123 slice 5 (scope A): closes the missing worker -> step-runner
+        # seam — nothing previously routed a compensation's outcome (emitted
+        # by the worker's _process_workflow_compensation) into
+        # handle_compensation_result. parse_compensation_result_detail
+        # returns handle_compensation_result's exact keyword shape so this
+        # stays a thin routing hop, no re-derivation of the parsed fields.
+        parsed = workflow_contract.parse_compensation_result_detail(detail)
+        handle_compensation_result(**parsed)
     elif detail_type == 'execution.cancel.requested':
         cancel_execution(detail['executionId'])
     elif detail_type == 'execution.resume.requested':
