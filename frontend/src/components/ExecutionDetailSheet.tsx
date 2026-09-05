@@ -39,6 +39,28 @@ export interface ExecutionNodeResult {
   retryCount?: number | null;
   /** Additive: this node's precomputed usage totals (usage rollup). */
   usageTotals?: UsageTotals | null;
+  /** CIT-123 slice 5: mirrored onto a `#comp` pseudo-node's row when its
+   * compensation fails (design D7) — same classification the taxonomy
+   * module already computed, never re-derived here. */
+  failureClass?: string | null;
+  recommendedAction?: string | null;
+}
+
+/** CIT-123 slice 5 (interim CIT-126 contract, executor.py `_summary_mark_stopped`):
+ * one entry per FAILED compensation, in the order the unwind stopped. */
+export interface CompensationSummaryEntry {
+  nodeId: string;
+  error: string;
+  failureClass: string;
+  recommendedAction: string;
+}
+
+export interface CompensationSummary {
+  completed?: string[];
+  failed?: string[];
+  stoppedAt?: string | null;
+  reason?: string | null;
+  entries?: CompensationSummaryEntry[];
 }
 
 export interface ExecutionDetail {
@@ -56,6 +78,17 @@ export interface ExecutionDetail {
   nodeResults?: string | Record<string, unknown> | null;
   /** Additive: execution-level usage totals (AWSJSON string or parsed object). */
   usageTotals?: string | UsageTotals | null;
+  /** CIT-123 slice 5 (design D7): additive sub-status. The execution's
+   * top-level `status` STAYS 'failed' when compensation runs — this is
+   * never a replacement for it, only observability on top. One of
+   * 'running' | 'completed' | 'partial', or absent for a non-compensating
+   * execution (legacy runs, or a workflow with no compensation policy). */
+  compensationStatus?: string | null;
+  /** Reverse-topological unwind order (design D5) — the order the
+   * Compensations section renders in, independent of nodeResults map
+   * insertion order. */
+  compensationPlan?: string[] | null;
+  compensationSummary?: string | CompensationSummary | null;
 }
 
 interface ExecutionDetailSheetProps {
@@ -86,6 +119,16 @@ const STATUS_STYLES: Record<string, { bg: string; text: string; dot: string }> =
   failed: { bg: 'bg-destructive/20', text: 'text-destructive', dot: 'bg-destructive' },
   running: { bg: 'bg-primary/20', text: 'text-primary', dot: 'bg-primary' },
   pending: { bg: 'bg-muted/20', text: 'text-muted-foreground', dot: 'bg-muted-foreground' },
+  // CIT-123 slice 5 (design D8): compensation (#comp pseudo-node) statuses
+  // get their OWN explicit entries so `statusStyle` never falls through to
+  // the grey `pending` style above — that fallback would misrepresent an
+  // in-flight or completed rollback as "not started". Distinct hues per
+  // design (compensated=muted-info, compensating=amber,
+  // compensation_failed=destructive-outline); every render site also pairs
+  // the dot with a text label (never colour alone — accessibility rule).
+  compensating: { bg: 'bg-chart-4/20', text: 'text-chart-4', dot: 'bg-chart-4' },
+  compensated: { bg: 'bg-chart-3/20', text: 'text-chart-3', dot: 'bg-chart-3' },
+  compensation_failed: { bg: 'bg-destructive/10', text: 'text-destructive', dot: 'bg-destructive' },
 };
 
 function statusStyle(status?: string | null) {
@@ -130,6 +173,8 @@ function parseNodeResults(raw?: string | Record<string, unknown> | null): Execut
       error: typeof v.error === 'string' ? v.error : null,
       retryCount: typeof v.retryCount === 'number' ? v.retryCount : 0,
       usageTotals: parseUsageTotals(v.usageTotals),
+      failureClass: typeof v.failureClass === 'string' ? v.failureClass : null,
+      recommendedAction: typeof v.recommendedAction === 'string' ? v.recommendedAction : null,
     };
   });
   nodes.sort((a, b) => {
@@ -139,6 +184,132 @@ function parseNodeResults(raw?: string | Record<string, unknown> | null): Execut
     return a.startedAt.localeCompare(b.startedAt);
   });
   return nodes;
+}
+
+/** CIT-123 slice 5: the `#comp` pseudo-node key convention (mirrors the
+ * Python-side `_comp_key` in executor.py) — `${originalNodeId}#comp`. Real
+ * node ids never contain '#' (validator-enforced), so this discriminator
+ * cannot collide with a real node. */
+const COMPENSATION_KEY_SUFFIX = '#comp';
+
+function isCompensationNode(node: ExecutionNodeResult): boolean {
+  return node.nodeId.endsWith(COMPENSATION_KEY_SUFFIX);
+}
+
+function originalNodeIdOf(compNodeId: string): string {
+  return compNodeId.slice(0, -COMPENSATION_KEY_SUFFIX.length);
+}
+
+/** Splits the parsed node list into real DAG-node steps and `#comp`
+ * compensation pseudo-nodes — the latter are never rendered in the Steps
+ * section (design D7/D8: they are not real nodes and would be misleading
+ * there). */
+function splitCompensationNodes(
+  nodes: ExecutionNodeResult[],
+): { steps: ExecutionNodeResult[]; compensations: ExecutionNodeResult[] } {
+  const steps: ExecutionNodeResult[] = [];
+  const compensations: ExecutionNodeResult[] = [];
+  for (const node of nodes) {
+    if (isCompensationNode(node)) {
+      compensations.push(node);
+    } else {
+      steps.push(node);
+    }
+  }
+  return { steps, compensations };
+}
+
+/** Orders `#comp` pseudo-nodes by the execution's `compensationPlan`
+ * (reverse-topological unwind order, design D5) rather than by
+ * `startedAt` — the plan is the authoritative unwind order and is
+ * available even before a later entry has dispatched (no startedAt yet). */
+function orderCompensations(
+  compensations: ExecutionNodeResult[],
+  plan?: string[] | null,
+): ExecutionNodeResult[] {
+  if (!plan || plan.length === 0) return compensations;
+  const byOriginalId = new Map(compensations.map((c) => [originalNodeIdOf(c.nodeId), c]));
+  const ordered: ExecutionNodeResult[] = [];
+  for (const originalId of plan) {
+    const comp = byOriginalId.get(originalId);
+    if (comp) {
+      ordered.push(comp);
+      byOriginalId.delete(originalId);
+    }
+  }
+  // Any compensation not named in the plan (shouldn't happen, but never
+  // drop data) is appended in its existing (startedAt-sorted) order.
+  ordered.push(...byOriginalId.values());
+  return ordered;
+}
+
+/** Parse compensationSummary (JSON string, already-parsed object, or
+ * absent) into a CompensationSummary shape, or null when
+ * absent/malformed. Never throws — mirrors parseUsageTotals's defensive
+ * posture. */
+function parseCompensationSummary(raw: unknown): CompensationSummary | null {
+  let value: unknown = raw;
+  if (typeof value === 'string') {
+    if (value === '') return null;
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  const entries = Array.isArray(v.entries)
+    ? (v.entries as unknown[])
+        .filter((e): e is Record<string, unknown> => !!e && typeof e === 'object')
+        .map((e) => ({
+          nodeId: typeof e.nodeId === 'string' ? e.nodeId : '',
+          error: typeof e.error === 'string' ? e.error : '',
+          failureClass: typeof e.failureClass === 'string' ? e.failureClass : '',
+          recommendedAction: typeof e.recommendedAction === 'string' ? e.recommendedAction : '',
+        }))
+    : undefined;
+  return {
+    completed: Array.isArray(v.completed) ? (v.completed as string[]) : undefined,
+    failed: Array.isArray(v.failed) ? (v.failed as string[]) : undefined,
+    stoppedAt: typeof v.stoppedAt === 'string' ? v.stoppedAt : null,
+    reason: typeof v.reason === 'string' ? v.reason : null,
+    entries,
+  };
+}
+
+/** Human label for a `#comp` pseudo-node status — paired with the dot in
+ * every render site (accessibility rule: state is never colour alone). */
+function compensationStatusLabel(status?: string | null): string {
+  switch ((status || '').toLowerCase()) {
+    case 'compensating':
+      return 'Compensating';
+    case 'compensated':
+      return 'Compensated';
+    case 'compensation_failed':
+      return 'Compensation failed';
+    default:
+      return status || 'Unknown';
+  }
+}
+
+/**
+ * Header badge distinguishing a fully rolled-back failure from a partial
+ * (stopped) one (design D8 / scope B). Returns null when the execution
+ * never ran compensation at all (compensationStatus absent — legacy runs
+ * or no policy), so the badge is omitted rather than shown as misleading
+ * "n/a" text.
+ */
+function compensationBadgeLabel(compensationStatus?: string | null): string | null {
+  switch (compensationStatus) {
+    case 'completed':
+      return 'rolled back';
+    case 'partial':
+    case 'running':
+      return 'rollback incomplete';
+    default:
+      return null;
+  }
 }
 
 /** Parse a usageTotals value (JSON string, already-parsed object, or absent)
@@ -275,9 +446,25 @@ export function ExecutionDetailSheet({
     setInputExpanded(false);
   }, [execution?.executionId]);
 
-  const nodeSteps = useMemo(
+  const parsedNodes = useMemo(
     () => parseNodeResults(execution?.nodeResults),
     [execution?.nodeResults],
+  );
+  const { steps: nodeSteps, compensations: compensationNodesRaw } = useMemo(
+    () => splitCompensationNodes(parsedNodes),
+    [parsedNodes],
+  );
+  const compensationNodes = useMemo(
+    () => orderCompensations(compensationNodesRaw, execution?.compensationPlan),
+    [compensationNodesRaw, execution?.compensationPlan],
+  );
+  const compensationSummary = useMemo(
+    () => parseCompensationSummary(execution?.compensationSummary),
+    [execution?.compensationSummary],
+  );
+  const compensationBadge = useMemo(
+    () => compensationBadgeLabel(execution?.compensationStatus),
+    [execution?.compensationStatus],
   );
   const durationPercentiles = useMemo(
     () => computeDurationPercentiles(nodeSteps),
@@ -325,6 +512,18 @@ export function ExecutionDetailSheet({
             <Badge className={cn(headerStyle.bg, headerStyle.text, 'text-xs border-0')}>
               {execution.status}
             </Badge>
+            {compensationBadge && (
+              <Badge
+                className={cn(
+                  compensationBadge === 'rolled back'
+                    ? 'bg-chart-3/20 text-chart-3'
+                    : 'bg-destructive/10 text-destructive',
+                  'text-xs border-0',
+                )}
+              >
+                failed · {compensationBadge}
+              </Badge>
+            )}
             <span className="text-xs text-muted-foreground">
               Duration {computeDuration(execution.startedAt, execution.completedAt)}
             </span>
@@ -483,7 +682,82 @@ export function ExecutionDetailSheet({
             )}
           </section>
 
-          {/* Input — collapsed by default; omitted entirely when absent */}
+          {/* Compensations — CIT-123 slice 5 (design D8): #comp pseudo-nodes,
+              rendered in unwind (reverse-topo) order, never in Steps above.
+              Omitted entirely when the execution never ran compensation. */}
+          {compensationNodes.length > 0 && (
+            <section aria-label="Compensations">
+              <h3 className="text-sm font-medium text-foreground mb-2">Compensations</h3>
+              <div className="flex flex-col gap-1">
+                {compensationNodes.map((node) => {
+                  const isExpanded = !!expandedNodes[node.nodeId];
+                  const nodeStyle = statusStyle(node.status);
+                  const originalNodeId = originalNodeIdOf(node.nodeId);
+                  const summaryEntry = compensationSummary?.entries?.find(
+                    (e) => e.nodeId === originalNodeId,
+                  );
+                  const failureClass = node.failureClass ?? summaryEntry?.failureClass ?? null;
+                  const recommendedAction =
+                    node.recommendedAction ?? summaryEntry?.recommendedAction ?? null;
+                  return (
+                    <div key={node.nodeId} className="rounded-md border border-border/50">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        aria-expanded={isExpanded}
+                        className="h-auto w-full min-w-0 items-center justify-start gap-2 p-2 rounded-md text-left text-xs font-normal whitespace-normal cursor-pointer hover:bg-accent/50 transition-colors"
+                        onClick={() =>
+                          setExpandedNodes((prev) => ({
+                            ...prev,
+                            [node.nodeId]: !prev[node.nodeId],
+                          }))
+                        }
+                      >
+                        {isExpanded ? (
+                          <ChevronDown className="size-3 text-muted-foreground flex-shrink-0" />
+                        ) : (
+                          <ChevronRight className="size-3 text-muted-foreground flex-shrink-0" />
+                        )}
+                        <span
+                          className={cn('size-2 rounded-full flex-shrink-0', nodeStyle.dot)}
+                          aria-hidden="true"
+                        />
+                        <span className="font-mono text-foreground truncate">{originalNodeId}</span>
+                        {/* Text label alongside the dot — state is never colour alone. */}
+                        <span className={cn('flex-shrink-0', nodeStyle.text)}>
+                          {compensationStatusLabel(node.status)}
+                        </span>
+                        <span className="ml-auto text-muted-foreground flex-shrink-0">
+                          {computeDuration(node.startedAt, node.completedAt)}
+                        </span>
+                      </Button>
+                      {isExpanded && (
+                        <div className="flex flex-col gap-2 border-t border-border/50 p-2">
+                          {node.error && (
+                            <div className="rounded-md border border-destructive/50 bg-destructive/10 p-2 text-xs text-destructive whitespace-pre-wrap">
+                              {node.error}
+                            </div>
+                          )}
+                          {(failureClass || recommendedAction) && (
+                            <p className="text-xs text-muted-foreground">
+                              {failureClass && <>Failure class {failureClass}</>}
+                              {failureClass && recommendedAction && ' · '}
+                              {recommendedAction && <>Recommended action {recommendedAction}</>}
+                            </p>
+                          )}
+                          {!node.error && !failureClass && !recommendedAction && (
+                            <p className="text-xs text-muted-foreground">No detail recorded.</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+
           {prettyInput !== null && (
             <section aria-label="Input">
               <Button
