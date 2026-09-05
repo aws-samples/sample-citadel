@@ -1559,6 +1559,29 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
       "Decision d36fbbf7: eval-sampling AppSync wiring — see " +
       "ADDITION_ALLOWLIST entry AgenticAIApiListEvalProdSamplesResolverFF0E4413.",
   },
+  {
+    logicalId: "Query.listAvailableDataSources",
+    justification:
+      "Finding 0018a6d7: see ADDITION_ALLOWLIST entry " +
+      "AgenticAIApiListAvailableDataSourcesResolverF6DE4B81.",
+  },
+  {
+    logicalId: "Query.listIntegrationOperations",
+    justification:
+      "Finding 0018a6d7: see ADDITION_ALLOWLIST entry " +
+      "AgenticAIApiListIntegrationOperationsResolver737538A7.",
+  },
+  {
+    logicalId: "Mutation.updateAgentStatus",
+    justification:
+      "Finding 0018a6d7: UpdateAgentStatusResolver added in " +
+      "citadel-projects-dev (projects-stack.ts) on the existing " +
+      "AgentLambdaDataSource, same handler (agent-resolver.ts) and same " +
+      "project-membership/org check as its already-wired sibling " +
+      "Query.getAgentStatus. Not a backend-template addition (rail 1 " +
+      "doesn't see it) but rail 3's merged-set check spans all stacks, so " +
+      "it needs the same expected-new-field exemption.",
+  },
 ];
 
 /**
@@ -1613,8 +1636,7 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
   },
   {
     logicalId: "EvalRunCaseResultsTable961B302A",
-    justification:
-      "CIT-101: eval/release platform — EvalRunCaseResults table.",
+    justification: "CIT-101: eval/release platform — EvalRunCaseResults table.",
   },
   {
     logicalId: "EvalBaselinesTable1E81E088",
@@ -1631,8 +1653,7 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
   },
   {
     logicalId: "EvalSamplingConfigTable853B8B52",
-    justification:
-      "CIT-101: eval/release platform — EvalSamplingConfig table.",
+    justification: "CIT-101: eval/release platform — EvalSamplingConfig table.",
   },
   {
     logicalId: "EvalProdSamplesTable2B37B8C9",
@@ -1724,7 +1745,8 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
       "resolver Lambda.",
   },
   {
-    logicalId: "AgenticAIApiEvalSamplingConfigLambdaDataSourceServiceRoleFC35DA0E",
+    logicalId:
+      "AgenticAIApiEvalSamplingConfigLambdaDataSourceServiceRoleFC35DA0E",
     justification:
       "Service role of EvalSamplingConfigLambdaDataSource; added with it.",
   },
@@ -1762,6 +1784,31 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
       "StepRunner resume resolver — Mutation.resumeExecution on the " +
       "existing ExecutionLambdaDataSource (backend-stack.ts:3011); adds " +
       "workflow-resume capability, no existing resource changes.",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Finding 0018a6d7 — orphan-resolver wiring for 2 backend-stack-owned
+  // fields with pre-existing tested handlers but no resolver (see
+  // schema-resolver-parity-guard.test.ts's now-shrunk DELIBERATELY_UNWIRED
+  // map). Both attach to an EXISTING datasource shared with an
+  // already-wired sibling field on the same handler — no new datasource,
+  // no new Lambda, no new wiring pattern.
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    logicalId: "AgenticAIApiListAvailableDataSourcesResolverF6DE4B81",
+    justification:
+      "Finding 0018a6d7: Query.listAvailableDataSources on the existing " +
+      "DataStoreLambdaDataSource, same handler (datastore-resolver.ts) and " +
+      "same org-scoped OrgIndex query pattern as its already-wired sibling " +
+      "Query.listDataStores.",
+  },
+  {
+    logicalId: "AgenticAIApiListIntegrationOperationsResolver737538A7",
+    justification:
+      "Finding 0018a6d7: Query.listIntegrationOperations on the existing " +
+      "ToolConfigLambdaDataSource, same handler (tool-config-resolver.ts) " +
+      "as its already-wired sibling Query.getToolConfig. Reads only the " +
+      "static, non-tenant OPERATIONS_REGISTRY — no org scoping needed.",
   },
 ];
 

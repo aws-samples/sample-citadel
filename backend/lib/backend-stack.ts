@@ -2429,6 +2429,20 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
+    // listIntegrationOperations (finding 0018a6d7): same handler
+    // (tool-config-resolver.ts) and datasource as its siblings above. Reads
+    // only the static, non-tenant OPERATIONS_REGISTRY keyed by
+    // integrationType — no orgId argument, no DB access, nothing to scope.
+    toolConfigLambdaDataSource.createResolver(
+      "ListIntegrationOperationsResolver",
+      {
+        typeName: "Query",
+        fieldName: "listIntegrationOperations",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
+
     toolConfigLambdaDataSource.createResolver("CreateToolConfigResolver", {
       typeName: "Mutation",
       fieldName: "createToolConfig",
@@ -2857,6 +2871,20 @@ export class BackendStack extends cdk.Stack {
       {
         typeName: "Mutation",
         fieldName: "testDataStoreConnection",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
+
+    // listAvailableDataSources (finding 0018a6d7): sibling of listDataStores
+    // on the same datastore-resolver.ts handler/Lambda/datasource. Uses the
+    // identical orgId-scoped OrgIndex query pattern as listDataStores (no
+    // new authz posture introduced).
+    dataStoreLambdaDataSource.createResolver(
+      "ListAvailableDataSourcesResolver",
+      {
+        typeName: "Query",
+        fieldName: "listAvailableDataSources",
         requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
         responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
       },
