@@ -32,6 +32,7 @@ from dag import (
     find_ready_nodes,
     find_convergence_nodes,
     merge_node_configuration,
+    topological_sort,
 )
 from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
@@ -1300,6 +1301,424 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             failed_at=now,
             eval_run_id=execution.get('evalRunId'),
         )
+
+        # CIT-123 slice 3: compensation unwind trigger (design D1/D2, decision
+        # dfe2d9a1). Evaluated AFTER the terminal failure is fully persisted
+        # and published above, so a workflow with no compensation policy (the
+        # overwhelmingly common case today) is byte-identical to the
+        # pre-feature code path up to this point, and the gate itself is a
+        # pure read + at most one additional conditional write — never a
+        # second failure path.
+        _maybe_trigger_compensation_unwind(
+            execution_id, node_id, error, workflow, execution, node_results,
+        )
+
+
+def _reverse_topo_compensation_plan(nodes, edges, node_results, failing_node_id) -> list[str]:
+    """Return the ORIGINAL node ids to compensate, in strict reverse-
+    topological order (design D5).
+
+    Selection (design D1/D5/D1-INDETERMINATE-nuance): a node qualifies only
+    when ALL of:
+      * it is not the failing node itself (its output is indeterminate);
+      * its persisted status is exactly 'completed' (a 'skipped' or
+        'pending' predecessor never ran a side effect);
+      * its definition carries a well-formed ``compensation`` block
+        (``workflow_contract.normalize_compensation_block``);
+      * that block's ``sideEffecting`` is True (the default).
+
+    Pure function — no I/O, no mutation of any input.
+    """
+    order = topological_sort(nodes, edges)
+    qualifying: set[str] = set()
+    for node in nodes:
+        nid = node['id']
+        if nid == failing_node_id:
+            continue
+        if node_results.get(nid, {}).get('status') != 'completed':
+            continue
+        try:
+            block = workflow_contract.normalize_compensation_block(node)
+        except ValueError:
+            # A malformed block at unwind time is treated the same as
+            # 'absent' (fail-safe: never let a data error stop workflows
+            # from completing their forward run, which already happened) —
+            # skip this node's compensation. Slice 1 validation already
+            # rejects malformed blocks at definition-write time; reaching
+            # this branch means a definition was authored before that
+            # validation existed.
+            continue
+        if block is None or not block.get('sideEffecting', True):
+            continue
+        qualifying.add(nid)
+
+    # Reverse of forward topological order, filtered to qualifying nodes —
+    # this is strictly reverse-topological (a node's compensation always
+    # runs before any of its own predecessors' compensations).
+    return [nid for nid in reversed(order) if nid in qualifying]
+
+
+def _comp_key(original_node_id: str) -> str:
+    """The ``nodeResults`` pseudo-node key for a node's compensation state
+    (design D7). Never collides with a real node id (real ids come only
+    from the workflow definition's ``nodes[].id``, which the frontend/
+    backend validator disallows containing '#' — the same discriminator
+    convention CIT-121 uses for tool-call sort keys)."""
+    return f'{original_node_id}#comp'
+
+
+def _dispatch_compensation(
+    execution_id: str, workflow_id: str, original_node_id: str, block: dict,
+    compensation_generation: int, *, run_id: str | None = None,
+) -> None:
+    """Write the #comp pseudo-node to 'compensating' and dispatch it to the
+    worker seam over the shared SQS queue (design D2/D4).
+
+    Inert-safety (scope item d): with no ``WORKER_QUEUE_URL`` configured this
+    degrades exactly like ``invoke_node``'s own missing-queue-url branch — it
+    logs and returns without dispatching, never raising. The message carries
+    the RAW, unresolved template ``args`` (the slice-2 renderer is NOT
+    imported here); rendering is worker-side, slice 4.
+    """
+    now = _now_iso()
+    comp_key = _comp_key(original_node_id)
+
+    _executions_table.update_item(
+        Key={'executionId': execution_id},
+        UpdateExpression=(
+            'SET nodeResults.#cid.#status = :status, '
+            'nodeResults.#cid.#dispatchedAt = :dispatchedAt, '
+            'nodeResults.#cid.#gen = :gen'
+        ),
+        ExpressionAttributeNames={
+            '#cid': comp_key,
+            '#status': 'status',
+            '#dispatchedAt': 'dispatchedAt',
+            '#gen': 'compensationGeneration',
+        },
+        ExpressionAttributeValues={
+            ':status': 'compensating',
+            ':dispatchedAt': now,
+            ':gen': compensation_generation,
+        },
+    )
+
+    _log_event(
+        'compensation_dispatch',
+        executionId=execution_id,
+        workflowId=workflow_id,
+        nodeId=original_node_id,
+        tool=block['tool'],
+    )
+
+    queue_url = os.environ.get('WORKER_QUEUE_URL')
+    if not queue_url:
+        _logger.warning(
+            'WORKER_QUEUE_URL is not set; cannot dispatch compensation for node %s of execution %s',
+            original_node_id, execution_id,
+        )
+        return
+
+    message = workflow_contract.build_compensation_dispatch_message(
+        execution_id=execution_id,
+        node_id=comp_key,
+        workflow_id=workflow_id,
+        tool=block['tool'],
+        args=block['args'],
+        compensation_generation=compensation_generation,
+        dispatched_at=now,
+        run_id=run_id,
+    )
+    _get_sqs_client().send_message(QueueUrl=queue_url, MessageBody=json.dumps(message))
+
+
+def _summary_add_completed(summary: dict, node_id: str) -> dict:
+    return {**summary, 'completed': summary.get('completed', []) + [node_id]}
+
+
+def _summary_mark_stopped(summary: dict, node_id: str, reason: str) -> dict:
+    return {
+        **summary,
+        'failed': summary.get('failed', []) + [node_id],
+        'stoppedAt': node_id,
+        'reason': reason,
+    }
+
+
+def _maybe_trigger_compensation_unwind(
+    execution_id: str, failing_node_id: str, error: str, workflow: dict,
+    execution: dict, node_results: dict,
+) -> None:
+    """Evaluate the slice-1 workflow-level compensation policy and, if it
+    applies to this terminal failure, compute the reverse-topological plan
+    and dispatch the FIRST compensation (design D5: sequential, one at a
+    time).
+
+    Gates, all of which must hold for an unwind to fire (scope item a):
+      1. The workflow's ``configuration.compensation`` policy normalizes to
+         ``enabled: True`` and ``trigger.mode == 'on_terminal_failure'``
+         (``workflow_contract.normalize_compensation_policy`` — absent
+         policy defaults to disabled, so this is the byte-identical-when-
+         absent path).
+      2. The failing node's classified failure is NOT in the
+         CIRCUIT_OPEN / RETRY_AFTER_HUMAN carve-out (decision dfe2d9a1) —
+         those are left for the future recovery queue, never compensated.
+      3. At least ``trigger.minCompletedNodes`` qualifying nodes exist in
+         the reverse-topo plan (an early failure with too few completed
+         side effects skips the unwind ceremony entirely).
+
+    A workflow with no policy, a disabled policy, or a plan of zero
+    qualifying nodes writes NOTHING beyond what ``handle_node_failure``
+    already wrote — no ``compensationStatus``, no ``compensationGeneration``,
+    no ``#comp`` keys. This is the byte-identical assertion under test.
+    """
+    raw_policy = None
+    configuration = workflow.get('configuration')
+    if isinstance(configuration, str):
+        try:
+            configuration = json.loads(configuration)
+        except ValueError:
+            configuration = None
+    if isinstance(configuration, dict):
+        raw_policy = configuration.get('compensation')
+
+    try:
+        policy = workflow_contract.normalize_compensation_policy(raw_policy)
+    except ValueError:
+        # A malformed policy behaves as disabled (fail-safe) — a workflow's
+        # compensation config must never be able to CRASH the already-
+        # terminal failure path it is layered on top of.
+        return
+
+    if not policy['enabled'] or policy['trigger']['mode'] != 'on_terminal_failure':
+        return
+
+    failure_class = failure_taxonomy.classify(error)
+    if failure_class in (failure_taxonomy.FailureClass.CIRCUIT_OPEN,
+                          failure_taxonomy.FailureClass.APPROVAL_ABSENT):
+        # decision dfe2d9a1: CIRCUIT_OPEN and RETRY_AFTER_HUMAN (the
+        # disposition for APPROVAL_ABSENT) do NOT compensate — left for the
+        # future recovery queue.
+        return
+
+    definition = _parse_definition(workflow)
+    nodes = definition.get('nodes', [])
+    edges = definition.get('edges', [])
+
+    plan = _reverse_topo_compensation_plan(nodes, edges, node_results, failing_node_id)
+    if len(plan) < policy['trigger']['minCompletedNodes']:
+        return
+    if not plan:
+        return
+
+    # Mint the per-execution compensationGeneration fence (design D3/scope
+    # item e) exactly once per unwind, and seed compensationStatus='running'
+    # + the ordered plan. A SINGLE update_item call so a reader can never
+    # observe compensationGeneration without compensationStatus (or vice
+    # versa) — there is no partial-write window visible to another caller.
+    _executions_table.update_item(
+        Key={'executionId': execution_id},
+        UpdateExpression=(
+            'SET #compStatus = :running, #compPlan = :plan, #compSummary = :summary '
+            'ADD #compGen :one'
+        ),
+        ExpressionAttributeNames={
+            '#compStatus': 'compensationStatus',
+            '#compPlan': 'compensationPlan',
+            '#compSummary': 'compensationSummary',
+            '#compGen': 'compensationGeneration',
+        },
+        ExpressionAttributeValues={
+            ':running': 'running',
+            ':plan': plan,
+            ':summary': {'completed': [], 'failed': []},
+            ':one': 1,
+        },
+    )
+    fresh = _load_execution(execution_id) or execution
+    generation = fresh.get('compensationGeneration', 1)
+
+    first_node_id = plan[0]
+    first_node_def = next((n for n in nodes if n['id'] == first_node_id), None)
+    block = workflow_contract.normalize_compensation_block(first_node_def) if first_node_def else None
+    if block is None:
+        # Defensive: the plan was just built from a successful normalize —
+        # this branch should be unreachable, but never dispatch a malformed
+        # block if it somehow is.
+        return
+
+    workflow_id = execution.get('workflowId', '')
+    _dispatch_compensation(
+        execution_id, workflow_id, first_node_id, block, generation,
+        run_id=execution.get('runId'),
+    )
+
+
+def handle_compensation_result(
+    execution_id: str, original_node_id: str, *, success: bool,
+    output: dict | None = None, error: str | None = None,
+    compensation_generation: int | None = None,
+) -> None:
+    """Advance (or stop) a running unwind after one compensation's result.
+
+    This is the compensation-side analogue of ``handle_node_completion`` /
+    ``handle_node_failure`` — it is the single re-entry point the (future,
+    slice-4) worker result event drives, and is called directly by tests
+    that simulate that event today.
+
+    Fencing (design D3/scope item e): if ``compensation_generation`` is
+    supplied and does not match the execution's CURRENT
+    ``compensationGeneration``, the result is a STALE delivery (e.g. a
+    watchdog already re-drove the unwind and minted a new generation) and is
+    ignored entirely — no state write, no further dispatch. Mirrors CIT-121's
+    forward-dispatch generation fence.
+
+    Idempotency: a result for a #comp pseudo-node that is already terminal
+    ('compensated' or 'compensation_failed') is a no-op — no re-write, no
+    re-dispatch of the next plan entry. This absorbs a duplicate delivery
+    exactly like ``handle_node_completion``'s first-write-wins guard.
+
+    On failure (onFailure='stop', the only supported/default behaviour per
+    decision dfe2d9a1): the #comp node is marked 'compensation_failed', the
+    execution's ``compensationStatus`` becomes 'partial', and
+    ``compensationSummary`` records the stop point. The remaining plan is
+    NEVER dispatched.
+    """
+    execution = _load_execution(execution_id)
+    if not execution:
+        return
+
+    if execution.get('compensationStatus') not in ('running',):
+        # No unwind in flight (never started, or already reached a terminal
+        # compensationStatus) — a stray/duplicate result has nothing to
+        # advance.
+        return
+
+    current_generation = execution.get('compensationGeneration')
+    if compensation_generation is not None and compensation_generation != current_generation:
+        _log_event(
+            'compensation_result_stale_generation',
+            executionId=execution_id,
+            nodeId=original_node_id,
+            resultGeneration=compensation_generation,
+            currentGeneration=current_generation,
+        )
+        return
+
+    comp_key = _comp_key(original_node_id)
+    node_results = execution.get('nodeResults', {})
+    comp_state = node_results.get(comp_key, {})
+    if comp_state.get('status') in ('compensated', 'compensation_failed'):
+        # Idempotent no-op: already terminal (duplicate delivery).
+        return
+
+    plan = execution.get('compensationPlan', [])
+    try:
+        current_index = plan.index(original_node_id)
+    except ValueError:
+        # Not part of the tracked plan — ignore rather than corrupt state.
+        return
+
+    summary = execution.get('compensationSummary', {'completed': [], 'failed': []})
+    workflow_id = execution.get('workflowId', '')
+
+    if not success:
+        # onFailure='stop' (decision dfe2d9a1 — the only mode this slice
+        # implements; 'continue' is deferred, see design D5 owner-call).
+        # STOP the unwind: mark this compensation failed, record the stop
+        # point, and never dispatch the remaining plan entries.
+        new_summary = _summary_mark_stopped(summary, original_node_id, error or 'compensation_failed')
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET nodeResults.#cid.#status = :failed, '
+                'nodeResults.#cid.#error = :error, '
+                '#compStatus = :partial, #compSummary = :summary'
+            ),
+            ConditionExpression='nodeResults.#cid.#status = :compensating',
+            ExpressionAttributeNames={
+                '#cid': comp_key,
+                '#status': 'status',
+                '#error': 'error',
+                '#compStatus': 'compensationStatus',
+                '#compSummary': 'compensationSummary',
+            },
+            ExpressionAttributeValues={
+                ':failed': 'compensation_failed',
+                ':error': error or 'compensation_failed',
+                ':partial': 'partial',
+                ':summary': new_summary,
+                ':compensating': 'compensating',
+            },
+        )
+        _log_event(
+            'compensation_failed_stop',
+            executionId=execution_id,
+            workflowId=workflow_id,
+            nodeId=original_node_id,
+            error=error,
+        )
+        return
+
+    # Success: mark this #comp node compensated, advance to the next plan
+    # entry (if any), or finish the unwind.
+    new_summary = _summary_add_completed(summary, original_node_id)
+    is_last = current_index == len(plan) - 1
+    final_status = 'completed' if is_last else 'running'
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET nodeResults.#cid.#status = :compensated, '
+                '#compStatus = :finalStatus, #compSummary = :summary'
+            ),
+            ConditionExpression='nodeResults.#cid.#status = :compensating',
+            ExpressionAttributeNames={
+                '#cid': comp_key,
+                '#status': 'status',
+                '#compStatus': 'compensationStatus',
+                '#compSummary': 'compensationSummary',
+            },
+            ExpressionAttributeValues={
+                ':compensated': 'compensated',
+                ':finalStatus': final_status,
+                ':summary': new_summary,
+                ':compensating': 'compensating',
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            # Another delivery already advanced this #comp node — benign,
+            # absorbs the duplicate.
+            return
+        _logger.error(
+            'handle_compensation_result: advance write failed for execution=%s node=%s: %s',
+            execution_id, original_node_id, exc,
+        )
+        raise
+
+    if is_last:
+        return
+
+    workflow = _load_workflow(workflow_id)
+    if not workflow:
+        return
+    definition = _parse_definition(workflow)
+    nodes = definition.get('nodes', [])
+    next_node_id = plan[current_index + 1]
+    next_node_def = next((n for n in nodes if n['id'] == next_node_id), None)
+    if not next_node_def:
+        return
+    block = workflow_contract.normalize_compensation_block(next_node_def)
+    if block is None:
+        return
+
+    fresh = _load_execution(execution_id) or execution
+    generation = fresh.get('compensationGeneration', current_generation or 1)
+    _dispatch_compensation(
+        execution_id, workflow_id, next_node_id, block, generation,
+        run_id=execution.get('runId'),
+    )
 
 
 def cancel_execution(execution_id: str) -> None:
