@@ -38,6 +38,7 @@ The Blueprints & Workflows system provides server-side workflow persistence, a r
     - [Parallel Branch Resilience](#parallel-branch-resilience)
     - [Workflow-Level Timeout](#workflow-level-timeout)
     - [Subscription Fan-out Resilience](#subscription-fan-out-resilience)
+  - [Compensation Actions: A Worked Example](#compensation-actions-a-worked-example)
   - [Error Handling](#error-handling)
     - [Workflow Resolver](#workflow-resolver)
     - [App Resolver](#app-resolver)
@@ -137,6 +138,10 @@ A WorkflowEdge with an optional `condition` field containing an expression evalu
 ### Retry Policy
 
 A per-node configuration specifying `maxRetries`, `backoffBase` (seconds), `backoffMax` (seconds), and `retryableErrors` (array of error type strings). The Step Runner retries failed nodes using exponential backoff with full jitter: `delay = uniform(0, min(backoffBase × 2^attempt, backoffMax))`. When retries are exhausted, the node is marked as `failed`.
+
+### Compensation Actions (CIT-123)
+
+An optional, opt-in per-node `compensation` block (`{tool, args, sideEffecting?}`) that describes how to undo a node's side effect. Compensation is inert by default — a workflow with no `compensation` block on any node, or with `configuration.compensation.enabled` unset/`false`, behaves byte-identically to a workflow with no compensation feature at all. When enabled and a terminal failure occurs, the Step Runner walks the completed, side-effecting, compensation-bearing nodes in strict reverse-topological ("unwind") order and dispatches each compensation through the same governed worker seam (deny-list → circuit breaker → approval → CIT-121 idempotency) that governs every other tool call — never a separate, ungoverned path. See [Compensation Actions: A Worked Example](#compensation-actions-a-worked-example) for the full mechanics, the operator-visible states, and the honest limits of what does and does not compensate today.
 
 ### Workflow Configuration
 
@@ -390,7 +395,77 @@ The Workflow item supports an optional `timeout` field (seconds). When total exe
 
 The Fan-out Lambda is triggered by EventBridge rules matching `workflow.*` events. If the AppSync mutation call fails, the event is retried by EventBridge's built-in retry policy. The frontend auto-reconnects via Amplify on subscription disconnect, showing stale status badges until reconnected.
 
-## Error Handling
+## Compensation Actions: A Worked Example
+
+This section walks a single concrete scenario — a workflow node that files a support ticket — end to end: the definition, what happens when a *later* node fails, what the operator sees in the execution detail sheet, and the honest limits of what compensation does and does not cover today (CIT-123). For the underlying data model, see [Compensation Actions (CIT-123)](#compensation-actions-cit-123); for the governed-execution seam every compensation runs through, see [Node Invocation Flow](#node-invocation-flow).
+
+### The workflow
+
+A three-node workflow: `create-ticket` files a support ticket, `notify-oncall` pages on-call with the ticket reference, `close-out` performs a final reconciliation step that can fail (e.g. a downstream system is unreachable or a governance policy denies the call).
+
+```json
+{
+  "configuration": {
+    "compensation": {
+      "enabled": true,
+      "trigger": { "mode": "on_terminal_failure", "minCompletedNodes": 1 },
+      "onFailure": "stop"
+    }
+  },
+  "nodes": [
+    {
+      "id": "create-ticket",
+      "agentId": "ticketing-agent",
+      "compensation": {
+        "tool": "close_ticket",
+        "args": { "ticketId": "${output.ticketId}", "reason": "workflow rolled back" },
+        "sideEffecting": true
+      }
+    },
+    { "id": "notify-oncall", "agentId": "paging-agent" },
+    { "id": "close-out", "agentId": "reconciliation-agent" }
+  ],
+  "edges": [
+    { "source": "create-ticket", "target": "notify-oncall" },
+    { "source": "notify-oncall", "target": "close-out" }
+  ]
+}
+```
+
+`configuration.compensation.enabled: true` is the workflow-level opt-in — without it (or with the field absent entirely), this workflow behaves byte-identically to one with no compensation feature: no unwind, no `#comp` rows, no new nodeResults keys. `minCompletedNodes: 1` means the unwind ceremony is skipped if the workflow fails before even `create-ticket` completes (nothing to roll back yet).
+
+### What the args template references
+
+`create-ticket`'s own compensation (`close_ticket`) references `${output.ticketId}` — a path into `create-ticket`'s **own recorded output**, not any other node's. This is deliberate: a compensation undoes the side effect of the node it is attached to, using that node's own result (e.g. `{"ticketId": "TCK-4471"}`), never a cross-node reference. The template grammar is a restricted, non-Turing substitution (`output.<dotted.path>` / `output.items[0]`) evaluated by a hand-written resolver — never `eval`/`.format()`/Jinja — so there is no code-execution surface in a rollback argument. If `ticketId` is missing from the recorded output (a malformed or truncated result), the renderer fails closed: the compensation is never dispatched with a fabricated value, and the failure is written to the interim sink below as an unresolved-template failure.
+
+### What happens on failure at a later node
+
+`close-out` fails terminally (say, a policy `DENY` — `POLICY_DENIED` in the failure taxonomy). Because the failure disposition is not in the `RETRY_AFTER_HUMAN`/`CIRCUIT_OPEN` carve-out (see Honest limits below), the unwind fires:
+
+1. The Step Runner computes the reverse-topological plan over completed, side-effecting, compensation-bearing nodes: only `create-ticket` qualifies (`notify-oncall` has no `compensation` block, so it is skipped — paging on-call is not something we "undo"; `close-out` itself never completed, so it has no recorded output to compensate from).
+2. `create-ticket#comp` is written `compensating` and dispatched to the worker over the **same governed seam** every forward tool call uses (deny-list → circuit breaker → approval → CIT-121 idempotency reserve/finalize) — never a separate, ungoverned rollback path.
+3. `close_ticket` runs with `ticketId` resolved from `create-ticket`'s recorded output. On success, `create-ticket#comp` becomes `compensated` and the execution's `compensationStatus` becomes `completed` (this was the only qualifying node, so the unwind is done after one step).
+4. If `close_ticket` itself fails (e.g. the ticketing system also denies it, or a breaker is open), `create-ticket#comp` becomes `compensation_failed`, `compensationStatus` becomes `partial`, and the unwind **stops** — see `onFailure: 'stop'` below.
+
+The execution's top-level `status` stays `failed` throughout — compensation is additive observability on a failed run, never a reclassification of it as successful.
+
+### What the operator sees
+
+Opening the execution in the execution detail sheet shows:
+
+- The `FAILED` status badge, plus a second badge reading **"failed · rolled back"** (full unwind, `compensationStatus: completed`) or **"failed · rollback incomplete"** (`compensationStatus: partial` — a compensation itself failed and the unwind stopped).
+- A **Compensations** section, separate from the node **Steps** list, listing `create-ticket`'s compensation entry in unwind order with its own status (`Compensating` / `Compensated` / `Compensation failed`) shown as both a coloured dot *and* a text label — status is never conveyed by colour alone.
+- Expanding a failed compensation entry shows the raw error plus the `failureClass` and `recommendedAction` mirrored from the same failure-taxonomy classification the interim sink recorded (see below) — never a second, independently-derived classification.
+
+### Honest limits (read this before relying on compensation for anything critical)
+
+- **`RETRY_AFTER_HUMAN` and `CIRCUIT_OPEN` do not compensate.** If `close-out` fails with a disposition of `RETRY_AFTER_HUMAN` (e.g. `APPROVAL_ABSENT` — a human approval is still pending) or a classification of `CIRCUIT_OPEN` (the target is known-bad *right now*, not permanently), the unwind never fires at all. Both are "leave it for a human/the target to recover" outcomes, not "give up and roll back" outcomes — compensating here would undo `create-ticket`'s side effect while a human could still complete the approval, or while the circuit could still close on its own. This is enforced in code (`_maybe_trigger_compensation_unwind`), not just documented intent.
+- **`onFailure: 'stop'` halts the unwind — there is no partial-continue mode today.** If a plan has multiple qualifying compensations and the first one fails, the remaining ones are **never dispatched**. This is the only supported mode; an `onFailure: 'continue'` (best-effort, run every compensation regardless of earlier failures) was considered in the design and explicitly deferred, not implemented.
+- **CIT-126 (the recovery queue) does not exist yet.** A failed or stopped unwind writes three durable, never-swallowed records — the `#comp` pseudo-node row, an off-frontier escalation event, and a `GovernanceFinding` — but nothing automatically retries, drains, or resolves them. `compensationSummary.entries[]` (with `failureClass` and a fixed `recommendedAction` vocabulary: `escalate_to_human` / `retry_after_target_recovery` / `manual_review_required`) is shaped so a future CIT-126 consumer can drain it directly, but until CIT-126 ships, resolving a stuck compensation is a manual, off-system operation — check the escalation event and the Governance Ledger finding for the classified failure, then act by hand.
+- **Only the failing node's *predecessors* are compensated — never the failing node itself.** `close-out` in this example has no recorded output (it failed, it didn't complete), so there is nothing to compensate it with even if it had a `compensation` block.
+- **Compensation is sequential, one at a time, in strict reverse-topological order** — never parallel. A workflow with a long completed prefix and several qualifying compensations will unwind them one after another, not concurrently.
+
+
 
 ### Workflow Resolver
 

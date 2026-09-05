@@ -258,6 +258,7 @@ The app detail view's Executions tab lists executions. Click a row to open the e
 - Error block — shown for failed executions.
 - Per-node step timeline — status, agent, duration, and retry count per node, with expandable output and error per step.
 - Collapsible input — the payload the run started with.
+- For a workflow with compensation enabled (CIT-123), a failed execution additionally shows a **"failed · rolled back"** / **"failed · rollback incomplete"** badge and a separate **Compensations** section listing the rollback attempts in unwind order. See [Compensation Actions: A Worked Example](./BLUEPRINTS_WORKFLOWS.md#compensation-actions-a-worked-example) for the full mechanics and honest limits.
 
 The sheet refreshes live while the execution is still running.
 
@@ -300,6 +301,7 @@ The workflow execution path follows least privilege:
 ## Related Documentation
 
 - [BLUEPRINTS_WORKFLOWS.md](./BLUEPRINTS_WORKFLOWS.md) — engine architecture, data model, retries, conditional branching, testing strategy
+- [BLUEPRINTS_WORKFLOWS.md § Compensation Actions: A Worked Example](./BLUEPRINTS_WORKFLOWS.md#compensation-actions-a-worked-example) — ticket-creation rollback walkthrough, operator-visible states, and honest limits (CIT-123)
 - [AGENT_APPS.md](./AGENT_APPS.md) — Agent Apps platform, including the app detail Workflows and Executions tabs
 - [EVENTBRIDGE_CATALOG.md](./EVENTBRIDGE_CATALOG.md) — event envelope contracts for `workflow.*` events
 - [QUICK_START.md](./QUICK_START.md) — 5-minute deployment, including running the demo workflow
