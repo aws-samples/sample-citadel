@@ -501,6 +501,101 @@ def is_workflow_node_message(body: Any) -> bool:
     return isinstance(body, dict) and body.get('message_type') == MESSAGE_TYPE_WORKFLOW_NODE
 
 
+# --- Compensation dispatch message (CIT-123 slice 3) ------------------------
+#
+# A SEPARATE discriminator from MESSAGE_TYPE_WORKFLOW_NODE — the worker-side
+# governed execution path (slice 4) does not exist yet, so this message type
+# is currently inert: nothing in the deployed worker recognises
+# 'workflow_compensation' today, and slice 3 dispatches it only when a
+# workflow has explicitly opted in (workflow_contract.normalize_compensation_
+# policy().enabled). Per design D2/D4, the ``args`` on this message are the
+# RAW, UNRESOLVED compensation template (e.g. '${output.id}') — rendering
+# against the compensating node's recorded output happens worker-side in
+# slice 4 (the slice-2 renderer module is deliberately NOT imported here).
+MESSAGE_TYPE_WORKFLOW_COMPENSATION = 'workflow_compensation'
+
+
+def build_compensation_dispatch_message(
+    *,
+    execution_id: str,
+    node_id: str,
+    workflow_id: str,
+    tool: str,
+    args: Optional[dict[str, Any]] = None,
+    compensation_generation: Optional[int] = None,
+    dispatched_at: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> dict:
+    """Build a JSON-serializable compensation-dispatch message.
+
+    ``node_id`` is the compensation PSEUDO-node id (``'{origNodeId}#comp'``),
+    matching the ``nodeResults`` key the executor tracks compensation state
+    under — never the original node's own id, so a compensation dispatch can
+    never be confused with a forward node dispatch even on the same queue.
+
+    ``args`` is the RAW template dict (unresolved ``${output...}`` tokens) —
+    this function performs no rendering/validation of template syntax; that
+    is `workflow_contract.normalize_compensation_block`'s job at data-entry
+    time (slice 1) and the renderer's job worker-side (slice 4).
+
+    ``compensation_generation`` mirrors the forward dispatch's
+    ``dispatch_generation`` fence (D3/E): the per-EXECUTION monotonic counter
+    minted once when the unwind starts, carried so a stale (re-dispatched-
+    away) unwind worker can be fenced before any side effect. Omitted when
+    not supplied, keeping the message byte-identical for any caller that
+    hasn't adopted the fence.
+    """
+    args_data = {} if args is None else args
+    _validate_identity(
+        'compensation-dispatch message',
+        execution_id=execution_id,
+        node_id=node_id,
+        workflow_id=workflow_id,
+        tool=tool,
+    )
+    if not isinstance(args_data, dict):
+        raise ValueError("compensation-dispatch message: 'args' must be an object")
+    if compensation_generation is not None and (
+        not isinstance(compensation_generation, int) or isinstance(compensation_generation, bool)
+    ):
+        raise ValueError(
+            "compensation-dispatch message: 'compensation_generation' must be an int when present"
+        )
+    if dispatched_at is not None and not isinstance(dispatched_at, str):
+        raise ValueError(
+            "compensation-dispatch message: 'dispatched_at' must be a string when present"
+        )
+    if run_id is not None and not isinstance(run_id, str):
+        raise ValueError(
+            "compensation-dispatch message: 'run_id' must be a string when present"
+        )
+
+    message: dict[str, Any] = {
+        'message_type': MESSAGE_TYPE_WORKFLOW_COMPENSATION,
+        'execution_id': execution_id,
+        'node_id': node_id,
+        'workflow_id': workflow_id,
+        'tool': tool,
+        'args': args_data,
+    }
+    if compensation_generation is not None:
+        message['compensation_generation'] = compensation_generation
+    if dispatched_at is not None:
+        message['dispatchedAt'] = dispatched_at
+    if isinstance(run_id, str) and run_id:
+        message['runId'] = run_id
+    return message
+
+
+def is_workflow_compensation_message(body: Any) -> bool:
+    """True only when *body* carries the compensation-dispatch discriminator.
+
+    Mirrors ``is_workflow_node_message`` exactly, for the same
+    shared-queue-routing reason.
+    """
+    return isinstance(body, dict) and body.get('message_type') == MESSAGE_TYPE_WORKFLOW_COMPENSATION
+
+
 def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:
     """Parse and validate a node-dispatch message.
 

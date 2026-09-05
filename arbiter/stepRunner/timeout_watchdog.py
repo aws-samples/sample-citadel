@@ -421,6 +421,15 @@ def handler(event, context):
     frontier, else reconcile-or-fail a stalled node, else fail the execution at
     the execution-level backstop. Returns a small summary dict for
     observability.
+
+    CIT-123 slice 3 (scope item f): this sweep is DELIBERATELY scoped to
+    ``status=='running'`` executions ONLY, matching ``_scan_running``'s
+    filter and the design's explicit downstream-consumer-safety requirement
+    that the watchdog's primary scan never picks up a 'failed' execution with
+    an in-flight unwind. A stalled unwind lives on an ALREADY-'failed'
+    execution (D7) and is therefore handled by the separate
+    ``reconcile_stalled_compensations`` sweep below, never folded into this
+    loop.
     """
     now = _now()
     timeout = _timeout_seconds()
@@ -451,3 +460,157 @@ def handler(event, context):
         'reDispatched': re_dispatched,
         'nodeFailed': node_failed,
     }
+
+
+# ---------------------------------------------------------------------------
+# CIT-123 slice 3 — stalled compensation-unwind detection (scope item f).
+#
+# A running unwind lives on an execution whose top-level ``status`` is
+# ALREADY 'failed' (design D7 — compensation never introduces a new
+# top-level status), with ``compensationStatus == 'running'``. That
+# execution is therefore INVISIBLE to ``_scan_running``/``handler`` above by
+# design (both filter on status=='running', per the downstream-consumer-
+# safety requirement). Without a dedicated sweep, a compensation dispatched
+# to the not-yet-built worker seam (slice 4) that never replies would stall
+# SILENTLY forever — this sweep is that missing detection, satisfying "a
+# stalled unwind must be detected, not silent" without changing what the
+# primary running-execution scan considers terminal.
+#
+# Scan strategy note: DynamoDB has no GSI on ``compensationStatus`` today (no
+# schema/CDK change in this slice's scope), so this reuses the same
+# unindexed Scan + FilterExpression pattern ``_scan_running`` already uses
+# for ``status`` — acceptable for the same reason that one is: a low-
+# frequency scheduled sweep, not a hot path.
+# ---------------------------------------------------------------------------
+
+
+def _scan_compensating() -> list:
+    """Scan the executions table for items with compensationStatus == 'running'.
+
+    Mirrors ``_scan_running``'s pagination pattern exactly.
+    """
+    items: list = []
+    scan_kwargs = {
+        'FilterExpression': '#cs = :running',
+        'ExpressionAttributeNames': {'#cs': 'compensationStatus'},
+        'ExpressionAttributeValues': {':running': 'running'},
+    }
+    while True:
+        resp = _executions_table.scan(**scan_kwargs)
+        items.extend(resp.get('Items', []))
+        last_key = resp.get('LastEvaluatedKey')
+        if not last_key:
+            break
+        scan_kwargs['ExclusiveStartKey'] = last_key
+    return items
+
+
+def _find_stalled_compensation(execution: dict, now: datetime, node_stall: int):
+    """Return the id of a #comp pseudo-node stuck 'compensating' past the
+    node-stall threshold, else None. Reuses the SAME stall window as forward
+    node stall detection (``NODE_STALL_TIMEOUT_SECONDS`` *
+    ``NODE_STALL_FACTOR``) — a compensation is a single deterministic
+    governed tool call (design D2), materially cheaper than an agent turn,
+    so the forward-node threshold is a conservative (generous) upper bound,
+    not an undersized one. Absence of a parseable ``dispatchedAt`` is judged
+    conservatively (never fails on unknown age), matching
+    ``_find_stalled_node``'s convention exactly."""
+    cutoff = now - timedelta(seconds=node_stall)
+    for key, nr in (execution.get('nodeResults') or {}).items():
+        if not key.endswith('#comp') or nr.get('status') != 'compensating':
+            continue
+        dispatched = _parse_iso(nr.get('dispatchedAt', ''))
+        if dispatched is not None and dispatched <= cutoff:
+            return key
+    return None
+
+
+def _fail_stalled_compensation(execution: dict, comp_key: str) -> bool:
+    """Idempotently mark one stalled #comp pseudo-node
+    'compensation_failed' and STOP the unwind (onFailure='stop', decision
+    dfe2d9a1 — the only mode this slice implements), recording the stop
+    point on ``compensationSummary`` exactly like a worker-reported failure
+    would (design D6/D7). The conditional guard (#status = 'compensating')
+    makes this a no-op if another sweep or a late worker reply already
+    advanced the node — returns False in that case, True if THIS call
+    performed the transition."""
+    execution_id = execution['executionId']
+    original_node_id = comp_key[: -len('#comp')]
+    summary = execution.get('compensationSummary', {'completed': [], 'failed': []})
+    new_summary = {
+        **summary,
+        'failed': summary.get('failed', []) + [original_node_id],
+        'stoppedAt': original_node_id,
+        'reason': 'compensation_stalled',
+    }
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET nodeResults.#cid.#status = :failed, '
+                'nodeResults.#cid.#error = :error, '
+                '#compStatus = :partial, #compSummary = :summary'
+            ),
+            ConditionExpression='nodeResults.#cid.#status = :compensating',
+            ExpressionAttributeNames={
+                '#cid': comp_key,
+                '#status': 'status',
+                '#error': 'error',
+                '#compStatus': 'compensationStatus',
+                '#compSummary': 'compensationSummary',
+            },
+            ExpressionAttributeValues={
+                ':failed': 'compensation_failed',
+                ':error': 'compensation stalled: exceeded the node stall timeout with no worker reply',
+                ':partial': 'partial',
+                ':summary': new_summary,
+                ':compensating': 'compensating',
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            return False
+        _logger.error(
+            'watchdog: stalled-compensation fail write failed for executionId=%s node=%s: %s',
+            execution_id, comp_key, exc,
+        )
+        raise
+
+    _logger.warning(
+        'watchdog: failed stalled compensation executionId=%s node=%s',
+        execution_id, comp_key,
+    )
+    return True
+
+
+def reconcile_stalled_compensations() -> dict:
+    """Dedicated sweep for stalled compensation unwinds (scope item f).
+
+    Scans every execution with ``compensationStatus == 'running'``
+    (necessarily already ``status == 'failed'`` — D7), and for each one
+    whose currently-dispatched #comp pseudo-node has exceeded the node-stall
+    threshold with no reply, marks it 'compensation_failed' and stops the
+    unwind (decision dfe2d9a1's onFailure='stop'). A healthy in-flight
+    compensation (dispatched within the stall window) is left untouched.
+
+    Never touches ``status`` — only ``nodeResults.<key>.status``,
+    ``compensationStatus``, and ``compensationSummary``, preserving the
+    downstream-consumer-safety invariant that this slice adds no new
+    top-level execution status.
+
+    Returns a small summary dict for observability, mirroring ``handler``'s
+    shape.
+    """
+    now = _now()
+    node_stall = _node_stall_seconds()
+
+    scanned = 0
+    failed = 0
+    for execution in _scan_compensating():
+        scanned += 1
+        comp_key = _find_stalled_compensation(execution, now, node_stall)
+        if comp_key is not None:
+            if _fail_stalled_compensation(execution, comp_key):
+                failed += 1
+
+    return {'scanned': scanned, 'compensationFailed': failed}
