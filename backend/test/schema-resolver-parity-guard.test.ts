@@ -83,35 +83,62 @@ const RESOLVER_STACK_NAMES = [
  *       the guard fail again, as intended.
  */
 const DELIBERATELY_UNWIRED: ReadonlyMap<string, string> = new Map([
-  // --- pre-existing, tracked separately (finding 0018a6d7), NOT fixed by
-  // this change (finding 24563f6c/d037634b only) ---
-  [
-    "Mutation.updateAgentStatus",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Handler exists (agent-resolver.ts:125) but no stack wires a resolver for it. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
-  ],
+  // --- finding 0018a6d7 follow-up: 3 of 7 fields wired (updateAgentStatus,
+  // listAvailableDataSources, listIntegrationOperations — see backend-stack.ts
+  // / projects-stack.ts resolver additions and the corresponding CDK template
+  // assertions). The remaining 4 stay allowlisted below because wiring them
+  // as-is would introduce or reach a real authz/tenant-isolation gap; each
+  // entry below names the specific missing control. ---
   [
     "Mutation.updateProjectProgress",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
+    "No AppSync-compatible handler exists. The only related Lambda " +
+      "(project-progress-updater.ts) is an internal EventBridge consumer " +
+      "invoked from the 'intake.progress.updated' rule (projects-stack.ts) " +
+      "— its handler signature takes an EventBridge detail payload, not an " +
+      "AppSyncResolverEvent, has no event.identity, and performs no " +
+      "authentication or org check. Wiring it as a resolver would require " +
+      "writing a new handler from scratch (out of scope for a wiring fix) " +
+      "and, done naively, would let any authenticated caller write another " +
+      "org's project progress with no org-membership check. Finding 0018a6d7.",
   ],
   [
     "Mutation.testTool",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
-  ],
-  [
-    "Query.listAvailableDataSources",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
-  ],
-  [
-    "Query.listIntegrationOperations",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
+    "Handler exists (tool-sandbox.ts handler/executeTool) and its Lambda " +
+      "is already defined in services-stack.ts (ToolSandboxFunction) but " +
+      "never attached to a resolver. SECURITY GATE FAILED: the handler " +
+      "accepts orgId as a client-supplied argument but never validates it " +
+      "against the caller's actual identity/org (no extractOrgFromEvent- " +
+      "style check), and loadToolConfig(toolId) looks up the tool config by " +
+      "toolId alone with no org filter — so a caller could pass another " +
+      "org's toolId and receive that tool's execution output using that " +
+      "org's scoped credentials. Do not wire until the handler enforces " +
+      "caller-org == tool-owner-org before executeTool() runs. Finding 0018a6d7.",
   ],
   [
     "Query.getDashboardMetrics",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
+    "Handler exists (app-metrics-handler.ts getDashboardMetrics) but no " +
+      "AppSync-shaped wrapper calls it anywhere (contrast: getAppMetrics has " +
+      "a wrapper in registry-agent-record-resolver.ts and IS wired). " +
+      "SECURITY GATE FAILED: getDashboardMetrics(orgId, ...) accepts orgId " +
+      "but never uses it — its ScanCommand FilterExpression only filters on " +
+      "begins_with(groupId, 'APP#') and the time range, so it aggregates " +
+      "request/latency metrics across every organization's apps. Wiring " +
+      "this today would leak cross-tenant usage data to any caller with " +
+      "access to the query. Do not wire until the scan is filtered to the " +
+      "caller's org. Finding 0018a6d7.",
   ],
   [
     "Query.getRecentActivity",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
+    "Handler exists (recent-activity-resolver.ts getRecentActivity) with a " +
+      "dedicated test file, but no CDK stack even defines a Lambda function " +
+      "for it (let alone a resolver) — it is fully undeployed. SECURITY " +
+      "GATE FAILED: getRecentActivity(orgId, ...) accepts orgId but " +
+      "fetchRecent()'s ScanCommand has no FilterExpression at all — it scans " +
+      "the full projects/agent-config/workflows/integrations tables and " +
+      "returns names, statuses, and timestamps from every organization. " +
+      "Wiring this would leak cross-tenant activity data platform-wide. Do " +
+      "not wire until scans are org-filtered (or replaced with an org-keyed " +
+      "GSI query). Finding 0018a6d7.",
   ],
 ]);
 
