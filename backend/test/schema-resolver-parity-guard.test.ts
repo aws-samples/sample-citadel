@@ -95,7 +95,12 @@ const DELIBERATELY_UNWIRED: ReadonlyMap<string, string> = new Map([
   ],
   [
     "Mutation.testTool",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
+    "Finding 615aa5bb: org-scoping + tool:execute permission gate now fixed " +
+      "(tool-sandbox.ts). Still not wired — separate blocker filed: " +
+      "ToolSandboxFunction's TOOLS_CONFIG_TABLE env var points at a table " +
+      "name (citadel-tools-config-{env}) no stack creates (real table is " +
+      "citadel-tools-{env}); testTool would always fail at runtime until " +
+      "that's corrected. Was: finding 0018a6d7.",
   ],
   [
     "Query.listAvailableDataSources",
@@ -107,11 +112,21 @@ const DELIBERATELY_UNWIRED: ReadonlyMap<string, string> = new Map([
   ],
   [
     "Query.getDashboardMetrics",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
+    "Finding 615aa5bb: cross-tenant scan fixed (app-metrics-handler.ts now " +
+      "scopes via AppsTable.OrgIndex + per-app GroupIndex, no ScanCommand " +
+      "remains). Still not wired — no AppSync-shaped Lambda/resolver is " +
+      "deployed for this field at all (the only deployed Lambda for this " +
+      "file, AppMetricsHandler in gateway-stack.ts, is a CloudWatch Logs " +
+      "subscription consumer, not a GraphQL resolver). Was: finding 0018a6d7.",
   ],
   [
     "Query.getRecentActivity",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
+    "Finding 615aa5bb: cross-tenant scan fixed (recent-activity-resolver.ts " +
+      "now scopes projects via OrganizationIndex, workflows via " +
+      "OrgStatusIndex, integrations via a direct org-keyed Query — agent " +
+      "activity is excluded rather than scanned, since AgentConfigTable has " +
+      "no org attribute/GSI). Still not wired — no Lambda is deployed for " +
+      "this field at all. Was: finding 0018a6d7.",
   ],
 ]);
 
