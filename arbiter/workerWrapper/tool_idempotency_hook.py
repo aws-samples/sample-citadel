@@ -444,6 +444,15 @@ class IdempotencyToolHook:
     ``mode_resolver`` maps a tool name to ``'ledger'``/``'bypass'`` (fail-safe
     default ``'ledger'`` via ``classify_idempotency_mode``); when absent every
     tool is ledger-protected.
+
+    ``is_compensation`` is a STRUCTURAL flag, not a string convention: the
+    caller (``compensation_executor.build_compensation_hook``) sets it
+    explicitly because it already knows it is building the compensation
+    path's hook, rather than the collision-prone alternative of suffixing
+    ``node_id`` itself with a marker like ``"#comp"`` before handing it here.
+    Forwarded verbatim to ``tool_idempotency.build_key`` so a compensation
+    call's ledger key can never coincide with an original call's key for any
+    ``node_id`` value — see that function's docstring.
     """
 
     def __init__(
@@ -455,6 +464,7 @@ class IdempotencyToolHook:
         mode_resolver: Callable[[str], str] | None = None,
         dispatch_generation: int | None = None,
         client_token_param_resolver: Callable[[str], str | None] | None = None,
+        is_compensation: bool = False,
     ):
         self._org_id = org_id or ""
         self._execution_id = execution_id or ""
@@ -462,6 +472,7 @@ class IdempotencyToolHook:
         self._mode_resolver = mode_resolver
         self._dispatch_generation = dispatch_generation
         self._client_token_param_resolver = client_token_param_resolver
+        self._is_compensation = is_compensation
         self._call_index = 0
 
     @property
@@ -509,6 +520,7 @@ class IdempotencyToolHook:
             pk, sk = build_key(
                 self._org_id, self._execution_id, self._node_id,
                 call_index, tool_name, tool_input,
+                is_compensation=self._is_compensation,
             )
         except Exception:  # noqa: BLE001 — canonicalization failure: fail closed
             # A side-effecting call whose key cannot be derived must not run

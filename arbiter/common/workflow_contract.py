@@ -357,11 +357,42 @@ def _require_non_empty_str(mapping: dict, key: str, kind: str) -> str:
     return value
 
 
+#: Delimiter used to join segments of the tool-execution ledger's sort key
+#: (``nodeId#callIndex#toolName#argsHash``, see
+#: ``workerWrapper.tool_idempotency.build_sort_key``). An identifier that
+#: itself contains this character can derive a ledger key indistinguishable
+#: from a DIFFERENT identifier's key (e.g. node id ``n1#comp`` collides with
+#: the compensation pseudo-node derived from node id ``n1``) — the colliding
+#: party then replays the other's recorded result via a ledger HIT_COMPLETED
+#: and skips its own real side effect. Rejected here, at message BUILD time
+#: (create/send), for every identifier that flows into a ledger key segment.
+#: This function is NOT called on the message PARSE/read path (see
+#: ``parse_node_dispatch_message`` / ``parse_node_result_detail``), so an
+#: already-stored message or workflow execution containing a legacy '#'
+#: identifier still parses; only NEW build calls are rejected.
+#:
+#: Scope note: this module has no workflow-DEFINITION (nodes[].id)
+#: create/update validator — that create/update path lives in the backend
+#: TypeScript layer (``backend/src/lambda/workflow-resolver.ts``), which
+#: currently applies NO character restriction to a node id either (confirmed
+#: by inspection: no ``valid``/regex/pattern check on any node id field in
+#: that resolver). No committed/seeded workflow definition or blueprint in
+#: this repository uses ``'#'`` in a node id (confirmed by search). Extending
+#: rejection to that TypeScript create/update path is out of scope for this
+#: Python-side ledger-key fix; flagged here rather than silently assumed.
+LEDGER_KEY_DELIMITER = '#'
+
+
 def _validate_identity(kind: str, **fields: Any) -> None:
     for key, value in fields.items():
         if not isinstance(value, str) or value == '':
             raise ValueError(
                 f"{kind}: field '{key}' is required and must be a non-empty string"
+            )
+        if LEDGER_KEY_DELIMITER in value:
+            raise ValueError(
+                f"{kind}: field '{key}' must not contain the reserved "
+                f"delimiter {LEDGER_KEY_DELIMITER!r} (got {value!r})"
             )
 
 

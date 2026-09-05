@@ -62,6 +62,7 @@ __all__ = [
     "classify_idempotency_mode",
     "detect_write_verbs",
     "check_bypass_classification",
+    "COMPENSATION_MARKER",
     "MODE_LEDGER",
     "MODE_BYPASS",
 ]
@@ -149,6 +150,53 @@ def args_hash(tool_input: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+#: Fixed role-marker token appended AFTER the sort key's ``argsHash`` field
+#: (never adjacent to or overlapping ``node_id``) to structurally separate a
+#: compensation call's ledger row from any original call's row. This is the
+#: fix for the ledger-key collision (f9ceb38e).
+#:
+#: Two prior designs for this same fix were proven unsound and are
+#: deliberately NOT what shipped, recorded here so a future change does not
+#: reintroduce either:
+#:
+#: 1. A marker segment placed ADJACENT to ``node_id`` (e.g.
+#:    ``f"{node_id}#comp#{callIndex}#..."``) — REJECTED: for
+#:    ``node_id='n1#comp'`` (original call) vs ``node_id='n1'`` (compensation
+#:    call), both produce the identical string ``"n1#comp#0#TOOL#hash"``.
+#:    Any marker adjacent to a caller-controlled string can be imitated by
+#:    that string's own content, regardless of the marker's shape or content.
+#: 2. Moving the role split into the PARTITION key
+#:    (``f"{org_id}#{execution_id}#{'comp'|'orig'}"``) — REJECTED: it breaks
+#:    ``governance.tool_execution_ledger._split_pk``'s documented invariant
+#:    that a ledger PK decomposes via a single ``str.partition('#')`` into
+#:    exactly ``(orgId, executionId)``; a third segment corrupts the
+#:    ``executionId`` half used to derive the S3 offload key prefix
+#:    (``tool-results/{orgId}/{executionId}/...``) for EVERY row, not just
+#:    compensation rows.
+#:
+#: This (shipped) design appends the marker AFTER ``hash_hex`` instead.
+#: ``hash_hex`` is always exactly 64 lowercase hex characters (a SHA-256
+#: hexdigest, alphabet ``[0-9a-f]``, produced by :func:`args_hash`) with no
+#: trailing ``'#'`` — so an ORIGINAL key's last 5 characters are always hex
+#: digits and can NEVER equal the literal ``'#comp'`` a COMPENSATION key
+#: appends. Formally: an original key is
+#: ``f"{node_id}#{callIndex}#{toolName}#{hash_hex}"`` (ends in a hex digit,
+#: no field after ``hash_hex``); a compensation key is
+#: ``f"{node_id}#{callIndex}#{toolName}#{hash_hex}#comp"`` (ends in
+#: ``'#comp'``). For these to collide as strings for ANY
+#: ``node_id``/``callIndex``/``toolName``/``hash_hex`` values, the
+#: original's LAST 5 characters would have to equal ``'#comp'`` — but its
+#: last 5 characters are always 5 of the 64 hex digits of ``hash_hex``
+#: (``#`` is not in the hex alphabet), so this is impossible independent of
+#: every other field's content, including a hostile ``node_id`` containing
+#: ``'#'``, ``'#comp'``, empty string, or unicode. Unlike design 1, the
+#: marker's position is anchored to a field (``hash_hex``) whose ALPHABET
+#: excludes the delimiter, not to a field (``node_id``) callers control
+#: freely — that is what makes this collision-free without depending on
+#: node-id hygiene.
+COMPENSATION_MARKER = "comp"
+
+
 def build_partition_key(org_id: str, execution_id: str) -> str:
     """Ledger partition key: ``orgId#executionId``.
 
@@ -157,12 +205,27 @@ def build_partition_key(org_id: str, execution_id: str) -> str:
     resolved server-side (execution row / trusted env), never from a
     subprocess-supplied payload. ``executionId`` alone is globally unique, so
     correctness holds even when ``orgId`` is an empty/sentinel string.
+
+    Unchanged by the compensation-collision fix (f9ceb38e): the role split
+    lives entirely in the sort key's trailing marker (see
+    :data:`COMPENSATION_MARKER`), never here — a partition-key-based design
+    was considered and rejected (see that constant's docstring) because it
+    breaks ``governance.tool_execution_ledger._split_pk``'s single-partition
+    decomposition invariant.
     """
     return f"{org_id}#{execution_id}"
 
 
-def build_sort_key(node_id: str, call_index: int, tool_name: str, hash_hex: str) -> str:
-    """Ledger sort key: ``nodeId#callIndex#toolName#argsHash``.
+def build_sort_key(
+    node_id: str,
+    call_index: int,
+    tool_name: str,
+    hash_hex: str,
+    *,
+    is_compensation: bool = False,
+) -> str:
+    """Ledger sort key: ``nodeId#callIndex#toolName#argsHash``, or
+    ``nodeId#callIndex#toolName#argsHash#comp`` when ``is_compensation``.
 
     ``toolName`` and ``argsHash`` are included even though
     ``(executionId, nodeId, callIndex)`` is already unique within one attempt:
@@ -172,8 +235,21 @@ def build_sort_key(node_id: str, call_index: int, tool_name: str, hash_hex: str)
     absorbed. Dispatch generation is deliberately NOT in the key (that would
     mint a fresh key on every re-dispatch and guarantee duplicates — the
     opposite of the goal); cross-dispatch closure is PR2's worker fence.
+
+    ``is_compensation=False`` (the default) produces the EXACT SAME 4-field
+    string every existing caller and stored row already uses — byte-
+    identical, zero format change for the non-compensation path.
+    ``is_compensation=True`` appends :data:`COMPENSATION_MARKER` as a 5th
+    field AFTER ``hash_hex`` — see that constant's docstring for the proof
+    that this is collision-free with EVERY possible original-call key,
+    independent of ``node_id``'s content. This is the structural,
+    belt-and-braces fix for the f9ceb38e ledger-key collision: a compensation
+    call's key can never coincide with any original call's key, whether or
+    not ``node_id`` happens to contain the reserved ``'#'`` delimiter or the
+    literal substring ``'#comp'``.
     """
-    return f"{node_id}#{call_index}#{tool_name}#{hash_hex}"
+    base = f"{node_id}#{call_index}#{tool_name}#{hash_hex}"
+    return f"{base}#{COMPENSATION_MARKER}" if is_compensation else base
 
 
 def build_key(
@@ -183,12 +259,21 @@ def build_key(
     call_index: int,
     tool_name: str,
     tool_input: Any,
+    *,
+    is_compensation: bool = False,
 ) -> tuple[str, str]:
-    """Derive the ``(partitionKey, sortKey)`` ledger key for a tool call."""
+    """Derive the ``(partitionKey, sortKey)`` ledger key for a tool call.
+
+    ``is_compensation`` is forwarded to :func:`build_sort_key` only — see
+    that function's and :data:`COMPENSATION_MARKER`'s docstrings for why
+    appending the marker AFTER ``hash_hex`` (not adjacent to ``node_id``, and
+    not in the partition key) is what makes collision-freedom hold for every
+    possible ``node_id``, not merely well-behaved ones.
+    """
     hash_hex = args_hash(tool_input)
     return (
         build_partition_key(org_id, execution_id),
-        build_sort_key(node_id, call_index, tool_name, hash_hex),
+        build_sort_key(node_id, call_index, tool_name, hash_hex, is_compensation=is_compensation),
     )
 
 

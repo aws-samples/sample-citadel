@@ -22,11 +22,13 @@ if _PROJECT_ROOT not in sys.path:
 from arbiter.workerWrapper.tool_idempotency import (  # noqa: E402
     BypassMisflagError,
     CanonicalizationError,
+    COMPENSATION_MARKER,
     MODE_BYPASS,
     MODE_LEDGER,
     args_hash,
     build_key,
     build_partition_key,
+    build_sort_key,
     canonicalize,
     check_bypass_classification,
     classify_idempotency_mode,
@@ -198,6 +200,131 @@ class TestKeyDerivation:
         _, sk_a = build_key("o", "e", "n", 0, "t", {"x": 1})
         _, sk_b = build_key("o", "e", "n", 0, "t", {"x": 2})
         assert sk_a != sk_b
+
+
+# ---------------------------------------------------------------------------
+# f9ceb38e — compensation ledger-key collision fix
+#
+# The defect (verified empirically): a compensation for node id 'n1' derived
+# its key by handing build_key/build_sort_key the ALREADY-SUFFIXED string
+# 'n1#comp' as a plain node_id. A node literally NAMED 'n1#comp' running its
+# OWN original (non-compensation) call derives the identical sort key
+# ('n1#comp#0#TOOL#argsHash' either way) — the colliding party then replays
+# the other's recorded result via a ledger HIT_COMPLETED and skips its real
+# side effect. Fixed at two layers:
+#   1. common.workflow_contract._validate_identity now rejects the reserved
+#      '#' delimiter in any identifier that flows into a dispatch/result
+#      message build (covered by test_workflow_contract.py).
+#   2. Belt-and-braces, HERE: build_sort_key/build_key take an explicit
+#      is_compensation flag that appends COMPENSATION_MARKER as a 5th field
+#      AFTER hash_hex (never adjacent to node_id). hash_hex is always exactly
+#      64 lowercase hex characters with no '#', so an original (4-field) key
+#      can never end in the literal "#comp" a compensation (5-field) key
+#      appends — collision-freedom holds for EVERY possible node_id,
+#      independent of identifier hygiene. Two earlier designs (a marker
+#      segment adjacent to node_id; splitting the partition key) were tried
+#      and proven unsound/invasive respectively — see COMPENSATION_MARKER's
+#      docstring in tool_idempotency.py for why they were rejected.
+# ---------------------------------------------------------------------------
+
+
+class TestCompensationMarkerCollisionFix:
+    def test_concrete_regression_n1_comp_literal_node_id(self):
+        """The exact defect scenario: an ORIGINAL (non-compensation) call for
+        a node literally named 'n1#comp' must NOT collide with a
+        COMPENSATION call for a node named 'n1'."""
+        original_pk, original_sk = build_key(
+            "org1", "exec1", "n1#comp", 0, "TOOL", {"a": 1},
+            is_compensation=False,
+        )
+        compensation_pk, compensation_sk = build_key(
+            "org1", "exec1", "n1", 0, "TOOL", {"a": 1},
+            is_compensation=True,
+        )
+        assert original_pk == compensation_pk  # same org/execution partition
+        assert original_sk != compensation_sk  # sort keys MUST differ
+
+    def test_compensation_key_differs_from_same_node_original_key(self):
+        """The common case: a compensation for node 'n1' must not collide
+        with node 'n1's own original call, for identical tool/args/call
+        index (the two attempts a real double-delivery guard must tell
+        apart)."""
+        pk_a, sk_a = build_key("org1", "exec1", "n1", 0, "TOOL", {"a": 1}, is_compensation=False)
+        pk_b, sk_b = build_key("org1", "exec1", "n1", 0, "TOOL", {"a": 1}, is_compensation=True)
+        assert pk_a == pk_b
+        assert sk_a != sk_b
+
+    def test_compensation_marker_is_appended_after_the_hex_digest_field(self):
+        # Precondition the collision-freedom proof relies on: hash_hex is
+        # always exactly 64 lowercase hex characters (sha256 hexdigest,
+        # alphabet [0-9a-f]) with no '#', so appending "#" + COMPENSATION_
+        # MARKER after it can never be produced by hash_hex's own content —
+        # the boundary is anchored to a field callers cannot control the
+        # alphabet of, not to node_id (which callers fully control).
+        hash_hex = "0" * 64
+        assert all(c in "0123456789abcdef" for c in hash_hex)
+        original = build_sort_key("n", 0, "t", hash_hex, is_compensation=False)
+        compensation = build_sort_key("n", 0, "t", hash_hex, is_compensation=True)
+        assert compensation == f"{original}#{COMPENSATION_MARKER}"
+        assert not original.endswith(f"#{COMPENSATION_MARKER}")
+
+    @given(
+        node_id=st.text(min_size=0, max_size=40),
+        other_node_id=st.text(min_size=0, max_size=40),
+        call_index=st.integers(min_value=0, max_value=1000),
+        tool_name=st.text(min_size=1, max_size=40),
+        args=st.dictionaries(st.text(min_size=1, max_size=10), st.integers(), max_size=5),
+    )
+    @settings(max_examples=300, deadline=None)
+    def test_original_and_compensation_keys_never_equal_for_any_node_ids(
+        self, node_id, other_node_id, call_index, tool_name, args,
+    ):
+        """Property: for ARBITRARY node ids — including hostile ones
+        containing '#', the literal substring '#comp', unicode, and
+        empty-ish segments (the empty string itself, and strings composed
+        only of '#') — an ORIGINAL call's key and a COMPENSATION call's key
+        are NEVER equal, whether the two calls are for the same node id or
+        two different (possibly colliding-by-construction) node ids.
+
+        This must hold at the ``build_sort_key``/``build_key`` layer alone,
+        independent of ``common.workflow_contract``'s identifier-hygiene
+        rejection — it is the belt-and-braces guarantee, so the strategy
+        deliberately generates node ids a validator would reject (this
+        module has no opinion on identifier hygiene; the ``is_compensation``
+        flag alone must carry collision-freedom).
+        """
+        original_sk = build_sort_key(node_id, call_index, tool_name, "deadbeef", is_compensation=False)
+        compensation_sk = build_sort_key(
+            other_node_id, call_index, tool_name, "deadbeef", is_compensation=True,
+        )
+        assert original_sk != compensation_sk
+
+    @given(
+        node_id=st.one_of(
+            st.just(""),
+            st.just("#"),
+            st.just("##"),
+            st.just("#comp"),
+            st.just("n1#comp"),
+            st.text(alphabet=st.characters(min_codepoint=0x1F600, max_codepoint=0x1F64F), min_size=1, max_size=5),
+            st.text(min_size=0, max_size=40),
+        ),
+        call_index=st.integers(min_value=0, max_value=1000),
+        tool_name=st.text(min_size=1, max_size=40),
+    )
+    @settings(max_examples=300, deadline=None)
+    def test_same_node_id_original_vs_compensation_never_equal_hostile_ids(
+        self, node_id, call_index, tool_name,
+    ):
+        """Property, narrower and stronger than the above: for the SAME
+        hostile node id (including '#', '#comp', 'n1#comp', unicode, and
+        empty string), the ORIGINAL call's key for that id and the
+        COMPENSATION call's key for that SAME id are never equal — the
+        exact shape of the historical defect (one node id, two roles).
+        """
+        original_sk = build_sort_key(node_id, call_index, tool_name, "deadbeef", is_compensation=False)
+        compensation_sk = build_sort_key(node_id, call_index, tool_name, "deadbeef", is_compensation=True)
+        assert original_sk != compensation_sk
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,14 @@ _ids = st.text(
     min_size=1,
     max_size=40,
 )
+# Identity fields that flow through _validate_identity (execution_id,
+# node_id, workflow_id, agent_id on build_node_dispatch_message /
+# build_node_result_detail): same as _ids but excludes the reserved ledger
+# key delimiter '#', which those builders now reject (see
+# common.workflow_contract._validate_identity / LEDGER_KEY_DELIMITER, the
+# f9ceb38e ledger-key-collision fix). '#'-hygiene itself is covered by its
+# own dedicated rejection tests below.
+_identity_ids = _ids.filter(lambda s: '#' not in s)
 # Free text (may be empty) with no surrogates — safe for json round-trips.
 _text = st.text(st.characters(blacklist_categories=('Cs',)), max_size=60)
 # Non-empty free text (for error strings).
@@ -80,10 +88,10 @@ def test_discriminator_and_status_constants_have_expected_values():
 
 
 @given(
-    execution_id=_ids,
-    node_id=_ids,
-    workflow_id=_ids,
-    agent_id=_ids,
+    execution_id=_identity_ids,
+    node_id=_identity_ids,
+    workflow_id=_identity_ids,
+    agent_id=_identity_ids,
     input_data=_json_dicts,
     configuration=_json_dicts,
     correlation_id=st.none() | _ids,
@@ -112,10 +120,10 @@ def test_dispatch_message_round_trips_all_fields(
 
 
 @given(
-    execution_id=_ids,
-    node_id=_ids,
-    workflow_id=_ids,
-    agent_id=_ids,
+    execution_id=_identity_ids,
+    node_id=_identity_ids,
+    workflow_id=_identity_ids,
+    agent_id=_identity_ids,
     input_data=_json_dicts,
     configuration=_json_dicts,
 )
@@ -196,10 +204,10 @@ def test_build_dispatch_rejects_empty_identifier():
 
 
 @given(
-    execution_id=_ids,
-    node_id=_ids,
-    workflow_id=_ids,
-    agent_id=_ids,
+    execution_id=_identity_ids,
+    node_id=_identity_ids,
+    workflow_id=_identity_ids,
+    agent_id=_identity_ids,
     output=_json_dicts,
     timestamp=_ids,
 )
@@ -228,10 +236,10 @@ def test_result_detail_round_trips_when_completed(
 
 
 @given(
-    execution_id=_ids,
-    node_id=_ids,
-    workflow_id=_ids,
-    agent_id=_ids,
+    execution_id=_identity_ids,
+    node_id=_identity_ids,
+    workflow_id=_identity_ids,
+    agent_id=_identity_ids,
     error=_nonempty_text,
     timestamp=_ids,
 )
