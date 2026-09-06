@@ -124,6 +124,12 @@ export function hasPermission(
       // has it via the bypass above; NEVER folded into a broad role beyond
       // architect/admin (least privilege).
       "tool:approve",
+      // Tool sandbox execution (finding 615aa5bb): tool:execute authorizes
+      // running a tool config's code with its resolved, scoped credentials
+      // via testTool/executeTool. Same trust tier as tool:approve — running
+      // a tool's real credentials is at least as sensitive as pre-approving
+      // a gated run, so it stays with architect/admin, never a broader role.
+      "tool:execute",
     ],
     developer: [
       "project:read",

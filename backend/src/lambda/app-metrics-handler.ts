@@ -8,9 +8,13 @@
  *
  * Requirements: 6.1, 6.2, 6.3, 6.7
  */
-import { DynamoDBDocumentClient, UpdateCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { gunzipSync } from 'zlib';
+import {
+  DynamoDBDocumentClient,
+  UpdateCommand,
+  QueryCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { gunzipSync } from "zlib";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -50,16 +54,16 @@ export function parseAccessLogEntries(messages: string[]): AccessLogEntry[] {
     try {
       const parsed = JSON.parse(msg);
       if (
-        typeof parsed.requestId === 'string' &&
-        typeof parsed.appId === 'string' &&
-        typeof parsed.status === 'number' &&
-        typeof parsed.latency === 'number' &&
-        typeof parsed.timestamp === 'string'
+        typeof parsed.requestId === "string" &&
+        typeof parsed.appId === "string" &&
+        typeof parsed.status === "number" &&
+        typeof parsed.latency === "number" &&
+        typeof parsed.timestamp === "string"
       ) {
         entries.push({
           requestId: parsed.requestId,
           appId: parsed.appId,
-          apiKeyId: parsed.apiKeyId || 'unknown',
+          apiKeyId: parsed.apiKeyId || "unknown",
           status: parsed.status,
           latency: parsed.latency,
           timestamp: parsed.timestamp,
@@ -76,11 +80,13 @@ export function parseAccessLogEntries(messages: string[]): AccessLogEntry[] {
  * Groups access log entries by appId + hour bucket.
  * Key format: "{appId}|{yyyy-MM-dd-HH}"
  */
-export function groupByAppAndHour(entries: AccessLogEntry[]): Record<string, AccessLogEntry[]> {
+export function groupByAppAndHour(
+  entries: AccessLogEntry[],
+): Record<string, AccessLogEntry[]> {
   const groups: Record<string, AccessLogEntry[]> = {};
   for (const entry of entries) {
     const date = new Date(entry.timestamp);
-    const hourBucket = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}-${String(date.getUTCHours()).padStart(2, '0')}`;
+    const hourBucket = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}-${String(date.getUTCHours()).padStart(2, "0")}`;
     const key = `${entry.appId}|${hourBucket}`;
     if (!groups[key]) {
       groups[key] = [];
@@ -152,15 +158,17 @@ async function getProcessedLogIds(
   hourBucket: string,
   deps: MetricsDeps,
 ): Promise<Set<string>> {
-  const result = await deps.docClient.send(new QueryCommand({
-    TableName: deps.appsTable,
-    IndexName: 'GroupIndex',
-    KeyConditionExpression: 'groupId = :gid AND sortId = :sid',
-    ExpressionAttributeValues: {
-      ':gid': `APP#${appId}`,
-      ':sid': `METRICS#${hourBucket}`,
-    },
-  }));
+  const result = await deps.docClient.send(
+    new QueryCommand({
+      TableName: deps.appsTable,
+      IndexName: "GroupIndex",
+      KeyConditionExpression: "groupId = :gid AND sortId = :sid",
+      ExpressionAttributeValues: {
+        ":gid": `APP#${appId}`,
+        ":sid": `METRICS#${hourBucket}`,
+      },
+    }),
+  );
 
   const items = result.Items || [];
   if (items.length > 0 && Array.isArray(items[0].processedLogIds)) {
@@ -180,12 +188,13 @@ async function upsertMetrics(
   newLogIds: string[],
   deps: MetricsDeps,
 ): Promise<void> {
-  await deps.docClient.send(new UpdateCommand({
-    TableName: deps.appsTable,
-    Key: {
-      appId: `${appId}#METRICS#${hourBucket}`,
-    },
-    UpdateExpression: `
+  await deps.docClient.send(
+    new UpdateCommand({
+      TableName: deps.appsTable,
+      Key: {
+        appId: `${appId}#METRICS#${hourBucket}`,
+      },
+      UpdateExpression: `
       ADD totalRequests :totalRequests,
           successCount :successCount,
           clientErrorCount :clientErrorCount,
@@ -198,21 +207,22 @@ async function upsertMetrics(
           processedLogIds = list_append(if_not_exists(processedLogIds, :emptyList), :newLogIds),
           updatedAt = :now
     `,
-    ExpressionAttributeValues: {
-      ':totalRequests': metrics.totalRequests,
-      ':successCount': metrics.successCount,
-      ':clientErrorCount': metrics.clientErrorCount,
-      ':serverErrorCount': metrics.serverErrorCount,
-      ':groupId': `APP#${appId}`,
-      ':sortId': `METRICS#${hourBucket}`,
-      ':p50Latency': metrics.p50Latency,
-      ':p95Latency': metrics.p95Latency,
-      ':p99Latency': metrics.p99Latency,
-      ':newLogIds': newLogIds,
-      ':emptyList': [],
-      ':now': new Date().toISOString(),
-    },
-  }));
+      ExpressionAttributeValues: {
+        ":totalRequests": metrics.totalRequests,
+        ":successCount": metrics.successCount,
+        ":clientErrorCount": metrics.clientErrorCount,
+        ":serverErrorCount": metrics.serverErrorCount,
+        ":groupId": `APP#${appId}`,
+        ":sortId": `METRICS#${hourBucket}`,
+        ":p50Latency": metrics.p50Latency,
+        ":p95Latency": metrics.p95Latency,
+        ":p99Latency": metrics.p99Latency,
+        ":newLogIds": newLogIds,
+        ":emptyList": [],
+        ":now": new Date().toISOString(),
+      },
+    }),
+  );
 }
 
 /**
@@ -226,18 +236,20 @@ export async function processMetricsEvent(
   const groups = groupByAppAndHour(entries);
 
   for (const [key, groupEntries] of Object.entries(groups)) {
-    const [appId, hourBucket] = key.split('|');
+    const [appId, hourBucket] = key.split("|");
 
     // Fetch already-processed log IDs for idempotency
     const processedIds = await getProcessedLogIds(appId, hourBucket, deps);
 
     // Filter out already-processed entries
-    const newEntries = groupEntries.filter(e => !processedIds.has(e.requestId));
+    const newEntries = groupEntries.filter(
+      (e) => !processedIds.has(e.requestId),
+    );
 
     if (newEntries.length === 0) continue;
 
     const metrics = computeMetrics(newEntries);
-    const newLogIds = newEntries.map(e => e.requestId);
+    const newLogIds = newEntries.map((e) => e.requestId);
 
     await upsertMetrics(appId, hourBucket, metrics, newLogIds, deps);
   }
@@ -268,14 +280,14 @@ export interface AppMetricsBucket {
  */
 function toHourBucket(isoTimestamp: string): string {
   const date = new Date(isoTimestamp);
-  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}-${String(date.getUTCHours()).padStart(2, '0')}`;
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}-${String(date.getUTCHours()).padStart(2, "0")}`;
 }
 
 /**
  * Converts an hour bucket string (yyyy-MM-dd-HH) to an ISO 8601 timestamp.
  */
 function hourBucketToTimestamp(bucket: string): string {
-  const [year, month, day, hour] = bucket.split('-').map(Number);
+  const [year, month, day, hour] = bucket.split("-").map(Number);
   return new Date(Date.UTC(year, month - 1, day, hour)).toISOString();
 }
 
@@ -293,16 +305,19 @@ export async function getAppMetrics(
   const startBucket = toHourBucket(startTime);
   const endBucket = toHourBucket(endTime);
 
-  const result = await deps.docClient.send(new QueryCommand({
-    TableName: deps.appsTable,
-    IndexName: 'GroupIndex',
-    KeyConditionExpression: 'groupId = :gid AND sortId BETWEEN :startSort AND :endSort',
-    ExpressionAttributeValues: {
-      ':gid': `APP#${appId}`,
-      ':startSort': `METRICS#${startBucket}`,
-      ':endSort': `METRICS#${endBucket}`,
-    },
-  }));
+  const result = await deps.docClient.send(
+    new QueryCommand({
+      TableName: deps.appsTable,
+      IndexName: "GroupIndex",
+      KeyConditionExpression:
+        "groupId = :gid AND sortId BETWEEN :startSort AND :endSort",
+      ExpressionAttributeValues: {
+        ":gid": `APP#${appId}`,
+        ":startSort": `METRICS#${startBucket}`,
+        ":endSort": `METRICS#${endBucket}`,
+      },
+    }),
+  );
 
   const items = result.Items || [];
 
@@ -340,7 +355,7 @@ export async function getAppMetrics(
     weightedP99 += (item.p99Latency || 0) * bucketRequests;
 
     // Extract hour bucket from sortId: "METRICS#yyyy-MM-dd-HH"
-    const bucket = item.sortId.replace('METRICS#', '');
+    const bucket = item.sortId.replace("METRICS#", "");
     timeSeries.push({
       timestamp: hourBucketToTimestamp(bucket),
       requestCount: bucketRequests,
@@ -364,49 +379,110 @@ export async function getAppMetrics(
 // ── Dashboard Metrics (cross-app aggregation) ───────────────
 
 export interface DashboardMetricsResult {
-  dailyActivity: Array<{ date: string; successCount: number; errorCount: number }>;
+  dailyActivity: Array<{
+    date: string;
+    successCount: number;
+    errorCount: number;
+  }>;
   totalRequests: number;
   successRate: number;
   avgLatency: number;
 }
 
+/**
+ * Aggregates dashboard metrics across every app belonging to the caller's
+ * org (finding 615aa5bb — previously a table-wide ScanCommand that ignored
+ * orgId entirely and aggregated every organization's apps).
+ *
+ * Org scoping: resolves the org's own appIds via AppsTable.OrgIndex — the
+ * same GSI listApps/listDataStores already query by orgId (see
+ * registry-agent-record-resolver.ts's listApps and datastore-resolver.ts's
+ * listDataStores) — then aggregates only those apps' METRICS# rows via
+ * GroupIndex (the same per-app query getAppMetrics uses above). No
+ * table-wide scan remains.
+ *
+ * Requirements: 6.4, 6.5, 6.6
+ */
 export async function getDashboardMetrics(
   orgId: string,
   startTime: string,
   endTime: string,
   deps: MetricsDeps,
 ): Promise<DashboardMetricsResult> {
+  // 1. Resolve the caller org's own appIds — never a cross-org lookup.
+  const orgAppsResult = await deps.docClient.send(
+    new QueryCommand({
+      TableName: deps.appsTable,
+      IndexName: "OrgIndex",
+      KeyConditionExpression: "orgId = :orgId",
+      ExpressionAttributeValues: { ":orgId": orgId },
+      ProjectionExpression: "appId",
+    }),
+  );
+
+  const appIds = (orgAppsResult.Items || [])
+    .map((item) => item.appId as string)
+    .filter((id): id is string => typeof id === "string");
+
+  if (appIds.length === 0) {
+    return {
+      dailyActivity: [],
+      totalRequests: 0,
+      successRate: 0,
+      avgLatency: 0,
+    };
+  }
+
+  // 2. Aggregate METRICS# rows for only those apps (per-app GroupIndex
+  // query, same shape as getAppMetrics above), run in parallel.
   const startBucket = toHourBucket(startTime);
   const endBucket = toHourBucket(endTime);
 
-  const result = await deps.docClient.send(new ScanCommand({
-    TableName: deps.appsTable,
-    IndexName: 'GroupIndex',
-    FilterExpression: 'begins_with(groupId, :appPrefix) AND sortId BETWEEN :startSort AND :endSort',
-    ExpressionAttributeValues: {
-      ':appPrefix': 'APP#',
-      ':startSort': `METRICS#${startBucket}`,
-      ':endSort': `METRICS#${endBucket}`,
-    },
-  }));
+  const perAppResults = await Promise.all(
+    appIds.map((appId) =>
+      deps.docClient.send(
+        new QueryCommand({
+          TableName: deps.appsTable,
+          IndexName: "GroupIndex",
+          KeyConditionExpression:
+            "groupId = :gid AND sortId BETWEEN :startSort AND :endSort",
+          ExpressionAttributeValues: {
+            ":gid": `APP#${appId}`,
+            ":startSort": `METRICS#${startBucket}`,
+            ":endSort": `METRICS#${endBucket}`,
+          },
+        }),
+      ),
+    ),
+  );
 
-  const items = result.Items || [];
+  const items = perAppResults.flatMap((r) => r.Items || []);
 
   if (items.length === 0) {
-    return { dailyActivity: [], totalRequests: 0, successRate: 0, avgLatency: 0 };
+    return {
+      dailyActivity: [],
+      totalRequests: 0,
+      successRate: 0,
+      avgLatency: 0,
+    };
   }
 
-  const dayMap = new Map<string, { successCount: number; errorCount: number }>();
+  const dayMap = new Map<
+    string,
+    { successCount: number; errorCount: number }
+  >();
   let totalRequests = 0;
   let totalSuccess = 0;
   let weightedLatencySum = 0;
 
   for (const item of items) {
-    const bucket = (item.sortId as string).replace('METRICS#', '');
+    const bucket = (item.sortId as string).replace("METRICS#", "");
     const day = bucket.substring(0, 10);
     const requests = (item.totalRequests as number) || 0;
     const success = (item.successCount as number) || 0;
-    const errors = ((item.clientErrorCount as number) || 0) + ((item.serverErrorCount as number) || 0);
+    const errors =
+      ((item.clientErrorCount as number) || 0) +
+      ((item.serverErrorCount as number) || 0);
     const latency = (item.p50Latency as number) || 0;
 
     totalRequests += requests;
@@ -420,7 +496,11 @@ export async function getDashboardMetrics(
   }
 
   const dailyActivity = Array.from(dayMap.entries())
-    .map(([date, data]) => ({ date, successCount: data.successCount, errorCount: data.errorCount }))
+    .map(([date, data]) => ({
+      date,
+      successCount: data.successCount,
+      errorCount: data.errorCount,
+    }))
     .sort((a, b) => a.date.localeCompare(b.date));
 
   return {
@@ -445,11 +525,13 @@ export const handler = async (event: LogsSubscriptionEvent): Promise<void> => {
   const deps: MetricsDeps = { docClient, appsTable };
 
   // CloudWatch Logs subscription filter delivers base64-encoded gzipped data
-  const payload = Buffer.from(event.awslogs.data, 'base64');
+  const payload = Buffer.from(event.awslogs.data, "base64");
   const decompressed = gunzipSync(payload);
   const logData = JSON.parse(decompressed.toString());
 
-  const messages: string[] = logData.logEvents.map((e: { message: string }) => e.message);
+  const messages: string[] = logData.logEvents.map(
+    (e: { message: string }) => e.message,
+  );
   const entries = parseAccessLogEntries(messages);
 
   await processMetricsEvent(entries, deps);

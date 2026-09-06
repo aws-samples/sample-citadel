@@ -103,42 +103,30 @@ const DELIBERATELY_UNWIRED: ReadonlyMap<string, string> = new Map([
   ],
   [
     "Mutation.testTool",
-    "Handler exists (tool-sandbox.ts handler/executeTool) and its Lambda " +
-      "is already defined in services-stack.ts (ToolSandboxFunction) but " +
-      "never attached to a resolver. SECURITY GATE FAILED: the handler " +
-      "accepts orgId as a client-supplied argument but never validates it " +
-      "against the caller's actual identity/org (no extractOrgFromEvent- " +
-      "style check), and loadToolConfig(toolId) looks up the tool config by " +
-      "toolId alone with no org filter — so a caller could pass another " +
-      "org's toolId and receive that tool's execution output using that " +
-      "org's scoped credentials. Do not wire until the handler enforces " +
-      "caller-org == tool-owner-org before executeTool() runs. Finding 0018a6d7.",
+    "Finding 615aa5bb: org-scoping + tool:execute permission gate now fixed " +
+      "(tool-sandbox.ts). Still not wired — separate blocker filed: " +
+      "ToolSandboxFunction's TOOLS_CONFIG_TABLE env var points at a table " +
+      "name (citadel-tools-config-{env}) no stack creates (real table is " +
+      "citadel-tools-{env}); testTool would always fail at runtime until " +
+      "that's corrected. Was: finding 0018a6d7.",
   ],
   [
     "Query.getDashboardMetrics",
-    "Handler exists (app-metrics-handler.ts getDashboardMetrics) but no " +
-      "AppSync-shaped wrapper calls it anywhere (contrast: getAppMetrics has " +
-      "a wrapper in registry-agent-record-resolver.ts and IS wired). " +
-      "SECURITY GATE FAILED: getDashboardMetrics(orgId, ...) accepts orgId " +
-      "but never uses it — its ScanCommand FilterExpression only filters on " +
-      "begins_with(groupId, 'APP#') and the time range, so it aggregates " +
-      "request/latency metrics across every organization's apps. Wiring " +
-      "this today would leak cross-tenant usage data to any caller with " +
-      "access to the query. Do not wire until the scan is filtered to the " +
-      "caller's org. Finding 0018a6d7.",
+    "Finding 615aa5bb: cross-tenant scan fixed (app-metrics-handler.ts now " +
+      "scopes via AppsTable.OrgIndex + per-app GroupIndex, no ScanCommand " +
+      "remains). Still not wired — no AppSync-shaped Lambda/resolver is " +
+      "deployed for this field at all (the only deployed Lambda for this " +
+      "file, AppMetricsHandler in gateway-stack.ts, is a CloudWatch Logs " +
+      "subscription consumer, not a GraphQL resolver). Was: finding 0018a6d7.",
   ],
   [
     "Query.getRecentActivity",
-    "Handler exists (recent-activity-resolver.ts getRecentActivity) with a " +
-      "dedicated test file, but no CDK stack even defines a Lambda function " +
-      "for it (let alone a resolver) — it is fully undeployed. SECURITY " +
-      "GATE FAILED: getRecentActivity(orgId, ...) accepts orgId but " +
-      "fetchRecent()'s ScanCommand has no FilterExpression at all — it scans " +
-      "the full projects/agent-config/workflows/integrations tables and " +
-      "returns names, statuses, and timestamps from every organization. " +
-      "Wiring this would leak cross-tenant activity data platform-wide. Do " +
-      "not wire until scans are org-filtered (or replaced with an org-keyed " +
-      "GSI query). Finding 0018a6d7.",
+    "Finding 615aa5bb: cross-tenant scan fixed (recent-activity-resolver.ts " +
+      "now scopes projects via OrganizationIndex, workflows via " +
+      "OrgStatusIndex, integrations via a direct org-keyed Query — agent " +
+      "activity is excluded rather than scanned, since AgentConfigTable has " +
+      "no org attribute/GSI). Still not wired — no Lambda is deployed for " +
+      "this field at all. Was: finding 0018a6d7.",
   ],
 ]);
 
