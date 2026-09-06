@@ -83,15 +83,23 @@ const RESOLVER_STACK_NAMES = [
  *       the guard fail again, as intended.
  */
 const DELIBERATELY_UNWIRED: ReadonlyMap<string, string> = new Map([
-  // --- pre-existing, tracked separately (finding 0018a6d7), NOT fixed by
-  // this change (finding 24563f6c/d037634b only) ---
-  [
-    "Mutation.updateAgentStatus",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Handler exists (agent-resolver.ts:125) but no stack wires a resolver for it. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
-  ],
+  // --- finding 0018a6d7 follow-up: 3 of 7 fields wired (updateAgentStatus,
+  // listAvailableDataSources, listIntegrationOperations — see backend-stack.ts
+  // / projects-stack.ts resolver additions and the corresponding CDK template
+  // assertions). The remaining 4 stay allowlisted below because wiring them
+  // as-is would introduce or reach a real authz/tenant-isolation gap; each
+  // entry below names the specific missing control. ---
   [
     "Mutation.updateProjectProgress",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
+    "No AppSync-compatible handler exists. The only related Lambda " +
+      "(project-progress-updater.ts) is an internal EventBridge consumer " +
+      "invoked from the 'intake.progress.updated' rule (projects-stack.ts) " +
+      "— its handler signature takes an EventBridge detail payload, not an " +
+      "AppSyncResolverEvent, has no event.identity, and performs no " +
+      "authentication or org check. Wiring it as a resolver would require " +
+      "writing a new handler from scratch (out of scope for a wiring fix) " +
+      "and, done naively, would let any authenticated caller write another " +
+      "org's project progress with no org-membership check. Finding 0018a6d7.",
   ],
   [
     "Mutation.testTool",
@@ -101,14 +109,6 @@ const DELIBERATELY_UNWIRED: ReadonlyMap<string, string> = new Map([
       "name (citadel-tools-config-{env}) no stack creates (real table is " +
       "citadel-tools-{env}); testTool would always fail at runtime until " +
       "that's corrected. Was: finding 0018a6d7.",
-  ],
-  [
-    "Query.listAvailableDataSources",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
-  ],
-  [
-    "Query.listIntegrationOperations",
-    "Pre-existing gap surfaced by this guard, same class as resumeExecution. Tracked separately: finding 0018a6d7. Not in scope for finding 24563f6c.",
   ],
   [
     "Query.getDashboardMetrics",

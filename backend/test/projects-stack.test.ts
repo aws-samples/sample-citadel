@@ -178,9 +178,9 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   });
 
   // --- Resolver count ---
-  test("defines exactly 23 AppSync resolvers (matching the move manifest)", () => {
+  test("defines exactly 24 AppSync resolvers (matching the move manifest + updateAgentStatus, finding 0018a6d7)", () => {
     const resolvers = template.findResources("AWS::AppSync::Resolver");
-    expect(Object.keys(resolvers)).toHaveLength(23);
+    expect(Object.keys(resolvers)).toHaveLength(24);
   });
 
   test("defines exactly 10 AppSync Lambda data sources", () => {
@@ -197,6 +197,7 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
     ["Mutation", "updateProject"],
     ["Mutation", "uploadDocument"],
     ["Query", "getAgentStatus"],
+    ["Mutation", "updateAgentStatus"],
     ["Query", "getConversationHistory"],
     ["Mutation", "sendMessage"],
     ["Mutation", "publishConversationMessage"],
@@ -225,6 +226,31 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
       });
     },
   );
+
+  // --- Finding 0018a6d7: updateAgentStatus wired onto the SAME datasource
+  // as its sibling getAgentStatus (both on agent-resolver.ts) ---
+  test("Mutation.updateAgentStatus is attached to the same datasource as Query.getAgentStatus", () => {
+    const resolvers = template.findResources("AWS::AppSync::Resolver");
+    const getStatus = Object.values(resolvers).filter(
+      (r) =>
+        (r as { Properties: { FieldName: string } }).Properties.FieldName ===
+        "getAgentStatus",
+    );
+    const updateStatus = Object.values(resolvers).filter(
+      (r) =>
+        (r as { Properties: { FieldName: string } }).Properties.FieldName ===
+        "updateAgentStatus",
+    );
+    expect(getStatus).toHaveLength(1);
+    expect(updateStatus).toHaveLength(1);
+    expect(
+      (updateStatus[0] as { Properties: { DataSourceName: unknown } })
+        .Properties.DataSourceName,
+    ).toEqual(
+      (getStatus[0] as { Properties: { DataSourceName: unknown } }).Properties
+        .DataSourceName,
+    );
+  });
 
   // --- JWT-free: satellites don't own auth ---
   test("does not define any Cognito UserPool (auth stays in BackendStack)", () => {

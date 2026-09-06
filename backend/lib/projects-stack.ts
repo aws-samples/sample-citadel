@@ -314,6 +314,17 @@ export class ProjectsStack extends cdk.Stack {
       agentLambdaDataSource,
     );
 
+    // updateAgentStatus (finding 0018a6d7): sibling of getAgentStatus on the
+    // same agent-resolver.ts handler, same Lambda, same datasource. Handler
+    // enforces the identical project-membership/org check as getAgentStatus
+    // (see agent-resolver.ts updateAgentStatus doc comment) before writing.
+    makeResolver(
+      "UpdateAgentStatusResolver",
+      "Mutation",
+      "updateAgentStatus",
+      agentLambdaDataSource,
+    );
+
     // ============================================================
     // Document Upload Resolver
     // ============================================================

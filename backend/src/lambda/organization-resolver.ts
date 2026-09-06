@@ -1,10 +1,16 @@
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, DeleteCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  DeleteCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 import {
   CognitoIdentityProviderClient,
   ListUsersCommand,
-} from '@aws-sdk/client-cognito-identity-provider';
-import { v4 as uuidv4 } from 'uuid';
+} from "@aws-sdk/client-cognito-identity-provider";
+import { v4 as uuidv4 } from "uuid";
+import type { AuthContext } from "../types";
 
 const client = new DynamoDBClient({});
 // removeUndefinedValues: defensive guard so no undefined attribute can break
@@ -15,8 +21,8 @@ const docClient = DynamoDBDocumentClient.from(client, {
 });
 const cognitoClient = new CognitoIdentityProviderClient({});
 
-const ORGANIZATIONS_TABLE = process.env.ORGANIZATIONS_TABLE || '';
-const USER_POOL_ID = process.env.USER_POOL_ID || '';
+const ORGANIZATIONS_TABLE = process.env.ORGANIZATIONS_TABLE || "";
+const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
 interface CreateOrganizationInput {
   name: string;
@@ -39,10 +45,41 @@ interface UserManagementResponse {
 interface OrganizationResolverEvent {
   info: { fieldName: string };
   arguments: { input: CreateOrganizationInput; orgId: string };
+  identity?: {
+    sub?: string;
+    username?: string;
+    ["cognito:groups"]?: string[];
+    claims?: Record<string, string>;
+    ["custom:role"]?: string;
+  };
 }
 
-export const handler = async (event: OrganizationResolverEvent): Promise<unknown> => {
-  console.log('Organization resolver event:', JSON.stringify(event, null, 2));
+// Admin gate — mirrors eval-sampling-config-resolver.ts / promotion-policy-resolver.ts
+// exactly: same shape, same error string, same fail-closed doctrine. Any
+// failure to resolve a role (missing identity, missing claim, resolver
+// exception) results in `roles` being empty, so requireAdmin always refuses
+// rather than defaulting open.
+function requireAdmin(authContext: AuthContext, action: string): void {
+  if (!authContext.roles?.includes("admin")) {
+    throw new Error(`UnauthorizedError: admin role required to ${action}`);
+  }
+}
+
+function authContextFromEvent(event: OrganizationResolverEvent): AuthContext {
+  const identity = event?.identity || {};
+  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
+  return {
+    userId: identity.sub || identity.username || "anonymous",
+    username: identity.username,
+    groups: identity["cognito:groups"] || [],
+    roles: claimRole ? [claimRole] : [],
+  };
+}
+
+export const handler = async (
+  event: OrganizationResolverEvent,
+): Promise<unknown> => {
+  console.log("Organization resolver event:", JSON.stringify(event, null, 2));
 
   // AppSync delivers the operation name under event.info.fieldName (not
   // event.fieldName). Reading the wrong path left fieldName undefined, so every
@@ -53,10 +90,17 @@ export const handler = async (event: OrganizationResolverEvent): Promise<unknown
 
   try {
     switch (fieldName) {
-      case 'createOrganization':
+      case "createOrganization":
         return await createOrganization(args.input);
-      case 'deleteOrganization':
+      case "deleteOrganization": {
+        // Resolve authContext INSIDE the try/case so that any exception thrown
+        // while deriving it (malformed identity, etc.) is caught by the
+        // existing catch-and-rethrow below and surfaces as a refusal — never
+        // as an unhandled crash that could be mistaken for "allow".
+        const authContext = authContextFromEvent(event);
+        requireAdmin(authContext, "delete an organization");
         return await deleteOrganization(args.orgId);
+      }
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
@@ -66,21 +110,23 @@ export const handler = async (event: OrganizationResolverEvent): Promise<unknown
   }
 };
 
-async function createOrganization(input: CreateOrganizationInput): Promise<Organization> {
-  console.log('Creating organization:', input);
+async function createOrganization(
+  input: CreateOrganizationInput,
+): Promise<Organization> {
+  console.log("Creating organization:", input);
 
   // Check if organization with same name already exists
   const existingOrgs = await docClient.send(
     new ScanCommand({
       TableName: ORGANIZATIONS_TABLE,
-      FilterExpression: '#name = :name',
+      FilterExpression: "#name = :name",
       ExpressionAttributeNames: {
-        '#name': 'name',
+        "#name": "name",
       },
       ExpressionAttributeValues: {
-        ':name': input.name,
+        ":name": input.name,
       },
-    })
+    }),
   );
 
   if (existingOrgs.Items && existingOrgs.Items.length > 0) {
@@ -95,7 +141,7 @@ async function createOrganization(input: CreateOrganizationInput): Promise<Organ
     name: input.name,
     // Default to '' (matches project-resolver.ts). Writing `undefined` breaks
     // DynamoDB marshalling in the real client → Lambda:Unhandled (Issue #14).
-    description: input.description || '',
+    description: input.description || "",
     createdAt: now,
   };
 
@@ -103,26 +149,28 @@ async function createOrganization(input: CreateOrganizationInput): Promise<Organ
     new PutCommand({
       TableName: ORGANIZATIONS_TABLE,
       Item: organization,
-    })
+    }),
   );
 
-  console.log('Organization created:', organization);
+  console.log("Organization created:", organization);
   return organization;
 }
 
-async function deleteOrganization(orgId: string): Promise<UserManagementResponse> {
-  console.log('Deleting organization:', orgId);
+async function deleteOrganization(
+  orgId: string,
+): Promise<UserManagementResponse> {
+  console.log("Deleting organization:", orgId);
 
   // 1. Existence check (preserved from prior behaviour, runs FIRST so a
   //    missing-org request short-circuits before any Cognito call).
   const existingOrgs = await docClient.send(
     new ScanCommand({
       TableName: ORGANIZATIONS_TABLE,
-      FilterExpression: 'orgId = :orgId',
+      FilterExpression: "orgId = :orgId",
       ExpressionAttributeValues: {
-        ':orgId': orgId,
+        ":orgId": orgId,
       },
-    })
+    }),
   );
 
   if (!existingOrgs.Items || existingOrgs.Items.length === 0) {
@@ -140,7 +188,7 @@ async function deleteOrganization(orgId: string): Promise<UserManagementResponse
   if (!orgName) {
     // Fail closed: without the name we cannot correlate users to this org.
     throw new Error(
-      'Cannot delete organization: organization record has no name; orphan-user verification cannot run.'
+      "Cannot delete organization: organization record has no name; orphan-user verification cannot run.",
     );
   }
 
@@ -161,7 +209,7 @@ async function deleteOrganization(orgId: string): Promise<UserManagementResponse
   //    for a tenant-deletion path.
   if (!USER_POOL_ID) {
     throw new Error(
-      'Cannot delete organization: USER_POOL_ID is not configured; orphan-user verification cannot run.'
+      "Cannot delete organization: USER_POOL_ID is not configured; orphan-user verification cannot run.",
     );
   }
 
@@ -182,16 +230,16 @@ async function deleteOrganization(orgId: string): Promise<UserManagementResponse
         UserPoolId: USER_POOL_ID,
         Limit: 60,
         PaginationToken: paginationToken,
-      })
+      }),
     );
 
     for (const user of usersResponse.Users ?? []) {
       const assignedToOrg = (user.Attributes ?? []).some(
-        (attr) => attr.Name === 'custom:organization' && attr.Value === orgName
+        (attr) => attr.Name === "custom:organization" && attr.Value === orgName,
       );
       if (assignedToOrg) {
         throw new Error(
-          'Cannot delete organization: 1+ user(s) still assigned. Reassign or remove these users before deleting the organization.'
+          "Cannot delete organization: 1+ user(s) still assigned. Reassign or remove these users before deleting the organization.",
         );
       }
     }
@@ -209,10 +257,10 @@ async function deleteOrganization(orgId: string): Promise<UserManagementResponse
     new DeleteCommand({
       TableName: ORGANIZATIONS_TABLE,
       Key: { orgId },
-    })
+    }),
   );
 
-  console.log('Organization deleted:', orgId);
+  console.log("Organization deleted:", orgId);
   return {
     success: true,
     message: `Organization deleted successfully`,
