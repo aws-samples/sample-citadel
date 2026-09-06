@@ -59,15 +59,101 @@ describe("organization-resolver", () => {
   const adminIdentity = { sub: "admin-1", "custom:role": "admin" };
   const nonAdminIdentity = { sub: "user-1", "custom:role": "project_manager" };
 
+  describe("createOrganization — admin authorization gate (finding c79cd4f6)", () => {
+    // RED: a non-admin caller must be refused BEFORE any AWS call — zero
+    // Cognito and zero DynamoDB calls on the refusal path.
+    test("refuses a non-admin caller before any Cognito or DynamoDB call", async () => {
+      await expect(
+        handler(
+          makeEvent(
+            "createOrganization",
+            { input: { name: "New Org" } },
+            nonAdminIdentity,
+          ),
+        ),
+      ).rejects.toThrow(/UnauthorizedError/);
+
+      expect(dynamoMock.commandCalls(ScanCommand)).toHaveLength(0);
+      expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
+      expect(cognitoMock.commandCalls(ListUsersCommand)).toHaveLength(0);
+    });
+
+    // RED: identity that resolves to no role at all (missing custom:role
+    // claim entirely) must also be refused — fail closed, never fail open.
+    test("refuses when identity has no resolvable role", async () => {
+      await expect(
+        handler(
+          makeEvent(
+            "createOrganization",
+            { input: { name: "New Org" } },
+            { sub: "user-2" },
+          ),
+        ),
+      ).rejects.toThrow(/UnauthorizedError/);
+
+      expect(dynamoMock.commandCalls(ScanCommand)).toHaveLength(0);
+      expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    // RED: identity-resolution failure (no identity object at all, e.g. an
+    // IAM/unauthenticated-role invocation path) must refuse, not crash open.
+    test("refuses when the event has no identity at all", async () => {
+      const event = {
+        info: { fieldName: "createOrganization" },
+        arguments: { input: { name: "New Org" } },
+      };
+      await expect(handler(event)).rejects.toThrow(/UnauthorizedError/);
+
+      expect(dynamoMock.commandCalls(ScanCommand)).toHaveLength(0);
+      expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    // RED: a malformed claim (custom:role present but empty string) must
+    // resolve to no role and be refused — fail closed on garbage input.
+    test("refuses when custom:role claim is malformed (empty string)", async () => {
+      await expect(
+        handler(
+          makeEvent(
+            "createOrganization",
+            { input: { name: "New Org" } },
+            { sub: "user-3", "custom:role": "" },
+          ),
+        ),
+      ).rejects.toThrow(/UnauthorizedError/);
+
+      expect(dynamoMock.commandCalls(ScanCommand)).toHaveLength(0);
+      expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    // GREEN: an admin caller still succeeds through the full existing flow.
+    test("allows an admin caller through to the existing create flow", async () => {
+      dynamoMock.on(ScanCommand).resolves({ Items: [] });
+      dynamoMock.on(PutCommand).resolves({});
+
+      const result = await handler(
+        makeEvent(
+          "createOrganization",
+          { input: { name: "New Org" } },
+          adminIdentity,
+        ),
+      );
+
+      expect(result.orgId).toBe("org-uuid-123");
+      expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+  });
+
   describe("createOrganization", () => {
     test("creates organization when name is unique and preserves the description", async () => {
       dynamoMock.on(ScanCommand).resolves({ Items: [] });
       dynamoMock.on(PutCommand).resolves({});
 
       const result = await handler(
-        makeEvent("createOrganization", {
-          input: { name: "New Org", description: "A test org" },
-        }),
+        makeEvent(
+          "createOrganization",
+          { input: { name: "New Org", description: "A test org" } },
+          adminIdentity,
+        ),
       );
 
       expect(result.orgId).toBe("org-uuid-123");
@@ -88,9 +174,11 @@ describe("organization-resolver", () => {
 
       // `description` omitted from input -> resolver must default it to ''.
       const result = await handler(
-        makeEvent("createOrganization", {
-          input: { name: "No Desc Org" },
-        }),
+        makeEvent(
+          "createOrganization",
+          { input: { name: "No Desc Org" } },
+          adminIdentity,
+        ),
       );
 
       expect(result.orgId).toBe("org-uuid-123");
@@ -118,9 +206,11 @@ describe("organization-resolver", () => {
 
       await expect(
         handler(
-          makeEvent("createOrganization", {
-            input: { name: "Duplicate" },
-          }),
+          makeEvent(
+            "createOrganization",
+            { input: { name: "Duplicate" } },
+            adminIdentity,
+          ),
         ),
       ).rejects.toThrow("already exists");
     });
