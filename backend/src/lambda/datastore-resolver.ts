@@ -1,5 +1,5 @@
-import { AppSyncResolverEvent } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { AppSyncResolverEvent } from "aws-lambda";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   PutCommand,
@@ -7,22 +7,23 @@ import {
   UpdateCommand,
   DeleteCommand,
   QueryCommand,
-} from '@aws-sdk/lib-dynamodb';
+} from "@aws-sdk/lib-dynamodb";
 import {
   SecretsManagerClient,
   CreateSecretCommand,
   GetSecretValueCommand,
   DeleteSecretCommand,
-} from '@aws-sdk/client-secrets-manager';
-import { v4 as uuidv4 } from 'uuid';
-import { getAdapter } from './adapters/registry';
-import { PolicyManager, type ScopedCredentials } from '../utils/policy-manager';
-import { getDataStoreOperations } from '../utils/operations-registry';
+} from "@aws-sdk/client-secrets-manager";
+import { v4 as uuidv4 } from "uuid";
+import { getAdapter } from "./adapters/registry";
+import { PolicyManager, type ScopedCredentials } from "../utils/policy-manager";
+import { getDataStoreOperations } from "../utils/operations-registry";
+import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
 import {
   ConflictError,
   ResourceNotFoundError,
   ValidationError,
-} from './adapters/errors';
+} from "./adapters/errors";
 
 // --- Clients ---
 
@@ -31,20 +32,24 @@ const secretsManager = new SecretsManagerClient({});
 const policyManager = new PolicyManager();
 
 const DATASTORES_TABLE = process.env.DATASTORES_TABLE!;
-const HEALTH_MONITOR_ROLE_PARAM = process.env.HEALTH_MONITOR_ROLE_PARAM || '';
+const HEALTH_MONITOR_ROLE_PARAM = process.env.HEALTH_MONITOR_ROLE_PARAM || "";
 
 // Lazy-loaded health monitor role ARN from SSM
 let _healthMonitorRoleArn: string | null = null;
 async function getAdditionalTrustedPrincipals(): Promise<string[]> {
   if (!HEALTH_MONITOR_ROLE_PARAM) return [];
-  if (_healthMonitorRoleArn !== null) return _healthMonitorRoleArn ? [_healthMonitorRoleArn] : [];
+  if (_healthMonitorRoleArn !== null)
+    return _healthMonitorRoleArn ? [_healthMonitorRoleArn] : [];
   try {
-    const { SSMClient, GetParameterCommand } = await import('@aws-sdk/client-ssm');
+    const { SSMClient, GetParameterCommand } =
+      await import("@aws-sdk/client-ssm");
     const ssm = new SSMClient({});
-    const result = await ssm.send(new GetParameterCommand({ Name: HEALTH_MONITOR_ROLE_PARAM }));
-    _healthMonitorRoleArn = result.Parameter?.Value || '';
+    const result = await ssm.send(
+      new GetParameterCommand({ Name: HEALTH_MONITOR_ROLE_PARAM }),
+    );
+    _healthMonitorRoleArn = result.Parameter?.Value || "";
   } catch {
-    _healthMonitorRoleArn = '';
+    _healthMonitorRoleArn = "";
   }
   return _healthMonitorRoleArn ? [_healthMonitorRoleArn] : [];
 }
@@ -102,7 +107,10 @@ interface DataStoreRecord {
   [key: string]: unknown;
 }
 
-interface AppSyncEvent extends Omit<AppSyncResolverEvent<DataStoreResolverArguments>, 'identity'> {
+interface AppSyncEvent extends Omit<
+  AppSyncResolverEvent<DataStoreResolverArguments>,
+  "identity"
+> {
   identity?: AppSyncEventIdentity;
 }
 
@@ -118,7 +126,7 @@ export async function handler(event: AppSyncEvent) {
             ? {
                 ...event.arguments.input,
                 credentials: event.arguments.input.credentials
-                  ? '[REDACTED]'
+                  ? "[REDACTED]"
                   : undefined,
               }
             : undefined,
@@ -126,48 +134,69 @@ export async function handler(event: AppSyncEvent) {
       : undefined,
   };
   console.log(
-    'DataStore resolver event:',
-    JSON.stringify(sanitizedEvent, null, 2)
+    "DataStore resolver event:",
+    JSON.stringify(sanitizedEvent, null, 2),
   );
 
   const { fieldName } = event.info;
 
   try {
     switch (fieldName) {
-      case 'listDataStores':
-        return await listDataStores(
-          event.arguments.orgId,
-          event.arguments.category
-        );
-      case 'getDataStore':
+      case "listDataStores": {
+        // Org scoping (sweep finding 615aa5bb): a non-admin caller's
+        // server-derived org always wins over the requested orgId argument
+        // — same read-path tenant gate as listIntegrations
+        // (integration-resolver.ts) / listApps
+        // (registry-agent-record-resolver.ts) / listProjects
+        // (project-resolver.ts). Admins may pass an explicit orgId.
+        const admin = isAdminFromEvent(event);
+        const callerOrgId = admin ? null : await extractOrgFromEvent(event);
+        const effectiveOrgId = callerOrgId || event.arguments.orgId;
+        return await listDataStores(effectiveOrgId, event.arguments.category);
+      }
+      case "getDataStore":
         return await getDataStore(event.arguments.dataStoreId);
-      case 'getDataStoreStats':
-        return await getDataStoreStats(event.arguments.orgId);
-      case 'createDataStore':
+      case "getDataStoreStats": {
+        // Org scoping (sweep finding 615aa5bb, filed as the getDataStoreStats
+        // defect): same coerce-not-reject read-path gate as listDataStores
+        // above — a read has no side effect to block, so silently scoping to
+        // the caller's real org is sufficient.
+        const admin = isAdminFromEvent(event);
+        const callerOrgId = admin ? null : await extractOrgFromEvent(event);
+        const effectiveOrgId = callerOrgId || event.arguments.orgId;
+        return await getDataStoreStats(effectiveOrgId);
+      }
+      case "createDataStore":
         return await createDataStore(
           event.arguments.input,
-          event.identity?.username || 'system'
+          event.identity?.username || "system",
         );
-      case 'updateDataStore':
+      case "updateDataStore":
         return await updateDataStore(event.arguments.input);
-      case 'deleteDataStore':
+      case "deleteDataStore":
         return await deleteDataStore(event.arguments.dataStoreId);
-      case 'connectDataStore':
+      case "connectDataStore":
         return await connectDataStore(event.arguments.dataStoreId);
-      case 'disconnectDataStore':
+      case "disconnectDataStore":
         return await disconnectDataStore(event.arguments.dataStoreId);
-      case 'testDataStoreConnection':
+      case "testDataStoreConnection":
         return await testDataStoreConnection(event.arguments.dataStoreId);
-      case 'listAvailableDataSources':
+      case "listAvailableDataSources": {
+        // Org scoping (sweep finding 615aa5bb): same coerce-not-reject
+        // read-path gate as listDataStores/getDataStoreStats above.
+        const admin = isAdminFromEvent(event);
+        const callerOrgId = admin ? null : await extractOrgFromEvent(event);
+        const effectiveOrgId = callerOrgId || event.arguments.orgId;
         return await listAvailableDataSources(
-          event.arguments.orgId,
-          event.arguments.usage
+          effectiveOrgId,
+          event.arguments.usage,
         );
+      }
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
   } catch (error: unknown) {
-    console.error('DataStore resolver error:', error);
+    console.error("DataStore resolver error:", error);
     throw error;
   }
 }
@@ -176,7 +205,7 @@ export async function handler(event: AppSyncEvent) {
 
 async function persistErrorState(
   dataStoreId: string,
-  _error: unknown
+  _error: unknown,
 ): Promise<void> {
   try {
     // Clean up the failed entry so stale records don't accumulate in the UI
@@ -184,17 +213,17 @@ async function persistErrorState(
       new DeleteCommand({
         TableName: DATASTORES_TABLE,
         Key: { dataStoreId },
-      })
+      }),
     );
   } catch (persistError) {
-    console.error('Failed to clean up failed data store entry:', persistError);
+    console.error("Failed to clean up failed data store entry:", persistError);
   }
 }
 
 async function retryOptimisticLock<T>(
   fn: () => Promise<T>,
   maxRetries = 3,
-  baseDelayMs = 100
+  baseDelayMs = 100,
 ): Promise<T> {
   let lastError: Error | undefined;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -202,7 +231,8 @@ async function retryOptimisticLock<T>(
       return await fn();
     } catch (error: unknown) {
       if (
-        (error instanceof Error && error.name === 'ConditionalCheckFailedException') ||
+        (error instanceof Error &&
+          error.name === "ConditionalCheckFailedException") ||
         error instanceof ConflictError
       ) {
         lastError = error;
@@ -216,8 +246,8 @@ async function retryOptimisticLock<T>(
     }
   }
   throw new ConflictError(
-    'Version conflict: data store was modified concurrently',
-    lastError
+    "Version conflict: data store was modified concurrently",
+    lastError,
   );
 }
 
@@ -233,22 +263,22 @@ async function listDataStores(orgId: string, category?: string) {
     FilterExpression?: string;
   } = {
     TableName: DATASTORES_TABLE,
-    IndexName: 'OrgIndex',
-    KeyConditionExpression: 'orgId = :orgId',
-    ExpressionAttributeValues: { ':orgId': orgId },
+    IndexName: "OrgIndex",
+    KeyConditionExpression: "orgId = :orgId",
+    ExpressionAttributeValues: { ":orgId": orgId },
     ScanIndexForward: false,
   };
 
   if (category) {
-    params.FilterExpression = 'category = :category';
-    params.ExpressionAttributeValues[':category'] = category;
+    params.FilterExpression = "category = :category";
+    params.ExpressionAttributeValues[":category"] = category;
   }
 
   const result = await dynamodb.send(new QueryCommand(params));
   // Backward compatibility: default usage to 'both' for legacy items (Req 1.10)
   const items = result.Items || [];
   for (const item of items) {
-    item.usage = (item.usage || 'both').toUpperCase();
+    item.usage = (item.usage || "both").toUpperCase();
   }
   return items;
 }
@@ -258,18 +288,16 @@ async function getDataStore(dataStoreId: string): Promise<DataStoreRecord> {
     new GetCommand({
       TableName: DATASTORES_TABLE,
       Key: { dataStoreId },
-    })
+    }),
   );
 
   if (!result.Item) {
-    throw new ResourceNotFoundError(
-      `Data store not found: ${dataStoreId}`
-    );
+    throw new ResourceNotFoundError(`Data store not found: ${dataStoreId}`);
   }
 
   // Backward compatibility: default usage to 'both' for legacy items (Req 1.10)
   const item = result.Item;
-  item.usage = (item.usage || 'both').toUpperCase();
+  item.usage = (item.usage || "both").toUpperCase();
 
   return item as DataStoreRecord;
 }
@@ -278,10 +306,10 @@ async function getDataStoreStats(orgId: string) {
   const result = await dynamodb.send(
     new QueryCommand({
       TableName: DATASTORES_TABLE,
-      IndexName: 'OrgIndex',
-      KeyConditionExpression: 'orgId = :orgId',
-      ExpressionAttributeValues: { ':orgId': orgId },
-    })
+      IndexName: "OrgIndex",
+      KeyConditionExpression: "orgId = :orgId",
+      ExpressionAttributeValues: { ":orgId": orgId },
+    }),
   );
 
   const items = result.Items || [];
@@ -293,8 +321,8 @@ async function getDataStoreStats(orgId: string) {
   for (const item of items) {
     byCategory[item.category] = (byCategory[item.category] || 0) + 1;
     byType[item.type] = (byType[item.type] || 0) + 1;
-    if (item.status === 'CONNECTED') connected++;
-    if (item.status === 'ERROR') errorCount++;
+    if (item.status === "CONNECTED") connected++;
+    if (item.status === "ERROR") errorCount++;
   }
 
   return {
@@ -311,24 +339,24 @@ async function listAvailableDataSources(orgId: string, usage?: string) {
   const result = await dynamodb.send(
     new QueryCommand({
       TableName: DATASTORES_TABLE,
-      IndexName: 'OrgIndex',
-      KeyConditionExpression: 'orgId = :orgId',
-      ExpressionAttributeValues: { ':orgId': orgId },
-    })
+      IndexName: "OrgIndex",
+      KeyConditionExpression: "orgId = :orgId",
+      ExpressionAttributeValues: { ":orgId": orgId },
+    }),
   );
 
   const items = result.Items || [];
 
   // Filter to only CONNECTED stores (Req 3.7)
-  let connectedStores = items.filter((item) => item.status === 'CONNECTED');
+  let connectedStores = items.filter((item) => item.status === "CONNECTED");
 
   // Apply usage filter when provided (Req 3.5)
   if (usage) {
     const filterUpper = usage.toUpperCase();
-    if (filterUpper !== 'BOTH') {
+    if (filterUpper !== "BOTH") {
       connectedStores = connectedStores.filter((item) => {
-        const storeUsage = (item.usage || 'BOTH').toUpperCase();
-        return storeUsage === filterUpper || storeUsage === 'BOTH';
+        const storeUsage = (item.usage || "BOTH").toUpperCase();
+        return storeUsage === filterUpper || storeUsage === "BOTH";
       });
     }
     // When filter is 'both', return all connected stores (no additional filtering)
@@ -340,7 +368,7 @@ async function listAvailableDataSources(orgId: string, usage?: string) {
     const ctx = await policyManager.getAccountContext();
     accountId = ctx.accountId;
   } catch (error) {
-    console.warn('Failed to get account context for scopedRoleArn:', error);
+    console.warn("Failed to get account context for scopedRoleArn:", error);
   }
 
   // Enrich each store with capabilities and scopedRoleArn (Req 3.3, 3.4)
@@ -349,7 +377,7 @@ async function listAvailableDataSources(orgId: string, usage?: string) {
     name: item.name,
     type: item.type,
     category: item.category,
-    usage: (item.usage || 'BOTH').toUpperCase(),
+    usage: (item.usage || "BOTH").toUpperCase(),
     status: item.status,
     provider: item.provider,
     capabilities: getDataStoreOperations(item.type),
@@ -370,14 +398,14 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
     const existingResult = await dynamodb.send(
       new QueryCommand({
         TableName: DATASTORES_TABLE,
-        IndexName: 'OrgIndex',
-        KeyConditionExpression: 'orgId = :orgId',
-        FilterExpression: 'clientRequestToken = :token',
+        IndexName: "OrgIndex",
+        KeyConditionExpression: "orgId = :orgId",
+        FilterExpression: "clientRequestToken = :token",
         ExpressionAttributeValues: {
-          ':orgId': input.orgId,
-          ':token': input.clientRequestToken,
+          ":orgId": input.orgId,
+          ":token": input.clientRequestToken,
         },
-      })
+      }),
     );
 
     if (existingResult.Items && existingResult.Items.length > 0) {
@@ -387,7 +415,7 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
 
   const adapter = getAdapter(input.type);
   const config =
-    typeof input.config === 'string' ? JSON.parse(input.config) : input.config;
+    typeof input.config === "string" ? JSON.parse(input.config) : input.config;
 
   // Inject the data store name into config so adapters can use it as the
   // resource name. This bridges the gap between the frontend wizard (which
@@ -397,23 +425,23 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
   }
 
   const credentials = input.credentials
-    ? typeof input.credentials === 'string'
+    ? typeof input.credentials === "string"
       ? JSON.parse(input.credentials)
       : input.credentials
     : undefined;
 
   // Determine icon and provider from type metadata
-  const icon = 'Database';
-  const provider = input.type.startsWith('EXTERNAL_')
-    ? 'External'
-    : 'Amazon Web Services';
+  const icon = "Database";
+  const provider = input.type.startsWith("EXTERNAL_")
+    ? "External"
+    : "Amazon Web Services";
 
   // Validate and default usage field (defense in depth — Req 10.2)
-  const VALID_USAGE_VALUES = ['KNOWLEDGE', 'OPERATIONAL', 'BOTH'];
-  const usage = input.usage ? input.usage.toUpperCase() : 'BOTH';
+  const VALID_USAGE_VALUES = ["KNOWLEDGE", "OPERATIONAL", "BOTH"];
+  const usage = input.usage ? input.usage.toUpperCase() : "BOTH";
   if (!VALID_USAGE_VALUES.includes(usage)) {
     throw new ValidationError(
-      `Invalid usage value: ${input.usage}. Allowed values: KNOWLEDGE, OPERATIONAL, BOTH`
+      `Invalid usage value: ${input.usage}. Allowed values: KNOWLEDGE, OPERATIONAL, BOTH`,
     );
   }
 
@@ -424,7 +452,7 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
     description: input.description || null,
     type: input.type,
     category: input.category,
-    status: 'CREATED',
+    status: "CREATED",
     icon,
     provider,
     provisionMode: input.provisionMode,
@@ -432,7 +460,7 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
     createdBy,
     createdAt: timestamp,
     updatedAt: timestamp,
-    config: typeof config === 'string' ? config : JSON.stringify(config),
+    config: typeof config === "string" ? config : JSON.stringify(config),
     usage,
     version: 1,
     clientRequestToken: input.clientRequestToken || null,
@@ -443,13 +471,16 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
       new PutCommand({
         TableName: DATASTORES_TABLE,
         Item: item,
-        ConditionExpression: 'attribute_not_exists(dataStoreId)',
-      })
+        ConditionExpression: "attribute_not_exists(dataStoreId)",
+      }),
     );
   } catch (error: unknown) {
-    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+    if (
+      error instanceof Error &&
+      error.name === "ConditionalCheckFailedException"
+    ) {
       throw new ConflictError(
-        `Data store with ID ${dataStoreId} already exists`
+        `Data store with ID ${dataStoreId} already exists`,
       );
     }
     throw error;
@@ -464,7 +495,7 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
         new CreateSecretCommand({
           Name: secretName,
           SecretString: JSON.stringify(credentials),
-        })
+        }),
       );
       secretArn = createSecretResponse.ARN;
     }
@@ -472,7 +503,7 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
     // Get account context and set up IAM role
     const { accountId, region } = await policyManager.getAccountContext();
     const policies =
-      input.provisionMode === 'CREATE_NEW'
+      input.provisionMode === "CREATE_NEW"
         ? adapter.requiredPolicies(config, accountId, region).provision
         : adapter.requiredPolicies(config, accountId, region).connect;
 
@@ -482,17 +513,17 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
         dataStoreId,
         policies,
         accountId,
-        'datastore',
+        "datastore",
         config.crossAccountRoleArn,
-        await getAdditionalTrustedPrincipals()
+        await getAdditionalTrustedPrincipals(),
       );
       // IAM is eventually consistent — wait for role/policy propagation
       await new Promise((resolve) => setTimeout(resolve, 10000));
       const creds = await policyManager.assumeScopedRole(
         dataStoreId,
         accountId,
-        'datastore',
-        config.crossAccountRoleArn
+        "datastore",
+        config.crossAccountRoleArn,
       );
       scopedCredentials = creds;
     }
@@ -502,24 +533,24 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
     let size: string | undefined;
     let records: number | undefined;
 
-    if (input.provisionMode === 'CREATE_NEW') {
+    if (input.provisionMode === "CREATE_NEW") {
       // Update status to PROVISIONING
       await dynamodb.send(
         new UpdateCommand({
           TableName: DATASTORES_TABLE,
           Key: { dataStoreId },
-          UpdateExpression: 'SET #status = :status, updatedAt = :now',
-          ExpressionAttributeNames: { '#status': 'status' },
+          UpdateExpression: "SET #status = :status, updatedAt = :now",
+          ExpressionAttributeNames: { "#status": "status" },
           ExpressionAttributeValues: {
-            ':status': 'PROVISIONING',
-            ':now': new Date().toISOString(),
+            ":status": "PROVISIONING",
+            ":now": new Date().toISOString(),
           },
-        })
+        }),
       );
 
       const provisionResult = await adapter.provision!(
         config,
-        scopedCredentials || credentials
+        scopedCredentials || credentials,
       );
       resourceArn = provisionResult.resourceArn;
       size = provisionResult.size;
@@ -534,7 +565,7 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
       size = size || metrics.size;
       records = records ?? metrics.records;
     } catch (metricsError) {
-      console.warn('Failed to get metrics (non-fatal):', metricsError);
+      console.warn("Failed to get metrics (non-fatal):", metricsError);
     }
 
     // Update final state
@@ -543,21 +574,21 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
         TableName: DATASTORES_TABLE,
         Key: { dataStoreId },
         UpdateExpression:
-          'SET #status = :status, updatedAt = :now, resourceArn = :arn, secretArn = :secret, #size = :size, records = :records',
+          "SET #status = :status, updatedAt = :now, resourceArn = :arn, secretArn = :secret, #size = :size, records = :records",
         ExpressionAttributeNames: {
-          '#status': 'status',
-          '#size': 'size',
+          "#status": "status",
+          "#size": "size",
         },
         ExpressionAttributeValues: {
-          ':status': 'CONNECTED',
-          ':now': new Date().toISOString(),
-          ':arn': resourceArn || null,
-          ':secret': secretArn || null,
-          ':size': size || null,
-          ':records': records ?? null,
+          ":status": "CONNECTED",
+          ":now": new Date().toISOString(),
+          ":arn": resourceArn || null,
+          ":secret": secretArn || null,
+          ":size": size || null,
+          ":records": records ?? null,
         },
-        ReturnValues: 'ALL_NEW',
-      })
+        ReturnValues: "ALL_NEW",
+      }),
     );
 
     return finalUpdate.Attributes;
@@ -574,7 +605,7 @@ async function updateDataStore(input: UpdateDataStoreInput) {
   // Optimistic locking
   if (existing.version !== input.version) {
     throw new ConflictError(
-      `Version conflict: expected ${input.version}, found ${existing.version}`
+      `Version conflict: expected ${input.version}, found ${existing.version}`,
     );
   }
 
@@ -587,17 +618,17 @@ async function updateDataStore(input: UpdateDataStoreInput) {
   if (input.description !== undefined) updates.description = input.description;
   if (input.config !== undefined) {
     updates.config =
-      typeof input.config === 'string'
+      typeof input.config === "string"
         ? input.config
         : JSON.stringify(input.config);
   }
   if (input.usage !== undefined) {
     // Validate usage field (defense in depth — Req 10.2)
-    const VALID_USAGE_VALUES = ['KNOWLEDGE', 'OPERATIONAL', 'BOTH'];
+    const VALID_USAGE_VALUES = ["KNOWLEDGE", "OPERATIONAL", "BOTH"];
     const usageValue = input.usage.toUpperCase();
     if (!VALID_USAGE_VALUES.includes(usageValue)) {
       throw new ValidationError(
-        `Invalid usage value: ${input.usage}. Allowed values: KNOWLEDGE, OPERATIONAL, BOTH`
+        `Invalid usage value: ${input.usage}. Allowed values: KNOWLEDGE, OPERATIONAL, BOTH`,
       );
     }
     updates.usage = usageValue;
@@ -615,26 +646,29 @@ async function updateDataStore(input: UpdateDataStoreInput) {
     exprValues[valueKey] = value;
   }
 
-  exprValues[':expectedVersion'] = input.version;
+  exprValues[":expectedVersion"] = input.version;
 
   try {
     const result = await dynamodb.send(
       new UpdateCommand({
         TableName: DATASTORES_TABLE,
         Key: { dataStoreId },
-        UpdateExpression: `SET ${setExpressions.join(', ')}`,
-        ConditionExpression: '#version = :expectedVersion',
-        ExpressionAttributeNames: { ...exprNames, '#version': 'version' },
+        UpdateExpression: `SET ${setExpressions.join(", ")}`,
+        ConditionExpression: "#version = :expectedVersion",
+        ExpressionAttributeNames: { ...exprNames, "#version": "version" },
         ExpressionAttributeValues: exprValues,
-        ReturnValues: 'ALL_NEW',
-      })
+        ReturnValues: "ALL_NEW",
+      }),
     );
 
     return result.Attributes;
   } catch (error: unknown) {
-    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+    if (
+      error instanceof Error &&
+      error.name === "ConditionalCheckFailedException"
+    ) {
       throw new ConflictError(
-        'Version conflict: data store was modified concurrently'
+        "Version conflict: data store was modified concurrently",
       );
     }
     await persistErrorState(dataStoreId, error);
@@ -649,14 +683,17 @@ async function deleteDataStore(dataStoreId: string) {
     existing = await getDataStore(dataStoreId);
   } catch (error) {
     if (error instanceof ResourceNotFoundError) {
-      return { success: true, message: 'Data store not found or already deleted' };
+      return {
+        success: true,
+        message: "Data store not found or already deleted",
+      };
     }
     throw error;
   }
 
   const adapter = getAdapter(existing.type);
   const config =
-    typeof existing.config === 'string'
+    typeof existing.config === "string"
       ? JSON.parse(existing.config)
       : existing.config;
 
@@ -667,25 +704,25 @@ async function deleteDataStore(dataStoreId: string) {
     scopedCredentials = await policyManager.assumeScopedRole(
       dataStoreId,
       accountId,
-      'datastore'
+      "datastore",
     );
   } catch (error) {
-    console.warn('Failed to assume scoped role for cleanup:', error);
+    console.warn("Failed to assume scoped role for cleanup:", error);
   }
 
   // Disconnect first
   try {
     await adapter.disconnect(config);
   } catch (error) {
-    console.warn('Failed to disconnect:', error);
+    console.warn("Failed to disconnect:", error);
   }
 
   // Deprovision infrastructure if this was a CREATE_NEW data store
-  if (existing.provisionMode === 'CREATE_NEW' && adapter.deprovision) {
+  if (existing.provisionMode === "CREATE_NEW" && adapter.deprovision) {
     try {
       await adapter.deprovision(config, scopedCredentials);
     } catch (error) {
-      console.warn('Failed to deprovision infrastructure:', error);
+      console.warn("Failed to deprovision infrastructure:", error);
     }
   }
 
@@ -696,10 +733,10 @@ async function deleteDataStore(dataStoreId: string) {
         new DeleteSecretCommand({
           SecretId: existing.secretArn,
           ForceDeleteWithoutRecovery: true,
-        })
+        }),
       );
     } catch (error) {
-      console.warn('Failed to delete secret:', error);
+      console.warn("Failed to delete secret:", error);
     }
   }
 
@@ -707,7 +744,7 @@ async function deleteDataStore(dataStoreId: string) {
   try {
     await policyManager.deleteRole(dataStoreId);
   } catch (error) {
-    console.warn('Failed to delete IAM role:', error);
+    console.warn("Failed to delete IAM role:", error);
   }
 
   // Delete from DynamoDB
@@ -715,10 +752,10 @@ async function deleteDataStore(dataStoreId: string) {
     new DeleteCommand({
       TableName: DATASTORES_TABLE,
       Key: { dataStoreId },
-    })
+    }),
   );
 
-  return { success: true, message: 'Data store deleted successfully' };
+  return { success: true, message: "Data store deleted successfully" };
 }
 
 async function connectDataStore(dataStoreId: string) {
@@ -728,7 +765,7 @@ async function connectDataStore(dataStoreId: string) {
 
     const adapter = getAdapter(existing.type);
     const config =
-      typeof existing.config === 'string'
+      typeof existing.config === "string"
         ? JSON.parse(existing.config)
         : existing.config;
 
@@ -737,17 +774,21 @@ async function connectDataStore(dataStoreId: string) {
     if (existing.secretArn) {
       try {
         const secretResult = await secretsManager.send(
-          new GetSecretValueCommand({ SecretId: existing.secretArn })
+          new GetSecretValueCommand({ SecretId: existing.secretArn }),
         );
-        credentials = JSON.parse(secretResult.SecretString || '{}');
+        credentials = JSON.parse(secretResult.SecretString || "{}");
       } catch (error) {
-        console.warn('Failed to retrieve credentials:', error);
+        console.warn("Failed to retrieve credentials:", error);
       }
     }
 
     // Set up scoped credentials if needed
     const { accountId, region } = await policyManager.getAccountContext();
-    const policies = adapter.requiredPolicies(config, accountId, region).connect;
+    const policies = adapter.requiredPolicies(
+      config,
+      accountId,
+      region,
+    ).connect;
     let scopedCredentials: ScopedCredentials | undefined;
 
     if (policies.length > 0) {
@@ -755,17 +796,17 @@ async function connectDataStore(dataStoreId: string) {
         dataStoreId,
         policies,
         accountId,
-        'datastore',
+        "datastore",
         config.crossAccountRoleArn,
-        await getAdditionalTrustedPrincipals()
+        await getAdditionalTrustedPrincipals(),
       );
       // IAM is eventually consistent — wait for policy propagation
       await new Promise((resolve) => setTimeout(resolve, 5000));
       scopedCredentials = await policyManager.assumeScopedRole(
         dataStoreId,
         accountId,
-        'datastore',
-        config.crossAccountRoleArn
+        "datastore",
+        config.crossAccountRoleArn,
       );
     }
 
@@ -782,27 +823,30 @@ async function connectDataStore(dataStoreId: string) {
           TableName: DATASTORES_TABLE,
           Key: { dataStoreId },
           UpdateExpression:
-            'SET #status = :status, updatedAt = :now, #version = :newVersion REMOVE errorMessage',
-          ConditionExpression: '#version = :expectedVersion',
+            "SET #status = :status, updatedAt = :now, #version = :newVersion REMOVE errorMessage",
+          ConditionExpression: "#version = :expectedVersion",
           ExpressionAttributeNames: {
-            '#status': 'status',
-            '#version': 'version',
+            "#status": "status",
+            "#version": "version",
           },
           ExpressionAttributeValues: {
-            ':status': 'CONNECTED',
-            ':now': new Date().toISOString(),
-            ':newVersion': currentVersion + 1,
-            ':expectedVersion': currentVersion,
+            ":status": "CONNECTED",
+            ":now": new Date().toISOString(),
+            ":newVersion": currentVersion + 1,
+            ":expectedVersion": currentVersion,
           },
-          ReturnValues: 'ALL_NEW',
-        })
+          ReturnValues: "ALL_NEW",
+        }),
       );
 
       return result.Attributes;
     } catch (error: unknown) {
-      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+      if (
+        error instanceof Error &&
+        error.name === "ConditionalCheckFailedException"
+      ) {
         throw new ConflictError(
-          'Version conflict: data store was modified concurrently'
+          "Version conflict: data store was modified concurrently",
         );
       }
       throw error;
@@ -817,14 +861,14 @@ async function disconnectDataStore(dataStoreId: string) {
 
     const adapter = getAdapter(existing.type);
     const config =
-      typeof existing.config === 'string'
+      typeof existing.config === "string"
         ? JSON.parse(existing.config)
         : existing.config;
 
     try {
       await adapter.disconnect(config);
     } catch (error) {
-      console.warn('Disconnect warning:', error);
+      console.warn("Disconnect warning:", error);
     }
 
     try {
@@ -833,27 +877,30 @@ async function disconnectDataStore(dataStoreId: string) {
           TableName: DATASTORES_TABLE,
           Key: { dataStoreId },
           UpdateExpression:
-            'SET #status = :status, updatedAt = :now, #version = :newVersion',
-          ConditionExpression: '#version = :expectedVersion',
+            "SET #status = :status, updatedAt = :now, #version = :newVersion",
+          ConditionExpression: "#version = :expectedVersion",
           ExpressionAttributeNames: {
-            '#status': 'status',
-            '#version': 'version',
+            "#status": "status",
+            "#version": "version",
           },
           ExpressionAttributeValues: {
-            ':status': 'DISCONNECTED',
-            ':now': new Date().toISOString(),
-            ':newVersion': currentVersion + 1,
-            ':expectedVersion': currentVersion,
+            ":status": "DISCONNECTED",
+            ":now": new Date().toISOString(),
+            ":newVersion": currentVersion + 1,
+            ":expectedVersion": currentVersion,
           },
-          ReturnValues: 'ALL_NEW',
-        })
+          ReturnValues: "ALL_NEW",
+        }),
       );
 
       return result.Attributes;
     } catch (error: unknown) {
-      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+      if (
+        error instanceof Error &&
+        error.name === "ConditionalCheckFailedException"
+      ) {
         throw new ConflictError(
-          'Version conflict: data store was modified concurrently'
+          "Version conflict: data store was modified concurrently",
         );
       }
       throw error;
@@ -865,7 +912,7 @@ async function testDataStoreConnection(dataStoreId: string) {
   const existing = await getDataStore(dataStoreId);
   const adapter = getAdapter(existing.type);
   const config =
-    typeof existing.config === 'string'
+    typeof existing.config === "string"
       ? JSON.parse(existing.config)
       : existing.config;
 
@@ -874,11 +921,11 @@ async function testDataStoreConnection(dataStoreId: string) {
   if (existing.secretArn) {
     try {
       const secretResult = await secretsManager.send(
-        new GetSecretValueCommand({ SecretId: existing.secretArn })
+        new GetSecretValueCommand({ SecretId: existing.secretArn }),
       );
-      credentials = JSON.parse(secretResult.SecretString || '{}');
+      credentials = JSON.parse(secretResult.SecretString || "{}");
     } catch (error) {
-      console.warn('Failed to retrieve credentials:', error);
+      console.warn("Failed to retrieve credentials:", error);
     }
   }
 
@@ -892,17 +939,17 @@ async function testDataStoreConnection(dataStoreId: string) {
       scopedCredentials = await policyManager.assumeScopedRole(
         dataStoreId,
         accountId,
-        'datastore',
-        config.crossAccountRoleArn
+        "datastore",
+        config.crossAccountRoleArn,
       );
     } catch (error) {
-      console.warn('Failed to assume scoped role for test:', error);
+      console.warn("Failed to assume scoped role for test:", error);
     }
   }
 
   const testResult = await adapter.testConnection(
     config,
-    scopedCredentials || credentials
+    scopedCredentials || credentials,
   );
 
   return {
