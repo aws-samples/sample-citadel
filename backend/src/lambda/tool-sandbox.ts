@@ -13,6 +13,9 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import * as vm from "vm";
+import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import { hasPermission } from "../utils/auth";
+import type { AuthContext } from "../types";
 
 // --- Clients ---
 
@@ -49,6 +52,11 @@ export interface SandboxBinding {
 export interface SandboxToolConfig {
   integrationBindings?: SandboxBinding[];
   dataStoreBindings?: SandboxBinding[];
+  /** Owning org. Absent on legacy/shared configs, which are treated as
+   * visible to every org-scoped caller — mirrors the
+   * `mapped.orgId && mapped.orgId !== callerOrgId` guard in
+   * tool-config-resolver.ts's getToolConfigRegistry. */
+  orgId?: string;
 }
 
 /**
@@ -103,25 +111,65 @@ export function addToHistory<T>(
  * This function is extracted from the Lambda handler to enable property-based
  * testing with mock dependencies.
  *
+ * Org scoping (finding 615aa5bb): `callerOrgId` MUST be derived server-side
+ * from the caller's identity (see `handler` below, which calls
+ * `extractOrgFromEvent`) — it is never the client-supplied `orgId` GraphQL
+ * argument. `toolId` is looked up with no org filter (ToolsConfigTable has
+ * no OrgIndex — see backend/lib/arbiter-stack.ts), so the org check runs
+ * AFTER load, comparing the loaded config's own `orgId` to `callerOrgId`,
+ * mirroring `getToolConfigRegistry`'s guard in tool-config-resolver.ts. A
+ * mismatch is reported as "Tool not found" (same not-found-shaped response
+ * as a missing tool) rather than a distinct 403, so a caller cannot use the
+ * error shape to enumerate other orgs' tool IDs. A config with no `orgId`
+ * (legacy/shared) is visible to every org-scoped caller.
+ *
+ * Additionally requires the `tool:execute` permission — this executes the
+ * tool's own code with its resolved, scoped credentials, so it is gated at
+ * the same trust tier as `tool:approve` (architect/admin only).
+ *
  * @param toolId - The tool to execute
  * @param inputs - Sample inputs for the tool
- * @param orgId - Organization ID
+ * @param authContext - Caller's auth context (roles), for the permission gate
+ * @param callerOrgId - Server-derived caller org (never client-supplied)
  * @param deps - Injectable dependencies for testing
  * @param timeoutMs - Execution timeout in milliseconds (default 30000)
  */
 export async function executeTool(
   toolId: string,
   inputs: unknown,
-  orgId: string,
+  authContext: AuthContext,
+  callerOrgId: string,
   deps: ExecuteToolDeps,
   timeoutMs: number = 30000,
 ): Promise<ToolTestResult> {
   const startTime = Date.now();
 
+  // PERMISSION gate — tool:execute (admin via bypass in hasPermission).
+  if (!hasPermission(authContext, "tool:execute")) {
+    return {
+      success: false,
+      error:
+        "UnauthorizedError: tool:execute permission required to run a tool",
+      executionTimeMs: Date.now() - startTime,
+    };
+  }
+
   try {
     // 1. Load tool config from DynamoDB
     const toolConfig = await deps.loadToolConfig(toolId);
     if (!toolConfig) {
+      return {
+        success: false,
+        error: "Tool not found",
+        executionTimeMs: Date.now() - startTime,
+      };
+    }
+
+    // ORG MATCH — enforced AFTER load since the lookup itself has no org
+    // filter available (no OrgIndex on ToolsConfigTable). A cross-org
+    // config is reported identically to a missing one (no existence
+    // disclosure across tenants).
+    if (toolConfig.orgId && toolConfig.orgId !== callerOrgId) {
       return {
         success: false,
         error: "Tool not found",
@@ -287,16 +335,74 @@ function logToolExecution(
   );
 }
 
+/** AppSync identity shape this handler reads (mirrors auth-event.ts). */
+interface ToolSandboxEventIdentity {
+  sub?: string;
+  username?: string;
+  ["custom:role"]?: string;
+  ["cognito:groups"]?: string[];
+  claims?: Record<string, unknown> | null;
+}
+
+function authContextFromEvent(
+  identity: ToolSandboxEventIdentity | undefined,
+): AuthContext {
+  const claimRole =
+    identity?.["custom:role"] ??
+    (identity?.claims?.["custom:role"] as string | undefined);
+  return {
+    userId: identity?.sub || identity?.username || "anonymous",
+    username: identity?.username,
+    groups: identity?.["cognito:groups"] || [],
+    roles: claimRole ? [claimRole] : [],
+  };
+}
+
 // --- Lambda handler ---
 
 export async function handler(event: {
+  identity?: ToolSandboxEventIdentity;
   arguments: {
     toolId: string;
     inputs: string;
+    /** Client-supplied org — advisory only. The caller's ACTUAL org is
+     * always re-derived server-side via extractOrgFromEvent (finding
+     * 615aa5bb); a value here that disagrees with the derived org is
+     * rejected as a cross-org attempt rather than silently ignored, so a
+     * caller gets clear feedback instead of a confusing implicit
+     * substitution (mirrors decideToolApproval's cross-org-input guard in
+     * tool-approval-resolver.ts). */
     orgId: string;
   };
 }): Promise<ToolTestResult> {
-  const { toolId, inputs: inputsJson, orgId } = event.arguments;
+  const { toolId, inputs: inputsJson, orgId: suppliedOrgId } = event.arguments;
+  const authContext = authContextFromEvent(event.identity);
+
+  const admin = isAdminFromEvent(event);
+  const callerOrgId = await extractOrgFromEvent(event);
+
+  if (!admin) {
+    if (!callerOrgId) {
+      return {
+        success: false,
+        error: "UnauthorizedError: caller organization could not be determined",
+        executionTimeMs: 0,
+      };
+    }
+    if (suppliedOrgId && suppliedOrgId !== callerOrgId) {
+      return {
+        success: false,
+        error:
+          "UnauthorizedError: orgId argument does not match caller's organization",
+        executionTimeMs: 0,
+      };
+    }
+  }
+
+  // Server-derived org always wins; admins without a resolvable org fall
+  // back to the (still permission-gated, still config-orgId-checked)
+  // supplied value so admin tooling isn't blocked.
+  const effectiveOrgId = callerOrgId || suppliedOrgId;
 
   // Validate inputs
   let inputs: unknown;
@@ -310,9 +416,16 @@ export async function handler(event: {
     };
   }
 
-  const result = await executeTool(toolId, inputs, orgId, defaultDeps(), 30000);
+  const result = await executeTool(
+    toolId,
+    inputs,
+    authContext,
+    effectiveOrgId,
+    defaultDeps(),
+    30000,
+  );
 
-  logToolExecution(toolId, orgId, result);
+  logToolExecution(toolId, effectiveOrgId, result);
 
   return result;
 }
