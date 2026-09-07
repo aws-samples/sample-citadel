@@ -659,9 +659,12 @@ export class TelemetryStack extends cdk.Stack {
           PROJECTS_TABLE: props.projectsTable.tableName,
           ENVIRONMENT: props.environment,
           // Dual-backend dispatch (design §3 "SIMPLEST safe option"):
-          // defaults to `xray` (today's behavior, unchanged) until an
-          // operator flips this to `spans` post-cutover, once
-          // Transaction Search is enabled account-wide. See
+          // defaults to `spans`, overridable per environment via
+          // TRACE_BACKEND=xray. `spans` requires CloudWatch Transaction
+          // Search to be enabled in the target account/region; `xray`
+          // remains supported as a fallback (see the xray:Get* grant
+          // below). Viewer end-to-end verification against `spans` and
+          // removal of the xray:Get* grant are still outstanding — see
           // docs/TRACING_RUNBOOK.md cutover procedure.
           TRACE_BACKEND:
             process.env.TRACE_BACKEND === "xray" ? "xray" : "spans",
@@ -715,11 +718,13 @@ export class TelemetryStack extends cdk.Stack {
     // --- Transaction Search span-query port (design §3 dual-backend,
     // §4 "Least-privilege IAM") ---------------------------------------
     // Added ALONGSIDE the xray:Get* grant above, not instead of it — the
-    // default backend is still `xray` during the transition (TRACE_BACKEND
-    // env, default `xray`), so removing xray:Get* now would blind the
-    // default path. Both permission sets are granted so flipping
-    // TRACE_BACKEND=spans post-cutover requires no IAM change (design §3
-    // "Reversible ... needs no IAM change").
+    // default backend is now `spans`, but `xray` remains a supported
+    // fallback (operator override via TRACE_BACKEND=xray), so the
+    // xray:Get* grant stays until viewer end-to-end verification against
+    // `spans` is complete and that grant's removal is confirmed safe.
+    // Both permission sets are granted so flipping TRACE_BACKEND either
+    // way requires no IAM change (design §3 "Reversible ... needs no IAM
+    // change").
     //
     // logs:StartQuery DOES support resource-level scoping (unlike
     // GetQueryResults/StopQuery, which operate on an opaque queryId with
