@@ -1055,7 +1055,7 @@ export const handler: AppSyncResolverHandler<
       case "updateApp":
         return await updateApp(args.input, userId, event);
       case "deleteApp":
-        return await deleteApp(args.appId, userId);
+        return await deleteApp(args.appId, userId, event);
       case "bindWorkflowToApp":
         return await bindWorkflowToApp(args.appId, args.workflowId, userId);
       case "unbindWorkflowFromApp":
@@ -1789,12 +1789,23 @@ async function updateApp(
   return projectAgentAppNormalized(finalRecord);
 }
 
-async function deleteApp(appId: string, userId: string): Promise<unknown> {
+async function deleteApp(
+  appId: string,
+  userId: string,
+  event: unknown,
+): Promise<unknown> {
   const existing = await getRegistryService().getResource("agent", appId);
   if (!existing) {
     throw new Error("App not found");
   }
   const projection = projectAgentApp(existing);
+
+  // Finding 6400b440: deleteApp is destructive and irreversible — gate it
+  // at 'owner' (matching grant/revoke's requirement, NOT the editor-level
+  // lifecycle mutations from 8f8fd119) BEFORE any side effect. Must run
+  // before revokeFabricatorAuthority and before deleteResource so a refused
+  // caller triggers zero calls to either.
+  await assertManifestOwnerAccess(appId, existing, event);
 
   // US-ARB-014: revoke the per-app fabricator authority unit BEFORE the
   // registry delete. If revoke throws an unrecoverable error we do NOT
