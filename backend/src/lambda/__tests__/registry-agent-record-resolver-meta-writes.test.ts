@@ -10,23 +10,26 @@
  * call sites so the OrgIndex projection (Step 3) stays current.
  */
 // Env vars MUST be set BEFORE importing the resolver — see crud.test.ts.
-process.env.REGISTRY_ID = 'test-registry-id';
-process.env.APPS_TABLE = 'citadel-apps-test';
-process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
-process.env.AGENT_CONFIG_TABLE = 'citadel-agents-test';
-process.env.EVENT_BUS_NAME = 'citadel-agents-test';
-process.env.USER_POOL_ID = 'us-east-1_test';
-process.env.AWS_REGION = 'us-east-1';
+process.env.REGISTRY_ID = "test-registry-id";
+process.env.APPS_TABLE = "citadel-apps-test";
+process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
+process.env.AGENT_CONFIG_TABLE = "citadel-agents-test";
+process.env.EVENT_BUS_NAME = "citadel-agents-test";
+process.env.USER_POOL_ID = "us-east-1_test";
+process.env.AWS_REGION = "us-east-1";
 delete process.env.AUTHORITY_UNITS_TABLE;
 
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
 import {
   DynamoDBDocumentClient,
   PutCommand,
   UpdateCommand,
   DeleteCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { mockClient } from 'aws-sdk-client-mock';
+} from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -34,13 +37,17 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 import {
   seedMockRegistry,
   resetMockRegistry,
-} from './fixtures/registry-service-mock';
+} from "./fixtures/registry-service-mock";
 
-jest.mock('../../services/registry-service', () => {
-  const { getMockRegistryService } = jest.requireActual('./fixtures/registry-service-mock');
-  const actual = jest.requireActual('../../services/registry-service');
+jest.mock("../../services/registry-service", () => {
+  const { getMockRegistryService } = jest.requireActual(
+    "./fixtures/registry-service-mock",
+  );
+  const actual = jest.requireActual("../../services/registry-service");
   return {
-    RegistryService: jest.fn().mockImplementation(() => getMockRegistryService()),
+    RegistryService: jest
+      .fn()
+      .mockImplementation(() => getMockRegistryService()),
     getRegistryService: jest.fn(() => getMockRegistryService()),
     _resetRegistryService: jest.fn(),
     isRegistryEnabled: jest.fn(() => true),
@@ -49,16 +56,16 @@ jest.mock('../../services/registry-service', () => {
   };
 });
 
-jest.mock('../../utils/appsync', () => ({
-  getUserId: jest.fn().mockReturnValue('user-123'),
+jest.mock("../../utils/appsync", () => ({
+  getUserId: jest.fn().mockReturnValue("user-123"),
 }));
 
-jest.mock('../../utils/appsync-publish', () => ({
+jest.mock("../../utils/appsync-publish", () => ({
   publishAppStatusEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
-import { handler } from '../registry-agent-record-resolver';
-import { APP_META_SORT_VALUE } from '../../utils/apps-table-meta';
+import { handler } from "../registry-agent-record-resolver";
+import { APP_META_SORT_VALUE } from "../../utils/apps-table-meta";
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
@@ -68,33 +75,45 @@ type HandlerEvent = Parameters<typeof handler>[0];
 // (single cast here) so calls don't pass superfluous arguments.
 const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
-function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123', admin = false) {
+function makeEvent(
+  fieldName: string,
+  args: Record<string, unknown>,
+  sub = "user-123",
+  admin = false,
+) {
   return {
     info: { fieldName },
     arguments: args,
+    // Non-admin identity carries custom:organization: 'org-1' — matching
+    // seedApp's default manifest.orgId and createdBy — so callers satisfy
+    // the finding-8f8fd119 editor gate (assertManifestAccess) on updateApp
+    // via the same-org + implicit-creator-owner fallback path.
     identity: admin
-      ? { sub, claims: { sub, 'custom:role': 'admin' }, 'custom:role': 'admin' }
-      : { sub, claims: { sub } },
+      ? { sub, claims: { sub, "custom:role": "admin" }, "custom:role": "admin" }
+      : { sub, claims: { sub, "custom:organization": "org-1" } },
   } as unknown as HandlerEvent;
 }
 
-function seedApp(opts: { version?: number; orgId?: string; status?: string } = {}): void {
-  seedMockRegistry('agent', 'app-1', {
-    name: 'Test App',
-    description: 'Test',
-    status: opts.status ?? 'DRAFT',
+function seedApp(
+  opts: { version?: number; orgId?: string; status?: string } = {},
+): void {
+  seedMockRegistry("agent", "app-1", {
+    name: "Test App",
+    description: "Test",
+    status: opts.status ?? "DRAFT",
     customDescriptorContent: JSON.stringify({
-      appId: 'app-1',
+      appId: "app-1",
       manifest: {
-        orgId: opts.orgId ?? 'org-1',
+        orgId: opts.orgId ?? "org-1",
         version: opts.version ?? 1,
-        status: opts.status ?? 'DRAFT',
+        status: opts.status ?? "DRAFT",
         workflowIds: [],
         agentBindings: [],
         permissions: [],
         configSchema: null,
         configValues: null,
         authConfig: null,
+        createdBy: "user-123",
         access: {},
         routingConfig: null,
       },
@@ -102,7 +121,7 @@ function seedApp(opts: { version?: number; orgId?: string; status?: string } = {
   });
 }
 
-describe('registry-agent-record-resolver — AppsTable #META mirror writes', () => {
+describe("registry-agent-record-resolver — AppsTable #META mirror writes", () => {
   beforeEach(() => {
     resetMockRegistry();
     ebMock.reset();
@@ -123,14 +142,14 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
     delete process.env.REGISTRY_ID;
   });
 
-  describe('createApp', () => {
-    test('writes an UpdateCommand for the metadata row with full projection', async () => {
+  describe("createApp", () => {
+    test("writes an UpdateCommand for the metadata row with full projection", async () => {
       const result = await invokeHandler(
-        makeEvent('createApp', {
+        makeEvent("createApp", {
           input: {
-            name: 'New App',
-            description: 'A test app',
-            orgId: 'org-1',
+            name: "New App",
+            description: "A test app",
+            orgId: "org-1",
           },
         }),
       );
@@ -140,73 +159,86 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
       const updateCalls = ddbMock.commandCalls(UpdateCommand);
       const metaUpdate = updateCalls.find(
         (c) =>
-          c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === result.appId &&
+          c.args[0].input.TableName === "citadel-apps-test" &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)
+            ?.appId === result.appId &&
           // Key must be appId only — no sortId in the key.
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined,
+          (c.args[0].input.Key as Record<string, unknown> | undefined)
+            ?.sortId === undefined,
       );
       expect(metaUpdate).toBeDefined();
-      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':v_orgId']).toBe('org-1');
-      expect(values[':v_name']).toBe('New App');
-      expect(values[':v_status']).toBe('DRAFT');
-      expect(values[':v_version']).toBe(1);
-      expect(values[':v_createdBy']).toBe('user-123');
-      expect(values[':v_workflowIds']).toEqual([]);
-      expect(typeof values[':v_createdAt']).toBe('string');
-      expect(typeof values[':v_updatedAt']).toBe('string');
+      const values = metaUpdate!.args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[":v_orgId"]).toBe("org-1");
+      expect(values[":v_name"]).toBe("New App");
+      expect(values[":v_status"]).toBe("DRAFT");
+      expect(values[":v_version"]).toBe(1);
+      expect(values[":v_createdBy"]).toBe("user-123");
+      expect(values[":v_workflowIds"]).toEqual([]);
+      expect(typeof values[":v_createdAt"]).toBe("string");
+      expect(typeof values[":v_updatedAt"]).toBe("string");
       // sortId is set as a data attribute (carried by the upsert), not as
       // part of the key.
-      expect(values[':v_sortId']).toBe(APP_META_SORT_VALUE);
+      expect(values[":v_sortId"]).toBe(APP_META_SORT_VALUE);
     });
 
-    test('mirrors sourceProjectId onto the metadata row when the input carries it (intake linkage)', async () => {
+    test("mirrors sourceProjectId onto the metadata row when the input carries it (intake linkage)", async () => {
       const result = await invokeHandler(
-        makeEvent('createApp', {
+        makeEvent("createApp", {
           input: {
-            name: 'Intake App',
-            orgId: 'org-1',
-            sourceProjectId: 'sess-42',
+            name: "Intake App",
+            orgId: "org-1",
+            sourceProjectId: "sess-42",
           },
         }),
       );
 
-      const metaUpdate = ddbMock.commandCalls(UpdateCommand).find(
-        (c) =>
-          c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === result.appId,
-      );
+      const metaUpdate = ddbMock
+        .commandCalls(UpdateCommand)
+        .find(
+          (c) =>
+            c.args[0].input.TableName === "citadel-apps-test" &&
+            (c.args[0].input.Key as Record<string, unknown> | undefined)
+              ?.appId === result.appId,
+        );
       expect(metaUpdate).toBeDefined();
-      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':v_sourceProjectId']).toBe('sess-42');
+      const values = metaUpdate!.args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[":v_sourceProjectId"]).toBe("sess-42");
     });
 
-    test('omits sourceProjectId from the metadata row when the input has none (backward compatible)', async () => {
+    test("omits sourceProjectId from the metadata row when the input has none (backward compatible)", async () => {
       const result = await invokeHandler(
-        makeEvent('createApp', {
-          input: { name: 'Plain App', orgId: 'org-1' },
+        makeEvent("createApp", {
+          input: { name: "Plain App", orgId: "org-1" },
         }),
       );
 
-      const metaUpdate = ddbMock.commandCalls(UpdateCommand).find(
-        (c) =>
-          c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === result.appId,
-      );
+      const metaUpdate = ddbMock
+        .commandCalls(UpdateCommand)
+        .find(
+          (c) =>
+            c.args[0].input.TableName === "citadel-apps-test" &&
+            (c.args[0].input.Key as Record<string, unknown> | undefined)
+              ?.appId === result.appId,
+        );
       expect(metaUpdate).toBeDefined();
-      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(':v_sourceProjectId' in values).toBe(false);
-      expect(metaUpdate!.args[0].input.UpdateExpression).not.toContain('sourceProjectId');
+      const values = metaUpdate!.args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
+      expect(":v_sourceProjectId" in values).toBe(false);
+      expect(metaUpdate!.args[0].input.UpdateExpression).not.toContain(
+        "sourceProjectId",
+      );
     });
   });
 
-  describe('updateApp', () => {
-    test('writes an UpdateCommand for the metadata row with only the changed fields', async () => {
+  describe("updateApp", () => {
+    test("writes an UpdateCommand for the metadata row with only the changed fields", async () => {
       seedApp({ version: 1 });
 
       await invokeHandler(
-        makeEvent('updateApp', {
-          input: { appId: 'app-1', version: 1, name: 'Renamed' },
+        makeEvent("updateApp", {
+          input: { appId: "app-1", version: 1, name: "Renamed" },
         }),
       );
 
@@ -216,32 +248,35 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
       // resolver may issue.
       const metaUpdate = updateCalls.find(
         (c) =>
-          c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === 'app-1' &&
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined,
+          c.args[0].input.TableName === "citadel-apps-test" &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)
+            ?.appId === "app-1" &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)
+            ?.sortId === undefined,
       );
       expect(metaUpdate).toBeDefined();
 
-      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
+      const values = metaUpdate!.args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
       // name was provided -> mirrored. status/description/routingConfig were
       // NOT provided -> must NOT be in the update.
-      expect(values[':v_name']).toBe('Renamed');
-      expect(values[':v_status']).toBeUndefined();
-      expect(values[':v_description']).toBeUndefined();
-      expect(values[':v_routingConfig']).toBeUndefined();
+      expect(values[":v_name"]).toBe("Renamed");
+      expect(values[":v_status"]).toBeUndefined();
+      expect(values[":v_description"]).toBeUndefined();
+      expect(values[":v_routingConfig"]).toBeUndefined();
       // updatedAt and version are always written.
-      expect(typeof values[':v_updatedAt']).toBe('string');
-      expect(values[':v_version']).toBe(2);
+      expect(typeof values[":v_updatedAt"]).toBe("string");
+      expect(values[":v_version"]).toBe(2);
     });
 
-    test('mirrors a status change', async () => {
-      seedApp({ version: 1, status: 'PENDING_APPROVAL' });
+    test("mirrors a status change", async () => {
+      seedApp({ version: 1, status: "PENDING_APPROVAL" });
 
       await invokeHandler(
         makeEvent(
-          'updateApp',
-          { input: { appId: 'app-1', version: 1, status: 'APPROVED' } },
-          'admin-1',
+          "updateApp",
+          { input: { appId: "app-1", version: 1, status: "APPROVED" } },
+          "admin-1",
           true,
         ),
       );
@@ -249,61 +284,64 @@ describe('registry-agent-record-resolver — AppsTable #META mirror writes', () 
       const updateCalls = ddbMock.commandCalls(UpdateCommand);
       const metaUpdate = updateCalls.find(
         (c) =>
-          c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === 'app-1' &&
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined &&
-          (c.args[0].input.ExpressionAttributeValues as Record<string, unknown> | undefined)?.[':v_status'] !==
-            undefined,
+          c.args[0].input.TableName === "citadel-apps-test" &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)
+            ?.appId === "app-1" &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)
+            ?.sortId === undefined &&
+          (
+            c.args[0].input.ExpressionAttributeValues as
+              Record<string, unknown> | undefined
+          )?.[":v_status"] !== undefined,
       );
       expect(metaUpdate).toBeDefined();
-      const values = metaUpdate!.args[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':v_status']).toBe('APPROVED');
-      expect(values[':v_version']).toBe(2);
+      const values = metaUpdate!.args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[":v_status"]).toBe("APPROVED");
+      expect(values[":v_version"]).toBe(2);
     });
   });
 
-  describe('deleteApp', () => {
-    test('writes a DeleteCommand for the metadata row keyed on appId only', async () => {
+  describe("deleteApp", () => {
+    test("writes a DeleteCommand for the metadata row keyed on appId only", async () => {
       seedApp();
 
-      await invokeHandler(
-        makeEvent('deleteApp', { appId: 'app-1' }),
-      );
+      await invokeHandler(makeEvent("deleteApp", { appId: "app-1" }));
 
       const deleteCalls = ddbMock.commandCalls(DeleteCommand);
       const metaDelete = deleteCalls.find(
         (c) =>
-          c.args[0].input.TableName === 'citadel-apps-test' &&
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.appId === 'app-1' &&
+          c.args[0].input.TableName === "citadel-apps-test" &&
+          (c.args[0].input.Key as Record<string, unknown> | undefined)
+            ?.appId === "app-1" &&
           // Key must be appId only — AppsTable has no sort key.
-          (c.args[0].input.Key as Record<string, unknown> | undefined)?.sortId === undefined,
+          (c.args[0].input.Key as Record<string, unknown> | undefined)
+            ?.sortId === undefined,
       );
       expect(metaDelete).toBeDefined();
     });
   });
 
-  describe('eventually-consistent failure semantics', () => {
-    test('createApp succeeds even if AppsTable UpdateCommand throws', async () => {
-      ddbMock.on(UpdateCommand).rejects(new Error('AppsTable down'));
+  describe("eventually-consistent failure semantics", () => {
+    test("createApp succeeds even if AppsTable UpdateCommand throws", async () => {
+      ddbMock.on(UpdateCommand).rejects(new Error("AppsTable down"));
 
       // Helper swallows the error → handler must still resolve.
       await expect(
         invokeHandler(
-          makeEvent('createApp', {
-            input: { name: 'New App', orgId: 'org-1' },
+          makeEvent("createApp", {
+            input: { name: "New App", orgId: "org-1" },
           }),
         ),
       ).resolves.toBeDefined();
     });
 
-    test('deleteApp succeeds even if AppsTable DeleteCommand throws', async () => {
+    test("deleteApp succeeds even if AppsTable DeleteCommand throws", async () => {
       seedApp();
-      ddbMock.on(DeleteCommand).rejects(new Error('AppsTable down'));
+      ddbMock.on(DeleteCommand).rejects(new Error("AppsTable down"));
 
       await expect(
-        invokeHandler(
-          makeEvent('deleteApp', { appId: 'app-1' }),
-        ),
+        invokeHandler(makeEvent("deleteApp", { appId: "app-1" })),
       ).resolves.toBeDefined();
     });
   });

@@ -23,18 +23,21 @@
  */
 // Env vars MUST be set BEFORE `import { handler }` — the resolver captures
 // EVENT_BUS_NAME / APPS_TABLE / DEFAULT_REGION at module-load time.
-process.env.REGISTRY_ID = 'test-registry-id';
-process.env.APPS_TABLE = 'citadel-apps-test';
-process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
-process.env.AGENT_CONFIG_TABLE = 'citadel-agents-test';
-process.env.EVENT_BUS_NAME = 'citadel-agents-test';
-process.env.USER_POOL_ID = 'us-east-1_test';
-process.env.AWS_REGION = 'us-east-1';
+process.env.REGISTRY_ID = "test-registry-id";
+process.env.APPS_TABLE = "citadel-apps-test";
+process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
+process.env.AGENT_CONFIG_TABLE = "citadel-agents-test";
+process.env.EVENT_BUS_NAME = "citadel-agents-test";
+process.env.USER_POOL_ID = "us-east-1_test";
+process.env.AWS_REGION = "us-east-1";
 // Leave AUTHORITY_UNITS_TABLE unset so grantFabricatorAuthority becomes a
 // no-op inside createApp and we do not need a DynamoDB mock for that path.
 delete process.env.AUTHORITY_UNITS_TABLE;
 
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
 import {
   DynamoDBDocumentClient,
   QueryCommand,
@@ -42,8 +45,8 @@ import {
   PutCommand,
   UpdateCommand,
   DeleteCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { mockClient } from 'aws-sdk-client-mock';
+} from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -51,11 +54,11 @@ const ddbMock = mockClient(DynamoDBDocumentClient);
 import {
   seedMockRegistry,
   resetMockRegistry,
-} from './fixtures/registry-service-mock';
+} from "./fixtures/registry-service-mock";
 
-jest.mock('../../services/registry-service', () => {
+jest.mock("../../services/registry-service", () => {
   const { getMockRegistryService } = jest.requireActual(
-    './fixtures/registry-service-mock',
+    "./fixtures/registry-service-mock",
   );
   // Stable singleton wrapping the fixture with jest.fn spies so tests can
   // inspect the exact args the resolver passes to the registry writes.
@@ -73,16 +76,16 @@ jest.mock('../../services/registry-service', () => {
   };
 });
 
-jest.mock('../../utils/appsync', () => ({
-  getUserId: jest.fn().mockReturnValue('user-123'),
+jest.mock("../../utils/appsync", () => ({
+  getUserId: jest.fn().mockReturnValue("user-123"),
 }));
 
-jest.mock('../../utils/appsync-publish', () => ({
+jest.mock("../../utils/appsync-publish", () => ({
   publishAppStatusEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
-import { getRegistryService } from '../../services/registry-service';
-import { handler } from '../registry-agent-record-resolver';
+import { getRegistryService } from "../../services/registry-service";
+import { handler } from "../registry-agent-record-resolver";
 
 const registry = getRegistryService() as unknown as {
   createResource: jest.Mock;
@@ -97,11 +100,17 @@ type HandlerEvent = Parameters<typeof handler>[0];
 // (single cast here) so calls don't pass superfluous arguments.
 const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
-function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
+function makeEvent(
+  fieldName: string,
+  args: Record<string, unknown>,
+  sub = "user-123",
+): HandlerEvent {
   return {
     info: { fieldName },
     arguments: args,
-    identity: { sub, claims: { sub } },
+    // custom:organization: 'org-1' matches seedApp's manifest.orgId and
+    // createdBy — satisfies the finding-8f8fd119 editor gate on updateApp.
+    identity: { sub, claims: { sub, "custom:organization": "org-1" } },
   } as unknown as HandlerEvent;
 }
 
@@ -136,32 +145,35 @@ function lastMetaDescriptionWrite(): unknown {
     .filter((c) =>
       Object.prototype.hasOwnProperty.call(
         c.args[0].input.ExpressionAttributeValues ?? {},
-        ':v_description',
+        ":v_description",
       ),
     );
   expect(calls.length).toBeGreaterThanOrEqual(1);
   return calls[calls.length - 1].args[0].input.ExpressionAttributeValues![
-    ':v_description'
+    ":v_description"
   ];
 }
 
-function seedApp(opts: { name?: string; description?: string; version?: number } = {}): void {
-  seedMockRegistry('agent', 'app-1', {
-    name: opts.name ?? 'Legacy App',
-    description: opts.description ?? 'Existing description',
-    status: 'DRAFT',
+function seedApp(
+  opts: { name?: string; description?: string; version?: number } = {},
+): void {
+  seedMockRegistry("agent", "app-1", {
+    name: opts.name ?? "Legacy App",
+    description: opts.description ?? "Existing description",
+    status: "DRAFT",
     customDescriptorContent: JSON.stringify({
-      appId: 'app-1',
+      appId: "app-1",
       manifest: {
-        orgId: 'org-1',
+        orgId: "org-1",
         version: opts.version ?? 1,
-        status: 'DRAFT',
+        status: "DRAFT",
         workflowIds: [],
         agentBindings: [],
         permissions: [],
         configSchema: null,
         configValues: null,
         authConfig: null,
+        createdBy: "user-123",
         access: {},
         routingConfig: null,
       },
@@ -169,7 +181,7 @@ function seedApp(opts: { name?: string; description?: string; version?: number }
   });
 }
 
-describe('registry-agent-record-resolver — description defaulting', () => {
+describe("registry-agent-record-resolver — description defaulting", () => {
   beforeEach(() => {
     resetMockRegistry();
     registry.createResource.mockClear();
@@ -180,8 +192,12 @@ describe('registry-agent-record-resolver — description defaulting', () => {
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
     ddbMock.on(DeleteCommand).resolves({});
-    ddbMock.on(QueryCommand).resolves({ Items: [], LastEvaluatedKey: undefined });
-    ddbMock.on(ScanCommand).resolves({ Items: [], LastEvaluatedKey: undefined });
+    ddbMock
+      .on(QueryCommand)
+      .resolves({ Items: [], LastEvaluatedKey: undefined });
+    ddbMock
+      .on(ScanCommand)
+      .resolves({ Items: [], LastEvaluatedKey: undefined });
   });
 
   afterAll(() => {
@@ -196,122 +212,122 @@ describe('registry-agent-record-resolver — description defaulting', () => {
 
   // ─── createApp ─────────────────────────────────────────────────
 
-  describe('createApp', () => {
-    test('defaults the registry description to the app name when description is omitted (Import Blueprint New App regression)', async () => {
+  describe("createApp", () => {
+    test("defaults the registry description to the app name when description is omitted (Import Blueprint New App regression)", async () => {
       await invokeHandler(
-        makeEvent('createApp', {
-          input: { name: 'My New App', orgId: 'org-1' },
+        makeEvent("createApp", {
+          input: { name: "My New App", orgId: "org-1" },
         }),
       );
 
       const created = lastCreateResourceInput();
-      expect(created.description).toBe('My New App');
+      expect(created.description).toBe("My New App");
     });
 
-    test('defaults a blank (whitespace-only) description to the app name', async () => {
+    test("defaults a blank (whitespace-only) description to the app name", async () => {
       await invokeHandler(
-        makeEvent('createApp', {
-          input: { name: 'My New App', orgId: 'org-1', description: '   ' },
+        makeEvent("createApp", {
+          input: { name: "My New App", orgId: "org-1", description: "   " },
         }),
       );
 
       const created = lastCreateResourceInput();
-      expect(created.description).toBe('My New App');
+      expect(created.description).toBe("My New App");
     });
 
-    test('mirrors the defaulted description to the AppsTable #META row (registry/mirror consistency)', async () => {
+    test("mirrors the defaulted description to the AppsTable #META row (registry/mirror consistency)", async () => {
       await invokeHandler(
-        makeEvent('createApp', {
-          input: { name: 'My New App', orgId: 'org-1' },
+        makeEvent("createApp", {
+          input: { name: "My New App", orgId: "org-1" },
         }),
       );
 
-      expect(lastMetaDescriptionWrite()).toBe('My New App');
+      expect(lastMetaDescriptionWrite()).toBe("My New App");
     });
 
-    test('passes a provided non-empty description to the registry verbatim', async () => {
+    test("passes a provided non-empty description to the registry verbatim", async () => {
       await invokeHandler(
-        makeEvent('createApp', {
+        makeEvent("createApp", {
           input: {
-            name: 'My New App',
-            orgId: 'org-1',
-            description: 'Hand-written description',
+            name: "My New App",
+            orgId: "org-1",
+            description: "Hand-written description",
           },
         }),
       );
 
       const created = lastCreateResourceInput();
-      expect(created.description).toBe('Hand-written description');
-      expect(lastMetaDescriptionWrite()).toBe('Hand-written description');
+      expect(created.description).toBe("Hand-written description");
+      expect(lastMetaDescriptionWrite()).toBe("Hand-written description");
     });
   });
 
   // ─── updateApp (sibling-path sweep) ────────────────────────────
 
-  describe('updateApp', () => {
-    test('never forwards an explicit-blank description to the registry — defaults to the app name', async () => {
-      seedApp({ name: 'Legacy App' });
+  describe("updateApp", () => {
+    test("never forwards an explicit-blank description to the registry — defaults to the app name", async () => {
+      seedApp({ name: "Legacy App" });
 
       await invokeHandler(
-        makeEvent('updateApp', {
-          input: { appId: 'app-1', version: 1, description: '' },
+        makeEvent("updateApp", {
+          input: { appId: "app-1", version: 1, description: "" },
         }),
       );
 
       const updated = lastUpdateResourceInput();
-      expect(updated.description).toBe('Legacy App');
+      expect(updated.description).toBe("Legacy App");
     });
 
-    test('defaults to the app name when description is omitted and the existing record description is blank (legacy record)', async () => {
-      seedApp({ name: 'Legacy App', description: '' });
+    test("defaults to the app name when description is omitted and the existing record description is blank (legacy record)", async () => {
+      seedApp({ name: "Legacy App", description: "" });
 
       await invokeHandler(
-        makeEvent('updateApp', {
-          input: { appId: 'app-1', version: 1, name: 'Renamed App' },
+        makeEvent("updateApp", {
+          input: { appId: "app-1", version: 1, name: "Renamed App" },
         }),
       );
 
       const updated = lastUpdateResourceInput();
-      expect(updated.description).toBe('Renamed App');
+      expect(updated.description).toBe("Renamed App");
     });
 
-    test('mirrors the defaulted description to the AppsTable #META row when the caller sent a blank description', async () => {
-      seedApp({ name: 'Legacy App' });
+    test("mirrors the defaulted description to the AppsTable #META row when the caller sent a blank description", async () => {
+      seedApp({ name: "Legacy App" });
 
       await invokeHandler(
-        makeEvent('updateApp', {
-          input: { appId: 'app-1', version: 1, description: '   ' },
+        makeEvent("updateApp", {
+          input: { appId: "app-1", version: 1, description: "   " },
         }),
       );
 
-      expect(lastMetaDescriptionWrite()).toBe('Legacy App');
+      expect(lastMetaDescriptionWrite()).toBe("Legacy App");
     });
 
-    test('preserves a provided non-empty description verbatim', async () => {
-      seedApp({ name: 'Legacy App' });
+    test("preserves a provided non-empty description verbatim", async () => {
+      seedApp({ name: "Legacy App" });
 
       await invokeHandler(
-        makeEvent('updateApp', {
-          input: { appId: 'app-1', version: 1, description: 'Updated by hand' },
-        }),
-      );
-
-      const updated = lastUpdateResourceInput();
-      expect(updated.description).toBe('Updated by hand');
-      expect(lastMetaDescriptionWrite()).toBe('Updated by hand');
-    });
-
-    test('keeps the existing non-blank description when the caller omits it', async () => {
-      seedApp({ name: 'Legacy App', description: 'Existing description' });
-
-      await invokeHandler(
-        makeEvent('updateApp', {
-          input: { appId: 'app-1', version: 1, name: 'Renamed App' },
+        makeEvent("updateApp", {
+          input: { appId: "app-1", version: 1, description: "Updated by hand" },
         }),
       );
 
       const updated = lastUpdateResourceInput();
-      expect(updated.description).toBe('Existing description');
+      expect(updated.description).toBe("Updated by hand");
+      expect(lastMetaDescriptionWrite()).toBe("Updated by hand");
+    });
+
+    test("keeps the existing non-blank description when the caller omits it", async () => {
+      seedApp({ name: "Legacy App", description: "Existing description" });
+
+      await invokeHandler(
+        makeEvent("updateApp", {
+          input: { appId: "app-1", version: 1, name: "Renamed App" },
+        }),
+      );
+
+      const updated = lastUpdateResourceInput();
+      expect(updated.description).toBe("Existing description");
     });
   });
 });

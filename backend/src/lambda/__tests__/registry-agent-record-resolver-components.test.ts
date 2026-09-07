@@ -91,7 +91,10 @@ function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
-    identity: { sub: "user-123", claims: { sub: "user-123" } },
+    identity: {
+      sub: "user-123",
+      claims: { sub: "user-123", "custom:organization": "org-1" },
+    },
   } as unknown as HandlerEvent;
 }
 
@@ -122,6 +125,12 @@ function seedApp(
         configSchema: opts.configSchema ?? null,
         configValues: opts.configValues ?? null,
         authConfig: null,
+        // createdBy stamps the test caller (user-123) as the implicit
+        // creator-owner fallback in assertManifestAccess, so these
+        // functional tests (which are not themselves about authorization)
+        // exercise the legitimate-caller path rather than being refused by
+        // the finding-8f8fd119 editor gate added to every mutation here.
+        createdBy: "user-123",
         access: {},
         routingConfig: null,
       },

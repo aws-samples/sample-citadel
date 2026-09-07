@@ -8,31 +8,39 @@
  * agent-app-shim-resolver.test.ts.
  */
 
-process.env.REGISTRY_ID = 'test-registry-id';
-process.env.APPS_TABLE = 'citadel-apps-test';
-process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
-process.env.AGENT_CONFIG_TABLE = 'citadel-agents-test';
-process.env.EVENT_BUS_NAME = 'citadel-agents-test';
-process.env.USER_POOL_ID = 'us-east-1_test';
-process.env.AUTHORITY_UNITS_TABLE = 'test-authority-units';
-process.env.APPSYNC_ENDPOINT = 'https://test-api.appsync-api.us-east-1.amazonaws.com/graphql';
-process.env.AWS_REGION = 'us-east-1';
+process.env.REGISTRY_ID = "test-registry-id";
+process.env.APPS_TABLE = "citadel-apps-test";
+process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
+process.env.AGENT_CONFIG_TABLE = "citadel-agents-test";
+process.env.EVENT_BUS_NAME = "citadel-agents-test";
+process.env.USER_POOL_ID = "us-east-1_test";
+process.env.AUTHORITY_UNITS_TABLE = "test-authority-units";
+process.env.APPSYNC_ENDPOINT =
+  "https://test-api.appsync-api.us-east-1.amazonaws.com/graphql";
+process.env.AWS_REGION = "us-east-1";
 
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { mockClient } from 'aws-sdk-client-mock';
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
 
 import {
   seedMockRegistry,
   resetMockRegistry,
-} from './fixtures/registry-service-mock';
+} from "./fixtures/registry-service-mock";
 
-jest.mock('../../services/registry-service', () => {
-  const { getMockRegistryService } = jest.requireActual('./fixtures/registry-service-mock');
-  const actual = jest.requireActual('../../services/registry-service');
+jest.mock("../../services/registry-service", () => {
+  const { getMockRegistryService } = jest.requireActual(
+    "./fixtures/registry-service-mock",
+  );
+  const actual = jest.requireActual("../../services/registry-service");
   return {
-    RegistryService: jest.fn().mockImplementation(() => getMockRegistryService()),
+    RegistryService: jest
+      .fn()
+      .mockImplementation(() => getMockRegistryService()),
     getRegistryService: jest.fn(() => getMockRegistryService()),
     _resetRegistryService: jest.fn(),
     isRegistryEnabled: jest.fn(() => true),
@@ -41,20 +49,20 @@ jest.mock('../../services/registry-service', () => {
   };
 });
 
-jest.mock('../../utils/appsync', () => ({
-  getUserId: jest.fn().mockReturnValue('user-123'),
+jest.mock("../../utils/appsync", () => ({
+  getUserId: jest.fn().mockReturnValue("user-123"),
 }));
 
 const mockPublishAppStatusEvent = jest.fn().mockResolvedValue({});
-jest.mock('../../utils/appsync-publish', () => ({
+jest.mock("../../utils/appsync-publish", () => ({
   publishAppStatusEvent: mockPublishAppStatusEvent,
 }));
 
-jest.mock('uuid', () => ({
-  v4: jest.fn().mockReturnValue('test-correlation-id'),
+jest.mock("uuid", () => ({
+  v4: jest.fn().mockReturnValue("test-correlation-id"),
 }));
 
-import { handler } from '../registry-agent-record-resolver';
+import { handler } from "../registry-agent-record-resolver";
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
@@ -68,7 +76,12 @@ function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
-    identity: { sub: 'user-123', claims: { sub: 'user-123' } },
+    // custom:organization: 'org-1' matches seedApp's default orgId and
+    // createdBy — satisfies the finding-8f8fd119 editor gate on updateApp.
+    identity: {
+      sub: "user-123",
+      claims: { sub: "user-123", "custom:organization": "org-1" },
+    },
   } as unknown as HandlerEvent;
 }
 
@@ -78,20 +91,20 @@ function makeAdminEvent(fieldName: string, args: Record<string, unknown>) {
     info: { fieldName },
     arguments: args,
     identity: {
-      sub: 'admin-1',
-      claims: { sub: 'admin-1', 'custom:role': 'admin' },
-      'custom:role': 'admin',
+      sub: "admin-1",
+      claims: { sub: "admin-1", "custom:role": "admin" },
+      "custom:role": "admin",
     },
   } as unknown as HandlerEvent;
 }
 
-function seedApp(status: string, version: number = 1, orgId: string = 'org-1') {
-  seedMockRegistry('agent', 'app-1', {
-    name: 'Test App',
-    description: 'Test',
+function seedApp(status: string, version: number = 1, orgId: string = "org-1") {
+  seedMockRegistry("agent", "app-1", {
+    name: "Test App",
+    description: "Test",
     status,
     customDescriptorContent: JSON.stringify({
-      appId: 'app-1',
+      appId: "app-1",
       manifest: {
         orgId,
         version,
@@ -102,6 +115,11 @@ function seedApp(status: string, version: number = 1, orgId: string = 'org-1') {
         configSchema: null,
         configValues: null,
         authConfig: null,
+        // createdBy stamps 'user-123' (the mocked getUserId return / plain
+        // makeEvent's default sub) as the implicit creator-owner fallback,
+        // so non-admin makeEvent callers satisfy the finding-8f8fd119
+        // editor gate on updateApp regardless of the orgId param used.
+        createdBy: "user-123",
         access: {},
         routingConfig: null,
       },
@@ -109,7 +127,7 @@ function seedApp(status: string, version: number = 1, orgId: string = 'org-1') {
   });
 }
 
-describe('registry-agent-record-resolver — status transition events', () => {
+describe("registry-agent-record-resolver — status transition events", () => {
   beforeEach(() => {
     resetMockRegistry();
     ebMock.reset();
@@ -129,89 +147,89 @@ describe('registry-agent-record-resolver — status transition events', () => {
     delete process.env.AUTHORITY_UNITS_TABLE;
   });
 
-  test('emits app.status.pending_approval_to_approved on PENDING_APPROVAL→APPROVED transition (admin decision)', async () => {
-    seedApp('PENDING_APPROVAL', 1);
+  test("emits app.status.pending_approval_to_approved on PENDING_APPROVAL→APPROVED transition (admin decision)", async () => {
+    seedApp("PENDING_APPROVAL", 1);
 
     await invokeHandler(
-      makeAdminEvent('updateApp', {
-        input: { appId: 'app-1', status: 'APPROVED', version: 1 },
+      makeAdminEvent("updateApp", {
+        input: { appId: "app-1", status: "APPROVED", version: 1 },
       }),
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvent = allEntries.find(
-      (e) => e?.DetailType === 'app.status.pending_approval_to_approved',
+      (e) => e?.DetailType === "app.status.pending_approval_to_approved",
     );
 
     expect(statusEvent).toBeDefined();
-    expect(statusEvent!.Source).toBe('citadel.apps');
-    expect(statusEvent!.EventBusName).toBe('citadel-agents-test');
+    expect(statusEvent!.Source).toBe("citadel.apps");
+    expect(statusEvent!.EventBusName).toBe("citadel-agents-test");
 
     const detail = JSON.parse(statusEvent!.Detail!);
-    expect(detail.appId).toBe('app-1');
-    expect(detail.orgId).toBe('org-1');
-    expect(detail.previousStatus).toBe('PENDING_APPROVAL');
-    expect(detail.newStatus).toBe('APPROVED');
+    expect(detail.appId).toBe("app-1");
+    expect(detail.orgId).toBe("org-1");
+    expect(detail.previousStatus).toBe("PENDING_APPROVAL");
+    expect(detail.newStatus).toBe("APPROVED");
     expect(detail.timestamp).toBeDefined();
-    expect(detail.correlationId).toBe('test-correlation-id');
+    expect(detail.correlationId).toBe("test-correlation-id");
   });
 
-  test('emits app.status.approved_to_deprecated on APPROVED→DEPRECATED transition', async () => {
-    seedApp('APPROVED', 1);
+  test("emits app.status.approved_to_deprecated on APPROVED→DEPRECATED transition", async () => {
+    seedApp("APPROVED", 1);
 
     await invokeHandler(
-      makeEvent('updateApp', {
-        input: { appId: 'app-1', status: 'DEPRECATED', version: 1 },
+      makeEvent("updateApp", {
+        input: { appId: "app-1", status: "DEPRECATED", version: 1 },
       }),
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvent = allEntries.find(
-      (e) => e?.DetailType === 'app.status.approved_to_deprecated',
+      (e) => e?.DetailType === "app.status.approved_to_deprecated",
     );
 
     expect(statusEvent).toBeDefined();
     const detail = JSON.parse(statusEvent!.Detail!);
-    expect(detail.previousStatus).toBe('APPROVED');
-    expect(detail.newStatus).toBe('DEPRECATED');
+    expect(detail.previousStatus).toBe("APPROVED");
+    expect(detail.newStatus).toBe("DEPRECATED");
   });
 
-  test('emits app.status.rejected_to_draft on REJECTED→DRAFT (resubmit) transition', async () => {
-    seedApp('REJECTED', 3);
+  test("emits app.status.rejected_to_draft on REJECTED→DRAFT (resubmit) transition", async () => {
+    seedApp("REJECTED", 3);
 
     await invokeHandler(
-      makeEvent('updateApp', {
-        input: { appId: 'app-1', status: 'DRAFT', version: 3 },
+      makeEvent("updateApp", {
+        input: { appId: "app-1", status: "DRAFT", version: 3 },
       }),
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvent = allEntries.find(
-      (e) => e?.DetailType === 'app.status.rejected_to_draft',
+      (e) => e?.DetailType === "app.status.rejected_to_draft",
     );
 
     expect(statusEvent).toBeDefined();
     const detail = JSON.parse(statusEvent!.Detail!);
-    expect(detail.previousStatus).toBe('REJECTED');
-    expect(detail.newStatus).toBe('DRAFT');
+    expect(detail.previousStatus).toBe("REJECTED");
+    expect(detail.newStatus).toBe("DRAFT");
   });
 
-  test('status event timestamp is valid ISO 8601', async () => {
-    seedApp('REJECTED', 3);
+  test("status event timestamp is valid ISO 8601", async () => {
+    seedApp("REJECTED", 3);
 
     await invokeHandler(
-      makeEvent('updateApp', {
-        input: { appId: 'app-1', status: 'DRAFT', version: 3 },
+      makeEvent("updateApp", {
+        input: { appId: "app-1", status: "DRAFT", version: 3 },
       }),
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvent = allEntries.find(
-      (e) => e?.DetailType === 'app.status.rejected_to_draft',
+      (e) => e?.DetailType === "app.status.rejected_to_draft",
     );
     const detail = JSON.parse(statusEvent!.Detail!);
 
@@ -219,97 +237,99 @@ describe('registry-agent-record-resolver — status transition events', () => {
     expect(parsed.toISOString()).toBe(detail.timestamp);
   });
 
-  test('does not emit status transition event for non-status updates', async () => {
-    seedApp('DRAFT', 1);
+  test("does not emit status transition event for non-status updates", async () => {
+    seedApp("DRAFT", 1);
 
     await invokeHandler(
-      makeEvent('updateApp', {
-        input: { appId: 'app-1', name: 'Updated Name', version: 1 },
+      makeEvent("updateApp", {
+        input: { appId: "app-1", name: "Updated Name", version: 1 },
       }),
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvents = allEntries.filter((e) =>
-      e?.DetailType?.startsWith('app.status.'),
+      e?.DetailType?.startsWith("app.status."),
     );
     expect(statusEvents.length).toBe(0);
   });
 
-  test('does not emit status transition event when status is unchanged', async () => {
-    seedApp('DRAFT', 1);
+  test("does not emit status transition event when status is unchanged", async () => {
+    seedApp("DRAFT", 1);
 
     await invokeHandler(
-      makeEvent('updateApp', {
-        input: { appId: 'app-1', status: 'DRAFT', name: 'Updated', version: 1 },
+      makeEvent("updateApp", {
+        input: { appId: "app-1", status: "DRAFT", name: "Updated", version: 1 },
       }),
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvents = allEntries.filter((e) =>
-      e?.DetailType?.startsWith('app.status.'),
+      e?.DetailType?.startsWith("app.status."),
     );
     expect(statusEvents.length).toBe(0);
   });
 
-  test('calls publishAppStatusEvent for PENDING_APPROVAL→APPROVED transition (admin decision)', async () => {
-    seedApp('PENDING_APPROVAL', 1);
+  test("calls publishAppStatusEvent for PENDING_APPROVAL→APPROVED transition (admin decision)", async () => {
+    seedApp("PENDING_APPROVAL", 1);
 
     await invokeHandler(
-      makeAdminEvent('updateApp', {
-        input: { appId: 'app-1', status: 'APPROVED', version: 1 },
+      makeAdminEvent("updateApp", {
+        input: { appId: "app-1", status: "APPROVED", version: 1 },
       }),
     );
 
     expect(mockPublishAppStatusEvent).toHaveBeenCalledTimes(1);
     expect(mockPublishAppStatusEvent).toHaveBeenCalledWith(
       expect.objectContaining({
-        appId: 'app-1',
-        previousStatus: 'PENDING_APPROVAL',
-        newStatus: 'APPROVED',
+        appId: "app-1",
+        previousStatus: "PENDING_APPROVAL",
+        newStatus: "APPROVED",
         timestamp: expect.any(String),
       }),
     );
   });
 
-  test('does not call publishAppStatusEvent for non-status updates', async () => {
-    seedApp('DRAFT', 1);
+  test("does not call publishAppStatusEvent for non-status updates", async () => {
+    seedApp("DRAFT", 1);
 
     await invokeHandler(
-      makeEvent('updateApp', {
-        input: { appId: 'app-1', name: 'Updated Name', version: 1 },
+      makeEvent("updateApp", {
+        input: { appId: "app-1", name: "Updated Name", version: 1 },
       }),
     );
 
     expect(mockPublishAppStatusEvent).not.toHaveBeenCalled();
   });
 
-  test('does not fail updateApp if publishAppStatusEvent throws', async () => {
-    mockPublishAppStatusEvent.mockRejectedValueOnce(new Error('AppSync unreachable'));
+  test("does not fail updateApp if publishAppStatusEvent throws", async () => {
+    mockPublishAppStatusEvent.mockRejectedValueOnce(
+      new Error("AppSync unreachable"),
+    );
 
-    seedApp('REJECTED', 3);
+    seedApp("REJECTED", 3);
 
     const result = (await invokeHandler(
-      makeEvent('updateApp', {
-        input: { appId: 'app-1', status: 'DRAFT', version: 3 },
+      makeEvent("updateApp", {
+        input: { appId: "app-1", status: "DRAFT", version: 3 },
       }),
     )) as Record<string, unknown>;
 
     expect(result).toBeDefined();
-    expect(result.appId).toBe('app-1');
+    expect(result.appId).toBe("app-1");
   });
 
-  test('publishAppStatusEvent mutation emits app.status.published and echoes payload', async () => {
+  test("publishAppStatusEvent mutation emits app.status.published and echoes payload", async () => {
     const input = {
-      appId: 'app-xyz',
-      previousStatus: 'DRAFT',
-      newStatus: 'APPROVED',
-      timestamp: '2025-05-08T10:00:00.000Z',
+      appId: "app-xyz",
+      previousStatus: "DRAFT",
+      newStatus: "APPROVED",
+      timestamp: "2025-05-08T10:00:00.000Z",
     };
 
     const result = await invokeHandler(
-      makeEvent('publishAppStatusEvent', { input }),
+      makeEvent("publishAppStatusEvent", { input }),
     );
 
     expect(result).toEqual(input);
@@ -317,9 +337,9 @@ describe('registry-agent-record-resolver — status transition events', () => {
       .commandCalls(PutEventsCommand)
       .flatMap((c) => c.args[0].input.Entries || []);
     const published = entries.find(
-      (e) => e?.DetailType === 'app.status.published',
+      (e) => e?.DetailType === "app.status.published",
     );
     expect(published).toBeDefined();
-    expect(published!.Source).toBe('citadel.apps');
+    expect(published!.Source).toBe("citadel.apps");
   });
 });

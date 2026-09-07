@@ -95,7 +95,13 @@ function makeEvent(
   return {
     info: { fieldName },
     arguments: args,
-    identity: { sub, claims: { sub } },
+    // custom:organization defaults to "org-1" — matching seedApp's default
+    // manifest.orgId and createdBy ("user-123") — so callers of the plain
+    // makeEvent satisfy the finding-8f8fd119 editor gate on updateApp
+    // (assertManifestAccess) via the same-org + implicit-creator-owner
+    // fallback path, without weakening the admin-gate test above (that test
+    // asserts on the SEPARATE isAdminFromEvent check, unaffected by org).
+    identity: { sub, claims: { sub, "custom:organization": "org-1" } },
   } as unknown as HandlerEvent;
 }
 
@@ -162,6 +168,13 @@ function seedApp(
         configSchema: null,
         configValues: null,
         authConfig: null,
+        // createdBy stamps the default caller ("user-123", plain makeEvent's
+        // default sub) as the implicit creator-owner fallback in
+        // assertManifestAccess, so these CRUD tests exercise the legitimate
+        // editor/owner path rather than being refused by the finding-8f8fd119
+        // gate now on updateApp. Callers testing cross-org/non-editor refusal
+        // use a distinct seeded app or override via opts.manifest.
+        createdBy: "user-123",
         access: {},
         routingConfig: null,
         ...(opts.manifest ?? {}),
