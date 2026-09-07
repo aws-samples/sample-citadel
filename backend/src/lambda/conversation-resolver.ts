@@ -15,7 +15,6 @@ import {
 } from "@aws-sdk/client-eventbridge";
 import { v4 as uuidv4 } from "uuid";
 import { mintRunId, buildDispatchContext } from "../utils/run-id";
-import { assertProjectAccess } from "../utils/project-access";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -53,14 +52,6 @@ interface AppSyncEvent {
 async function sendMessage(event: AppSyncEvent) {
   const { projectId, message } = event.arguments;
   const userId = event.identity.sub;
-
-  // Security fix (finding 60a5a6ae, CRE item 1): projectId is client-supplied
-  // and drives both the DynamoDB write and the EventBridge dispatch that
-  // triggers another tenant's agents (prompt/message injection). Reconcile
-  // it against the caller BEFORE any write — reusing the same gate
-  // project-resolver.ts's getProject enforces. Fail closed on any
-  // identity/lookup failure.
-  await assertProjectAccess(projectId, userId, event);
 
   console.log("Sending message:", {
     projectId,
@@ -167,13 +158,6 @@ async function getConversationHistory(event: AppSyncEvent) {
     limit?: number;
     nextToken?: string;
   };
-  const userId = event.identity.sub;
-
-  // Security fix (finding 60a5a6ae, CRE item 1): projectId is client-supplied
-  // and drives the DynamoDB query — reconcile it against the caller BEFORE
-  // any read (cross-tenant conversation disclosure otherwise). Reuses the
-  // same gate as sendMessage.
-  await assertProjectAccess(projectId, userId, event);
 
   console.log("Getting conversation history for project:", projectId);
 

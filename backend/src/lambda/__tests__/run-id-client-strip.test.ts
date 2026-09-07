@@ -133,19 +133,11 @@ describe("runId client-strip — chat message (conversation-resolver sendMessage
   beforeEach(() => {
     process.env.CONVERSATIONS_TABLE = "test-conversations";
     process.env.EVENT_BUS_NAME = "test-event-bus";
-    process.env.PROJECTS_TABLE = "test-projects";
-    // sendMessage now reconciles projectId against the caller (finding
-    // 60a5a6ae, CRE item 1) — this test is about runId stripping, not
-    // access control, so satisfy the gate with an owner match.
-    ddbMock.on(GetCommand).resolves({
-      Item: { owner: "user-123", organization: "org-1" },
-    });
   });
 
   afterEach(() => {
     delete process.env.CONVERSATIONS_TABLE;
     delete process.env.EVENT_BUS_NAME;
-    delete process.env.PROJECTS_TABLE;
   });
 
   test("ignores a client-supplied runId planted in the message input and mints a fresh one", async () => {
