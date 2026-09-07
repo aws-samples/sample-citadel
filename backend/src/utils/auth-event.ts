@@ -1,13 +1,30 @@
-import { CognitoIdentityProviderClient, AdminGetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
+import {
+  CognitoIdentityProviderClient,
+  AdminGetUserCommand,
+} from "@aws-sdk/client-cognito-identity-provider";
 
 const cognitoClient = new CognitoIdentityProviderClient({});
+
+/**
+ * Thrown by {@link assertRowOrg} when a loaded row's org does not match the
+ * caller's server-derived org. Callers should let this propagate (fail
+ * closed) rather than catching and continuing.
+ */
+export class CrossOrgAccessError extends Error {
+  constructor(message = "Access denied") {
+    super(message);
+    this.name = "CrossOrgAccessError";
+  }
+}
 
 /**
  * Reads a claim from the AppSync identity, tolerating both shapes:
  *  - `identity['custom:organization']` (Cognito user pool auth mode)
  *  - `identity.claims['custom:organization']` (some proxy/IAM modes)
  */
-type IdentityBag = Record<string, unknown> & { claims?: Record<string, unknown> | null };
+type IdentityBag = Record<string, unknown> & {
+  claims?: Record<string, unknown> | null;
+};
 type EventWithIdentity = { identity?: IdentityBag | null } | null | undefined;
 
 function readClaim(event: unknown, name: string): string | undefined {
@@ -26,7 +43,9 @@ function readClaim(event: unknown, name: string): string | undefined {
  * intake-orchestration resolver (project-owner fallback for org-less
  * project rows created before the pre-token-generation trigger existed).
  */
-export async function lookupUserOrganization(username: string): Promise<string | null> {
+export async function lookupUserOrganization(
+  username: string,
+): Promise<string | null> {
   const userPoolId = process.env.USER_POOL_ID;
   if (!userPoolId) return null;
 
@@ -34,10 +53,12 @@ export async function lookupUserOrganization(username: string): Promise<string |
     const response = await cognitoClient.send(
       new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }),
     );
-    const attr = response.UserAttributes?.find((a) => a.Name === 'custom:organization');
+    const attr = response.UserAttributes?.find(
+      (a) => a.Name === "custom:organization",
+    );
     return attr?.Value || null;
   } catch (err) {
-    console.warn('lookupUserOrganization: Cognito lookup failed', {
+    console.warn("lookupUserOrganization: Cognito lookup failed", {
       userId: username,
       err: String(err),
     });
@@ -57,8 +78,10 @@ export async function lookupUserOrganization(username: string): Promise<string |
  * api-key auth). Callers are responsible for deciding whether null means
  * "deny" or "allow through".
  */
-export async function extractOrgFromEvent(event: unknown): Promise<string | null> {
-  const claimOrg = readClaim(event, 'custom:organization');
+export async function extractOrgFromEvent(
+  event: unknown,
+): Promise<string | null> {
+  const claimOrg = readClaim(event, "custom:organization");
   if (claimOrg) return claimOrg;
 
   const identity: IdentityBag = (event as EventWithIdentity)?.identity || {};
@@ -79,20 +102,20 @@ export async function extractOrgFromEvent(event: unknown): Promise<string | null
  */
 export function isAdminFromEvent(event: unknown): boolean {
   // Path 1: explicit custom:role claim equals 'admin'.
-  if (readClaim(event, 'custom:role') === 'admin') return true;
+  if (readClaim(event, "custom:role") === "admin") return true;
 
   // Path 2: cognito:groups membership includes 'admin'. Cognito issues this
   // claim as an array in standard JWT, but some AppSync auth modes flatten
   // it to a comma-separated string. Tolerate both.
-  const groups = readClaim(event, 'cognito:groups');
+  const groups = readClaim(event, "cognito:groups");
   if (Array.isArray(groups)) {
-    return groups.some((g) => typeof g === 'string' && g === 'admin');
+    return groups.some((g) => typeof g === "string" && g === "admin");
   }
-  if (typeof groups === 'string') {
+  if (typeof groups === "string") {
     return groups
-      .split(',')
+      .split(",")
       .map((s) => s.trim())
-      .includes('admin');
+      .includes("admin");
   }
 
   return false;
@@ -115,20 +138,51 @@ export function isAdminFromEvent(event: unknown): boolean {
  */
 export function hasRoleFromEvent(event: unknown, role: string): boolean {
   // Path 1: explicit custom:role claim equals the requested role.
-  if (readClaim(event, 'custom:role') === role) return true;
+  if (readClaim(event, "custom:role") === role) return true;
 
   // Path 2: cognito:groups membership includes the requested role. Tolerate
   // both the array and comma-separated-string shapes (see isAdminFromEvent).
-  const groups = readClaim(event, 'cognito:groups');
+  const groups = readClaim(event, "cognito:groups");
   if (Array.isArray(groups)) {
-    return groups.some((g) => typeof g === 'string' && g === role);
+    return groups.some((g) => typeof g === "string" && g === role);
   }
-  if (typeof groups === 'string') {
+  if (typeof groups === "string") {
     return groups
-      .split(',')
+      .split(",")
       .map((s) => s.trim())
       .includes(role);
   }
 
   return false;
+}
+
+/**
+ * Fetch-then-verify row-org reconciliation gate. Shared by every resolver
+ * that loads a client-supplied-ID row and must refuse a cross-org caller
+ * BEFORE any mutation/side-effect (finding ca76d041). Mirrors the
+ * already-correct `getExecution` gate in execution-resolver.ts and the
+ * `assertRowOrg`/`CrossOrgRowError` pattern duplicated in
+ * eval-comparison-resolver.ts and replay-package-builder.ts — this is the
+ * ONE shared version new callers should use instead of inlining another
+ * copy.
+ *
+ * Admins bypass (mirrors isAdminFromEvent usage elsewhere in this file).
+ * Otherwise: the caller's server-derived org (extractOrgFromEvent) must
+ * equal the row's `orgId`. Fail closed — a row with no orgId, or a caller
+ * with no resolvable org, is denied rather than silently allowed.
+ *
+ * Throws {@link CrossOrgAccessError} on denial.
+ */
+export async function assertRowOrg(
+  row: { orgId?: unknown } | null | undefined,
+  event: unknown,
+): Promise<void> {
+  if (isAdminFromEvent(event)) return;
+
+  const rowOrgId = typeof row?.orgId === "string" ? row.orgId : undefined;
+  const callerOrgId = await extractOrgFromEvent(event);
+
+  if (!rowOrgId || !callerOrgId || rowOrgId !== callerOrgId) {
+    throw new CrossOrgAccessError();
+  }
 }
