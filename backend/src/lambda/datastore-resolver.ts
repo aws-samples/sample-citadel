@@ -18,9 +18,14 @@ import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "./adapters/registry";
 import { PolicyManager, type ScopedCredentials } from "../utils/policy-manager";
 import { getDataStoreOperations } from "../utils/operations-registry";
-import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  assertRowOrg,
+} from "../utils/auth-event";
 import {
   ConflictError,
+  PermissionError,
   ResourceNotFoundError,
   ValidationError,
 } from "./adapters/errors";
@@ -104,6 +109,7 @@ interface DataStoreRecord {
   secretArn?: string;
   status?: string;
   usage?: string;
+  orgId?: string;
   [key: string]: unknown;
 }
 
@@ -155,7 +161,7 @@ export async function handler(event: AppSyncEvent) {
         return await listDataStores(effectiveOrgId, event.arguments.category);
       }
       case "getDataStore":
-        return await getDataStore(event.arguments.dataStoreId);
+        return await getDataStoreGuarded(event.arguments.dataStoreId, event);
       case "getDataStoreStats": {
         // Org scoping (sweep finding 615aa5bb, filed as the getDataStoreStats
         // defect): same coerce-not-reject read-path gate as listDataStores
@@ -170,17 +176,21 @@ export async function handler(event: AppSyncEvent) {
         return await createDataStore(
           event.arguments.input,
           event.identity?.username || "system",
+          event,
         );
       case "updateDataStore":
-        return await updateDataStore(event.arguments.input);
+        return await updateDataStore(event.arguments.input, event);
       case "deleteDataStore":
-        return await deleteDataStore(event.arguments.dataStoreId);
+        return await deleteDataStore(event.arguments.dataStoreId, event);
       case "connectDataStore":
-        return await connectDataStore(event.arguments.dataStoreId);
+        return await connectDataStore(event.arguments.dataStoreId, event);
       case "disconnectDataStore":
-        return await disconnectDataStore(event.arguments.dataStoreId);
+        return await disconnectDataStore(event.arguments.dataStoreId, event);
       case "testDataStoreConnection":
-        return await testDataStoreConnection(event.arguments.dataStoreId);
+        return await testDataStoreConnection(
+          event.arguments.dataStoreId,
+          event,
+        );
       case "listAvailableDataSources": {
         // Org scoping (sweep finding 615aa5bb): same coerce-not-reject
         // read-path gate as listDataStores/getDataStoreStats above.
@@ -302,6 +312,24 @@ async function getDataStore(dataStoreId: string): Promise<DataStoreRecord> {
   return item as DataStoreRecord;
 }
 
+/**
+ * Fetch-then-verify gate for the `getDataStore` GraphQL field itself
+ * (finding ca76d041, datastore half; CRE item 2). Unlike the collection
+ * reads above (listDataStores/getDataStoreStats/listAvailableDataSources),
+ * a single by-ID read has no orgId argument to coerce against — there is
+ * nothing to fall back to, so an unresolvable/mismatched caller org is a
+ * hard denial via the shared `assertRowOrg` gate, same as every mutation
+ * below. Admins bypass (assertRowOrg honours isAdminFromEvent).
+ */
+async function getDataStoreGuarded(
+  dataStoreId: string,
+  event: unknown,
+): Promise<DataStoreRecord> {
+  const item = await getDataStore(dataStoreId);
+  await assertRowOrg(item, event);
+  return item;
+}
+
 async function getDataStoreStats(orgId: string) {
   const result = await dynamodb.send(
     new QueryCommand({
@@ -389,7 +417,27 @@ async function listAvailableDataSources(orgId: string, usage?: string) {
 
 // --- Mutations ---
 
-async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
+async function createDataStore(
+  input: CreateDataStoreInput,
+  createdBy: string,
+  event: unknown,
+) {
+  // Org scoping (finding ca76d041, datastore half; CRE item 2): createDataStore
+  // trusted a client-supplied input.orgId outright. Mutation convention is
+  // reject-not-coerce (unlike the read-path collection queries above): derive
+  // the caller's org server-side and refuse a mismatched client value BEFORE
+  // any DynamoDB write, Secrets Manager call, or IAM change. Admins may still
+  // create on behalf of any org (same bypass every other operation honours).
+  const admin = isAdminFromEvent(event);
+  if (!admin) {
+    const callerOrgId = await extractOrgFromEvent(event);
+    if (!callerOrgId || callerOrgId !== input.orgId) {
+      throw new PermissionError(
+        "Access denied: orgId does not match caller's organization",
+      );
+    }
+  }
+
   const dataStoreId = uuidv4();
   const timestamp = new Date().toISOString();
 
@@ -598,9 +646,14 @@ async function createDataStore(input: CreateDataStoreInput, createdBy: string) {
   }
 }
 
-async function updateDataStore(input: UpdateDataStoreInput) {
+async function updateDataStore(input: UpdateDataStoreInput, event: unknown) {
   const dataStoreId = input.dataStoreId;
   const existing = await getDataStore(dataStoreId);
+
+  // Org scoping (finding ca76d041): reconcile BEFORE the optimistic-lock
+  // check or any write — a cross-org caller must never learn version info
+  // via a ConflictError side channel either.
+  await assertRowOrg(existing, event);
 
   // Optimistic locking
   if (existing.version !== input.version) {
@@ -676,7 +729,7 @@ async function updateDataStore(input: UpdateDataStoreInput) {
   }
 }
 
-async function deleteDataStore(dataStoreId: string) {
+async function deleteDataStore(dataStoreId: string, event: unknown) {
   let existing: DataStoreRecord | undefined;
 
   try {
@@ -690,6 +743,13 @@ async function deleteDataStore(dataStoreId: string) {
     }
     throw error;
   }
+
+  // Org scoping (finding ca76d041): reconcile BEFORE disconnect, deprovision,
+  // secret deletion, IAM role deletion, or the DynamoDB delete — this is the
+  // worst-case operation (it deprovisions infrastructure, force-deletes the
+  // secret, and deletes the citadel-ds IAM role), so the gate must run before
+  // any of that, not just before the final DynamoDB delete.
+  await assertRowOrg(existing, event);
 
   const adapter = getAdapter(existing.type);
   const config =
@@ -758,9 +818,14 @@ async function deleteDataStore(dataStoreId: string) {
   return { success: true, message: "Data store deleted successfully" };
 }
 
-async function connectDataStore(dataStoreId: string) {
+async function connectDataStore(dataStoreId: string, event: unknown) {
   return retryOptimisticLock(async () => {
     const existing = await getDataStore(dataStoreId);
+
+    // Org scoping (finding ca76d041): reconcile BEFORE assuming any scoped
+    // role, retrieving credentials, or calling adapter.connect.
+    await assertRowOrg(existing, event);
+
     const currentVersion = existing.version;
 
     const adapter = getAdapter(existing.type);
@@ -854,9 +919,13 @@ async function connectDataStore(dataStoreId: string) {
   });
 }
 
-async function disconnectDataStore(dataStoreId: string) {
+async function disconnectDataStore(dataStoreId: string, event: unknown) {
   return retryOptimisticLock(async () => {
     const existing = await getDataStore(dataStoreId);
+
+    // Org scoping (finding ca76d041): reconcile BEFORE adapter.disconnect.
+    await assertRowOrg(existing, event);
+
     const currentVersion = existing.version;
 
     const adapter = getAdapter(existing.type);
@@ -908,8 +977,13 @@ async function disconnectDataStore(dataStoreId: string) {
   });
 }
 
-async function testDataStoreConnection(dataStoreId: string) {
+async function testDataStoreConnection(dataStoreId: string, event: unknown) {
   const existing = await getDataStore(dataStoreId);
+
+  // Org scoping (finding ca76d041): reconcile BEFORE retrieving credentials
+  // from Secrets Manager or calling adapter.testConnection.
+  await assertRowOrg(existing, event);
+
   const adapter = getAdapter(existing.type);
   const config =
     typeof existing.config === "string"
