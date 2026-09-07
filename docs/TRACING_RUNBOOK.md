@@ -57,11 +57,13 @@ current X-Ray-API-backed viewer cannot coexist in one account. Decide (a)
 or (b) explicitly; any plan that assumes "AgentCore agents in the viewer"
 without funding the port in (a) is wrong.
 
-**(a) Port the trace query surface to Transaction Search — IMPLEMENTED
-(design task `c7a4bf52`).** `trace-query-handler.ts` now dispatches on a
-`TRACE_BACKEND` env var (`xray` | `spans`, **default `xray`**) — the
-handler ships with NO behavior change until an operator flips it. The
-`spans` path queries CloudWatch Logs Insights over `aws/spans`
+**(a) Select `spans` as the trace backend — IMPLEMENTED (design task
+`c7a4bf52`).** `trace-query-handler.ts` dispatches on the `TRACE_BACKEND`
+env var (`xray` | `spans`), a supported adopter choice configured via
+`backend/.env` (see `backend/.env.example` and
+[docs/DEPLOYMENT.md](DEPLOYMENT.md)) — **default `xray`**, so the handler
+ships with no behavior change unless an adopter explicitly opts into
+`spans`. The `spans` path queries CloudWatch Logs Insights over `aws/spans`
 (`utils/spans-query.ts`: `StartQuery` → bounded poll (~20s cap, `500ms`
 interval, `StopQuery` on early exit) → `GetQueryResults`) and shapes rows
 into the SAME `TraceEntry`/`TraceSpan` types the X-Ray path emits
@@ -75,15 +77,20 @@ same allowlist/reject-first discipline as `xray-filter.ts`.
 > `startTimeUnixNano`/`endTimeUnixNano`, the `attributes.*`/`annotation.*`
 > attribute-key shapes). These are design-time assumptions, not values
 > confirmed against a real Transaction Search span. See "Cutover
-> procedure" below — do not flip `TRACE_BACKEND=spans` in any real account
-> before completing the schema-verification step.
+> procedure" below — do not select `TRACE_BACKEND=spans` in any real
+> account before completing the schema-verification step.
 
-### Cutover procedure (flipping `TRACE_BACKEND` from `xray` to `spans`)
+### Cutover procedure (switching an environment's `TRACE_BACKEND` from `xray` to `spans`)
+
+`TRACE_BACKEND` is a supported adopter choice (`backend/.env`, see
+`backend/.env.example` and [docs/DEPLOYMENT.md](DEPLOYMENT.md)) — this
+procedure is the recommended path for any adopter choosing `spans` over the
+default `xray`, not merely an internal cutover.
 
 Both IAM permission sets (X-Ray read + Logs Insights StartQuery/
 GetQueryResults/StopQuery) are granted on the `TraceQueryHandler` role
-regardless of the env value (`telemetry-stack.ts`), so this cutover is an
-**env-only** change — no IAM/CDK-permission deploy is needed at flip time.
+regardless of the env value (`telemetry-stack.ts`), so this change is an
+**env-only** change — no IAM/CDK-permission deploy is needed at switch time.
 
 1. **Verify the aws/spans schema with a real sample** (blocking,
    pre-requisite — do this BEFORE step 2). In a dev account with
@@ -104,22 +111,22 @@ regardless of the env value (`telemetry-stack.ts`), so this cutover is an
    redirects the account's X-Ray trace destination to CloudWatch Logs; the
    `xray` backend goes blind for every Lambda in every stack the moment
    this is done.
-3. **Flip `TRACE_BACKEND=spans`** — a tiny CDK env-only deploy of
-   `telemetry-stack.ts` (`TRACE_BACKEND` Lambda environment variable). No
-   other resource changes (after this branch's telemetry-stack is
-   deployed) — both IAM permission sets are already granted on the
-   deployed `TraceQueryHandler` role only once the branch's stack update
-   has shipped; against an account still running a pre-port
+3. **Set `TRACE_BACKEND=spans`** in `backend/.env` — a tiny CDK env-only
+   deploy of `telemetry-stack.ts` (`TRACE_BACKEND` Lambda environment
+   variable). No other resource changes (after this branch's
+   telemetry-stack is deployed) — both IAM permission sets are already
+   granted on the deployed `TraceQueryHandler` role only once the branch's
+   stack update has shipped; against an account still running a pre-port
    `telemetry-stack.ts`, this step is a full stack deploy, not merely an
-   env-var flip.
+   env-var change.
 4. **Verify** the waterfall viewer against a live execution/conversation
    trace and the admin raw-trace-id route; confirm `status`/`linkedBy`
    behave as documented below and that AgentCore agent spans (once the
    runtime grants + ADOT wiring below are live) appear in the same viewer.
-5. **Reversible**: flip `TRACE_BACKEND` back to `xray` instantly if the
-   ported path misbehaves — this works right up until the account-wide
+5. **Reversible**: set `TRACE_BACKEND` back to `xray` instantly if the
+   `spans` path misbehaves — this works right up until the account-wide
    Transaction Search switch itself is reverted (which is the actually
-   hard-to-reverse step, not the env flag).
+   hard-to-reverse step, not the env var).
 6. **Deferred cleanup (do NOT do this until `spans` is confirmed stable in
    all environments)**: remove the `xray:GetTraceSummaries`/
    `BatchGetTraces` grant + its NagSuppression from `telemetry-stack.ts`,
@@ -130,9 +137,10 @@ regardless of the env value (`telemetry-stack.ts`), so this cutover is an
 **(b) Keep the X-Ray APIs and do NOT enable Transaction Search.** The
 waterfall viewer keeps working exactly as documented in this runbook, and
 AgentCore-hosted agents stay **invisible** to tracing (their spans have
-nowhere to go that we query). This is the pre-port default state
-(`TRACE_BACKEND` unset/`xray`) — safe indefinitely, but a permanent blind
-spot for AgentCore agents if the cutover above is never run.
+nowhere to go that we query). This is `TRACE_BACKEND`'s default value
+(`xray`, unset resolves the same way) — the correct out-of-box choice, safe
+indefinitely, but a permanent blind spot for AgentCore agents unless an
+adopter completes the cutover above.
 
 ### What the intake container needs before its telemetry appears at all
 

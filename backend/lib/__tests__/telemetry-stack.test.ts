@@ -916,16 +916,70 @@ describe("TelemetryStack — TraceQueryHandler (waterfall trace viewer, pass 1)"
     expect(joined).toContain("logs:getqueryresults");
   });
 
-  test("TraceQueryHandler Lambda has a TRACE_BACKEND environment variable defaulting to xray", () => {
-    const { template } = buildStack();
-    template.hasResourceProperties("AWS::Lambda::Function", {
-      Handler: "trace-query-handler.handler",
-      Environment: {
-        Variables: Match.objectLike({
-          TRACE_BACKEND: "xray",
-        }),
-      },
-    });
+  test("TraceQueryHandler Lambda has a TRACE_BACKEND environment variable defaulting to xray when unset", () => {
+    const originalTraceBackend = process.env.TRACE_BACKEND;
+    delete process.env.TRACE_BACKEND;
+    try {
+      const { template } = buildStack();
+      template.hasResourceProperties("AWS::Lambda::Function", {
+        Handler: "trace-query-handler.handler",
+        Environment: {
+          Variables: Match.objectLike({
+            TRACE_BACKEND: "xray",
+          }),
+        },
+      });
+    } finally {
+      if (originalTraceBackend === undefined) {
+        delete process.env.TRACE_BACKEND;
+      } else {
+        process.env.TRACE_BACKEND = originalTraceBackend;
+      }
+    }
+  });
+
+  test("TraceQueryHandler Lambda resolves TRACE_BACKEND=xray explicitly to xray", () => {
+    const originalTraceBackend = process.env.TRACE_BACKEND;
+    process.env.TRACE_BACKEND = "xray";
+    try {
+      const { template } = buildStack();
+      template.hasResourceProperties("AWS::Lambda::Function", {
+        Handler: "trace-query-handler.handler",
+        Environment: {
+          Variables: Match.objectLike({
+            TRACE_BACKEND: "xray",
+          }),
+        },
+      });
+    } finally {
+      if (originalTraceBackend === undefined) {
+        delete process.env.TRACE_BACKEND;
+      } else {
+        process.env.TRACE_BACKEND = originalTraceBackend;
+      }
+    }
+  });
+
+  test("TraceQueryHandler Lambda resolves TRACE_BACKEND=spans to spans", () => {
+    const originalTraceBackend = process.env.TRACE_BACKEND;
+    process.env.TRACE_BACKEND = "spans";
+    try {
+      const { template } = buildStack();
+      template.hasResourceProperties("AWS::Lambda::Function", {
+        Handler: "trace-query-handler.handler",
+        Environment: {
+          Variables: Match.objectLike({
+            TRACE_BACKEND: "spans",
+          }),
+        },
+      });
+    } finally {
+      if (originalTraceBackend === undefined) {
+        delete process.env.TRACE_BACKEND;
+      } else {
+        process.env.TRACE_BACKEND = originalTraceBackend;
+      }
+    }
   });
 
   test("3 trace routes are wired on the existing costHttpApi, all with the JWT authorizer", () => {

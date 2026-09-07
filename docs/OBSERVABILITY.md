@@ -18,14 +18,17 @@ X-Ray APIs and accept that AgentCore agents remain invisible to tracing),
 and what the intake container is still missing before it emits telemetry at
 all.
 
-**Update — the port landed.** `trace-query-handler.ts` now dispatches on a
-`TRACE_BACKEND` env var (`xray` | `spans`, default `xray` — no behavior
-change until an operator flips it); `spans` queries CloudWatch Logs
+**Trace backend — a supported adopter choice.** `trace-query-handler.ts`
+dispatches on the `TRACE_BACKEND` env var (`xray` | `spans`), configured via
+`backend/.env` — see `backend/.env.example`. The default is `xray` (no
+prerequisites, correct out of the box); `spans` queries CloudWatch Logs
 Insights over `aws/spans` instead of the X-Ray APIs, and shapes results into
 the same `TraceEntry`/`TraceSpan` types so this page's behavior below is
-identical either way. See "Account tracing settings — Transaction Search" in
-`docs/TRACING_RUNBOOK.md` for the cutover procedure and its open
-schema-verification caveat before flipping the flag in any real account.
+identical either way. Selecting `spans` requires CloudWatch Transaction
+Search to already be enabled in the target account/region — see "Account
+tracing settings — Transaction Search" in `docs/TRACING_RUNBOOK.md` for the
+cutover procedure and its schema-verification step before choosing `spans`
+in any real account.
 
 ## What it is
 
