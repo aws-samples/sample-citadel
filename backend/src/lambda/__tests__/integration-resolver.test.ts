@@ -181,7 +181,7 @@ describe("Integration Resolver - Unit Tests", () => {
             },
           },
         },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       const result = await invoke(event);
@@ -240,7 +240,7 @@ describe("Integration Resolver - Unit Tests", () => {
             config: { serverUrl: "https://mcp.example.com" },
           },
         },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       await expect(invoke(event)).rejects.toThrow(
@@ -302,7 +302,7 @@ describe("Integration Resolver - Unit Tests", () => {
             },
           },
         },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       const result = await invoke(event);
@@ -352,7 +352,7 @@ describe("Integration Resolver - Unit Tests", () => {
             },
           },
         },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       const result = await invoke(event);
@@ -404,7 +404,7 @@ describe("Integration Resolver - Unit Tests", () => {
             },
           },
         },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       const result = await invoke(event);
@@ -471,7 +471,7 @@ describe("Integration Resolver - Unit Tests", () => {
       const event = {
         info: { fieldName: "deleteIntegration" },
         arguments: { integrationId },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       const result = await invoke(event);
@@ -541,7 +541,7 @@ describe("Integration Resolver - Unit Tests", () => {
       const event = {
         info: { fieldName: "deleteIntegration" },
         arguments: { integrationId },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       const result = await invoke(event);
@@ -590,7 +590,7 @@ describe("Integration Resolver - Unit Tests", () => {
       const event = {
         info: { fieldName: "deleteIntegration" },
         arguments: { integrationId },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       const result = await invoke(event);
@@ -656,7 +656,7 @@ describe("Integration Resolver - Unit Tests", () => {
       const event = {
         info: { fieldName: "testIntegration" },
         arguments: { integrationId },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       // This will fail at connection test but we can verify SSM retrieval
@@ -711,7 +711,7 @@ describe("Integration Resolver - Unit Tests", () => {
             },
           },
         },
-        identity: { username: "test-user" },
+        identity: { username: "test-user", "custom:organization": "org-123" },
       };
 
       await invoke(event);
@@ -759,11 +759,9 @@ describe("Integration Resolver - Unit Tests", () => {
       bedrockAgentMock
         .on(CreateGatewayTargetCommand)
         .resolves({ targetId: mockTargetId });
-      secretsMock
-        .onAnyCommand()
-        .resolves({
-          ARN: "arn:aws:secretsmanager:us-east-1:111:secret:mcp-2lo",
-        });
+      secretsMock.onAnyCommand().resolves({
+        ARN: "arn:aws:secretsmanager:us-east-1:111:secret:mcp-2lo",
+      });
       ssmMock.onAnyCommand().resolves({});
       dynamoMock.onAnyCommand().resolves({});
 
@@ -785,7 +783,7 @@ describe("Integration Resolver - Unit Tests", () => {
             config: { serverUrl: "https://mcp.example.com" },
           },
         },
-        identity: { username: "tester" },
+        identity: { username: "tester", "custom:organization": "org-2lo" },
       };
 
       const result = await invoke(event);
@@ -855,11 +853,9 @@ describe("Integration Resolver - Unit Tests", () => {
       //   - leave `authorizationUrl` unset until the handler resolves it
       const idpAuthUrl = "https://idp.example.com/oauth/authorize?state=abc";
       void idpAuthUrl; // retained for parity with the handler-level test
-      secretsMock
-        .onAnyCommand()
-        .resolves({
-          ARN: "arn:aws:secretsmanager:us-east-1:111:secret:mcp-3lo",
-        });
+      secretsMock.onAnyCommand().resolves({
+        ARN: "arn:aws:secretsmanager:us-east-1:111:secret:mcp-3lo",
+      });
       ssmMock.onAnyCommand().resolves({});
       dynamoMock.onAnyCommand().resolves({});
 
@@ -882,7 +878,7 @@ describe("Integration Resolver - Unit Tests", () => {
             config: { serverUrl: "https://mcp.example.com" },
           },
         },
-        identity: { username: "tester" },
+        identity: { username: "tester", "custom:organization": "org-3lo" },
       };
 
       const result = await invoke(event);
@@ -918,11 +914,9 @@ describe("Integration Resolver - Unit Tests", () => {
       bedrockAgentMock
         .on(CreateGatewayTargetCommand)
         .resolves({ targetId: "target-mcp-disc" });
-      secretsMock
-        .onAnyCommand()
-        .resolves({
-          ARN: "arn:aws:secretsmanager:us-east-1:111:secret:mcp-disc",
-        });
+      secretsMock.onAnyCommand().resolves({
+        ARN: "arn:aws:secretsmanager:us-east-1:111:secret:mcp-disc",
+      });
       ssmMock.onAnyCommand().resolves({});
       dynamoMock.onAnyCommand().resolves({});
 
@@ -945,7 +939,7 @@ describe("Integration Resolver - Unit Tests", () => {
             config: { serverUrl: "https://mcp.example.com" },
           },
         },
-        identity: { username: "tester" },
+        identity: { username: "tester", "custom:organization": "org-disc" },
       };
 
       await invoke(event);
@@ -967,11 +961,9 @@ describe("Integration Resolver - Unit Tests", () => {
       bedrockAgentMock
         .on(CreateGatewayTargetCommand)
         .resolves({ targetId: "target-mcp-api" });
-      secretsMock
-        .onAnyCommand()
-        .resolves({
-          ARN: "arn:aws:secretsmanager:us-east-1:111:secret:mcp-api",
-        });
+      secretsMock.onAnyCommand().resolves({
+        ARN: "arn:aws:secretsmanager:us-east-1:111:secret:mcp-api",
+      });
       ssmMock.onAnyCommand().resolves({});
       dynamoMock.onAnyCommand().resolves({});
 
@@ -986,7 +978,7 @@ describe("Integration Resolver - Unit Tests", () => {
             config: { serverUrl: "https://mcp.example.com" },
           },
         },
-        identity: { username: "tester" },
+        identity: { username: "tester", "custom:organization": "org-api" },
       };
 
       await invoke(event);
@@ -1025,7 +1017,7 @@ describe("Integration Resolver - Unit Tests", () => {
             config: { serverUrl: "https://mcp.example.com" },
           },
         },
-        identity: { username: "tester" },
+        identity: { username: "tester", "custom:organization": "org-legacy" },
       };
 
       await expect(invoke(event)).rejects.toThrow(/grantType/);
@@ -1077,7 +1069,7 @@ describe("Integration Resolver - Unit Tests", () => {
       const event = {
         info: { fieldName: "connectIntegration" },
         arguments: { integrationId },
-        identity: { username: "tester" },
+        identity: { username: "tester", "custom:organization": "org-3lo" },
       };
 
       const result = await invoke(event);
@@ -1150,7 +1142,7 @@ describe("Integration Resolver - Unit Tests", () => {
       const event = {
         info: { fieldName: "deleteIntegration" },
         arguments: { integrationId },
-        identity: { username: "tester" },
+        identity: { username: "tester", "custom:organization": "org-del" },
       };
 
       const result = await invoke(event);
@@ -1237,7 +1229,7 @@ describe("Integration Resolver - Unit Tests", () => {
       const event = {
         info: { fieldName: "deleteIntegration" },
         arguments: { integrationId },
-        identity: { username: "tester" },
+        identity: { username: "tester", "custom:organization": "org-del" },
       };
 
       await expect(invoke(event)).rejects.toThrow(/EventBridge unreachable/);
@@ -1286,7 +1278,7 @@ describe("Integration Resolver - Unit Tests", () => {
       const event = {
         info: { fieldName: "deleteIntegration" },
         arguments: { integrationId },
-        identity: { username: "tester" },
+        identity: { username: "tester", "custom:organization": "org-del" },
       };
 
       const result = await invoke(event);
