@@ -143,6 +143,14 @@ const GATED_OPS: Record<string, { requiredRole: "owner" | "editor" }> = {
   createAppApiKey: { requiredRole: "editor" },
   revokeAppApiKey: { requiredRole: "editor" },
   rotateAppApiKey: { requiredRole: "editor" },
+  // Finding c35137bb: both mutate manifest.workflowIds and alter which
+  // workflows the app executes at runtime, rather than destroying the app
+  // — gated at 'editor', same tier as updateApp/addAppComponent/
+  // updateAgentBinding. See
+  // registry-agent-record-resolver-workflow-binding-editor-gate.test.ts for
+  // the dedicated cross-org/non-editor/editor/owner/admin coverage.
+  bindWorkflowToApp: { requiredRole: "editor" },
+  unbindWorkflowFromApp: { requiredRole: "editor" },
 };
 
 /**
@@ -164,24 +172,6 @@ const EXEMPT_OPS: Record<string, string> = {
   publishAppStatusEvent:
     "internal EventBridge publish helper invoked by other already-gated " +
     "handlers, not a caller-facing app mutation in its own right",
-  // KNOWN PRE-EXISTING GAP — flagged, NOT silently excused. Both mutate the
-  // manifest's workflowIds (writeManifestMutation + updateResource) with NO
-  // assertManifestAccess call, matching the exact shape of finding 6400b440
-  // (deleteApp). Left out of this fix's scope because gating them at
-  // 'editor' would require updating existing passing tests in
-  // registry-agent-record-resolver-workflows.test.ts and
-  // registry-agent-record-resolver-identity.test.ts that currently seed
-  // `access: {}` with no createdBy and assert success with no identity
-  // gate at all — that is a second, separate fix that needs its own
-  // red/green cycle and reviewer sign-off, not something to fold silently
-  // into the deleteApp fix. Tracked for a dedicated follow-up; DO NOT
-  // remove this entry without actually adding the gate.
-  bindWorkflowToApp:
-    "PRE-EXISTING GAP, not yet gated — mutates manifest.workflowIds with " +
-    "no assertManifestAccess call; tracked for follow-up, see comment above",
-  unbindWorkflowFromApp:
-    "PRE-EXISTING GAP, not yet gated — mutates manifest.workflowIds with " +
-    "no assertManifestAccess call; tracked for follow-up, see comment above",
 };
 
 describe("registry-agent-record-resolver — dispatch enumeration completeness", () => {
@@ -192,6 +182,7 @@ describe("registry-agent-record-resolver — dispatch enumeration completeness",
     expect(cases.length).toBeGreaterThan(15);
     expect(cases).toContain("deleteApp");
     expect(cases).toContain("grantAppAccess");
+    expect(cases).toContain("bindWorkflowToApp");
   });
 
   test("every dispatch case is accounted for in GATED_OPS or EXEMPT_OPS", () => {
