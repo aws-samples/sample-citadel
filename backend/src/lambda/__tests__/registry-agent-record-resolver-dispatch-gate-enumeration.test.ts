@@ -129,7 +129,10 @@ const GATE_CALL_RE = /assertManifest(Owner)?Access\s*\(/;
  * extractFunctionBody + GATE_CALL_RE against the real source, not merely
  * asserted here.
  */
-const GATED_OPS: Record<string, { requiredRole: "owner" | "editor" }> = {
+const GATED_OPS: Record<
+  string,
+  { requiredRole: "owner" | "editor" | "viewer" }
+> = {
   updateApp: { requiredRole: "editor" },
   deleteApp: { requiredRole: "owner" },
   addAppComponent: { requiredRole: "editor" },
@@ -151,6 +154,15 @@ const GATED_OPS: Record<string, { requiredRole: "owner" | "editor" }> = {
   // the dedicated cross-org/non-editor/editor/owner/admin coverage.
   bindWorkflowToApp: { requiredRole: "editor" },
   unbindWorkflowFromApp: { requiredRole: "editor" },
+  // Finding 603e732f: previously delegated to app-access-control.ts's
+  // DynamoDB-backed listAppAccessEntries (a writer-less store, ungated on
+  // this dispatch) — now reads manifest.access directly and is gated at
+  // 'viewer', the lowest tier, since it is a non-mutating read that a
+  // viewer legitimately needs (to see who else has access), same
+  // justification as getApp/listApps' own viewer-tier reads. See
+  // registry-agent-record-resolver-access.test.ts for the dedicated
+  // cross-org/no-entry/viewer/admin coverage.
+  listAppAccessEntries: { requiredRole: "viewer" },
 };
 
 /**
@@ -167,7 +179,6 @@ const EXEMPT_OPS: Record<string, string> = {
   listAppApiKeys:
     "pure read of API key metadata (no plaintext secret); relies on the " +
     "AppSync field-level auth already applied ahead of this resolver",
-  listAppAccessEntries: "pure read of the access-control listing",
   getAppMetrics: "pure read of aggregated metrics",
   publishAppStatusEvent:
     "internal EventBridge publish helper invoked by other already-gated " +

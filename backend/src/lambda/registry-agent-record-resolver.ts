@@ -83,10 +83,6 @@ import {
   listAppApiKeys as listAppApiKeysImpl,
   type ApiKeyDeps,
 } from "./app-api-key-management";
-import {
-  listAppAccessEntries as listAppAccessEntriesImpl,
-  type AccessControlDeps,
-} from "./app-access-control";
 import { getAppMetrics as getAppMetricsImpl } from "./app-metrics-handler";
 import {
   upsertAppMeta,
@@ -429,11 +425,13 @@ async function resolveCreatedByName(
 }
 
 /**
- * Returns the deps struct for the preserved API-key / access / metrics
- * helpers. APPS_TABLE lives here (and only here) during the deprecation
- * window; AgentApp-shape surfaces do not read this struct.
+ * Returns the deps struct for the preserved API-key / metrics helpers.
+ * APPS_TABLE lives here (and only here) during the deprecation window;
+ * AgentApp-shape surfaces do not read this struct. `listAppAccessEntries`
+ * no longer uses this struct — it reads the Registry manifest directly
+ * (finding 603e732f), the same store grantAppAccess/revokeAppAccess write.
  */
-function getSharedDeps(): ApiKeyDeps & AccessControlDeps {
+function getSharedDeps(): ApiKeyDeps {
   return {
     docClient: getDocClient(),
     appsTable: APPS_TABLE,
@@ -1120,7 +1118,7 @@ export const handler: AppSyncResolverHandler<
       case "listAppApiKeys":
         return await listAppApiKeys(args.appId);
       case "listAppAccessEntries":
-        return await listAppAccessEntries(args.appId);
+        return await listAppAccessEntries(args.appId, event);
       case "getAppMetrics":
         return await getAppMetrics(args.appId, args.startTime, args.endTime);
 
@@ -2483,12 +2481,12 @@ async function setAppAuthConfig(
 }
 
 /**
- * Role hierarchy for assertManifestAccess. Mirrors app-access-control.ts's
- * ROLE_LEVEL exactly (owner > editor > viewer) — kept as a file-local copy
- * rather than importing that module's map, because this gate authorizes
- * against a DIFFERENT store (the Registry manifest's `access` map, not the
- * ACCESS# DynamoDB rows app-access-control.ts reads) and must not create a
- * coupling that makes it look like the two stores are kept in sync.
+ * Role hierarchy for assertManifestAccess (owner > editor > viewer).
+ * Historically mirrored the same-named `ROLE_LEVEL` map in
+ * `app-access-control.ts`; that module (and its separate, writer-less
+ * DynamoDB ACCESS# store) was deleted by finding 603e732f — the manifest's
+ * `access` map is now the sole access-control store, so this map has no
+ * sibling to stay in sync with.
  */
 const MANIFEST_ROLE_LEVEL: Record<string, number> = {
   viewer: 1,
@@ -2505,15 +2503,20 @@ const MANIFEST_ROLE_LEVEL: Record<string, number> = {
  * createAppApiKey, ...) at 'editor' while grant/revoke keep requiring
  * 'owner' with byte-for-byte identical semantics (see the two thin
  * `assertManifestOwnerAccess`-shaped call sites below, which still request
- * 'owner').
+ * 'owner'), and `listAppAccessEntries` requests 'viewer' (finding 603e732f).
  *
- * checkOperationAccess/checkAppAccess (app-access-control.ts) reserve these
+ * Historical note (finding 603e732f): `app-access-control.ts` used to
+ * define `checkOperationAccess`/`checkAppAccess`, which reserved these
  * operations by role but read a SEPARATE DynamoDB ACCESS# store (appsTable
- * GroupIndex) that this resolver's writes never update — that store has
- * ZERO production writers (autoAssignOwner/grantAppAccess/revokeAppAccess in
- * app-access-control.ts are exercised only by tests). The canonical,
- * write-consistent store is the Registry record MANIFEST's `access` map: it
- * is the ONLY store this resolver's mutations actually update (via
+ * GroupIndex) that this resolver's writes never updated — that store had
+ * ZERO production writers, and its own live reader (`listAppAccessEntries`)
+ * was wired into this resolver's dispatch, so listing always returned `[]`
+ * even when grants existed in the manifest. That entire module was deleted
+ * (dead RBAC + booby trap, not a fail-open hole — its readers failed
+ * closed) and `listAppAccessEntries` below was repointed to read the
+ * manifest directly through this same gate. The canonical, write-consistent
+ * store is the Registry record MANIFEST's `access` map: it is the ONLY
+ * store this resolver's mutations actually update (via
  * writeManifestMutation), and it is read here the same way getApp's own
  * tenant gate reads the manifest's `orgId` — so a grant is immediately
  * visible to the next authorization check in-process (the split-brain
@@ -2524,12 +2527,11 @@ const MANIFEST_ROLE_LEVEL: Record<string, number> = {
  * Fails closed: any missing identity, missing app, or Cognito lookup
  * failure (via extractOrgFromEvent) results in a thrown "Access denied"
  * BEFORE any manifest read is used to authorize a write. Admin group
- * bypasses, matching checkAppAccess's own convention. Same-org membership
- * alone is NOT sufficient — the caller must hold `requiredRole` (or higher)
- * in the manifest's `access` map, or (for apps created before the owner-gate
- * fix, whose manifests never had an owner entry populated) be the app's
- * recorded `createdBy` — see the fallback below, unchanged from the
- * owner-only version.
+ * bypasses. Same-org membership alone is NOT sufficient — the caller must
+ * hold `requiredRole` (or higher) in the manifest's `access` map, or (for
+ * apps created before the owner-gate fix, whose manifests never had an
+ * owner entry populated) be the app's recorded `createdBy` — see the
+ * fallback below, unchanged from the owner-only version.
  */
 export async function assertManifestAccess(
   appId: string,
@@ -2688,8 +2690,89 @@ async function listAppApiKeys(appId: string): Promise<unknown> {
   return listAppApiKeysImpl(appId, getSharedDeps());
 }
 
-async function listAppAccessEntries(appId: string): Promise<unknown> {
-  return listAppAccessEntriesImpl(appId, getSharedDeps());
+/**
+ * GraphQL shape for `AppAccessEntry` (schema.graphql:1928) — kept as a
+ * file-local type rather than importing from app-access-control.ts, since
+ * that module's own `AccessEntry` type describes rows from the (now
+ * unread) DynamoDB ACCESS# store, not the manifest.
+ */
+interface AppAccessEntryShape {
+  userId: string;
+  role: string;
+  grantedBy: string;
+  grantedAt: string;
+}
+
+/**
+ * Lists app access entries (finding 603e732f). Previously delegated to
+ * app-access-control.ts#listAppAccessEntries, which queried a DynamoDB
+ * ACCESS# store that has ZERO production writers — grantAppAccess/
+ * revokeAppAccess (above) write ONLY the Registry manifest's `access` map
+ * via writeManifestMutation, so the old listing always returned `[]` even
+ * when grants existed (a functional defect: a newly granted user never
+ * appeared in their own app's access list). This now reads the SAME store
+ * the grant/revoke mutations write, so listing agrees with what
+ * assertManifestAccess would authorize.
+ *
+ * Includes the createdBy implicit-owner fallback assertManifestAccess
+ * itself honours (see that function's doc comment): when the manifest has
+ * no explicit `owner` entry yet (apps created before the owner-gate fix),
+ * the recorded creator is surfaced as an implicit owner row so the list is
+ * consistent with who the gate would actually authorize as owner — rather
+ * than silently omitting them.
+ *
+ * Gated at 'viewer' — the lowest tier, matching listApps/getApp and the
+ * OPERATION_ROLE_MAP's own historical 'viewer' classification for this
+ * operation (app-access-control.ts). Viewer is the right tier because: (a)
+ * listing does not mutate anything, unlike grant/revoke which stay 'owner'
+ * gated; (b) a viewer legitimately needs to see the access list to know
+ * who to ask for an elevated role, the same reason getApp/listApps are
+ * viewer-gated reads; (c) 'editor' would be stricter than any other
+ * sibling read on this dispatch surface for no corresponding risk — the
+ * entries expose userId/role/grantedBy/grantedAt, not secrets (contrast
+ * listAppApiKeys, which never returns plaintext keys either).
+ */
+async function listAppAccessEntries(
+  appId: string,
+  event: unknown,
+): Promise<AppAccessEntryShape[]> {
+  const record = await getRegistryService().getResource("agent", appId);
+  if (!record) {
+    throw new Error("App not found");
+  }
+
+  await assertManifestAccess(appId, record, event, "viewer");
+
+  const manifest = readManifest(record);
+  const access = manifest.access ?? {};
+
+  const entries: AppAccessEntryShape[] = Object.entries(access).map(
+    ([entryUserId, entry]) => ({
+      userId: entryUserId,
+      role: entry.role,
+      grantedBy: entry.grantedBy,
+      grantedAt: entry.grantedAt,
+    }),
+  );
+
+  // Implicit-creator-owner fallback (mirrors assertManifestAccess's own
+  // fallback exactly): only applies when NO explicit owner entry exists
+  // yet, and only surfaces the identity the system itself recorded as
+  // createdBy — never client-suppliable. `grantedAt` uses the record's
+  // own createdAt (server-stamped, never absent for a persisted record)
+  // since there was never an explicit grant event to timestamp — schema
+  // declares `grantedAt: AWSDateTime!` as non-null.
+  const hasAnyOwnerEntry = entries.some((e) => e.role === "owner");
+  if (!hasAnyOwnerEntry && manifest.createdBy) {
+    entries.push({
+      userId: manifest.createdBy,
+      role: "owner",
+      grantedBy: "system",
+      grantedAt: (record.createdAt ?? new Date(0)).toISOString(),
+    });
+  }
+
+  return entries;
 }
 
 async function getAppMetrics(
