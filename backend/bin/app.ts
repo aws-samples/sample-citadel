@@ -438,6 +438,12 @@ const gatewayStack = new GatewayStack(app, `citadel-gateway-${environment}`, {
   appsTable: backendStack.appsTable,
   eventBus: backendStack.agentEventBus,
   idempotencyTable: backendStack.idempotencyTable,
+  // Owner gate (finding 13a58234): publish/unpublish must read the app's
+  // Registry manifest before any provisioning/teardown. Same
+  // registryId/registryArn already threaded into ServicesStack/
+  // GovernanceStack/ArbiterStack below.
+  registryId: backendStack.registryId,
+  registryArn: backendStack.registryArn,
 });
 
 // Telemetry stack has already been instantiated above (before FrontendStack)
@@ -978,6 +984,10 @@ if (app.node.tryGetContext("nag") !== "false") {
     // only. Not a fresh per-function ServiceRole — the shared, hand-named
     // writer role — so its DefaultPolicy lives under backendStack.
     [backendStack, "AgentReleaseWriterRole/DefaultPolicy/Resource"],
+    // Publish handler owner gate (finding 13a58234): GetRegistryRecord
+    // only, scoped to the registry ARN + its records, to fetch the app's
+    // manifest for the owner-role check before any provisioning/teardown.
+    [gatewayStack, "AppPublishHandler/ServiceRole/DefaultPolicy/Resource"],
   ];
   for (const [stack, path] of registryArnPaths) {
     NagSuppressions.addResourceSuppressionsByPath(

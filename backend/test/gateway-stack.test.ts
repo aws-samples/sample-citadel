@@ -45,6 +45,9 @@ function createTestStack(): { stack: GatewayStack; template: Template } {
     appsTable,
     eventBus,
     idempotencyTable,
+    registryId: "test-registry-id",
+    registryArn:
+      "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/test-registry-id",
   });
 
   const template = Template.fromStack(stack);
@@ -97,6 +100,18 @@ describe("GatewayStack — Shared Lambda Functions (Task 1.1)", () => {
           ENVIRONMENT: "test",
           AUTHORIZER_FUNCTION_ARN: Match.anyValue(),
           IDEMPOTENCY_TABLE: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  // --- Owner-gate registry wiring (finding 13a58234) ---
+  test("AppPublishHandler has REGISTRY_ID environment variable", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "app-publish-handler.handler",
+      Environment: {
+        Variables: Match.objectLike({
+          REGISTRY_ID: "test-registry-id",
         }),
       },
     });
@@ -304,6 +319,58 @@ describe("GatewayStack — IAM Permissions (Task 1.1)", () => {
         ]),
       },
     });
+  });
+
+  // --- Registry read grant (finding 13a58234) ---
+  // Regression guard: without this grant/env, the owner gate wiring
+  // silently fails closed in production (GetResource throws an access
+  // error) rather than merely being untested — asserting its presence
+  // here prevents that regression from shipping unnoticed.
+  test("publish handler has bedrock-agentcore:GetRegistryRecord scoped to the registry ARN (read-only, no list/write)", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: "bedrock-agentcore:GetRegistryRecord",
+            Resource: Match.arrayWith([
+              "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/test-registry-id",
+              "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/test-registry-id/*",
+            ]),
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("publish handler's registry grant does NOT include list or write actions", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const lambdas = template.findResources("AWS::Lambda::Function");
+    const handlerLogicalId = Object.keys(lambdas).find(
+      (k) => lambdas[k].Properties?.Handler === "app-publish-handler.handler",
+    );
+    const handlerRoleRef =
+      lambdas[handlerLogicalId!].Properties.Role?.["Fn::GetAtt"]?.[0];
+
+    const handlerPolicies = Object.values(policies).filter((p: any) =>
+      (p.Properties?.Roles ?? []).some((r: any) => r.Ref === handlerRoleRef),
+    );
+
+    const registryStatements = handlerPolicies.flatMap((policy: any) =>
+      (policy.Properties.PolicyDocument.Statement as any[]).filter((stmt) => {
+        const actions: string[] = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        return actions.some((a) => a.startsWith("bedrock-agentcore:"));
+      }),
+    );
+    expect(registryStatements.length).toBeGreaterThan(0);
+    for (const stmt of registryStatements) {
+      const actions: string[] = Array.isArray(stmt.Action)
+        ? stmt.Action
+        : [stmt.Action];
+      expect(actions).toEqual(["bedrock-agentcore:GetRegistryRecord"]);
+    }
   });
 });
 
