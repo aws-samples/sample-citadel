@@ -10,16 +10,26 @@
  */
 
 import { AppSyncResolverHandler } from "aws-lambda";
-import { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { BedrockAgentClient, DeleteKnowledgeBaseDocumentsCommand } from "@aws-sdk/client-bedrock-agent";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { getUserId } from "../utils/appsync";
 import {
-  getKbIds,
-  pollStatuses,
-} from "./document-ingestion-shared";
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+  ListObjectsV2Command,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import {
+  BedrockAgentClient,
+  DeleteKnowledgeBaseDocumentsCommand,
+} from "@aws-sdk/client-bedrock-agent";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  QueryCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { getUserId } from "../utils/appsync";
+import { assertProjectAccess } from "../utils/project-access";
+import { getKbIds, pollStatuses } from "./document-ingestion-shared";
 
 const s3Client = new S3Client({});
 const bedrockAgentClient = new BedrockAgentClient({});
@@ -44,7 +54,7 @@ interface UploadUrlResponse {
  */
 async function generateUploadUrl(
   input: GenerateUploadUrlInput,
-  userId: string
+  userId: string,
 ): Promise<UploadUrlResponse> {
   const { projectId, fileName, fileType, fileSize } = input;
 
@@ -52,7 +62,7 @@ async function generateUploadUrl(
   const maxSize = 10 * 1024 * 1024; // 10MB
   if (fileSize > maxSize) {
     throw new Error(
-      `File size ${fileSize} exceeds maximum allowed size of ${maxSize} bytes (10MB)`
+      `File size ${fileSize} exceeds maximum allowed size of ${maxSize} bytes (10MB)`,
     );
   }
 
@@ -66,7 +76,7 @@ async function generateUploadUrl(
 
   if (!allowedTypes.includes(fileType)) {
     throw new Error(
-      `File type ${fileType} is not allowed. Supported types: PDF, DOCX, TXT, MD`
+      `File type ${fileType} is not allowed. Supported types: PDF, DOCX, TXT, MD`,
     );
   }
 
@@ -124,7 +134,9 @@ interface ProjectDocument {
 }
 
 /** Read jobs rows for a project keyed by documentKey. Throws on table errors. */
-async function readJobsForProject(projectId: string): Promise<Map<string, { status: string; statusReason?: string }>> {
+async function readJobsForProject(
+  projectId: string,
+): Promise<Map<string, { status: string; statusReason?: string }>> {
   const tableName = process.env.INGESTION_TABLE;
   const map = new Map<string, { status: string; statusReason?: string }>();
   if (!tableName) {
@@ -134,14 +146,24 @@ async function readJobsForProject(projectId: string): Promise<Map<string, { stat
   }
   let nextToken: Record<string, unknown> | undefined;
   do {
-    const resp = await ddb.send(new QueryCommand({
-      TableName: tableName,
-      KeyConditionExpression: "projectId = :pid",
-      ExpressionAttributeValues: { ":pid": projectId },
-      ExclusiveStartKey: nextToken,
-    }));
-    for (const item of (resp.Items ?? []) as Array<{ documentKey?: string; status?: string; statusReason?: string }>) {
-      if (item.documentKey) map.set(item.documentKey, { status: item.status ?? "UNKNOWN", statusReason: item.statusReason });
+    const resp = await ddb.send(
+      new QueryCommand({
+        TableName: tableName,
+        KeyConditionExpression: "projectId = :pid",
+        ExpressionAttributeValues: { ":pid": projectId },
+        ExclusiveStartKey: nextToken,
+      }),
+    );
+    for (const item of (resp.Items ?? []) as Array<{
+      documentKey?: string;
+      status?: string;
+      statusReason?: string;
+    }>) {
+      if (item.documentKey)
+        map.set(item.documentKey, {
+          status: item.status ?? "UNKNOWN",
+          statusReason: item.statusReason,
+        });
     }
     nextToken = resp.LastEvaluatedKey;
   } while (nextToken);
@@ -153,13 +175,20 @@ async function readJobsForProject(projectId: string): Promise<Map<string, { stat
  * truth for ingestion status; on any table read failure we degrade gracefully
  * to a direct Bedrock KB query (never failing the whole list).
  */
-async function listProjectDocuments(projectId: string): Promise<ProjectDocument[]> {
-  const response = await s3Client.send(new ListObjectsV2Command({ Bucket: DOCUMENT_BUCKET, Prefix: `${projectId}/` }));
+async function listProjectDocuments(
+  projectId: string,
+): Promise<ProjectDocument[]> {
+  const response = await s3Client.send(
+    new ListObjectsV2Command({
+      Bucket: DOCUMENT_BUCKET,
+      Prefix: `${projectId}/`,
+    }),
+  );
   const items: ProjectDocument[] = (response.Contents || []).map((obj) => ({
     documentKey: obj.Key!,
-    fileName: obj.Key!.split('/').slice(1).join('/'),
+    fileName: obj.Key!.split("/").slice(1).join("/"),
     size: obj.Size ?? 0,
-    lastModified: obj.LastModified?.toISOString() ?? '',
+    lastModified: obj.LastModified?.toISOString() ?? "",
     status: undefined,
     statusReason: undefined,
   }));
@@ -171,10 +200,17 @@ async function listProjectDocuments(projectId: string): Promise<ProjectDocument[
     const jobs = await readJobsForProject(projectId);
     return items.map((item) => {
       const j = jobs.get(item.documentKey);
-      return { ...item, status: j?.status ?? 'NOT_FOUND', statusReason: j?.statusReason };
+      return {
+        ...item,
+        status: j?.status ?? "NOT_FOUND",
+        statusReason: j?.statusReason,
+      };
     });
   } catch (tableErr) {
-    console.error('listProjectDocuments: jobs-table read failed, falling back to KB query', tableErr);
+    console.error(
+      "listProjectDocuments: jobs-table read failed, falling back to KB query",
+      tableErr,
+    );
   }
 
   // Fallback path: direct Bedrock KB query (chunked <=10 inside pollStatuses).
@@ -182,11 +218,18 @@ async function listProjectDocuments(projectId: string): Promise<ProjectDocument[
     const statusMap = await pollStatuses(items.map((it) => it.documentKey));
     return items.map((item) => {
       const s = statusMap.get(item.documentKey);
-      return { ...item, status: s?.status ?? 'NOT_FOUND', statusReason: s?.statusReason };
+      return {
+        ...item,
+        status: s?.status ?? "NOT_FOUND",
+        statusReason: s?.statusReason,
+      };
     });
   } catch (err) {
-    console.error('listProjectDocuments: failed to fetch KB ingestion status, degrading to UNKNOWN', err);
-    return items.map((item) => ({ ...item, status: 'UNKNOWN' }));
+    console.error(
+      "listProjectDocuments: failed to fetch KB ingestion status, degrading to UNKNOWN",
+      err,
+    );
+    return items.map((item) => ({ ...item, status: "UNKNOWN" }));
   }
 }
 
@@ -195,44 +238,73 @@ async function listProjectDocuments(projectId: string): Promise<ProjectDocument[
  * falling back to a direct Bedrock KB query when the row is absent or the table
  * read fails.
  */
-async function getDocumentIngestionStatus(documentKey: string): Promise<{ documentKey: string; status: string; statusReason?: string; updatedAt?: string }> {
+async function getDocumentIngestionStatus(
+  documentKey: string,
+): Promise<{
+  documentKey: string;
+  status: string;
+  statusReason?: string;
+  updatedAt?: string;
+}> {
   const tableName = process.env.INGESTION_TABLE;
-  const projectId = documentKey.split('/')[0];
+  const projectId = documentKey.split("/")[0];
 
   if (tableName) {
     try {
-      const resp = await ddb.send(new GetCommand({ TableName: tableName, Key: { projectId, documentKey } }));
+      const resp = await ddb.send(
+        new GetCommand({
+          TableName: tableName,
+          Key: { projectId, documentKey },
+        }),
+      );
       if (resp.Item) {
         return {
           documentKey,
-          status: resp.Item.status ?? 'UNKNOWN',
+          status: resp.Item.status ?? "UNKNOWN",
           statusReason: resp.Item.statusReason,
           updatedAt: resp.Item.updatedAt,
         };
       }
     } catch (err) {
-      console.error('getDocumentIngestionStatus: jobs-table read failed, falling back to KB query', err);
+      console.error(
+        "getDocumentIngestionStatus: jobs-table read failed, falling back to KB query",
+        err,
+      );
     }
   }
 
   // Fallback: direct KB query.
   const statusMap = await pollStatuses([documentKey]);
   const s = statusMap.get(documentKey);
-  return { documentKey, status: s?.status ?? 'NOT_FOUND', statusReason: s?.statusReason, updatedAt: s?.updatedAt };
+  return {
+    documentKey,
+    status: s?.status ?? "NOT_FOUND",
+    statusReason: s?.statusReason,
+    updatedAt: s?.updatedAt,
+  };
 }
 
 /**
  * Delete a document from S3 and Bedrock KB
  */
-async function deleteDocument(projectId: string, documentKey: string): Promise<{ documentKey: string; status: string }> {
+async function deleteDocument(
+  projectId: string,
+  documentKey: string,
+): Promise<{ documentKey: string; status: string }> {
   const { kbId, dsId } = await getKbIds();
-  await bedrockAgentClient.send(new DeleteKnowledgeBaseDocumentsCommand({
-    knowledgeBaseId: kbId,
-    dataSourceId: dsId,
-    documentIdentifiers: [{ dataSourceType: 'CUSTOM', custom: { id: documentKey } }],
-  }));
-  await s3Client.send(new DeleteObjectCommand({ Bucket: DOCUMENT_BUCKET, Key: documentKey }));
-  return { documentKey, status: 'DELETED' };
+  await bedrockAgentClient.send(
+    new DeleteKnowledgeBaseDocumentsCommand({
+      knowledgeBaseId: kbId,
+      dataSourceId: dsId,
+      documentIdentifiers: [
+        { dataSourceType: "CUSTOM", custom: { id: documentKey } },
+      ],
+    }),
+  );
+  await s3Client.send(
+    new DeleteObjectCommand({ Bucket: DOCUMENT_BUCKET, Key: documentKey }),
+  );
+  return { documentKey, status: "DELETED" };
 }
 
 /**
@@ -245,10 +317,13 @@ interface DocumentUploadResolverArguments {
   documentKey: string;
 }
 
-export const handler: AppSyncResolverHandler<DocumentUploadResolverArguments, unknown> = async (event) => {
+export const handler: AppSyncResolverHandler<
+  DocumentUploadResolverArguments,
+  unknown
+> = async (event) => {
   console.log(
     "Document upload resolver event:",
-    JSON.stringify(event, null, 2)
+    JSON.stringify(event, null, 2),
   );
 
   const { info, arguments: args, identity } = event;
@@ -256,14 +331,30 @@ export const handler: AppSyncResolverHandler<DocumentUploadResolverArguments, un
   const userId = getUserId(identity);
 
   try {
+    // Security fix (finding 60a5a6ae, CRE item 1): every field here acts on a
+    // client-supplied projectId used to build S3 keys (write for
+    // generateDocumentUploadUrl, the worst case — cross-tenant write feeds
+    // the knowledge base). Reconcile projectId against the caller BEFORE any
+    // presign, S3 list/delete, or DynamoDB/KB read — reusing the same gate
+    // project-resolver.ts's getProject enforces. Fail closed on any
+    // identity/lookup failure.
+    //
+    // getDocumentIngestionStatus derives its S3-facing projectId from the
+    // documentKey prefix, but the schema also supplies projectId directly
+    // (args.projectId) — gate on that value so the check itself never
+    // trusts a value assembled from the same untrusted key.
     switch (fieldName) {
       case "generateDocumentUploadUrl":
+        await assertProjectAccess(args.input.projectId, userId, event);
         return await generateUploadUrl(args.input, userId);
       case "listProjectDocuments":
+        await assertProjectAccess(args.projectId, userId, event);
         return await listProjectDocuments(args.projectId);
       case "getDocumentIngestionStatus":
+        await assertProjectAccess(args.projectId, userId, event);
         return await getDocumentIngestionStatus(args.documentKey);
       case "deleteDocument":
+        await assertProjectAccess(args.projectId, userId, event);
         return await deleteDocument(args.projectId, args.documentKey);
       default:
         throw new Error(`Unknown field: ${fieldName}`);
