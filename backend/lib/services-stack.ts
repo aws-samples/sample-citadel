@@ -1019,7 +1019,7 @@ def handler(event, context):
         handler: "tool-sandbox.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
-          TOOLS_CONFIG_TABLE: `citadel-tools-config-${props.environment}`,
+          TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
           TOOLS_BUCKET: `citadel-tools-${props.environment}-${this.account}-${this.region}`,
           POWERTOOLS_SERVICE_NAME: "citadel",
           POWERTOOLS_LOG_LEVEL: "INFO",
@@ -1036,7 +1036,7 @@ def handler(event, context):
         effect: iam.Effect.ALLOW,
         actions: ["dynamodb:GetItem"],
         resources: [
-          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/citadel-tools-config-${props.environment}`,
+          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/citadel-tools-${props.environment}`,
         ],
       }),
     );
