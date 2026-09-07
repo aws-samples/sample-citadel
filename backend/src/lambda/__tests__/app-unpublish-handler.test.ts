@@ -3,6 +3,8 @@
  *
  * Validates: Requirements 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 8.8, 8.9
  */
+process.env.REGISTRY_ID = 'test-registry-id';
+
 import {
   ApiGatewayV2Client,
   DeleteApiCommand,
@@ -14,8 +16,70 @@ import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { IAMClient, DeleteRolePolicyCommand, DeleteRoleCommand } from '@aws-sdk/client-iam';
 import { mockClient } from 'aws-sdk-client-mock';
 
+import {
+  seedMockRegistry,
+  resetMockRegistry,
+} from './fixtures/registry-service-mock';
+
+// This file tests unpublishApp directly (not through the handler), so it
+// must mock RegistryService itself for the owner gate (finding 13a58234).
+// Every call site below passes OWNER_EVENT, an AppSync identity whose
+// custom:organization/sub match the seeded app's manifest owner, so the
+// gate passes and existing behavior is exercised unchanged.
+jest.mock('../../services/registry-service', () => {
+  const { getMockRegistryService } = jest.requireActual(
+    './fixtures/registry-service-mock',
+  );
+  const actual = jest.requireActual('../../services/registry-service');
+  return {
+    RegistryService: jest
+      .fn()
+      .mockImplementation(() => getMockRegistryService()),
+    TypeMismatchError: actual.TypeMismatchError,
+    RegistryLifecycleError: actual.RegistryLifecycleError,
+  };
+});
+
 import { unpublishApp, AppMetadata } from '../app-publish-handler';
 import { PolicyManager } from '../../utils/policy-manager';
+
+// ── Owner-gate fixture (finding 13a58234) ───────────────────
+
+const UNPUBLISH_OWNER_ID = 'user-1';
+const UNPUBLISH_APP_ORG = 'org-1';
+
+/** AppSync event authorized as the seeded app's owner — see seedOwnerApp. */
+const OWNER_EVENT = {
+  identity: {
+    sub: UNPUBLISH_OWNER_ID,
+    claims: {
+      sub: UNPUBLISH_OWNER_ID,
+      'custom:organization': UNPUBLISH_APP_ORG,
+    },
+  },
+};
+
+/**
+ * Seeds a mock Registry record for `appId` whose manifest.createdBy ==
+ * UNPUBLISH_OWNER_ID and manifest.orgId == UNPUBLISH_APP_ORG, so
+ * OWNER_EVENT satisfies assertManifestAccess's implicit-creator-owner
+ * fallback. Call once per appId used in a test (default 'app-1', matching
+ * this file's existing fixtures).
+ */
+function seedOwnerApp(appId: string = 'app-1') {
+  seedMockRegistry('agent', appId, {
+    name: 'Test App',
+    status: 'PUBLISHED',
+    customDescriptorContent: JSON.stringify({
+      appId,
+      manifest: {
+        orgId: UNPUBLISH_APP_ORG,
+        createdBy: UNPUBLISH_OWNER_ID,
+        access: {},
+      },
+    }),
+  });
+}
 
 // ── Mocks ───────────────────────────────────────────────────
 
@@ -85,6 +149,8 @@ beforeEach(() => {
   ebMock.reset();
   stsMock.reset();
   iamMock.reset();
+  resetMockRegistry();
+  seedOwnerApp();
 
   apiGwMock.on(DeleteApiCommand).resolves({});
   ddbMock.on(UpdateCommand).resolves({});
@@ -104,7 +170,7 @@ describe('unpublishApp — idempotency', () => {
     const draftApp = makePublishedApp({ status: 'DRAFT' });
     ddbMock.on(QueryCommand).resolves({ Items: [draftApp] });
 
-    const result = await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    const result = await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     expect(result.app.status).toBe('DRAFT');
     expect(apiGwMock.commandCalls(DeleteApiCommand)).toHaveLength(0);
@@ -115,7 +181,7 @@ describe('unpublishApp — idempotency', () => {
     const activeApp = makePublishedApp({ status: 'ACTIVE' });
     ddbMock.on(QueryCommand).resolves({ Items: [activeApp] });
 
-    const result = await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    const result = await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     expect(result.app.status).toBe('ACTIVE');
     expect(apiGwMock.commandCalls(DeleteApiCommand)).toHaveLength(0);
@@ -125,7 +191,7 @@ describe('unpublishApp — idempotency', () => {
     const archivedApp = makePublishedApp({ status: 'ARCHIVED' });
     ddbMock.on(QueryCommand).resolves({ Items: [archivedApp] });
 
-    const result = await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    const result = await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     expect(result.app.status).toBe('ARCHIVED');
   });
@@ -145,7 +211,7 @@ describe('unpublishApp — full teardown', () => {
       ],
     });
 
-    const result = await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    const result = await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     // Status should be DRAFT
     expect(result.app.status).toBe('DRAFT');
@@ -176,7 +242,7 @@ describe('unpublishApp — full teardown', () => {
       Items: [makePublishedApp()],
     });
 
-    await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     // Verify the metadata update removes endpointUrl and apiId
     const updateCalls = ddbMock.commandCalls(UpdateCommand);
@@ -193,7 +259,7 @@ describe('unpublishApp — full teardown', () => {
       Items: [makePublishedApp()],
     });
 
-    await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     const updateCalls = ddbMock.commandCalls(UpdateCommand);
     // Key is appId only — AppsTable has no sort key.
@@ -220,7 +286,7 @@ describe('unpublishApp — EventBridge event', () => {
       Items: [makePublishedApp()],
     });
 
-    await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     expect(ebCalls).toHaveLength(1);
@@ -234,7 +300,7 @@ describe('unpublishApp — EventBridge event', () => {
       Items: [makePublishedApp({ orgId: 'org-test' })],
     });
 
-    await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const detail = JSON.parse(ebCalls[0].args[0].input.Entries![0].Detail!);
@@ -258,7 +324,7 @@ describe('unpublishApp — correlation ID', () => {
       Items: [makePublishedApp()],
     });
 
-    await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const detail = JSON.parse(ebCalls[0].args[0].input.Entries![0].Detail!);
@@ -277,7 +343,7 @@ describe('unpublishApp — best-effort teardown', () => {
     });
     apiGwMock.on(DeleteApiCommand).rejects(new Error('API GW delete failed'));
 
-    const result = await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    const result = await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     // Should still set status to DRAFT
     expect(result.app.status).toBe('DRAFT');
@@ -318,7 +384,7 @@ describe('unpublishApp — best-effort teardown', () => {
       return {};
     });
 
-    const result = await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    const result = await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     expect(result.app.status).toBe('DRAFT');
     expect(result.warnings).toBeDefined();
@@ -333,7 +399,7 @@ describe('unpublishApp — best-effort teardown', () => {
       new Error('IAM role delete failed'),
     );
 
-    const result = await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    const result = await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     expect(result.app.status).toBe('DRAFT');
     expect(result.warnings).toBeDefined();
@@ -349,7 +415,7 @@ describe('unpublishApp — best-effort teardown', () => {
       new Error('IAM failed'),
     );
 
-    const result = await unpublishApp('app-1', 'user-1', makeDefaultDeps());
+    const result = await unpublishApp('app-1', 'user-1', OWNER_EVENT, makeDefaultDeps());
 
     expect(result.app.status).toBe('DRAFT');
     expect(result.warnings!.length).toBeGreaterThanOrEqual(2);
@@ -363,7 +429,7 @@ describe('unpublishApp — error handling', () => {
     ddbMock.on(QueryCommand).resolves({ Items: [] });
 
     await expect(
-      unpublishApp('nonexistent', 'user-1', makeDefaultDeps()),
+      unpublishApp('nonexistent', 'user-1', OWNER_EVENT, makeDefaultDeps()),
     ).rejects.toThrow('App not found');
   });
 });

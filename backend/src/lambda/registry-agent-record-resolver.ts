@@ -2501,7 +2501,7 @@ const MANIFEST_ROLE_LEVEL: Record<string, number> = {
  * recorded `createdBy` — see the fallback below, unchanged from the
  * owner-only version.
  */
-async function assertManifestAccess(
+export async function assertManifestAccess(
   appId: string,
   record: RegistryRecord,
   event: unknown,

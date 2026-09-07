@@ -38,6 +38,8 @@ import {
 import { PolicyManager } from "../utils/policy-manager";
 import { updateAppMetaFields } from "../utils/apps-table-meta";
 import { hashApiKey, getApiKeyPepper, HASH_ALG } from "../utils/api-key-hash";
+import { RegistryService } from "../services/registry-service";
+import { assertManifestAccess } from "./registry-agent-record-resolver";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -241,6 +243,7 @@ let _apiGwClient: ApiGatewayV2Client | undefined;
 let _eventBridgeClient: EventBridgeClient | undefined;
 let _cwLogsClient: CloudWatchLogsClient | undefined;
 let _policyManager: PolicyManager | undefined;
+let _registryService: RegistryService | undefined;
 
 function getDocClient(): DynamoDBDocumentClient {
   if (!_docClient)
@@ -262,6 +265,28 @@ function getCwLogsClient(): CloudWatchLogsClient {
 function getPolicyManager(): PolicyManager {
   if (!_policyManager) _policyManager = new PolicyManager();
   return _policyManager;
+}
+
+/**
+ * Lazy RegistryService singleton, mirroring the same pattern used by
+ * registry-agent-record-resolver.ts. Read-only usage here: this handler
+ * ONLY calls getResource to fetch the manifest for the owner gate
+ * (finding 13a58234) — it must never write to the Registry.
+ */
+function getRegistryService(): RegistryService {
+  if (!_registryService) {
+    const registryId = process.env.REGISTRY_ID;
+    if (!registryId) {
+      throw new Error(
+        "REGISTRY_ID environment variable is required by app-publish-handler",
+      );
+    }
+    _registryService = new RegistryService({
+      registryId,
+      region: REGION,
+    });
+  }
+  return _registryService;
 }
 
 // ── Provision API Gateway ───────────────────────────────────
@@ -436,6 +461,7 @@ export async function provisionApiGateway(
 export async function publishApp(
   appId: string,
   userId: string,
+  resolverEvent: unknown,
   deps: {
     docClient: DynamoDBDocumentClient;
     apiGwClient: ApiGatewayV2Client;
@@ -459,6 +485,24 @@ export async function publishApp(
   },
 ): Promise<PublishResult> {
   const correlationId = uuidv4();
+
+  // 0. Owner gate (finding 13a58234) — BEFORE any provisioning, key
+  // generation, IAM change, EventBridge publish, or status write. Reuses
+  // the SAME shared manifest-access gate as grantAppAccess/revokeAppAccess
+  // and deleteApp (PR 134), pinned at requiredRole='owner': publish/
+  // unpublish provision or tear down billable, externally-reachable
+  // infrastructure and mint/revoke plaintext API keys, so they are
+  // owner-reserved, not editor-reserved. Fails closed on any missing
+  // identity, unresolvable org, missing record, or a record with no
+  // owner/createdBy (assertManifestAccess's own fail-closed contract).
+  const registryRecord = await getRegistryService().getResource(
+    "agent",
+    appId,
+  );
+  if (!registryRecord) {
+    throw new Error(`App not found: ${appId}`);
+  }
+  await assertManifestAccess(appId, registryRecord, resolverEvent, "owner");
 
   // 1. Fetch app metadata and components
   const componentsResult = await deps.docClient.send(
@@ -674,6 +718,7 @@ export interface UnpublishResult {
 export async function unpublishApp(
   appId: string,
   userId: string,
+  resolverEvent: unknown,
   deps: {
     docClient: DynamoDBDocumentClient;
     apiGwClient: ApiGatewayV2Client;
@@ -698,6 +743,18 @@ export async function unpublishApp(
 ): Promise<UnpublishResult> {
   const correlationId = uuidv4();
   const warnings: string[] = [];
+
+  // 0. Owner gate (finding 13a58234) — BEFORE any teardown (API Gateway
+  // delete, key revocation, IAM role delete, status write). Same shared
+  // gate as publishApp above; see that function's comment for rationale.
+  const registryRecord = await getRegistryService().getResource(
+    "agent",
+    appId,
+  );
+  if (!registryRecord) {
+    throw new Error(`App not found: ${appId}`);
+  }
+  await assertManifestAccess(appId, registryRecord, resolverEvent, "owner");
 
   // 1. Fetch app metadata and components
   const componentsResult = await deps.docClient.send(
@@ -833,7 +890,19 @@ export async function unpublishApp(
 interface AppPublishResolverEvent {
   info?: { fieldName?: string };
   arguments: { appId: string };
-  identity?: { sub?: string; claims?: { sub?: string } };
+  /**
+   * Broadened beyond {sub, claims.sub} to carry the full Cognito claims bag
+   * (custom:organization, custom:role, cognito:groups, or the nested
+   * claims.* equivalents) — assertManifestAccess's extractOrgFromEvent /
+   * isAdminFromEvent (auth-event.ts) read these directly off `identity`,
+   * mirroring every other AppSync resolver event shape in this codebase.
+   */
+  identity?: {
+    sub?: string;
+    username?: string;
+    claims?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
 }
 
 export const handler = async (
@@ -843,13 +912,16 @@ export const handler = async (
 
   const { info, arguments: args, identity } = event;
   const fieldName = info?.fieldName;
-  const userId = identity?.sub || identity?.claims?.sub || "unknown";
+  const userId =
+    identity?.sub ||
+    (identity?.claims?.sub as string | undefined) ||
+    "unknown";
 
   switch (fieldName) {
     case "publishApp":
-      return await publishApp(args.appId, userId);
+      return await publishApp(args.appId, userId, event);
     case "unpublishApp": {
-      const unpublishResult = await unpublishApp(args.appId, userId);
+      const unpublishResult = await unpublishApp(args.appId, userId, event);
       return unpublishResult.app;
     }
     default:

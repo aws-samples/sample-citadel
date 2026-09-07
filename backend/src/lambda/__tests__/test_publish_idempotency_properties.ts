@@ -7,6 +7,8 @@
  * re-provisioning. For any non-published app, `unpublishApp` returns current
  * state without error.
  */
+process.env.REGISTRY_ID = 'test-registry-id';
+
 import * as fc from 'fast-check';
 import {
   ApiGatewayV2Client,
@@ -24,8 +26,72 @@ import { STSClient } from '@aws-sdk/client-sts';
 import { IAMClient } from '@aws-sdk/client-iam';
 import { mockClient } from 'aws-sdk-client-mock';
 
+import {
+  seedMockRegistry,
+  resetMockRegistry,
+} from './fixtures/registry-service-mock';
+
+// This file tests publishApp/unpublishApp directly (not through the
+// handler), so it must mock RegistryService itself for the owner gate
+// (finding 13a58234). Every call site below passes an OWNER_EVENT built
+// from the property-generated appId, and seedOwnerApp seeds a matching
+// Registry record per property run, so the gate passes and the pre-fix
+// idempotency behavior is exercised unchanged.
+jest.mock('../../services/registry-service', () => {
+  const { getMockRegistryService } = jest.requireActual(
+    './fixtures/registry-service-mock',
+  );
+  const actual = jest.requireActual('../../services/registry-service');
+  return {
+    RegistryService: jest
+      .fn()
+      .mockImplementation(() => getMockRegistryService()),
+    TypeMismatchError: actual.TypeMismatchError,
+    RegistryLifecycleError: actual.RegistryLifecycleError,
+  };
+});
+
 import { publishApp, unpublishApp, AppMetadata } from '../app-publish-handler';
 import { PolicyManager } from '../../utils/policy-manager';
+
+// ── Owner-gate fixture (finding 13a58234) ───────────────────
+
+const IDEMPOTENCY_OWNER_ID = 'user-1';
+const IDEMPOTENCY_APP_ORG = 'owner-org';
+
+/** AppSync event authorized as the seeded app's owner — see seedOwnerApp. */
+const OWNER_EVENT = {
+  identity: {
+    sub: IDEMPOTENCY_OWNER_ID,
+    claims: {
+      sub: IDEMPOTENCY_OWNER_ID,
+      'custom:organization': IDEMPOTENCY_APP_ORG,
+    },
+  },
+};
+
+/**
+ * Seeds a mock Registry record for `appId` whose manifest.createdBy ==
+ * IDEMPOTENCY_OWNER_ID and manifest.orgId == IDEMPOTENCY_APP_ORG, matching
+ * OWNER_EVENT's claims, so assertManifestAccess's org-equality check plus
+ * implicit-creator-owner fallback both pass regardless of the
+ * property-generated orgId used in the AppMetadata row itself (that value
+ * only flows into the EventBridge event detail, not the Registry gate).
+ */
+function seedOwnerApp(appId: string) {
+  seedMockRegistry('agent', appId, {
+    name: 'Test App',
+    status: 'ACTIVE',
+    customDescriptorContent: JSON.stringify({
+      appId,
+      manifest: {
+        orgId: IDEMPOTENCY_APP_ORG,
+        createdBy: IDEMPOTENCY_OWNER_ID,
+        access: {},
+      },
+    }),
+  });
+}
 
 // ── Mocks ───────────────────────────────────────────────────
 
@@ -96,6 +162,7 @@ describe('Property 4: Publish and unpublish idempotence', () => {
     ebMock.reset();
     stsMock.reset();
     iamMock.reset();
+    resetMockRegistry();
     (mockPolicyManager.getAccountContext as jest.Mock).mockClear();
     (mockPolicyManager.ensureRole as jest.Mock).mockClear();
     (mockPolicyManager.deleteRole as jest.Mock).mockClear();
@@ -120,6 +187,8 @@ describe('Property 4: Publish and unpublish idempotence', () => {
           apiGwMock.reset();
           ddbMock.reset();
           ebMock.reset();
+          resetMockRegistry();
+          seedOwnerApp(appId);
 
           const publishedApp: AppMetadata = {
             appId,
@@ -140,7 +209,7 @@ describe('Property 4: Publish and unpublish idempotence', () => {
             ],
           });
 
-          const result = await publishApp(appId, 'user-1', makeDeps());
+          const result = await publishApp(appId, 'user-1', OWNER_EVENT, makeDeps());
 
           // Returns current published state
           expect(result.app.status).toBe('PUBLISHED');
@@ -183,6 +252,8 @@ describe('Property 4: Publish and unpublish idempotence', () => {
           apiGwMock.reset();
           ddbMock.reset();
           ebMock.reset();
+          resetMockRegistry();
+          seedOwnerApp(appId);
           (mockPolicyManager.deleteRole as jest.Mock).mockClear();
 
           const app: AppMetadata = {
@@ -197,7 +268,7 @@ describe('Property 4: Publish and unpublish idempotence', () => {
 
           ddbMock.on(QueryCommand).resolves({ Items: [app] });
 
-          const result = await unpublishApp(appId, 'user-1', makeDeps());
+          const result = await unpublishApp(appId, 'user-1', OWNER_EVENT, makeDeps());
 
           // Returns current state unchanged
           expect(result.app.status).toBe(status);

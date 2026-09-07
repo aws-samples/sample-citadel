@@ -12,6 +12,15 @@ export interface GatewayStackProps extends cdk.StackProps {
   appsTable: dynamodb.ITable;
   eventBus: events.IEventBus;
   idempotencyTable: dynamodb.ITable;
+  /**
+   * AgentCore Registry id/ARN, threaded from BackendStack.registryId /
+   * BackendStack.registryArn (mirrors the arbiter-stack.ts registryId/
+   * registryArn props). Required for the publish handler's owner gate
+   * (finding 13a58234) — it reads (never writes) the app's Registry
+   * manifest via RegistryService before any provisioning/teardown.
+   */
+  registryId: string;
+  registryArn: string;
 }
 
 export class GatewayStack extends cdk.Stack {
@@ -81,6 +90,11 @@ export class GatewayStack extends cdk.Stack {
         AUTHORIZER_FUNCTION_ARN: this.authorizerFunction.functionArn,
         IDEMPOTENCY_TABLE: props.idempotencyTable.tableName,
         APIGW_EVENTBRIDGE_ROLE_ARN: apiGwEventBridgeRole.roleArn,
+        // Owner gate (finding 13a58234): the handler fetches the app's
+        // Registry manifest via RegistryService before any
+        // provisioning/teardown, gated at requiredRole='owner' via the
+        // shared assertManifestAccess (registry-agent-record-resolver.ts).
+        REGISTRY_ID: props.registryId,
       },
       timeout: cdk.Duration.seconds(120),
       logGroup: new logs.LogGroup(this, "AppPublishHandlerLogs", {
@@ -233,6 +247,21 @@ export class GatewayStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ["lambda:AddPermission", "lambda:RemovePermission"],
         resources: [this.authorizerFunction.functionArn],
+      }),
+    );
+
+    // --- Publish Handler: Registry read grant (finding 13a58234) ---
+    // Least-privilege READ-ONLY: the owner gate calls
+    // RegistryService.getResource('agent', appId) to fetch the app's
+    // manifest before any provisioning/teardown. GetRegistryRecord only —
+    // no ListRegistryRecords/write actions, since this handler never lists
+    // or mutates Registry records. Mirrors the props.registryArn grant
+    // pattern in arbiter-stack.ts (supervisor/worker/fabricator Lambdas).
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["bedrock-agentcore:GetRegistryRecord"],
+        resources: [props.registryArn, `${props.registryArn}/*`],
       }),
     );
 
