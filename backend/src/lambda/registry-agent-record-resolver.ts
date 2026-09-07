@@ -1055,21 +1055,22 @@ export const handler: AppSyncResolverHandler<
       case "updateApp":
         return await updateApp(args.input, userId, event);
       case "deleteApp":
-        return await deleteApp(args.appId, userId);
+        return await deleteApp(args.appId, userId, event);
       case "bindWorkflowToApp":
         return await bindWorkflowToApp(args.appId, args.workflowId, userId);
       case "unbindWorkflowFromApp":
         return await unbindWorkflowFromApp(args.appId, args.workflowId, userId);
       case "updateAgentBinding":
-        return await updateAgentBinding(args.input, userId);
+        return await updateAgentBinding(args.input, userId, event);
       case "addAppComponent":
-        return await addAppComponent(args.appId, args.component, userId);
+        return await addAppComponent(args.appId, args.component, userId, event);
       case "removeAppComponent":
         return await removeAppComponent(
           args.appId,
           args.componentType,
           args.componentId,
           userId,
+          event,
         );
       case "setAppConfigSchema":
         return await setAppConfigSchema(
@@ -1077,6 +1078,7 @@ export const handler: AppSyncResolverHandler<
           args.schema,
           args.version,
           userId,
+          event,
         );
       case "setAppConfigValues":
         return await setAppConfigValues(
@@ -1084,9 +1086,15 @@ export const handler: AppSyncResolverHandler<
           args.values,
           args.version,
           userId,
+          event,
         );
       case "setAppAuthConfig":
-        return await setAppAuthConfig(args.appId, args.authConfig, userId);
+        return await setAppAuthConfig(
+          args.appId,
+          args.authConfig,
+          userId,
+          event,
+        );
       case "grantAppAccess":
         return await grantAppAccess(
           args.appId,
@@ -1115,11 +1123,12 @@ export const handler: AppSyncResolverHandler<
           args.name,
           args.expiresIn,
           userId,
+          event,
         );
       case "revokeAppApiKey":
-        return await revokeAppApiKey(args.appId, args.keyId, userId);
+        return await revokeAppApiKey(args.appId, args.keyId, userId, event);
       case "rotateAppApiKey":
-        return await rotateAppApiKey(args.appId, args.keyId, userId);
+        return await rotateAppApiKey(args.appId, args.keyId, userId, event);
 
       default:
         throw new Error(`Unknown field: ${fieldName}`);
@@ -1543,7 +1552,33 @@ async function updateApp(
     throw new Error("App not found");
   }
 
+  // Editor-gate (finding 8f8fd119) — BEFORE any write. See
+  // assertManifestAccess for the store rationale (Registry manifest `access`
+  // map, not the ACCESS# DDB rows). Content edits, status transitions, and
+  // decisions below all flow through this single write path, so gating here
+  // covers the entire function.
+  await assertManifestAccess(input.appId, existing, event, "editor");
+
   const existingManifest = readManifest(existing);
+
+  // orgId reassignment is rejected outright, never authorized-and-applied.
+  // manifest.orgId is the tenant boundary assertManifestAccess itself reads
+  // (callerOrgId === manifest.orgId) and that getApp/listApps use to scope
+  // visibility — letting ANY caller (including a legitimate same-org
+  // editor) change it would let an app be walked out of its owning org's
+  // listApps and into another org's, i.e. a tenant-takeover primitive with
+  // no legitimate lifecycle use: no other gated mutation here needs to move
+  // an app between orgs, and the intended path for provisioning a NEW app
+  // in a different org is createApp, not an update of an existing one.
+  // Reject unconditionally (not just for non-owners) rather than silently
+  // ignoring the field, so a caller sees an explicit error instead of a
+  // confusing partial-apply.
+  if (input.orgId !== undefined && input.orgId !== existingManifest.orgId) {
+    throw new Error(
+      "ValidationError: orgId cannot be changed on an existing app",
+    );
+  }
+
   const existingVersion = existingManifest.version ?? 1;
   if (input.version !== undefined && input.version !== existingVersion) {
     throw new Error("Conflict: app was modified concurrently. Please retry.");
@@ -1754,12 +1789,23 @@ async function updateApp(
   return projectAgentAppNormalized(finalRecord);
 }
 
-async function deleteApp(appId: string, userId: string): Promise<unknown> {
+async function deleteApp(
+  appId: string,
+  userId: string,
+  event: unknown,
+): Promise<unknown> {
   const existing = await getRegistryService().getResource("agent", appId);
   if (!existing) {
     throw new Error("App not found");
   }
   const projection = projectAgentApp(existing);
+
+  // Finding 6400b440: deleteApp is destructive and irreversible — gate it
+  // at 'owner' (matching grant/revoke's requirement, NOT the editor-level
+  // lifecycle mutations from 8f8fd119) BEFORE any side effect. Must run
+  // before revokeFabricatorAuthority and before deleteResource so a refused
+  // caller triggers zero calls to either.
+  await assertManifestOwnerAccess(appId, existing, event);
 
   // US-ARB-014: revoke the per-app fabricator authority unit BEFORE the
   // registry delete. If revoke throws an unrecoverable error we do NOT
@@ -1844,6 +1890,19 @@ async function unbindWorkflowFromApp(
 // Exported for reuse by intake-orchestration-resolver (via
 // ensureAppAgentBindings) — the canonical READY-promotion core. Export-only
 // refactor: behaviour is identical for the AppSync mutation path.
+//
+// `event` is OPTIONAL and gates on 'editor' when present (finding 8f8fd119).
+// The AppSync dispatch call site always passes the real event. The ONLY
+// caller that omits it is ensureAppAgentBindings, invoked from
+// intake-orchestration-resolver as a server-internal step of the
+// fabrication/import conversational flow — it runs after the user has
+// already consented in-session to bind agents into an app THEY are actively
+// operating on, driven by userId derived the same way the AppSync path
+// derives it (getUserId from the SAME request's identity), not by an
+// external caller supplying an arbitrary appId. That trust boundary is
+// upstream of this function (the conversational flow itself), not a
+// justification to skip authorization for the AppSync mutation path — hence
+// gating whenever `event` IS supplied, unconditionally.
 export async function updateAgentBinding(
   input: {
     appId: string;
@@ -1854,10 +1913,14 @@ export async function updateAgentBinding(
     status?: string;
   },
   userId: string,
+  event?: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", input.appId);
   if (!record) {
     throw new Error("App not found");
+  }
+  if (event !== undefined) {
+    await assertManifestAccess(input.appId, record, event, "editor");
   }
   const manifest = readManifest(record);
   const bindings = manifest.agentBindings || [];
@@ -1967,14 +2030,24 @@ export async function updateAgentBinding(
 // Exported for reuse by intake-orchestration-resolver (via
 // ensureAppAgentBindings) — the canonical agent-binding core. Export-only
 // refactor: behaviour is identical for the AppSync mutation path.
+//
+// `event` is OPTIONAL and gates on 'editor' when present (finding 8f8fd119)
+// — same rationale as updateAgentBinding above: gate unconditionally
+// whenever an event is supplied (the AppSync path always supplies one); the
+// ensureAppAgentBindings internal-reuse call site is the only omitter, and
+// that trust boundary lives upstream in the conversational fabrication flow.
 export async function addAppComponent(
   appId: string,
   component: { type: string; data: string },
   userId: string,
+  event?: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
     throw new Error("App not found");
+  }
+  if (event !== undefined) {
+    await assertManifestAccess(appId, record, event, "editor");
   }
 
   const data =
@@ -2200,11 +2273,13 @@ async function removeAppComponent(
   componentType: string,
   componentId: string,
   userId: string,
+  event: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
     throw new Error("App not found");
   }
+  await assertManifestAccess(appId, record, event, "editor");
 
   const mutatedContent = writeManifestMutation(record, (m) => {
     switch (componentType) {
@@ -2243,11 +2318,14 @@ async function setAppConfigSchema(
   schemaInput: string | object,
   version: number,
   userId: string,
+  event: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
     throw new Error("App not found");
   }
+  await assertManifestAccess(appId, record, event, "editor");
+
   const manifest = readManifest(record);
   if ((manifest.version ?? 1) !== version) {
     throw new Error("Conflict: app was modified concurrently. Please retry.");
@@ -2291,11 +2369,14 @@ async function setAppConfigValues(
   valuesInput: string | object,
   version: number,
   userId: string,
+  event: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
     throw new Error("App not found");
   }
+  await assertManifestAccess(appId, record, event, "editor");
+
   const manifest = readManifest(record);
   if ((manifest.version ?? 1) !== version) {
     throw new Error("Conflict: app was modified concurrently. Please retry.");
@@ -2344,11 +2425,13 @@ async function setAppAuthConfig(
   appId: string,
   authConfigInput: string | object,
   userId: string,
+  event: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
     throw new Error("App not found");
   }
+  await assertManifestAccess(appId, record, event, "editor");
 
   const authConfig =
     typeof authConfigInput === "string"
@@ -2370,32 +2453,59 @@ async function setAppAuthConfig(
 }
 
 /**
- * Owner-gate for grantAppAccess/revokeAppAccess (finding 8b0e32a7, CRE item
- * 4). checkOperationAccess/checkAppAccess (app-access-control.ts) reserve
- * both operations at 'owner' but read a SEPARATE DynamoDB ACCESS# store
- * (appsTable GroupIndex) that this resolver's writes never update — that
- * store has ZERO production writers (autoAssignOwner/grantAppAccess/
- * revokeAppAccess in app-access-control.ts are exercised only by tests).
- * The canonical, write-consistent store is the Registry record MANIFEST's
- * `access` map: it is the ONLY store this resolver's grant/revoke actually
- * mutate (via writeManifestMutation), and it is read here the same way
- * getApp's own tenant gate reads the manifest's `orgId` — so a grant is
- * immediately visible to the next authorization check in-process (the
- * split-brain requirement).
+ * Role hierarchy for assertManifestAccess. Mirrors app-access-control.ts's
+ * ROLE_LEVEL exactly (owner > editor > viewer) — kept as a file-local copy
+ * rather than importing that module's map, because this gate authorizes
+ * against a DIFFERENT store (the Registry manifest's `access` map, not the
+ * ACCESS# DynamoDB rows app-access-control.ts reads) and must not create a
+ * coupling that makes it look like the two stores are kept in sync.
+ */
+const MANIFEST_ROLE_LEVEL: Record<string, number> = {
+  viewer: 1,
+  editor: 2,
+  owner: 3,
+};
+
+/**
+ * Shared manifest-access gate (finding 8b0e32a7 / CRE item 4, generalized
+ * for finding 8f8fd119). Originally `assertManifestOwnerAccess` — hardcoded
+ * to 'owner' for grantAppAccess/revokeAppAccess. Parameterised on
+ * `requiredRole` so the SAME gate, reading the SAME store, can reserve the
+ * editor-level lifecycle mutations (updateApp, addAppComponent,
+ * createAppApiKey, ...) at 'editor' while grant/revoke keep requiring
+ * 'owner' with byte-for-byte identical semantics (see the two thin
+ * `assertManifestOwnerAccess`-shaped call sites below, which still request
+ * 'owner').
+ *
+ * checkOperationAccess/checkAppAccess (app-access-control.ts) reserve these
+ * operations by role but read a SEPARATE DynamoDB ACCESS# store (appsTable
+ * GroupIndex) that this resolver's writes never update — that store has
+ * ZERO production writers (autoAssignOwner/grantAppAccess/revokeAppAccess in
+ * app-access-control.ts are exercised only by tests). The canonical,
+ * write-consistent store is the Registry record MANIFEST's `access` map: it
+ * is the ONLY store this resolver's mutations actually update (via
+ * writeManifestMutation), and it is read here the same way getApp's own
+ * tenant gate reads the manifest's `orgId` — so a grant is immediately
+ * visible to the next authorization check in-process (the split-brain
+ * requirement). This is also why assertRowOrg (eval-comparison-resolver.ts)
+ * is the wrong fit: it is an org-equality check on a plain DynamoDB row with
+ * no role hierarchy, and apps are stored in the Registry manifest.
  *
  * Fails closed: any missing identity, missing app, or Cognito lookup
  * failure (via extractOrgFromEvent) results in a thrown "Access denied"
  * BEFORE any manifest read is used to authorize a write. Admin group
  * bypasses, matching checkAppAccess's own convention. Same-org membership
- * alone is NOT sufficient — the caller must hold 'owner' in the manifest's
- * `access` map, or (for apps created before this fix, whose manifests never
- * had an owner entry populated) be the app's recorded `createdBy` — see the
- * fallback below.
+ * alone is NOT sufficient — the caller must hold `requiredRole` (or higher)
+ * in the manifest's `access` map, or (for apps created before the owner-gate
+ * fix, whose manifests never had an owner entry populated) be the app's
+ * recorded `createdBy` — see the fallback below, unchanged from the
+ * owner-only version.
  */
-async function assertManifestOwnerAccess(
+async function assertManifestAccess(
   appId: string,
   record: RegistryRecord,
   event: unknown,
+  requiredRole: "viewer" | "editor" | "owner",
 ): Promise<void> {
   if (isAdminFromEvent(event)) {
     return;
@@ -2405,29 +2515,39 @@ async function assertManifestOwnerAccess(
     (event as { identity?: Parameters<typeof getUserId>[0] })?.identity,
   );
   if (!callerId || callerId === "anonymous") {
-    throw new Error(`Access denied: requires owner role for app ${appId}`);
+    throw new Error(
+      `Access denied: requires ${requiredRole} role for app ${appId}`,
+    );
   }
 
   const callerOrgId = await extractOrgFromEvent(event);
   const manifest = readManifest(record);
   if (!callerOrgId || callerOrgId !== manifest.orgId) {
-    throw new Error(`Access denied: requires owner role for app ${appId}`);
+    throw new Error(
+      `Access denied: requires ${requiredRole} role for app ${appId}`,
+    );
   }
 
   const callerEntry = manifest.access?.[callerId];
-  const isExplicitOwner = callerEntry?.role === "owner";
+  const callerRole = callerEntry?.role;
+  const meetsExplicitRole =
+    !!callerRole &&
+    (MANIFEST_ROLE_LEVEL[callerRole] ?? 0) >=
+      (MANIFEST_ROLE_LEVEL[requiredRole] ?? 0);
 
-  // Backward-compat fallback: apps created BEFORE this fix have `access: {}`
-  // in their manifest (the field existed but nothing ever populated an
-  // owner entry into it) — with no fallback, existing app creators would be
-  // locked out of granting/revoking on their own apps. `createdBy` has
-  // always been stamped server-side at createApp time from the caller's
-  // verified identity, never client-suppliable, so treating the creator as
-  // an implicit owner when NO owner entry exists yet is safe and does not
-  // reopen the vulnerability: it only recognizes the one identity the
-  // system itself recorded as having created the app, and stops applying
-  // the instant a real owner entry exists (including the one seeded by
-  // createApp going forward).
+  // Backward-compat fallback: apps created BEFORE the owner-gate fix have
+  // `access: {}` in their manifest (the field existed but nothing ever
+  // populated an owner entry into it) — with no fallback, existing app
+  // creators would be locked out of managing their own apps. `createdBy`
+  // has always been stamped server-side at createApp time from the
+  // caller's verified identity, never client-suppliable, so treating the
+  // creator as an implicit OWNER when NO owner entry exists yet is safe
+  // and does not reopen the vulnerability: it only recognizes the one
+  // identity the system itself recorded as having created the app (the
+  // highest role), and stops applying the instant a real owner entry
+  // exists (including the one seeded by createApp going forward). An
+  // implicit creator-owner satisfies any requiredRole, since owner is the
+  // top of the hierarchy.
   const hasAnyOwnerEntry = Object.values(manifest.access ?? {}).some(
     (entry) => entry?.role === "owner",
   );
@@ -2436,9 +2556,25 @@ async function assertManifestOwnerAccess(
     !!manifest.createdBy &&
     manifest.createdBy === callerId;
 
-  if (!isExplicitOwner && !isImplicitCreatorOwner) {
-    throw new Error(`Access denied: requires owner role for app ${appId}`);
+  if (!meetsExplicitRole && !isImplicitCreatorOwner) {
+    throw new Error(
+      `Access denied: requires ${requiredRole} role for app ${appId}`,
+    );
   }
+}
+
+/**
+ * Thin owner-role wrapper preserving the exact call shape/behaviour of the
+ * pre-8f8fd119 `assertManifestOwnerAccess` for grantAppAccess/revokeAppAccess.
+ * Grant/revoke must continue to require 'owner' — this is not weakened by
+ * the generalization above.
+ */
+async function assertManifestOwnerAccess(
+  appId: string,
+  record: RegistryRecord,
+  event: unknown,
+): Promise<void> {
+  return assertManifestAccess(appId, record, event, "owner");
 }
 
 async function grantAppAccess(
@@ -2558,7 +2694,21 @@ async function createAppApiKey(
   name: string,
   expiresIn: number | undefined,
   userId: string,
+  event: unknown,
 ): Promise<unknown> {
+  // Editor-gate (finding 8f8fd119) — createAppApiKey/rotateAppApiKey are the
+  // highest-exposure ops in this finding: with no gate, ANY authenticated
+  // caller could mint a plaintext key for ANY app in ANY org, i.e. silent
+  // cross-tenant data-plane access. app-api-key-management.ts operates
+  // purely on AppsTable APIKEY# rows and never touches the Registry
+  // manifest, so the gate — and the record fetch it needs — lives here,
+  // strictly BEFORE createAppApiKeyImpl (key generation + DDB write).
+  const record = await getRegistryService().getResource("agent", appId);
+  if (!record) {
+    throw new Error("App not found");
+  }
+  await assertManifestAccess(appId, record, event, "editor");
+
   const result = await createAppApiKeyImpl(
     appId,
     name,
@@ -2584,7 +2734,16 @@ async function revokeAppApiKey(
   appId: string,
   keyId: string,
   userId: string,
+  event: unknown,
 ): Promise<unknown> {
+  // Editor-gate (finding 8f8fd119) — BEFORE any revoke write. See
+  // createAppApiKey above for why the record fetch lives in this wrapper.
+  const record = await getRegistryService().getResource("agent", appId);
+  if (!record) {
+    throw new Error("App not found");
+  }
+  await assertManifestAccess(appId, record, event, "editor");
+
   return revokeAppApiKeyImpl(appId, keyId, userId, getSharedDeps());
 }
 
@@ -2592,7 +2751,15 @@ async function rotateAppApiKey(
   appId: string,
   keyId: string,
   userId: string,
+  event: unknown,
 ): Promise<unknown> {
+  // Editor-gate (finding 8f8fd119) — BEFORE any key generation/revocation.
+  const record = await getRegistryService().getResource("agent", appId);
+  if (!record) {
+    throw new Error("App not found");
+  }
+  await assertManifestAccess(appId, record, event, "editor");
+
   const result = await rotateAppApiKeyImpl(
     appId,
     keyId,

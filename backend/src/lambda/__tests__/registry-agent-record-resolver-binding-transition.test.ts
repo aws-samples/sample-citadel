@@ -17,22 +17,25 @@
  * reach the resolver at all.
  */
 
-process.env.REGISTRY_ID = 'test-registry-id';
-process.env.APPS_TABLE = 'citadel-apps-test';
-process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
-process.env.AGENT_CONFIG_TABLE = 'citadel-agents-test';
-process.env.EVENT_BUS_NAME = 'citadel-agents-test';
-process.env.USER_POOL_ID = 'us-east-1_test';
-process.env.AUTHORITY_UNITS_TABLE = 'test-authority-units';
+process.env.REGISTRY_ID = "test-registry-id";
+process.env.APPS_TABLE = "citadel-apps-test";
+process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
+process.env.AGENT_CONFIG_TABLE = "citadel-agents-test";
+process.env.EVENT_BUS_NAME = "citadel-agents-test";
+process.env.USER_POOL_ID = "us-east-1_test";
+process.env.AUTHORITY_UNITS_TABLE = "test-authority-units";
 process.env.APPSYNC_ENDPOINT =
-  'https://test-api.appsync-api.us-east-1.amazonaws.com/graphql';
-process.env.AWS_REGION = 'us-east-1';
-process.env.MODEL_CATALOG_TABLE = 'citadel-model-catalog-test';
+  "https://test-api.appsync-api.us-east-1.amazonaws.com/graphql";
+process.env.AWS_REGION = "us-east-1";
+process.env.MODEL_CATALOG_TABLE = "citadel-model-catalog-test";
 
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
-import { mockClient } from 'aws-sdk-client-mock';
-import { TypeMismatchError } from '../../services/registry-service';
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
+import { TypeMismatchError } from "../../services/registry-service";
 
 const ebMock = mockClient(EventBridgeClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -46,10 +49,10 @@ const resolveRecordIdMock = jest.fn();
 const getResourceMock = jest.fn();
 const updateResourceMock = jest.fn();
 
-jest.mock('../../services/registry-service', () => {
-  const actual = jest.requireActual('../../services/registry-service');
+jest.mock("../../services/registry-service", () => {
+  const actual = jest.requireActual("../../services/registry-service");
   const { getMockRegistryService } = jest.requireActual(
-    './fixtures/registry-service-mock',
+    "./fixtures/registry-service-mock",
   );
   return {
     ...actual,
@@ -76,49 +79,50 @@ jest.mock('../../services/registry-service', () => {
   };
 });
 
-jest.mock('../../utils/appsync', () => ({
-  getUserId: jest.fn().mockReturnValue('user-123'),
+jest.mock("../../utils/appsync", () => ({
+  getUserId: jest.fn().mockReturnValue("user-123"),
 }));
 
-jest.mock('../../utils/appsync-publish', () => ({
+jest.mock("../../utils/appsync-publish", () => ({
   publishAppStatusEvent: jest.fn().mockResolvedValue({}),
 }));
 
-jest.mock('uuid', () => ({
-  v4: jest.fn().mockReturnValue('test-correlation-id'),
+jest.mock("uuid", () => ({
+  v4: jest.fn().mockReturnValue("test-correlation-id"),
 }));
 
 import {
   seedMockRegistry,
   resetMockRegistry,
-} from './fixtures/registry-service-mock';
-import { handler } from '../registry-agent-record-resolver';
+} from "./fixtures/registry-service-mock";
+import { handler } from "../registry-agent-record-resolver";
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const APP_RECORD_ID = 'app000000001';
-const AGENT_RECORD_ID = 'agt000000001'; // valid 12-char recordId
-const AGENT_NAME = 'email_validator_agent'; // legacy human-readable id
+const APP_RECORD_ID = "app000000001";
+const AGENT_RECORD_ID = "agt000000001"; // valid 12-char recordId
+const AGENT_NAME = "email_validator_agent"; // legacy human-readable id
 
 function seedAppWithBinding(agentId: string) {
-  seedMockRegistry('agent', APP_RECORD_ID, {
-    name: 'Test App',
-    description: 'Test',
-    status: 'DRAFT',
+  seedMockRegistry("agent", APP_RECORD_ID, {
+    name: "Test App",
+    description: "Test",
+    status: "DRAFT",
     customDescriptorContent: JSON.stringify({
       appId: APP_RECORD_ID,
       manifest: {
-        orgId: 'org-1',
+        orgId: "org-1",
+        createdBy: "user-123",
         version: 1,
-        status: 'DRAFT',
+        status: "DRAFT",
         workflowIds: [],
         agentBindings: [
           {
             agentId,
-            status: 'DESIGN',
-            addedAt: '2026-01-01T00:00:00Z',
+            status: "DESIGN",
+            addedAt: "2026-01-01T00:00:00Z",
           },
         ],
         permissions: [],
@@ -135,21 +139,21 @@ function seedAppWithBinding(agentId: string) {
 function activeAgentRecord(recordId: string) {
   return {
     recordId,
-    name: 'email_validator_agent',
+    name: "email_validator_agent",
     // APPROVED is the authoritative active signal: the READY gate derives
     // the agent's state from record.status via toInternalState, not from
     // the descriptor mirror (which drifts — see the fabricated-agent tests).
-    status: 'APPROVED',
-    customDescriptorContent: JSON.stringify({ state: 'active' }),
+    status: "APPROVED",
+    customDescriptorContent: JSON.stringify({ state: "active" }),
   };
 }
 
 function inactiveAgentRecord(recordId: string) {
   return {
     recordId,
-    name: 'email_validator_agent',
-    status: 'DRAFT',
-    customDescriptorContent: JSON.stringify({ state: 'draft' }),
+    name: "email_validator_agent",
+    status: "DRAFT",
+    customDescriptorContent: JSON.stringify({ state: "draft" }),
   };
 }
 
@@ -165,7 +169,10 @@ function makeEvent(fieldName: string, args: Record<string, unknown>) {
   return {
     info: { fieldName },
     arguments: args,
-    identity: { sub: 'user-123', claims: { sub: 'user-123' } },
+    identity: {
+      sub: "user-123",
+      claims: { sub: "user-123", "custom:organization": "org-1" },
+    },
   } as unknown as HandlerEvent;
 }
 
@@ -173,7 +180,7 @@ function makeEvent(fieldName: string, args: Record<string, unknown>) {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('updateAgentBinding — READY transition agentId resolution', () => {
+describe("updateAgentBinding — READY transition agentId resolution", () => {
   beforeEach(() => {
     resetMockRegistry();
     ebMock.reset();
@@ -186,12 +193,18 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     // returned record, mimicking the real RegistryService. This is what
     // projectAgentApp consumes, so assertions can read the post-update
     // manifest via the normal projection path.
-    updateResourceMock.mockImplementation(async (_type: unknown, id: unknown, input: { customMetadata?: string }) => ({
-      recordId: id,
-      name: 'Test App',
-      status: 'DRAFT',
-      customDescriptorContent: input.customMetadata,
-    }));
+    updateResourceMock.mockImplementation(
+      async (
+        _type: unknown,
+        id: unknown,
+        input: { customMetadata?: string },
+      ) => ({
+        recordId: id,
+        name: "Test App",
+        status: "DRAFT",
+        customDescriptorContent: input.customMetadata,
+      }),
+    );
   });
 
   afterAll(() => {
@@ -206,23 +219,24 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     delete process.env.AUTHORITY_UNITS_TABLE;
   });
 
-  test('succeeds when agentId is already a 12-char recordId and the agent is active', async () => {
+  test("succeeds when agentId is already a 12-char recordId and the agent is active", async () => {
     seedAppWithBinding(AGENT_RECORD_ID);
     resolveRecordIdMock.mockImplementation(async (_type, id) => id);
     // First getResource call: app lookup. Second: agent lookup after resolve.
     getResourceMock
       .mockResolvedValueOnce({
         recordId: APP_RECORD_ID,
-        name: 'Test App',
-        status: 'DRAFT',
+        name: "Test App",
+        status: "DRAFT",
         customDescriptorContent: JSON.stringify({
           appId: APP_RECORD_ID,
           manifest: {
-            orgId: 'org-1',
+            orgId: "org-1",
+            createdBy: "user-123",
             version: 1,
-            status: 'DRAFT',
+            status: "DRAFT",
             agentBindings: [
-              { agentId: AGENT_RECORD_ID, status: 'DESIGN', addedAt: 't' },
+              { agentId: AGENT_RECORD_ID, status: "DESIGN", addedAt: "t" },
             ],
           },
         }),
@@ -230,27 +244,27 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
       .mockResolvedValueOnce(activeAgentRecord(AGENT_RECORD_ID));
 
     const result = await invokeHandler(
-      makeEvent('updateAgentBinding', {
+      makeEvent("updateAgentBinding", {
         input: {
           appId: APP_RECORD_ID,
           agentId: AGENT_RECORD_ID,
-          status: 'READY',
+          status: "READY",
         },
       }),
     );
 
-    expect(resolveRecordIdMock).toHaveBeenCalledWith('agent', AGENT_RECORD_ID);
+    expect(resolveRecordIdMock).toHaveBeenCalledWith("agent", AGENT_RECORD_ID);
     expect(result).toMatchObject({
       agentBindings: [
         expect.objectContaining({
           agentId: AGENT_RECORD_ID,
-          status: 'READY',
+          status: "READY",
         }),
       ],
     });
   });
 
-  test('resolves a human-readable agentId to a recordId before calling getResource', async () => {
+  test("resolves a human-readable agentId to a recordId before calling getResource", async () => {
     seedAppWithBinding(AGENT_NAME);
     resolveRecordIdMock.mockImplementation(async (_type, id) => {
       expect(id).toBe(AGENT_NAME);
@@ -259,16 +273,17 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     getResourceMock
       .mockResolvedValueOnce({
         recordId: APP_RECORD_ID,
-        name: 'Test App',
-        status: 'DRAFT',
+        name: "Test App",
+        status: "DRAFT",
         customDescriptorContent: JSON.stringify({
           appId: APP_RECORD_ID,
           manifest: {
-            orgId: 'org-1',
+            orgId: "org-1",
+            createdBy: "user-123",
             version: 1,
-            status: 'DRAFT',
+            status: "DRAFT",
             agentBindings: [
-              { agentId: AGENT_NAME, status: 'DESIGN', addedAt: 't' },
+              { agentId: AGENT_NAME, status: "DESIGN", addedAt: "t" },
             ],
           },
         }),
@@ -276,25 +291,25 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
       .mockResolvedValueOnce(activeAgentRecord(AGENT_RECORD_ID));
 
     await invokeHandler(
-      makeEvent('updateAgentBinding', {
+      makeEvent("updateAgentBinding", {
         input: {
           appId: APP_RECORD_ID,
           agentId: AGENT_NAME,
-          status: 'READY',
+          status: "READY",
         },
       }),
     );
 
     // resolveRecordId was consulted for the binding's human name…
-    expect(resolveRecordIdMock).toHaveBeenCalledWith('agent', AGENT_NAME);
+    expect(resolveRecordIdMock).toHaveBeenCalledWith("agent", AGENT_NAME);
     // …and the subsequent getResource call used the resolved recordId, never
     // the raw name (this is the branch that previously hit the SDK regex).
     const agentLookup = getResourceMock.mock.calls.find(
-      ([type, id]) => type === 'agent' && id === AGENT_RECORD_ID,
+      ([type, id]) => type === "agent" && id === AGENT_RECORD_ID,
     );
     expect(agentLookup).toBeDefined();
     const rawNameLookup = getResourceMock.mock.calls.find(
-      ([type, id]) => type === 'agent' && id === AGENT_NAME,
+      ([type, id]) => type === "agent" && id === AGENT_NAME,
     );
     expect(rawNameLookup).toBeUndefined();
   });
@@ -308,16 +323,17 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     );
     getResourceMock.mockResolvedValueOnce({
       recordId: APP_RECORD_ID,
-      name: 'Test App',
-      status: 'DRAFT',
+      name: "Test App",
+      status: "DRAFT",
       customDescriptorContent: JSON.stringify({
         appId: APP_RECORD_ID,
         manifest: {
-          orgId: 'org-1',
+          orgId: "org-1",
+          createdBy: "user-123",
           version: 1,
-          status: 'DRAFT',
+          status: "DRAFT",
           agentBindings: [
-            { agentId: AGENT_NAME, status: 'DESIGN', addedAt: 't' },
+            { agentId: AGENT_NAME, status: "DESIGN", addedAt: "t" },
           ],
         },
       }),
@@ -325,23 +341,23 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
 
     await expect(
       invokeHandler(
-        makeEvent('updateAgentBinding', {
+        makeEvent("updateAgentBinding", {
           input: {
             appId: APP_RECORD_ID,
             agentId: AGENT_NAME,
-            status: 'READY',
+            status: "READY",
           },
         }),
       ),
     ).rejects.toThrow(`Agent ${AGENT_NAME} not found`);
     // The agent getResource path must not be reached when resolution failed.
     const agentLookups = getResourceMock.mock.calls.filter(
-      ([type, id]) => type === 'agent' && id !== APP_RECORD_ID,
+      ([type, id]) => type === "agent" && id !== APP_RECORD_ID,
     );
     expect(agentLookups).toHaveLength(0);
   });
 
-  test('surfaces the activation-gate error when getResource throws TypeMismatchError on the resolved agent', async () => {
+  test("surfaces the activation-gate error when getResource throws TypeMismatchError on the resolved agent", async () => {
     // Simulates the case where the resolved recordId exists but is not an
     // agent record (or the SDK otherwise rejects the lookup with a type
     // mismatch). The caller must see the normal activation-gate message
@@ -351,16 +367,17 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     getResourceMock
       .mockResolvedValueOnce({
         recordId: APP_RECORD_ID,
-        name: 'Test App',
-        status: 'DRAFT',
+        name: "Test App",
+        status: "DRAFT",
         customDescriptorContent: JSON.stringify({
           appId: APP_RECORD_ID,
           manifest: {
-            orgId: 'org-1',
+            orgId: "org-1",
+            createdBy: "user-123",
             version: 1,
-            status: 'DRAFT',
+            status: "DRAFT",
             agentBindings: [
-              { agentId: AGENT_NAME, status: 'DESIGN', addedAt: 't' },
+              { agentId: AGENT_NAME, status: "DESIGN", addedAt: "t" },
             ],
           },
         }),
@@ -373,33 +390,34 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
 
     await expect(
       invokeHandler(
-        makeEvent('updateAgentBinding', {
+        makeEvent("updateAgentBinding", {
           input: {
             appId: APP_RECORD_ID,
             agentId: AGENT_NAME,
-            status: 'READY',
+            status: "READY",
           },
         }),
       ),
-    ).rejects.toThrow('Agent must be active before it can be marked as ready');
+    ).rejects.toThrow("Agent must be active before it can be marked as ready");
   });
 
-  test('throws the activation-gate error when the resolved agent is not in active state', async () => {
+  test("throws the activation-gate error when the resolved agent is not in active state", async () => {
     seedAppWithBinding(AGENT_RECORD_ID);
     resolveRecordIdMock.mockResolvedValue(AGENT_RECORD_ID);
     getResourceMock
       .mockResolvedValueOnce({
         recordId: APP_RECORD_ID,
-        name: 'Test App',
-        status: 'DRAFT',
+        name: "Test App",
+        status: "DRAFT",
         customDescriptorContent: JSON.stringify({
           appId: APP_RECORD_ID,
           manifest: {
-            orgId: 'org-1',
+            orgId: "org-1",
+            createdBy: "user-123",
             version: 1,
-            status: 'DRAFT',
+            status: "DRAFT",
             agentBindings: [
-              { agentId: AGENT_RECORD_ID, status: 'DESIGN', addedAt: 't' },
+              { agentId: AGENT_RECORD_ID, status: "DESIGN", addedAt: "t" },
             ],
           },
         }),
@@ -408,18 +426,18 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
 
     await expect(
       invokeHandler(
-        makeEvent('updateAgentBinding', {
+        makeEvent("updateAgentBinding", {
           input: {
             appId: APP_RECORD_ID,
             agentId: AGENT_RECORD_ID,
-            status: 'READY',
+            status: "READY",
           },
         }),
       ),
-    ).rejects.toThrow('Agent must be active before it can be marked as ready');
+    ).rejects.toThrow("Agent must be active before it can be marked as ready");
   });
 
-  test('promotes to READY for a registry-fabricated agent whose descriptor still says inactive but whose record status is APPROVED', async () => {
+  test("promotes to READY for a registry-fabricated agent whose descriptor still says inactive but whose record status is APPROVED", async () => {
     // Dual-store regression: the fabricator writes descriptor
     // `state: 'inactive'` and intakeActivateProjectAgents flips ONLY
     // record.status → APPROVED (SubmitRegistryRecordForApproval never
@@ -431,50 +449,51 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     getResourceMock
       .mockResolvedValueOnce({
         recordId: APP_RECORD_ID,
-        name: 'Test App',
-        status: 'DRAFT',
+        name: "Test App",
+        status: "DRAFT",
         customDescriptorContent: JSON.stringify({
           appId: APP_RECORD_ID,
           manifest: {
-            orgId: 'org-1',
+            orgId: "org-1",
+            createdBy: "user-123",
             version: 1,
-            status: 'DRAFT',
+            status: "DRAFT",
             agentBindings: [
-              { agentId: AGENT_RECORD_ID, status: 'DESIGN', addedAt: 't' },
+              { agentId: AGENT_RECORD_ID, status: "DESIGN", addedAt: "t" },
             ],
           },
         }),
       })
       .mockResolvedValueOnce({
         recordId: AGENT_RECORD_ID,
-        name: 'fabricated_agent',
-        status: 'APPROVED',
+        name: "fabricated_agent",
+        status: "APPROVED",
         customDescriptorContent: JSON.stringify({
-          categories: ['worker'],
-          state: 'inactive', // stale — never updated by activation
-          manifest: { name: 'fabricated_agent', tools: [] },
-          sourceProjectId: 'sess-1111',
+          categories: ["worker"],
+          state: "inactive", // stale — never updated by activation
+          manifest: { name: "fabricated_agent", tools: [] },
+          sourceProjectId: "sess-1111",
         }),
       });
 
     const result = await invokeHandler(
-      makeEvent('updateAgentBinding', {
+      makeEvent("updateAgentBinding", {
         input: {
           appId: APP_RECORD_ID,
           agentId: AGENT_RECORD_ID,
-          status: 'READY',
+          status: "READY",
         },
       }),
     );
 
     expect(result).toMatchObject({
       agentBindings: [
-        expect.objectContaining({ agentId: AGENT_RECORD_ID, status: 'READY' }),
+        expect.objectContaining({ agentId: AGENT_RECORD_ID, status: "READY" }),
       ],
     });
   });
 
-  test('rejects READY when the descriptor claims active but the record status is DRAFT (drift false-positive closed)', async () => {
+  test("rejects READY when the descriptor claims active but the record status is DRAFT (drift false-positive closed)", async () => {
     // The inverse drift: a descriptor whose `state` defaulted/stuck at
     // 'active' must not let a non-activated (DRAFT) agent flip live.
     seedAppWithBinding(AGENT_RECORD_ID);
@@ -482,67 +501,69 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     getResourceMock
       .mockResolvedValueOnce({
         recordId: APP_RECORD_ID,
-        name: 'Test App',
-        status: 'DRAFT',
+        name: "Test App",
+        status: "DRAFT",
         customDescriptorContent: JSON.stringify({
           appId: APP_RECORD_ID,
           manifest: {
-            orgId: 'org-1',
+            orgId: "org-1",
+            createdBy: "user-123",
             version: 1,
-            status: 'DRAFT',
+            status: "DRAFT",
             agentBindings: [
-              { agentId: AGENT_RECORD_ID, status: 'DESIGN', addedAt: 't' },
+              { agentId: AGENT_RECORD_ID, status: "DESIGN", addedAt: "t" },
             ],
           },
         }),
       })
       .mockResolvedValueOnce({
         recordId: AGENT_RECORD_ID,
-        name: 'drifted_agent',
-        status: 'DRAFT',
-        customDescriptorContent: JSON.stringify({ state: 'active' }),
+        name: "drifted_agent",
+        status: "DRAFT",
+        customDescriptorContent: JSON.stringify({ state: "active" }),
       });
 
     await expect(
       invokeHandler(
-        makeEvent('updateAgentBinding', {
+        makeEvent("updateAgentBinding", {
           input: {
             appId: APP_RECORD_ID,
             agentId: AGENT_RECORD_ID,
-            status: 'READY',
+            status: "READY",
           },
         }),
       ),
-    ).rejects.toThrow('Agent must be active before it can be marked as ready');
+    ).rejects.toThrow("Agent must be active before it can be marked as ready");
   });
 
-  test('does not invoke resolveRecordId or agent getResource when the transition is not READY', async () => {
+  test("does not invoke resolveRecordId or agent getResource when the transition is not READY", async () => {
     // Updating a binding back to DESIGN (or editing a non-status field) is
     // a pure manifest mutation and must never touch the activation gate.
     seedAppWithBinding(AGENT_NAME);
     getResourceMock.mockResolvedValueOnce({
       recordId: APP_RECORD_ID,
-      name: 'Test App',
-      status: 'DRAFT',
+      name: "Test App",
+      status: "DRAFT",
       customDescriptorContent: JSON.stringify({
         appId: APP_RECORD_ID,
         manifest: {
-          orgId: 'org-1',
+          orgId: "org-1",
+          createdBy: "user-123",
           version: 1,
-          status: 'DRAFT',
+          status: "DRAFT",
           agentBindings: [
-            { agentId: AGENT_NAME, status: 'READY', addedAt: 't' },
+            { agentId: AGENT_NAME, status: "READY", addedAt: "t" },
           ],
         },
       }),
     });
 
     await invokeHandler(
-      makeEvent('updateAgentBinding', {
+      makeEvent("updateAgentBinding", {
         input: {
           appId: APP_RECORD_ID,
           agentId: AGENT_NAME,
-          status: 'DESIGN',
+          status: "DESIGN",
         },
       }),
     );
@@ -551,7 +572,7 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
     // The only getResource call is the app lookup at the top of the handler;
     // there must be no second call for the agent itself.
     const agentLookups = getResourceMock.mock.calls.filter(
-      ([type, id]) => type === 'agent' && id !== APP_RECORD_ID,
+      ([type, id]) => type === "agent" && id !== APP_RECORD_ID,
     );
     expect(agentLookups).toHaveLength(0);
   });
@@ -568,12 +589,12 @@ describe('updateAgentBinding — READY transition agentId resolution', () => {
 //   - When MODEL_CATALOG_TABLE is not configured the helper is a safe no-op.
 // Uses generic placeholder catalog keys — no real model-id literals.
 // ---------------------------------------------------------------------------
-describe('updateAgentBinding — modelOverride catalog validation', () => {
-  const CATALOG_TABLE = 'citadel-model-catalog-test';
-  const ENABLED_KEY = 'catalog-model-enabled';
-  const DISABLED_KEY = 'catalog-model-disabled';
-  const UNKNOWN_KEY = 'catalog-model-unknown';
-  const LEGACY_KEY = 'legacy-model-key';
+describe("updateAgentBinding — modelOverride catalog validation", () => {
+  const CATALOG_TABLE = "citadel-model-catalog-test";
+  const ENABLED_KEY = "catalog-model-enabled";
+  const DISABLED_KEY = "catalog-model-disabled";
+  const UNKNOWN_KEY = "catalog-model-unknown";
+  const LEGACY_KEY = "legacy-model-key";
 
   beforeEach(() => {
     resetMockRegistry();
@@ -583,12 +604,18 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
     resolveRecordIdMock.mockReset();
     getResourceMock.mockReset();
     updateResourceMock.mockReset();
-    updateResourceMock.mockImplementation(async (_type: unknown, id: unknown, input: { customMetadata?: string }) => ({
-      recordId: id,
-      name: 'Test App',
-      status: 'DRAFT',
-      customDescriptorContent: input.customMetadata,
-    }));
+    updateResourceMock.mockImplementation(
+      async (
+        _type: unknown,
+        id: unknown,
+        input: { customMetadata?: string },
+      ) => ({
+        recordId: id,
+        name: "Test App",
+        status: "DRAFT",
+        customDescriptorContent: input.customMetadata,
+      }),
+    );
     process.env.MODEL_CATALOG_TABLE = CATALOG_TABLE;
   });
 
@@ -601,19 +628,20 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
   function seedApp(existingModelOverride?: string) {
     getResourceMock.mockResolvedValueOnce({
       recordId: APP_RECORD_ID,
-      name: 'Test App',
-      status: 'DRAFT',
+      name: "Test App",
+      status: "DRAFT",
       customDescriptorContent: JSON.stringify({
         appId: APP_RECORD_ID,
         manifest: {
-          orgId: 'org-1',
+          orgId: "org-1",
+          createdBy: "user-123",
           version: 1,
-          status: 'DRAFT',
+          status: "DRAFT",
           agentBindings: [
             {
               agentId: AGENT_RECORD_ID,
-              status: 'DESIGN',
-              addedAt: 't',
+              status: "DESIGN",
+              addedAt: "t",
               ...(existingModelOverride !== undefined && {
                 modelOverride: existingModelOverride,
               }),
@@ -625,16 +653,19 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
   }
 
   function bindingEvent(modelOverride: string) {
-    return makeEvent('updateAgentBinding', {
+    return makeEvent("updateAgentBinding", {
       input: { appId: APP_RECORD_ID, agentId: AGENT_RECORD_ID, modelOverride },
     });
   }
 
-  test('(a) changing modelOverride to an enabled catalog key succeeds', async () => {
+  test("(a) changing modelOverride to an enabled catalog key succeeds", async () => {
     seedApp();
     ddbMock
-      .on(GetCommand, { TableName: CATALOG_TABLE, Key: { modelKey: ENABLED_KEY } })
-      .resolves({ Item: { modelKey: ENABLED_KEY, status: 'enabled' } });
+      .on(GetCommand, {
+        TableName: CATALOG_TABLE,
+        Key: { modelKey: ENABLED_KEY },
+      })
+      .resolves({ Item: { modelKey: ENABLED_KEY, status: "enabled" } });
 
     const result = await invokeHandler(bindingEvent(ENABLED_KEY));
 
@@ -644,41 +675,41 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
     });
   });
 
-  test('(b) changing modelOverride to an unknown catalog key throws', async () => {
+  test("(b) changing modelOverride to an unknown catalog key throws", async () => {
     seedApp();
     ddbMock.on(GetCommand).resolves({}); // no Item
 
-    await expect(
-      invokeHandler(bindingEvent(UNKNOWN_KEY)),
-    ).rejects.toThrow('not found in the model catalog');
+    await expect(invokeHandler(bindingEvent(UNKNOWN_KEY))).rejects.toThrow(
+      "not found in the model catalog",
+    );
     // Nothing persisted when validation fails.
     expect(updateResourceMock).not.toHaveBeenCalled();
   });
 
-  test('(c) changing modelOverride to a disabled catalog key throws', async () => {
+  test("(c) changing modelOverride to a disabled catalog key throws", async () => {
     seedApp();
     ddbMock
       .on(GetCommand)
-      .resolves({ Item: { modelKey: DISABLED_KEY, status: 'disabled' } });
+      .resolves({ Item: { modelKey: DISABLED_KEY, status: "disabled" } });
 
-    await expect(
-      invokeHandler(bindingEvent(DISABLED_KEY)),
-    ).rejects.toThrow('is not enabled');
+    await expect(invokeHandler(bindingEvent(DISABLED_KEY))).rejects.toThrow(
+      "is not enabled",
+    );
     expect(updateResourceMock).not.toHaveBeenCalled();
   });
 
-  test('(d) empty string clears the override without catalog validation', async () => {
+  test("(d) empty string clears the override without catalog validation", async () => {
     seedApp(LEGACY_KEY);
 
-    const result = await invokeHandler(bindingEvent(''));
+    const result = await invokeHandler(bindingEvent(""));
 
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(result).toMatchObject({
-      agentBindings: [expect.objectContaining({ modelOverride: '' })],
+      agentBindings: [expect.objectContaining({ modelOverride: "" })],
     });
   });
 
-  test('(e) unchanged legacy value is grandfathered — no catalog validation', async () => {
+  test("(e) unchanged legacy value is grandfathered — no catalog validation", async () => {
     seedApp(LEGACY_KEY);
 
     const result = await invokeHandler(bindingEvent(LEGACY_KEY));
@@ -689,19 +720,19 @@ describe('updateAgentBinding — modelOverride catalog validation', () => {
     });
   });
 
-  test('unset MODEL_CATALOG_TABLE is a safe no-op (changed override still persists)', async () => {
+  test("unset MODEL_CATALOG_TABLE is a safe no-op (changed override still persists)", async () => {
     delete process.env.MODEL_CATALOG_TABLE;
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
     seedApp();
 
-    const result = await invokeHandler(bindingEvent('catalog-model-some-new'));
+    const result = await invokeHandler(bindingEvent("catalog-model-some-new"));
 
     // No catalog read attempted, mutation still persisted (non-breaking).
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     expect(warnSpy).toHaveBeenCalled();
     expect(result).toMatchObject({
       agentBindings: [
-        expect.objectContaining({ modelOverride: 'catalog-model-some-new' }),
+        expect.objectContaining({ modelOverride: "catalog-model-some-new" }),
       ],
     });
     warnSpy.mockRestore();

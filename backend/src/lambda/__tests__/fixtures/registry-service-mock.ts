@@ -35,6 +35,7 @@ export function resetMockRegistry(): void {
   listResourceSummariesCallCount = 0;
   getResourceCallCounts.clear();
   updateResourceCallCount = 0;
+  deleteResourceCallCount = 0;
 }
 
 /** Test-visible call counter: how many times listResourceSummaries() ran. */
@@ -62,6 +63,17 @@ export function getGetResourceCallCount(
 let updateResourceCallCount = 0;
 export function getUpdateResourceCallCount(): number {
   return updateResourceCallCount;
+}
+
+/**
+ * Test-visible call counter: total deleteResource() invocations across all
+ * records, this test run. Used to assert "zero deletes on refused access"
+ * (finding 6400b440) the same way getUpdateResourceCallCount asserts "zero
+ * writes on refused access" for the editor/owner gates.
+ */
+let deleteResourceCallCount = 0;
+export function getDeleteResourceCallCount(): number {
+  return deleteResourceCallCount;
 }
 
 export function getMockRegistryService() {
@@ -225,6 +237,7 @@ export function getMockRegistryService() {
       return updated as RegistryRecord;
     },
     async deleteResource(type: ResourceType, id: string): Promise<void> {
+      deleteResourceCallCount += 1;
       records.delete(`${type}:${id}`);
     },
     async resolveRecordId(_type: ResourceType, id: string): Promise<string> {
