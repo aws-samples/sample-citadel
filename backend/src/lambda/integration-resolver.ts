@@ -38,7 +38,11 @@ import {
   type IntegrationStatus,
 } from "../utils/lifecycle-validator";
 import { storeCredentials } from "../utils/credential-manager";
-import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  assertRowOrg,
+} from "../utils/auth-event";
 import {
   provisionCredentialProvider,
   deprovisionCredentialProvider,
@@ -372,17 +376,21 @@ export async function handler(event: AppSyncEvent) {
         return await createIntegration(
           event.arguments.input,
           event.identity?.username || "system",
+          event,
         );
       case "updateIntegration":
-        return await updateIntegration(event.arguments.input);
+        return await updateIntegration(event.arguments.input, event);
       case "deleteIntegration":
-        return await deleteIntegration(event.arguments.integrationId);
+        return await deleteIntegration(event.arguments.integrationId, event);
       case "testIntegration":
-        return await testIntegration(event.arguments.integrationId);
+        return await testIntegration(event.arguments.integrationId, event);
       case "connectIntegration":
-        return await connectIntegration(event.arguments.integrationId);
+        return await connectIntegration(event.arguments.integrationId, event);
       case "disconnectIntegration":
-        return await disconnectIntegration(event.arguments.integrationId);
+        return await disconnectIntegration(
+          event.arguments.integrationId,
+          event,
+        );
       case "listIntegrations": {
         // Org scoping (sweep finding under 615aa5bb): a non-admin caller's
         // server-derived org always wins over the requested orgId argument
@@ -399,7 +407,15 @@ export async function handler(event: AppSyncEvent) {
         );
       }
       case "getIntegration": {
+        // Org scoping (finding ca76d041, integration half; CRE item 3):
+        // a by-ID read has no orgId argument to coerce against, so an
+        // unresolvable/mismatched caller org is a hard denial via the
+        // shared assertRowOrg gate — same fetch-then-verify convention as
+        // getDataStoreGuarded in datastore-resolver.ts. The credential
+        // sanitization below limits readback exposure but was never a
+        // substitute for the tenant gate itself.
         const integration = await getIntegration(event.arguments.integrationId);
+        await assertRowOrg(integration, event);
         return sanitizeIntegrationForResponse(integration);
       }
       default:
@@ -426,7 +442,25 @@ export async function handler(event: AppSyncEvent) {
 async function createIntegration(
   input: CreateIntegrationInput,
   createdBy: string,
+  event: unknown,
 ) {
+  // Org scoping (finding ca76d041, integration half; CRE item 3):
+  // createIntegration trusted a client-supplied input.orgId outright.
+  // Mutation convention is reject-not-coerce (mirrors createDataStore in
+  // datastore-resolver.ts) — derive the caller's org server-side and refuse
+  // a mismatched client value BEFORE any Secrets Manager call, credential
+  // provider provisioning, or DynamoDB write. Admins may still create on
+  // behalf of any org (same bypass every other operation below honours).
+  const admin = isAdminFromEvent(event);
+  if (!admin) {
+    const callerOrgId = await extractOrgFromEvent(event);
+    if (!callerOrgId || callerOrgId !== input.orgId) {
+      throw new Error(
+        "Access denied: orgId does not match caller's organization",
+      );
+    }
+  }
+
   const integrationId = uuidv4();
   const timestamp = new Date().toISOString();
 
@@ -613,8 +647,15 @@ async function createIntegration(
   }
 }
 
-async function updateIntegration(input: UpdateIntegrationInput) {
+async function updateIntegration(
+  input: UpdateIntegrationInput,
+  event: unknown,
+) {
   const integration = await getIntegration(input.integrationId);
+
+  // Org scoping (finding ca76d041): reconcile BEFORE any Secrets Manager
+  // read/write, SSM write, or the final DynamoDB Put.
+  await assertRowOrg(integration, event);
 
   const spec = getConnectorSpec(integration.integrationType);
   if (!spec) {
@@ -738,8 +779,12 @@ async function updateIntegration(input: UpdateIntegrationInput) {
   return sanitizeIntegrationForResponse(integration);
 }
 
-async function testIntegration(integrationId: string) {
+async function testIntegration(integrationId: string, event: unknown) {
   const integration = await getIntegration(integrationId);
+
+  // Org scoping (finding ca76d041): reconcile BEFORE reading the secret,
+  // reading SSM parameters, or calling testConnection.
+  await assertRowOrg(integration, event);
 
   if (!canTest(integration.status as IntegrationStatus)) {
     throw new Error(
@@ -841,8 +886,12 @@ async function testIntegration(integrationId: string) {
  * is in `CREATE_PENDING_AUTH`, the persisted `authorizationUrl` is
  * surfaced so the frontend can redirect the user to the IdP.
  */
-async function connectIntegration(integrationId: string) {
+async function connectIntegration(integrationId: string, event: unknown) {
   const integration = await getIntegration(integrationId);
+
+  // Org scoping (finding ca76d041): reconcile BEFORE publishing the
+  // connect-requested event or writing CONNECTING status to DynamoDB.
+  await assertRowOrg(integration, event);
 
   if (!canConnect(integration.status as IntegrationStatus)) {
     throw new Error(
@@ -916,8 +965,12 @@ async function connectIntegration(integrationId: string) {
   }
 }
 
-async function disconnectIntegration(integrationId: string) {
+async function disconnectIntegration(integrationId: string, event: unknown) {
   const integration = await getIntegration(integrationId);
+
+  // Org scoping (finding ca76d041): reconcile BEFORE publishing the
+  // disconnect-requested event or writing DISCONNECTED status to DynamoDB.
+  await assertRowOrg(integration, event);
 
   if (!canDisconnect(integration.status as IntegrationStatus)) {
     throw new Error(
@@ -1039,8 +1092,17 @@ async function getIntegration(integrationId: string) {
  * integration). The DDB row is marked `targetStatus: DELETING` so the
  * frontend can show "Disconnecting..." until the handler finishes.
  */
-async function deleteIntegration(integrationId: string) {
+async function deleteIntegration(integrationId: string, event: unknown) {
   const integration = await getIntegration(integrationId);
+
+  // Org scoping (finding ca76d041): reconcile BEFORE publishing the
+  // disconnect-requested (full teardown) event. This is the worst-case
+  // operation — the downstream gateway-registration-handler deletes the
+  // gateway target, deprovisions the credential provider, force-deletes
+  // the Secrets Manager secret, and deletes the DynamoDB row — so the gate
+  // must run before the event that drives all of that is ever emitted, not
+  // just before the local DynamoDB status update below.
+  await assertRowOrg(integration, event);
 
   try {
     await emitIntegrationEvent("integration.disconnect.requested", {
