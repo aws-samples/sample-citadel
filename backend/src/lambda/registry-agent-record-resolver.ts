@@ -1057,9 +1057,19 @@ export const handler: AppSyncResolverHandler<
       case "deleteApp":
         return await deleteApp(args.appId, userId, event);
       case "bindWorkflowToApp":
-        return await bindWorkflowToApp(args.appId, args.workflowId, userId);
+        return await bindWorkflowToApp(
+          args.appId,
+          args.workflowId,
+          userId,
+          event,
+        );
       case "unbindWorkflowFromApp":
-        return await unbindWorkflowFromApp(args.appId, args.workflowId, userId);
+        return await unbindWorkflowFromApp(
+          args.appId,
+          args.workflowId,
+          userId,
+          event,
+        );
       case "updateAgentBinding":
         return await updateAgentBinding(args.input, userId, event);
       case "addAppComponent":
@@ -1829,14 +1839,27 @@ async function deleteApp(
   return { success: true, message: `App ${appId} deleted` };
 }
 
+// `event` is OPTIONAL and gates on 'editor' when present (finding
+// c35137bb), following the SAME convention established by
+// addAppComponent/updateAgentBinding (finding 8f8fd119): the AppSync
+// dispatch call site always passes the real event, so the mutation is
+// always gated on that path. There is no server-internal caller that
+// invokes this function directly today (grep confirms the dispatch switch
+// is the only call site) — the parameter is optional purely to match the
+// established convention for these manifest-mutating handlers, not because
+// an unguarded internal caller currently exists.
 async function bindWorkflowToApp(
   appId: string,
   workflowId: string,
   userId: string,
+  event?: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
     throw new Error("App not found");
+  }
+  if (event !== undefined) {
+    await assertManifestAccess(appId, record, event, "editor");
   }
   const manifest = readManifest(record);
   const existingIds = manifest.workflowIds || [];
@@ -1859,14 +1882,21 @@ async function bindWorkflowToApp(
   return projectAgentAppNormalized(updated);
 }
 
+// `event` is OPTIONAL and gates on 'editor' when present (finding
+// c35137bb), following the SAME convention as bindWorkflowToApp above —
+// see that function's comment for the internal-caller rationale.
 async function unbindWorkflowFromApp(
   appId: string,
   workflowId: string,
   userId: string,
+  event?: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
     throw new Error("App not found");
+  }
+  if (event !== undefined) {
+    await assertManifestAccess(appId, record, event, "editor");
   }
   const manifest = readManifest(record);
   const remaining = (manifest.workflowIds || []).filter(
