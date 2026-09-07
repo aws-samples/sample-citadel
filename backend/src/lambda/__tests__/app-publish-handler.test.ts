@@ -6,6 +6,8 @@
  *
  * Validates: Requirements 1.2, 1.3, 1.5, 1.7, 1.9, 1.10, 2.1, 2.2, 2.4, 2.8
  */
+process.env.REGISTRY_ID = "test-registry-id";
+
 import {
   ApiGatewayV2Client,
   CreateApiCommand,
@@ -39,6 +41,31 @@ import {
 import { mockClient } from "aws-sdk-client-mock";
 
 import {
+  seedMockRegistry,
+  resetMockRegistry,
+} from "./fixtures/registry-service-mock";
+
+// This file tests publishApp/unpublishApp directly (not through the
+// handler), so it must mock RegistryService itself for the owner gate
+// (finding 13a58234) — every call site below passes OWNER_EVENT, an
+// AppSync identity whose custom:organization/sub match the seeded app's
+// manifest owner, so the gate passes and existing behavior is exercised
+// unchanged.
+jest.mock("../../services/registry-service", () => {
+  const { getMockRegistryService } = jest.requireActual(
+    "./fixtures/registry-service-mock",
+  );
+  const actual = jest.requireActual("../../services/registry-service");
+  return {
+    RegistryService: jest
+      .fn()
+      .mockImplementation(() => getMockRegistryService()),
+    TypeMismatchError: actual.TypeMismatchError,
+    RegistryLifecycleError: actual.RegistryLifecycleError,
+  };
+});
+
+import {
   validatePublishPreconditions,
   provisionApiGateway,
   publishApp,
@@ -51,6 +78,41 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { PolicyManager } from "../../utils/policy-manager";
 import * as apiKeyHash from "../../utils/api-key-hash";
 import { hashApiKey, HASH_ALG } from "../../utils/api-key-hash";
+
+// ── Owner-gate fixture (finding 13a58234) ───────────────────
+
+const PUBLISH_OWNER_ID = "user-1";
+const PUBLISH_APP_ORG = "org-1";
+
+/** AppSync event authorized as the seeded app's owner — see seedOwnerApp. */
+const OWNER_EVENT = {
+  identity: {
+    sub: PUBLISH_OWNER_ID,
+    claims: { sub: PUBLISH_OWNER_ID, "custom:organization": PUBLISH_APP_ORG },
+  },
+};
+
+/**
+ * Seeds a mock Registry record for `appId` whose manifest.createdBy ==
+ * PUBLISH_OWNER_ID and manifest.orgId == PUBLISH_APP_ORG, so OWNER_EVENT
+ * satisfies assertManifestAccess's implicit-creator-owner fallback. Call
+ * once per appId used in a test (default "app-1", matching this file's
+ * existing fixtures).
+ */
+function seedOwnerApp(appId: string = "app-1") {
+  seedMockRegistry("agent", appId, {
+    name: "Test App",
+    status: "ACTIVE",
+    customDescriptorContent: JSON.stringify({
+      appId,
+      manifest: {
+        orgId: PUBLISH_APP_ORG,
+        createdBy: PUBLISH_OWNER_ID,
+        access: {},
+      },
+    }),
+  });
+}
 
 // ── Mocks ───────────────────────────────────────────────────
 
@@ -698,10 +760,12 @@ describe("publishApp", () => {
     deleteRole: jest.fn().mockResolvedValue(undefined),
   } as unknown as PolicyManager;
 
-  let defaultDeps: Parameters<typeof publishApp>[2];
+  let defaultDeps: Parameters<typeof publishApp>[3];
 
   beforeEach(() => {
     setupDefaultMocks();
+    resetMockRegistry();
+    seedOwnerApp();
     (mockPolicyManager.getAccountContext as jest.Mock).mockClear();
     (mockPolicyManager.ensureRole as jest.Mock).mockClear();
     defaultDeps = {
@@ -731,7 +795,7 @@ describe("publishApp", () => {
       ],
     });
 
-    const result = await publishApp("app-1", "user-1", defaultDeps);
+    const result = await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
 
     expect(result.app.status).toBe("PUBLISHED");
     expect(result.endpointUrl).toBe(
@@ -750,7 +814,7 @@ describe("publishApp", () => {
     ddbMock.on(QueryCommand).resolves({ Items: [] });
 
     await expect(
-      publishApp("nonexistent", "user-1", defaultDeps),
+      publishApp("nonexistent", "user-1", OWNER_EVENT, defaultDeps),
     ).rejects.toThrow("App not found");
   });
 
@@ -766,7 +830,7 @@ describe("publishApp", () => {
       ],
     });
 
-    await expect(publishApp("app-1", "user-1", defaultDeps)).rejects.toThrow(
+    await expect(publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps)).rejects.toThrow(
       "Publish preconditions not met",
     );
   });
@@ -791,7 +855,7 @@ describe("publishApp", () => {
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
 
-    const result = await publishApp("app-1", "user-1", defaultDeps);
+    const result = await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
 
     // Verify result
     expect(result.app.status).toBe("PUBLISHED");
@@ -878,7 +942,7 @@ describe("publishApp", () => {
 
     apiGwMock.on(CreateStageCommand).rejects(new Error("Provisioning failed"));
 
-    await expect(publishApp("app-1", "user-1", defaultDeps)).rejects.toThrow(
+    await expect(publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps)).rejects.toThrow(
       "Provisioning failed",
     );
 
@@ -905,7 +969,7 @@ describe("publishApp", () => {
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
 
-    await publishApp("app-1", "user-1", defaultDeps);
+    await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
 
     const createApiCall = apiGwMock.commandCalls(CreateApiCommand)[0];
     expect(createApiCall.args[0].input.Name).toBe("citadel-app-app-1-dev");
@@ -1035,10 +1099,12 @@ describe("publishApp intake progress-on-publish", () => {
     deleteRole: jest.fn().mockResolvedValue(undefined),
   } as unknown as PolicyManager;
 
-  let defaultDeps: Parameters<typeof publishApp>[2];
+  let defaultDeps: Parameters<typeof publishApp>[3];
 
   beforeEach(() => {
     setupDefaultMocks();
+    resetMockRegistry();
+    seedOwnerApp();
     defaultDeps = {
       docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
       apiGwClient: new ApiGatewayV2Client({}),
@@ -1081,7 +1147,7 @@ describe("publishApp intake progress-on-publish", () => {
   test("emits implementation=100 intake progress event when the app carries a sourceProjectId", async () => {
     seedPublishableApp({ sourceProjectId: "proj-42" });
 
-    await publishApp("app-1", "user-1", defaultDeps);
+    await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
 
     const entries = findIntakeProgressEntries();
     expect(entries).toHaveLength(1);
@@ -1097,7 +1163,7 @@ describe("publishApp intake progress-on-publish", () => {
   test("emits NO intake progress event when the app has no sourceProjectId linkage (backward compatible)", async () => {
     seedPublishableApp();
 
-    await publishApp("app-1", "user-1", defaultDeps);
+    await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
 
     expect(findIntakeProgressEntries()).toHaveLength(0);
     // The status-transition event still goes out.
@@ -1119,7 +1185,7 @@ describe("publishApp intake progress-on-publish", () => {
         return Promise.resolve({});
       });
 
-    const result = await publishApp("app-1", "user-1", defaultDeps);
+    const result = await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
 
     expect(result.app.status).toBe("PUBLISHED");
     expect(result.endpointUrl).toBeTruthy();
@@ -1138,7 +1204,7 @@ describe("publishApp intake progress-on-publish", () => {
       ],
     });
 
-    await publishApp("app-1", "user-1", defaultDeps);
+    await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
 
     expect(findIntakeProgressEntries()).toHaveLength(0);
   });
