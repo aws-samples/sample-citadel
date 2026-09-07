@@ -34,6 +34,7 @@ export function resetMockRegistry(): void {
   records.clear();
   listResourceSummariesCallCount = 0;
   getResourceCallCounts.clear();
+  updateResourceCallCount = 0;
 }
 
 /** Test-visible call counter: how many times listResourceSummaries() ran. */
@@ -49,6 +50,18 @@ export function getGetResourceCallCount(
   id: string,
 ): number {
   return getResourceCallCounts.get(`${type}:${id}`) ?? 0;
+}
+
+/**
+ * Test-visible call counter: total updateResource() invocations across all
+ * records, this test run. Used to assert "zero writes on refused access"
+ * (finding 8b0e32a7) without needing to spy on a per-call service instance,
+ * since `getMockRegistryService()` returns a fresh object per call but all
+ * instances share this module-level counter.
+ */
+let updateResourceCallCount = 0;
+export function getUpdateResourceCallCount(): number {
+  return updateResourceCallCount;
 }
 
 export function getMockRegistryService() {
@@ -181,6 +194,7 @@ export function getMockRegistryService() {
       id: string,
       input: UpdateResourceInput,
     ): Promise<RegistryRecord> {
+      updateResourceCallCount += 1;
       const existing = records.get(`${type}:${id}`);
       if (!existing) throw new Error(`Record not found: ${type}:${id}`);
       const updated: MockRegistryRecord = {

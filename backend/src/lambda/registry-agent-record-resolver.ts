@@ -1088,9 +1088,15 @@ export const handler: AppSyncResolverHandler<
       case "setAppAuthConfig":
         return await setAppAuthConfig(args.appId, args.authConfig, userId);
       case "grantAppAccess":
-        return await grantAppAccess(args.appId, args.userId, args.role, userId);
+        return await grantAppAccess(
+          args.appId,
+          args.userId,
+          args.role,
+          userId,
+          event,
+        );
       case "revokeAppAccess":
-        return await revokeAppAccess(args.appId, args.userId, userId);
+        return await revokeAppAccess(args.appId, args.userId, userId, event);
 
       // Non-AgentApp queries (preserved DDB / subscription paths)
       case "listAppApiKeys":
@@ -1445,7 +1451,18 @@ export async function createApp(
     configSchema: null,
     configValues: null,
     authConfig: null,
-    access: {},
+    // Seed the creator as an explicit owner entry (finding 8b0e32a7 / CRE
+    // item 4). Apps created BEFORE this change have no entry here at all —
+    // assertManifestOwnerAccess falls back to manifest.createdBy for those,
+    // since createdBy has always been stamped and cannot be spoofed by a
+    // caller (server-derived at createApp time).
+    access: {
+      [userId]: {
+        role: "owner",
+        grantedAt: now,
+        grantedBy: "system",
+      },
+    },
     routingConfig: null,
     ...(input.sourceProjectId !== undefined && {
       sourceProjectId: input.sourceProjectId,
@@ -2352,16 +2369,91 @@ async function setAppAuthConfig(
   return projectAgentAppNormalized(updated);
 }
 
+/**
+ * Owner-gate for grantAppAccess/revokeAppAccess (finding 8b0e32a7, CRE item
+ * 4). checkOperationAccess/checkAppAccess (app-access-control.ts) reserve
+ * both operations at 'owner' but read a SEPARATE DynamoDB ACCESS# store
+ * (appsTable GroupIndex) that this resolver's writes never update — that
+ * store has ZERO production writers (autoAssignOwner/grantAppAccess/
+ * revokeAppAccess in app-access-control.ts are exercised only by tests).
+ * The canonical, write-consistent store is the Registry record MANIFEST's
+ * `access` map: it is the ONLY store this resolver's grant/revoke actually
+ * mutate (via writeManifestMutation), and it is read here the same way
+ * getApp's own tenant gate reads the manifest's `orgId` — so a grant is
+ * immediately visible to the next authorization check in-process (the
+ * split-brain requirement).
+ *
+ * Fails closed: any missing identity, missing app, or Cognito lookup
+ * failure (via extractOrgFromEvent) results in a thrown "Access denied"
+ * BEFORE any manifest read is used to authorize a write. Admin group
+ * bypasses, matching checkAppAccess's own convention. Same-org membership
+ * alone is NOT sufficient — the caller must hold 'owner' in the manifest's
+ * `access` map, or (for apps created before this fix, whose manifests never
+ * had an owner entry populated) be the app's recorded `createdBy` — see the
+ * fallback below.
+ */
+async function assertManifestOwnerAccess(
+  appId: string,
+  record: RegistryRecord,
+  event: unknown,
+): Promise<void> {
+  if (isAdminFromEvent(event)) {
+    return;
+  }
+
+  const callerId = getUserId(
+    (event as { identity?: Parameters<typeof getUserId>[0] })?.identity,
+  );
+  if (!callerId || callerId === "anonymous") {
+    throw new Error(`Access denied: requires owner role for app ${appId}`);
+  }
+
+  const callerOrgId = await extractOrgFromEvent(event);
+  const manifest = readManifest(record);
+  if (!callerOrgId || callerOrgId !== manifest.orgId) {
+    throw new Error(`Access denied: requires owner role for app ${appId}`);
+  }
+
+  const callerEntry = manifest.access?.[callerId];
+  const isExplicitOwner = callerEntry?.role === "owner";
+
+  // Backward-compat fallback: apps created BEFORE this fix have `access: {}`
+  // in their manifest (the field existed but nothing ever populated an
+  // owner entry into it) — with no fallback, existing app creators would be
+  // locked out of granting/revoking on their own apps. `createdBy` has
+  // always been stamped server-side at createApp time from the caller's
+  // verified identity, never client-suppliable, so treating the creator as
+  // an implicit owner when NO owner entry exists yet is safe and does not
+  // reopen the vulnerability: it only recognizes the one identity the
+  // system itself recorded as having created the app, and stops applying
+  // the instant a real owner entry exists (including the one seeded by
+  // createApp going forward).
+  const hasAnyOwnerEntry = Object.values(manifest.access ?? {}).some(
+    (entry) => entry?.role === "owner",
+  );
+  const isImplicitCreatorOwner =
+    !hasAnyOwnerEntry &&
+    !!manifest.createdBy &&
+    manifest.createdBy === callerId;
+
+  if (!isExplicitOwner && !isImplicitCreatorOwner) {
+    throw new Error(`Access denied: requires owner role for app ${appId}`);
+  }
+}
+
 async function grantAppAccess(
   appId: string,
   targetUserId: string,
   role: string,
   grantingUserId: string,
+  event: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
     throw new Error("App not found");
   }
+
+  await assertManifestOwnerAccess(appId, record, event);
 
   const now = new Date().toISOString();
   const mutatedContent = writeManifestMutation(record, (m) => {
@@ -2393,11 +2485,14 @@ async function revokeAppAccess(
   appId: string,
   targetUserId: string,
   revokingUserId: string,
+  event: unknown,
 ): Promise<unknown> {
   const record = await getRegistryService().getResource("agent", appId);
   if (!record) {
     throw new Error("App not found");
   }
+
+  await assertManifestOwnerAccess(appId, record, event);
 
   const mutatedContent = writeManifestMutation(record, (m) => {
     const access = m.access || {};

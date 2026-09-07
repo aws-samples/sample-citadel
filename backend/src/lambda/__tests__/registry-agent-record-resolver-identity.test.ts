@@ -23,34 +23,37 @@
  */
 // Env vars MUST be set BEFORE importing the resolver — module captures them
 // at load time (see crud.test.ts).
-process.env.REGISTRY_ID = 'test-registry-id';
-process.env.APPS_TABLE = 'citadel-apps-test';
-process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
-process.env.AGENT_CONFIG_TABLE = 'citadel-agents-test';
-process.env.EVENT_BUS_NAME = 'citadel-agents-test';
-process.env.USER_POOL_ID = 'us-east-1_test';
-process.env.AWS_REGION = 'us-east-1';
+process.env.REGISTRY_ID = "test-registry-id";
+process.env.APPS_TABLE = "citadel-apps-test";
+process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
+process.env.AGENT_CONFIG_TABLE = "citadel-agents-test";
+process.env.EVENT_BUS_NAME = "citadel-agents-test";
+process.env.USER_POOL_ID = "us-east-1_test";
+process.env.AWS_REGION = "us-east-1";
 // Keep authority grant/revoke as no-ops (no DDB mock needed for that path).
 delete process.env.AUTHORITY_UNITS_TABLE;
 
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
 import {
   DynamoDBDocumentClient,
   GetCommand,
   UpdateCommand,
   DeleteCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { mockClient } from 'aws-sdk-client-mock';
+} from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 /** The 12-char id the (mocked) registry assigns, ignoring the caller's uuid. */
-const REGISTRY_ASSIGNED_ID = 'rec123456789';
+const REGISTRY_ASSIGNED_ID = "rec123456789";
 /** Stale client-side UUID embedded in seeded descriptors for sweep tests. */
-const STALE_UUID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const STALE_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
-jest.mock('../../services/registry-service', () => {
+jest.mock("../../services/registry-service", () => {
   interface MockRegistryRecord {
     recordId: string;
     name?: string;
@@ -73,10 +76,10 @@ jest.mock('../../services/registry-service', () => {
       // Mimic the real registry: the caller-supplied id is DISCARDED and a
       // registry-assigned 12-char recordId is used instead.
       const record = {
-        recordId: 'rec123456789',
+        recordId: "rec123456789",
         name: input.name,
         description: input.description,
-        status: 'DRAFT',
+        status: "DRAFT",
         customDescriptorContent: input.customMetadata,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -94,7 +97,9 @@ jest.mock('../../services/registry-service', () => {
       const updated = {
         ...existing,
         ...(input.name !== undefined && { name: input.name }),
-        ...(input.description !== undefined && { description: input.description }),
+        ...(input.description !== undefined && {
+          description: input.description,
+        }),
         ...(input.customMetadata !== undefined && {
           customDescriptorContent: input.customMetadata,
         }),
@@ -132,23 +137,24 @@ jest.mock('../../services/registry-service', () => {
     isRegistryEnabled: jest.fn(() => true),
     TypeMismatchError,
     RegistryLifecycleError,
-    __seed: (type: string, id: string, rec: MockRegistryRecord) => records.set(`${type}:${id}`, rec),
+    __seed: (type: string, id: string, rec: MockRegistryRecord) =>
+      records.set(`${type}:${id}`, rec),
     __get: (type: string, id: string) => records.get(`${type}:${id}`),
     __reset: () => records.clear(),
   };
 });
 
-jest.mock('../../utils/appsync', () => ({
-  getUserId: jest.fn().mockReturnValue('user-123'),
+jest.mock("../../utils/appsync", () => ({
+  getUserId: jest.fn().mockReturnValue("user-123"),
 }));
 
-jest.mock('../../utils/appsync-publish', () => ({
+jest.mock("../../utils/appsync-publish", () => ({
   publishAppStatusEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
-import { handler } from '../registry-agent-record-resolver';
+import { handler } from "../registry-agent-record-resolver";
 
-import * as registryServiceMockedModule from '../../services/registry-service';
+import * as registryServiceMockedModule from "../../services/registry-service";
 
 interface SeededRegistryRecord {
   recordId: string;
@@ -177,11 +183,15 @@ type HandlerEvent = Parameters<typeof handler>[0];
 // (single cast here) so calls don't pass superfluous arguments.
 const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
-function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
+function makeEvent(
+  fieldName: string,
+  args: Record<string, unknown>,
+  sub = "user-123",
+): HandlerEvent {
   return {
     info: { fieldName },
     arguments: args,
-    identity: { sub, claims: { sub } },
+    identity: { sub, claims: { sub, "custom:organization": "org-1" } },
   } as unknown as HandlerEvent;
 }
 
@@ -190,27 +200,40 @@ function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user
  * in its customDescriptorContent (a stale UUID) — the exact persisted state
  * a real createApp leaves behind.
  */
-function seedAppWithStaleDescriptorId(manifest: Record<string, unknown> = {}): void {
-  registryMock.__seed('agent', 'app-1', {
-    recordId: 'app-1',
-    name: 'Test App',
-    description: 'Test',
-    status: 'DRAFT',
+function seedAppWithStaleDescriptorId(
+  manifest: Record<string, unknown> = {},
+): void {
+  registryMock.__seed("agent", "app-1", {
+    recordId: "app-1",
+    name: "Test App",
+    description: "Test",
+    status: "DRAFT",
     createdAt: new Date(),
     updatedAt: new Date(),
     customDescriptorContent: JSON.stringify({
       appId: STALE_UUID,
       manifest: {
-        orgId: 'org-1',
+        orgId: "org-1",
         version: 1,
-        status: 'DRAFT',
+        status: "DRAFT",
         workflowIds: [],
         agentBindings: [],
         permissions: [],
         configSchema: null,
         configValues: null,
         authConfig: null,
-        access: {},
+        // user-123 is makeEvent's default caller — seeded as owner here so
+        // the grantAppAccess/revokeAppAccess owner gate (finding 8b0e32a7)
+        // does not refuse these identity-chain tests, which are unrelated
+        // to access control. Gate refusal paths are covered separately in
+        // registry-agent-record-resolver-access-owner-gate.test.ts.
+        access: {
+          "user-123": {
+            role: "owner",
+            grantedAt: "2024-01-01T00:00:00Z",
+            grantedBy: "system",
+          },
+        },
         routingConfig: null,
         ...manifest,
       },
@@ -222,10 +245,14 @@ function seedAppWithStaleDescriptorId(manifest: Record<string, unknown> = {}): v
 function metaUpdateCalls() {
   return ddbMock
     .commandCalls(UpdateCommand)
-    .filter((c) => (c.args[0].input as { TableName?: string }).TableName === 'citadel-apps-test');
+    .filter(
+      (c) =>
+        (c.args[0].input as { TableName?: string }).TableName ===
+        "citadel-apps-test",
+    );
 }
 
-describe('registry-agent-record-resolver — appId identity chain', () => {
+describe("registry-agent-record-resolver — appId identity chain", () => {
   beforeEach(() => {
     registryMock.__reset();
     ebMock.reset();
@@ -245,16 +272,16 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
     delete process.env.REGISTRY_ID;
   });
 
-  describe('createApp', () => {
-    test('returns the registry-assigned recordId as appId, not the original UUID from customDescriptorContent', async () => {
+  describe("createApp", () => {
+    test("returns the registry-assigned recordId as appId, not the original UUID from customDescriptorContent", async () => {
       const result = (await invokeHandler(
-        makeEvent('createApp', {
-          input: { name: 'New App', description: 'A test app', orgId: 'org-1' },
+        makeEvent("createApp", {
+          input: { name: "New App", description: "A test app", orgId: "org-1" },
         }),
       )) as Record<string, unknown>;
 
       // The persisted record's descriptor still embeds the original UUID.
-      const persisted = registryMock.__get('agent', REGISTRY_ASSIGNED_ID);
+      const persisted = registryMock.__get("agent", REGISTRY_ASSIGNED_ID);
       expect(persisted).toBeDefined();
       const descriptor = JSON.parse(persisted.customDescriptorContent);
       expect(descriptor.appId).not.toBe(REGISTRY_ASSIGNED_ID); // uuid, discarded by registry
@@ -265,43 +292,52 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
       expect(result.appId).not.toBe(descriptor.appId);
     });
 
-    test('returned appId agrees with the AppsTable #META mirror key', async () => {
+    test("returned appId agrees with the AppsTable #META mirror key", async () => {
       const result = (await invokeHandler(
-        makeEvent('createApp', {
-          input: { name: 'New App', description: 'A test app', orgId: 'org-1' },
+        makeEvent("createApp", {
+          input: { name: "New App", description: "A test app", orgId: "org-1" },
         }),
       )) as Record<string, unknown>;
 
       const calls = metaUpdateCalls();
       expect(calls).toHaveLength(1);
-      const mirrorKey = (calls[0].args[0].input as { Key: { appId?: string } }).Key.appId;
+      const mirrorKey = (calls[0].args[0].input as { Key: { appId?: string } })
+        .Key.appId;
       expect(mirrorKey).toBe(REGISTRY_ASSIGNED_ID);
       // Create-then-import identity chain: the id handed back to the caller
       // must be the same id the mirror row is keyed by.
       expect(result.appId).toBe(mirrorKey);
     });
 
-    test('logs an error with appId and tableName when the #META mirror write fails', async () => {
-      ddbMock.on(UpdateCommand).rejects(new Error('provisioning boom'));
-      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
-      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    test("logs an error with appId and tableName when the #META mirror write fails", async () => {
+      ddbMock.on(UpdateCommand).rejects(new Error("provisioning boom"));
+      const errorSpy = jest
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+      const warnSpy = jest
+        .spyOn(console, "warn")
+        .mockImplementation(() => undefined);
       try {
         await invokeHandler(
-          makeEvent('createApp', {
-            input: { name: 'New App', description: 'A test app', orgId: 'org-1' },
+          makeEvent("createApp", {
+            input: {
+              name: "New App",
+              description: "A test app",
+              orgId: "org-1",
+            },
           }),
         );
 
         const mirrorFailureLogs = errorSpy.mock.calls.filter(
           (call) =>
-            typeof call[0] === 'string' &&
-            call[0].includes('#META mirror write failed'),
+            typeof call[0] === "string" &&
+            call[0].includes("#META mirror write failed"),
         );
         expect(mirrorFailureLogs).toHaveLength(1);
         expect(mirrorFailureLogs[0][1]).toEqual(
           expect.objectContaining({
             appId: REGISTRY_ASSIGNED_ID,
-            tableName: 'citadel-apps-test',
+            tableName: "citadel-apps-test",
           }),
         );
       } finally {
@@ -311,127 +347,148 @@ describe('registry-agent-record-resolver — appId identity chain', () => {
     });
   });
 
-  describe('sibling mutation paths return recordId when the descriptor embeds a stale UUID', () => {
-    test('updateApp', async () => {
+  describe("sibling mutation paths return recordId when the descriptor embeds a stale UUID", () => {
+    test("updateApp", async () => {
       seedAppWithStaleDescriptorId();
       const result = (await invokeHandler(
-        makeEvent('updateApp', { input: { appId: 'app-1', name: 'Renamed' } }),
+        makeEvent("updateApp", { input: { appId: "app-1", name: "Renamed" } }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('bindWorkflowToApp (new binding)', async () => {
+    test("bindWorkflowToApp (new binding)", async () => {
       seedAppWithStaleDescriptorId();
       const result = (await invokeHandler(
-        makeEvent('bindWorkflowToApp', { appId: 'app-1', workflowId: 'wf-1' }),
+        makeEvent("bindWorkflowToApp", { appId: "app-1", workflowId: "wf-1" }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('bindWorkflowToApp (idempotent early return)', async () => {
-      seedAppWithStaleDescriptorId({ workflowIds: ['wf-1'] });
+    test("bindWorkflowToApp (idempotent early return)", async () => {
+      seedAppWithStaleDescriptorId({ workflowIds: ["wf-1"] });
       const result = (await invokeHandler(
-        makeEvent('bindWorkflowToApp', { appId: 'app-1', workflowId: 'wf-1' }),
+        makeEvent("bindWorkflowToApp", { appId: "app-1", workflowId: "wf-1" }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('unbindWorkflowFromApp', async () => {
-      seedAppWithStaleDescriptorId({ workflowIds: ['wf-1'] });
+    test("unbindWorkflowFromApp", async () => {
+      seedAppWithStaleDescriptorId({ workflowIds: ["wf-1"] });
       const result = (await invokeHandler(
-        makeEvent('unbindWorkflowFromApp', { appId: 'app-1', workflowId: 'wf-1' }),
+        makeEvent("unbindWorkflowFromApp", {
+          appId: "app-1",
+          workflowId: "wf-1",
+        }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('updateAgentBinding', async () => {
+    test("updateAgentBinding", async () => {
       seedAppWithStaleDescriptorId({
-        agentBindings: [{ agentId: 'agent-x', status: 'DESIGN' }],
+        agentBindings: [{ agentId: "agent-x", status: "DESIGN" }],
       });
       const result = (await invokeHandler(
-        makeEvent('updateAgentBinding', {
-          input: { appId: 'app-1', agentId: 'agent-x', systemPromptAddition: 'hi' },
+        makeEvent("updateAgentBinding", {
+          input: {
+            appId: "app-1",
+            agentId: "agent-x",
+            systemPromptAddition: "hi",
+          },
         }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('addAppComponent', async () => {
+    test("addAppComponent", async () => {
       seedAppWithStaleDescriptorId();
       const result = (await invokeHandler(
-        makeEvent('addAppComponent', {
-          appId: 'app-1',
-          component: { type: 'agent', data: JSON.stringify({ agentId: 'agent-y' }) },
+        makeEvent("addAppComponent", {
+          appId: "app-1",
+          component: {
+            type: "agent",
+            data: JSON.stringify({ agentId: "agent-y" }),
+          },
         }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('removeAppComponent', async () => {
+    test("removeAppComponent", async () => {
       seedAppWithStaleDescriptorId({
-        agentBindings: [{ agentId: 'agent-x', status: 'DESIGN' }],
+        agentBindings: [{ agentId: "agent-x", status: "DESIGN" }],
       });
       const result = (await invokeHandler(
-        makeEvent('removeAppComponent', {
-          appId: 'app-1',
-          componentType: 'agent',
-          componentId: 'agent-x',
+        makeEvent("removeAppComponent", {
+          appId: "app-1",
+          componentType: "agent",
+          componentId: "agent-x",
         }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('setAppConfigSchema', async () => {
+    test("setAppConfigSchema", async () => {
       seedAppWithStaleDescriptorId();
       const result = (await invokeHandler(
-        makeEvent('setAppConfigSchema', {
-          appId: 'app-1',
-          schema: JSON.stringify({ type: 'object' }),
+        makeEvent("setAppConfigSchema", {
+          appId: "app-1",
+          schema: JSON.stringify({ type: "object" }),
           version: 1,
         }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('setAppConfigValues', async () => {
+    test("setAppConfigValues", async () => {
       seedAppWithStaleDescriptorId();
       const result = (await invokeHandler(
-        makeEvent('setAppConfigValues', {
-          appId: 'app-1',
+        makeEvent("setAppConfigValues", {
+          appId: "app-1",
           values: JSON.stringify({}),
           version: 1,
         }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('setAppAuthConfig', async () => {
+    test("setAppAuthConfig", async () => {
       seedAppWithStaleDescriptorId();
       const result = (await invokeHandler(
-        makeEvent('setAppAuthConfig', {
-          appId: 'app-1',
-          authConfig: JSON.stringify({ mode: 'NONE' }),
+        makeEvent("setAppAuthConfig", {
+          appId: "app-1",
+          authConfig: JSON.stringify({ mode: "NONE" }),
         }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('grantAppAccess', async () => {
+    test("grantAppAccess", async () => {
       seedAppWithStaleDescriptorId();
       const result = (await invokeHandler(
-        makeEvent('grantAppAccess', { appId: 'app-1', userId: 'user-2', role: 'viewer' }),
+        makeEvent("grantAppAccess", {
+          appId: "app-1",
+          userId: "user-2",
+          role: "viewer",
+        }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
 
-    test('revokeAppAccess', async () => {
+    test("revokeAppAccess", async () => {
       seedAppWithStaleDescriptorId({
-        access: { 'user-2': { role: 'viewer', grantedAt: 'x', grantedBy: 'y' } },
+        access: {
+          "user-123": {
+            role: "owner",
+            grantedAt: "2024-01-01T00:00:00Z",
+            grantedBy: "system",
+          },
+          "user-2": { role: "viewer", grantedAt: "x", grantedBy: "y" },
+        },
       });
       const result = (await invokeHandler(
-        makeEvent('revokeAppAccess', { appId: 'app-1', userId: 'user-2' }),
+        makeEvent("revokeAppAccess", { appId: "app-1", userId: "user-2" }),
       )) as Record<string, unknown>;
-      expect(result.appId).toBe('app-1');
+      expect(result.appId).toBe("app-1");
     });
   });
 });
