@@ -1,16 +1,30 @@
 /**
  * Tests for conversation-resolver Lambda
  */
-import { DynamoDBDocumentClient, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { mockClient } from 'aws-sdk-client-mock';
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  QueryCommand,
+} from "@aws-sdk/lib-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { mockClient } from "aws-sdk-client-mock";
 
 const dynamoMock = mockClient(DynamoDBDocumentClient);
 const eventBridgeMock = mockClient(EventBridgeClient);
 
-jest.mock('uuid', () => ({ v4: jest.fn().mockReturnValue('msg-uuid-123') }));
+jest.mock("uuid", () => ({ v4: jest.fn().mockReturnValue("msg-uuid-123") }));
 
-import { handler } from '../conversation-resolver';
+const assertProjectAccessMock = jest.fn();
+jest.mock("../../utils/project-access", () => ({
+  assertProjectAccess: (...args: unknown[]) => assertProjectAccessMock(...args),
+  ProjectAccessDeniedError: class ProjectAccessDeniedError extends Error {},
+}));
+
+import { handler } from "../conversation-resolver";
+import { ProjectAccessDeniedError } from "../../utils/project-access";
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
@@ -26,12 +40,14 @@ interface MessageResult {
   message: string;
 }
 
-describe('conversation-resolver', () => {
+describe("conversation-resolver", () => {
   beforeEach(() => {
     dynamoMock.reset();
     eventBridgeMock.reset();
-    process.env.CONVERSATIONS_TABLE = 'test-conversations';
-    process.env.EVENT_BUS_NAME = 'test-event-bus';
+    assertProjectAccessMock.mockReset();
+    assertProjectAccessMock.mockResolvedValue(undefined);
+    process.env.CONVERSATIONS_TABLE = "test-conversations";
+    process.env.EVENT_BUS_NAME = "test-event-bus";
   });
 
   afterEach(() => {
@@ -39,164 +55,279 @@ describe('conversation-resolver', () => {
     delete process.env.EVENT_BUS_NAME;
   });
 
-  const makeEvent = (fieldName: string, args: Record<string, unknown>): HandlerEvent =>
+  const makeEvent = (
+    fieldName: string,
+    args: Record<string, unknown>,
+  ): HandlerEvent =>
     ({
       info: { fieldName },
       arguments: args,
-      identity: { sub: 'user-123', username: 'testuser' },
+      identity: { sub: "user-123", username: "testuser" },
     }) as unknown as HandlerEvent;
 
-  describe('sendMessage', () => {
-    test('stores message in DynamoDB and publishes USER_INPUT to EventBridge', async () => {
+  describe("sendMessage", () => {
+    test("stores message in DynamoDB and publishes USER_INPUT to EventBridge", async () => {
       dynamoMock.on(PutCommand).resolves({});
       eventBridgeMock.on(PutEventsCommand).resolves({});
 
-      const result = await invoke<MessageResult>(makeEvent('sendMessage', {
-        projectId: 'proj-1',
-        message: {
-          agentId: 'agent-1',
-          message: 'Hello agent',
-          messageType: 'USER_INPUT',
-        },
-      }));
+      const result = await invoke<MessageResult>(
+        makeEvent("sendMessage", {
+          projectId: "proj-1",
+          message: {
+            agentId: "agent-1",
+            message: "Hello agent",
+            messageType: "USER_INPUT",
+          },
+        }),
+      );
 
-      expect(result.id).toBe('msg-uuid-123');
-      expect(result.projectId).toBe('proj-1');
-      expect(result.message).toBe('Hello agent');
+      expect(result.id).toBe("msg-uuid-123");
+      expect(result.projectId).toBe("proj-1");
+      expect(result.message).toBe("Hello agent");
 
       expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(1);
       expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(1);
     });
 
-    test('does not publish to EventBridge for non-USER_INPUT messages', async () => {
+    test("does not publish to EventBridge for non-USER_INPUT messages", async () => {
       dynamoMock.on(PutCommand).resolves({});
 
-      await handler(makeEvent('sendMessage', {
-        projectId: 'proj-1',
-        message: {
-          agentId: 'agent-1',
-          message: 'System notification',
-          messageType: 'SYSTEM_NOTIFICATION',
-        },
-      }));
+      await handler(
+        makeEvent("sendMessage", {
+          projectId: "proj-1",
+          message: {
+            agentId: "agent-1",
+            message: "System notification",
+            messageType: "SYSTEM_NOTIFICATION",
+          },
+        }),
+      );
 
       expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(0);
     });
 
-    test('succeeds even if EventBridge publish fails', async () => {
+    test("succeeds even if EventBridge publish fails", async () => {
       dynamoMock.on(PutCommand).resolves({});
-      eventBridgeMock.on(PutEventsCommand).rejects(new Error('EB down'));
+      eventBridgeMock.on(PutEventsCommand).rejects(new Error("EB down"));
 
-      const result = await invoke<MessageResult>(makeEvent('sendMessage', {
-        projectId: 'proj-1',
-        message: {
-          agentId: 'agent-1',
-          message: 'Hello',
-          messageType: 'USER_INPUT',
-        },
-      }));
+      const result = await invoke<MessageResult>(
+        makeEvent("sendMessage", {
+          projectId: "proj-1",
+          message: {
+            agentId: "agent-1",
+            message: "Hello",
+            messageType: "USER_INPUT",
+          },
+        }),
+      );
 
       // Should still return the message (stored in DDB)
       expect(result.id).toBeDefined();
     });
   });
 
-  describe('getConversationHistory', () => {
-    test('returns paginated messages sorted by timestamp', async () => {
-          dynamoMock.on(QueryCommand).resolves({
-            Items: [
-              { id: 'm1', projectId: 'proj-1', message: 'First', timestamp: '2025-01-01T00:00:00Z' },
-              { id: 'm2', projectId: 'proj-1', message: 'Second', timestamp: '2025-01-01T00:01:00Z' },
-            ],
-            // No LastEvaluatedKey -> nextToken should be null.
-          });
-    
-          const result = await invoke<{ items: unknown[]; nextToken: string | null }>(
-            makeEvent('getConversationHistory', {
-              projectId: 'proj-1',
-            }),
-          );
-    
-          // Resolver now returns {items, nextToken} for cursor pagination.
-          expect(result.items).toHaveLength(2);
-          expect(result.nextToken).toBeNull();
-        });
-    
-        test('returns a nextToken when DynamoDB paginates', async () => {
-          dynamoMock.on(QueryCommand).resolves({
-            Items: [
-              { id: 'm1', projectId: 'proj-1', message: 'First', timestamp: '2025-01-01T00:00:00Z' },
-            ],
-            LastEvaluatedKey: { projectId: 'proj-1', timestamp: '2025-01-01T00:00:00Z' },
-          });
-    
-          const result = await invoke<{ items: unknown[]; nextToken: string }>(
-            makeEvent('getConversationHistory', {
-              projectId: 'proj-1',
-            }),
-          );
-    
-          expect(result.items).toHaveLength(1);
-          expect(typeof result.nextToken).toBe('string');
-          // nextToken is a base64-encoded JSON blob of the LastEvaluatedKey.
-          expect(JSON.parse(Buffer.from(result.nextToken, 'base64').toString())).toEqual({
-            projectId: 'proj-1',
-            timestamp: '2025-01-01T00:00:00Z',
-          });
-        });
+  describe("getConversationHistory", () => {
+    test("returns paginated messages sorted by timestamp", async () => {
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [
+          {
+            id: "m1",
+            projectId: "proj-1",
+            message: "First",
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+          {
+            id: "m2",
+            projectId: "proj-1",
+            message: "Second",
+            timestamp: "2025-01-01T00:01:00Z",
+          },
+        ],
+        // No LastEvaluatedKey -> nextToken should be null.
+      });
 
-    test('returns empty items list when no messages', async () => {
-          dynamoMock.on(QueryCommand).resolves({ Items: [] });
-    
-          const result = await invoke<{ items: unknown[]; nextToken: string | null }>(
-            makeEvent('getConversationHistory', {
-              projectId: 'proj-1',
-            }),
-          );
-    
-          expect(result.items).toEqual([]);
-          expect(result.nextToken).toBeNull();
-        });
-  });
+      const result = await invoke<{
+        items: unknown[];
+        nextToken: string | null;
+      }>(
+        makeEvent("getConversationHistory", {
+          projectId: "proj-1",
+        }),
+      );
 
-  describe('sendMessageToAgent', () => {
-    test('converts to sendMessage format and stores', async () => {
-      dynamoMock.on(PutCommand).resolves({});
-      eventBridgeMock.on(PutEventsCommand).resolves({});
+      // Resolver now returns {items, nextToken} for cursor pagination.
+      expect(result.items).toHaveLength(2);
+      expect(result.nextToken).toBeNull();
+    });
 
-      const result = await invoke<MessageResult>(makeEvent('sendMessageToAgent', {
-        projectId: 'proj-1',
-        agentId: 'agent-1',
-        message: 'Direct message',
-      }));
+    test("returns a nextToken when DynamoDB paginates", async () => {
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [
+          {
+            id: "m1",
+            projectId: "proj-1",
+            message: "First",
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+        ],
+        LastEvaluatedKey: {
+          projectId: "proj-1",
+          timestamp: "2025-01-01T00:00:00Z",
+        },
+      });
 
-      expect(result.id).toBeDefined();
-      expect(result.message).toBe('Direct message');
+      const result = await invoke<{ items: unknown[]; nextToken: string }>(
+        makeEvent("getConversationHistory", {
+          projectId: "proj-1",
+        }),
+      );
+
+      expect(result.items).toHaveLength(1);
+      expect(typeof result.nextToken).toBe("string");
+      // nextToken is a base64-encoded JSON blob of the LastEvaluatedKey.
+      expect(
+        JSON.parse(Buffer.from(result.nextToken, "base64").toString()),
+      ).toEqual({
+        projectId: "proj-1",
+        timestamp: "2025-01-01T00:00:00Z",
+      });
+    });
+
+    test("returns empty items list when no messages", async () => {
+      dynamoMock.on(QueryCommand).resolves({ Items: [] });
+
+      const result = await invoke<{
+        items: unknown[];
+        nextToken: string | null;
+      }>(
+        makeEvent("getConversationHistory", {
+          projectId: "proj-1",
+        }),
+      );
+
+      expect(result.items).toEqual([]);
+      expect(result.nextToken).toBeNull();
     });
   });
 
-  describe('publishConversationMessage', () => {
-    test('returns the input as-is for subscription trigger', async () => {
+  describe("sendMessageToAgent", () => {
+    test("converts to sendMessage format and stores", async () => {
+      dynamoMock.on(PutCommand).resolves({});
+      eventBridgeMock.on(PutEventsCommand).resolves({});
+
+      const result = await invoke<MessageResult>(
+        makeEvent("sendMessageToAgent", {
+          projectId: "proj-1",
+          agentId: "agent-1",
+          message: "Direct message",
+        }),
+      );
+
+      expect(result.id).toBeDefined();
+      expect(result.message).toBe("Direct message");
+    });
+  });
+
+  describe("publishConversationMessage", () => {
+    test("returns the input as-is for subscription trigger", async () => {
       const input = {
-        id: 'msg-1',
-        projectId: 'proj-1',
-        agentId: 'agent-1',
-        message: 'Agent response',
-        messageType: 'AGENT_RESPONSE',
-        timestamp: '2025-01-01T00:00:00Z',
+        id: "msg-1",
+        projectId: "proj-1",
+        agentId: "agent-1",
+        message: "Agent response",
+        messageType: "AGENT_RESPONSE",
+        timestamp: "2025-01-01T00:00:00Z",
       };
 
-      const result = await handler(makeEvent('publishConversationMessage', {
-        input,
-      }));
+      const result = await handler(
+        makeEvent("publishConversationMessage", {
+          input,
+        }),
+      );
 
       expect(result).toEqual(input);
     });
   });
 
-  test('throws on unknown field', async () => {
-    await expect(
-      handler(makeEvent('unknownField', {}))
-    ).rejects.toThrow('Unknown field');
+  test("throws on unknown field", async () => {
+    await expect(handler(makeEvent("unknownField", {}))).rejects.toThrow(
+      "Unknown field",
+    );
+  });
+
+  describe("cross-tenant projectId is refused before any privileged operation", () => {
+    beforeEach(() => {
+      assertProjectAccessMock.mockRejectedValue(
+        new ProjectAccessDeniedError("Access denied"),
+      );
+    });
+
+    test("sendMessage: denies BEFORE storing to DynamoDB or dispatching to EventBridge (worst case — agent-dispatch injection)", async () => {
+      await expect(
+        handler(
+          makeEvent("sendMessage", {
+            projectId: "victim-proj",
+            message: {
+              agentId: "agent-1",
+              message: "malicious payload",
+              messageType: "USER_INPUT",
+            },
+          }),
+        ),
+      ).rejects.toThrow("Access denied");
+
+      expect(assertProjectAccessMock).toHaveBeenCalledWith(
+        "victim-proj",
+        "user-123",
+        expect.anything(),
+      );
+      expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
+      expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(0);
+    });
+
+    test("sendMessageToAgent: denies before storing or dispatching", async () => {
+      await expect(
+        handler(
+          makeEvent("sendMessageToAgent", {
+            projectId: "victim-proj",
+            agentId: "agent-1",
+            message: "malicious payload",
+          }),
+        ),
+      ).rejects.toThrow("Access denied");
+
+      expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
+      expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(0);
+    });
+
+    test("getConversationHistory: denies BEFORE any DynamoDB query read", async () => {
+      await expect(
+        handler(
+          makeEvent("getConversationHistory", { projectId: "victim-proj" }),
+        ),
+      ).rejects.toThrow("Access denied");
+
+      expect(dynamoMock.commandCalls(QueryCommand)).toHaveLength(0);
+    });
+  });
+
+  describe("publishConversationMessage (IAM-only internal path)", () => {
+    test("does not call the project-access gate — invoked by agent-message-handler under a field-scoped IAM policy, not end-user identity", async () => {
+      const input = {
+        id: "msg-1",
+        projectId: "proj-1",
+        agentId: "agent-1",
+        message: "Agent response",
+        messageType: "AGENT_RESPONSE",
+        timestamp: "2025-01-01T00:00:00Z",
+      };
+
+      const result = await handler(
+        makeEvent("publishConversationMessage", { input }),
+      );
+
+      expect(result).toEqual(input);
+      expect(assertProjectAccessMock).not.toHaveBeenCalled();
+    });
   });
 });
