@@ -4,9 +4,15 @@
  */
 
 import { AppSyncResolverHandler } from "aws-lambda";
-import { S3Client, GetObjectCommand, ListObjectVersionsCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  GetObjectCommand,
+  ListObjectVersionsCommand,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
+import { getUserId } from "../utils/appsync";
+import { assertProjectAccess } from "../utils/project-access";
 
 const s3 = new S3Client({});
 const lambda = new LambdaClient({});
@@ -18,7 +24,11 @@ function s3Key(projectId: string, documentKey: string): string {
   return `${projectId}/${documentKey}`;
 }
 
-async function getProjectDocument(projectId: string, documentKey: string, versionId?: string) {
+async function getProjectDocument(
+  projectId: string,
+  documentKey: string,
+  versionId?: string,
+) {
   const cmd = new GetObjectCommand({
     Bucket: SESSION_BUCKET,
     Key: s3Key(projectId, documentKey),
@@ -48,29 +58,42 @@ async function listDocumentVersions(projectId: string, documentKey: string) {
   }));
 }
 
-async function generateDocumentPdf(projectId: string, documentKey: string): Promise<{ url: string; expiresIn: number }> {
+async function generateDocumentPdf(
+  projectId: string,
+  documentKey: string,
+): Promise<{ url: string; expiresIn: number }> {
   const key = s3Key(projectId, documentKey);
   const pdfKey = key.replace(/\.md$/, ".pdf");
 
   // Invoke PDF generator synchronously
-  await lambda.send(new InvokeCommand({
-    FunctionName: PDF_GENERATOR_FUNCTION,
-    InvocationType: "RequestResponse",
-    Payload: Buffer.from(JSON.stringify({
-      Records: [{
-        s3: {
-          bucket: { name: SESSION_BUCKET },
-          object: { key },
-        },
-      }],
-    })),
-  }));
+  await lambda.send(
+    new InvokeCommand({
+      FunctionName: PDF_GENERATOR_FUNCTION,
+      InvocationType: "RequestResponse",
+      Payload: Buffer.from(
+        JSON.stringify({
+          Records: [
+            {
+              s3: {
+                bucket: { name: SESSION_BUCKET },
+                object: { key },
+              },
+            },
+          ],
+        }),
+      ),
+    }),
+  );
 
   // Return presigned URL to the generated PDF
-  const url = await getSignedUrl(s3, new GetObjectCommand({
-    Bucket: SESSION_BUCKET,
-    Key: pdfKey,
-  }), { expiresIn: 900 });
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({
+      Bucket: SESSION_BUCKET,
+      Key: pdfKey,
+    }),
+    { expiresIn: 900 },
+  );
 
   return { url, expiresIn: 900 };
 }
@@ -82,11 +105,31 @@ interface DocumentResolverArguments {
   versionId?: string;
 }
 
-export const handler: AppSyncResolverHandler<DocumentResolverArguments, unknown> = async (event) => {
-  const { info, arguments: args } = event;
+export const handler: AppSyncResolverHandler<
+  DocumentResolverArguments,
+  unknown
+> = async (event) => {
+  const { info, arguments: args, identity } = event;
   const { projectId, documentKey, versionId } = args;
+  const fieldName = info.fieldName;
 
-  switch (info.fieldName) {
+  // Security fix (finding 60a5a6ae, CRE item 1): projectId is client-supplied
+  // and used to build every S3 key in this resolver. Reconcile it against
+  // the caller BEFORE any S3 read, presign, or Lambda invocation — reusing
+  // the same gate project-resolver.ts's getProject already enforces. Fail
+  // closed on any identity/lookup failure.
+  const knownFields = new Set([
+    "getProjectDocument",
+    "getDocumentVersion",
+    "listDocumentVersions",
+    "generateDocumentPdf",
+  ]);
+  if (knownFields.has(fieldName)) {
+    const userId = getUserId(identity);
+    await assertProjectAccess(projectId, userId, event);
+  }
+
+  switch (fieldName) {
     case "getProjectDocument":
       return getProjectDocument(projectId, documentKey);
     case "getDocumentVersion":
@@ -96,6 +139,6 @@ export const handler: AppSyncResolverHandler<DocumentResolverArguments, unknown>
     case "generateDocumentPdf":
       return generateDocumentPdf(projectId, documentKey);
     default:
-      throw new Error(`Unknown field: ${info.fieldName}`);
+      throw new Error(`Unknown field: ${fieldName}`);
   }
 };
