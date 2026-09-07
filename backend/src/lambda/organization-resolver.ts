@@ -90,8 +90,17 @@ export const handler = async (
 
   try {
     switch (fieldName) {
-      case "createOrganization":
+      case "createOrganization": {
+        // Resolve authContext INSIDE the try/case so that any exception
+        // thrown while deriving it (malformed identity, etc.) is caught by
+        // the existing catch-and-rethrow below and surfaces as a refusal —
+        // never as an unhandled crash that could be mistaken for "allow".
+        // Placed BEFORE any Cognito or DynamoDB call, mirroring
+        // deleteOrganization's gate (finding c79cd4f6).
+        const authContext = authContextFromEvent(event);
+        requireAdmin(authContext, "create an organization");
         return await createOrganization(args.input);
+      }
       case "deleteOrganization": {
         // Resolve authContext INSIDE the try/case so that any exception thrown
         // while deriving it (malformed identity, etc.) is caught by the
