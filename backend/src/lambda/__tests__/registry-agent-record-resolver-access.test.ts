@@ -1,10 +1,15 @@
 /**
  * Unit tests for registry-native resolver access/auth surfaces.
  * PR 6a — covers setAppAuthConfig, grantAppAccess, revokeAppAccess, and
- * listAppAccessEntries. The first three mutate the registry manifest; the
- * last delegates to `app-access-control#listAppAccessEntries` (preserved
- * DDB-backed path) — we mock that helper to isolate the resolver's shape
- * wrapper from its storage backing.
+ * listAppAccessEntries.
+ *
+ * Finding 603e732f: listAppAccessEntries previously delegated to
+ * `app-access-control.ts#listAppAccessEntries`, a DynamoDB ACCESS#-row
+ * reader with ZERO production writers — grant/revoke write ONLY the
+ * manifest, so the old listing always returned `[]` even when grants
+ * existed. That module was deleted; listing now reads `manifest.access`
+ * directly (the SAME store grant/revoke write), gated at 'viewer' via
+ * `assertManifestAccess`.
  */
 
 process.env.REGISTRY_ID = "test-registry-id";
@@ -46,14 +51,34 @@ jest.mock("../../services/registry-service", () => {
   };
 });
 
-jest.mock("../../utils/appsync", () => ({
-  getUserId: jest.fn().mockReturnValue("user-123"),
+// Cognito lookups are used by extractOrgFromEvent's fallback path; these
+// tests always supply custom:organization directly on the event so no
+// network call is made, but we still mock the client defensively (mirrors
+// registry-agent-record-resolver-access-owner-gate.test.ts's convention).
+// NOTE: utils/appsync#getUserId is intentionally left UNMOCKED (unlike the
+// original version of this file) — assertManifestAccess/listAppAccessEntries
+// now vary the caller identity per test via makeEvent's `opts.userId`, and
+// the real getUserId correctly derives it from `identity.sub`.
+jest.mock("@aws-sdk/client-cognito-identity-provider", () => ({
+  CognitoIdentityProviderClient: jest.fn().mockImplementation(() => ({
+    send: jest
+      .fn()
+      .mockRejectedValue(new Error("Cognito not reachable in test")),
+  })),
+  AdminGetUserCommand: jest.fn(),
 }));
 
-const mockListAppAccessEntriesImpl = jest.fn();
-jest.mock("../app-access-control", () => ({
-  listAppAccessEntries: (...args: unknown[]) =>
-    mockListAppAccessEntriesImpl(...args),
+// Cognito lookups are used by extractOrgFromEvent's fallback path; these
+// tests always supply custom:organization directly on the event so no
+// network call is made, but we still mock the client defensively (mirrors
+// registry-agent-record-resolver-access-owner-gate.test.ts's convention).
+jest.mock("@aws-sdk/client-cognito-identity-provider", () => ({
+  CognitoIdentityProviderClient: jest.fn().mockImplementation(() => ({
+    send: jest
+      .fn()
+      .mockRejectedValue(new Error("Cognito not reachable in test")),
+  })),
+  AdminGetUserCommand: jest.fn(),
 }));
 
 import { handler } from "../registry-agent-record-resolver";
@@ -66,14 +91,24 @@ type HandlerEvent = Parameters<typeof handler>[0];
 // (single cast here) so calls don't pass superfluous arguments.
 const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
-function makeEvent(fieldName: string, args: Record<string, unknown>) {
+function makeEvent(
+  fieldName: string,
+  args: Record<string, unknown>,
+  opts: { userId?: string; orgId?: string; groups?: string[] } = {},
+) {
+  const userId = opts.userId ?? "user-123";
+  // Default orgId to "org-1" (seedApp's org) so calls that omit `opts`
+  // entirely keep the pre-existing success-path behaviour; callers that
+  // want to test a MISSING org claim pass `orgId: undefined` explicitly
+  // alongside a non-default userId.
+  const orgId = "orgId" in opts ? opts.orgId : "org-1";
+  const claims: Record<string, unknown> = { sub: userId };
+  if (orgId !== undefined) claims["custom:organization"] = orgId;
+  if (opts.groups !== undefined) claims["cognito:groups"] = opts.groups;
   return {
     info: { fieldName },
     arguments: args,
-    identity: {
-      sub: "user-123",
-      claims: { sub: "user-123", "custom:organization": "org-1" },
-    },
+    identity: { sub: userId, claims },
   } as unknown as HandlerEvent;
 }
 
@@ -119,7 +154,6 @@ describe("registry-agent-record-resolver — access / auth surfaces", () => {
     resetMockRegistry();
     ebMock.reset();
     ebMock.on(PutEventsCommand).resolves({});
-    mockListAppAccessEntriesImpl.mockReset();
   });
 
   // ─── setAppAuthConfig ────────────────────────────────────────
@@ -242,45 +276,239 @@ describe("registry-agent-record-resolver — access / auth surfaces", () => {
   // ─── listAppAccessEntries ────────────────────────────────────
 
   describe("listAppAccessEntries", () => {
-    test("delegates to app-access-control#listAppAccessEntries with the deps struct", async () => {
-      const entries = [
-        {
-          userId: "u1",
-          role: "editor",
-          grantedBy: "admin",
-          grantedAt: "2024-01-01T00:00:00Z",
-        },
-        {
-          userId: "u2",
-          role: "viewer",
-          grantedBy: "admin",
-          grantedAt: "2024-01-02T00:00:00Z",
-        },
-      ];
-      mockListAppAccessEntriesImpl.mockResolvedValueOnce(entries);
+    test("returns entries that exist in the manifest (previously returned empty — finding 603e732f)", async () => {
+      seedMockRegistry("agent", "app-1", {
+        name: "Test App",
+        description: "Test",
+        status: "DRAFT",
+        customDescriptorContent: JSON.stringify({
+          appId: "app-1",
+          manifest: {
+            orgId: "org-1",
+            version: 1,
+            status: "DRAFT",
+            createdBy: "user-123",
+            workflowIds: [],
+            agentBindings: [],
+            permissions: [],
+            configSchema: null,
+            configValues: null,
+            authConfig: null,
+            access: {
+              "user-123": {
+                role: "owner",
+                grantedAt: "2024-01-01T00:00:00Z",
+                grantedBy: "system",
+              },
+              "target-user": {
+                role: "editor",
+                grantedAt: "2024-02-01T00:00:00Z",
+                grantedBy: "user-123",
+              },
+            },
+            routingConfig: null,
+          },
+        }),
+      });
 
       const result = await invokeHandler(
         makeEvent("listAppAccessEntries", { appId: "app-1" }),
       );
 
-      expect(result).toEqual(entries);
-      expect(mockListAppAccessEntriesImpl).toHaveBeenCalledTimes(1);
-      const call = mockListAppAccessEntriesImpl.mock.calls[0];
-      expect(call[0]).toBe("app-1");
-      // Second arg is the shared deps struct containing docClient + appsTable.
-      expect(call[1]).toEqual(
-        expect.objectContaining({ appsTable: "citadel-apps-test" }),
+      expect(result).toEqual(
+        expect.arrayContaining([
+          {
+            userId: "user-123",
+            role: "owner",
+            grantedBy: "system",
+            grantedAt: "2024-01-01T00:00:00Z",
+          },
+          {
+            userId: "target-user",
+            role: "editor",
+            grantedBy: "user-123",
+            grantedAt: "2024-02-01T00:00:00Z",
+          },
+        ]),
       );
+      expect((result as unknown[]).length).toBe(2);
     });
 
-    test("returns empty array when no access entries exist", async () => {
-      mockListAppAccessEntriesImpl.mockResolvedValueOnce([]);
+    test("surfaces the implicit creator-owner when the manifest has no explicit owner entry yet", async () => {
+      seedMockRegistry("agent", "app-legacy", {
+        name: "Legacy App",
+        description: "Test",
+        status: "DRAFT",
+        createdAt: new Date("2023-06-01T00:00:00Z"),
+        customDescriptorContent: JSON.stringify({
+          appId: "app-legacy",
+          manifest: {
+            orgId: "org-1",
+            version: 1,
+            status: "DRAFT",
+            createdBy: "user-123",
+            workflowIds: [],
+            agentBindings: [],
+            permissions: [],
+            configSchema: null,
+            configValues: null,
+            authConfig: null,
+            access: {}, // pre-owner-gate-fix app: no explicit owner entry
+            routingConfig: null,
+          },
+        }),
+      });
 
       const result = await invokeHandler(
-        makeEvent("listAppAccessEntries", { appId: "app-empty" }),
+        makeEvent("listAppAccessEntries", { appId: "app-legacy" }),
+      );
+
+      expect(result).toEqual([
+        {
+          userId: "user-123",
+          role: "owner",
+          grantedBy: "system",
+          grantedAt: "2023-06-01T00:00:00.000Z",
+        },
+      ]);
+    });
+
+    test("returns empty array when the app exists but has no access entries and no createdBy", async () => {
+      seedMockRegistry("agent", "app-empty", {
+        name: "Empty App",
+        description: "Test",
+        status: "DRAFT",
+        customDescriptorContent: JSON.stringify({
+          appId: "app-empty",
+          manifest: {
+            orgId: "org-1",
+            version: 1,
+            status: "DRAFT",
+            workflowIds: [],
+            agentBindings: [],
+            permissions: [],
+            configSchema: null,
+            configValues: null,
+            authConfig: null,
+            access: {},
+            routingConfig: null,
+          },
+        }),
+      });
+
+      // user-123 is not in the access map and there's no createdBy fallback,
+      // so authorize as admin to reach the (empty) listing itself.
+      const result = await invokeHandler(
+        makeEvent(
+          "listAppAccessEntries",
+          { appId: "app-empty" },
+          { userId: "admin-user", orgId: "org-1", groups: ["admin"] },
+        ),
       );
 
       expect(result).toEqual([]);
+    });
+
+    test("throws when app not found", async () => {
+      await expect(
+        invokeHandler(
+          makeEvent("listAppAccessEntries", { appId: "nonexistent" }),
+        ),
+      ).rejects.toThrow("App not found");
+    });
+
+    // ─── authorization (viewer-and-above; finding 603e732f) ───────
+
+    test("allows a viewer-role caller to list access entries", async () => {
+      seedMockRegistry("agent", "app-1", {
+        name: "Test App",
+        description: "Test",
+        status: "DRAFT",
+        customDescriptorContent: JSON.stringify({
+          appId: "app-1",
+          manifest: {
+            orgId: "org-1",
+            version: 1,
+            status: "DRAFT",
+            createdBy: "owner-user",
+            workflowIds: [],
+            agentBindings: [],
+            permissions: [],
+            configSchema: null,
+            configValues: null,
+            authConfig: null,
+            access: {
+              "owner-user": {
+                role: "owner",
+                grantedAt: "2024-01-01T00:00:00Z",
+                grantedBy: "system",
+              },
+              "viewer-user": {
+                role: "viewer",
+                grantedAt: "2024-01-02T00:00:00Z",
+                grantedBy: "owner-user",
+              },
+            },
+            routingConfig: null,
+          },
+        }),
+      });
+
+      await expect(
+        invokeHandler(
+          makeEvent(
+            "listAppAccessEntries",
+            { appId: "app-1" },
+            { userId: "viewer-user", orgId: "org-1" },
+          ),
+        ),
+      ).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ userId: "viewer-user" }),
+        ]),
+      );
+    });
+
+    test("refuses a cross-org caller (fails closed, consistent with the owner gate)", async () => {
+      seedApp();
+
+      await expect(
+        invokeHandler(
+          makeEvent(
+            "listAppAccessEntries",
+            { appId: "app-1" },
+            { userId: "cross-org-user", orgId: "org-2" },
+          ),
+        ),
+      ).rejects.toThrow(/Access denied/i);
+    });
+
+    test("refuses a same-org caller with no access entry and no implicit-owner fallback", async () => {
+      seedApp();
+
+      await expect(
+        invokeHandler(
+          makeEvent(
+            "listAppAccessEntries",
+            { appId: "app-1" },
+            { userId: "stranger-user", orgId: "org-1" },
+          ),
+        ),
+      ).rejects.toThrow(/Access denied/i);
+    });
+
+    test("admin group bypasses the viewer check", async () => {
+      seedApp();
+
+      await expect(
+        invokeHandler(
+          makeEvent(
+            "listAppAccessEntries",
+            { appId: "app-1" },
+            { userId: "admin-user", orgId: "unrelated-org", groups: ["admin"] },
+          ),
+        ),
+      ).resolves.toBeDefined();
     });
   });
 });

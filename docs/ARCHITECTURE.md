@@ -275,7 +275,7 @@ Admins see all organizations; non-admins see only their own.
 
 ### App-Level RBAC
 
-Published apps support owner/editor/viewer roles via the `grantAppAccess` / `revokeAppAccess` mutations. The `app-access-control` Lambda enforces these roles on app-specific operations.
+Published apps support owner/editor/viewer roles via the `grantAppAccess` / `revokeAppAccess` mutations, stored in the Registry record manifest's `access` map. The `assertManifestAccess` gate in `registry-agent-record-resolver.ts` enforces these roles on app-specific operations, including `listAppAccessEntries` (viewer-and-above).
 
 ### API Key Authentication (Published Apps)
 
