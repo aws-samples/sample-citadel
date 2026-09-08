@@ -1336,6 +1336,14 @@
           {
             "AttributeName": "agentUseId",
             "AttributeType": "S"
+          },
+          {
+            "AttributeName": "orgId",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "submittedAt",
+            "AttributeType": "S"
           }
         ],
         "BillingMode": "PAY_PER_REQUEST",
@@ -1378,7 +1386,25 @@
         "TimeToLiveSpecification": {
           "AttributeName": "ttl",
           "Enabled": true
-        }
+        },
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "OrgIndex",
+            "KeySchema": [
+              {
+                "AttributeName": "orgId",
+                "KeyType": "HASH"
+              },
+              {
+                "AttributeName": "submittedAt",
+                "KeyType": "RANGE"
+              }
+            ],
+            "Projection": {
+              "ProjectionType": "ALL"
+            }
+          }
+        ]
       }
     },
     "TaskRunnerResolverFunctionLogsDF000813": {

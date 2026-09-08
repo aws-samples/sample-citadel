@@ -983,17 +983,40 @@ export class BackendStack extends cdk.Stack {
     // PK orchestrationId (intake session id, or '0' for direct UI requests) /
     // SK agentUseId (agent name / requestId). On-demand + PITR per conventions;
     // a `ttl` attribute (epoch seconds, ~7 days) keeps the table self-pruning.
-    new dynamodb.Table(this, "FabricationJobsTable", {
-      tableName: `citadel-fabrication-jobs-${props.environment}`,
-      partitionKey: {
-        name: "orchestrationId",
-        type: dynamodb.AttributeType.STRING,
+    const fabricationJobsTable = new dynamodb.Table(
+      this,
+      "FabricationJobsTable",
+      {
+        tableName: `citadel-fabrication-jobs-${props.environment}`,
+        partitionKey: {
+          name: "orchestrationId",
+          type: dynamodb.AttributeType.STRING,
+        },
+        sortKey: { name: "agentUseId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+        timeToLiveAttribute: "ttl",
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
       },
-      sortKey: { name: "agentUseId", type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      timeToLiveAttribute: "ttl",
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    );
+
+    // Org-scoped GSI (cross-tenant exposure fix, design evidence bf4a13f2):
+    // the fabricator-queue-resolver previously had no way to scope its read
+    // to the caller's own tenant — it either bound a client-supplied
+    // projectId directly to the base-table PK with no org check, or ran an
+    // unfiltered Scan across every tenant's rows. All three writers now
+    // stamp a server-derived `orgId` onto the row; this index lets the
+    // resolver ALWAYS query by the caller's own org (never a Scan, never an
+    // unreconciled client-supplied key). submittedAt as sort key preserves
+    // the resolver's existing "most recent first" ordering without a
+    // separate client-side sort pass. Legacy rows written before this
+    // change carry no orgId and simply fall out of this index's query —
+    // no backfill; they age out via the table's existing 7-day TTL.
+    fabricationJobsTable.addGlobalSecondaryIndex({
+      indexName: "OrgIndex",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "submittedAt", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // NOTE: fabricatorRequestResolverFunction/fabricatorQueueResolverFunction

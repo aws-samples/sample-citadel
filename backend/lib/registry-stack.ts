@@ -780,13 +780,17 @@ export class RegistryStack extends cdk.Stack {
         ],
       }),
     );
-    // Least privilege: the queue resolver only reads (Query for a given
-    // project, Scan otherwise) — matches the baseline exactly.
+    // Least privilege (cross-tenant exposure fix, design evidence bf4a13f2):
+    // the resolver now ALWAYS queries the org-scoped OrgIndex GSI by the
+    // caller's own server-derived org — the raw table Scan is removed
+    // entirely (it was the widest leak: an unfiltered harvest across every
+    // tenant). dynamodb:Query is scoped to the GSI ARN only; the resolver no
+    // longer reads the base table's primary index directly.
     fabricatorQueueResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:Query", "dynamodb:Scan"],
-        resources: [fabricationJobsTableArn],
+        actions: ["dynamodb:Query"],
+        resources: [`${fabricationJobsTableArn}/index/OrgIndex`],
       }),
     );
 

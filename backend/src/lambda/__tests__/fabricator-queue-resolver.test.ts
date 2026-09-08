@@ -1,11 +1,15 @@
 /**
- * Tests for fabricator-queue-resolver Lambda.
+ * Tests for fabricator-queue-resolver Lambda (mapRow/normalization
+ * behavior). Org-scoping / cross-tenant security behavior is covered
+ * separately in fabricator-queue-resolver-org-scoping.test.ts.
  *
  * The resolver reads the durable fabrication-jobs table (source of truth for
- * per-agent fabrication status) instead of peeking SQS. When a projectId is
- * supplied it Queries by PK=orchestrationId; otherwise it Scans with a bounded
- * Limit. Rows map to FabricationQueueItem, sorted by submittedAt descending.
- * On any error it returns [] to preserve the existing contract.
+ * per-agent fabrication status) via the org-scoped `OrgIndex` GSI
+ * (orgId PK / submittedAt SK) — always scoped to the caller's own
+ * server-derived org. When a projectId is supplied, results are further
+ * filtered (client-side, within the org-scoped set) to that project's
+ * orchestrationId. Rows map to FabricationQueueItem, sorted by submittedAt
+ * descending. On any error it returns [] to preserve the existing contract.
  */
 import {
   DynamoDBDocumentClient,
@@ -16,22 +20,34 @@ import { mockClient } from "aws-sdk-client-mock";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
+jest.mock("../../utils/auth-event", () => ({
+  extractOrgFromEvent: jest.fn(),
+}));
+
+import { extractOrgFromEvent } from "../../utils/auth-event";
+
 process.env.FABRICATION_JOBS_TABLE = "citadel-fabrication-jobs-test";
 
 import { handler } from "../fabricator-queue-resolver";
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
-/** Build the minimal AppSync event the resolver reads (info.fieldName + arguments). */
+const mockExtractOrg = extractOrgFromEvent as jest.MockedFunction<
+  typeof extractOrgFromEvent
+>;
+
+/** Build the minimal AppSync event the resolver reads (info.fieldName + arguments + identity). */
 const makeEvent = (args: { projectId?: string } = {}): HandlerEvent =>
   ({
     info: { fieldName: "getFabricatorQueue" },
     arguments: args,
+    identity: { sub: "caller-1", "custom:organization": "org-caller" },
   }) as unknown as HandlerEvent;
 
 const row = (over: Record<string, unknown>) => ({
   orchestrationId: "0",
   agentUseId: "req-1",
+  orgId: "org-caller",
   status: "PENDING",
   agentName: "AgentOne",
   taskDescription: "do a thing",
@@ -42,11 +58,13 @@ const row = (over: Record<string, unknown>) => ({
 describe("fabricator-queue-resolver", () => {
   beforeEach(() => {
     ddbMock.reset();
+    jest.clearAllMocks();
     process.env.FABRICATION_JOBS_TABLE = "citadel-fabrication-jobs-test";
+    mockExtractOrg.mockResolvedValue("org-caller");
   });
 
-  test("Scans (bounded) and maps rows when no projectId is given", async () => {
-    ddbMock.on(ScanCommand).resolves({
+  test("Queries the org GSI (never a Scan) and maps rows when no projectId is given", async () => {
+    ddbMock.on(QueryCommand).resolves({
       Items: [
         row({ agentUseId: "req-1", submittedAt: "2026-06-01T00:00:00.000Z" }),
         row({
@@ -61,11 +79,10 @@ describe("fabricator-queue-resolver", () => {
 
     const result = await handler(makeEvent());
 
-    expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(1);
-    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
-    expect(
-      ddbMock.commandCalls(ScanCommand)[0].args[0].input.Limit,
-    ).toBeDefined();
+    expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
+    const input = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(input.IndexName).toBeDefined();
     // Sorted by submittedAt descending → req-2 first.
     expect(result.map((r) => r.requestId)).toEqual(["req-2", "req-1"]);
     expect(result[0]).toMatchObject({
@@ -78,10 +95,16 @@ describe("fabricator-queue-resolver", () => {
     });
   });
 
-  test("Queries by PK=orchestrationId when projectId is provided", async () => {
+  test("filters to the requested project (within the caller's own org rows) when projectId is provided", async () => {
     ddbMock.on(QueryCommand).resolves({
       Items: [
-        row({ agentUseId: "req-9", status: "FAILED", errorMessage: "boom" }),
+        row({
+          agentUseId: "req-9",
+          orchestrationId: "proj-42",
+          status: "FAILED",
+          errorMessage: "boom",
+        }),
+        row({ agentUseId: "req-other", orchestrationId: "some-other-proj" }),
       ],
     });
 
@@ -89,10 +112,6 @@ describe("fabricator-queue-resolver", () => {
 
     expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(1);
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
-    const qInput = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
-    expect(qInput.ExpressionAttributeValues).toMatchObject({
-      ":pk": "proj-42",
-    });
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({
       requestId: "req-9",
@@ -102,11 +121,12 @@ describe("fabricator-queue-resolver", () => {
   });
 
   test("falls back agentName to agentId when agentName is absent", async () => {
-    ddbMock.on(ScanCommand).resolves({
+    ddbMock.on(QueryCommand).resolves({
       Items: [
         {
           orchestrationId: "0",
           agentUseId: "req-1",
+          orgId: "org-caller",
           status: "PROCESSING",
           agentId: "FabricatedAgentX",
           updatedAt: "2026-06-10T00:00:00.000Z",
@@ -120,11 +140,12 @@ describe("fabricator-queue-resolver", () => {
   });
 
   test("falls back agentName to agentUseId when only agentUseId is present", async () => {
-    ddbMock.on(ScanCommand).resolves({
+    ddbMock.on(QueryCommand).resolves({
       Items: [
         {
           orchestrationId: "0",
           agentUseId: "agent-use-77",
+          orgId: "org-caller",
           status: "PROCESSING",
           updatedAt: "2026-06-10T00:00:00.000Z",
         },
@@ -137,11 +158,12 @@ describe("fabricator-queue-resolver", () => {
   });
 
   test("falls back submittedAt to updatedAt when submittedAt is absent", async () => {
-    ddbMock.on(ScanCommand).resolves({
+    ddbMock.on(QueryCommand).resolves({
       Items: [
         {
           orchestrationId: "0",
           agentUseId: "req-1",
+          orgId: "org-caller",
           status: "PROCESSING",
           agentId: "FabricatedAgentX",
           updatedAt: "2026-06-10T12:34:56.000Z",
@@ -155,7 +177,7 @@ describe("fabricator-queue-resolver", () => {
   });
 
   test("uses agentName and submittedAt as-is when both are present", async () => {
-    ddbMock.on(ScanCommand).resolves({
+    ddbMock.on(QueryCommand).resolves({
       Items: [
         row({
           agentName: "RealName",
@@ -173,7 +195,7 @@ describe("fabricator-queue-resolver", () => {
   });
 
   test("returns [] on a DynamoDB error", async () => {
-    ddbMock.on(ScanCommand).rejects(new Error("ddb down"));
+    ddbMock.on(QueryCommand).rejects(new Error("ddb down"));
     const result = await handler(makeEvent());
     expect(result).toEqual([]);
   });
@@ -182,7 +204,7 @@ describe("fabricator-queue-resolver", () => {
     delete process.env.FABRICATION_JOBS_TABLE;
     const result = await handler(makeEvent());
     expect(result).toEqual([]);
-    expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
   });
 
   describe("status normalization (badge-stuck incident hardening)", () => {
@@ -192,11 +214,12 @@ describe("fabricator-queue-resolver", () => {
     // must also never pass through verbatim (invalid GraphQL enum member).
 
     test("a row with a missing status is not surfaced as active work (normalized to FAILED, not PENDING)", async () => {
-      ddbMock.on(ScanCommand).resolves({
+      ddbMock.on(QueryCommand).resolves({
         Items: [
           {
             orchestrationId: "0",
             agentUseId: "req-no-status",
+            orgId: "org-caller",
             agentName: "AgentNoStatus",
             submittedAt: "2026-06-01T00:00:00.000Z",
           },
@@ -209,7 +232,7 @@ describe("fabricator-queue-resolver", () => {
     });
 
     test("a row with an unrecognized status is normalized to a valid enum member instead of passing through verbatim", async () => {
-      ddbMock.on(ScanCommand).resolves({
+      ddbMock.on(QueryCommand).resolves({
         Items: [row({ agentUseId: "req-bad-status", status: "DONE" })],
       });
 
@@ -221,7 +244,7 @@ describe("fabricator-queue-resolver", () => {
     test.each(["PENDING", "PROCESSING", "COMPLETED", "FAILED"] as const)(
       "a valid %s status passes through unchanged",
       async (status) => {
-        ddbMock.on(ScanCommand).resolves({
+        ddbMock.on(QueryCommand).resolves({
           Items: [row({ agentUseId: `req-${status}`, status })],
         });
 
