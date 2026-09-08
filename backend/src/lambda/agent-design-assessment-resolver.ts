@@ -1,3 +1,4 @@
+import { deriveRoles } from "../utils/auth-event";
 /**
  * AgentDesignAssessment resolver.
  *
@@ -120,12 +121,11 @@ function authContextFromEvent(
   event: AgentDesignAssessmentResolverEvent,
 ): AuthContext {
   const identity: GovernanceEventIdentity = event?.identity || {};
-  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
     groups: identity["cognito:groups"] || [],
-    roles: claimRole ? [claimRole] : [],
+    roles: deriveRoles(event),
   };
 }
 

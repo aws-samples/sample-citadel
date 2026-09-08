@@ -89,7 +89,12 @@ function makeEvent(
     // the finding-8f8fd119 editor gate (assertManifestAccess) on updateApp
     // via the same-org + implicit-creator-owner fallback path.
     identity: admin
-      ? { sub, claims: { sub, "custom:role": "admin" }, "custom:role": "admin" }
+      ? {
+          sub,
+          claims: { sub, "custom:role": "admin" },
+          "custom:role": "admin",
+          "cognito:groups": ["admin"],
+        }
       : { sub, claims: { sub, "custom:organization": "org-1" } },
   } as unknown as HandlerEvent;
 }

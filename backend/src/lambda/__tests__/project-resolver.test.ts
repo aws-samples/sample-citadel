@@ -284,7 +284,7 @@ describe("project-resolver — organization scoping", () => {
       makeEventWithIdentity(
         "listProjects",
         {},
-        { sub: "admin-1", "custom:role": "admin" },
+        { sub: "admin-1", "custom:role": "admin", "cognito:groups": ["admin"] },
       ),
     )) as unknown as { items: Array<{ id: string; archetypeStatus: string }> };
 
@@ -385,7 +385,7 @@ describe("project-resolver — organization scoping", () => {
       makeEventWithIdentity(
         "getProject",
         { id: "proj-org-b" },
-        { sub: "admin-1", "custom:role": "admin" },
+        { sub: "admin-1", "custom:role": "admin", "cognito:groups": ["admin"] },
       ),
     )) as unknown as { id: string };
 
@@ -437,7 +437,7 @@ describe("project-resolver — organization scoping", () => {
       makeEventWithIdentity(
         "listProjects",
         { nextToken: JSON.stringify(priorKey) },
-        { sub: "admin-1", "custom:role": "admin" },
+        { sub: "admin-1", "custom:role": "admin", "cognito:groups": ["admin"] },
       ),
     )) as unknown as { items: Array<{ id: string }>; nextToken?: string };
 

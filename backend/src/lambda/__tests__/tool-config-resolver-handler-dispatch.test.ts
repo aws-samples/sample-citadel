@@ -527,7 +527,11 @@ describe("tool-config-resolver handler switch dispatch (task 7.5)", () => {
 
       const adminIdentity = {
         sub: "admin",
-        claims: { "custom:organization": "admin-home", "custom:role": "admin" },
+        claims: {
+          "custom:organization": "admin-home",
+          "custom:role": "admin",
+          "cognito:groups": ["admin"],
+        },
       };
       const result = await handler(
         makeEvent("listToolConfigs", {}, adminIdentity),

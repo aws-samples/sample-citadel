@@ -40,18 +40,23 @@ export function extractOrgFromHttpEvent(
 }
 
 /**
- * True when the caller is an admin, via either:
- *  1. `custom:role === 'admin'`
- *  2. `cognito:groups` membership includes `'admin'` — tolerant of both the
- *     JS-array shape (standard JWT decoding) and a comma-separated-string
- *     shape (some proxy/authorizer configurations flatten it).
+ * True when the caller is an admin, determined SOLELY by
+ * `cognito:groups` membership — tolerant of both the JS-array shape
+ * (standard JWT decoding) and a comma-separated-string shape (some
+ * proxy/authorizer configurations flatten it).
+ *
+ * `custom:role === 'admin'` is deliberately NOT honoured here (finding
+ * 7aa877f8): absent an explicit Cognito client WriteAttributes allow-list,
+ * custom:role is a client-writable attribute that any authenticated user
+ * can set via UpdateUserAttributes, so it cannot be trusted as an
+ * authorization signal. Group membership can only be changed via the
+ * Admin* Cognito API. Mirrors backend/src/utils/auth-event.ts's
+ * isAdminFromEvent, which received the same fix.
  */
 export function isAdminFromHttpEvent(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): boolean {
   const claims = readClaims(event);
-
-  if (claims["custom:role"] === "admin") return true;
 
   const groups = claims["cognito:groups"];
   if (Array.isArray(groups)) {

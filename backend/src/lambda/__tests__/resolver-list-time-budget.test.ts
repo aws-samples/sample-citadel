@@ -56,7 +56,9 @@ import {
   _resetRegistryService as resetToolRegistry,
 } from "../tool-config-resolver";
 
-const adminIdentity = { claims: { "custom:role": "admin" } };
+const adminIdentity = {
+  claims: { "custom:role": "admin", "cognito:groups": ["admin"] },
+};
 
 describe("list resolvers thread the Lambda time budget into listResources", () => {
   const originalEnv = process.env;

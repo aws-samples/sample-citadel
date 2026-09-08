@@ -78,6 +78,7 @@ describe("resolveScopedOrg", () => {
     const event = makeEvent({
       "custom:organization": "org-1",
       "custom:role": "admin",
+      "cognito:groups": ["admin"],
     });
     expect(resolveScopedOrg(event, "org-2")).toEqual({
       ok: true,

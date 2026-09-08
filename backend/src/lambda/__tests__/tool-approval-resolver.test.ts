@@ -16,8 +16,24 @@ import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
 // extractOrgFromEvent hits Cognito; stub it to a deterministic caller org.
+// deriveRoles is given a lightweight real-ish implementation (rather than a
+// static stub) so role-gated tests (e.g. "architect role is permitted")
+// still see the fixture's custom:role claim, while admin remains
+// group-authoritative per finding 7aa877f8 — mirrors the real
+// auth-event.ts derivation without pulling in its Cognito dependency.
 jest.mock("../../utils/auth-event", () => ({
   extractOrgFromEvent: jest.fn(),
+  deriveRoles: jest.fn((event: unknown) => {
+    const identity =
+      (event as { identity?: Record<string, unknown> })?.identity || {};
+    const claimRole = identity["custom:role"] as string | undefined;
+    const groups = identity["cognito:groups"];
+    const isGroupAdmin = Array.isArray(groups) && groups.includes("admin");
+    const roles: string[] = [];
+    if (claimRole && claimRole !== "admin") roles.push(claimRole);
+    if (isGroupAdmin) roles.push("admin");
+    return roles;
+  }),
 }));
 import { extractOrgFromEvent } from "../../utils/auth-event";
 

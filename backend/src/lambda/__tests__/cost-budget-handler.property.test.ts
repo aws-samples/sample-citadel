@@ -36,7 +36,10 @@ function makeGetBudgetsEvent(
   const claims: Record<string, unknown> = {
     "custom:organization": claimOrg,
   };
-  if (isAdmin) claims["custom:role"] = "admin";
+  if (isAdmin) {
+    claims["custom:role"] = "admin";
+    claims["cognito:groups"] = ["admin"];
+  }
 
   const qsp: Record<string, string> | null =
     queryOrgId !== undefined ? { orgId: queryOrgId } : null;
@@ -64,7 +67,10 @@ function makePutBudgetEvent(
   const claims: Record<string, unknown> = {
     "custom:organization": claimOrg,
   };
-  if (isAdmin) claims["custom:role"] = "admin";
+  if (isAdmin) {
+    claims["custom:role"] = "admin";
+    claims["cognito:groups"] = ["admin"];
+  }
 
   return {
     version: "2.0",

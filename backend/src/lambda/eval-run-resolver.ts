@@ -1,3 +1,4 @@
+import { deriveRoles } from "../utils/auth-event";
 /**
  * EvalRun / EvalRunCaseResult resolver (CIT-102 Pass A).
  *
@@ -71,12 +72,11 @@ type EvalRunResolverEvent = GovernanceResolverEvent<EvalRunResolverArguments>;
 
 function authContextFromEvent(event: EvalRunResolverEvent): AuthContext {
   const identity: GovernanceEventIdentity = event?.identity || {};
-  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
     groups: identity["cognito:groups"] || [],
-    roles: claimRole ? [claimRole] : [],
+    roles: deriveRoles(event),
   };
 }
 

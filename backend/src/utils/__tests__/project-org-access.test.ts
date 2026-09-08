@@ -109,7 +109,11 @@ describe("assertProjectOrgAccess", () => {
       Item: { id: "proj-1", owner: "owner-1", organization: "org-a" },
     });
     const event = {
-      identity: { sub: "admin-1", "custom:role": "admin" },
+      identity: {
+        sub: "admin-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     };
     await expect(
       assertProjectOrgAccess("proj-1", event),
@@ -120,7 +124,13 @@ describe("assertProjectOrgAccess", () => {
     // Sanity: the admin bypass short-circuits before the fetch, matching
     // assertRowOrg's isAdminFromEvent(event) early-return convention.
     ddbMock.on(GetCommand).rejects(new Error("should not be called"));
-    const event = { identity: { sub: "admin-1", "custom:role": "admin" } };
+    const event = {
+      identity: {
+        sub: "admin-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
+    };
     await expect(
       assertProjectOrgAccess("proj-1", event),
     ).resolves.toBeUndefined();

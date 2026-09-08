@@ -91,6 +91,7 @@ import { hasPermission } from "../utils/auth";
 import {
   extractOrgFromEvent,
   lookupUserOrganization,
+  deriveRoles,
 } from "../utils/auth-event";
 import { putRelease } from "./release-store";
 import { RegistryService } from "../services/registry-service";
@@ -449,12 +450,11 @@ type ReleaseResolverEvent = GovernanceResolverEvent<ReleaseResolverArguments>;
 
 function authContextFromEvent(event: ReleaseResolverEvent): AuthContext {
   const identity: GovernanceEventIdentity = event?.identity || {};
-  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
     groups: identity["cognito:groups"] || [],
-    roles: claimRole ? [claimRole] : [],
+    roles: deriveRoles(event),
   };
 }
 

@@ -3,6 +3,7 @@ import {
   GetUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { AuthContext } from "../types";
+import { isAdminFromEvent } from "./auth-event";
 
 const cognitoClient = new CognitoIdentityProviderClient({});
 
@@ -21,12 +22,25 @@ export async function validateCognitoToken(
 
     const groups: string[] = [];
     const roles: string[] = [];
+    let claimRole: string | undefined;
 
     // Extract custom attributes
     for (const attr of attributes) {
       if (attr.Name === "custom:role") {
-        roles.push(attr.Value!);
+        claimRole = attr.Value;
       }
+    }
+
+    // finding 7aa877f8: custom:role is a client-writable attribute (absent
+    // an explicit Cognito client WriteAttributes allow-list, any
+    // authenticated user could self-grant custom:role=admin via
+    // UpdateUserAttributes). GetUserCommand does not return group
+    // membership, so admin cannot be verified group-authoritatively from
+    // this attributes-only response — treat 'admin' as untrusted here and
+    // never push it into roles. Non-admin role claims are preserved for
+    // permission checks that don't gate on the admin bypass.
+    if (claimRole && claimRole !== "admin") {
+      roles.push(claimRole);
     }
 
     return {
@@ -171,10 +185,22 @@ export function extractUserIdFromEvent(event: unknown): string {
 export function createAuthContext(event: unknown): AuthContext {
   const identity: IdentityBag = (event as EventWithIdentity).identity || {};
 
+  // finding 7aa877f8: admin must be group-authoritative (isAdminFromEvent),
+  // never derived from the client-writable custom:role attribute alone.
+  // Non-admin custom:role claims are preserved for other permission checks.
+  const claimRole = identity["custom:role"] as string | undefined;
+  const roles: string[] = [];
+  if (claimRole && claimRole !== "admin") {
+    roles.push(claimRole);
+  }
+  if (isAdminFromEvent(event)) {
+    roles.push("admin");
+  }
+
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
     groups: (identity["cognito:groups"] as string[] | undefined) || [],
-    roles: identity["custom:role"] ? [identity["custom:role"] as string] : [],
+    roles,
   };
 }

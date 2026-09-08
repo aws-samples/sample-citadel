@@ -1050,7 +1050,11 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
 
       const adminIdentity = {
         sub: "admin",
-        claims: { "custom:organization": "admin-home", "custom:role": "admin" },
+        claims: {
+          "custom:organization": "admin-home",
+          "custom:role": "admin",
+          "cognito:groups": ["admin"],
+        },
       };
       const result = await handler(
         makeEvent("listToolConfigs", {}, adminIdentity),
@@ -1085,7 +1089,11 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
 
       const adminIdentity = {
         sub: "admin",
-        claims: { "custom:organization": "admin-home", "custom:role": "admin" },
+        claims: {
+          "custom:organization": "admin-home",
+          "custom:role": "admin",
+          "cognito:groups": ["admin"],
+        },
       };
       const result = await handler(
         makeEvent("getToolConfig", { toolId: "tool-x" }, adminIdentity),

@@ -26,6 +26,7 @@ import {
 jest.mock("../../utils/auth-event", () => ({
   extractOrgFromEvent: jest.fn(),
   isAdminFromEvent: jest.fn(),
+  deriveRoles: jest.fn(() => []),
 }));
 jest.mock("../../utils/auth", () => ({
   hasPermission: jest.fn(),

@@ -1,3 +1,4 @@
+import { deriveRoles } from "../utils/auth-event";
 /**
  * promotion-policy-resolver.ts — admin-only GraphQL resolver for
  * PromotionPolicyConfig storage/reads. Mirrors
@@ -168,12 +169,11 @@ function authContextFromEvent(
   event: PromotionPolicyResolverEvent,
 ): AuthContext {
   const identity = event?.identity || {};
-  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
     groups: identity["cognito:groups"] || [],
-    roles: claimRole ? [claimRole] : [],
+    roles: deriveRoles(event),
   };
 }
 

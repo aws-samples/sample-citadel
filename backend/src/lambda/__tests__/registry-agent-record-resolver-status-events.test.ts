@@ -94,6 +94,7 @@ function makeAdminEvent(fieldName: string, args: Record<string, unknown>) {
       sub: "admin-1",
       claims: { sub: "admin-1", "custom:role": "admin" },
       "custom:role": "admin",
+      "cognito:groups": ["admin"],
     },
   } as unknown as HandlerEvent;
 }

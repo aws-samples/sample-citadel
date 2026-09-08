@@ -158,7 +158,11 @@ const SAME_ORG_IDENTITY = {
   sub: "victim-user",
   "custom:organization": "org-victim",
 };
-const ADMIN_IDENTITY = { sub: "admin-1", "custom:role": "admin" };
+const ADMIN_IDENTITY = {
+  sub: "admin-1",
+  "custom:role": "admin",
+  "cognito:groups": ["admin"],
+};
 
 beforeEach(() => {
   jest.clearAllMocks();

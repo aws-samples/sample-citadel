@@ -129,7 +129,11 @@ describe("GET /traces/by-execution/{executionId} — ownership authorization", (
     const event = makeEvent(
       "GET /traces/by-execution/{executionId}",
       { executionId: "exec-3" },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
 
     const res = await handler(event);
@@ -218,7 +222,11 @@ describe("GET /traces/{traceId} — admin-only (invariant 2)", () => {
     const event = makeEvent(
       "GET /traces/{traceId}",
       { traceId: "1-5f84c7c1-000000000000000000000001" },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
 
     const res = await handler(event);
@@ -230,7 +238,7 @@ describe("GET /traces/{traceId} — admin-only (invariant 2)", () => {
     const event = makeEvent(
       "GET /traces/{traceId}",
       { traceId: "1-5f84c7c1-000000000000000000000001" },
-      { "custom:role": "admin" },
+      { "custom:role": "admin", "cognito:groups": ["admin"] },
     );
     const res = await handler(event);
     expect(res.statusCode).toBe(403);
@@ -721,7 +729,11 @@ describe("TRACE_BACKEND=spans dispatch (design §3 dual-backend, §1 query mecha
     const event = makeEvent(
       "GET /traces/{traceId}",
       { traceId: "1-5f84c7c1-000000000000000000000002" },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
 
     const res = await handler(event);
@@ -767,7 +779,11 @@ describe("TRACE_BACKEND=spans dispatch (design §3 dual-backend, §1 query mecha
     const event = makeEvent(
       "GET /traces/{traceId}",
       { traceId: "6a7e5de027c150316d0ff197004e14b1" },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
 
     const res = await handler(event);
@@ -826,7 +842,11 @@ describe("route param validation (400 arms) + non-Error throw path", () => {
     const event = makeEvent(
       "GET /traces/{traceId}",
       {},
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
     const res = await handler(event);
     expect(res.statusCode).toBe(400);
@@ -1028,7 +1048,11 @@ describe("X-Ray path — remaining freshness/window/response arms", () => {
     const event = makeEvent(
       "GET /traces/{traceId}",
       { traceId: "1-5f84c7c1-00000000000000000000000b" },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
 
     const res = await handler(event);
@@ -1047,7 +1071,11 @@ describe("X-Ray path — remaining freshness/window/response arms", () => {
       requestContext: {
         authorizer: {
           jwt: {
-            claims: { "custom:organization": "org-1", "custom:role": "admin" },
+            claims: {
+              "custom:organization": "org-1",
+              "custom:role": "admin",
+              "cognito:groups": ["admin"],
+            },
             scopes: null,
           },
         },
@@ -1124,7 +1152,11 @@ describe("TRACE_BACKEND=spans — defensive filter rejects, failed-status mappin
     const event = makeEvent(
       "GET /traces/{traceId}",
       { traceId: 'bad"trace|id' },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
 
     const res = await handler(event);
@@ -1147,7 +1179,11 @@ describe("TRACE_BACKEND=spans — defensive filter rejects, failed-status mappin
     const event = makeEvent(
       "GET /traces/{traceId}",
       { traceId: "1-5f84c7c1-00000000000000000000000d" },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
 
     const res = await handler(event);
@@ -1320,7 +1356,11 @@ describe("TRACE_BACKEND=spans — defensive filter rejects, failed-status mappin
     const event = makeEvent(
       "GET /traces/by-execution/{executionId}",
       { executionId: "exec-meta-admin" },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
       { includeMetadata: "1" },
     );
 
@@ -1377,7 +1417,11 @@ describe("TRACE_BACKEND=spans — defensive filter rejects, failed-status mappin
     const event = makeEvent(
       "GET /traces/by-execution/{executionId}",
       { executionId: "exec-meta-noopt" },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
 
     const res = await handler(event);
@@ -1396,7 +1440,11 @@ describe("TRACE_BACKEND=spans — defensive filter rejects, failed-status mappin
     const event = makeEvent(
       "GET /traces/{traceId}",
       { traceId: "1-5f84c7c1-00000000000000000000000f" },
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
       { includeMetadata: "1" },
     );
 
