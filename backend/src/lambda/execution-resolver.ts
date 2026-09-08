@@ -254,7 +254,7 @@ export const handler: AppSyncResolverHandler<
       case "getExecution":
         return await getExecution(args.executionId, userId, event);
       case "listExecutions":
-        return await listExecutions(args.workflowId);
+        return await listExecutions(args.workflowId, event);
       case "startExecution":
         return await startExecution(args.workflowId, args.input, userId, event);
       case "cancelExecution":
@@ -305,7 +305,36 @@ async function getExecution(
 
 async function listExecutions(
   workflowId: string,
+  event: ExecutionResolverEvent,
 ): Promise<{ items: unknown[]; nextToken?: string }> {
+  // Org filter (finding 2c262386): listExecutions previously ran the
+  // WorkflowIndex query directly with no org check at all — any
+  // client-supplied workflowId exposed that workflow's executions
+  // (including input/output) across tenants. EXECUTIONS_TABLE carries no
+  // orgId GSI (only WorkflowIndex on workflowId+startedAt), so there is no
+  // direct org-filtered index available. Least-bad correct option: load
+  // the parent WORKFLOWS_TABLE row (the org source of truth for this
+  // workflowId — the same lookup startExecution already performs) and
+  // reconcile it against the caller's derived org BEFORE running the
+  // query. Refuse rather than return filtered/foreign data, matching
+  // get/start/cancel/resume's existing "Access denied" semantics exactly.
+  const workflowResult = await docClient.send(
+    new GetCommand({
+      TableName: WORKFLOWS_TABLE,
+      Key: { workflowId },
+    }),
+  );
+
+  const workflow = workflowResult.Item;
+  if (!workflow) {
+    throw new Error("Workflow not found");
+  }
+
+  const userOrg = await extractOrgFromEvent(event);
+  if (!userOrg || workflow.orgId !== userOrg) {
+    throw new Error("Access denied");
+  }
+
   const result = await docClient.send(
     new QueryCommand({
       TableName: EXECUTIONS_TABLE,
