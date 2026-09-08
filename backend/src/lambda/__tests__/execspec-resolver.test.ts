@@ -34,6 +34,7 @@ const ebMock = mockClient(EventBridgeClient);
 // Env must be set before importing the module under test.
 process.env.EXECUTION_SPECS_TABLE = 'citadel-execution-specifications-test';
 process.env.EVENT_BUS_NAME = 'citadel-agents-test';
+process.env.PROJECTS_TABLE = 'citadel-projects-test';
 
 import {
   createExecutionSpecification,
@@ -637,6 +638,24 @@ describe('execspec-resolver', () => {
   // ── handler dispatch ──────────────────────────────────────────────────
 
   describe('handler dispatch', () => {
+    // finding 2c262386: handler dispatch now threads `event` into the
+    // project-org gate, so every dispatch test needs a project record whose
+    // organization matches the caller's `custom:organization` claim.
+    beforeEach(() => {
+      ddbMock
+        .on(GetCommand, {
+          TableName: 'citadel-projects-test',
+          Key: { id: 'proj-1' },
+        })
+        .resolves({
+          Item: {
+            id: 'proj-1',
+            owner: 'someone-else',
+            organization: 'org-shared',
+          },
+        });
+    });
+
     function makeEvent(
       fieldName: string,
       args: Record<string, unknown>,
@@ -649,6 +668,7 @@ describe('execspec-resolver', () => {
           sub: `user-${role}`,
           username: role,
           'custom:role': role,
+          'custom:organization': 'org-shared',
         },
       };
     }
@@ -663,7 +683,12 @@ describe('execspec-resolver', () => {
     });
 
     test('getExecutionSpecification dispatch', async () => {
-      ddbMock.on(GetCommand).resolves({ Item: existingSpec() });
+      ddbMock
+        .on(GetCommand, {
+          TableName: 'citadel-execution-specifications-test',
+          Key: { specId: 'spec-1' },
+        })
+        .resolves({ Item: existingSpec() });
       const result = (await handler(
         makeEvent('getExecutionSpecification', { specId: 'spec-1' }),
       )) as { specId: string };

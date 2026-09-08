@@ -893,6 +893,11 @@ exports.handler = async (event) => {
         environment: {
           EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          // finding 2c262386: assertProjectOrgAccess reads PROJECTS_TABLE
+          // to reconcile the caller's org against the exec spec's owning
+          // project before any read/write. Read-only — this resolver
+          // never writes Projects.
+          PROJECTS_TABLE: props.projectsTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "ExecSpecResolverFunctionLogs", {
@@ -906,6 +911,9 @@ exports.handler = async (event) => {
       execSpecResolverFunction,
     );
     props.agentEventBus.grantPutEventsTo(execSpecResolverFunction);
+    // finding 2c262386: read-only grant for the project-org reconciliation
+    // gate (assertProjectOrgAccess). Least privilege — no write access.
+    props.projectsTable.grantReadData(execSpecResolverFunction);
 
     const execSpecDataSourceRole = new iam.Role(
       this,
