@@ -841,6 +841,50 @@ export class BackendStack extends cdk.Stack {
     );
 
     // User Pool Client
+    //
+    // writeAttributes/readAttributes are set EXPLICITLY (finding 7aa877f8).
+    // Leaving them unset lets Cognito's permissive default apply: the
+    // client can write ALL mutable, non-developer-only attributes,
+    // including custom:role and custom:organization. Combined with
+    // ALLOW_USER_SRP_AUTH / ALLOW_USER_PASSWORD_AUTH below, that let any
+    // authenticated end user call UpdateUserAttributes and self-grant
+    // custom:role=admin.
+    //
+    // Enumeration of what the app legitimately writes via this client (see
+    // backend/test/backend-stack-user-pool-client-write-attributes.test.ts
+    // for the pinned assertion): no frontend or resolver code calls
+    // updateUserAttributes/UpdateUserAttributesCommand for the caller's own
+    // record — the only attribute write outside this client is
+    // AdminUpdateUserAttributesCommand in assignUserRole
+    // (user-management-resolver.ts), which uses the Admin* API under the
+    // Lambda's IAM role and is NOT gated by client writeAttributes at all.
+    // The allow-list below covers only the standard profile fields
+    // configured as mutable in standardAttributes above (email, given_name,
+    // family_name), so self-service profile editing / email
+    // re-verification keeps working. custom:role and custom:organization
+    // are deliberately excluded — they must only ever be changed by
+    // admin-privileged server-side calls (AdminUpdateUserAttributesCommand,
+    // AdminAddUserToGroupCommand), never by the end user's own token.
+    //
+    // Mutable is NOT set to false on the custom attributes: that property
+    // cannot be changed post-creation without recreating the attribute
+    // (and its data), so the allow-list is the correct control here, not
+    // attribute immutability.
+    const clientWriteAttributes =
+      new cognito.ClientAttributes().withStandardAttributes({
+        email: true,
+        givenName: true,
+        familyName: true,
+      });
+    const clientReadAttributes = new cognito.ClientAttributes()
+      .withStandardAttributes({
+        email: true,
+        givenName: true,
+        familyName: true,
+        emailVerified: true,
+      })
+      .withCustomAttributes("role", "organization");
+
     this.userPoolClient = new cognito.UserPoolClient(this, "UserPoolClient", {
       userPool: this.userPool,
       userPoolClientName: `citadel-client-${props.environment}`,
@@ -861,6 +905,8 @@ export class BackendStack extends cdk.Stack {
           cognito.OAuthScope.PROFILE,
         ],
       },
+      writeAttributes: clientWriteAttributes,
+      readAttributes: clientReadAttributes,
       refreshTokenValidity: cdk.Duration.days(30),
       accessTokenValidity: cdk.Duration.hours(1),
       idTokenValidity: cdk.Duration.hours(1),
