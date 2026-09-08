@@ -2,24 +2,42 @@
  * Unit tests for workflow-resolver Lambda — CRUD operations
  * Uses aws-sdk-client-mock for DynamoDB, EventBridge, Cognito
  */
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand, DeleteCommand, BatchGetCommand } from '@aws-sdk/lib-dynamodb';
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { CognitoIdentityProviderClient, AdminGetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
-import { mockClient } from 'aws-sdk-client-mock';
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+  QueryCommand,
+  DeleteCommand,
+  BatchGetCommand,
+} from "@aws-sdk/lib-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import {
+  CognitoIdentityProviderClient,
+  AdminGetUserCommand,
+} from "@aws-sdk/client-cognito-identity-provider";
+import { mockClient } from "aws-sdk-client-mock";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const ebMock = mockClient(EventBridgeClient);
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
 
-jest.mock('../../utils/appsync', () => ({
-  getUserId: jest.fn().mockReturnValue('user-123'),
+jest.mock("../../utils/appsync", () => ({
+  getUserId: jest.fn().mockReturnValue("user-123"),
 }));
 
-import { handler } from '../workflow-resolver';
+import { handler } from "../workflow-resolver";
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
-function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user-123'): HandlerEvent {
+function makeEvent(
+  fieldName: string,
+  args: Record<string, unknown>,
+  sub = "user-123",
+): HandlerEvent {
   return {
     info: { fieldName },
     arguments: args,
@@ -34,7 +52,9 @@ function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user
 const invokeHandler = handler as (event: HandlerEvent) => Promise<unknown>;
 
 /** Invokes the handler and casts the result. */
-async function invoke<T = Record<string, unknown>>(event: HandlerEvent): Promise<T> {
+async function invoke<T = Record<string, unknown>>(
+  event: HandlerEvent,
+): Promise<T> {
   return (await invokeHandler(event)) as T;
 }
 
@@ -42,26 +62,26 @@ async function invoke<T = Record<string, unknown>>(event: HandlerEvent): Promise
 function mockCognitoOrg(orgId: string) {
   cognitoMock.on(AdminGetUserCommand).resolves({
     UserAttributes: [
-      { Name: 'sub', Value: 'user-123' },
-      { Name: 'custom:organization', Value: orgId },
+      { Name: "sub", Value: "user-123" },
+      { Name: "custom:organization", Value: orgId },
     ],
   });
 }
 
-describe('workflow-resolver', () => {
+describe("workflow-resolver", () => {
   beforeAll(() => {
-    process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
-    process.env.APPS_TABLE = 'citadel-apps-test';
-    process.env.AGENT_CONFIG_TABLE = 'citadel-agents-test';
-    process.env.EVENT_BUS_NAME = 'citadel-agents-test';
-    process.env.USER_POOL_ID = 'us-east-1_test';
+    process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
+    process.env.APPS_TABLE = "citadel-apps-test";
+    process.env.AGENT_CONFIG_TABLE = "citadel-agents-test";
+    process.env.EVENT_BUS_NAME = "citadel-agents-test";
+    process.env.USER_POOL_ID = "us-east-1_test";
   });
 
   beforeEach(() => {
     ddbMock.reset();
     ebMock.reset();
     cognitoMock.reset();
-    mockCognitoOrg('org-1');
+    mockCognitoOrg("org-1");
     ebMock.on(PutEventsCommand).resolves({});
   });
 
@@ -75,49 +95,53 @@ describe('workflow-resolver', () => {
 
   // ─── getWorkflow ───────────────────────────────────────────────
 
-  describe('getWorkflow', () => {
-    test('returns item when caller orgId matches workflow orgId', async () => {
+  describe("getWorkflow", () => {
+    test("returns item when caller orgId matches workflow orgId", async () => {
       const workflow = {
-        workflowId: 'wf-1',
-        orgId: 'org-1',
-        name: 'Test Workflow',
-        status: 'DRAFT',
+        workflowId: "wf-1",
+        orgId: "org-1",
+        name: "Test Workflow",
+        status: "DRAFT",
         version: 1,
       };
       ddbMock.on(GetCommand).resolves({ Item: workflow });
 
       const result = await invoke(
-        makeEvent('getWorkflow', { workflowId: 'wf-1' }),
+        makeEvent("getWorkflow", { workflowId: "wf-1" }),
       );
 
       expect(result).toEqual(workflow);
     });
 
-    test('throws Access denied when caller orgId does not match workflow orgId', async () => {
+    test("throws Access denied when caller orgId does not match workflow orgId", async () => {
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-other', name: 'Other Org Workflow' },
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-other",
+          name: "Other Org Workflow",
+        },
       });
 
       await expect(
-        invoke(makeEvent('getWorkflow', { workflowId: 'wf-1' }),),
-      ).rejects.toThrow('Access denied');
+        invoke(makeEvent("getWorkflow", { workflowId: "wf-1" })),
+      ).rejects.toThrow("Access denied");
     });
 
-    test('claim-first path: reads custom:organization from identity and skips Cognito', async () => {
+    test("claim-first path: reads custom:organization from identity and skips Cognito", async () => {
       const workflow = {
-        workflowId: 'wf-claim',
-        orgId: 'org-claim',
-        name: 'Claim Workflow',
-        status: 'DRAFT',
+        workflowId: "wf-claim",
+        orgId: "org-claim",
+        name: "Claim Workflow",
+        status: "DRAFT",
         version: 1,
       };
       ddbMock.on(GetCommand).resolves({ Item: workflow });
 
       // identity carries the claim directly — Cognito must not be called
       const claimEvent = {
-        info: { fieldName: 'getWorkflow' },
-        arguments: { workflowId: 'wf-claim' },
-        identity: { sub: 'user-123', 'custom:organization': 'org-claim' },
+        info: { fieldName: "getWorkflow" },
+        arguments: { workflowId: "wf-claim" },
+        identity: { sub: "user-123", "custom:organization": "org-claim" },
       } as unknown as HandlerEvent;
 
       const result = await invoke(claimEvent);
@@ -129,122 +153,196 @@ describe('workflow-resolver', () => {
 
   // ─── listWorkflows ─────────────────────────────────────────────
 
-  describe('listWorkflows', () => {
-    test('queries OrgStatusIndex and filters isBlueprint=false', async () => {
+  describe("listWorkflows", () => {
+    test("queries OrgStatusIndex and filters isBlueprint=false", async () => {
       const items = [
-        { workflowId: 'wf-1', orgId: 'org-1', isBlueprint: 'false', status: 'DRAFT' },
-        { workflowId: 'wf-2', orgId: 'org-1', isBlueprint: 'false', status: 'PUBLISHED' },
+        {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          isBlueprint: "false",
+          status: "DRAFT",
+        },
+        {
+          workflowId: "wf-2",
+          orgId: "org-1",
+          isBlueprint: "false",
+          status: "PUBLISHED",
+        },
       ];
       ddbMock.on(QueryCommand).resolves({ Items: items });
 
       const result = await invoke(
-        makeEvent('listWorkflows', { orgId: 'org-1' }),
+        makeEvent("listWorkflows", { orgId: "org-1" }),
       );
 
       expect(result).toEqual({ items, nextToken: undefined });
 
       const queryCall = ddbMock.commandCalls(QueryCommand)[0];
-      expect(queryCall.args[0].input.IndexName).toBe('OrgStatusIndex');
+      expect(queryCall.args[0].input.IndexName).toBe("OrgStatusIndex");
     });
   });
 
   // ─── listBlueprints ────────────────────────────────────────────
 
-  describe('listBlueprints', () => {
-    test('queries BlueprintIndex for isBlueprint=true and filters by category', async () => {
+  describe("listBlueprints", () => {
+    test("queries BlueprintIndex for isBlueprint=true and filters by category", async () => {
       const blueprints = [
         {
-          workflowId: 'bp-1',
-          isBlueprint: 'true',
-          metadata: JSON.stringify({ category: 'data-processing' }),
+          workflowId: "bp-1",
+          isBlueprint: "true",
+          metadata: JSON.stringify({ category: "data-processing" }),
         },
       ];
       ddbMock.on(QueryCommand).resolves({ Items: blueprints });
 
       const result = await invoke(
-        makeEvent('listBlueprints', { category: 'data-processing' }),
+        makeEvent("listBlueprints", { category: "data-processing" }),
       );
 
       expect(result).toEqual({ items: blueprints, nextToken: undefined });
 
       const queryCall = ddbMock.commandCalls(QueryCommand)[0];
-      expect(queryCall.args[0].input.IndexName).toBe('BlueprintIndex');
+      expect(queryCall.args[0].input.IndexName).toBe("BlueprintIndex");
     });
   });
 
   // ─── createWorkflow ────────────────────────────────────────────
 
-  describe('createWorkflow', () => {
+  describe("createWorkflow", () => {
     test('sets version=1, status=DRAFT, generates UUID, isBlueprint defaults to "false"', async () => {
       ddbMock.on(PutCommand).resolves({});
 
       const result = await invoke(
-        makeEvent('createWorkflow', {
+        makeEvent("createWorkflow", {
           input: {
-            name: 'New Workflow',
-            description: 'A test workflow',
-            orgId: 'org-1',
+            name: "New Workflow",
+            description: "A test workflow",
+            orgId: "org-1",
             definition: JSON.stringify({ nodes: [], edges: [] }),
           },
         }),
       );
 
       expect(result).toMatchObject({
-        name: 'New Workflow',
-        orgId: 'org-1',
-        status: 'DRAFT',
+        name: "New Workflow",
+        orgId: "org-1",
+        status: "DRAFT",
         version: 1,
-        isBlueprint: 'false',
+        isBlueprint: "false",
       });
       expect(result.workflowId).toBeDefined();
       expect(result.createdAt).toBeDefined();
       expect(result.updatedAt).toBeDefined();
-      expect(result.createdBy).toBe('user-123');
+      expect(result.createdBy).toBe("user-123");
 
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+
+    // Org derivation (finding 2c262386 lower set): createWorkflow must
+    // derive orgId from the authenticated identity and REJECT a mismatched
+    // client-supplied input.orgId rather than stamping it verbatim — same
+    // convention as decision b5d463f2 (createDataStore mutation path).
+    test("rejects a mismatched input.orgId and does not persist (plant-into-foreign-org attempt)", async () => {
+      // Caller's identity resolves to org-1 (mockCognitoOrg('org-1') in
+      // beforeEach); attempt to plant a workflow into org-victim.
+      await expect(
+        invoke(
+          makeEvent("createWorkflow", {
+            input: {
+              name: "Malicious Plant",
+              orgId: "org-victim",
+              definition: JSON.stringify({ nodes: [], edges: [] }),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/Access denied|orgId/i);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test("derives orgId from identity when input.orgId is absent", async () => {
+      ddbMock.on(PutCommand).resolves({});
+
+      const result = await invoke(
+        makeEvent("createWorkflow", {
+          input: {
+            name: "No OrgId Supplied",
+            definition: JSON.stringify({ nodes: [], edges: [] }),
+          },
+        }),
+      );
+
+      expect(result.orgId).toBe("org-1");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+
+    test("fails closed when caller org is unresolvable (no claim, Cognito lookup fails)", async () => {
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+
+      await expect(
+        invoke(
+          makeEvent("createWorkflow", {
+            input: {
+              name: "Unresolvable Org",
+              orgId: "org-1",
+              definition: JSON.stringify({ nodes: [], edges: [] }),
+            },
+          }),
+        ),
+      ).rejects.toThrow(/Access denied|orgId|organization/i);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     });
   });
 
   // ─── updateWorkflow ────────────────────────────────────────────
 
-  describe('updateWorkflow', () => {
-    test('succeeds with correct version (optimistic lock)', async () => {
+  describe("updateWorkflow", () => {
+    test("succeeds with correct version (optimistic lock)", async () => {
       ddbMock.on(UpdateCommand).resolves({
         Attributes: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          name: 'Updated Name',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          name: "Updated Name",
           version: 2,
-          status: 'DRAFT',
+          status: "DRAFT",
         },
       });
       // Mock getWorkflow for org check
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-1', version: 1, status: 'DRAFT' },
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          version: 1,
+          status: "DRAFT",
+        },
       });
 
       const result = await invoke(
-        makeEvent('updateWorkflow', {
-          input: { workflowId: 'wf-1', name: 'Updated Name', version: 1 },
+        makeEvent("updateWorkflow", {
+          input: { workflowId: "wf-1", name: "Updated Name", version: 1 },
         }),
       );
 
-      expect(result.name).toBe('Updated Name');
+      expect(result.name).toBe("Updated Name");
       expect(result.version).toBe(2);
     });
 
-    test('throws conflict error when version is stale', async () => {
+    test("throws conflict error when version is stale", async () => {
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-1', version: 3, status: 'DRAFT' },
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          version: 3,
+          status: "DRAFT",
+        },
       });
-      const condErr = new Error('ConditionalCheckFailedException');
-      condErr.name = 'ConditionalCheckFailedException';
+      const condErr = new Error("ConditionalCheckFailedException");
+      condErr.name = "ConditionalCheckFailedException";
       ddbMock.on(UpdateCommand).rejects(condErr);
 
       await expect(
         invoke(
-          makeEvent('updateWorkflow', {
-            input: { workflowId: 'wf-1', name: 'Stale', version: 1 },
+          makeEvent("updateWorkflow", {
+            input: { workflowId: "wf-1", name: "Stale", version: 1 },
           }),
         ),
       ).rejects.toThrow(/Conflict/);
@@ -259,91 +357,97 @@ describe('workflow-resolver', () => {
   // through validateDefinitionStructure, which now rejects '#' in any
   // nodes[].id before the definition reaches DynamoDB.
 
-  describe('node id ledger-key delimiter rejection', () => {
+  describe("node id ledger-key delimiter rejection", () => {
     test('createWorkflow rejects a node id containing "#", naming the field/character, and does not persist', async () => {
       await expect(
         invoke(
-          makeEvent('createWorkflow', {
+          makeEvent("createWorkflow", {
             input: {
-              name: 'Bad Node Id',
-              orgId: 'org-1',
+              name: "Bad Node Id",
+              orgId: "org-1",
               definition: JSON.stringify({
-                nodes: [{ id: 'n1#comp', agentId: 'agent-1', type: 'agent' }],
+                nodes: [{ id: "n1#comp", agentId: "agent-1", type: "agent" }],
                 edges: [],
               }),
             },
           }),
         ),
-      ).rejects.toThrow(/Invalid workflow definition.*n1#comp.*reserved delimiter.*'#'/s);
+      ).rejects.toThrow(
+        /Invalid workflow definition.*n1#comp.*reserved delimiter.*'#'/s,
+      );
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     });
 
     test('updateWorkflow rejects a node id containing "#" on the changed definition and does not persist', async () => {
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
+          workflowId: "wf-1",
+          orgId: "org-1",
           version: 1,
-          status: 'DRAFT',
+          status: "DRAFT",
           definition: '{"nodes":[],"edges":[]}',
-          updatedAt: '2024-01-01T00:00:00Z',
-          createdBy: 'user-123',
+          updatedAt: "2024-01-01T00:00:00Z",
+          createdBy: "user-123",
         },
       });
 
       await expect(
         invoke(
-          makeEvent('updateWorkflow', {
+          makeEvent("updateWorkflow", {
             input: {
-              workflowId: 'wf-1',
+              workflowId: "wf-1",
               version: 1,
               definition: JSON.stringify({
-                nodes: [{ id: 'n1#comp', agentId: 'agent-1', type: 'agent' }],
+                nodes: [{ id: "n1#comp", agentId: "agent-1", type: "agent" }],
                 edges: [],
               }),
             },
           }),
         ),
-      ).rejects.toThrow(/Invalid workflow definition.*n1#comp.*reserved delimiter.*'#'/s);
+      ).rejects.toThrow(
+        /Invalid workflow definition.*n1#comp.*reserved delimiter.*'#'/s,
+      );
       expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     });
 
     test('importWorkflow rejects a node id containing "#" and does not persist', async () => {
       const workflowJson = JSON.stringify({
-        name: 'Bad Import',
+        name: "Bad Import",
         definition: JSON.stringify({
-          nodes: [{ id: 'n1#comp', agentId: 'a1', type: 'agent' }],
+          nodes: [{ id: "n1#comp", agentId: "a1", type: "agent" }],
           edges: [],
         }),
       });
 
       await expect(
         invoke(
-          makeEvent('importWorkflow', {
-            input: { orgId: 'org-1', workflowJson },
+          makeEvent("importWorkflow", {
+            input: { orgId: "org-1", workflowJson },
           }),
         ),
-      ).rejects.toThrow(/Invalid workflow definition.*n1#comp.*reserved delimiter.*'#'/s);
+      ).rejects.toThrow(
+        /Invalid workflow definition.*n1#comp.*reserved delimiter.*'#'/s,
+      );
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     });
 
-    test('createWorkflow still accepts a node id with other punctuation (hyphen, underscore, dot)', async () => {
+    test("createWorkflow still accepts a node id with other punctuation (hyphen, underscore, dot)", async () => {
       ddbMock.on(PutCommand).resolves({});
 
       const result = await invoke(
-        makeEvent('createWorkflow', {
+        makeEvent("createWorkflow", {
           input: {
-            name: 'Legit Punctuation',
-            orgId: 'org-1',
+            name: "Legit Punctuation",
+            orgId: "org-1",
             definition: JSON.stringify({
-              nodes: [{ id: 'n1-a_b.c', agentId: 'agent-1', type: 'agent' }],
+              nodes: [{ id: "n1-a_b.c", agentId: "agent-1", type: "agent" }],
               edges: [],
             }),
           },
         }),
       );
 
-      expect(result.status).toBe('DRAFT');
+      expect(result.status).toBe("DRAFT");
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
     });
 
@@ -354,22 +458,22 @@ describe('workflow-resolver', () => {
       // never call validateDefinitionStructure, so a pre-existing legacy
       // definition is not bricked.
       const legacyDefinition = JSON.stringify({
-        nodes: [{ id: 'legacy#node', agentId: 'agent-1', type: 'agent' }],
+        nodes: [{ id: "legacy#node", agentId: "agent-1", type: "agent" }],
         edges: [],
       });
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-legacy',
-          orgId: 'org-1',
-          name: 'Legacy Workflow',
+          workflowId: "wf-legacy",
+          orgId: "org-1",
+          name: "Legacy Workflow",
           definition: legacyDefinition,
-          status: 'DRAFT',
+          status: "DRAFT",
           version: 1,
         },
       });
 
       const result = await invoke(
-        makeEvent('getWorkflow', { workflowId: 'wf-legacy' }),
+        makeEvent("getWorkflow", { workflowId: "wf-legacy" }),
       );
 
       expect(result.definition).toBe(legacyDefinition);
@@ -382,29 +486,35 @@ describe('workflow-resolver', () => {
       // is present in the update.
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-legacy',
-          orgId: 'org-1',
+          workflowId: "wf-legacy",
+          orgId: "org-1",
           version: 1,
-          status: 'DRAFT',
+          status: "DRAFT",
           definition: JSON.stringify({
-            nodes: [{ id: 'legacy#node', agentId: 'agent-1', type: 'agent' }],
+            nodes: [{ id: "legacy#node", agentId: "agent-1", type: "agent" }],
             edges: [],
           }),
-          updatedAt: '2024-01-01T00:00:00Z',
-          createdBy: 'user-123',
+          updatedAt: "2024-01-01T00:00:00Z",
+          createdBy: "user-123",
         },
       });
       ddbMock.on(UpdateCommand).resolves({
-        Attributes: { workflowId: 'wf-legacy', orgId: 'org-1', name: 'Renamed', version: 2, status: 'DRAFT' },
+        Attributes: {
+          workflowId: "wf-legacy",
+          orgId: "org-1",
+          name: "Renamed",
+          version: 2,
+          status: "DRAFT",
+        },
       });
 
       const result = await invoke(
-        makeEvent('updateWorkflow', {
-          input: { workflowId: 'wf-legacy', name: 'Renamed', version: 1 },
+        makeEvent("updateWorkflow", {
+          input: { workflowId: "wf-legacy", name: "Renamed", version: 1 },
         }),
       );
 
-      expect(result.name).toBe('Renamed');
+      expect(result.name).toBe("Renamed");
       expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
     });
   });
@@ -413,43 +523,47 @@ describe('workflow-resolver', () => {
   // AppSync delivers AWSJSON arguments as parsed OBJECTS, not strings.
   // The resolver must accept both and always persist JSON STRINGS.
 
-  describe('AWSJSON object normalization (AppSync delivers parsed objects)', () => {
+  describe("AWSJSON object normalization (AppSync delivers parsed objects)", () => {
     const defObject = {
-      version: '1.0.0',
-      nodes: [{ id: 'n1', agentId: 'agent-1', type: 'agent' }],
+      version: "1.0.0",
+      nodes: [{ id: "n1", agentId: "agent-1", type: "agent" }],
       edges: [],
     };
 
-    describe('createWorkflow with object arguments', () => {
-      test('accepts definition as OBJECT (live-bug regression) and persists a JSON string', async () => {
+    describe("createWorkflow with object arguments", () => {
+      test("accepts definition as OBJECT (live-bug regression) and persists a JSON string", async () => {
         ddbMock.on(PutCommand).resolves({});
 
         const result = await invoke(
-          makeEvent('createWorkflow', {
+          makeEvent("createWorkflow", {
             input: {
-              name: 'Object Definition Workflow',
-              orgId: 'org-1',
+              name: "Object Definition Workflow",
+              orgId: "org-1",
               definition: defObject, // object, exactly as AppSync delivers AWSJSON
               isBlueprint: true,
             },
           }),
         );
 
-        expect(result.status).toBe('DRAFT');
-        expect(result.isBlueprint).toBe('true'); // isBlueprint flag honored
+        expect(result.status).toBe("DRAFT");
+        expect(result.isBlueprint).toBe("true"); // isBlueprint flag honored
 
         const putItem = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item!;
-        expect(typeof putItem.definition).toBe('string');
+        expect(typeof putItem.definition).toBe("string");
         expect(JSON.parse(putItem.definition)).toEqual(defObject); // round-trips
       });
 
-      test('accepts definition as STRING and persists the identical string (no double-encoding)', async () => {
+      test("accepts definition as STRING and persists the identical string (no double-encoding)", async () => {
         ddbMock.on(PutCommand).resolves({});
         const defString = JSON.stringify(defObject);
 
         await invoke(
-          makeEvent('createWorkflow', {
-            input: { name: 'String Definition Workflow', orgId: 'org-1', definition: defString },
+          makeEvent("createWorkflow", {
+            input: {
+              name: "String Definition Workflow",
+              orgId: "org-1",
+              definition: defString,
+            },
           }),
         );
 
@@ -457,38 +571,44 @@ describe('workflow-resolver', () => {
         expect(putItem.definition).toBe(defString); // not wrapped in extra quotes
       });
 
-      test('still rejects a non-JSON definition string', async () => {
+      test("still rejects a non-JSON definition string", async () => {
         await expect(
           invoke(
-            makeEvent('createWorkflow', {
-              input: { name: 'Bad', orgId: 'org-1', definition: 'not-json' },
+            makeEvent("createWorkflow", {
+              input: { name: "Bad", orgId: "org-1", definition: "not-json" },
             }),
           ),
         ).rejects.toThrow(/Invalid workflow definition/);
         expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
       });
 
-      test('rejects an OBJECT definition missing nodes/edges arrays', async () => {
+      test("rejects an OBJECT definition missing nodes/edges arrays", async () => {
         await expect(
           invoke(
-            makeEvent('createWorkflow', {
-              input: { name: 'Bad', orgId: 'org-1', definition: { version: '1.0.0' } },
+            makeEvent("createWorkflow", {
+              input: {
+                name: "Bad",
+                orgId: "org-1",
+                definition: { version: "1.0.0" },
+              },
             }),
           ),
         ).rejects.toThrow(/Invalid workflow definition/);
         expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
       });
 
-      test('persists configuration and metadata OBJECTS as JSON strings', async () => {
+      test("persists configuration and metadata OBJECTS as JSON strings", async () => {
         ddbMock.on(PutCommand).resolves({});
-        const configuration = { integrations: { int1: { endpoint: 'https://example.com' } } };
-        const metadata = { category: 'data-processing' };
+        const configuration = {
+          integrations: { int1: { endpoint: "https://example.com" } },
+        };
+        const metadata = { category: "data-processing" };
 
         await invoke(
-          makeEvent('createWorkflow', {
+          makeEvent("createWorkflow", {
             input: {
-              name: 'Config Meta Workflow',
-              orgId: 'org-1',
+              name: "Config Meta Workflow",
+              orgId: "org-1",
               definition: defObject,
               configuration,
               metadata,
@@ -497,332 +617,376 @@ describe('workflow-resolver', () => {
         );
 
         const putItem = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item!;
-        expect(typeof putItem.configuration).toBe('string');
+        expect(typeof putItem.configuration).toBe("string");
         expect(JSON.parse(putItem.configuration)).toEqual(configuration);
-        expect(typeof putItem.metadata).toBe('string');
+        expect(typeof putItem.metadata).toBe("string");
         expect(JSON.parse(putItem.metadata)).toEqual(metadata);
       });
     });
 
-    describe('updateWorkflow with object arguments', () => {
+    describe("updateWorkflow with object arguments", () => {
       beforeEach(() => {
         ddbMock.on(GetCommand).resolves({
           Item: {
-            workflowId: 'wf-1',
-            orgId: 'org-1',
+            workflowId: "wf-1",
+            orgId: "org-1",
             version: 1,
-            status: 'DRAFT',
+            status: "DRAFT",
             definition: '{"nodes":[],"edges":[]}',
-            updatedAt: '2024-01-01T00:00:00Z',
-            createdBy: 'user-123',
+            updatedAt: "2024-01-01T00:00:00Z",
+            createdBy: "user-123",
           },
         });
         ddbMock.on(UpdateCommand).resolves({
-          Attributes: { workflowId: 'wf-1', orgId: 'org-1', version: 2, status: 'DRAFT' },
+          Attributes: {
+            workflowId: "wf-1",
+            orgId: "org-1",
+            version: 2,
+            status: "DRAFT",
+          },
         });
       });
 
-      test('accepts definition as OBJECT (live-bug regression) and persists a JSON string', async () => {
+      test("accepts definition as OBJECT (live-bug regression) and persists a JSON string", async () => {
         await invoke(
-          makeEvent('updateWorkflow', {
-            input: { workflowId: 'wf-1', definition: defObject, version: 1 },
+          makeEvent("updateWorkflow", {
+            input: { workflowId: "wf-1", definition: defObject, version: 1 },
           }),
         );
 
         const exprValues =
-          ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues!;
-        expect(typeof exprValues[':definition']).toBe('string');
-        expect(JSON.parse(exprValues[':definition'])).toEqual(defObject);
+          ddbMock.commandCalls(UpdateCommand)[0].args[0].input
+            .ExpressionAttributeValues!;
+        expect(typeof exprValues[":definition"]).toBe("string");
+        expect(JSON.parse(exprValues[":definition"])).toEqual(defObject);
       });
 
-      test('accepts definition as STRING and persists the identical string (no double-encoding)', async () => {
+      test("accepts definition as STRING and persists the identical string (no double-encoding)", async () => {
         const defString = JSON.stringify(defObject);
 
         await invoke(
-          makeEvent('updateWorkflow', {
-            input: { workflowId: 'wf-1', definition: defString, version: 1 },
+          makeEvent("updateWorkflow", {
+            input: { workflowId: "wf-1", definition: defString, version: 1 },
           }),
         );
 
         const exprValues =
-          ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues!;
-        expect(exprValues[':definition']).toBe(defString);
+          ddbMock.commandCalls(UpdateCommand)[0].args[0].input
+            .ExpressionAttributeValues!;
+        expect(exprValues[":definition"]).toBe(defString);
       });
 
-      test('still rejects an OBJECT definition missing nodes/edges arrays', async () => {
+      test("still rejects an OBJECT definition missing nodes/edges arrays", async () => {
         await expect(
           invoke(
-            makeEvent('updateWorkflow', {
-              input: { workflowId: 'wf-1', definition: { foo: 'bar' }, version: 1 },
+            makeEvent("updateWorkflow", {
+              input: {
+                workflowId: "wf-1",
+                definition: { foo: "bar" },
+                version: 1,
+              },
             }),
           ),
         ).rejects.toThrow(/Invalid workflow definition/);
         expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
       });
 
-      test('persists configuration and metadata OBJECTS as JSON strings', async () => {
-        const configuration = { parameters: { key1: 'value1' } };
-        const metadata = { category: 'ops' };
+      test("persists configuration and metadata OBJECTS as JSON strings", async () => {
+        const configuration = { parameters: { key1: "value1" } };
+        const metadata = { category: "ops" };
 
         await invoke(
-          makeEvent('updateWorkflow', {
-            input: { workflowId: 'wf-1', configuration, metadata, version: 1 },
+          makeEvent("updateWorkflow", {
+            input: { workflowId: "wf-1", configuration, metadata, version: 1 },
           }),
         );
 
         const exprValues =
-          ddbMock.commandCalls(UpdateCommand)[0].args[0].input.ExpressionAttributeValues!;
-        expect(typeof exprValues[':configuration']).toBe('string');
-        expect(JSON.parse(exprValues[':configuration'])).toEqual(configuration);
-        expect(typeof exprValues[':metadata']).toBe('string');
-        expect(JSON.parse(exprValues[':metadata'])).toEqual(metadata);
+          ddbMock.commandCalls(UpdateCommand)[0].args[0].input
+            .ExpressionAttributeValues!;
+        expect(typeof exprValues[":configuration"]).toBe("string");
+        expect(JSON.parse(exprValues[":configuration"])).toEqual(configuration);
+        expect(typeof exprValues[":metadata"]).toBe("string");
+        expect(JSON.parse(exprValues[":metadata"])).toEqual(metadata);
       });
     });
   });
 
   // ─── deleteWorkflow ────────────────────────────────────────────
 
-  describe('deleteWorkflow', () => {
-    test('succeeds when workflow is DRAFT', async () => {
+  describe("deleteWorkflow", () => {
+    test("succeeds when workflow is DRAFT", async () => {
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-1', status: 'DRAFT' },
+        Item: { workflowId: "wf-1", orgId: "org-1", status: "DRAFT" },
       });
       ddbMock.on(DeleteCommand).resolves({});
 
       const result = await invoke(
-        makeEvent('deleteWorkflow', { workflowId: 'wf-1' }),
+        makeEvent("deleteWorkflow", { workflowId: "wf-1" }),
       );
 
       expect(result).toEqual({ success: true, message: expect.any(String) });
       expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(1);
     });
 
-    test('throws error when workflow is PUBLISHED', async () => {
+    test("throws error when workflow is PUBLISHED", async () => {
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-1', status: 'PUBLISHED' },
+        Item: { workflowId: "wf-1", orgId: "org-1", status: "PUBLISHED" },
       });
 
       await expect(
-        invoke(makeEvent('deleteWorkflow', { workflowId: 'wf-1' }),),
+        invoke(makeEvent("deleteWorkflow", { workflowId: "wf-1" })),
       ).rejects.toThrow(/published/i);
     });
   });
 
   // ─── publishWorkflow ───────────────────────────────────────────
 
-  describe('publishWorkflow', () => {
+  describe("publishWorkflow", () => {
     const validDefinition = JSON.stringify({
       nodes: [
-        { id: 'n1', agentId: 'agent-1', type: 'agent' },
-        { id: 'n2', agentId: 'agent-2', type: 'agent' },
+        { id: "n1", agentId: "agent-1", type: "agent" },
+        { id: "n2", agentId: "agent-2", type: "agent" },
       ],
-      edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+      edges: [{ id: "e1", source: "n1", target: "n2" }],
     });
 
-    test('validates definition and updates status to PUBLISHED', async () => {
+    test("validates definition and updates status to PUBLISHED", async () => {
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          status: 'DRAFT',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
           definition: validDefinition,
           version: 1,
         },
       });
       ddbMock.on(BatchGetCommand).resolves({
-        Responses: { 'citadel-agents-test': [{ agentId: 'agent-1' }, { agentId: 'agent-2' }] },
+        Responses: {
+          "citadel-agents-test": [
+            { agentId: "agent-1" },
+            { agentId: "agent-2" },
+          ],
+        },
       });
       ddbMock.on(UpdateCommand).resolves({
         Attributes: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          status: 'PUBLISHED',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "PUBLISHED",
           definition: validDefinition,
           version: 2,
         },
       });
 
       const result = await invoke(
-        makeEvent('publishWorkflow', { workflowId: 'wf-1' }),
+        makeEvent("publishWorkflow", { workflowId: "wf-1" }),
       );
 
-      expect(result.status).toBe('PUBLISHED');
+      expect(result.status).toBe("PUBLISHED");
     });
 
-    test('returns validation errors for invalid definition (node missing agentId)', async () => {
+    test("returns validation errors for invalid definition (node missing agentId)", async () => {
       const invalidDef = JSON.stringify({
         nodes: [
-          { id: 'n1', type: 'agent' }, // missing agentId
+          { id: "n1", type: "agent" }, // missing agentId
         ],
         edges: [],
       });
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          status: 'DRAFT',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
           definition: invalidDef,
           version: 1,
         },
       });
 
       await expect(
-        invoke(makeEvent('publishWorkflow', { workflowId: 'wf-1' }),),
+        invoke(makeEvent("publishWorkflow", { workflowId: "wf-1" })),
       ).rejects.toThrow(/validation/i);
     });
 
-    test('rejects when any node has a placeholder- agentId', async () => {
+    test("rejects when any node has a placeholder- agentId", async () => {
       const placeholderDef = JSON.stringify({
-        nodes: [
-          { id: 'n1', agentId: 'placeholder-foo', type: 'agent' },
-        ],
+        nodes: [{ id: "n1", agentId: "placeholder-foo", type: "agent" }],
         edges: [],
       });
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          status: 'DRAFT',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
           definition: placeholderDef,
           version: 1,
         },
       });
 
       await expect(
-        invoke(makeEvent('publishWorkflow', { workflowId: 'wf-1' }),),
+        invoke(makeEvent("publishWorkflow", { workflowId: "wf-1" })),
       ).rejects.toThrow(/placeholder.*n1/i);
     });
 
-    test('accepts when all nodes have real (12-char alphanumeric) agentIds', async () => {
+    test("accepts when all nodes have real (12-char alphanumeric) agentIds", async () => {
       const realDef = JSON.stringify({
         nodes: [
-          { id: 'n1', agentId: 'a1b2c3d4e5f6', type: 'agent' },
-          { id: 'n2', agentId: 'z9y8x7w6v5u4', type: 'agent' },
+          { id: "n1", agentId: "a1b2c3d4e5f6", type: "agent" },
+          { id: "n2", agentId: "z9y8x7w6v5u4", type: "agent" },
         ],
-        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+        edges: [{ id: "e1", source: "n1", target: "n2" }],
       });
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          status: 'DRAFT',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
           definition: realDef,
           version: 1,
         },
       });
       ddbMock.on(BatchGetCommand).resolves({
-        Responses: { 'citadel-agents-test': [{ agentId: 'a1b2c3d4e5f6' }, { agentId: 'z9y8x7w6v5u4' }] },
+        Responses: {
+          "citadel-agents-test": [
+            { agentId: "a1b2c3d4e5f6" },
+            { agentId: "z9y8x7w6v5u4" },
+          ],
+        },
       });
       ddbMock.on(UpdateCommand).resolves({
         Attributes: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          status: 'PUBLISHED',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "PUBLISHED",
           definition: realDef,
           version: 2,
         },
       });
 
       const result = await invoke(
-        makeEvent('publishWorkflow', { workflowId: 'wf-1' }),
+        makeEvent("publishWorkflow", { workflowId: "wf-1" }),
       );
 
-      expect(result.status).toBe('PUBLISHED');
+      expect(result.status).toBe("PUBLISHED");
     });
 
-    test('rejects when one node has placeholder- among many real ones (full validation, not first-match)', async () => {
+    test("rejects when one node has placeholder- among many real ones (full validation, not first-match)", async () => {
       const mixedDef = JSON.stringify({
         nodes: [
-          { id: 'n1', agentId: 'a1b2c3d4e5f6', type: 'agent' },
-          { id: 'n2', agentId: 'z9y8x7w6v5u4', type: 'agent' },
-          { id: 'n3', agentId: 'placeholder-bad', type: 'agent' },
+          { id: "n1", agentId: "a1b2c3d4e5f6", type: "agent" },
+          { id: "n2", agentId: "z9y8x7w6v5u4", type: "agent" },
+          { id: "n3", agentId: "placeholder-bad", type: "agent" },
         ],
         edges: [
-          { id: 'e1', source: 'n1', target: 'n2' },
-          { id: 'e2', source: 'n2', target: 'n3' },
+          { id: "e1", source: "n1", target: "n2" },
+          { id: "e2", source: "n2", target: "n3" },
         ],
       });
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          status: 'DRAFT',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
           definition: mixedDef,
           version: 1,
         },
       });
 
       await expect(
-        invoke(makeEvent('publishWorkflow', { workflowId: 'wf-1' }),),
+        invoke(makeEvent("publishWorkflow", { workflowId: "wf-1" })),
       ).rejects.toThrow(/placeholder.*n3/i);
     });
 
-    test('rejects publish when a node agentId does not exist in the agents table (stays DRAFT)', async () => {
+    test("rejects publish when a node agentId does not exist in the agents table (stays DRAFT)", async () => {
       const def = JSON.stringify({
         nodes: [
-          { id: 'n1', agentId: 'real-agent-1', type: 'agent' },
-          { id: 'n2', agentId: 'ghost-agent', type: 'agent' },
+          { id: "n1", agentId: "real-agent-1", type: "agent" },
+          { id: "n2", agentId: "ghost-agent", type: "agent" },
         ],
-        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+        edges: [{ id: "e1", source: "n1", target: "n2" }],
       });
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-1', status: 'DRAFT', definition: def, version: 1 },
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
+          definition: def,
+          version: 1,
+        },
       });
       // Only real-agent-1 exists; ghost-agent is absent from the agents table
       ddbMock.on(BatchGetCommand).resolves({
-        Responses: { 'citadel-agents-test': [{ agentId: 'real-agent-1' }] },
+        Responses: { "citadel-agents-test": [{ agentId: "real-agent-1" }] },
       });
 
       await expect(
-        invoke(makeEvent('publishWorkflow', { workflowId: 'wf-1' }),),
+        invoke(makeEvent("publishWorkflow", { workflowId: "wf-1" })),
       ).rejects.toThrow(/ghost-agent/i);
 
       // Must remain DRAFT — no status transition
       expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     });
 
-    test('publishes when every node agentId resolves to an existing agent (queries agents table)', async () => {
+    test("publishes when every node agentId resolves to an existing agent (queries agents table)", async () => {
       const def = JSON.stringify({
         nodes: [
-          { id: 'n1', agentId: 'real-agent-1', type: 'agent' },
-          { id: 'n2', agentId: 'real-agent-2', type: 'agent' },
+          { id: "n1", agentId: "real-agent-1", type: "agent" },
+          { id: "n2", agentId: "real-agent-2", type: "agent" },
         ],
-        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+        edges: [{ id: "e1", source: "n1", target: "n2" }],
       });
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-1', status: 'DRAFT', definition: def, version: 1 },
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
+          definition: def,
+          version: 1,
+        },
       });
       ddbMock.on(BatchGetCommand).resolves({
-        Responses: { 'citadel-agents-test': [{ agentId: 'real-agent-1' }, { agentId: 'real-agent-2' }] },
+        Responses: {
+          "citadel-agents-test": [
+            { agentId: "real-agent-1" },
+            { agentId: "real-agent-2" },
+          ],
+        },
       });
       ddbMock.on(UpdateCommand).resolves({
-        Attributes: { workflowId: 'wf-1', orgId: 'org-1', status: 'PUBLISHED', version: 2 },
+        Attributes: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "PUBLISHED",
+          version: 2,
+        },
       });
 
       const result = await invoke(
-        makeEvent('publishWorkflow', { workflowId: 'wf-1' }),
+        makeEvent("publishWorkflow", { workflowId: "wf-1" }),
       );
 
-      expect(result.status).toBe('PUBLISHED');
+      expect(result.status).toBe("PUBLISHED");
 
       // Existence check must have queried the agents table
       const batchCalls = ddbMock.commandCalls(BatchGetCommand);
       expect(batchCalls.length).toBeGreaterThanOrEqual(1);
-      expect(batchCalls[0].args[0].input.RequestItems!['citadel-agents-test']).toBeDefined();
+      expect(
+        batchCalls[0].args[0].input.RequestItems!["citadel-agents-test"],
+      ).toBeDefined();
     });
   });
 
   // ─── EventBridge events ────────────────────────────────────────
 
-  describe('EventBridge events', () => {
-    test('emits workflow.created event on createWorkflow', async () => {
+  describe("EventBridge events", () => {
+    test("emits workflow.created event on createWorkflow", async () => {
       ddbMock.on(PutCommand).resolves({});
 
       await invoke(
-        makeEvent('createWorkflow', {
+        makeEvent("createWorkflow", {
           input: {
-            name: 'EB Test',
-            orgId: 'org-1',
+            name: "EB Test",
+            orgId: "org-1",
             definition: JSON.stringify({ nodes: [], edges: [] }),
           },
         }),
@@ -831,118 +995,137 @@ describe('workflow-resolver', () => {
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
       expect(ebCalls).toHaveLength(1);
       const entry = ebCalls[0].args[0].input.Entries![0];
-      expect(entry.Source).toBe('citadel.workflows');
-      expect(entry.DetailType).toBe('workflow.created');
+      expect(entry.Source).toBe("citadel.workflows");
+      expect(entry.DetailType).toBe("workflow.created");
     });
 
-    test('emits workflow.updated event on updateWorkflow', async () => {
+    test("emits workflow.updated event on updateWorkflow", async () => {
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-1', version: 1, status: 'DRAFT' },
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          version: 1,
+          status: "DRAFT",
+        },
       });
       ddbMock.on(UpdateCommand).resolves({
-        Attributes: { workflowId: 'wf-1', orgId: 'org-1', name: 'Updated', version: 2 },
+        Attributes: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          name: "Updated",
+          version: 2,
+        },
       });
 
       await invoke(
-        makeEvent('updateWorkflow', {
-          input: { workflowId: 'wf-1', name: 'Updated', version: 1 },
+        makeEvent("updateWorkflow", {
+          input: { workflowId: "wf-1", name: "Updated", version: 1 },
         }),
       );
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
       expect(ebCalls).toHaveLength(1);
       const entry = ebCalls[0].args[0].input.Entries![0];
-      expect(entry.Source).toBe('citadel.workflows');
-      expect(entry.DetailType).toBe('workflow.updated');
+      expect(entry.Source).toBe("citadel.workflows");
+      expect(entry.DetailType).toBe("workflow.updated");
     });
 
-    test('emits workflow.deleted event on deleteWorkflow', async () => {
+    test("emits workflow.deleted event on deleteWorkflow", async () => {
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-1', status: 'DRAFT' },
+        Item: { workflowId: "wf-1", orgId: "org-1", status: "DRAFT" },
       });
       ddbMock.on(DeleteCommand).resolves({});
 
-      await invoke(
-        makeEvent('deleteWorkflow', { workflowId: 'wf-1' }),
-      );
+      await invoke(makeEvent("deleteWorkflow", { workflowId: "wf-1" }));
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
       expect(ebCalls).toHaveLength(1);
       const entry = ebCalls[0].args[0].input.Entries![0];
-      expect(entry.Source).toBe('citadel.workflows');
-      expect(entry.DetailType).toBe('workflow.deleted');
+      expect(entry.Source).toBe("citadel.workflows");
+      expect(entry.DetailType).toBe("workflow.deleted");
     });
 
-    test('emits workflow.published event on publishWorkflow', async () => {
+    test("emits workflow.published event on publishWorkflow", async () => {
       const validDef = JSON.stringify({
         nodes: [
-          { id: 'n1', agentId: 'a1', type: 'agent' },
-          { id: 'n2', agentId: 'a2', type: 'agent' },
+          { id: "n1", agentId: "a1", type: "agent" },
+          { id: "n2", agentId: "a2", type: "agent" },
         ],
-        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+        edges: [{ id: "e1", source: "n1", target: "n2" }],
       });
       ddbMock.on(GetCommand).resolves({
-        Item: { workflowId: 'wf-1', orgId: 'org-1', status: 'DRAFT', definition: validDef, version: 1 },
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
+          definition: validDef,
+          version: 1,
+        },
       });
       ddbMock.on(BatchGetCommand).resolves({
-        Responses: { 'citadel-agents-test': [{ agentId: 'a1' }, { agentId: 'a2' }] },
+        Responses: {
+          "citadel-agents-test": [{ agentId: "a1" }, { agentId: "a2" }],
+        },
       });
       ddbMock.on(UpdateCommand).resolves({
-        Attributes: { workflowId: 'wf-1', orgId: 'org-1', status: 'PUBLISHED', version: 2 },
+        Attributes: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "PUBLISHED",
+          version: 2,
+        },
       });
 
-      await invoke(
-        makeEvent('publishWorkflow', { workflowId: 'wf-1' }),
-      );
+      await invoke(makeEvent("publishWorkflow", { workflowId: "wf-1" }));
 
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
       expect(ebCalls).toHaveLength(1);
       const entry = ebCalls[0].args[0].input.Entries![0];
-      expect(entry.Source).toBe('citadel.workflows');
-      expect(entry.DetailType).toBe('workflow.published');
+      expect(entry.Source).toBe("citadel.workflows");
+      expect(entry.DetailType).toBe("workflow.published");
     });
   });
 
   // ─── updateWorkflowConfiguration ──────────────────────────────
 
-  describe('updateWorkflowConfiguration', () => {
-    test('shallow merges config at top-level keys and uses optimistic lock via version', async () => {
+  describe("updateWorkflowConfiguration", () => {
+    test("shallow merges config at top-level keys and uses optimistic lock via version", async () => {
       const existingConfig = JSON.stringify({
-        integrations: { int1: { endpoint: 'https://old.com' } },
-        credentials: { cred1: 'secret-ref-1' },
+        integrations: { int1: { endpoint: "https://old.com" } },
+        credentials: { cred1: "secret-ref-1" },
       });
       const newConfig = JSON.stringify({
-        integrations: { int2: { endpoint: 'https://new.com' } },
-        parameters: { key1: 'value1' },
+        integrations: { int2: { endpoint: "https://new.com" } },
+        parameters: { key1: "value1" },
       });
       // GetCommand returns existing workflow with config
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
+          workflowId: "wf-1",
+          orgId: "org-1",
           version: 3,
-          status: 'DRAFT',
+          status: "DRAFT",
           configuration: existingConfig,
         },
       });
       // UpdateCommand returns merged result
       ddbMock.on(UpdateCommand).resolves({
         Attributes: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
+          workflowId: "wf-1",
+          orgId: "org-1",
           version: 4,
-          status: 'DRAFT',
+          status: "DRAFT",
           configuration: JSON.stringify({
-            integrations: { int2: { endpoint: 'https://new.com' } },
-            credentials: { cred1: 'secret-ref-1' },
-            parameters: { key1: 'value1' },
+            integrations: { int2: { endpoint: "https://new.com" } },
+            credentials: { cred1: "secret-ref-1" },
+            parameters: { key1: "value1" },
           }),
         },
       });
 
       const result = await invoke(
-        makeEvent('updateWorkflowConfiguration', {
-          workflowId: 'wf-1',
+        makeEvent("updateWorkflowConfiguration", {
+          workflowId: "wf-1",
           configuration: newConfig,
           version: 3,
         }),
@@ -953,43 +1136,44 @@ describe('workflow-resolver', () => {
       const updateCalls = ddbMock.commandCalls(UpdateCommand);
       expect(updateCalls).toHaveLength(1);
       const updateInput = updateCalls[0].args[0].input;
-      expect(updateInput.ConditionExpression).toContain('version');
+      expect(updateInput.ConditionExpression).toContain("version");
     });
   });
 
   // ─── importBlueprint ──────────────────────────────────────────
 
-  describe('importBlueprint', () => {
+  describe("importBlueprint", () => {
     const blueprintDef = JSON.stringify({
       nodes: [
-        { id: 'n1', agentId: 'agent-1', type: 'agent' },
-        { id: 'n2', agentId: 'agent-2', type: 'agent' },
+        { id: "n1", agentId: "agent-1", type: "agent" },
+        { id: "n2", agentId: "agent-2", type: "agent" },
       ],
-      edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+      edges: [{ id: "e1", source: "n1", target: "n2" }],
     });
 
-    test('deep-copies definition from PUBLISHED blueprint, sets DRAFT, isBlueprint=false, appends workflowId to app workflowIds, emits workflow.imported', async () => {
+    test("deep-copies definition from PUBLISHED blueprint, sets DRAFT, isBlueprint=false, appends workflowId to app workflowIds, emits workflow.imported", async () => {
       // First GetCommand: blueprint lookup
-      ddbMock.on(GetCommand)
+      ddbMock
+        .on(GetCommand)
         .resolvesOnce({
           Item: {
-            workflowId: 'bp-1',
-            orgId: 'org-1',
-            name: 'My Blueprint',
-            status: 'PUBLISHED',
-            isBlueprint: 'true',
+            workflowId: "bp-1",
+            orgId: "org-1",
+            name: "My Blueprint",
+            status: "PUBLISHED",
+            isBlueprint: "true",
             definition: blueprintDef,
-            metadata: JSON.stringify({ category: 'data-processing' }),
+            metadata: JSON.stringify({ category: "data-processing" }),
             version: 2,
           },
         })
         // Second GetCommand: app lookup
         .resolvesOnce({
           Item: {
-            appId: 'app-1',
-            orgId: 'org-1',
-            name: 'My App',
-            workflowIds: ['wf-existing'],
+            appId: "app-1",
+            orgId: "org-1",
+            name: "My App",
+            workflowIds: ["wf-existing"],
             version: 1,
           },
         });
@@ -997,16 +1181,16 @@ describe('workflow-resolver', () => {
       ddbMock.on(UpdateCommand).resolves({});
 
       const result = await invoke(
-        makeEvent('importBlueprint', { blueprintId: 'bp-1', appId: 'app-1' }),
+        makeEvent("importBlueprint", { blueprintId: "bp-1", appId: "app-1" }),
       );
 
       // New workflow created as DRAFT, not a blueprint
-      expect(result.status).toBe('DRAFT');
-      expect(result.isBlueprint).toBe('false');
+      expect(result.status).toBe("DRAFT");
+      expect(result.isBlueprint).toBe("false");
       expect(result.workflowId).toBeDefined();
-      expect(result.workflowId).not.toBe('bp-1'); // new UUID
-      expect(result.name).toBe('My Blueprint (Copy)'); // default name
-      expect(result.appId).toBe('app-1');
+      expect(result.workflowId).not.toBe("bp-1"); // new UUID
+      expect(result.name).toBe("My Blueprint (Copy)"); // default name
+      expect(result.appId).toBe("app-1");
 
       // Definition is deep-copied
       expect(result.definition).toBe(blueprintDef);
@@ -1019,17 +1203,17 @@ describe('workflow-resolver', () => {
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
       expect(ebCalls).toHaveLength(1);
       const entry = ebCalls[0].args[0].input.Entries![0];
-      expect(entry.DetailType).toBe('workflow.imported');
+      expect(entry.DetailType).toBe("workflow.imported");
     });
 
-    test('rejects draft blueprints', async () => {
+    test("rejects draft blueprints", async () => {
       ddbMock.on(GetCommand).resolvesOnce({
         Item: {
-          workflowId: 'bp-draft',
-          orgId: 'org-1',
-          name: 'Draft Blueprint',
-          status: 'DRAFT',
-          isBlueprint: 'true',
+          workflowId: "bp-draft",
+          orgId: "org-1",
+          name: "Draft Blueprint",
+          status: "DRAFT",
+          isBlueprint: "true",
           definition: blueprintDef,
           version: 1,
         },
@@ -1037,29 +1221,33 @@ describe('workflow-resolver', () => {
 
       await expect(
         invoke(
-          makeEvent('importBlueprint', { blueprintId: 'bp-draft', appId: 'app-1' }),
+          makeEvent("importBlueprint", {
+            blueprintId: "bp-draft",
+            appId: "app-1",
+          }),
         ),
       ).rejects.toThrow(/published/i);
     });
 
-    test('rejects wrong orgId (throws Access denied)', async () => {
-      ddbMock.on(GetCommand)
+    test("rejects wrong orgId (throws Access denied)", async () => {
+      ddbMock
+        .on(GetCommand)
         .resolvesOnce({
           Item: {
-            workflowId: 'bp-1',
-            orgId: 'org-1',
-            name: 'Blueprint',
-            status: 'PUBLISHED',
-            isBlueprint: 'true',
+            workflowId: "bp-1",
+            orgId: "org-1",
+            name: "Blueprint",
+            status: "PUBLISHED",
+            isBlueprint: "true",
             definition: blueprintDef,
             version: 2,
           },
         })
         .resolvesOnce({
           Item: {
-            appId: 'app-1',
-            orgId: 'org-other', // different org
-            name: 'Other App',
+            appId: "app-1",
+            orgId: "org-other", // different org
+            name: "Other App",
             workflowIds: [],
             version: 1,
           },
@@ -1067,95 +1255,123 @@ describe('workflow-resolver', () => {
 
       await expect(
         invoke(
-          makeEvent('importBlueprint', { blueprintId: 'bp-1', appId: 'app-1' }),
+          makeEvent("importBlueprint", { blueprintId: "bp-1", appId: "app-1" }),
         ),
       ).rejects.toThrow(/Access denied/i);
     });
 
-    test('applies agentMapping to rewrite placeholder node agentIds to real agentIds', async () => {
+    test("applies agentMapping to rewrite placeholder node agentIds to real agentIds", async () => {
       const placeholderDef = JSON.stringify({
         nodes: [
-          { id: 'n1', agentId: 'placeholder-writer', type: 'agent' },
-          { id: 'n2', agentId: 'placeholder-reviewer', type: 'agent' },
+          { id: "n1", agentId: "placeholder-writer", type: "agent" },
+          { id: "n2", agentId: "placeholder-reviewer", type: "agent" },
         ],
-        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+        edges: [{ id: "e1", source: "n1", target: "n2" }],
       });
-      ddbMock.on(GetCommand)
+      ddbMock
+        .on(GetCommand)
         .resolvesOnce({
           Item: {
-            workflowId: 'bp-1', orgId: 'org-1', name: 'BP', status: 'PUBLISHED',
-            isBlueprint: 'true', definition: placeholderDef, version: 2,
+            workflowId: "bp-1",
+            orgId: "org-1",
+            name: "BP",
+            status: "PUBLISHED",
+            isBlueprint: "true",
+            definition: placeholderDef,
+            version: 2,
           },
         })
         .resolvesOnce({
-          Item: { appId: 'app-1', orgId: 'org-1', name: 'App', workflowIds: [], version: 1 },
+          Item: {
+            appId: "app-1",
+            orgId: "org-1",
+            name: "App",
+            workflowIds: [],
+            version: 1,
+          },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
 
       const result = await invoke(
-        makeEvent('importBlueprint', {
-          blueprintId: 'bp-1',
-          appId: 'app-1',
+        makeEvent("importBlueprint", {
+          blueprintId: "bp-1",
+          appId: "app-1",
           agentMapping: JSON.stringify({
-            'placeholder-writer': 'real-agent-1',
-            'placeholder-reviewer': 'real-agent-2',
+            "placeholder-writer": "real-agent-1",
+            "placeholder-reviewer": "real-agent-2",
           }),
         }),
       );
 
       const parsed = JSON.parse(result.definition as string);
-      expect(parsed.nodes[0].agentId).toBe('real-agent-1');
-      expect(parsed.nodes[1].agentId).toBe('real-agent-2');
+      expect(parsed.nodes[0].agentId).toBe("real-agent-1");
+      expect(parsed.nodes[1].agentId).toBe("real-agent-2");
       // Persisted definition must also be remapped
       const putItem = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item;
-      expect(JSON.parse(putItem!.definition).nodes[0].agentId).toBe('real-agent-1');
+      expect(JSON.parse(putItem!.definition).nodes[0].agentId).toBe(
+        "real-agent-1",
+      );
     });
 
-    test('leaves unmapped node agentIds unchanged when applying agentMapping', async () => {
+    test("leaves unmapped node agentIds unchanged when applying agentMapping", async () => {
       const mixedDef = JSON.stringify({
         nodes: [
-          { id: 'n1', agentId: 'placeholder-writer', type: 'agent' },
-          { id: 'n2', agentId: 'already-real', type: 'agent' },
+          { id: "n1", agentId: "placeholder-writer", type: "agent" },
+          { id: "n2", agentId: "already-real", type: "agent" },
         ],
-        edges: [{ id: 'e1', source: 'n1', target: 'n2' }],
+        edges: [{ id: "e1", source: "n1", target: "n2" }],
       });
-      ddbMock.on(GetCommand)
+      ddbMock
+        .on(GetCommand)
         .resolvesOnce({
           Item: {
-            workflowId: 'bp-1', orgId: 'org-1', name: 'BP', status: 'PUBLISHED',
-            isBlueprint: 'true', definition: mixedDef, version: 2,
+            workflowId: "bp-1",
+            orgId: "org-1",
+            name: "BP",
+            status: "PUBLISHED",
+            isBlueprint: "true",
+            definition: mixedDef,
+            version: 2,
           },
         })
         .resolvesOnce({
-          Item: { appId: 'app-1', orgId: 'org-1', name: 'App', workflowIds: [], version: 1 },
+          Item: {
+            appId: "app-1",
+            orgId: "org-1",
+            name: "App",
+            workflowIds: [],
+            version: 1,
+          },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
 
       const result = await invoke(
-        makeEvent('importBlueprint', {
-          blueprintId: 'bp-1',
-          appId: 'app-1',
-          agentMapping: JSON.stringify({ 'placeholder-writer': 'real-agent-1' }),
+        makeEvent("importBlueprint", {
+          blueprintId: "bp-1",
+          appId: "app-1",
+          agentMapping: JSON.stringify({
+            "placeholder-writer": "real-agent-1",
+          }),
         }),
       );
 
       const parsed = JSON.parse(result.definition as string);
-      expect(parsed.nodes[0].agentId).toBe('real-agent-1');
-      expect(parsed.nodes[1].agentId).toBe('already-real');
+      expect(parsed.nodes[0].agentId).toBe("real-agent-1");
+      expect(parsed.nodes[1].agentId).toBe("already-real");
     });
   });
 
   // ─── importWorkflow ────────────────────────────────────────────
 
-  describe('importWorkflow', () => {
-    test('validates JSON structure, generates new UUID, sets version=1, status=DRAFT', async () => {
+  describe("importWorkflow", () => {
+    test("validates JSON structure, generates new UUID, sets version=1, status=DRAFT", async () => {
       const workflowJson = JSON.stringify({
-        name: 'Imported Workflow',
-        description: 'From export',
+        name: "Imported Workflow",
+        description: "From export",
         definition: JSON.stringify({
-          nodes: [{ id: 'n1', agentId: 'a1', type: 'agent' }],
+          nodes: [{ id: "n1", agentId: "a1", type: "agent" }],
           edges: [],
         }),
         configuration: null,
@@ -1164,117 +1380,208 @@ describe('workflow-resolver', () => {
       ddbMock.on(PutCommand).resolves({});
 
       const result = await invoke(
-        makeEvent('importWorkflow', {
-          input: { orgId: 'org-1', workflowJson, name: 'Custom Name' },
+        makeEvent("importWorkflow", {
+          input: { orgId: "org-1", workflowJson, name: "Custom Name" },
         }),
       );
 
       expect(result.workflowId).toBeDefined();
       expect(result.version).toBe(1);
-      expect(result.status).toBe('DRAFT');
-      expect(result.name).toBe('Custom Name');
-      expect(result.orgId).toBe('org-1');
+      expect(result.status).toBe("DRAFT");
+      expect(result.name).toBe("Custom Name");
+      expect(result.orgId).toBe("org-1");
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+
+    // Org derivation (finding 2c262386 lower set, primary case): importWorkflow
+    // let a caller plant a DRAFT workflow into ANOTHER tenant's workspace by
+    // setting input.orgId=victim. Must derive orgId from identity and REJECT
+    // a mismatched client value — zero writes.
+    test("rejects a mismatched input.orgId and does not persist (plant-into-foreign-org attempt)", async () => {
+      const workflowJson = JSON.stringify({
+        name: "Planted Workflow",
+        definition: JSON.stringify({
+          nodes: [{ id: "n1", agentId: "a1", type: "agent" }],
+          edges: [],
+        }),
+      });
+
+      await expect(
+        invoke(
+          makeEvent("importWorkflow", {
+            input: { orgId: "org-victim", workflowJson },
+          }),
+        ),
+      ).rejects.toThrow(/Access denied|orgId/i);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test("derives orgId from identity when input.orgId is absent", async () => {
+      const workflowJson = JSON.stringify({
+        name: "No OrgId Import",
+        definition: JSON.stringify({
+          nodes: [{ id: "n1", agentId: "a1", type: "agent" }],
+          edges: [],
+        }),
+      });
+      ddbMock.on(PutCommand).resolves({});
+
+      const result = await invoke(
+        makeEvent("importWorkflow", { input: { workflowJson } }),
+      );
+
+      expect(result.orgId).toBe("org-1");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+
+    test("fails closed when caller org is unresolvable", async () => {
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      const workflowJson = JSON.stringify({
+        name: "Unresolvable",
+        definition: JSON.stringify({ nodes: [], edges: [] }),
+      });
+
+      await expect(
+        invoke(
+          makeEvent("importWorkflow", {
+            input: { orgId: "org-1", workflowJson },
+          }),
+        ),
+      ).rejects.toThrow(/Access denied|orgId|organization/i);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     });
   });
 
   // ─── exportWorkflow ────────────────────────────────────────────
 
-  describe('exportWorkflow', () => {
-    test('returns workflow as JSON and verifies org access', async () => {
+  describe("exportWorkflow", () => {
+    test("returns workflow as JSON and verifies org access", async () => {
       const definition = JSON.stringify({ nodes: [], edges: [] });
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          name: 'Export Me',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          name: "Export Me",
           definition,
           configuration: null,
           metadata: null,
-          status: 'DRAFT',
+          status: "DRAFT",
           version: 1,
         },
       });
 
       const result = await invoke(
-        makeEvent('exportWorkflow', { workflowId: 'wf-1' }),
+        makeEvent("exportWorkflow", { workflowId: "wf-1" }),
       );
 
       // Should return the workflow data as JSON
       expect(result).toBeDefined();
-      const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-      expect(parsed.name).toBe('Export Me');
+      const parsed = typeof result === "string" ? JSON.parse(result) : result;
+      expect(parsed.name).toBe("Export Me");
       expect(parsed.definition).toBe(definition);
     });
   });
 
   // ─── getWorkflowVersion ────────────────────────────────────────
 
-  describe('getWorkflowVersion', () => {
-    test('extracts correct version from versionHistory array', async () => {
-      const v1Def = JSON.stringify({ nodes: [{ id: 'n1', agentId: 'a1', type: 'agent' }], edges: [] });
-      const v2Def = JSON.stringify({ nodes: [{ id: 'n1', agentId: 'a1', type: 'agent' }, { id: 'n2', agentId: 'a2', type: 'agent' }], edges: [] });
+  describe("getWorkflowVersion", () => {
+    test("extracts correct version from versionHistory array", async () => {
+      const v1Def = JSON.stringify({
+        nodes: [{ id: "n1", agentId: "a1", type: "agent" }],
+        edges: [],
+      });
+      const v2Def = JSON.stringify({
+        nodes: [
+          { id: "n1", agentId: "a1", type: "agent" },
+          { id: "n2", agentId: "a2", type: "agent" },
+        ],
+        edges: [],
+      });
       const currentDef = JSON.stringify({ nodes: [], edges: [] });
 
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          name: 'Versioned Workflow',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          name: "Versioned Workflow",
           definition: currentDef,
           version: 3,
           versionHistory: [
-            { version: 1, definition: v1Def, updatedAt: '2024-01-01T00:00:00Z', updatedBy: 'user-1' },
-            { version: 2, definition: v2Def, updatedAt: '2024-01-02T00:00:00Z', updatedBy: 'user-1' },
+            {
+              version: 1,
+              definition: v1Def,
+              updatedAt: "2024-01-01T00:00:00Z",
+              updatedBy: "user-1",
+            },
+            {
+              version: 2,
+              definition: v2Def,
+              updatedAt: "2024-01-02T00:00:00Z",
+              updatedBy: "user-1",
+            },
           ],
         },
       });
 
       const result = await invoke(
-        makeEvent('getWorkflowVersion', { workflowId: 'wf-1', version: 1 }),
+        makeEvent("getWorkflowVersion", { workflowId: "wf-1", version: 1 }),
       );
 
       expect(result.definition).toBe(v1Def);
-      expect(result.workflowId).toBe('wf-1');
+      expect(result.workflowId).toBe("wf-1");
     });
   });
 
   // ─── versioning ─────────────────────────────────────────────────
 
-  describe('versioning', () => {
-    const oldDef = JSON.stringify({ nodes: [{ id: 'n1', agentId: 'a1', type: 'agent' }], edges: [] });
-    const newDef = JSON.stringify({ nodes: [{ id: 'n1', agentId: 'a1', type: 'agent' }, { id: 'n2', agentId: 'a2', type: 'agent' }], edges: [] });
+  describe("versioning", () => {
+    const oldDef = JSON.stringify({
+      nodes: [{ id: "n1", agentId: "a1", type: "agent" }],
+      edges: [],
+    });
+    const newDef = JSON.stringify({
+      nodes: [
+        { id: "n1", agentId: "a1", type: "agent" },
+        { id: "n2", agentId: "a2", type: "agent" },
+      ],
+      edges: [],
+    });
 
-    test('updateWorkflow appends previous state to versionHistory before updating', async () => {
+    test("updateWorkflow appends previous state to versionHistory before updating", async () => {
       // Existing workflow at version 2 with one history entry
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
+          workflowId: "wf-1",
+          orgId: "org-1",
           version: 2,
-          status: 'DRAFT',
+          status: "DRAFT",
           definition: oldDef,
-          updatedAt: '2024-01-02T00:00:00Z',
-          createdBy: 'user-123',
+          updatedAt: "2024-01-02T00:00:00Z",
+          createdBy: "user-123",
           versionHistory: [
-            { version: 1, definition: '{"nodes":[],"edges":[]}', updatedAt: '2024-01-01T00:00:00Z', updatedBy: 'user-123' },
+            {
+              version: 1,
+              definition: '{"nodes":[],"edges":[]}',
+              updatedAt: "2024-01-01T00:00:00Z",
+              updatedBy: "user-123",
+            },
           ],
         },
       });
       ddbMock.on(UpdateCommand).resolves({
         Attributes: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
-          name: 'Updated',
+          workflowId: "wf-1",
+          orgId: "org-1",
+          name: "Updated",
           version: 3,
-          status: 'DRAFT',
+          status: "DRAFT",
           definition: newDef,
         },
       });
 
       await invoke(
-        makeEvent('updateWorkflow', {
-          input: { workflowId: 'wf-1', definition: newDef, version: 2 },
+        makeEvent("updateWorkflow", {
+          input: { workflowId: "wf-1", definition: newDef, version: 2 },
         }),
       );
 
@@ -1283,107 +1590,128 @@ describe('workflow-resolver', () => {
       expect(updateCalls).toHaveLength(1);
       const updateInput = updateCalls[0].args[0].input;
       const updateExpr = updateInput.UpdateExpression as string;
-      expect(updateExpr).toContain('versionHistory');
+      expect(updateExpr).toContain("versionHistory");
     });
 
-    test('versionHistory entry contains correct version, definition, updatedAt, updatedBy fields', async () => {
+    test("versionHistory entry contains correct version, definition, updatedAt, updatedBy fields", async () => {
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
+          workflowId: "wf-1",
+          orgId: "org-1",
           version: 2,
-          status: 'DRAFT',
+          status: "DRAFT",
           definition: oldDef,
-          updatedAt: '2024-06-15T10:30:00Z',
-          createdBy: 'user-123',
+          updatedAt: "2024-06-15T10:30:00Z",
+          createdBy: "user-123",
           versionHistory: [],
         },
       });
       ddbMock.on(UpdateCommand).resolves({
         Attributes: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
+          workflowId: "wf-1",
+          orgId: "org-1",
           version: 3,
           definition: newDef,
         },
       });
 
       await invoke(
-        makeEvent('updateWorkflow', {
-          input: { workflowId: 'wf-1', definition: newDef, version: 2 },
+        makeEvent("updateWorkflow", {
+          input: { workflowId: "wf-1", definition: newDef, version: 2 },
         }),
       );
 
       const updateCalls = ddbMock.commandCalls(UpdateCommand);
-      const exprValues = updateCalls[0].args[0].input.ExpressionAttributeValues!;
-      const historyEntry = exprValues[':historyEntry'];
+      const exprValues =
+        updateCalls[0].args[0].input.ExpressionAttributeValues!;
+      const historyEntry = exprValues[":historyEntry"];
       expect(historyEntry).toBeDefined();
       expect(historyEntry).toEqual([
         {
           version: 2,
           definition: oldDef,
-          updatedAt: '2024-06-15T10:30:00Z',
-          updatedBy: 'user-123',
+          updatedAt: "2024-06-15T10:30:00Z",
+          updatedBy: "user-123",
         },
       ]);
     });
 
-    test('getWorkflowVersion returns correct historical definition from versionHistory', async () => {
+    test("getWorkflowVersion returns correct historical definition from versionHistory", async () => {
       const v1Def = JSON.stringify({ nodes: [], edges: [] });
       ddbMock.on(GetCommand).resolves({
         Item: {
-          workflowId: 'wf-1',
-          orgId: 'org-1',
+          workflowId: "wf-1",
+          orgId: "org-1",
           version: 3,
           definition: newDef,
           versionHistory: [
-            { version: 1, definition: v1Def, updatedAt: '2024-01-01T00:00:00Z', updatedBy: 'user-1' },
-            { version: 2, definition: oldDef, updatedAt: '2024-01-02T00:00:00Z', updatedBy: 'user-1' },
+            {
+              version: 1,
+              definition: v1Def,
+              updatedAt: "2024-01-01T00:00:00Z",
+              updatedBy: "user-1",
+            },
+            {
+              version: 2,
+              definition: oldDef,
+              updatedAt: "2024-01-02T00:00:00Z",
+              updatedBy: "user-1",
+            },
           ],
         },
       });
 
       const result = await invoke(
-        makeEvent('getWorkflowVersion', { workflowId: 'wf-1', version: 2 }),
+        makeEvent("getWorkflowVersion", { workflowId: "wf-1", version: 2 }),
       );
 
       expect(result.version).toBe(2);
       expect(result.definition).toBe(oldDef);
-      expect(result.workflowId).toBe('wf-1');
+      expect(result.workflowId).toBe("wf-1");
     });
   });
 
   // ─── listAppWorkflows ──────────────────────────────────────────
 
-  describe('listAppWorkflows', () => {
-    test('fetches app by appId, then BatchGetItem for workflows by workflowIds', async () => {
+  describe("listAppWorkflows", () => {
+    test("fetches app by appId, then BatchGetItem for workflows by workflowIds", async () => {
       // GetCommand returns the app
       ddbMock.on(GetCommand).resolves({
         Item: {
-          appId: 'app-1',
-          orgId: 'org-1',
-          name: 'My App',
-          workflowIds: ['wf-1', 'wf-2'],
+          appId: "app-1",
+          orgId: "org-1",
+          name: "My App",
+          workflowIds: ["wf-1", "wf-2"],
           version: 1,
         },
       });
       // BatchGetCommand returns the workflows
       ddbMock.on(BatchGetCommand).resolves({
         Responses: {
-          'citadel-workflows-test': [
-            { workflowId: 'wf-1', orgId: 'org-1', name: 'Workflow 1', status: 'DRAFT' },
-            { workflowId: 'wf-2', orgId: 'org-1', name: 'Workflow 2', status: 'PUBLISHED' },
+          "citadel-workflows-test": [
+            {
+              workflowId: "wf-1",
+              orgId: "org-1",
+              name: "Workflow 1",
+              status: "DRAFT",
+            },
+            {
+              workflowId: "wf-2",
+              orgId: "org-1",
+              name: "Workflow 2",
+              status: "PUBLISHED",
+            },
           ],
         },
       });
 
       const result = await invoke<Record<string, unknown>[]>(
-        makeEvent('listAppWorkflows', { appId: 'app-1' }),
+        makeEvent("listAppWorkflows", { appId: "app-1" }),
       );
 
       expect(result).toHaveLength(2);
-      expect(result[0].workflowId).toBe('wf-1');
-      expect(result[1].workflowId).toBe('wf-2');
+      expect(result[0].workflowId).toBe("wf-1");
+      expect(result[1].workflowId).toBe("wf-2");
 
       // Verify BatchGetCommand was called
       expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(1);

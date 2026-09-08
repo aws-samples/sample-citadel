@@ -301,6 +301,9 @@ describe("execution-resolver", () => {
 
   describe("listExecutions", () => {
     test("queries WorkflowIndex GSI by workflowId", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: { workflowId: "wf-1", orgId: "org-1", status: "PUBLISHED" },
+      });
       const items = [
         {
           executionId: "exec-1",
@@ -328,6 +331,77 @@ describe("execution-resolver", () => {
       expect(queryCall.args[0].input.KeyConditionExpression).toContain(
         "workflowId",
       );
+    });
+
+    // Org filter (finding 2c262386, execution-resolver): listExecutions had
+    // NO org check at all — any client-supplied workflowId returned that
+    // workflow's executions (incl. input/output) regardless of tenant.
+    // EXECUTIONS_TABLE carries no orgId GSI (only WorkflowIndex on
+    // workflowId+startedAt exists — confirmed against backend-stack.ts), so
+    // there is no direct org-filtered index to query. The least-bad correct
+    // option: load the parent WORKFLOWS_TABLE row (already the org source
+    // of truth for this workflowId, same lookup startExecution performs)
+    // and reconcile it against the caller's derived org BEFORE running the
+    // WorkflowIndex query — refuse rather than return filtered/foreign data,
+    // matching get/start/cancel/resume's existing "Access denied" semantics
+    // exactly rather than inventing a new silent-empty-list behavior.
+    test("throws Access denied and issues zero QueryCommands when the workflow belongs to a different org", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-victim",
+          orgId: "org-other",
+          status: "PUBLISHED",
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("listExecutions", { workflowId: "wf-victim" })),
+      ).rejects.toThrow("Access denied");
+
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    });
+
+    test("returns executions when the workflow belongs to the caller's org", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: { workflowId: "wf-1", orgId: "org-1", status: "PUBLISHED" },
+      });
+      const items = [
+        {
+          executionId: "exec-1",
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "completed",
+          startedAt: "2024-01-01T00:00:00Z",
+        },
+      ];
+      ddbMock.on(QueryCommand).resolves({ Items: items });
+
+      const result = await invoke(
+        makeEvent("listExecutions", { workflowId: "wf-1" }),
+      );
+
+      expect(result).toEqual({ items, nextToken: undefined });
+    });
+
+    test("fails closed (throws) when the workflow does not exist", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: undefined });
+
+      await expect(
+        invoke(makeEvent("listExecutions", { workflowId: "wf-missing" })),
+      ).rejects.toThrow(/not found/i);
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    });
+
+    test("fails closed when the caller org is unresolvable, even though the workflow exists and matches by coincidence", async () => {
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      ddbMock.on(GetCommand).resolves({
+        Item: { workflowId: "wf-1", orgId: "org-1", status: "PUBLISHED" },
+      });
+
+      await expect(
+        invoke(makeEvent("listExecutions", { workflowId: "wf-1" })),
+      ).rejects.toThrow("Access denied");
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
     });
   });
 
@@ -570,6 +644,16 @@ describe("execution-resolver", () => {
   // ─── Cold-start metric ──────────────────────────────────────────
 
   describe("cold-start metric", () => {
+    beforeEach(() => {
+      // listExecutions is used here purely as a cheap probe call for the
+      // cold-start-metric behavior; seed the workflow-org lookup it now
+      // performs (finding 2c262386 org filter) so these tests aren't
+      // testing org semantics incidentally.
+      ddbMock.on(GetCommand).resolves({
+        Item: { workflowId: "wf-1", orgId: "org-1", status: "PUBLISHED" },
+      });
+    });
+
     test("first invocation in a fresh container emits NodeColdStart", async () => {
       ddbMock.on(QueryCommand).resolves({ Items: [] });
 
