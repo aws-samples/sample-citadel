@@ -29,11 +29,14 @@ import {
   GetCommand,
   PutCommand,
   TransactWriteCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { mockClient } from 'aws-sdk-client-mock';
-import * as fc from 'fast-check';
-import type { AuthContext } from '../../types';
+} from "@aws-sdk/lib-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { mockClient } from "aws-sdk-client-mock";
+import * as fc from "fast-check";
+import type { AuthContext } from "../../types";
 
 // ── Auth mock ─────────────────────────────────────────────────────────
 // Track B is landing `assessment:submit` on architect + project_manager in
@@ -41,13 +44,13 @@ import type { AuthContext } from '../../types';
 // permission helper: `architect` and `project_manager` and `admin` hold
 // `assessment:submit`, `developer` does not. This matches the intended
 // auth.ts rolePermissions table.
-jest.mock('../../utils/auth', () => ({
+jest.mock("../../utils/auth", () => ({
   hasPermission: (authContext: AuthContext, permission: string): boolean => {
-    if (authContext.roles?.includes('admin')) return true;
+    if (authContext.roles?.includes("admin")) return true;
     const grants: Record<string, string[]> = {
-      architect: ['assessment:submit', 'project:read'],
-      project_manager: ['assessment:submit', 'project:read'],
-      developer: ['project:read'],
+      architect: ["assessment:submit", "project:read"],
+      project_manager: ["assessment:submit", "project:read"],
+      developer: ["project:read"],
     };
     for (const role of authContext.roles || []) {
       if ((grants[role] || []).includes(permission)) return true;
@@ -61,17 +64,18 @@ const ebMock = mockClient(EventBridgeClient);
 
 // Env MUST be set before importing the module under test — the resolver
 // captures process.env at module load time.
-process.env.AGENT_DESIGN_ASSESSMENTS_TABLE = 'citadel-agent-design-assessments-test';
-process.env.PROJECTS_TABLE = 'citadel-projects-test';
-process.env.EVENT_BUS_NAME = 'citadel-agents-test';
+process.env.AGENT_DESIGN_ASSESSMENTS_TABLE =
+  "citadel-agent-design-assessments-test";
+process.env.PROJECTS_TABLE = "citadel-projects-test";
+process.env.EVENT_BUS_NAME = "citadel-agents-test";
 
 import {
   startAgentDesignAssessment,
   submitAgentDesignAssessment,
   getAgentDesignAssessment,
   handler,
-} from '../agent-design-assessment-resolver';
-import { __resetGovernanceNotifierForTest } from '../../utils/notifier-base';
+} from "../agent-design-assessment-resolver";
+import { __resetGovernanceNotifierForTest } from "../../utils/notifier-base";
 import {
   GovernanceArchetype,
   ProjectArchetypeStatus,
@@ -79,13 +83,13 @@ import {
   type SubmitAgentDesignAssessmentInput,
   type DimensionComplexityInput,
   type AgentDesignAssessment,
-} from '../../types';
+} from "../../types";
 
-const ASSESS_TABLE = 'citadel-agent-design-assessments-test';
-const PROJECTS_TABLE = 'citadel-projects-test';
+const ASSESS_TABLE = "citadel-agent-design-assessments-test";
+const PROJECTS_TABLE = "citadel-projects-test";
 
 function authContextFor(
-  role: 'architect' | 'developer' | 'project_manager' | 'admin',
+  role: "architect" | "developer" | "project_manager" | "admin",
 ): AuthContext {
   return {
     userId: `user-${role}`,
@@ -97,10 +101,10 @@ function authContextFor(
 
 function validRanking(): DimensionComplexityInput[] {
   return [
-    { dimension: 'CODE', rank: 1, rationale: 'core modernisation path' },
-    { dimension: 'DATA', rank: 2, rationale: 'schema migration needed' },
-    { dimension: 'INTEGRATION', rank: 3, rationale: 'a few legacy hooks' },
-    { dimension: 'INFRASTRUCTURE', rank: 4, rationale: 'greenfield AWS' },
+    { dimension: "CODE", rank: 1, rationale: "core modernisation path" },
+    { dimension: "DATA", rank: 2, rationale: "schema migration needed" },
+    { dimension: "INTEGRATION", rank: 3, rationale: "a few legacy hooks" },
+    { dimension: "INFRASTRUCTURE", rank: 4, rationale: "greenfield AWS" },
   ];
 }
 
@@ -108,12 +112,12 @@ function validInput(
   overrides: Partial<SubmitAgentDesignAssessmentInput> = {},
 ): SubmitAgentDesignAssessmentInput {
   return {
-    projectId: 'proj-1',
+    projectId: "proj-1",
     archetype: GovernanceArchetype.MONOLITHIC_DB,
     archetypeConfidence: 0.9,
     dimensionRanking: validRanking(),
-    accessibleDataSources: ['postgres-prod'],
-    primaryRiskAreas: ['data-migration'],
+    accessibleDataSources: ["postgres-prod"],
+    primaryRiskAreas: ["data-migration"],
     ...overrides,
   };
 }
@@ -122,7 +126,7 @@ function existingAssessment(
   overrides: Partial<AgentDesignAssessment> = {},
 ): AgentDesignAssessment {
   return {
-    projectId: 'proj-1',
+    projectId: "proj-1",
     archetype: null,
     archetypeConfidence: null,
     archetypeStatus: ProjectArchetypeStatus.PENDING,
@@ -131,8 +135,8 @@ function existingAssessment(
     primaryRiskAreas: [],
     completedAt: null,
     completedBy: null,
-    createdAt: '2026-04-30T00:00:00.000Z',
-    updatedAt: '2026-04-30T00:00:00.000Z',
+    createdAt: "2026-04-30T00:00:00.000Z",
+    updatedAt: "2026-04-30T00:00:00.000Z",
     ...overrides,
   };
 }
@@ -143,35 +147,35 @@ function completedAssessment(): AgentDesignAssessment {
     archetypeConfidence: 0.9,
     archetypeStatus: ProjectArchetypeStatus.CLASSIFIED,
     dimensionRanking: validRanking().map((d) => ({ ...d })),
-    accessibleDataSources: ['postgres-prod'],
-    primaryRiskAreas: ['data-migration'],
-    completedAt: '2026-04-30T01:00:00.000Z',
-    completedBy: 'user-architect',
-    updatedAt: '2026-04-30T01:00:00.000Z',
+    accessibleDataSources: ["postgres-prod"],
+    primaryRiskAreas: ["data-migration"],
+    completedAt: "2026-04-30T01:00:00.000Z",
+    completedBy: "user-architect",
+    updatedAt: "2026-04-30T01:00:00.000Z",
   });
 }
 
-describe('agent-design-assessment-resolver', () => {
+describe("agent-design-assessment-resolver", () => {
   beforeEach(() => {
     ddbMock.reset();
     ebMock.reset();
     ebMock.on(PutEventsCommand).resolves({
       FailedEntryCount: 0,
-      Entries: [{ EventId: 'evt-1' }],
+      Entries: [{ EventId: "evt-1" }],
     });
     __resetGovernanceNotifierForTest();
   });
 
   // ── startAgentDesignAssessment ────────────────────────────────────────
 
-  describe('startAgentDesignAssessment', () => {
-    test('1. happy path: persists PENDING row with ISO-8601 timestamps and ConditionExpression attribute_not_exists(projectId)', async () => {
+  describe("startAgentDesignAssessment", () => {
+    test("1. happy path: persists PENDING row with ISO-8601 timestamps and ConditionExpression attribute_not_exists(projectId)", async () => {
       ddbMock.on(PutCommand).resolves({});
-      const auth = authContextFor('architect');
+      const auth = authContextFor("architect");
 
-      const row = await startAgentDesignAssessment('proj-1', auth);
+      const row = await startAgentDesignAssessment("proj-1", auth);
 
-      expect(row.projectId).toBe('proj-1');
+      expect(row.projectId).toBe("proj-1");
       expect(row.archetype).toBeNull();
       expect(row.archetypeConfidence).toBeNull();
       expect(row.archetypeStatus).toBe(ProjectArchetypeStatus.PENDING);
@@ -180,70 +184,74 @@ describe('agent-design-assessment-resolver', () => {
       expect(row.primaryRiskAreas).toEqual([]);
       expect(row.completedAt).toBeNull();
       expect(row.completedBy).toBeNull();
-      expect(row.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-      expect(row.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(row.createdAt).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+      );
+      expect(row.updatedAt).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+      );
 
       const puts = ddbMock.commandCalls(PutCommand);
       expect(puts).toHaveLength(1);
       expect(puts[0].args[0].input.TableName).toBe(ASSESS_TABLE);
       expect(puts[0].args[0].input.ConditionExpression).toBe(
-        'attribute_not_exists(projectId)',
+        "attribute_not_exists(projectId)",
       );
       expect(puts[0].args[0].input.Item).toMatchObject({
-        projectId: 'proj-1',
-        archetypeStatus: 'PENDING',
+        projectId: "proj-1",
+        archetypeStatus: "PENDING",
       });
     });
 
-    test('2. project_manager also allowed (assessment:submit grant on architect + project_manager)', async () => {
+    test("2. project_manager also allowed (assessment:submit grant on architect + project_manager)", async () => {
       ddbMock.on(PutCommand).resolves({});
-      const auth = authContextFor('project_manager');
-      const row = await startAgentDesignAssessment('proj-2', auth);
-      expect(row.projectId).toBe('proj-2');
+      const auth = authContextFor("project_manager");
+      const row = await startAgentDesignAssessment("proj-2", auth);
+      expect(row.projectId).toBe("proj-2");
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
     });
 
-    test('3. developer denied: UnauthorizedError, no DDB write', async () => {
+    test("3. developer denied: UnauthorizedError, no DDB write", async () => {
       ddbMock.on(PutCommand).resolves({});
-      const auth = authContextFor('developer');
-      await expect(
-        startAgentDesignAssessment('proj-1', auth),
-      ).rejects.toThrow(/UnauthorizedError.*assessment:submit/);
+      const auth = authContextFor("developer");
+      await expect(startAgentDesignAssessment("proj-1", auth)).rejects.toThrow(
+        /UnauthorizedError.*assessment:submit/,
+      );
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     });
 
-    test('4. empty projectId → ValidationError, no DDB write', async () => {
-      const auth = authContextFor('architect');
-      await expect(startAgentDesignAssessment('', auth)).rejects.toThrow(
+    test("4. empty projectId → ValidationError, no DDB write", async () => {
+      const auth = authContextFor("architect");
+      await expect(startAgentDesignAssessment("", auth)).rejects.toThrow(
         /ValidationError.*projectId/,
       );
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     });
 
-    test('5. ConditionalCheckFailedException from pre-existing row propagates', async () => {
-      const ccf = new Error('The conditional request failed');
-      ccf.name = 'ConditionalCheckFailedException';
+    test("5. ConditionalCheckFailedException from pre-existing row propagates", async () => {
+      const ccf = new Error("The conditional request failed");
+      ccf.name = "ConditionalCheckFailedException";
       ddbMock.on(PutCommand).rejects(ccf);
-      const auth = authContextFor('architect');
-      await expect(
-        startAgentDesignAssessment('proj-1', auth),
-      ).rejects.toThrow(/conditional/i);
+      const auth = authContextFor("architect");
+      await expect(startAgentDesignAssessment("proj-1", auth)).rejects.toThrow(
+        /conditional/i,
+      );
     });
   });
 
   // ── getAgentDesignAssessment ──────────────────────────────────────────
 
-  describe('getAgentDesignAssessment', () => {
-    test('6. returns null when missing', async () => {
+  describe("getAgentDesignAssessment", () => {
+    test("6. returns null when missing", async () => {
       ddbMock.on(GetCommand).resolves({ Item: undefined });
-      const result = await getAgentDesignAssessment('proj-missing');
+      const result = await getAgentDesignAssessment("proj-missing");
       expect(result).toBeNull();
     });
 
-    test('7. returns Item when present', async () => {
+    test("7. returns Item when present", async () => {
       const existing = existingAssessment();
       ddbMock.on(GetCommand).resolves({ Item: existing });
-      const result = await getAgentDesignAssessment('proj-1');
+      const result = await getAgentDesignAssessment("proj-1");
       expect(result).toEqual(existing);
       const gets = ddbMock.commandCalls(GetCommand);
       expect(gets).toHaveLength(1);
@@ -253,9 +261,9 @@ describe('agent-design-assessment-resolver', () => {
 
   // ── submitAgentDesignAssessment — perm gate ───────────────────────────
 
-  describe('submitAgentDesignAssessment — perm gate', () => {
-    test('8. developer denied BEFORE any DDB access', async () => {
-      const auth = authContextFor('developer');
+  describe("submitAgentDesignAssessment — perm gate", () => {
+    test("8. developer denied BEFORE any DDB access", async () => {
+      const auth = authContextFor("developer");
       await expect(
         submitAgentDesignAssessment(validInput(), auth),
       ).rejects.toThrow(/UnauthorizedError.*assessment:submit/);
@@ -266,24 +274,26 @@ describe('agent-design-assessment-resolver', () => {
 
   // ── submitAgentDesignAssessment — validation branches ─────────────────
 
-  describe('submitAgentDesignAssessment — validation', () => {
-    test('9. dimensionRanking length != 4 rejected', async () => {
-      const auth = authContextFor('architect');
-      const input = validInput({ dimensionRanking: validRanking().slice(0, 3) });
+  describe("submitAgentDesignAssessment — validation", () => {
+    test("9. dimensionRanking length != 4 rejected", async () => {
+      const auth = authContextFor("architect");
+      const input = validInput({
+        dimensionRanking: validRanking().slice(0, 3),
+      });
       await expect(submitAgentDesignAssessment(input, auth)).rejects.toThrow(
         /ValidationError.*dimensionRanking.*exactly 4/,
       );
       expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
     });
 
-    test('10. duplicate ranks (1,1,2,3) rejected', async () => {
-      const auth = authContextFor('architect');
+    test("10. duplicate ranks (1,1,2,3) rejected", async () => {
+      const auth = authContextFor("architect");
       const input = validInput({
         dimensionRanking: [
-          { dimension: 'CODE', rank: 1, rationale: 'ok' },
-          { dimension: 'DATA', rank: 1, rationale: 'ok' },
-          { dimension: 'INTEGRATION', rank: 2, rationale: 'ok' },
-          { dimension: 'INFRASTRUCTURE', rank: 3, rationale: 'ok' },
+          { dimension: "CODE", rank: 1, rationale: "ok" },
+          { dimension: "DATA", rank: 1, rationale: "ok" },
+          { dimension: "INTEGRATION", rank: 2, rationale: "ok" },
+          { dimension: "INFRASTRUCTURE", rank: 3, rationale: "ok" },
         ],
       });
       await expect(submitAgentDesignAssessment(input, auth)).rejects.toThrow(
@@ -291,14 +301,14 @@ describe('agent-design-assessment-resolver', () => {
       );
     });
 
-    test('11. missing rank 4 (ranks 1,2,3,5) rejected', async () => {
-      const auth = authContextFor('architect');
+    test("11. missing rank 4 (ranks 1,2,3,5) rejected", async () => {
+      const auth = authContextFor("architect");
       const input = validInput({
         dimensionRanking: [
-          { dimension: 'CODE', rank: 1, rationale: 'ok' },
-          { dimension: 'DATA', rank: 2, rationale: 'ok' },
-          { dimension: 'INTEGRATION', rank: 3, rationale: 'ok' },
-          { dimension: 'INFRASTRUCTURE', rank: 5, rationale: 'ok' },
+          { dimension: "CODE", rank: 1, rationale: "ok" },
+          { dimension: "DATA", rank: 2, rationale: "ok" },
+          { dimension: "INTEGRATION", rank: 3, rationale: "ok" },
+          { dimension: "INFRASTRUCTURE", rank: 5, rationale: "ok" },
         ],
       });
       await expect(submitAgentDesignAssessment(input, auth)).rejects.toThrow(
@@ -306,14 +316,14 @@ describe('agent-design-assessment-resolver', () => {
       );
     });
 
-    test('12. wrong dimension set (CODE duplicated, INFRASTRUCTURE missing) rejected', async () => {
-      const auth = authContextFor('architect');
+    test("12. wrong dimension set (CODE duplicated, INFRASTRUCTURE missing) rejected", async () => {
+      const auth = authContextFor("architect");
       const input = validInput({
         dimensionRanking: [
-          { dimension: 'CODE', rank: 1, rationale: 'ok' },
-          { dimension: 'CODE', rank: 2, rationale: 'ok' },
-          { dimension: 'DATA', rank: 3, rationale: 'ok' },
-          { dimension: 'INTEGRATION', rank: 4, rationale: 'ok' },
+          { dimension: "CODE", rank: 1, rationale: "ok" },
+          { dimension: "CODE", rank: 2, rationale: "ok" },
+          { dimension: "DATA", rank: 3, rationale: "ok" },
+          { dimension: "INTEGRATION", rank: 4, rationale: "ok" },
         ],
       });
       await expect(submitAgentDesignAssessment(input, auth)).rejects.toThrow(
@@ -321,30 +331,30 @@ describe('agent-design-assessment-resolver', () => {
       );
     });
 
-    test('13. empty accessibleDataSources rejected', async () => {
-      const auth = authContextFor('architect');
+    test("13. empty accessibleDataSources rejected", async () => {
+      const auth = authContextFor("architect");
       const input = validInput({ accessibleDataSources: [] });
       await expect(submitAgentDesignAssessment(input, auth)).rejects.toThrow(
         /ValidationError.*accessibleDataSources/,
       );
     });
 
-    test('14. empty primaryRiskAreas rejected', async () => {
-      const auth = authContextFor('architect');
+    test("14. empty primaryRiskAreas rejected", async () => {
+      const auth = authContextFor("architect");
       const input = validInput({ primaryRiskAreas: [] });
       await expect(submitAgentDesignAssessment(input, auth)).rejects.toThrow(
         /ValidationError.*primaryRiskAreas/,
       );
     });
 
-    test('15. empty rationale (whitespace only) rejected', async () => {
-      const auth = authContextFor('architect');
+    test("15. empty rationale (whitespace only) rejected", async () => {
+      const auth = authContextFor("architect");
       const input = validInput({
         dimensionRanking: [
-          { dimension: 'CODE', rank: 1, rationale: '   ' },
-          { dimension: 'DATA', rank: 2, rationale: 'ok' },
-          { dimension: 'INTEGRATION', rank: 3, rationale: 'ok' },
-          { dimension: 'INFRASTRUCTURE', rank: 4, rationale: 'ok' },
+          { dimension: "CODE", rank: 1, rationale: "   " },
+          { dimension: "DATA", rank: 2, rationale: "ok" },
+          { dimension: "INTEGRATION", rank: 3, rationale: "ok" },
+          { dimension: "INFRASTRUCTURE", rank: 4, rationale: "ok" },
         ],
       });
       await expect(submitAgentDesignAssessment(input, auth)).rejects.toThrow(
@@ -355,18 +365,20 @@ describe('agent-design-assessment-resolver', () => {
 
   // ── submitAgentDesignAssessment — lifecycle guards ────────────────────
 
-  describe('submitAgentDesignAssessment — lifecycle guards', () => {
-    test('16. assessment not started (GetCommand returns null) → throws', async () => {
-      const auth = authContextFor('architect');
+  describe("submitAgentDesignAssessment — lifecycle guards", () => {
+    test("16. assessment not started (GetCommand returns null) → throws", async () => {
+      const auth = authContextFor("architect");
       ddbMock.on(GetCommand).resolves({ Item: undefined });
       await expect(
         submitAgentDesignAssessment(validInput(), auth),
-      ).rejects.toThrow(/AgentDesignAssessment not found.*startAgentDesignAssessment/);
+      ).rejects.toThrow(
+        /AgentDesignAssessment not found.*startAgentDesignAssessment/,
+      );
       expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(0);
     });
 
-    test('17. re-submission on completed assessment (completedAt !== null) → throws, no TransactWrite', async () => {
-      const auth = authContextFor('architect');
+    test("17. re-submission on completed assessment (completedAt !== null) → throws, no TransactWrite", async () => {
+      const auth = authContextFor("architect");
       ddbMock.on(GetCommand).resolves({ Item: completedAssessment() });
       await expect(
         submitAgentDesignAssessment(validInput(), auth),
@@ -378,9 +390,9 @@ describe('agent-design-assessment-resolver', () => {
 
   // ── submitAgentDesignAssessment — happy path ──────────────────────────
 
-  describe('submitAgentDesignAssessment — happy path', () => {
-    test('18. emits EXACTLY one TransactWriteCommand with 2 items spanning both tables + governance.archetype.classified', async () => {
-      const auth = authContextFor('architect');
+  describe("submitAgentDesignAssessment — happy path", () => {
+    test("18. emits EXACTLY one TransactWriteCommand with 2 items spanning both tables + governance.archetype.classified", async () => {
+      const auth = authContextFor("architect");
       // First Get: existing PENDING row. Second Get: post-commit re-fetch.
       const pending = existingAssessment();
       const postCommit = completedAssessment();
@@ -395,7 +407,7 @@ describe('agent-design-assessment-resolver', () => {
       // Result is the post-commit row.
       expect(result.archetype).toBe(GovernanceArchetype.MONOLITHIC_DB);
       expect(result.archetypeStatus).toBe(ProjectArchetypeStatus.CLASSIFIED);
-      expect(result.completedBy).toBe('user-architect');
+      expect(result.completedBy).toBe("user-architect");
 
       // Exactly one TransactWriteCommand.
       const tx = ddbMock.commandCalls(TransactWriteCommand);
@@ -421,9 +433,9 @@ describe('agent-design-assessment-resolver', () => {
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
       expect(ebCalls).toHaveLength(1);
       const entry = ebCalls[0].args[0].input.Entries![0];
-      expect(entry.DetailType).toBe('governance.archetype.classified');
+      expect(entry.DetailType).toBe("governance.archetype.classified");
       const detail = JSON.parse(entry.Detail!);
-      expect(detail.projectId).toBe('proj-1');
+      expect(detail.projectId).toBe("proj-1");
       expect(detail.archetype).toBe(GovernanceArchetype.MONOLITHIC_DB);
       // `confidence` is the field name in the typed DetailPayloadOf
       // map in notifier-base.ts (reconciled). The resolver passes
@@ -432,8 +444,8 @@ describe('agent-design-assessment-resolver', () => {
       expect(detail.confidence).toBe(0.9);
     });
 
-    test('19. ProjectsTable update writes the archetype back (mirror-write)', async () => {
-      const auth = authContextFor('architect');
+    test("19. ProjectsTable update writes the archetype back (mirror-write)", async () => {
+      const auth = authContextFor("architect");
       ddbMock
         .on(GetCommand)
         .resolvesOnce({ Item: existingAssessment() })
@@ -442,13 +454,14 @@ describe('agent-design-assessment-resolver', () => {
 
       await submitAgentDesignAssessment(validInput(), auth);
 
-      const items = ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input
-        .TransactItems!;
+      const items =
+        ddbMock.commandCalls(TransactWriteCommand)[0].args[0].input
+          .TransactItems!;
       const projectsUpdate = items.find(
         (i) => i.Update?.TableName === PROJECTS_TABLE,
       );
       expect(projectsUpdate).toBeDefined();
-      expect(projectsUpdate!.Update!.Key).toEqual({ id: 'proj-1' });
+      expect(projectsUpdate!.Update!.Key).toEqual({ id: "proj-1" });
       const values = projectsUpdate!.Update!.ExpressionAttributeValues!;
       // Find the value corresponding to archetype in the UpdateExpression.
       const archetypeValue = Object.entries(values).find(
@@ -461,8 +474,8 @@ describe('agent-design-assessment-resolver', () => {
       expect(statusValue).toBeDefined();
     });
 
-    test('20. archetypeConfidence defaults to 1.0 when omitted', async () => {
-      const auth = authContextFor('architect');
+    test("20. archetypeConfidence defaults to 1.0 when omitted", async () => {
+      const auth = authContextFor("architect");
       ddbMock
         .on(GetCommand)
         .resolvesOnce({ Item: existingAssessment() })
@@ -484,58 +497,95 @@ describe('agent-design-assessment-resolver', () => {
 
   // ── handler dispatch ──────────────────────────────────────────────────
 
-  describe('handler dispatch', () => {
+  describe("handler dispatch", () => {
+    // finding 2c262386: handler dispatch now threads `event` into the
+    // project-org gate, so every dispatch test needs a project record
+    // whose organization matches the caller's `custom:organization` claim.
+    beforeEach(() => {
+      ddbMock
+        .on(GetCommand, {
+          TableName: "citadel-projects-test",
+          Key: { id: "proj-1" },
+        })
+        .resolves({
+          Item: {
+            id: "proj-1",
+            owner: "someone-else",
+            organization: "org-shared",
+          },
+        });
+    });
+
     function event(
       fieldName: string,
       args: Record<string, unknown>,
-      role: 'architect' | 'developer' = 'architect',
+      role: "architect" | "developer" = "architect",
     ): Record<string, unknown> {
       return {
         info: { fieldName },
         arguments: args,
-        identity: { sub: `user-${role}`, username: role, 'custom:role': role },
+        identity: {
+          sub: `user-${role}`,
+          username: role,
+          "custom:role": role,
+          "custom:organization": "org-shared",
+        },
       };
     }
 
-    test('21. dispatches startAgentDesignAssessment', async () => {
+    test("21. dispatches startAgentDesignAssessment", async () => {
       ddbMock.on(PutCommand).resolves({});
       const result = (await handler(
-        event('startAgentDesignAssessment', { projectId: 'proj-1' }),
+        event("startAgentDesignAssessment", { projectId: "proj-1" }),
       )) as { projectId: string; archetypeStatus: string };
-      expect(result.projectId).toBe('proj-1');
-      expect(result.archetypeStatus).toBe('PENDING');
+      expect(result.projectId).toBe("proj-1");
+      expect(result.archetypeStatus).toBe("PENDING");
     });
 
-    test('22. dispatches getAgentDesignAssessment', async () => {
-      ddbMock.on(GetCommand).resolves({ Item: existingAssessment() });
-      const result = (await handler(
-        event('getAgentDesignAssessment', { projectId: 'proj-1' }, 'developer'),
-      )) as { projectId: string } | null;
-      expect(result?.projectId).toBe('proj-1');
-    });
-
-    test('23. dispatches submitAgentDesignAssessment with full input object', async () => {
+    test("22. dispatches getAgentDesignAssessment", async () => {
       ddbMock
-        .on(GetCommand)
+        .on(GetCommand, {
+          TableName: "citadel-agent-design-assessments-test",
+          Key: { projectId: "proj-1" },
+        })
+        .resolves({ Item: existingAssessment() });
+      const result = (await handler(
+        event("getAgentDesignAssessment", { projectId: "proj-1" }, "developer"),
+      )) as { projectId: string } | null;
+      expect(result?.projectId).toBe("proj-1");
+    });
+
+    test("23. dispatches submitAgentDesignAssessment with full input object", async () => {
+      ddbMock
+        .on(GetCommand, {
+          TableName: "citadel-agent-design-assessments-test",
+          Key: { projectId: "proj-1" },
+        })
         .resolvesOnce({ Item: existingAssessment() })
         .resolvesOnce({ Item: completedAssessment() });
       ddbMock.on(TransactWriteCommand).resolves({});
-      const result = (await handler(event('submitAgentDesignAssessment', validInput()))) as {
+      const result = (await handler(
+        event("submitAgentDesignAssessment", validInput()),
+      )) as {
         archetypeStatus: string;
       };
-      expect(result.archetypeStatus).toBe('CLASSIFIED');
+      expect(result.archetypeStatus).toBe("CLASSIFIED");
     });
 
-    test('24. unknown fieldName throws', async () => {
-      await expect(
-        handler(event('bogusField', {})),
-      ).rejects.toThrow(/Unknown fieldName.*bogusField/);
+    test("24. unknown fieldName throws", async () => {
+      await expect(handler(event("bogusField", {}))).rejects.toThrow(
+        /Unknown fieldName.*bogusField/,
+      );
     });
 
-    test('25. handler honours auth gate on write fields (developer denied)', async () => {
+    test("25. handler honours auth gate on write fields (developer denied)", async () => {
       await expect(
         handler(
-          event('startAgentDesignAssessment', { projectId: 'proj-1' }, 'developer'),
+          event(
+            "startAgentDesignAssessment",
+            { projectId: "proj-1" },
+            "developer",
+          ),
         ),
       ).rejects.toThrow(/UnauthorizedError/);
     });
@@ -543,22 +593,22 @@ describe('agent-design-assessment-resolver', () => {
 
   // ── Property test: resolver validator matches schema allowlist ────────
 
-  describe('property: submitAgentDesignAssessment validator (200 iters)', () => {
-    test('26. ValidationError iff ranking is not a permutation of the 4 dimensions with ranks = {1,2,3,4}', async () => {
+  describe("property: submitAgentDesignAssessment validator (200 iters)", () => {
+    test("26. ValidationError iff ranking is not a permutation of the 4 dimensions with ranks = {1,2,3,4}", async () => {
       const dimensionArb = fc.constantFrom<FourDimensionLiteral>(
-        'CODE',
-        'DATA',
-        'INTEGRATION',
-        'INFRASTRUCTURE',
+        "CODE",
+        "DATA",
+        "INTEGRATION",
+        "INFRASTRUCTURE",
       );
       // QB-003-1: use bounded simple rationale strings to avoid ReDoS-risk
       // payloads in redactPII.
       const rationaleArb = fc.constantFrom(
-        'core work',
-        'some data',
-        'small scope',
-        'integration point',
-        'simple',
+        "core work",
+        "some data",
+        "small scope",
+        "integration point",
+        "simple",
       );
       const entryArb = fc.record({
         dimension: dimensionArb,
@@ -568,10 +618,10 @@ describe('agent-design-assessment-resolver', () => {
       const rankingArb = fc.array(entryArb, { minLength: 0, maxLength: 8 });
 
       const FOUR = new Set<FourDimensionLiteral>([
-        'CODE',
-        'DATA',
-        'INTEGRATION',
-        'INFRASTRUCTURE',
+        "CODE",
+        "DATA",
+        "INTEGRATION",
+        "INFRASTRUCTURE",
       ]);
 
       await fc.assert(
@@ -582,7 +632,7 @@ describe('agent-design-assessment-resolver', () => {
           ebMock.reset();
           ebMock.on(PutEventsCommand).resolves({
             FailedEntryCount: 0,
-            Entries: [{ EventId: 'evt-prop' }],
+            Entries: [{ EventId: "evt-prop" }],
           });
           __resetGovernanceNotifierForTest();
 
@@ -598,7 +648,8 @@ describe('agent-design-assessment-resolver', () => {
           const validLength = ranking.length === 4;
           const ranks = ranking.map((r) => r.rank).sort((a, b) => a - b);
           const validRanks =
-            validLength && JSON.stringify(ranks) === JSON.stringify([1, 2, 3, 4]);
+            validLength &&
+            JSON.stringify(ranks) === JSON.stringify([1, 2, 3, 4]);
           const dims = new Set(ranking.map((r) => r.dimension));
           const validDims =
             validLength &&
@@ -606,16 +657,17 @@ describe('agent-design-assessment-resolver', () => {
             [...FOUR].every((d) => dims.has(d));
           const validRationales =
             validLength && ranking.every((r) => r.rationale.trim().length > 0);
-          const isValid = validLength && validRanks && validDims && validRationales;
+          const isValid =
+            validLength && validRanks && validDims && validRationales;
 
-          const auth = authContextFor('architect');
+          const auth = authContextFor("architect");
           const input: SubmitAgentDesignAssessmentInput = {
-            projectId: 'proj-prop',
+            projectId: "proj-prop",
             archetype: GovernanceArchetype.MONOLITHIC_DB,
             archetypeConfidence: 0.8,
             dimensionRanking: ranking,
-            accessibleDataSources: ['src-1'],
-            primaryRiskAreas: ['risk-1'],
+            accessibleDataSources: ["src-1"],
+            primaryRiskAreas: ["risk-1"],
           };
 
           if (isValid) {
