@@ -123,18 +123,19 @@ export async function writeReleasePromotionApprovalFinding(
   const ttl = timestamp + TTL_DAYS * 86400;
 
   const item: Record<string, unknown> = {
+    // Unified camelCase convention (decision 2dd461f6, slice 1) — see
+    // release-gate-finding-writer.ts's identical comment and
+    // governance-ledger-attribute-convention.test.ts.
     findingId,
     workflowId,
     timestamp,
-    workflow_id: workflowId,
     decision: input.decision,
     requesting_agent: REQUESTING_AGENT,
     target_agent: input.agentTargetId,
     reason: buildReason(input),
-    finding_id: findingId,
     decided_by: input.decidedBy,
     category: "release-promotion-approval",
-    org_id: input.orgId,
+    orgId: input.orgId,
     environment: input.environment,
     release_id: input.releaseId,
     ttl,

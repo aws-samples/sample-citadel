@@ -182,18 +182,23 @@ export async function writeReleaseGateFinding(
   const ttl = timestamp + TTL_DAYS * 86400;
 
   const item: Record<string, unknown> = {
+    // Unified camelCase convention (decision 2dd461f6, slice 1): findingId
+    // and workflowId were already the table's own key-schema attributes
+    // (HASH key / workflow-index GSI HASH key); orgId now follows the same
+    // convention, matching the 16 other tables in this repo that already
+    // key on `orgId`. The pre-slice-1 snake_case duplicates
+    // (finding_id/workflow_id/org_id) are retired — see
+    // governance-ledger-attribute-convention.test.ts, which pins this.
     findingId,
     workflowId,
     timestamp,
-    workflow_id: workflowId,
     decision: input.decision,
     requesting_agent: REQUESTING_AGENT,
     target_agent: input.agentTargetId,
     reason: buildReason(input),
-    finding_id: findingId,
     decided_by: input.decidedBy,
     category: "release-promotion",
-    org_id: input.orgId,
+    orgId: input.orgId,
     environment: input.environment,
     release_id: input.releaseId,
     enforcement_mode: input.mode,

@@ -159,20 +159,21 @@ describe("writeReleaseGateFinding", () => {
     expect(Object.prototype.hasOwnProperty.call(item, "evalRunId")).toBe(false);
 
     // Exhaustive shape check: the pre-stamping key set, nothing more.
+    // Unified camelCase convention (decision 2dd461f6, slice 1): the
+    // legacy snake_case duplicates workflow_id/finding_id/org_id are
+    // retired — findingId/workflowId/orgId are now the ONLY forms.
     expect(Object.keys(item).sort()).toEqual(
       [
         "findingId",
         "workflowId",
         "timestamp",
-        "workflow_id",
         "decision",
         "requesting_agent",
         "target_agent",
         "reason",
-        "finding_id",
         "decided_by",
         "category",
-        "org_id",
+        "orgId",
         "environment",
         "release_id",
         "enforcement_mode",

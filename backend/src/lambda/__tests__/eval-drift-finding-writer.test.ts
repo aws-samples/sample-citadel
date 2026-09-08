@@ -65,8 +65,17 @@ describe("handleDriftDetected", () => {
     expect(typeof item.findingId).toBe("string");
     expect(item.workflowId).toBe("EVAL_DRIFT#agent-1#policy_compliance");
     expect(typeof item.timestamp).toBe("number");
-    // Dataclass field names (snake_case), same as the Python writer.
-    expect(item.workflow_id).toBe("EVAL_DRIFT#agent-1#policy_compliance");
+    // Unified camelCase convention (decision 2dd461f6, slice 1): the
+    // legacy snake_case workflow_id/finding_id duplicates are retired —
+    // workflowId/findingId above are now the ONLY forms. Every OTHER
+    // dataclass-style field (requesting_agent/target_agent) stays
+    // snake_case — unifying those is out of scope for this slice.
+    expect(Object.prototype.hasOwnProperty.call(item, "workflow_id")).toBe(
+      false,
+    );
+    expect(Object.prototype.hasOwnProperty.call(item, "finding_id")).toBe(
+      false,
+    );
     expect(item.decision).toBe("escalate");
     expect(item.requesting_agent).toBe("eval-drift-detector");
     expect(item.target_agent).toBe("agent-1");

@@ -288,6 +288,34 @@ type DdbRow = Record<string, unknown>;
 
 // --- Helpers ---
 
+/**
+ * Reads a governance-ledger attribute that was unified from a legacy
+ * snake_case name to a camelCase name (decision 2dd461f6, slice 1:
+ * findingId/workflowId/orgId). Prefers the NEW (camelCase) attribute;
+ * falls back to the OLD (snake_case) attribute for rows written before
+ * the unification landed.
+ *
+ * COMPATIBILITY WINDOW: the ledger table has a 90-day TTL (QT1-10), so
+ * every pre-unification row will have expired and been purged by DynamoDB
+ * on its own by approximately 2026-12-08 (90 days after this slice
+ * landed, 2026-09-08). This fallback may be REMOVED after that date —
+ * at that point every live row will already carry the new name and the
+ * legacy branch is dead weight. Do not remove it before then: rows
+ * written up to the moment this slice deployed still carry ONLY the old
+ * name and must keep being readable until they age out.
+ */
+function readLedgerAttr(
+  row: DdbRow,
+  camelKey: string,
+  legacySnakeKey: string,
+): string | undefined {
+  const camelValue = row[camelKey];
+  if (typeof camelValue === "string") return camelValue;
+  const snakeValue = row[legacySnakeKey];
+  if (typeof snakeValue === "string") return snakeValue;
+  return undefined;
+}
+
 function zeroReconcilerStatus(): ReconcilerStatus {
   return {
     lastRunAt: null,
@@ -336,7 +364,9 @@ export function projectFinding(row: DdbRow): GovernanceFindingProjected {
 
   return {
     findingId: typeof row.findingId === "string" ? row.findingId : "",
-    workflowId: typeof row.workflowId === "string" ? row.workflowId : "",
+    // workflowId is unified (decision 2dd461f6, slice 1) — see
+    // readLedgerAttr's doc comment for the fallback/removal-date policy.
+    workflowId: readLedgerAttr(row, "workflowId", "workflow_id") ?? "",
     decision: typeof row.decision === "string" ? row.decision : "",
     reason: typeof row.reason === "string" ? row.reason : "",
     requestingAgent:
@@ -949,8 +979,13 @@ async function getDecisionTrace(
     arbitrationPattern,
     scopeReduction,
   );
-  const findingOrgId =
-    typeof findingRow.orgId === "string" ? findingRow.orgId : undefined;
+  // orgId is unified (decision 2dd461f6, slice 1) — see readLedgerAttr's
+  // doc comment. No live row is stamped with either name yet (org
+  // filtering is slice 2), so this currently always resolves to
+  // undefined either way — the fallback exists so this call site is
+  // ALREADY capable of reading a stamped value the moment slice 2 lands,
+  // without a further code change here.
+  const findingOrgId = readLedgerAttr(findingRow, "orgId", "org_id");
   const linkedExecutionId = await findExecutionIdByRunId(
     finding.runId,
     findingOrgId,
@@ -6332,8 +6367,11 @@ async function getD4RetrospectiveReport(
         break;
       }
       scanned++;
-      const workflowId =
-        typeof row.workflow_id === "string" ? row.workflow_id : "";
+      // workflowId is unified (decision 2dd461f6, slice 1) — the dedup
+      // key here previously read ONLY the legacy `workflow_id`; it now
+      // prefers the new camelCase name and falls back for old rows. See
+      // readLedgerAttr's doc comment for the fallback/removal-date policy.
+      const workflowId = readLedgerAttr(row, "workflowId", "workflow_id") ?? "";
       const reason = typeof row.reason === "string" ? row.reason : "";
       const key = `${workflowId}|${reason}`;
       const scope =
