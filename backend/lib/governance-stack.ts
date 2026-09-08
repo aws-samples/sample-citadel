@@ -2301,6 +2301,11 @@ exports.handler = async (event) => {
           INTERROGATION_ROUNDS_TABLE: props.interrogationRoundsTable.tableName,
           GOVERNANCE_TRANSCRIPTS_BUCKET: governanceTranscriptsBucket.bucketName,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          // finding 2c262386: assertProjectOrgAccess reads PROJECTS_TABLE
+          // to reconcile the caller's org against the round's owning
+          // project before any read/write. Read-only — this resolver
+          // never writes Projects.
+          PROJECTS_TABLE: props.projectsTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(
@@ -2322,6 +2327,9 @@ exports.handler = async (event) => {
       interrogationRoundResolverFunction,
     );
     props.agentEventBus.grantPutEventsTo(interrogationRoundResolverFunction);
+    // finding 2c262386: read-only grant for the project-org reconciliation
+    // gate (assertProjectOrgAccess). Least privilege — no write access.
+    props.projectsTable.grantReadData(interrogationRoundResolverFunction);
 
     const interrogationRoundDataSourceRole = new iam.Role(
       this,
