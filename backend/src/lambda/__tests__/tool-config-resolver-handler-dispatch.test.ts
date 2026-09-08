@@ -9,8 +9,14 @@
  *
  * Validates: Requirements 4.6, 11.2, 11.3
  */
-import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
-import { mockClient } from 'aws-sdk-client-mock';
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  ScanCommand,
+  DeleteCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
 
 const dynamoMock = mockClient(DynamoDBDocumentClient);
 
@@ -25,7 +31,9 @@ const mockUpdateResource = jest.fn();
 const mockDeleteResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
 const mockSearchResources = jest.fn();
-const mockSerializeCustomMetadata = jest.fn((meta: unknown) => JSON.stringify(meta));
+const mockSerializeCustomMetadata = jest.fn((meta: unknown) =>
+  JSON.stringify(meta),
+);
 const mockDeserializeCustomMetadata = jest.fn(
   (json: string | null, defaults: Record<string, unknown>) => {
     if (!json) return defaults;
@@ -37,12 +45,20 @@ const mockDeserializeCustomMetadata = jest.fn(
   },
 );
 const mockToRegistryStatus = jest.fn((state: string) => {
-  const map: Record<string, string> = { active: 'APPROVED', inactive: 'DEPRECATED', maintenance: 'DRAFT' };
-  return map[state] || 'DEPRECATED';
+  const map: Record<string, string> = {
+    active: "APPROVED",
+    inactive: "DEPRECATED",
+    maintenance: "DRAFT",
+  };
+  return map[state] || "DEPRECATED";
 });
 const mockToInternalState = jest.fn((status: string) => {
-  const map: Record<string, string> = { APPROVED: 'active', DEPRECATED: 'inactive', DRAFT: 'maintenance' };
-  return map[status] || 'inactive';
+  const map: Record<string, string> = {
+    APPROVED: "active",
+    DEPRECATED: "inactive",
+    DRAFT: "maintenance",
+  };
+  return map[status] || "inactive";
 });
 
 /** Registry record fixture shape consumed by the mock mapper. */
@@ -58,12 +74,18 @@ interface RegistryRecordFixture {
 
 const mockMapToToolConfig = jest.fn((record: RegistryRecordFixture) => {
   const meta = record.customDescriptorContent
-    ? (() => { try { return JSON.parse(record.customDescriptorContent); } catch { return {}; } })()
+    ? (() => {
+        try {
+          return JSON.parse(record.customDescriptorContent);
+        } catch {
+          return {};
+        }
+      })()
     : {};
   return {
     toolId: record.recordId,
-    orgId: meta.orgId ?? '',
-    config: record.description || '',
+    orgId: meta.orgId ?? "",
+    config: record.description || "",
     state: mockToInternalState(record.status),
     categories: meta.categories || [],
     integrationBindings: meta.integrationBindings || null,
@@ -73,9 +95,9 @@ const mockMapToToolConfig = jest.fn((record: RegistryRecordFixture) => {
   };
 });
 
-jest.mock('../../services/registry-service', () => ({
+jest.mock("../../services/registry-service", () => ({
   RegistryService: jest.fn().mockImplementation(() => ({
-    getRegistryId: () => 'test-registry',
+    getRegistryId: () => "test-registry",
     listResources: mockListResources,
     getResource: mockGetResource,
     createResource: mockCreateResource,
@@ -91,13 +113,13 @@ jest.mock('../../services/registry-service', () => ({
   })),
 }));
 
-import { handler, _resetRegistryService } from '../tool-config-resolver';
+import { handler, _resetRegistryService } from "../tool-config-resolver";
 
 // ---------------------------------------------------------------------------
 
 const defaultIdentity = {
-  sub: 'test-user',
-  claims: { 'custom:organization': 'test-org-a' },
+  sub: "test-user",
+  claims: { "custom:organization": "test-org-a" },
 };
 
 const makeEvent = (
@@ -111,27 +133,27 @@ const makeEvent = (
 });
 
 const sampleRegistryRecord = {
-  recordId: 'tool-r1',
-  name: 'RegistryTool',
+  recordId: "tool-r1",
+  name: "RegistryTool",
   description: '{"name":"RegistryTool"}',
-  status: 'APPROVED',
+  status: "APPROVED",
   customDescriptorContent: JSON.stringify({
-    categories: ['cat1'],
-    icon: 'icon.png',
-    state: 'active',
-    orgId: 'test-org-a',
+    categories: ["cat1"],
+    icon: "icon.png",
+    state: "active",
+    orgId: "test-org-a",
     integrationBindings: [
-      { integrationId: 'int1', integrationType: 'SLACK', direction: 'OUTPUT' },
+      { integrationId: "int1", integrationType: "SLACK", direction: "OUTPUT" },
     ],
     dataStoreBindings: [
-      { dataStoreId: 'ds1', dataStoreType: 'S3', direction: 'BIDIRECTIONAL' },
+      { dataStoreId: "ds1", dataStoreType: "S3", direction: "BIDIRECTIONAL" },
     ],
   }),
-  createdAt: new Date('2025-01-01T00:00:00Z'),
-  updatedAt: new Date('2025-01-01T00:00:00Z'),
+  createdAt: new Date("2025-01-01T00:00:00Z"),
+  updatedAt: new Date("2025-01-01T00:00:00Z"),
 };
 
-describe('tool-config-resolver handler switch dispatch (task 7.5)', () => {
+describe("tool-config-resolver handler switch dispatch (task 7.5)", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
@@ -140,8 +162,8 @@ describe('tool-config-resolver handler switch dispatch (task 7.5)', () => {
     _resetRegistryService();
     process.env = {
       ...originalEnv,
-      TOOLS_CONFIG_TABLE: 'test-tools-config',
-      REGISTRY_ID: 'test-registry',
+      TOOLS_CONFIG_TABLE: "test-tools-config",
+      REGISTRY_ID: "test-registry",
     };
   });
 
@@ -151,185 +173,232 @@ describe('tool-config-resolver handler switch dispatch (task 7.5)', () => {
 
   // ─── REGISTRY_ENABLED=false: routes to DynamoDB ──────────────
 
-  describe('when REGISTRY_ENABLED is false', () => {
+  describe("when REGISTRY_ENABLED is false", () => {
     beforeEach(() => {
-      process.env.REGISTRY_ENABLED = 'false';
+      process.env.REGISTRY_ENABLED = "false";
     });
 
-    test('listToolConfigs uses DynamoDB scan', async () => {
+    test("listToolConfigs uses DynamoDB scan", async () => {
       dynamoMock.on(ScanCommand).resolves({
         Items: [
           {
-            toolId: 't1',
-            config: { name: 'T1' },
-            state: 'active',
-            integrationBindings: [{ integrationId: 'int1', integrationType: 'SLACK', direction: 'output' }],
-            dataStoreBindings: [{ dataStoreId: 'ds1', dataStoreType: 'S3', direction: 'bidirectional' }],
+            toolId: "t1",
+            config: { name: "T1" },
+            state: "active",
+            integrationBindings: [
+              {
+                integrationId: "int1",
+                integrationType: "SLACK",
+                direction: "output",
+              },
+            ],
+            dataStoreBindings: [
+              {
+                dataStoreId: "ds1",
+                dataStoreType: "S3",
+                direction: "bidirectional",
+              },
+            ],
           },
         ],
       });
 
-      const result = await handler(makeEvent('listToolConfigs'));
+      const result = await handler(makeEvent("listToolConfigs"));
 
       expect(mockListResources).not.toHaveBeenCalled();
       expect(result).toHaveLength(1);
-      expect(result[0].toolId).toBe('t1');
+      expect(result[0].toolId).toBe("t1");
       // GraphQL response shape: config is a JSON string
-      expect(typeof result[0].config).toBe('string');
+      expect(typeof result[0].config).toBe("string");
       // Bindings preserved (direction normalised to upper case by the resolver)
       expect(result[0].integrationBindings).toHaveLength(1);
-      expect(result[0].integrationBindings[0].direction).toBe('OUTPUT');
+      expect(result[0].integrationBindings[0].direction).toBe("OUTPUT");
       expect(result[0].dataStoreBindings).toHaveLength(1);
-      expect(result[0].dataStoreBindings[0].direction).toBe('BIDIRECTIONAL');
+      expect(result[0].dataStoreBindings[0].direction).toBe("BIDIRECTIONAL");
     });
 
-    test('getToolConfig uses DynamoDB GetItem', async () => {
+    test("getToolConfig uses DynamoDB GetItem", async () => {
       dynamoMock.on(GetCommand).resolves({
         Item: {
-          toolId: 't1',
-          config: { name: 'T1' },
-          state: 'active',
-          integrationBindings: [{ integrationId: 'int1', integrationType: 'SLACK' }],
+          toolId: "t1",
+          config: { name: "T1" },
+          state: "active",
+          integrationBindings: [
+            { integrationId: "int1", integrationType: "SLACK" },
+          ],
         },
       });
 
-      const result = await handler(makeEvent('getToolConfig', { toolId: 't1' }));
+      const result = await handler(
+        makeEvent("getToolConfig", { toolId: "t1" }),
+      );
 
       expect(mockGetResource).not.toHaveBeenCalled();
-      expect(result?.toolId).toBe('t1');
-      expect(typeof result?.config).toBe('string');
+      expect(result?.toolId).toBe("t1");
+      expect(typeof result?.config).toBe("string");
       // Bindings preserved in the response shape
       expect(result?.integrationBindings).toHaveLength(1);
     });
 
-    test('createToolConfig uses DynamoDB Put', async () => {
+    test("createToolConfig uses DynamoDB Put", async () => {
       dynamoMock.on(PutCommand).resolves({});
 
-      const result = await handler(makeEvent('createToolConfig', {
-        input: {
-          toolId: 'new',
-          config: '{"name":"N"}',
-          state: 'active',
-          integrationBindings: [{ integrationId: 'int1', integrationType: 'SLACK' }],
-        },
-      }));
+      const result = await handler(
+        makeEvent("createToolConfig", {
+          input: {
+            toolId: "new",
+            config: '{"name":"N"}',
+            state: "active",
+            integrationBindings: [
+              { integrationId: "int1", integrationType: "SLACK" },
+            ],
+          },
+        }),
+      );
 
       expect(mockCreateResource).not.toHaveBeenCalled();
-      expect(result.toolId).toBe('new');
-      expect(typeof result.config).toBe('string');
+      expect(result.toolId).toBe("new");
+      expect(typeof result.config).toBe("string");
       expect(result.integrationBindings).toHaveLength(1);
       expect(result.createdAt).toBeDefined();
       expect(result.updatedAt).toBeDefined();
     });
 
-    test('updateToolConfig uses DynamoDB Put', async () => {
+    test("updateToolConfig uses DynamoDB Put", async () => {
       dynamoMock.on(GetCommand).resolves({
         Item: {
-          toolId: 't1',
+          toolId: "t1",
+          orgId: "test-org-a",
           config: '{"old":true}',
-          state: 'active',
-          createdAt: '2025-01-01',
+          state: "active",
+          createdAt: "2025-01-01",
         },
       });
       dynamoMock.on(PutCommand).resolves({});
 
-      const result = await handler(makeEvent('updateToolConfig', {
-        input: { toolId: 't1', config: '{"new":true}' },
-      }));
+      const result = await handler(
+        makeEvent("updateToolConfig", {
+          input: { toolId: "t1", config: '{"new":true}' },
+        }),
+      );
 
       expect(mockUpdateResource).not.toHaveBeenCalled();
-      expect(result.toolId).toBe('t1');
-      expect(typeof result.config).toBe('string');
+      expect(result.toolId).toBe("t1");
+      expect(typeof result.config).toBe("string");
     });
 
-    test('deleteToolConfig uses DynamoDB Delete', async () => {
+    test("deleteToolConfig uses DynamoDB Delete", async () => {
+      dynamoMock.on(GetCommand).resolves({
+        Item: {
+          toolId: "t1",
+          orgId: "test-org-a",
+          config: "{}",
+          state: "active",
+        },
+      });
       dynamoMock.on(DeleteCommand).resolves({});
 
-      const result = await handler(makeEvent('deleteToolConfig', { toolId: 't1' }));
+      const result = await handler(
+        makeEvent("deleteToolConfig", { toolId: "t1" }),
+      );
 
       expect(mockDeleteResource).not.toHaveBeenCalled();
       expect(result.success).toBe(true);
     });
 
-    test('listIntegrationOperations is flag-independent', async () => {
-      const result = await handler(makeEvent('listIntegrationOperations', { integrationType: 'SLACK' }));
+    test("listIntegrationOperations is flag-independent", async () => {
+      const result = await handler(
+        makeEvent("listIntegrationOperations", { integrationType: "SLACK" }),
+      );
       expect(Array.isArray(result)).toBe(true);
     });
   });
 
   // ─── REGISTRY_ENABLED=true: routes to Registry ──────────────
 
-  describe('when REGISTRY_ENABLED is true', () => {
+  describe("when REGISTRY_ENABLED is true", () => {
     beforeEach(() => {
-      process.env.REGISTRY_ENABLED = 'true';
+      process.env.REGISTRY_ENABLED = "true";
     });
 
-    test('listToolConfigs uses RegistryService.listResources (merged with DDB)', async () => {
+    test("listToolConfigs uses RegistryService.listResources (merged with DDB)", async () => {
       mockListResources.mockResolvedValue([sampleRegistryRecord]);
       dynamoMock.on(ScanCommand).resolves({ Items: [] });
 
-      const result = await handler(makeEvent('listToolConfigs'));
+      const result = await handler(makeEvent("listToolConfigs"));
 
-      expect(mockListResources).toHaveBeenCalledWith('tool');
+      expect(mockListResources).toHaveBeenCalledWith("tool");
       expect(result).toHaveLength(1);
-      expect(result[0].toolId).toBe('tool-r1');
+      expect(result[0].toolId).toBe("tool-r1");
       // Bindings preserved in the GraphQL response shape from Registry mapping
       expect(result[0].integrationBindings).toHaveLength(1);
       expect(result[0].dataStoreBindings).toHaveLength(1);
     });
 
-    test('getToolConfig uses RegistryService.getResource', async () => {
+    test("getToolConfig uses RegistryService.getResource", async () => {
       mockGetResource.mockResolvedValue(sampleRegistryRecord);
 
-      const result = await handler(makeEvent('getToolConfig', { toolId: 'tool-r1' }));
+      const result = await handler(
+        makeEvent("getToolConfig", { toolId: "tool-r1" }),
+      );
 
-      expect(mockGetResource).toHaveBeenCalledWith('tool', 'tool-r1');
-      expect(result?.toolId).toBe('tool-r1');
+      expect(mockGetResource).toHaveBeenCalledWith("tool", "tool-r1");
+      expect(result?.toolId).toBe("tool-r1");
       expect(result?.integrationBindings).toHaveLength(1);
     });
 
-    test('createToolConfig uses RegistryService.createResource', async () => {
+    test("createToolConfig uses RegistryService.createResource", async () => {
       mockCreateResource.mockResolvedValue(sampleRegistryRecord);
 
-      const result = await handler(makeEvent('createToolConfig', {
-        input: {
-          toolId: 'tool-r1',
-          config: '{"name":"RegistryTool"}',
-          integrationBindings: [{ integrationId: 'int1', integrationType: 'SLACK' }],
-          dataStoreBindings: [{ dataStoreId: 'ds1', dataStoreType: 'S3' }],
-        },
-      }));
+      const result = await handler(
+        makeEvent("createToolConfig", {
+          input: {
+            toolId: "tool-r1",
+            config: '{"name":"RegistryTool"}',
+            integrationBindings: [
+              { integrationId: "int1", integrationType: "SLACK" },
+            ],
+            dataStoreBindings: [{ dataStoreId: "ds1", dataStoreType: "S3" }],
+          },
+        }),
+      );
 
       expect(mockCreateResource).toHaveBeenCalled();
-      expect(result.toolId).toBe('tool-r1');
+      expect(result.toolId).toBe("tool-r1");
       // GraphQL response preserves bindings
       expect(result.integrationBindings).toHaveLength(1);
       expect(result.dataStoreBindings).toHaveLength(1);
     });
 
-    test('updateToolConfig uses RegistryService.updateResource', async () => {
+    test("updateToolConfig uses RegistryService.updateResource", async () => {
       mockGetResource.mockResolvedValue(sampleRegistryRecord);
       mockUpdateResource.mockResolvedValue(sampleRegistryRecord);
 
-      const result = await handler(makeEvent('updateToolConfig', {
-        input: { toolId: 'tool-r1', categories: ['new-cat'] },
-      }));
+      const result = await handler(
+        makeEvent("updateToolConfig", {
+          input: { toolId: "tool-r1", categories: ["new-cat"] },
+        }),
+      );
 
       expect(mockUpdateResource).toHaveBeenCalled();
-      expect(result.toolId).toBe('tool-r1');
+      expect(result.toolId).toBe("tool-r1");
     });
 
-    test('deleteToolConfig uses RegistryService.deleteResource', async () => {
+    test("deleteToolConfig uses RegistryService.deleteResource", async () => {
       mockDeleteResource.mockResolvedValue(undefined);
 
-      const result = await handler(makeEvent('deleteToolConfig', { toolId: 'tool-r1' }));
+      const result = await handler(
+        makeEvent("deleteToolConfig", { toolId: "tool-r1" }),
+      );
 
-      expect(mockDeleteResource).toHaveBeenCalledWith('tool', 'tool-r1');
+      expect(mockDeleteResource).toHaveBeenCalledWith("tool", "tool-r1");
       expect(result.success).toBe(true);
     });
 
-    test('listIntegrationOperations is flag-independent', async () => {
-      const result = await handler(makeEvent('listIntegrationOperations', { integrationType: 'SLACK' }));
+    test("listIntegrationOperations is flag-independent", async () => {
+      const result = await handler(
+        makeEvent("listIntegrationOperations", { integrationType: "SLACK" }),
+      );
       expect(Array.isArray(result)).toBe(true);
       // Registry APIs should not have been called for this field
       expect(mockListResources).not.toHaveBeenCalled();
@@ -339,106 +408,143 @@ describe('tool-config-resolver handler switch dispatch (task 7.5)', () => {
 
   // ─── searchToolConfigs: Registry-only (per requirement 9.3) ─────
 
-  describe('searchToolConfigs is always wired to Registry', () => {
-    test('routes to RegistryService.searchResources regardless of flag', async () => {
-      process.env.REGISTRY_ENABLED = 'true';
+  describe("searchToolConfigs is always wired to Registry", () => {
+    test("routes to RegistryService.searchResources regardless of flag", async () => {
+      process.env.REGISTRY_ENABLED = "true";
       mockSearchResources.mockResolvedValue([sampleRegistryRecord]);
 
-      const result = await handler(makeEvent('searchToolConfigs', { query: 'test' }));
+      const result = await handler(
+        makeEvent("searchToolConfigs", { query: "test" }),
+      );
 
-      expect(mockSearchResources).toHaveBeenCalledWith('tool', 'test');
+      expect(mockSearchResources).toHaveBeenCalledWith("tool", "test");
       expect(result).toHaveLength(1);
-      expect(result[0].toolId).toBe('tool-r1');
+      expect(result[0].toolId).toBe("tool-r1");
     });
   });
 
   // ─── Phase-2a org scoping ───────────────────────────────────
-  describe('Phase-2a org scoping (handler)', () => {
+  describe("Phase-2a org scoping (handler)", () => {
     beforeEach(() => {
-      process.env.REGISTRY_ENABLED = 'true';
+      process.env.REGISTRY_ENABLED = "true";
     });
 
-    test('(a) create: orgId captured from JWT claim and serialized into customMetadata', async () => {
+    test("(a) create: orgId captured from JWT claim and serialized into customMetadata", async () => {
       mockCreateResource.mockResolvedValue(sampleRegistryRecord);
 
-      await handler(makeEvent(
-        'createToolConfig',
-        { input: { toolId: 'tool-r1', config: '{"name":"RegistryTool"}' } },
-      ));
+      await handler(
+        makeEvent("createToolConfig", {
+          input: { toolId: "tool-r1", config: '{"name":"RegistryTool"}' },
+        }),
+      );
 
       expect(mockSerializeCustomMetadata).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: 'test-org-a' }),
+        expect.objectContaining({ orgId: "test-org-a" }),
       );
     });
 
-    test('(b) update: existing orgId is preserved', async () => {
+    test("(b) update: existing orgId is preserved for a same-org caller", async () => {
       const owned = {
         ...sampleRegistryRecord,
-        customDescriptorContent: JSON.stringify({ orgId: 'original-owner-org' }),
+        customDescriptorContent: JSON.stringify({
+          orgId: "original-owner-org",
+        }),
       };
       mockGetResource.mockResolvedValue(owned);
       mockUpdateResource.mockResolvedValue(owned);
 
-      await handler(makeEvent(
-        'updateToolConfig',
-        { input: { toolId: 'tool-r1', categories: ['x'] } },
-        { sub: 'u', claims: { 'custom:organization': 'different-caller-org' } },
-      ));
+      await handler(
+        makeEvent(
+          "updateToolConfig",
+          { input: { toolId: "tool-r1", categories: ["x"] } },
+          { sub: "u", claims: { "custom:organization": "original-owner-org" } },
+        ),
+      );
 
       expect(mockSerializeCustomMetadata).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: 'original-owner-org' }),
+        expect.objectContaining({ orgId: "original-owner-org" }),
       );
     });
 
-    test('(c) list filters to caller org', async () => {
+    test("(b2) update: cross-org caller is refused BEFORE any Registry write (finding 13065e38)", async () => {
+      const owned = {
+        ...sampleRegistryRecord,
+        customDescriptorContent: JSON.stringify({
+          orgId: "original-owner-org",
+        }),
+      };
+      mockGetResource.mockResolvedValue(owned);
+
+      await expect(
+        handler(
+          makeEvent(
+            "updateToolConfig",
+            { input: { toolId: "tool-r1", categories: ["x"] } },
+            {
+              sub: "u",
+              claims: { "custom:organization": "different-caller-org" },
+            },
+          ),
+        ),
+      ).rejects.toThrow("Access denied");
+
+      expect(mockUpdateResource).not.toHaveBeenCalled();
+      expect(mockSerializeCustomMetadata).not.toHaveBeenCalled();
+    });
+
+    test("(c) list filters to caller org", async () => {
       const ours = {
         ...sampleRegistryRecord,
-        recordId: 'tool-a',
-        customDescriptorContent: JSON.stringify({ orgId: 'test-org-a' }),
+        recordId: "tool-a",
+        customDescriptorContent: JSON.stringify({ orgId: "test-org-a" }),
       };
       const theirs = {
         ...sampleRegistryRecord,
-        recordId: 'tool-b',
-        customDescriptorContent: JSON.stringify({ orgId: 'other-org' }),
+        recordId: "tool-b",
+        customDescriptorContent: JSON.stringify({ orgId: "other-org" }),
       };
       mockListResources.mockResolvedValue([ours, theirs]);
       dynamoMock.on(ScanCommand).resolves({ Items: [] });
 
-      const result = await handler(makeEvent('listToolConfigs'));
+      const result = await handler(makeEvent("listToolConfigs"));
       expect(result).toHaveLength(1);
-      expect(result[0].toolId).toBe('tool-a');
+      expect(result[0].toolId).toBe("tool-a");
     });
 
-    test('(d) admin list returns all orgs', async () => {
+    test("(d) admin list returns all orgs", async () => {
       const ours = {
         ...sampleRegistryRecord,
-        recordId: 'tool-a',
-        customDescriptorContent: JSON.stringify({ orgId: 'test-org-a' }),
+        recordId: "tool-a",
+        customDescriptorContent: JSON.stringify({ orgId: "test-org-a" }),
       };
       const theirs = {
         ...sampleRegistryRecord,
-        recordId: 'tool-b',
-        customDescriptorContent: JSON.stringify({ orgId: 'other-org' }),
+        recordId: "tool-b",
+        customDescriptorContent: JSON.stringify({ orgId: "other-org" }),
       };
       mockListResources.mockResolvedValue([ours, theirs]);
       dynamoMock.on(ScanCommand).resolves({ Items: [] });
 
       const adminIdentity = {
-        sub: 'admin',
-        claims: { 'custom:organization': 'admin-home', 'custom:role': 'admin' },
+        sub: "admin",
+        claims: { "custom:organization": "admin-home", "custom:role": "admin" },
       };
-      const result = await handler(makeEvent('listToolConfigs', {}, adminIdentity));
+      const result = await handler(
+        makeEvent("listToolConfigs", {}, adminIdentity),
+      );
       expect(result).toHaveLength(2);
     });
 
-    test('(e) get cross-org returns Not found (null)', async () => {
+    test("(e) get cross-org returns Not found (null)", async () => {
       mockGetResource.mockResolvedValue({
         ...sampleRegistryRecord,
-        customDescriptorContent: JSON.stringify({ orgId: 'other-org' }),
+        customDescriptorContent: JSON.stringify({ orgId: "other-org" }),
       });
       dynamoMock.on(GetCommand).resolves({});
 
-      const result = await handler(makeEvent('getToolConfig', { toolId: 'tool-r1' }));
+      const result = await handler(
+        makeEvent("getToolConfig", { toolId: "tool-r1" }),
+      );
       expect(result).toBeNull();
     });
   });
@@ -453,42 +559,42 @@ describe('tool-config-resolver handler switch dispatch (task 7.5)', () => {
   // serializeCustomMetadata, which is where the resolver stores it as
   // `createdBy`.
 
-  describe('caller identity is threaded into createToolConfigRegistry', () => {
+  describe("caller identity is threaded into createToolConfigRegistry", () => {
     beforeEach(() => {
-      process.env.REGISTRY_ENABLED = 'true';
+      process.env.REGISTRY_ENABLED = "true";
       mockCreateResource.mockResolvedValue(sampleRegistryRecord);
     });
 
-    test('uses identity.sub when provided (Cognito auth mode)', async () => {
+    test("uses identity.sub when provided (Cognito auth mode)", async () => {
       await handler(
         makeEvent(
-          'createToolConfig',
-          { input: { toolId: 'tool-r1', config: '{"name":"X"}' } },
+          "createToolConfig",
+          { input: { toolId: "tool-r1", config: '{"name":"X"}' } },
           {
-            sub: 'test-user-abc',
-            username: 'ignored-when-sub-present',
-            claims: { 'custom:organization': 'test-org-a' },
+            sub: "test-user-abc",
+            username: "ignored-when-sub-present",
+            claims: { "custom:organization": "test-org-a" },
           },
         ),
       );
       expect(mockSerializeCustomMetadata).toHaveBeenCalledWith(
-        expect.objectContaining({ createdBy: 'test-user-abc' }),
+        expect.objectContaining({ createdBy: "test-user-abc" }),
       );
     });
 
-    test('falls back to identity.username when no sub is present (IAM auth mode)', async () => {
+    test("falls back to identity.username when no sub is present (IAM auth mode)", async () => {
       await handler(
         makeEvent(
-          'createToolConfig',
-          { input: { toolId: 'tool-r1', config: '{"name":"X"}' } },
+          "createToolConfig",
+          { input: { toolId: "tool-r1", config: '{"name":"X"}' } },
           {
-            username: 'iam-caller',
-            claims: { 'custom:organization': 'test-org-a' },
+            username: "iam-caller",
+            claims: { "custom:organization": "test-org-a" },
           },
         ),
       );
       expect(mockSerializeCustomMetadata).toHaveBeenCalledWith(
-        expect.objectContaining({ createdBy: 'iam-caller' }),
+        expect.objectContaining({ createdBy: "iam-caller" }),
       );
     });
 
@@ -500,49 +606,56 @@ describe('tool-config-resolver handler switch dispatch (task 7.5)', () => {
       // observable) and leaving sub/username unset.
       await handler(
         makeEvent(
-          'createToolConfig',
-          { input: { toolId: 'tool-r1', config: '{"name":"X"}' } },
-          { claims: { 'custom:organization': 'test-org-a' } },
+          "createToolConfig",
+          { input: { toolId: "tool-r1", config: '{"name":"X"}' } },
+          { claims: { "custom:organization": "test-org-a" } },
         ),
       );
       expect(mockSerializeCustomMetadata).toHaveBeenCalledWith(
-        expect.objectContaining({ createdBy: 'unknown' }),
+        expect.objectContaining({ createdBy: "unknown" }),
       );
     });
   });
 
-  describe('caller identity is threaded into updateToolConfigRegistry', () => {
+  describe("caller identity is threaded into updateToolConfigRegistry", () => {
     beforeEach(() => {
-      process.env.REGISTRY_ENABLED = 'true';
+      process.env.REGISTRY_ENABLED = "true";
       mockGetResource.mockResolvedValue(sampleRegistryRecord);
       mockUpdateResource.mockResolvedValue(sampleRegistryRecord);
     });
 
-    test('uses identity.sub when provided', async () => {
+    test("uses identity.sub when provided", async () => {
       await handler(
         makeEvent(
-          'updateToolConfig',
-          { input: { toolId: 'tool-r1', categories: ['x'] } },
-          { sub: 'editor-sub-id', claims: { 'custom:organization': 'test-org-a' } },
+          "updateToolConfig",
+          { input: { toolId: "tool-r1", categories: ["x"] } },
+          {
+            sub: "editor-sub-id",
+            claims: { "custom:organization": "test-org-a" },
+          },
         ),
       );
       // sampleRegistryRecord has no createdBy in customDescriptorContent, so
       // the caller's sub becomes the record's createdBy on first edit.
       expect(mockSerializeCustomMetadata).toHaveBeenCalledWith(
-        expect.objectContaining({ createdBy: 'editor-sub-id' }),
+        expect.objectContaining({ createdBy: "editor-sub-id" }),
       );
     });
   });
 
   // ─── Unknown field ──────────────────────────────────────────
 
-  test('throws on unknown GraphQL field (flag off)', async () => {
-    process.env.REGISTRY_ENABLED = 'false';
-    await expect(handler(makeEvent('unknownField'))).rejects.toThrow('Unknown field');
+  test("throws on unknown GraphQL field (flag off)", async () => {
+    process.env.REGISTRY_ENABLED = "false";
+    await expect(handler(makeEvent("unknownField"))).rejects.toThrow(
+      "Unknown field",
+    );
   });
 
-  test('throws on unknown GraphQL field (flag on)', async () => {
-    process.env.REGISTRY_ENABLED = 'true';
-    await expect(handler(makeEvent('unknownField'))).rejects.toThrow('Unknown field');
+  test("throws on unknown GraphQL field (flag on)", async () => {
+    process.env.REGISTRY_ENABLED = "true";
+    await expect(handler(makeEvent("unknownField"))).rejects.toThrow(
+      "Unknown field",
+    );
   });
 });
