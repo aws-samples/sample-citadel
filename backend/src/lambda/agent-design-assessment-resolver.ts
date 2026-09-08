@@ -34,16 +34,49 @@
  *   payload `{projectId, archetype, archetypeConfidence}` (the field name
  *   `archetypeConfidence` matches the typed DetailPayloadOf map in
  *   notifier-base.ts — the catalog entry is the source of truth).
+ *
+ * ## Per-operation disposition (finding 2c262386)
+ *
+ * DEFECT: startAgentDesignAssessment / submitAgentDesignAssessment gated
+ * only on hasPermission('assessment:submit') and trusted the client-
+ * supplied projectId with NO project-to-organization reconciliation.
+ * submitAgentDesignAssessment is the sharpest: its TransactWriteCommand
+ * mutates BOTH the assessments row AND another organization's
+ * citadel-projects row archetype/archetypeConfidence/archetypeStatus
+ * fields — a cross-org write reachable via a single client-supplied
+ * projectId. FIX: `assertProjectOrgAccess` (backend/src/utils/
+ * project-org-access.ts, the SAME shared helper landed for adr-resolver in
+ * finding 677c1a6c / PR 142, reused verbatim) is threaded through every
+ * exported function as an OPTIONAL trailing `event` parameter — additive
+ * to hasPermission, never a replacement. `handler` always supplies `event`.
+ *
+ *  - startAgentDesignAssessment — GATED. hasPermission('assessment:submit')
+ *                       unchanged; org check on projectId runs immediately
+ *                       after and BEFORE the PutCommand.
+ *  - submitAgentDesignAssessment — GATED (sharpest op). Permission check
+ *                       first, then eager input validation, then the org
+ *                       check on input.projectId runs immediately after
+ *                       validation and BEFORE the existing-row fetch AND
+ *                       BEFORE the TransactWriteCommand is even
+ *                       constructed — the gate precedes the WHOLE
+ *                       transaction (both the assessments-table leg and
+ *                       the PROJECTS-table leg), not one leg of it, so a
+ *                       cross-org caller triggers zero transaction
+ *                       commits.
+ *  - getAgentDesignAssessment — GATED. Fetch-then-verify: the row is read
+ *                       from DynamoDB but the org check runs BEFORE the
+ *                       row is returned to the caller.
  */
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
   TransactWriteCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { emitGovernanceEvent } from '../utils/notifier-base';
-import { hasPermission } from '../utils/auth';
+} from "@aws-sdk/lib-dynamodb";
+import { emitGovernanceEvent } from "../utils/notifier-base";
+import { hasPermission } from "../utils/auth";
+import { assertProjectOrgAccess } from "../utils/project-org-access";
 import type {
   AuthContext,
   AgentDesignAssessment,
@@ -52,8 +85,8 @@ import type {
   FourDimensionLiteral,
   GovernanceEventIdentity,
   GovernanceResolverEvent,
-} from '../types';
-import { ProjectArchetypeStatus } from '../types';
+} from "../types";
+import { ProjectArchetypeStatus } from "../types";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -64,10 +97,10 @@ const PROJECTS_TABLE = process.env.PROJECTS_TABLE!;
 // escalate via archetypeStatus=PENDING_ESCALATION instead of introducing an
 // OTHER escape hatch.
 const FOUR_DIMENSIONS: readonly FourDimensionLiteral[] = [
-  'CODE',
-  'DATA',
-  'INTEGRATION',
-  'INFRASTRUCTURE',
+  "CODE",
+  "DATA",
+  "INTEGRATION",
+  "INFRASTRUCTURE",
 ];
 const EXPECTED_RANKS = [1, 2, 3, 4];
 
@@ -76,8 +109,7 @@ const EXPECTED_RANKS = [1, 2, 3, 4];
  * submitAgentDesignAssessment spreads its input at the top level of
  * `arguments`, hence the Partial<SubmitAgentDesignAssessmentInput> base.
  */
-interface AgentDesignAssessmentResolverArguments
-  extends Partial<SubmitAgentDesignAssessmentInput> {
+interface AgentDesignAssessmentResolverArguments extends Partial<SubmitAgentDesignAssessmentInput> {
   projectId: string;
 }
 
@@ -88,11 +120,11 @@ function authContextFromEvent(
   event: AgentDesignAssessmentResolverEvent,
 ): AuthContext {
   const identity: GovernanceEventIdentity = event?.identity || {};
-  const claimRole = identity['custom:role'] ?? identity.claims?.['custom:role'];
+  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
-    userId: identity.sub || identity.username || 'anonymous',
+    userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
-    groups: identity['cognito:groups'] || [],
+    groups: identity["cognito:groups"] || [],
     roles: claimRole ? [claimRole] : [],
   };
 }
@@ -103,10 +135,11 @@ function authContextFromEvent(
  * Mirrors the shape in adr-resolver.ts / execspec-resolver.ts.
  */
 function sanitizeForLog(input: unknown): unknown {
-  if (!input || typeof input !== 'object') return input;
+  if (!input || typeof input !== "object") return input;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
-    out[k] = typeof v === 'string' && v.length > 200 ? v.slice(0, 200) + '…' : v;
+    out[k] =
+      typeof v === "string" && v.length > 200 ? v.slice(0, 200) + "…" : v;
   }
   return out;
 }
@@ -115,52 +148,44 @@ function requireAssessmentSubmitPermission(
   authContext: AuthContext,
   action: string,
 ): void {
-  if (!hasPermission(authContext, 'assessment:submit')) {
+  if (!hasPermission(authContext, "assessment:submit")) {
     throw new Error(
       `UnauthorizedError: assessment:submit permission required to ${action}`,
     );
   }
 }
 
-function validateDimensionRanking(
-  ranking: DimensionComplexityInput[],
-): void {
+function validateDimensionRanking(ranking: DimensionComplexityInput[]): void {
   if (!Array.isArray(ranking) || ranking.length !== 4) {
     throw new Error(
-      'ValidationError: dimensionRanking must have exactly 4 entries',
+      "ValidationError: dimensionRanking must have exactly 4 entries",
     );
   }
 
   // Ranks must form exactly {1,2,3,4} (sorted ascending).
   const ranks = ranking.map((r) => r.rank).sort((a, b) => a - b);
-  if (
-    ranks.length !== 4 ||
-    ranks.some((r, i) => r !== EXPECTED_RANKS[i])
-  ) {
+  if (ranks.length !== 4 || ranks.some((r, i) => r !== EXPECTED_RANKS[i])) {
     throw new Error(
-      'ValidationError: dimensionRanking ranks must form exactly the set {1,2,3,4}',
+      "ValidationError: dimensionRanking ranks must form exactly the set {1,2,3,4}",
     );
   }
 
   // Dimensions must be a permutation of the four canonical values.
   const dims = new Set(ranking.map((r) => r.dimension));
-  if (
-    dims.size !== 4 ||
-    !FOUR_DIMENSIONS.every((d) => dims.has(d))
-  ) {
+  if (dims.size !== 4 || !FOUR_DIMENSIONS.every((d) => dims.has(d))) {
     throw new Error(
-      'ValidationError: dimensionRanking dimensions must be exactly {CODE, DATA, INTEGRATION, INFRASTRUCTURE} with each appearing once',
+      "ValidationError: dimensionRanking dimensions must be exactly {CODE, DATA, INTEGRATION, INFRASTRUCTURE} with each appearing once",
     );
   }
 
   // Each rationale must be a non-empty trimmed string.
   for (const entry of ranking) {
     if (
-      typeof entry.rationale !== 'string' ||
+      typeof entry.rationale !== "string" ||
       entry.rationale.trim().length === 0
     ) {
       throw new Error(
-        'ValidationError: each dimensionRanking entry must have a non-empty rationale',
+        "ValidationError: each dimensionRanking entry must have a non-empty rationale",
       );
     }
   }
@@ -169,14 +194,19 @@ function validateDimensionRanking(
 export async function startAgentDesignAssessment(
   projectId: string,
   authContext: AuthContext,
+  event?: unknown,
 ): Promise<AgentDesignAssessment> {
   requireAssessmentSubmitPermission(
     authContext,
-    'start agent design assessments',
+    "start agent design assessments",
   );
 
-  if (typeof projectId !== 'string' || projectId.length === 0) {
-    throw new Error('ValidationError: projectId is required');
+  if (typeof projectId !== "string" || projectId.length === 0) {
+    throw new Error("ValidationError: projectId is required");
+  }
+
+  if (event !== undefined) {
+    await assertProjectOrgAccess(projectId, event);
   }
 
   const now = new Date().toISOString();
@@ -198,7 +228,7 @@ export async function startAgentDesignAssessment(
     new PutCommand({
       TableName: ASSESS_TABLE,
       Item: row,
-      ConditionExpression: 'attribute_not_exists(projectId)',
+      ConditionExpression: "attribute_not_exists(projectId)",
     }),
   );
   return row;
@@ -206,26 +236,32 @@ export async function startAgentDesignAssessment(
 
 export async function getAgentDesignAssessment(
   projectId: string,
+  event?: unknown,
 ): Promise<AgentDesignAssessment | null> {
   const res = await docClient.send(
     new GetCommand({ TableName: ASSESS_TABLE, Key: { projectId } }),
   );
-  return (res.Item as AgentDesignAssessment | undefined) ?? null;
+  const row = (res.Item as AgentDesignAssessment | undefined) ?? null;
+  if (row && event !== undefined) {
+    await assertProjectOrgAccess(projectId, event);
+  }
+  return row;
 }
 
 export async function submitAgentDesignAssessment(
   input: SubmitAgentDesignAssessmentInput,
   authContext: AuthContext,
+  event?: unknown,
 ): Promise<AgentDesignAssessment> {
   // Step 1: perm gate FIRST — no DDB, no event, before any state work.
   requireAssessmentSubmitPermission(
     authContext,
-    'submit agent design assessments',
+    "submit agent design assessments",
   );
 
   // Step 2: eager input validation.
-  if (typeof input?.projectId !== 'string' || input.projectId.length === 0) {
-    throw new Error('ValidationError: projectId is required');
+  if (typeof input?.projectId !== "string" || input.projectId.length === 0) {
+    throw new Error("ValidationError: projectId is required");
   }
   validateDimensionRanking(input.dimensionRanking);
   if (
@@ -233,7 +269,7 @@ export async function submitAgentDesignAssessment(
     input.accessibleDataSources.length === 0
   ) {
     throw new Error(
-      'ValidationError: accessibleDataSources must contain at least one entry',
+      "ValidationError: accessibleDataSources must contain at least one entry",
     );
   }
   if (
@@ -241,20 +277,30 @@ export async function submitAgentDesignAssessment(
     input.primaryRiskAreas.length === 0
   ) {
     throw new Error(
-      'ValidationError: primaryRiskAreas must contain at least one entry',
+      "ValidationError: primaryRiskAreas must contain at least one entry",
     );
+  }
+
+  // Step 2b: org-reconciliation gate (finding 2c262386). Runs BEFORE the
+  // existing-row fetch (step 3) and BEFORE the TransactWriteCommand is
+  // even constructed (step 4) — the gate precedes the WHOLE transaction,
+  // not one leg of it, so a cross-org caller triggers zero
+  // TransactWriteCommand calls at all, meaning neither the assessments-
+  // table leg NOR the PROJECTS-table leg is ever attempted.
+  if (event !== undefined) {
+    await assertProjectOrgAccess(input.projectId, event);
   }
 
   // Step 3: existing-row guards.
   const existing = await getAgentDesignAssessment(input.projectId);
   if (!existing) {
     throw new Error(
-      'AgentDesignAssessment not found — call startAgentDesignAssessment first',
+      "AgentDesignAssessment not found — call startAgentDesignAssessment first",
     );
   }
   if (existing.completedAt !== null && existing.completedAt !== undefined) {
     throw new Error(
-      'Assessment already completed — re-submission not permitted',
+      "Assessment already completed — re-submission not permitted",
     );
   }
 
@@ -270,27 +316,27 @@ export async function submitAgentDesignAssessment(
             TableName: ASSESS_TABLE,
             Key: { projectId: input.projectId },
             UpdateExpression:
-              'SET archetype = :archetype,' +
-              ' archetypeConfidence = :conf,' +
-              ' archetypeStatus = :classified,' +
-              ' dimensionRanking = :ranking,' +
-              ' accessibleDataSources = :sources,' +
-              ' primaryRiskAreas = :risks,' +
-              ' completedAt = :now,' +
-              ' completedBy = :userId,' +
-              ' updatedAt = :now',
+              "SET archetype = :archetype," +
+              " archetypeConfidence = :conf," +
+              " archetypeStatus = :classified," +
+              " dimensionRanking = :ranking," +
+              " accessibleDataSources = :sources," +
+              " primaryRiskAreas = :risks," +
+              " completedAt = :now," +
+              " completedBy = :userId," +
+              " updatedAt = :now",
             // DDB-side re-submission guard — catches concurrent double-submit
             // that raced past the client-side `completedAt !== null` check.
-            ConditionExpression: 'attribute_not_exists(completedAt)',
+            ConditionExpression: "attribute_not_exists(completedAt)",
             ExpressionAttributeValues: {
-              ':archetype': input.archetype,
-              ':conf': archetypeConfidence,
-              ':classified': ProjectArchetypeStatus.CLASSIFIED,
-              ':ranking': input.dimensionRanking,
-              ':sources': input.accessibleDataSources,
-              ':risks': input.primaryRiskAreas,
-              ':now': now,
-              ':userId': authContext.userId,
+              ":archetype": input.archetype,
+              ":conf": archetypeConfidence,
+              ":classified": ProjectArchetypeStatus.CLASSIFIED,
+              ":ranking": input.dimensionRanking,
+              ":sources": input.accessibleDataSources,
+              ":risks": input.primaryRiskAreas,
+              ":now": now,
+              ":userId": authContext.userId,
             },
           },
         },
@@ -299,15 +345,15 @@ export async function submitAgentDesignAssessment(
             TableName: PROJECTS_TABLE,
             Key: { id: input.projectId },
             UpdateExpression:
-              'SET archetype = :archetype,' +
-              ' archetypeConfidence = :conf,' +
-              ' archetypeStatus = :classified,' +
-              ' updatedAt = :now',
+              "SET archetype = :archetype," +
+              " archetypeConfidence = :conf," +
+              " archetypeStatus = :classified," +
+              " updatedAt = :now",
             ExpressionAttributeValues: {
-              ':archetype': input.archetype,
-              ':conf': archetypeConfidence,
-              ':classified': ProjectArchetypeStatus.CLASSIFIED,
-              ':now': now,
+              ":archetype": input.archetype,
+              ":conf": archetypeConfidence,
+              ":classified": ProjectArchetypeStatus.CLASSIFIED,
+              ":now": now,
             },
           },
         },
@@ -320,7 +366,7 @@ export async function submitAgentDesignAssessment(
   // as the payload field name for this detail-type ( catalog,
   // reconciled). The row/input schema field remains
   // `archetypeConfidence` — only the event payload is renamed.
-  await emitGovernanceEvent('governance.archetype.classified', {
+  await emitGovernanceEvent("governance.archetype.classified", {
     projectId: input.projectId,
     archetype: input.archetype,
     confidence: archetypeConfidence,
@@ -333,34 +379,38 @@ export async function submitAgentDesignAssessment(
     // Vanishingly unlikely (commit succeeded moments ago), but fail loud if
     // a downstream process has deleted the row between commit and read.
     throw new Error(
-      'AgentDesignAssessment vanished after commit — investigate TTL / concurrent delete',
+      "AgentDesignAssessment vanished after commit — investigate TTL / concurrent delete",
     );
   }
   return after;
 }
 
-export const handler = async (event: AgentDesignAssessmentResolverEvent): Promise<unknown> => {
+export const handler = async (
+  event: AgentDesignAssessmentResolverEvent,
+): Promise<unknown> => {
   const fieldName = event?.info?.fieldName;
   const authContext = authContextFromEvent(event);
   try {
     switch (fieldName) {
-      case 'startAgentDesignAssessment':
+      case "startAgentDesignAssessment":
         return await startAgentDesignAssessment(
           event.arguments.projectId,
           authContext,
+          event,
         );
-      case 'submitAgentDesignAssessment':
+      case "submitAgentDesignAssessment":
         return await submitAgentDesignAssessment(
           event.arguments as SubmitAgentDesignAssessmentInput,
           authContext,
+          event,
         );
-      case 'getAgentDesignAssessment':
-        return await getAgentDesignAssessment(event.arguments.projectId);
+      case "getAgentDesignAssessment":
+        return await getAgentDesignAssessment(event.arguments.projectId, event);
       default:
         throw new Error(`Unknown fieldName: ${fieldName}`);
     }
   } catch (err: unknown) {
-    console.error('agent-design-assessment-resolver error', {
+    console.error("agent-design-assessment-resolver error", {
       fieldName,
       message: err instanceof Error ? err.message : undefined,
       args: sanitizeForLog(event?.arguments),

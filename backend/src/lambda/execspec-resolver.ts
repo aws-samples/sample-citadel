@@ -32,6 +32,53 @@
  * phase='audit-outcome' → ALLOWED | DENIED). Both auth-allowed and
  * auth-denied branches emit governance.specification.rejected so that
  * downstream alerting on denied attempts works identically to.
+ *
+ * ## Per-operation disposition (finding 2c262386)
+ *
+ * DEFECT: every op below gated only on hasPermission('spec:approve') and
+ * trusted the client-supplied/fetched projectId with NO project-to-
+ * organization reconciliation — an architect in org A could approve or
+ * rewrite org B's governance execution spec by specId. FIX:
+ * `assertProjectOrgAccess` (backend/src/utils/project-org-access.ts, the
+ * SAME shared helper landed for adr-resolver in finding 677c1a6c / PR 142,
+ * reused verbatim) is threaded through every exported function as an
+ * OPTIONAL trailing `event` parameter — additive to hasPermission, never a
+ * replacement. `handler` always supplies `event`.
+ *
+ *  - createExecutionSpecification — GATED. hasPermission('spec:approve')
+ *                       unchanged; org check on input.projectId runs
+ *                       immediately after and BEFORE the PutCommand.
+ *  - submitExecutionSpecification — GATED. Fetch-then-verify: specId is
+ *                       the only client-supplied key; the fetched spec's
+ *                       projectId is org-checked AFTER the fetch and
+ *                       BEFORE the transition-validating UpdateCommand.
+ *  - approveExecutionSpecification — GATED (sharpest op — approval changes
+ *                       a governance decision's state). Fetch-then-verify,
+ *                       same ordering as submit; org check runs BEFORE the
+ *                       UpdateCommand AND before the
+ *                       governance.specification.approved emission.
+ *  - rejectExecutionSpecification — GATED, but placed to PRESERVE the
+ *                       existing audit-before-auth ordering: the module's
+ *                       own pre-auth audit console.log line and the
+ *                       governance.specification.rejected emission (which
+ *                       must fire for every attempt, matching adr-
+ *                       resolver's reopenADR "audit row exists ∀
+ *                       invocation" intent) still run first. The org check
+ *                       is inserted AFTER the permission check (step 4)
+ *                       and AFTER the emit (step 6), but BEFORE the
+ *                       terminal UpdateCommand that flips the spec to
+ *                       REJECTED — so a cross-org caller is audited and
+ *                       denied loudly, but never gets the write.
+ *  - reviseExecutionSpecification — GATED. Fetch-then-verify; org check
+ *                       runs BEFORE the UpdateCommand that rewrites
+ *                       structuredPayload/narrativeS3Uri.
+ *  - getExecutionSpecification — GATED. Fetch-then-verify: the row is read
+ *                       from DynamoDB but the org check runs BEFORE the
+ *                       spec is returned to the caller.
+ *  - listExecutionSpecifications — GATED. org check on the client-supplied
+ *                       projectId runs BEFORE the QueryCommand, so a
+ *                       cross-org caller never triggers a read of another
+ *                       tenant's execution-spec rows at all.
  */
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
@@ -45,6 +92,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { LifecycleManager, EXECSPEC_TRANSITIONS } from '../adapters/lifecycle';
 import { emitGovernanceEvent } from '../utils/notifier-base';
 import { hasPermission } from '../utils/auth';
+import { assertProjectOrgAccess } from '../utils/project-org-access';
 import type {
   AuthContext,
   ExecutionSpecification,
@@ -139,11 +187,15 @@ function validateNarrativeUri(uri: unknown): void {
 export async function createExecutionSpecification(
   input: ExecutionSpecificationInput,
   authContext: AuthContext,
+  event?: unknown,
 ): Promise<ExecutionSpecification> {
   requireSpecApprovePermission(authContext, 'create execution specifications');
 
   if (!input.projectId) {
     throw new Error('ValidationError: projectId is required');
+  }
+  if (event !== undefined) {
+    await assertProjectOrgAccess(input.projectId, event);
   }
   if (!Array.isArray(input.sourceAdrIds) || input.sourceAdrIds.length === 0) {
     throw new Error('ValidationError: sourceAdrIds must be a non-empty array');
@@ -177,16 +229,25 @@ export async function createExecutionSpecification(
 
 export async function getExecutionSpecification(
   specId: string,
+  event?: unknown,
 ): Promise<ExecutionSpecification | null> {
   const res = await docClient.send(
     new GetCommand({ TableName: EXECUTION_SPECS_TABLE, Key: { specId } }),
   );
-  return (res.Item as ExecutionSpecification | undefined) ?? null;
+  const spec = (res.Item as ExecutionSpecification | undefined) ?? null;
+  if (spec && event !== undefined) {
+    await assertProjectOrgAccess(spec.projectId, event);
+  }
+  return spec;
 }
 
 export async function listExecutionSpecifications(
   projectId: string,
+  event?: unknown,
 ): Promise<ExecutionSpecification[]> {
+  if (event !== undefined) {
+    await assertProjectOrgAccess(projectId, event);
+  }
   const res = await docClient.send(
     new QueryCommand({
       TableName: EXECUTION_SPECS_TABLE,
@@ -244,10 +305,14 @@ async function updateStatus(
 export async function submitExecutionSpecification(
   specId: string,
   authContext: AuthContext,
+  event?: unknown,
 ): Promise<ExecutionSpecification> {
   requireSpecApprovePermission(authContext, 'submit execution specifications');
   const spec = await getExecutionSpecification(specId);
   if (!spec) throw new Error(`ExecutionSpecification not found: ${specId}`);
+  if (event !== undefined) {
+    await assertProjectOrgAccess(spec.projectId, event);
+  }
   execSpecLifecycle.validateTransition(spec.status, 'PENDING_REVIEW');
   return updateStatus(specId, spec.version, 'PENDING_REVIEW', {
     submittedAt: new Date().toISOString(),
@@ -257,11 +322,20 @@ export async function submitExecutionSpecification(
 export async function approveExecutionSpecification(
   specId: string,
   authContext: AuthContext,
+  event?: unknown,
 ): Promise<ExecutionSpecification> {
   // Permission check FIRST — no DDB access, no event, before any state work.
   requireSpecApprovePermission(authContext, 'approve execution specifications');
   const spec = await getExecutionSpecification(specId);
   if (!spec) throw new Error(`ExecutionSpecification not found: ${specId}`);
+  // Fetch-then-verify: specId is the only client-supplied key, so the org
+  // check runs on the FETCHED spec's projectId, after the fetch and BEFORE
+  // the UpdateCommand / governance event below — this is the sharpest op
+  // in the module (approval changes a governance decision's state), so
+  // nothing state-changing may happen before this gate passes.
+  if (event !== undefined) {
+    await assertProjectOrgAccess(spec.projectId, event);
+  }
   execSpecLifecycle.validateTransition(spec.status, 'APPROVED');
   const now = new Date().toISOString();
   const updated = await updateStatus(specId, spec.version, 'APPROVED', {
@@ -292,6 +366,12 @@ export async function approveExecutionSpecification(
  *      'ALLOWED' | 'DENIED' } AFTER the check.
  *   6. Emit governance.specification.rejected regardless of outcome so
  *      downstream monitoring on denied attempts works.
+ *   6b. Org-reconciliation gate (finding 2c262386): runs AFTER the audit
+ *      lines and emit above (preserving audit-before-auth — every attempt,
+ *      cross-org or not, is still audited and the event still emitted) but
+ *      BEFORE the terminal UpdateCommand in step 8 that flips the spec to
+ *      REJECTED. A cross-org caller is audited and denied, but the spec's
+ *      state is never mutated.
  *   7. If DENIED → throw UnauthorizedError (audit trail already durable).
  *   8. If ALLOWED → LifecycleManager.validateTransition then DDB update.
  *      A lifecycle-validation failure at this point leaves the audit lines
@@ -301,6 +381,7 @@ export async function rejectExecutionSpecification(
   specId: string,
   reason: string,
   authContext: AuthContext,
+  event?: unknown,
 ): Promise<ExecutionSpecification> {
   // Step 1: pre-audit input validation.
   if (typeof reason!== 'string' || !reason) {
@@ -358,6 +439,17 @@ export async function rejectExecutionSpecification(
   if (!spec) {
     throw new Error(`ExecutionSpecification not found: ${specId}`);
   }
+
+  // Step 8b: org-reconciliation gate (finding 2c262386). Placed AFTER the
+  // audit-before-auth sequence (steps 3-6) so the audit trail and the
+  // governance.specification.rejected emit still fire for every attempt,
+  // matching the existing invariant — but BEFORE the terminal
+  // UpdateCommand below, so a cross-org caller's REJECTED write never
+  // lands even if they somehow pass the spec:approve permission check.
+  if (event !== undefined) {
+    await assertProjectOrgAccess(spec.projectId, event);
+  }
+
   execSpecLifecycle.validateTransition(spec.status, 'REJECTED');
 
   return updateStatus(specId, spec.version, 'REJECTED', {
@@ -371,6 +463,7 @@ export async function reviseExecutionSpecification(
   specId: string,
   input: ReviseExecutionSpecificationInput,
   authContext: AuthContext,
+  event?: unknown,
 ): Promise<ExecutionSpecification> {
   requireSpecApprovePermission(authContext, 'revise execution specifications');
   if (typeof input.structuredPayload !== 'string' || !input.structuredPayload) {
@@ -380,6 +473,9 @@ export async function reviseExecutionSpecification(
 
   const spec = await getExecutionSpecification(specId);
   if (!spec) throw new Error(`ExecutionSpecification not found: ${specId}`);
+  if (event !== undefined) {
+    await assertProjectOrgAccess(spec.projectId, event);
+  }
   execSpecLifecycle.validateTransition(spec.status, 'DRAFT');
 
   return updateStatus(specId, spec.version, 'DRAFT', {
@@ -397,33 +493,41 @@ export const handler = async (event: ExecSpecResolverEvent): Promise<unknown> =>
         return await createExecutionSpecification(
           event.arguments.input as ExecutionSpecificationInput,
           authContext,
+          event,
         );
       case 'submitExecutionSpecification':
         return await submitExecutionSpecification(
           event.arguments.specId,
           authContext,
+          event,
         );
       case 'approveExecutionSpecification':
         return await approveExecutionSpecification(
           event.arguments.specId,
           authContext,
+          event,
         );
       case 'rejectExecutionSpecification':
         return await rejectExecutionSpecification(
           event.arguments.specId,
           event.arguments.reason,
           authContext,
+          event,
         );
       case 'reviseExecutionSpecification':
         return await reviseExecutionSpecification(
           event.arguments.specId,
           event.arguments.input as ReviseExecutionSpecificationInput,
           authContext,
+          event,
         );
       case 'getExecutionSpecification':
-        return await getExecutionSpecification(event.arguments.specId);
+        return await getExecutionSpecification(event.arguments.specId, event);
       case 'listExecutionSpecifications':
-        return await listExecutionSpecifications(event.arguments.projectId);
+        return await listExecutionSpecifications(
+          event.arguments.projectId,
+          event,
+        );
       default:
         throw new Error(`Unsupported field: ${fieldName}`);
     }

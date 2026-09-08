@@ -29,31 +29,63 @@
  *   known Q001..Q020 evaluators are pinned explicitly so any future
  *   checklist-author adding Qnnn entries triggers a deliberate code
  *   change here rather than a silent PENDING_EVIDENCE.
+ *
+ * ## Per-operation disposition (finding 2c262386)
+ *
+ * DEFECT: runProgramReview gated only on hasPermission('adr:create') and
+ * trusted the client-supplied projectId with NO project-to-organization
+ * reconciliation — an architect in one org could read another org's
+ * accumulated governance evidence (ADRs, execution specs, interrogation
+ * rounds, agent design assessment) and write a ProgramReview row against
+ * their projectId. FIX: `assertProjectOrgAccess` (backend/src/utils/
+ * project-org-access.ts, the SAME shared helper landed for adr-resolver in
+ * finding 677c1a6c / PR 142, reused verbatim) is threaded through every
+ * exported function as an OPTIONAL trailing `event` parameter — additive
+ * to hasPermission, never a replacement. `handler` always supplies `event`.
+ *
+ *  - runProgramReview — GATED. hasPermission('adr:create') unchanged; org
+ *                       check on projectId runs immediately after and
+ *                       BEFORE the parallel evidence-fetch Promise.all
+ *                       (listADRsForProject / listExecutionSpecifications /
+ *                       listInterrogationRounds / getAgentDesignAssessment)
+ *                       — zero foreign evidence reads happen for a cross-
+ *                       org caller — and BEFORE the PutCommand that
+ *                       persists the review row.
+ *  - getProgramReview  — GATED. Fetch-then-verify: the row is read but the
+ *                       org check runs BEFORE it is returned.
+ *  - listProgramReviewsForProject — GATED. org check on the client-
+ *                       supplied projectId runs BEFORE the QueryCommand.
+ *
+ * Note: the sibling evidence-source functions this module calls
+ * (listADRsForProject, listExecutionSpecifications,
+ * listInterrogationRounds, getAgentDesignAssessment) are invoked with NO
+ * `event` — they are internal, system-level calls whose right to read
+ * `projectId`'s evidence has already been established by THIS module's
+ * own gate above, matching the adr-resolver docblock's convention for
+ * internal/system callers.
  */
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
   QueryCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { v4 as uuidv4 } from 'uuid';
-import * as fs from 'fs';
-import * as path from 'path';
-import {
-  parseChecklist,
-  type ChecklistQuestion,
-} from './checklist-parser';
-import { listADRsForProject } from './adr-resolver';
-import { listExecutionSpecifications } from './execspec-resolver';
-import { listInterrogationRounds } from './interrogation-round-resolver';
-import { getAgentDesignAssessment } from './agent-design-assessment-resolver';
-import { hasPermission } from '../utils/auth';
+} from "@aws-sdk/lib-dynamodb";
+import { v4 as uuidv4 } from "uuid";
+import * as fs from "fs";
+import * as path from "path";
+import { parseChecklist, type ChecklistQuestion } from "./checklist-parser";
+import { listADRsForProject } from "./adr-resolver";
+import { listExecutionSpecifications } from "./execspec-resolver";
+import { listInterrogationRounds } from "./interrogation-round-resolver";
+import { getAgentDesignAssessment } from "./agent-design-assessment-resolver";
+import { hasPermission } from "../utils/auth";
+import { assertProjectOrgAccess } from "../utils/project-org-access";
 import type {
   AuthContext,
   GovernanceEventIdentity,
   GovernanceResolverEvent,
-} from '../types';
+} from "../types";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -66,10 +98,7 @@ const PROGRAM_REVIEWS_TABLE = process.env.PROGRAM_REVIEWS_TABLE!;
 // and interface shapes exactly match the Track B contract.
 
 export type ChecklistAnswerLiteral =
-  | 'PASS'
-  | 'FAIL'
-  | 'NOT_APPLICABLE'
-  | 'PENDING_EVIDENCE';
+  "PASS" | "FAIL" | "NOT_APPLICABLE" | "PENDING_EVIDENCE";
 
 export interface ChecklistResult {
   questionId: string;
@@ -103,22 +132,25 @@ export interface ProgramReview {
  * and the operator sees the error in CloudWatch.
  */
 function resolveChecklistPath(): string {
-  return path.join(__dirname, 'governance-checklist.md');
+  return path.join(__dirname, "governance-checklist.md");
 }
 
 const CHECKLIST_PATH = resolveChecklistPath();
 let CHECKLIST: ChecklistQuestion[] = [];
 try {
-  CHECKLIST = parseChecklist(fs.readFileSync(CHECKLIST_PATH, 'utf-8'));
+  CHECKLIST = parseChecklist(fs.readFileSync(CHECKLIST_PATH, "utf-8"));
 } catch (err) {
   // Cold-start failure: the checklist file is missing or malformed. Log
   // and continue with an empty list — runProgramReview will still emit a
   // valid (but empty) review row. This keeps the Lambda serviceable for
   // the /get/list paths even if the checklist is temporarily misbundled.
-  console.error('program-review-resolver: failed to load checklist at cold start', {
-    path: CHECKLIST_PATH,
-    error: (err as Error)?.message,
-  });
+  console.error(
+    "program-review-resolver: failed to load checklist at cold start",
+    {
+      path: CHECKLIST_PATH,
+      error: (err as Error)?.message,
+    },
+  );
 }
 
 // ── Evidence + Evaluator types ──────────────────────────────────────
@@ -185,16 +217,16 @@ type Evaluator = (evidence: Evidence) => EvaluatorOutput;
  * can surface the question as open rather than silently passing it.
  */
 const defaultEvaluator: Evaluator = () => ({
-  answer: 'PENDING_EVIDENCE',
+  answer: "PENDING_EVIDENCE",
   evidenceRefs: [],
   notes:
-    'No automated evaluator registered for this question; manual review required.',
+    "No automated evaluator registered for this question; manual review required.",
 });
 
 // ── Concrete evaluators Q001..Q012 ──────────────────────────────────
 // Q013..Q020 fall through to defaultEvaluator because their evidence
 // sources (investment breakdown, partner capability) are not yet modelled
-// by a backend entity. The spec explicitly permits PENDING_EVIDENCE for 
+// by a backend entity. The spec explicitly permits PENDING_EVIDENCE for
 // those clusters.
 
 const EVALUATORS: Record<string, Evaluator> = {
@@ -206,22 +238,23 @@ const EVALUATORS: Record<string, Evaluator> = {
     const completed =
       a != null &&
       a.completedAt != null &&
-      a.completedAt !== '' &&
-      a.archetypeStatus === 'CLASSIFIED' &&
+      a.completedAt !== "" &&
+      a.archetypeStatus === "CLASSIFIED" &&
       Array.isArray(a.dimensionRanking) &&
       a.dimensionRanking.length === 4;
     return completed
       ? {
-          answer: 'PASS',
+          answer: "PASS",
           evidenceRefs: [`AgentDesignAssessment:${ev.projectId}`],
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
-          notes: a == null
-            ? 'No AgentDesignAssessment row for project.'
-            : 'Assessment incomplete or not CLASSIFIED.',
+          notes:
+            a == null
+              ? "No AgentDesignAssessment row for project."
+              : "Assessment incomplete or not CLASSIFIED.",
         };
   },
 
@@ -232,21 +265,21 @@ const EVALUATORS: Record<string, Evaluator> = {
     const hits = ev.rounds.filter(
       (r) =>
         Array.isArray(r.participantRoles) &&
-        r.participantRoles.includes('OPERATIONS') &&
-        (r.status === 'STABILISED' || r.status === 'COMPLETE'),
+        r.participantRoles.includes("OPERATIONS") &&
+        (r.status === "STABILISED" || r.status === "COMPLETE"),
     );
     return hits.length > 0
       ? {
-          answer: 'PASS',
+          answer: "PASS",
           evidenceRefs: hits
             .map((r) => `InterrogationRound:${ev.projectId}:${r.roundN}`)
             .sort(),
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
-          notes: 'No operations-role interrogation rounds recorded.',
+          notes: "No operations-role interrogation rounds recorded.",
         };
   },
 
@@ -257,26 +290,26 @@ const EVALUATORS: Record<string, Evaluator> = {
     const a = ev.assessment;
     if (a == null || !Array.isArray(a.dimensionRanking)) {
       return {
-        answer: 'FAIL',
+        answer: "FAIL",
         evidenceRefs: [],
-        notes: 'Assessment missing.',
+        notes: "Assessment missing.",
       };
     }
     const hit = a.dimensionRanking.find(
       (d) =>
-        d.dimension === 'INTEGRATION_ARCHAEOLOGY' && d.coverage === 'COMPLETE',
+        d.dimension === "INTEGRATION_ARCHAEOLOGY" && d.coverage === "COMPLETE",
     );
     return hit
       ? {
-          answer: 'PASS',
+          answer: "PASS",
           evidenceRefs: [`AgentDesignAssessment:${ev.projectId}`],
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
           notes:
-            'Integration archaeology dimension missing or not marked COMPLETE.',
+            "Integration archaeology dimension missing or not marked COMPLETE.",
         };
   },
 
@@ -286,40 +319,40 @@ const EVALUATORS: Record<string, Evaluator> = {
     const a = ev.assessment;
     if (a == null || !Array.isArray(a.nonFunctionalConstraints)) {
       return {
-        answer: 'FAIL',
+        answer: "FAIL",
         evidenceRefs: [],
-        notes: 'Assessment missing or nonFunctionalConstraints unset.',
+        notes: "Assessment missing or nonFunctionalConstraints unset.",
       };
     }
-    const needed = ['PERFORMANCE', 'SECURITY', 'COMPLIANCE'];
+    const needed = ["PERFORMANCE", "SECURITY", "COMPLIANCE"];
     const have = new Set(a.nonFunctionalConstraints);
     const missing = needed.filter((n) => !have.has(n));
     return missing.length === 0
       ? {
-          answer: 'PASS',
+          answer: "PASS",
           evidenceRefs: [`AgentDesignAssessment:${ev.projectId}`],
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
-          notes: `Missing NFR classes: ${missing.join(', ')}.`,
+          notes: `Missing NFR classes: ${missing.join(", ")}.`,
         };
   },
 
   // Q005: Advisory multi-round loop (≥ 3 stabilised rounds).
   Q005: (ev) => {
-    const stabilised = ev.rounds.filter((r) => r.status === 'STABILISED');
+    const stabilised = ev.rounds.filter((r) => r.status === "STABILISED");
     return stabilised.length >= 3
       ? {
-          answer: 'PASS',
+          answer: "PASS",
           evidenceRefs: stabilised
             .map((r) => `InterrogationRound:${ev.projectId}:${r.roundN}`)
             .sort(),
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
           notes: `Only ${stabilised.length} stabilised round(s); need ≥3.`,
         };
@@ -327,17 +360,17 @@ const EVALUATORS: Record<string, Evaluator> = {
 
   // Q006: Decisions captured as locked ADRs.
   Q006: (ev) => {
-    const locked = ev.adrs.filter((a) => a.status === 'LOCKED');
+    const locked = ev.adrs.filter((a) => a.status === "LOCKED");
     return locked.length >= 1
       ? {
-          answer: 'PASS',
+          answer: "PASS",
           evidenceRefs: locked.map((a) => `ADR:${a.adrId}`).sort(),
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
-          notes: 'No LOCKED ADR recorded for project.',
+          notes: "No LOCKED ADR recorded for project.",
         };
   },
 
@@ -346,22 +379,22 @@ const EVALUATORS: Record<string, Evaluator> = {
   Q007: (ev) => {
     const hits = ev.rounds.filter(
       (r) =>
-        r.status === 'STABILISED' &&
+        r.status === "STABILISED" &&
         Array.isArray(r.injectedConstraintIds) &&
         r.injectedConstraintIds.length > 0,
     );
     return hits.length > 0
       ? {
-          answer: 'PASS',
+          answer: "PASS",
           evidenceRefs: hits
             .map((r) => `InterrogationRound:${ev.projectId}:${r.roundN}`)
             .sort(),
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
-          notes: 'No stabilised round with injected constraints.',
+          notes: "No stabilised round with injected constraints.",
         };
   },
 
@@ -371,23 +404,25 @@ const EVALUATORS: Record<string, Evaluator> = {
     const total = ev.rounds.length;
     if (total === 0) {
       return {
-        answer: 'NOT_APPLICABLE',
+        answer: "NOT_APPLICABLE",
         evidenceRefs: [],
-        notes: 'No interrogation rounds recorded.',
+        notes: "No interrogation rounds recorded.",
       };
     }
     const stabilised = ev.rounds.filter(
-      (r) => r.status === 'STABILISED',
+      (r) => r.status === "STABILISED",
     ).length;
     const ratio = stabilised / total;
     return ratio >= 0.75
       ? {
-          answer: 'PASS',
-          evidenceRefs: [`InterrogationRound:${ev.projectId}:ratio=${ratio.toFixed(2)}`],
+          answer: "PASS",
+          evidenceRefs: [
+            `InterrogationRound:${ev.projectId}:ratio=${ratio.toFixed(2)}`,
+          ],
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
           notes: `Stabilised/total = ${stabilised}/${total} = ${ratio.toFixed(2)} < 0.75.`,
         };
@@ -399,20 +434,23 @@ const EVALUATORS: Record<string, Evaluator> = {
   Q009: (ev) => {
     const hits = ev.specs.filter(
       (s) =>
-        (s.sourceDesignArtifactType === 'ADR' ||
-          s.sourceDesignArtifactType === 'AgentDesignAssessment') &&
-        s.executorKind !== 'DESIGN_AGENT',
+        (s.sourceDesignArtifactType === "ADR" ||
+          s.sourceDesignArtifactType === "AgentDesignAssessment") &&
+        s.executorKind !== "DESIGN_AGENT",
     );
     return hits.length > 0
       ? {
-          answer: 'PASS',
-          evidenceRefs: hits.map((s) => `ExecutionSpecification:${s.specId}`).sort(),
+          answer: "PASS",
+          evidenceRefs: hits
+            .map((s) => `ExecutionSpecification:${s.specId}`)
+            .sort(),
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
-          notes: 'No execution specification with clean design↔exec separation.',
+          notes:
+            "No execution specification with clean design↔exec separation.",
         };
   },
 
@@ -421,20 +459,22 @@ const EVALUATORS: Record<string, Evaluator> = {
   Q010: (ev) => {
     const hits = ev.specs.filter(
       (s) =>
-        s.status === 'APPROVED' &&
-        typeof s.approvedBy === 'string' &&
+        s.status === "APPROVED" &&
+        typeof s.approvedBy === "string" &&
         s.approvedBy.length > 0,
     );
     return hits.length > 0
       ? {
-          answer: 'PASS',
-          evidenceRefs: hits.map((s) => `ExecutionSpecification:${s.specId}`).sort(),
+          answer: "PASS",
+          evidenceRefs: hits
+            .map((s) => `ExecutionSpecification:${s.specId}`)
+            .sort(),
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
-          notes: 'No human-approved execution specification on record.',
+          notes: "No human-approved execution specification on record.",
         };
   },
 
@@ -443,7 +483,7 @@ const EVALUATORS: Record<string, Evaluator> = {
   // those IDs maps to an ADR whose status='LOCKED'.
   Q011: (ev) => {
     const lockedIds = new Set(
-      ev.adrs.filter((a) => a.status === 'LOCKED').map((a) => a.adrId),
+      ev.adrs.filter((a) => a.status === "LOCKED").map((a) => a.adrId),
     );
     const hits = ev.specs.filter(
       (s) =>
@@ -452,14 +492,16 @@ const EVALUATORS: Record<string, Evaluator> = {
     );
     return hits.length > 0
       ? {
-          answer: 'PASS',
-          evidenceRefs: hits.map((s) => `ExecutionSpecification:${s.specId}`).sort(),
+          answer: "PASS",
+          evidenceRefs: hits
+            .map((s) => `ExecutionSpecification:${s.specId}`)
+            .sort(),
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
-          notes: 'No execution specification cites a LOCKED ADR.',
+          notes: "No execution specification cites a LOCKED ADR.",
         };
   },
 
@@ -467,19 +509,20 @@ const EVALUATORS: Record<string, Evaluator> = {
   // PASS when ≥1 spec with narrativeReviewStatus='REVIEWED' and status='APPROVED'.
   Q012: (ev) => {
     const hits = ev.specs.filter(
-      (s) =>
-        s.narrativeReviewStatus === 'REVIEWED' && s.status === 'APPROVED',
+      (s) => s.narrativeReviewStatus === "REVIEWED" && s.status === "APPROVED",
     );
     return hits.length > 0
       ? {
-          answer: 'PASS',
-          evidenceRefs: hits.map((s) => `ExecutionSpecification:${s.specId}`).sort(),
+          answer: "PASS",
+          evidenceRefs: hits
+            .map((s) => `ExecutionSpecification:${s.specId}`)
+            .sort(),
           notes: null,
         }
       : {
-          answer: 'FAIL',
+          answer: "FAIL",
           evidenceRefs: [],
-          notes: 'No approved spec with REVIEWED narrative.',
+          notes: "No approved spec with REVIEWED narrative.",
         };
   },
 
@@ -494,7 +537,7 @@ function evaluate(
   question: ChecklistQuestion,
   evidence: Evidence,
 ): ChecklistResult {
-  const evaluator = EVALUATORS[question.questionId]?? defaultEvaluator;
+  const evaluator = EVALUATORS[question.questionId] ?? defaultEvaluator;
   const out = evaluator(evidence);
   return {
     questionId: question.questionId,
@@ -513,17 +556,17 @@ interface ProgramReviewArguments {
   reviewId: string;
 }
 
-type ProgramReviewResolverEvent = GovernanceResolverEvent<ProgramReviewArguments>;
+type ProgramReviewResolverEvent =
+  GovernanceResolverEvent<ProgramReviewArguments>;
 
 function authContextFromEvent(event: ProgramReviewResolverEvent): AuthContext {
   const identity: GovernanceEventIdentity = event?.identity || {};
-  const claimRole =
-    identity['custom:role'] ?? identity.claims?.['custom:role'];
+  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
-    userId: identity.sub || identity.username || 'anonymous',
+    userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
-    groups: identity['cognito:groups'] || [],
-    roles: claimRole ? [claimRole]: [],
+    groups: identity["cognito:groups"] || [],
+    roles: claimRole ? [claimRole] : [],
   };
 }
 
@@ -532,10 +575,11 @@ function authContextFromEvent(event: ProgramReviewResolverEvent): AuthContext {
  * be weaponised to exfiltrate long payloads. Non-string values pass through.
  */
 function sanitizeForLog(input: unknown): unknown {
-  if (!input || typeof input !== 'object') return input;
+  if (!input || typeof input !== "object") return input;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
-    out[k] = typeof v === 'string' && v.length > 200 ? v.slice(0, 200) + '…' : v;
+    out[k] =
+      typeof v === "string" && v.length > 200 ? v.slice(0, 200) + "…" : v;
   }
   return out;
 }
@@ -557,14 +601,24 @@ function sanitizeForLog(input: unknown): unknown {
 export async function runProgramReview(
   projectId: string,
   authContext: AuthContext,
+  event?: unknown,
 ): Promise<ProgramReview> {
-  if (!hasPermission(authContext, 'adr:create')) {
+  if (!hasPermission(authContext, "adr:create")) {
     throw new Error(
-      'UnauthorizedError: adr:create permission required to run program review',
+      "UnauthorizedError: adr:create permission required to run program review",
     );
   }
-  if (typeof projectId !== 'string' || projectId.length === 0) {
-    throw new Error('ValidationError: projectId is required');
+  if (typeof projectId !== "string" || projectId.length === 0) {
+    throw new Error("ValidationError: projectId is required");
+  }
+
+  // Org-reconciliation gate (finding 2c262386). Runs BEFORE the parallel
+  // evidence-fetch Promise.all below — a cross-org caller triggers ZERO
+  // reads of another organization's ADRs, execution specs, interrogation
+  // rounds, or agent design assessment — and BEFORE the PutCommand that
+  // persists the review row.
+  if (event !== undefined) {
+    await assertProjectOrgAccess(projectId, event);
   }
 
   // Fetch the four evidence sources in parallel. listInterrogationRounds
@@ -585,7 +639,9 @@ export async function runProgramReview(
     assessment: assessmentP ?? null,
   };
 
-  const results: ChecklistResult[] = CHECKLIST.map((q) => evaluate(q, evidence));
+  const results: ChecklistResult[] = CHECKLIST.map((q) =>
+    evaluate(q, evidence),
+  );
 
   const now = new Date().toISOString();
   const review: ProgramReview = {
@@ -601,7 +657,7 @@ export async function runProgramReview(
     new PutCommand({
       TableName: PROGRAM_REVIEWS_TABLE,
       Item: review,
-      ConditionExpression: 'attribute_not_exists(reviewId)',
+      ConditionExpression: "attribute_not_exists(reviewId)",
     }),
   );
   return review;
@@ -618,7 +674,7 @@ async function safeCall<T>(fn: () => Promise<T>): Promise<T | null> {
   try {
     return await fn();
   } catch (err) {
-    console.warn('program-review-resolver: evidence source failed', {
+    console.warn("program-review-resolver: evidence source failed", {
       error: (err as Error)?.message,
     });
     return null;
@@ -627,43 +683,61 @@ async function safeCall<T>(fn: () => Promise<T>): Promise<T | null> {
 
 export async function getProgramReview(
   reviewId: string,
+  event?: unknown,
 ): Promise<ProgramReview | null> {
   const res = await docClient.send(
     new GetCommand({ TableName: PROGRAM_REVIEWS_TABLE, Key: { reviewId } }),
   );
-  return (res.Item as ProgramReview | undefined) ?? null;
+  const review = (res.Item as ProgramReview | undefined) ?? null;
+  if (review && event !== undefined) {
+    await assertProjectOrgAccess(review.projectId, event);
+  }
+  return review;
 }
 
 export async function listProgramReviewsForProject(
   projectId: string,
+  event?: unknown,
 ): Promise<ProgramReview[]> {
+  if (event !== undefined) {
+    await assertProjectOrgAccess(projectId, event);
+  }
   const res = await docClient.send(
     new QueryCommand({
       TableName: PROGRAM_REVIEWS_TABLE,
-      IndexName: 'project-index',
-      KeyConditionExpression: 'projectId = :pid',
-      ExpressionAttributeValues: { ':pid': projectId },
+      IndexName: "project-index",
+      KeyConditionExpression: "projectId = :pid",
+      ExpressionAttributeValues: { ":pid": projectId },
     }),
   );
   return (res.Items as ProgramReview[] | undefined) ?? [];
 }
 
-export const handler = async (event: ProgramReviewResolverEvent): Promise<unknown> => {
+export const handler = async (
+  event: ProgramReviewResolverEvent,
+): Promise<unknown> => {
   const fieldName = event?.info?.fieldName;
   const authContext = authContextFromEvent(event);
   try {
     switch (fieldName) {
-      case 'runProgramReview':
-        return await runProgramReview(event.arguments.projectId, authContext);
-      case 'getProgramReview':
-        return await getProgramReview(event.arguments.reviewId);
-      case 'listProgramReviewsForProject':
-        return await listProgramReviewsForProject(event.arguments.projectId);
+      case "runProgramReview":
+        return await runProgramReview(
+          event.arguments.projectId,
+          authContext,
+          event,
+        );
+      case "getProgramReview":
+        return await getProgramReview(event.arguments.reviewId, event);
+      case "listProgramReviewsForProject":
+        return await listProgramReviewsForProject(
+          event.arguments.projectId,
+          event,
+        );
       default:
         throw new Error(`Unsupported field: ${fieldName}`);
     }
   } catch (err: unknown) {
-    console.error('program-review-resolver error', {
+    console.error("program-review-resolver error", {
       fieldName,
       message: err instanceof Error ? err.message : undefined,
       args: sanitizeForLog(event?.arguments),
