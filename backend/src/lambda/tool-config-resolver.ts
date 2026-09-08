@@ -12,7 +12,11 @@ import {
   type ToolCustomMetadata,
   type ListResourcesOptions,
 } from "../services/registry-service";
-import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  assertRowOrg,
+} from "../utils/auth-event";
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -310,6 +314,7 @@ export const handler = async (
             )
           : await createToolConfig(
               event.arguments.input as ToolConfigMutationInput,
+              event,
             );
 
       case "updateToolConfig":
@@ -321,12 +326,16 @@ export const handler = async (
             )
           : await updateToolConfig(
               event.arguments.input as ToolConfigMutationInput,
+              event,
             );
 
       case "deleteToolConfig":
         return registryEnabled
-          ? await deleteToolConfigRegistry(event.arguments.toolId as string)
-          : await deleteToolConfig(event.arguments.toolId as string);
+          ? await deleteToolConfigRegistry(
+              event.arguments.toolId as string,
+              event,
+            )
+          : await deleteToolConfig(event.arguments.toolId as string, event);
 
       case "listIntegrationOperations":
         return getOperations(event.arguments.integrationType as string);
@@ -574,6 +583,13 @@ export async function updateToolConfigRegistry(
     orgId: undefined,
   });
 
+  // Org scoping (finding 13065e38): reconcile the record's orgId against
+  // the caller BEFORE any Registry write. Mirrors datastore-resolver.ts's
+  // updateDataStore gate (finding ca76d041) — fetch-then-verify via the
+  // shared assertRowOrg helper, admin bypass included, fail closed on a
+  // missing/unresolvable org on either side.
+  await assertRowOrg({ orgId: existingMeta.orgId }, event);
+
   // Preserve existing orgId; fall back to caller for legacy records.
   // Never derive orgId from input — that field is backend-owned.
   const preservedOrgId =
@@ -673,8 +689,22 @@ export async function updateToolConfigRegistry(
  */
 export async function deleteToolConfigRegistry(
   toolId: string,
+  event?: OrgScopedEvent,
 ): Promise<{ success: boolean; message?: string }> {
   const registryService = getRegistryService();
+
+  // Org scoping (finding 13065e38): fetch-then-verify BEFORE the Registry
+  // delete. A missing record still fails closed via assertRowOrg (no orgId
+  // to reconcile against), rather than silently no-op'ing past the check.
+  const existing = await registryService.getResource("tool", toolId);
+  const existingMeta = existing
+    ? registryService.deserializeCustomMetadata<{ orgId?: string }>(
+        existing.customDescriptorContent ?? null,
+        { orgId: undefined },
+      )
+    : { orgId: undefined };
+  await assertRowOrg({ orgId: existingMeta.orgId }, event);
+
   try {
     await registryService.deleteResource("tool", toolId);
     return {
@@ -765,6 +795,7 @@ async function getToolConfig(toolId: string): Promise<ToolConfig | null> {
 
 async function createToolConfig(
   input: ToolConfigMutationInput,
+  event?: OrgScopedEvent,
 ): Promise<ToolConfig> {
   const now = new Date().toISOString();
   const config =
@@ -778,9 +809,19 @@ async function createToolConfig(
     validateDataStoreBindings(input.dataStoreBindings);
   }
 
+  // Org scoping (finding 13065e38): ToolConfigMutationInput carries no
+  // client-supplied orgId field at all, so there is no client value to
+  // reject — but leaving this hardcoded to "" (as before) permanently
+  // orphans every legacy-created row from the assertRowOrg gate now
+  // guarding updateToolConfig/deleteToolConfig (a row with no orgId always
+  // fails closed). Derive orgId server-side from the caller, exactly like
+  // createToolConfigRegistry already does, so newly-created legacy rows
+  // remain updatable/deletable by their owning org.
+  const orgId = event !== undefined ? await extractOrgFromEvent(event) : null;
+
   const toolConfig: ToolConfig = {
     toolId: input.toolId,
-    orgId: "",
+    orgId: orgId ?? "",
     config,
     state: input.state || "active",
     categories: input.categories || [],
@@ -826,11 +867,18 @@ async function createToolConfig(
 
 async function updateToolConfig(
   input: ToolConfigMutationInput,
+  event?: OrgScopedEvent,
 ): Promise<ToolConfig> {
   const existing = await getToolConfig(input.toolId);
   if (!existing) {
     throw new Error(`Tool config not found: ${input.toolId}`);
   }
+
+  // Org scoping (finding 13065e38): reconcile the row's orgId against the
+  // caller BEFORE any write. Mirrors datastore-resolver.ts's updateDataStore
+  // gate (finding ca76d041) — fetch-then-verify, admin bypass, fail closed
+  // on a missing/unresolvable org on either side.
+  await assertRowOrg(existing, event);
 
   // Validate bindings before persistence
   if (input.integrationBindings && Array.isArray(input.integrationBindings)) {
@@ -915,7 +963,13 @@ async function updateToolConfig(
 
 async function deleteToolConfig(
   toolId: string,
+  event?: OrgScopedEvent,
 ): Promise<{ success: boolean; message?: string }> {
+  // Org scoping (finding 13065e38): fetch-then-verify BEFORE the delete.
+  // A missing row fails closed via assertRowOrg (no orgId to reconcile).
+  const existing = await getToolConfig(toolId);
+  await assertRowOrg(existing, event);
+
   try {
     await docClient.send(
       new DeleteCommand({
