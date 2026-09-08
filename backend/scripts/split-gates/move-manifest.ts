@@ -1881,4 +1881,23 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       conditionKeys: [],
     },
   ],
+  // Finding 1a9181a4: agent-code-resolver's org+role authz fix (a29f50b)
+  // wired a bedrock-agentcore:GetRegistryRecord-only grant on the Registry
+  // (02a95f3) to look up the agent's Registry record for the orgId
+  // reconciliation check. Read-only, scoped to the registry ARN — no
+  // Create/Update/Delete action is granted. The satellite's frozen
+  // baseline predates this branch's authz work, so it cannot cover the
+  // statement; allowlisted here per the PR 111 reconciliation pattern
+  // rather than regenerating the baseline (a separate governance act).
+  AgentCodeResolverFunction720FFFB6: [
+    {
+      effect: "Allow",
+      actions: ["bedrock-agentcore:GetRegistryRecord"],
+      resources: [
+        "GETATT:AgentCoreRegistry:RegistryArn",
+        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+      ],
+      conditionKeys: [],
+    },
+  ],
 };

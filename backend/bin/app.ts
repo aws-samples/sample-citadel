@@ -988,6 +988,14 @@ if (app.node.tryGetContext("nag") !== "false") {
     // only, scoped to the registry ARN + its records, to fetch the app's
     // manifest for the owner-role check before any provisioning/teardown.
     [gatewayStack, "AppPublishHandler/ServiceRole/DefaultPolicy/Resource"],
+    // Agent-code org/role gate (finding 1a9181a4): GetRegistryRecord
+    // only, scoped to the registry ARN + its records, to fetch the
+    // agent's Registry record for the org reconciliation check before any
+    // S3/DynamoDB access. Same shape as the publish handler's grant above.
+    [
+      registryStack,
+      "AgentCodeResolverFunction/ServiceRole/DefaultPolicy/Resource",
+    ],
   ];
   for (const [stack, path] of registryArnPaths) {
     NagSuppressions.addResourceSuppressionsByPath(

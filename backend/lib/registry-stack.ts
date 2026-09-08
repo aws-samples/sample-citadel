@@ -623,6 +623,12 @@ export class RegistryStack extends cdk.Stack {
         environment: {
           AGENT_BUCKET_NAME: `citadel-code-${props.environment}-${this.account}-${this.region}`,
           AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+          // Org/role gate (finding 1a9181a4): the resolver fetches the
+          // agent's Registry record via RegistryService before any S3 or
+          // DynamoDB access, reconciling its orgId against the caller via
+          // the shared assertRowOrg gate (auth-event.ts) — mirrors the
+          // publish handler's REGISTRY_ID wiring in gateway-stack.ts.
+          REGISTRY_ID: props.registryId,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "AgentCodeResolverFunctionLogs", {
@@ -630,6 +636,18 @@ export class RegistryStack extends cdk.Stack {
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
       },
+    );
+
+    // Read-only Registry access for the org/role gate (finding 1a9181a4).
+    // GetRegistryRecord only — never Create/Update/Delete — scoped to this
+    // registry's ARN, exactly as gateway-stack.ts grants the publish
+    // handler's owner gate (finding 13a58234).
+    agentCodeResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["bedrock-agentcore:GetRegistryRecord"],
+        resources: [props.registryArn, `${props.registryArn}/*`],
+      }),
     );
 
     // S3 permissions for agent code — baseline grants by explicit,
