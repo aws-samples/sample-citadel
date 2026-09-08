@@ -2597,6 +2597,11 @@ exports.handler = async (event) => {
           AGENT_DESIGN_ASSESSMENTS_TABLE:
             props.agentDesignAssessmentsTable.tableName,
           ENVIRONMENT: props.environment,
+          // finding 2c262386: assertProjectOrgAccess reads PROJECTS_TABLE
+          // to reconcile the caller's org against the reviewed project
+          // before any evidence read/write. Read-only — this resolver
+          // never writes Projects.
+          PROJECTS_TABLE: props.projectsTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "ProgramReviewResolverFunctionLogs", {
@@ -2615,6 +2620,9 @@ exports.handler = async (event) => {
     props.agentDesignAssessmentsTable.grantReadData(
       programReviewResolverFunction,
     );
+    // finding 2c262386: read-only grant for the project-org reconciliation
+    // gate (assertProjectOrgAccess). Least privilege — no write access.
+    props.projectsTable.grantReadData(programReviewResolverFunction);
 
     const programReviewDataSourceRole = new iam.Role(
       this,
