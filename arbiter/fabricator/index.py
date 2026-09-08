@@ -298,6 +298,7 @@ def _write_fabrication_status(
     error_message: str | None = None,
     agent_name: str | None = None,
     registration_errors: list | None = None,
+    org_id: str | None = None,
 ) -> bool:
     """Upsert a per-agent fabrication status row in the durable jobs table.
 
@@ -305,6 +306,15 @@ def _write_fabrication_status(
     (``citadel-fabrication-jobs-${env}``) is keyed by orchestrationId (PK) /
     agentUseId (SK). process_event calls this at the START (PROCESSING), on
     SUCCESS (COMPLETED + agentId) and on EXCEPTION (FAILED + errorMessage).
+
+    ``org_id`` (Phase 2b / cross-tenant exposure fix, design evidence
+    bf4a13f2): the caller's organization, stamped onto the row so the
+    org-scoped getFabricatorQueue GSI query can find it. Written with
+    ``if_not_exists`` semantics — same rationale as ``agentName`` below — so
+    this arbiter write never clobbers an orgId a producer (direct-UI PENDING
+    write) already stamped on the row. Omitted entirely when empty/None
+    rather than writing a blank string, so an unresolvable org reads as
+    absent, not as a false empty-string match against a caller with no org.
 
     ``registration_errors`` is an ADDITIVE attribute (no new status enum
     value — the 4-value {PENDING, PROCESSING, COMPLETED, FAILED} contract is
@@ -365,6 +375,11 @@ def _write_fabrication_status(
         set_parts.append("#agentId = :agentId")
         names["#agentId"] = "agentId"
         values[":agentId"] = {"S": agent_id}
+    if org_id:
+        # if_not_exists: never clobber a producer-set orgId (e.g. the
+        # direct-UI PENDING write) — see docstring.
+        set_parts.append("orgId = if_not_exists(orgId, :orgId)")
+        values[":orgId"] = {"S": org_id}
     if error_message is not None:
         set_parts.append("#errorMessage = :errorMessage")
         names["#errorMessage"] = "errorMessage"
@@ -2194,7 +2209,8 @@ def process_event(event, context, request_type=None):
         # Durable status: mark this agent PROCESSING at the start. Best-effort
         # — a status-write failure never changes fabrication behavior.
         _write_fabrication_status(
-            orchestration_id, agent_use_id, "PROCESSING", agent_name=agent_use_id
+            orchestration_id, agent_use_id, "PROCESSING", agent_name=agent_use_id,
+            org_id=org_id,
         )
 
         # since this needs variable injection, keep within handler method scope.
@@ -2402,6 +2418,7 @@ def process_event(event, context, request_type=None):
                 error_message=all_failed_message[:1000],
                 agent_name=agent_use_id,
                 registration_errors=registration_errors,
+                org_id=org_id,
             )
             return
 
@@ -2409,6 +2426,7 @@ def process_event(event, context, request_type=None):
             orchestration_id, agent_use_id, "COMPLETED",
             agent_id=agent_use_id, agent_name=agent_use_id,
             registration_errors=registration_errors,
+            org_id=org_id,
         )
 
     except FabricationDeadlineExceeded as deadline_exc:
@@ -2427,7 +2445,8 @@ def process_event(event, context, request_type=None):
         _write_fabrication_status(
             orchestration_id, agent_use_id, "FAILED",
             error_message=timeout_message,
-            agent_name=agent_use_id
+            agent_name=agent_use_id,
+            org_id=org_id,
         )
         # Best-effort failure signals: the CLEAN RETURN is the loop-breaker,
         # so a failing EventBridge publish must never turn this path back
@@ -2460,7 +2479,8 @@ def process_event(event, context, request_type=None):
         _write_fabrication_status(
             orchestration_id, agent_use_id, "FAILED",
             error_message=user_actionable_failure_message(e),
-            agent_name=agent_use_id
+            agent_name=agent_use_id,
+            org_id=org_id,
         )
         # Publish intake progress failure
         publish_intake_progress(orchestration_id, agent_index, total_agents, agent_use_id, failed=True)
