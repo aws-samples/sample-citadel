@@ -434,6 +434,62 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     // 6 data sources => 6 appsync-assumable roles.
     expect(Object.keys(roles)).toHaveLength(6);
   });
+
+  describe("agent-code-resolver org/role gate wiring (finding 1a9181a4)", () => {
+    function agentCodeResolverFn(): Record<string, any> {
+      const fns = template.findResources("AWS::Lambda::Function", {
+        Properties: { Handler: "agent-code-resolver.handler" },
+      });
+      const fnLogicalId = Object.keys(fns)[0];
+      expect(fnLogicalId).toBeDefined();
+      return fns[fnLogicalId];
+    }
+
+    test("is wired with REGISTRY_ID, mirroring the publish handler's owner-gate wiring", () => {
+      const fn = agentCodeResolverFn();
+      const envVars = fn.Properties.Environment?.Variables ?? {};
+      expect(envVars.REGISTRY_ID).toBeDefined();
+    });
+
+    test("has a READ-ONLY bedrock-agentcore:GetRegistryRecord statement scoped to the registry ARN — no Create/Update/Delete", () => {
+      const fn = agentCodeResolverFn();
+      const roleRef = fn.Properties.Role?.["Fn::GetAtt"]?.[0];
+      expect(roleRef).toBeDefined();
+
+      const policies = template.findResources("AWS::IAM::Policy");
+      const attached = Object.values(policies).filter(
+        (p: Record<string, any>) =>
+          (p.Properties?.Roles ?? []).some(
+            (r: Record<string, any>) => r?.Ref === roleRef,
+          ),
+      );
+      const statements = attached.flatMap(
+        (p: Record<string, any>) => p.Properties.PolicyDocument.Statement,
+      );
+
+      const registryStatements = statements.filter((s: Record<string, any>) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.some(
+          (a: string) => typeof a === "string" && a.startsWith("bedrock-agentcore:"),
+        );
+      });
+      expect(registryStatements.length).toBeGreaterThan(0);
+
+      for (const stmt of registryStatements) {
+        const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+        expect(new Set(actions)).toEqual(
+          new Set(["bedrock-agentcore:GetRegistryRecord"]),
+        );
+        // No write-capable registry action anywhere on this role.
+        expect(actions).not.toContain("bedrock-agentcore:CreateRegistryRecord");
+        expect(actions).not.toContain("bedrock-agentcore:UpdateRegistryRecord");
+        expect(actions).not.toContain(
+          "bedrock-agentcore:UpdateRegistryRecordStatus",
+        );
+        expect(actions).not.toContain("bedrock-agentcore:DeleteRegistryRecord");
+      }
+    });
+  });
 });
 
 // CIT-125 slice A follow-up (design A.6 #6, deferred from the feature PR
