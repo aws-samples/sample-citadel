@@ -15,8 +15,20 @@
  * (backend/src/utils/auth-event.ts) — load the row, reconcile its orgId
  * against the caller's server-derived org (extractOrgFromEvent), and refuse
  * BEFORE any mutation, secret deletion, IAM change, or adapter/provider
- * call. Admins bypass, mirroring the read-path admin bypass already used by
- * listDataStores/getDataStoreStats/listAvailableDataSources.
+ * call. Admins bypass for EXISTING-ROW ops (getDataStore/updateDataStore/
+ * deleteDataStore/connectDataStore/disconnectDataStore/
+ * testDataStoreConnection), mirroring the read-path admin bypass already
+ * used by listDataStores/getDataStoreStats/listAvailableDataSources.
+ *
+ * createDataStore is the ONE exception (decision b5d463f2, owner-ratified):
+ * it does NOT honour the admin bypass. Previously a non-admin's mismatched
+ * input.orgId was rejected but an admin's was not, so an admin could write
+ * an arbitrary orgId into the record AND the Secrets Manager path
+ * (/citadel/datastores/{orgId}/...). The mismatch is now rejected for
+ * EVERYONE, admins included, before any DynamoDB write, Secrets Manager
+ * call, or IAM change. If platform operators genuinely need to provision on
+ * a tenant's behalf, that requires an EXPLICIT separate operator path —
+ * intentionally not built here; this fix only removes the implicit bypass.
  */
 
 // ---- Mock setup ----
@@ -298,7 +310,7 @@ describe("legitimate same-org callers still succeed", () => {
     expect(mockPolicyManager.deleteRole).toHaveBeenCalledTimes(1);
   });
 
-  test("admin caller may act cross-org (bypass preserved)", async () => {
+  test("admin caller may act cross-org for existing-row ops (bypass preserved)", async () => {
     const result = (await handler(
       makeEvent("getDataStore", { dataStoreId: "ds-victim" }, ADMIN_IDENTITY),
     )) as { dataStoreId: string };
@@ -379,40 +391,39 @@ describe("createDataStore rejects a foreign/mismatched orgId", () => {
     expect(result.dataStoreId).toBe("test-uuid");
   });
 
-  test("admin may create with an explicit orgId (bypass preserved)", async () => {
-    mockDynamoSend.mockImplementation((cmd: { _type?: string }) => {
-      if (cmd._type === "Query") return Promise.resolve({ Items: [] });
-      if (cmd._type === "Put") return Promise.resolve({});
-      if (cmd._type === "Update") {
-        return Promise.resolve({
-          Attributes: {
-            dataStoreId: "test-uuid",
-            status: "CONNECTED",
-            version: 1,
-          },
-        });
-      }
-      return Promise.resolve({});
-    });
+  test("admin caller is REJECTED for a mismatched orgId — no implicit admin bypass on createDataStore (decision b5d463f2)", async () => {
+    const putBefore = mockDynamoSend.mock.calls.length;
 
-    const result = (await handler(
-      makeEvent(
-        "createDataStore",
-        {
-          input: {
-            name: "admin-created",
-            type: "S3",
-            category: "S3_STORAGE",
-            provisionMode: "CONNECT_EXISTING",
-            orgId: "org-any",
-            config: JSON.stringify({ bucketName: "b" }),
-            clientRequestToken: "tok-admin-1",
+    await expect(
+      handler(
+        makeEvent(
+          "createDataStore",
+          {
+            input: {
+              name: "admin-attempted-foreign-write",
+              type: "S3",
+              category: "S3_STORAGE",
+              provisionMode: "CONNECT_EXISTING",
+              orgId: "org-any",
+              config: JSON.stringify({ bucketName: "b" }),
+              clientRequestToken: "tok-admin-1",
+            },
           },
-        },
-        ADMIN_IDENTITY,
+          ADMIN_IDENTITY,
+        ),
       ),
-    )) as { dataStoreId: string };
+    ).rejects.toThrow(/access denied|org/i);
 
-    expect(result.dataStoreId).toBe("test-uuid");
+    // Prove fail-closed by mutation, not by asserting an empty result:
+    // zero DynamoDB calls of ANY kind (no Put, no Query, no Update), zero
+    // Secrets Manager calls, zero IAM/policy-manager calls — the rejection
+    // must happen before any of createDataStore's side effects, including
+    // the idempotency-check Query that normally runs first.
+    expect(mockDynamoSend.mock.calls.length).toBe(putBefore);
+    expect(mockSecretsSend).not.toHaveBeenCalled();
+    expect(mockPolicyManager.ensureRole).not.toHaveBeenCalled();
+    expect(mockPolicyManager.assumeScopedRole).not.toHaveBeenCalled();
+    expect(mockAdapter.provision).not.toHaveBeenCalled();
+    expect(mockAdapter.connect).not.toHaveBeenCalled();
   });
 });

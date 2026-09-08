@@ -426,16 +426,21 @@ async function createDataStore(
   // trusted a client-supplied input.orgId outright. Mutation convention is
   // reject-not-coerce (unlike the read-path collection queries above): derive
   // the caller's org server-side and refuse a mismatched client value BEFORE
-  // any DynamoDB write, Secrets Manager call, or IAM change. Admins may still
-  // create on behalf of any org (same bypass every other operation honours).
-  const admin = isAdminFromEvent(event);
-  if (!admin) {
-    const callerOrgId = await extractOrgFromEvent(event);
-    if (!callerOrgId || callerOrgId !== input.orgId) {
-      throw new PermissionError(
-        "Access denied: orgId does not match caller's organization",
-      );
-    }
+  // any DynamoDB write, Secrets Manager call, or IAM change.
+  //
+  // Decision b5d463f2 (owner-ratified): this check does NOT honour the admin
+  // bypass that every other op in this file uses. An admin previously skipped
+  // the check entirely and could write an arbitrary orgId into the record AND
+  // the Secrets Manager path (/citadel/datastores/{orgId}/...) — the mismatch
+  // is now rejected for EVERYONE, admins included. If platform operators
+  // genuinely need to provision on a tenant's behalf, that requires an
+  // EXPLICIT separate operator path — intentionally not built speculatively
+  // here; this fix only removes the implicit bypass.
+  const callerOrgId = await extractOrgFromEvent(event);
+  if (!callerOrgId || callerOrgId !== input.orgId) {
+    throw new PermissionError(
+      "Access denied: orgId does not match caller's organization",
+    );
   }
 
   const dataStoreId = uuidv4();
