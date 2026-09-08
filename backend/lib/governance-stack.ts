@@ -773,6 +773,11 @@ exports.handler = async (event) => {
           ADRS_TABLE: props.adrsTable.tableName,
           ADR_REOPEN_ATTEMPTS_TABLE: props.adrReopenAttemptsTable.tableName,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          // finding 677c1a6c: assertProjectOrgAccess reads PROJECTS_TABLE
+          // to reconcile the caller's org against the ADR's owning project
+          // before any write/read. Read-only — this resolver never writes
+          // Projects.
+          PROJECTS_TABLE: props.projectsTable.tableName,
         },
         timeout: Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "ADRResolverFunctionLogs", {
@@ -785,6 +790,9 @@ exports.handler = async (event) => {
     props.adrsTable.grantReadWriteData(adrResolverFunction);
     props.adrReopenAttemptsTable.grantReadWriteData(adrResolverFunction);
     props.agentEventBus.grantPutEventsTo(adrResolverFunction);
+    // finding 677c1a6c: read-only grant for the project-org reconciliation
+    // gate (assertProjectOrgAccess). Least privilege — no write access.
+    props.projectsTable.grantReadData(adrResolverFunction);
 
     const adrDataSourceRole = new iam.Role(this, "ADRDataSourceRole", {
       assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),
