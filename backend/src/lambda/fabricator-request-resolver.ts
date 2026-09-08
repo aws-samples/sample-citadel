@@ -1,9 +1,13 @@
-import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
-import { randomUUID } from 'crypto';
-import type { RegistryRecord } from '../services/registry-service';
-import { extractOrgFromEvent } from '../utils/auth-event';
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+} from "@aws-sdk/lib-dynamodb";
+import { randomUUID } from "crypto";
+import type { RegistryRecord } from "../services/registry-service";
+import { extractOrgFromEvent } from "../utils/auth-event";
 
 const sqsClient = new SQSClient({});
 const dynamoClient = new DynamoDBClient({});
@@ -44,8 +48,8 @@ function deriveAgentName(taskDetails: string): string {
   if (match && match[1].trim()) {
     return match[1].trim();
   }
-  const firstLine = taskDetails.split('\n').find((l) => l.trim().length > 0);
-  return firstLine ? firstLine.trim() : 'Unknown Agent';
+  const firstLine = taskDetails.split("\n").find((l) => l.trim().length > 0);
+  return firstLine ? firstLine.trim() : "Unknown Agent";
 }
 
 /**
@@ -59,12 +63,15 @@ function deriveAgentName(taskDetails: string): string {
 async function writePendingFabricationStatus(
   requestId: string,
   taskDetails: string,
-  requestType: 'agent-creation' | 'tool-creation',
+  requestType: "agent-creation" | "tool-creation",
   requestedBy: string,
+  orgId: string | null,
 ): Promise<void> {
   const table = getFabricationJobsTable();
   if (!table) {
-    console.log('FABRICATION_JOBS_TABLE unset; skipping fabrication status write');
+    console.log(
+      "FABRICATION_JOBS_TABLE unset; skipping fabrication status write",
+    );
     return;
   }
   const now = new Date().toISOString();
@@ -73,13 +80,19 @@ async function writePendingFabricationStatus(
       new PutCommand({
         TableName: table,
         Item: {
-          orchestrationId: '0',
+          orchestrationId: "0",
           agentUseId: requestId,
-          status: 'PENDING',
+          // Server-derived caller org (Phase 2b already resolves this via
+          // extractOrgFromEvent for the SQS org_id field) — stamped onto the
+          // row so the org-scoped getFabricatorQueue GSI query can find it.
+          // Omitted (never a blank string) when unresolvable so a missing
+          // orgId reads as absent, not as a false empty-string match.
+          ...(orgId ? { orgId } : {}),
+          status: "PENDING",
           agentName: deriveAgentName(taskDetails),
           taskDescription: taskDetails.slice(0, TASK_DESCRIPTION_MAX),
           requestType,
-          requestedBy: requestedBy || 'unknown',
+          requestedBy: requestedBy || "unknown",
           submittedAt: now,
           updatedAt: now,
           ttl: Math.floor(Date.now() / 1000) + FABRICATION_JOBS_TTL_SECONDS,
@@ -88,7 +101,10 @@ async function writePendingFabricationStatus(
     );
   } catch (error) {
     // Eventually-consistent: never block the enqueue on a status-write error.
-    console.error('Failed to write PENDING fabrication status (continuing):', error);
+    console.error(
+      "Failed to write PENDING fabrication status (continuing):",
+      error,
+    );
   }
 }
 
@@ -113,9 +129,9 @@ function _projectIdFromRegistryRecord(
     const parsed = JSON.parse(record.customDescriptorContent);
     if (
       parsed &&
-      typeof parsed === 'object' &&
+      typeof parsed === "object" &&
       !Array.isArray(parsed) &&
-      typeof parsed.sourceProjectId === 'string'
+      typeof parsed.sourceProjectId === "string"
     ) {
       return parsed.sourceProjectId;
     }
@@ -157,11 +173,11 @@ interface CreateToolRequest {
  * `createdBy` on the Registry record.
  */
 function extractRequestedBy(event: FabricatorRequestResolverEvent): string {
-  return (
-    ((event.identity && ('sub' in event.identity ? event.identity.sub : undefined)) ||
-      (event.identity && ('username' in event.identity ? event.identity.username : undefined)) ||
-      'unknown') as string
-  );
+  return ((event.identity &&
+    ("sub" in event.identity ? event.identity.sub : undefined)) ||
+    (event.identity &&
+      ("username" in event.identity ? event.identity.username : undefined)) ||
+    "unknown") as string;
 }
 
 /** AppSync event slice this resolver reads. */
@@ -172,7 +188,7 @@ interface FabricatorRequestResolverEvent {
 }
 
 export const handler = async (event: FabricatorRequestResolverEvent) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log("Event:", JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
   const requestedBy = extractRequestedBy(event);
@@ -182,17 +198,25 @@ export const handler = async (event: FabricatorRequestResolverEvent) => {
   const orgId = await extractOrgFromEvent(event);
 
   try {
-    if (fieldName === 'requestAgentCreation') {
-      return await requestAgentCreation(event.arguments.input as CreateAgentRequest, requestedBy, orgId);
+    if (fieldName === "requestAgentCreation") {
+      return await requestAgentCreation(
+        event.arguments.input as CreateAgentRequest,
+        requestedBy,
+        orgId,
+      );
     }
 
-    if (fieldName === 'requestToolCreation') {
-      return await requestToolCreation(event.arguments.input as CreateToolRequest, requestedBy, orgId);
+    if (fieldName === "requestToolCreation") {
+      return await requestToolCreation(
+        event.arguments.input as CreateToolRequest,
+        requestedBy,
+        orgId,
+      );
     }
 
     throw new Error(`Unknown field: ${fieldName}`);
   } catch (error) {
-    console.error('Error:', error);
+    console.error("Error:", error);
     throw error;
   }
 };
@@ -200,7 +224,7 @@ export const handler = async (event: FabricatorRequestResolverEvent) => {
 async function sendToFabricatorQueue(
   requestId: string,
   taskDetails: string,
-  requestType: 'agent-creation' | 'tool-creation',
+  requestType: "agent-creation" | "tool-creation",
   requestedBy: string,
   orgId: string | null,
   sourceProjectId?: string,
@@ -213,9 +237,9 @@ async function sendToFabricatorQueue(
   }
 
   const fabricatorMessage = {
-    orchestration_id: '0', // Direct request, not part of orchestration
+    orchestration_id: "0", // Direct request, not part of orchestration
     agent_use_id: requestId,
-    node: 'fabricator',
+    node: "fabricator",
     agent_input,
     requested_by: requestedBy,
     // Phase 2b: carry caller org through the SQS boundary. Python fabricator
@@ -223,7 +247,7 @@ async function sendToFabricatorQueue(
     org_id: orgId || null,
   };
 
-  console.log('Sending message to Fabricator queue:', fabricatorMessage);
+  console.log("Sending message to Fabricator queue:", fabricatorMessage);
 
   try {
     await sqsClient.send(
@@ -232,27 +256,33 @@ async function sendToFabricatorQueue(
         MessageBody: JSON.stringify(fabricatorMessage),
         MessageAttributes: {
           requestType: {
-            DataType: 'String',
+            DataType: "String",
             StringValue: requestType,
           },
           requestId: {
-            DataType: 'String',
+            DataType: "String",
             StringValue: requestId,
           },
         },
-      })
+      }),
     );
 
-    console.log('Message sent successfully to Fabricator queue');
+    console.log("Message sent successfully to Fabricator queue");
   } catch (error) {
-    console.error('Error sending message to Fabricator queue:', error);
+    console.error("Error sending message to Fabricator queue:", error);
     throw new Error(`Failed to send request to Fabricator: ${error}`);
   }
 
   // Durable PENDING status row so the queue UI reflects this request even
   // after the consumer pulls the SQS message. Best-effort — never fails the
   // enqueue.
-  await writePendingFabricationStatus(requestId, taskDetails, requestType, requestedBy);
+  await writePendingFabricationStatus(
+    requestId,
+    taskDetails,
+    requestType,
+    requestedBy,
+    orgId,
+  );
 }
 
 /**
@@ -261,31 +291,46 @@ async function sendToFabricatorQueue(
  * A missing projectId means the fabricator design-assessment gate is a no-op,
  * which is the forward-compatible default.
  */
-async function resolveSourceProjectId(appId?: string): Promise<string | undefined> {
+async function resolveSourceProjectId(
+  appId?: string,
+): Promise<string | undefined> {
   if (!appId) return undefined;
   const appsTable = getAppsTable();
   if (!appsTable) {
-    console.warn('APPS_TABLE env var unset; skipping sourceProjectId lookup for app', appId);
+    console.warn(
+      "APPS_TABLE env var unset; skipping sourceProjectId lookup for app",
+      appId,
+    );
     return undefined;
   }
   try {
-    const result = await docClient.send(new GetCommand({
-      TableName: appsTable,
-      Key: { appId },
-    }));
+    const result = await docClient.send(
+      new GetCommand({
+        TableName: appsTable,
+        Key: { appId },
+      }),
+    );
     const row = result.Item;
     if (!row) {
-      console.warn('App row not found for sourceProjectId lookup:', appId);
+      console.warn("App row not found for sourceProjectId lookup:", appId);
       return undefined;
     }
     return row.sourceProjectId || undefined;
   } catch (error) {
-    console.warn('Failed to look up sourceProjectId for app (continuing without):', appId, error);
+    console.warn(
+      "Failed to look up sourceProjectId for app (continuing without):",
+      appId,
+      error,
+    );
     return undefined;
   }
 }
 
-async function requestAgentCreation(input: CreateAgentRequest, requestedBy: string, orgId: string | null) {
+async function requestAgentCreation(
+  input: CreateAgentRequest,
+  requestedBy: string,
+  orgId: string | null,
+) {
   const requestId = randomUUID();
 
   // Build the task details with all the information
@@ -297,28 +342,39 @@ Task Description:
 ${input.taskDescription}`;
 
   if (input.tools && input.tools.length > 0) {
-    taskDetails += `\n\nRequired Tools:\n${input.tools.map(t => `- ${t}`).join('\n')}`;
+    taskDetails += `\n\nRequired Tools:\n${input.tools.map((t) => `- ${t}`).join("\n")}`;
   }
 
   if (input.integrations && input.integrations.length > 0) {
-    taskDetails += `\n\nRequired Integrations:\n${input.integrations.map(i => `- ${i}`).join('\n')}`;
+    taskDetails += `\n\nRequired Integrations:\n${input.integrations.map((i) => `- ${i}`).join("\n")}`;
   }
 
   if (input.dataStores && input.dataStores.length > 0) {
-    taskDetails += `\n\nRequired Data Stores:\n${input.dataStores.map(d => `- ${d}`).join('\n')}`;
+    taskDetails += `\n\nRequired Data Stores:\n${input.dataStores.map((d) => `- ${d}`).join("\n")}`;
   }
 
   const sourceProjectId = await resolveSourceProjectId(input.appId);
-  await sendToFabricatorQueue(requestId, taskDetails, 'agent-creation', requestedBy, orgId, sourceProjectId);
+  await sendToFabricatorQueue(
+    requestId,
+    taskDetails,
+    "agent-creation",
+    requestedBy,
+    orgId,
+    sourceProjectId,
+  );
 
   return {
     success: true,
     requestId,
-    message: 'Agent creation request sent to Fabricator successfully',
+    message: "Agent creation request sent to Fabricator successfully",
   };
 }
 
-async function requestToolCreation(input: CreateToolRequest, requestedBy: string, orgId: string | null) {
+async function requestToolCreation(
+  input: CreateToolRequest,
+  requestedBy: string,
+  orgId: string | null,
+) {
   const requestId = randomUUID();
 
   // Build the task details for tool creation
@@ -330,19 +386,26 @@ Tool Description:
 ${input.toolDescription}`;
 
   if (input.integrations && input.integrations.length > 0) {
-    taskDetails += `\n\nRequired Integrations:\n${input.integrations.map(i => `- ${i}`).join('\n')}`;
+    taskDetails += `\n\nRequired Integrations:\n${input.integrations.map((i) => `- ${i}`).join("\n")}`;
   }
 
   if (input.dataStores && input.dataStores.length > 0) {
-    taskDetails += `\n\nRequired Data Stores:\n${input.dataStores.map(d => `- ${d}`).join('\n')}`;
+    taskDetails += `\n\nRequired Data Stores:\n${input.dataStores.map((d) => `- ${d}`).join("\n")}`;
   }
 
   const sourceProjectId = await resolveSourceProjectId(input.appId);
-  await sendToFabricatorQueue(requestId, taskDetails, 'tool-creation', requestedBy, orgId, sourceProjectId);
+  await sendToFabricatorQueue(
+    requestId,
+    taskDetails,
+    "tool-creation",
+    requestedBy,
+    orgId,
+    sourceProjectId,
+  );
 
   return {
     success: true,
     requestId,
-    message: 'Tool creation request sent to Fabricator successfully',
+    message: "Tool creation request sent to Fabricator successfully",
   };
 }

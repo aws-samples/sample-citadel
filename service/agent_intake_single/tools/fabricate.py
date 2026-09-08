@@ -41,6 +41,12 @@ REGISTRY_ID = os.getenv("REGISTRY_ID", "")
 # When unset the PENDING status write is skipped so this stays backward-
 # compatible in environments that haven't wired the table yet.
 FABRICATION_JOBS_TABLE = os.getenv("FABRICATION_JOBS_TABLE", "")
+# Projects table — used ONLY to resolve the session's organization (for the
+# orgId stamped onto fabrication-jobs rows below). For intake-driven
+# fabrication, orchestrationId == session_id == projectId (see
+# fabricatorQueueService.ts / the CDK comment on FabricationJobsTable), so
+# the session id is looked up directly as the project id.
+PROJECTS_TABLE = os.getenv("PROJECTS_TABLE", "")
 AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-2")
 
 # ~7 day TTL (epoch seconds) keeps the fabrication-jobs table self-pruning.
@@ -91,6 +97,29 @@ def _reset_registry_client_for_test() -> None:
     _registry_client = None
 
 
+def _resolve_session_organization(session_id: str) -> str | None:
+    """Resolve the intake session's organization for stamping onto the
+    fabrication-jobs row.
+
+    session_id == projectId for intake-driven fabrication (see module-level
+    PROJECTS_TABLE comment). Best-effort: returns None on any failure or
+    when PROJECTS_TABLE is unset — callers must treat None as "omit the
+    orgId attribute", never as an empty-string placeholder, so an
+    unresolvable org reads as absent rather than as a false match.
+    """
+    if not PROJECTS_TABLE:
+        return None
+    try:
+        item = dynamodb.Table(PROJECTS_TABLE).get_item(Key={"id": session_id}).get("Item")
+        org = item.get("organization") if item else None
+        return org if isinstance(org, str) and org.strip() else None
+    except Exception as e:  # noqa: BLE001 — best-effort: never block enqueue
+        logger.warning(
+            "Failed to resolve organization for session=%s: %s", session_id, e,
+        )
+        return None
+
+
 def _write_pending_fabrication_status(session_id: str, agent: dict) -> None:
     """Best-effort PENDING row for an intake-driven fabrication request.
 
@@ -108,7 +137,7 @@ def _write_pending_fabrication_status(session_id: str, agent: dict) -> None:
         return
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     try:
-        dynamodb.Table(FABRICATION_JOBS_TABLE).put_item(Item={
+        item = {
             "orchestrationId": session_id,
             "agentUseId": agent["name"],
             "status": "PENDING",
@@ -119,7 +148,11 @@ def _write_pending_fabrication_status(session_id: str, agent: dict) -> None:
             "submittedAt": now,
             "updatedAt": now,
             "ttl": int(time.time()) + FABRICATION_JOBS_TTL_SECONDS,
-        })
+        }
+        org_id = _resolve_session_organization(session_id)
+        if org_id:
+            item["orgId"] = org_id
+        dynamodb.Table(FABRICATION_JOBS_TABLE).put_item(Item=item)
     except Exception as e:  # noqa: BLE001 — best-effort: never block enqueue
         logger.warning(
             "Failed to write PENDING fabrication status for %s/%s: %s",

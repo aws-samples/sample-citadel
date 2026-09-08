@@ -1,10 +1,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import {
-  DynamoDBDocumentClient,
-  QueryCommand,
-  ScanCommand,
-} from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { AppSyncResolverEvent } from "aws-lambda";
+import { extractOrgFromEvent } from "../utils/auth-event";
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -14,9 +11,15 @@ function getFabricationJobsTable(): string | undefined {
   return process.env.FABRICATION_JOBS_TABLE;
 }
 
-// Upper bound on rows returned by the unfiltered (Scan) path so the queue
-// view stays cheap regardless of table size.
-const SCAN_LIMIT = 100;
+// Name of the org-scoped GSI (orgId PK / submittedAt SK) added to close the
+// cross-tenant exposure this resolver previously had via an unfiltered Scan
+// and a projectId Query with no org reconciliation. Must match the GSI name
+// registered on FabricationJobsTable in backend-stack.ts.
+const ORG_INDEX_NAME = "OrgIndex";
+
+// Upper bound on rows returned per query so the queue view stays cheap
+// regardless of table size.
+const QUERY_LIMIT = 100;
 
 type FabricationStatus = "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
 
@@ -63,6 +66,7 @@ interface FabricationJobRow {
   updatedAt?: string;
   errorMessage?: string;
   orchestrationId?: string;
+  orgId?: string;
   [key: string]: unknown;
 }
 
@@ -93,10 +97,23 @@ function mapRow(item: FabricationJobRow): FabricationQueueItem {
  * fabrication status. Replaces the previous SQS ReceiveMessage approach, which
  * was unreliable and competed with the fabricator consumer for messages.
  *
- * - With projectId: Query PK=orchestrationId (the intake session/project id).
- * - Without projectId: Scan with a bounded Limit.
- * Rows are sorted by submittedAt descending. On any error (or when the table
- * env var is unset) returns [] to preserve the resolver's existing contract.
+ * SECURITY (cross-tenant exposure fix, design evidence bf4a13f2): rows are
+ * stamped with a server-derived `orgId` at write time (all three writers —
+ * arbiter, intake, direct-UI). This resolver ALWAYS queries the new
+ * `OrgIndex` GSI (orgId PK / submittedAt SK) by the caller's own
+ * server-derived org (`extractOrgFromEvent`) — never a client-suppliable
+ * value, and never an unfiltered table Scan. When a projectId is supplied,
+ * results are additionally filtered to that project's orchestrationId, but
+ * ALWAYS from within the caller's own org-scoped result set — a caller can
+ * never read another tenant's rows by guessing their projectId.
+ *
+ * Fails closed: if the caller's organization cannot be resolved, returns []
+ * without issuing any query. Rows written before this fix carry no orgId
+ * and so fall out of the org-scoped query; they age out via the table's
+ * 7-day TTL (no backfill — see design evidence).
+ *
+ * On any error (or when the table env var is unset) returns [] to preserve
+ * the resolver's existing contract.
  */
 export const handler = async (
   event: AppSyncResolverEvent<{ projectId?: string }>,
@@ -109,27 +126,34 @@ export const handler = async (
     return [];
   }
 
+  const callerOrg = await extractOrgFromEvent(event);
+  if (!callerOrg) {
+    console.warn(
+      "getFabricatorQueue: caller organization could not be resolved; failing closed",
+    );
+    return [];
+  }
+
   const projectId = event.arguments?.projectId;
 
   try {
-    let items: FabricationJobRow[] = [];
+    const response = await docClient.send(
+      new QueryCommand({
+        TableName: table,
+        IndexName: ORG_INDEX_NAME,
+        KeyConditionExpression: "orgId = :orgId",
+        ExpressionAttributeValues: { ":orgId": callerOrg },
+        Limit: QUERY_LIMIT,
+        ScanIndexForward: false,
+      }),
+    );
+    let items = (response.Items || []) as FabricationJobRow[];
+
     if (projectId) {
-      const response = await docClient.send(
-        new QueryCommand({
-          TableName: table,
-          KeyConditionExpression: "orchestrationId = :pk",
-          ExpressionAttributeValues: { ":pk": projectId },
-        }),
-      );
-      items = (response.Items || []) as FabricationJobRow[];
-    } else {
-      const response = await docClient.send(
-        new ScanCommand({
-          TableName: table,
-          Limit: SCAN_LIMIT,
-        }),
-      );
-      items = (response.Items || []) as FabricationJobRow[];
+      // Constrain to the requested project WITHIN the caller's own
+      // org-scoped result set — never a raw orchestrationId lookup across
+      // tenants (that was the original defect).
+      items = items.filter((item) => item.orchestrationId === projectId);
     }
 
     const queueItems = items.map(mapRow);

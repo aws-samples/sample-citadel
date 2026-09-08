@@ -1501,9 +1501,35 @@
           {
             "AttributeName": "agentUseId",
             "AttributeType": "S"
+          },
+          {
+            "AttributeName": "orgId",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "submittedAt",
+            "AttributeType": "S"
           }
         ],
         "BillingMode": "PAY_PER_REQUEST",
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "OrgIndex",
+            "KeySchema": [
+              {
+                "AttributeName": "orgId",
+                "KeyType": "HASH"
+              },
+              {
+                "AttributeName": "submittedAt",
+                "KeyType": "RANGE"
+              }
+            ],
+            "Projection": {
+              "ProjectionType": "ALL"
+            }
+          }
+        ],
         "KeySchema": [
           {
             "AttributeName": "orchestrationId",
@@ -5747,11 +5773,10 @@
       {
         "effect": "Allow",
         "actions": [
-          "dynamodb:Query",
-          "dynamodb:Scan"
+          "dynamodb:Query"
         ],
         "resources": [
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-fabrication-jobs-dev"
+          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-fabrication-jobs-dev/index/OrgIndex"
         ],
         "conditionKeys": []
       },
