@@ -121,6 +121,7 @@ function makeAdminEvent(
     identity: {
       sub,
       "custom:role": "admin",
+      "cognito:groups": ["admin"],
       claims: { sub, "custom:role": "admin" },
     },
   } as unknown as HandlerEvent;

@@ -19,7 +19,7 @@
  * resume approval — see docs/APPROVAL_GATING.md.
  */
 import { hasPermission } from "../utils/auth";
-import { extractOrgFromEvent } from "../utils/auth-event";
+import { extractOrgFromEvent, deriveRoles } from "../utils/auth-event";
 import {
   writeToolApprovalGrant,
   type ToolApprovalGrantInput,
@@ -47,12 +47,11 @@ type DecideToolApprovalEvent =
 
 function authContextFromEvent(event: DecideToolApprovalEvent): AuthContext {
   const identity = event?.identity || {};
-  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
     groups: identity["cognito:groups"] || [],
-    roles: claimRole ? [claimRole as string] : [],
+    roles: deriveRoles(event),
   };
 }
 

@@ -56,7 +56,11 @@ describe("organization-resolver", () => {
     identity: identity ?? { sub: "user-1" },
   });
 
-  const adminIdentity = { sub: "admin-1", "custom:role": "admin" };
+  const adminIdentity = {
+    sub: "admin-1",
+    "custom:role": "admin",
+    "cognito:groups": ["admin"],
+  };
   const nonAdminIdentity = { sub: "user-1", "custom:role": "project_manager" };
 
   describe("createOrganization — admin authorization gate (finding c79cd4f6)", () => {

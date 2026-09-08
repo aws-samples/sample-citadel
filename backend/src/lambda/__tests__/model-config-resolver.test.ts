@@ -324,7 +324,11 @@ describe("model-config-resolver", () => {
         makeEvent(
           "setModelCatalogEntryStatus",
           { modelKey: "vendor.model-standard", status: "deprecated" },
-          { username: "role-admin", "custom:role": "admin" },
+          {
+            username: "role-admin",
+            "custom:role": "admin",
+            "cognito:groups": ["admin"],
+          },
         ),
       );
 

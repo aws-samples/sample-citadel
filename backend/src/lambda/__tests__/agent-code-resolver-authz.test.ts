@@ -113,6 +113,7 @@ describe("agent-code-resolver — authorization (finding 1a9181a4)", () => {
     sub: "admin-1",
     "custom:organization": ORG_B,
     "custom:role": "admin",
+    "cognito:groups": ["admin"],
   };
 
   function expectZeroDataAccess() {

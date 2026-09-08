@@ -1,3 +1,4 @@
+import { deriveRoles } from "../utils/auth-event";
 /**
  * ProgramReview resolver.
  *
@@ -561,12 +562,11 @@ type ProgramReviewResolverEvent =
 
 function authContextFromEvent(event: ProgramReviewResolverEvent): AuthContext {
   const identity: GovernanceEventIdentity = event?.identity || {};
-  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
     groups: identity["cognito:groups"] || [],
-    roles: claimRole ? [claimRole] : [],
+    roles: deriveRoles(event),
   };
 }
 

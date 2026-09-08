@@ -100,7 +100,10 @@ function makeEvent(
   const orgId = "orgId" in opts ? opts.orgId : "org-1";
   const claims: Record<string, unknown> = { sub };
   if (orgId !== undefined) claims["custom:organization"] = orgId;
-  if (admin) claims["custom:role"] = "admin";
+  if (admin) {
+    claims["custom:role"] = "admin";
+    claims["cognito:groups"] = ["admin"];
+  }
   return {
     info: { fieldName },
     arguments: args,

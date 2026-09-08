@@ -49,8 +49,27 @@ describe("extractOrgFromHttpEvent", () => {
 });
 
 describe("isAdminFromHttpEvent", () => {
-  test("true when custom:role === 'admin'", () => {
+  // finding 7aa877f8: custom:role alone is not a trustworthy admin signal
+  // (client-writable via UpdateUserAttributes absent an explicit Cognito
+  // WriteAttributes allow-list). Admin must be group-derived.
+  test("KEY ESCALATION TEST: false when custom:role === 'admin' but cognito:groups does not include admin", () => {
+    const event = makeEvent({
+      "custom:role": "admin",
+      "cognito:groups": ["viewer"],
+    });
+    expect(isAdminFromHttpEvent(event)).toBe(false);
+  });
+
+  test("KEY ESCALATION TEST: false when custom:role === 'admin' and cognito:groups is absent", () => {
     const event = makeEvent({ "custom:role": "admin" });
+    expect(isAdminFromHttpEvent(event)).toBe(false);
+  });
+
+  test("true for a genuine group admin regardless of custom:role", () => {
+    const event = makeEvent({
+      "custom:role": "developer",
+      "cognito:groups": ["admin"],
+    });
     expect(isAdminFromHttpEvent(event)).toBe(true);
   });
 

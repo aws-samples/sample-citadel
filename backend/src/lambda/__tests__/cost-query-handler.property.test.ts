@@ -33,7 +33,10 @@ function makeSummaryEvent(
   const claims: Record<string, unknown> = {
     "custom:organization": claimOrg,
   };
-  if (isAdmin) claims["custom:role"] = "admin";
+  if (isAdmin) {
+    claims["custom:role"] = "admin";
+    claims["cognito:groups"] = ["admin"];
+  }
 
   const qsp: Record<string, string> = { groupBy: "app" };
   if (queryOrgId !== undefined) qsp.orgId = queryOrgId;

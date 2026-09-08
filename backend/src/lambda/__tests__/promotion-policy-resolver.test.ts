@@ -145,6 +145,7 @@ describe("handler — AppSync dispatch", () => {
       identity: {
         sub: "admin-1",
         "custom:role": "admin",
+        "cognito:groups": ["admin"],
       },
       arguments: args,
     };

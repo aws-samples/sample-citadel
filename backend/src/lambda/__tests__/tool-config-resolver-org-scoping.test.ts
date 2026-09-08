@@ -100,7 +100,7 @@ const eventForOrg = (orgId: string | undefined, admin = false) => ({
     sub: "test-user",
     claims: {
       ...(orgId ? { "custom:organization": orgId } : {}),
-      ...(admin ? { "custom:role": "admin" } : {}),
+      ...(admin ? { "custom:role": "admin", "cognito:groups": ["admin"] } : {}),
     },
   },
 });

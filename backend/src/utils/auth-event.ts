@@ -92,21 +92,29 @@ export async function extractOrgFromEvent(
 }
 
 /**
- * True when the caller is an admin. Two paths are honoured:
- *  1. JWT claim `custom:role === 'admin'` (legacy / explicit role attribute).
- *  2. Cognito group membership `admin` via the `cognito:groups` claim.
+ * True when the caller is an admin, determined SOLELY by Cognito group
+ * membership (`cognito:groups` claim includes `admin`).
+ *
+ * Prior to finding 7aa877f8 this also honoured an explicit
+ * `custom:role === 'admin'` claim. That was an escalation vector: absent
+ * an explicit Cognito client WriteAttributes allow-list, `custom:role` is
+ * a client-writable attribute — ANY authenticated user could call
+ * UpdateUserAttributes and self-grant `custom:role=admin`, which this
+ * function (and the ~16 resolvers gating on it) then treated as real
+ * admin. Group membership can only be changed via the Admin* Cognito API
+ * (server-side, e.g. `assignUserRole`), so it is the only signal a caller
+ * cannot forge with their own token.
+ *
+ * The pre-token-generation trigger still promotes group membership into
+ * `custom:role` for legacy/display purposes, but that promoted claim MUST
+ * NOT be read back here as an authorization signal — doing so would just
+ * reintroduce the same trust-the-writable-attribute problem one hop away.
  *
  * The groups claim arrives in different shapes depending on AppSync auth
  * mode: a JS array under standard JWT decoding, but some proxies/auth modes
  * flatten it to a comma-separated string. Both shapes are tolerated.
  */
 export function isAdminFromEvent(event: unknown): boolean {
-  // Path 1: explicit custom:role claim equals 'admin'.
-  if (readClaim(event, "custom:role") === "admin") return true;
-
-  // Path 2: cognito:groups membership includes 'admin'. Cognito issues this
-  // claim as an array in standard JWT, but some AppSync auth modes flatten
-  // it to a comma-separated string. Tolerate both.
   const groups = readClaim(event, "cognito:groups");
   if (Array.isArray(groups)) {
     return groups.some((g) => typeof g === "string" && g === "admin");
@@ -119,6 +127,47 @@ export function isAdminFromEvent(event: unknown): boolean {
   }
 
   return false;
+}
+
+/**
+ * Derives the `AuthContext.roles` array for permission checks
+ * (`hasPermission`, every resolver-local `requireAdmin`), folding Cognito
+ * group membership into the returned roles so `roles.includes('admin')` is
+ * group-authoritative rather than trusting the client-writable
+ * `custom:role` attribute alone (finding 7aa877f8).
+ *
+ * This is the ONE shared derivation every `authContextFromEvent` copy
+ * across the governance resolvers (ADR, ExecutionSpecification,
+ * InterrogationRound, AgentDesignAssessment, ProgramReview, Release,
+ * EvalRun, EvalComparison, Eval, EvalSamplingConfig, PromotionPolicy,
+ * Organization, ToolApproval, ToolSandbox, EnvironmentReleasePointer) and
+ * auth.ts's `createAuthContext`/`validateCognitoToken` now delegate to,
+ * instead of each re-deriving `roles` from `custom:role` in isolation.
+ *
+ * Behaviour:
+ *  - `cognito:groups` membership in `admin` is ALWAYS included in the
+ *    result — this is the sole authoritative admin signal (group
+ *    membership can only be changed server-side via the Admin* Cognito
+ *    API, e.g. `assignUserRole`).
+ *  - The `custom:role` claim is preserved verbatim for non-admin role
+ *    checks (e.g. `architect`, `project_manager`, `developer`) so
+ *    existing non-admin permission behaviour is unchanged — only the
+ *    ADMIN signal is stripped of its trust in the writable attribute.
+ *  - No duplicate `'admin'` entry when both sources agree.
+ */
+export function deriveRoles(event: unknown): string[] {
+  const roles: string[] = [];
+
+  const claimRole = readClaim(event, "custom:role");
+  if (typeof claimRole === "string" && claimRole && claimRole !== "admin") {
+    roles.push(claimRole);
+  }
+
+  if (isAdminFromEvent(event)) {
+    roles.push("admin");
+  }
+
+  return roles;
 }
 
 /**

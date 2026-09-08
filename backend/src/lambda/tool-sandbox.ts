@@ -13,7 +13,11 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import * as vm from "vm";
-import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  deriveRoles,
+} from "../utils/auth-event";
 import { hasPermission } from "../utils/auth";
 import type { AuthContext } from "../types";
 
@@ -347,14 +351,11 @@ interface ToolSandboxEventIdentity {
 function authContextFromEvent(
   identity: ToolSandboxEventIdentity | undefined,
 ): AuthContext {
-  const claimRole =
-    identity?.["custom:role"] ??
-    (identity?.claims?.["custom:role"] as string | undefined);
   return {
     userId: identity?.sub || identity?.username || "anonymous",
     username: identity?.username,
     groups: identity?.["cognito:groups"] || [],
-    roles: claimRole ? [claimRole] : [],
+    roles: deriveRoles({ identity }),
   };
 }
 

@@ -91,7 +91,11 @@ describe("cost-budget-handler routing", () => {
         rawPath: "/budgets",
         queryStringParameters: { orgId: "org-2" },
       } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>,
-      { "custom:organization": "org-1", "custom:role": "admin" },
+      {
+        "custom:organization": "org-1",
+        "custom:role": "admin",
+        "cognito:groups": ["admin"],
+      },
     );
 
     const res = await handler(event);

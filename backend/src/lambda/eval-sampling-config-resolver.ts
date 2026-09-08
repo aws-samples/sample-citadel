@@ -1,3 +1,4 @@
+import { deriveRoles } from "../utils/auth-event";
 /**
  * eval-sampling-config-resolver (Phase 2 §2.1) — admin-only GraphQL
  * resolver for EvalSamplingConfig storage/reads, and read-only
@@ -158,12 +159,11 @@ function authContextFromEvent(
   event: EvalSamplingConfigResolverEvent,
 ): AuthContext {
   const identity = event?.identity || {};
-  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
     groups: identity["cognito:groups"] || [],
-    roles: claimRole ? [claimRole] : [],
+    roles: deriveRoles(event),
   };
 }
 

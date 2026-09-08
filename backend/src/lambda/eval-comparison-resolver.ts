@@ -75,7 +75,7 @@ import {
 import { v5 as uuidv5 } from "uuid";
 import { createHash } from "crypto";
 import { hasPermission } from "../utils/auth";
-import { extractOrgFromEvent } from "../utils/auth-event";
+import { extractOrgFromEvent, deriveRoles } from "../utils/auth-event";
 import { emitGovernanceEvent } from "../utils/notifier-base";
 import { resolveReplayBucketName } from "./utils/eval-artifact-store";
 import { scoreCase, type DimensionScore } from "./utils/eval-scoring";
@@ -188,12 +188,11 @@ type EvalComparisonResolverEvent =
 
 function authContextFromEvent(event: EvalComparisonResolverEvent): AuthContext {
   const identity: GovernanceEventIdentity = event?.identity || {};
-  const claimRole = identity["custom:role"] ?? identity.claims?.["custom:role"];
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
     groups: identity["cognito:groups"] || [],
-    roles: claimRole ? [claimRole] : [],
+    roles: deriveRoles(event),
   };
 }
 
