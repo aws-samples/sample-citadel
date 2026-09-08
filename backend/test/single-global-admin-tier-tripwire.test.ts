@@ -46,8 +46,11 @@
  *
  * WHAT IS PINNED, AND WHY THESE ARTEFACTS
  *   P1. The set of Cognito groups declared in the CDK (synthesized
- *       CloudFormation template, NOT source text — resilient to renames of
- *       construct ids, formatting, refactors). Post finding 7aa877f8,
+ *       CloudFormation template, read from `cdk.out/citadel-backend-<env>
+ *       .template.json` rather than instantiating BackendStack in-process
+ *       — see the import block below for why — NOT source text, so it is
+ *       resilient to renames of construct ids, formatting, refactors).
+ *       Post finding 7aa877f8,
  *       admin authority IS membership in the Cognito group "admin", and
  *       `AdminAddUserToGroupCommand` can only add users to groups that
  *       exist — so the declared group set is the entire role-tier
@@ -93,27 +96,45 @@
  *     existing admin plumbing, not every conceivable future one.
  */
 
-import * as cdk from "aws-cdk-lib";
-import { Template } from "aws-cdk-lib/assertions";
 import * as path from "path";
 import * as fs from "fs";
 import * as ts from "typescript";
+import { loadTemplate } from "../scripts/split-gates/template-utils";
+import type { CfnResource } from "../scripts/split-gates/types";
+import { guardCdkOutInCi } from "./helpers/cdk-out-guard";
 
-// Same asset-dir bootstrap as backend-stack-user-pool-client-write-attributes.test.ts:
-// BackendStack references these directories as assets at synth time.
-const assetDirs = [
-  path.resolve(__dirname, "../src/schema"),
-  path.resolve(__dirname, "../dist/lambda"),
-  path.resolve(__dirname, "../src/lambda/seed-admin-user"),
-  path.resolve(__dirname, "../src/lambda/seed-organizations"),
-];
-for (const dir of assetDirs) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
-import { BackendStack } from "../lib/backend-stack";
 import { isAdminFromEvent, deriveRoles } from "../src/utils/auth-event";
 import { hasPermission, createAuthContext } from "../src/utils/auth";
+
+// P1/P5 read the SYNTHESIZED backend template from cdk.out instead of
+// instantiating BackendStack in-process (finding: CannotFindAsset in CI —
+// BackendStack's SeedOrganizationsFunction resolves its Lambda asset via
+// `path.join(__dirname, "../../src/lambda/seed-organizations")` relative to
+// lib/backend-stack.ts, which only lands on `backend/src/lambda/...` when
+// the process cwd is `backend/`; CI's jest cwd has no such guarantee and the
+// asset staging step fails before synth ever reaches the Cognito
+// resources). This mirrors the established approach in
+// schema-resolver-parity-guard.test.ts / duplicate-alarm-name-guard.test.ts:
+// read `cdk.out/citadel-backend-<env>.template.json`, produced by the
+// Backend Build + Synth CI job and downloaded as an artifact before Backend
+// Tests runs. `SPLIT_GATES_ENV` defaults to "dev" for local runs and is set
+// to "test" in CI (ci.yml) to match how that artifact was synthesized.
+//
+// Env-agnosticism: verified by diffing a `citadel-backend-dev` and
+// `citadel-backend-test` synth — the Cognito UserPoolGroup set and the user
+// pool's custom attribute schema are byte-identical across environments (no
+// account/region/env token ever appears in a GroupName or a Schema entry's
+// Name), so no normalization is needed for P1/P5, unlike stateful resources
+// such as S3 BucketName (see template-utils.ts's ENV_DERIVED_KEYS) which
+// legitimately embed env/account/region and DO require it.
+const ENV = process.env.SPLIT_GATES_ENV ?? "dev";
+const BACKEND_TEMPLATE_PATH = path.resolve(
+  __dirname,
+  "..",
+  "cdk.out",
+  `citadel-backend-${ENV}.template.json`,
+);
+const backendTemplateExists = fs.existsSync(BACKEND_TEMPLATE_PATH);
 
 /**
  * Throws a loud, self-explanatory failure. Jest's `expect` has no message
@@ -195,23 +216,29 @@ describe("single-global-admin tripwire (finding 59e5a79c)", () => {
   // P1 + P5 — CDK: the Cognito group universe and custom attribute schema
   // ————————————————————————————————————————————————————————————————————
   describe("P1/P5 — CDK-declared Cognito role universe", () => {
-    let template: Template;
+    if (!backendTemplateExists) {
+      guardCdkOutInCi(
+        `citadel-backend-${ENV}.template.json`,
+        `cd backend && npm run build:lambda && npx cdk synth citadel-backend-${ENV} --quiet`,
+      );
+      it.skip(`skipped: cdk.out/citadel-backend-${ENV}.template.json missing (run cdk synth first)`, () => {});
+      return;
+    }
 
-    beforeAll(() => {
-      const app = new cdk.App({
-        context: { adminEmail: "test-admin@example.com" },
-      });
-      const stack = new BackendStack(app, "TripwireBackendStack", {
-        environment: "test",
-        env: { account: "123456789012", region: "us-east-1" },
-      });
-      template = Template.fromStack(stack);
-    });
+    const template = loadTemplate(BACKEND_TEMPLATE_PATH);
+
+    function resourcesOfType(type: string): Record<string, CfnResource> {
+      const out: Record<string, CfnResource> = {};
+      for (const [logicalId, res] of Object.entries(template.Resources)) {
+        if (res.Type === type) out[logicalId] = res;
+      }
+      return out;
+    }
 
     test("P1: declared Cognito groups are EXACTLY {admin, architect, developer, project_manager}", () => {
-      const groups = template.findResources("AWS::Cognito::UserPoolGroup");
+      const groups = resourcesOfType("AWS::Cognito::UserPoolGroup");
       const names = Object.values(groups)
-        .map((g) => g.Properties.GroupName as string)
+        .map((g) => g.Properties?.GroupName as string)
         .sort();
 
       const added = names.filter((n) => !PINNED_GROUP_NAMES.includes(n));
@@ -234,9 +261,9 @@ describe("single-global-admin tripwire (finding 59e5a79c)", () => {
     });
 
     test("P1: exactly ONE group grants admin, and its name is the flat, org-unqualified literal 'admin'", () => {
-      const groups = template.findResources("AWS::Cognito::UserPoolGroup");
+      const groups = resourcesOfType("AWS::Cognito::UserPoolGroup");
       const names = Object.values(groups).map(
-        (g) => g.Properties.GroupName as string,
+        (g) => g.Properties?.GroupName as string,
       );
 
       const adminLike = names.filter((n) => /admin/i.test(n));
@@ -249,12 +276,13 @@ describe("single-global-admin tripwire (finding 59e5a79c)", () => {
     });
 
     test("P5: user pool custom attributes are EXACTLY {role, organization} — no new org/tier dimension", () => {
-      const pools = template.findResources("AWS::Cognito::UserPool");
+      const pools = resourcesOfType("AWS::Cognito::UserPool");
       const ids = Object.keys(pools);
       expect(ids.length).toBe(1);
 
       type SchemaEntry = { Name: string; AttributeDataType?: string };
-      const schema: SchemaEntry[] = pools[ids[0]].Properties.Schema || [];
+      const schema: SchemaEntry[] =
+        (pools[ids[0]].Properties?.Schema as SchemaEntry[]) || [];
       // Custom attributes are the schema entries that are not standard
       // Cognito attribute names (standard ones: email, given_name, ...).
       const STANDARD = new Set([
