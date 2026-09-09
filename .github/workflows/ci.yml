@@ -151,6 +151,75 @@ jobs:
           path: backend/cdk.out/
           retention-days: 1
 
+  # ── Split gates: 7-rail IAM/policy safety gate for the backend-stack split ──
+  # split:gates (backend/scripts/split-gates.sh) runs its OWN internal `cdk
+  # synth` per stack (backend + 2 satellites) and a second nag-enabled synth
+  # for rail 5 — it cannot reuse Backend Build + Synth's cdk.out artifact.
+  # That artifact is synthesized with ENVIRONMENT=test, but split-gates.sh's
+  # own --env arg (default "dev", used here) only controls the *stack-name
+  # suffix* it looks up, independently of ENVIRONMENT; run-rails.ts's
+  # move-manifest.ts hardcodes its satellite stack names/MOVED_RESOLVERS
+  # mapping to the "-dev" suffix, so invoking with --env test breaks the
+  # backend<->satellite resolver/IAM join (62/22/62 false-positive
+  # violations, verified) even though it is not real drift. dev-env synth
+  # with ENVIRONMENT unset is therefore the only currently-correct
+  # invocation, which is a genuinely separate synth from Backend Build +
+  # Synth's test-env one — a new job, not a fold-in, despite the general
+  # preference to avoid a duplicate synth.
+  split-gates:
+    name: Split Gates (IAM/policy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install workspaces (root lockfile)
+        run: npm ci
+        working-directory: ${{ github.workspace }}
+
+      - name: Build Lambda bundles
+        run: npm run build:lambda
+
+      - name: Build CDK
+        run: npm run build
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps (required for FrontendStack CDK asset)
+        run: npm ci --prefix frontend
+        working-directory: ${{ github.workspace }}
+
+      - name: Build frontend (required for FrontendStack CDK asset)
+        run: npm run build --prefix frontend
+        working-directory: ${{ github.workspace }}
+
+      - name: Run split:gates (7 rails; dist must be rebuilt before synth)
+        run: npm run split:gates -- dev
+        env:
+          # CI=true is required: the gate helpers' guardCdkOutInCi fails
+          # loud under CI=true when an expected cdk.out template is
+          # missing, and silently SKIPs (vacuous pass) when unset — this
+          # job's own split-gates.sh synth always produces cdk.out itself,
+          # but CI=true is still set so any future refactor that removes
+          # that internal synth call fails loud here instead of passing
+          # vacuously. nag stays enabled (bin/app.ts default; no -c
+          # nag=false context passed).
+          CI: "true"
+          CDK_DEFAULT_ACCOUNT: "000000000000"
+          CDK_DEFAULT_REGION: us-east-1
+
   # ── Governance: backend resolver tests + governance stack synth ──
   # Frontend governance-engine tests run in the Frontend job; arbiter
   # governance tests run in the Arbiter job. This job covers the backend
