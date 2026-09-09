@@ -187,9 +187,9 @@ jobs:
 
       - name: Build Lambda bundles
         run: npm run build:lambda
-
-      - name: Build CDK
-        run: npm run build
+        # (kept: esbuild output for Lambda `Code.fromAsset` — split-gates.sh's
+        # internal `npm run build` only recompiles dist/bin,dist/lib via tsc,
+        # it never runs build:lambda)
 
       - uses: actions/setup-node@v5
         with:
@@ -204,7 +204,16 @@ jobs:
       - name: Build frontend (required for FrontendStack CDK asset)
         run: npm run build --prefix frontend
         working-directory: ${{ github.workspace }}
+        # (kept: bin/app.ts instantiates FrontendStack unconditionally, and
+        # its BucketDeployment asset reads frontend/build directly off disk —
+        # this is independent of and not covered by split-gates.sh's own
+        # dist rebuild, which only touches backend TS compilation)
 
+      # "Build CDK" (`npm run build` / tsc) step REMOVED here: split-gates.sh
+      # now rebuilds dist/ itself before every synth (PR 155, finding
+      # ef02d366) and aborts loud on a failed rebuild, so a prior tsc pass in
+      # this job is genuinely redundant — the script's own guard is what
+      # actually gates staleness now, not this job step.
       - name: Run split:gates (7 rails; dist must be rebuilt before synth)
         run: npm run split:gates -- dev
         env:
@@ -218,7 +227,30 @@ jobs:
           # nag=false context passed).
           CI: "true"
           CDK_DEFAULT_ACCOUNT: "000000000000"
-          CDK_DEFAULT_REGION: us-east-1
+          # us-west-2: must match backend/split-baseline/*.json's captured
+          # region so rail 6's comparison is valid — run-rails.ts now aborts
+          # before any rail (configuration error, not IAM drift) if the
+          # synthesized region differs from the baseline's (PR 156).
+          #
+          # BOTH CDK_DEFAULT_REGION and AWS_REGION/AWS_DEFAULT_REGION must be
+          # set: the aws-cdk CLI resolves its own "default env" for the app
+          # subprocess via the AWS SDK's credential/region provider chain and
+          # OVERWRITES CDK_DEFAULT_REGION in that subprocess's environment
+          # with whatever it resolves — it does not simply pass through a
+          # pre-set value. With no credentials and no IMDS (true on a
+          # GitHub-hosted runner) the SDK's region resolution falls back to
+          # AWS_REGION/AWS_DEFAULT_REGION if present, else a hardcoded
+          # "us-east-1" — silently discarding a CDK_DEFAULT_REGION-only
+          # setting (verified empirically: CDK_DEFAULT_REGION alone measured
+          # us-east-1 in the actual app process regardless of what this job
+          # set it to, while CDK_DEFAULT_ACCOUNT was NOT overwritten the same
+          # way, so this is specifically a region quirk, not a general
+          # env-passthrough issue). Setting the SDK-native vars too makes the
+          # resolution deterministic and account-for-account with the
+          # baseline instead of silently synthesizing us-east-1.
+          CDK_DEFAULT_REGION: us-west-2
+          AWS_REGION: us-west-2
+          AWS_DEFAULT_REGION: us-west-2
 
   # ── Governance: backend resolver tests + governance stack synth ──
   # Frontend governance-engine tests run in the Frontend job; arbiter
