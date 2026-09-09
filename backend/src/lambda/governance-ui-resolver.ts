@@ -4,10 +4,20 @@
  * AppSync resolver backing the five queries defined in
  * .kiro/specs/governance-ui/graphql-contract.md:
  *   - getGovernanceMode      (any authenticated user; fail-open per contract)
- *   - listGovernanceFindings (any authenticated user; GSI Query when workflowId is set, else Scan)
- *   - getGovernanceFinding   (any authenticated user; returns null on miss)
+ *   - listGovernanceFindings (org-isolated for non-admins: Query on
+ *                             org-index by server-derived orgId, never a
+ *                             Scan; admins Scan cross-org incl. un-stamped
+ *                             rows — decisions 7b3f4fe2 / 2dd461f6)
+ *   - getGovernanceFinding   (org-isolated for non-admins: null on a
+ *                             foreign-org/un-stamped/missing row — never
+ *                             a thrown error, which would be an existence
+ *                             oracle; admins bypass)
  *   - getReconcilerStatus    (admin only; returns zero defaults when SSM blob is absent or unparseable)
  *   - getRolloutReadiness    (admin only; 11-check readiness report)
+ *
+ * `getDecisionTrace` (Wave 3.B, below) follows the same org-isolation
+ * posture as `getGovernanceFinding` — null on a foreign-org/un-stamped
+ * row, admin bypass.
  *
  * The ledger DynamoDB table is owned by ArbiterStack (`citadel-governance-ledger-{env}`),
  * which is also where this Lambda is wired so cross-stack cycles with BackendStack
@@ -44,7 +54,7 @@ import {
   getGovernanceEnforce,
   getGovernanceEffectiveAt,
 } from "../utils/governance-flag";
-import { isAdminFromEvent } from "../utils/auth-event";
+import { isAdminFromEvent, extractOrgFromEvent } from "../utils/auth-event";
 import { emitGovernanceEvent } from "../utils/notifier-base";
 import {
   RegistryService,
@@ -440,7 +450,10 @@ async function getGovernanceMode(): Promise<{
   }
 }
 
-async function listGovernanceFindings(args: ListFindingsArgs): Promise<{
+async function listGovernanceFindings(
+  args: ListFindingsArgs,
+  event: AppSyncResolverEvent<unknown>,
+): Promise<{
   items: GovernanceFindingProjected[];
   nextCursor: string | null;
 }> {
@@ -451,11 +464,31 @@ async function listGovernanceFindings(args: ListFindingsArgs): Promise<{
 
   const limit = clampLimit(args.limit);
   const exclusiveStartKey = decodeCursor(args.cursor);
+  const isAdmin = isAdminFromEvent(event);
+
+  // Non-admin org isolation (decisions 7b3f4fe2 / 2dd461f6, slice 3).
+  // The caller's org is ALWAYS server-derived (extractOrgFromEvent) —
+  // there is no `orgId` argument on this query, so a client cannot
+  // smuggle in a different org to page through. A caller with no
+  // resolvable org gets an empty page rather than an error or a
+  // cross-org Scan.
+  let callerOrgId: string | null = null;
+  if (!isAdmin) {
+    callerOrgId = await extractOrgFromEvent(event);
+    if (!callerOrgId) {
+      return { items: [], nextCursor: null };
+    }
+  }
 
   let result: { Items?: DdbRow[]; LastEvaluatedKey?: Record<string, unknown> };
 
   if (args.workflowId) {
-    // GSI Query path — significantly cheaper than a Scan.
+    // GSI Query path — significantly cheaper than a Scan. Unchanged
+    // shape for admins; non-admins additionally get every row's org
+    // checked post-fetch below (this GSI has no org in its key, so the
+    // isolation has to happen after the page comes back — the page
+    // itself is already bounded by workflowId, so this cannot leak
+    // cross-org page density the way a bare Scan would).
     const expressionAttributeValues: Record<string, unknown> = {
       ":wid": args.workflowId,
     };
@@ -489,8 +522,19 @@ async function listGovernanceFindings(args: ListFindingsArgs): Promise<{
     });
 
     result = await dynamodb.send(cmd);
-  } else {
-    // Scan path with optional decision and sinceTs filters.
+
+    if (!isAdmin) {
+      const rows = result.Items ?? [];
+      result = {
+        ...result,
+        Items: rows.filter(
+          (row) => readLedgerAttr(row, "orgId", "org_id") === callerOrgId,
+        ),
+      };
+    }
+  } else if (isAdmin) {
+    // Admin Scan path — cross-org visibility retained by design (admin
+    // is the legitimate cross-org operator), including un-stamped rows.
     const filterClauses: string[] = [];
     const expressionAttributeNames: Record<string, string> = {};
     const expressionAttributeValues: Record<string, unknown> = {};
@@ -520,6 +564,47 @@ async function listGovernanceFindings(args: ListFindingsArgs): Promise<{
     });
 
     result = await dynamodb.send(cmd);
+  } else {
+    // Non-admin org-index Query path (decisions 7b3f4fe2 / 2dd461f6,
+    // slice 3). Deliberately NOT filter-after-Scan: a Scan's
+    // LastEvaluatedKey would leak a foreign findingId across the page
+    // boundary, and Limit-before-Filter would leak cross-org page
+    // density (the design explicitly rejected both). Un-stamped rows
+    // have no `orgId` attribute at all, so they can never appear on
+    // this index — they stay admin-only via the Scan branch above.
+    const filterClauses: string[] = [];
+    const expressionAttributeNames: Record<string, string> = {};
+    const expressionAttributeValues: Record<string, unknown> = {
+      ":orgId": callerOrgId,
+    };
+
+    if (args.decision) {
+      filterClauses.push("#decision = :decision");
+      expressionAttributeNames["#decision"] = "decision";
+      expressionAttributeValues[":decision"] = args.decision;
+    }
+    if (typeof args.sinceTs === "number") {
+      filterClauses.push("#ts >= :since");
+      expressionAttributeNames["#ts"] = "timestamp";
+      expressionAttributeValues[":since"] = args.sinceTs;
+    }
+
+    const cmd = new QueryCommand({
+      TableName: tableName,
+      IndexName: "org-index",
+      KeyConditionExpression: "orgId = :orgId",
+      ExpressionAttributeValues: expressionAttributeValues,
+      ...(Object.keys(expressionAttributeNames).length > 0
+        ? { ExpressionAttributeNames: expressionAttributeNames }
+        : {}),
+      ...(filterClauses.length > 0
+        ? { FilterExpression: filterClauses.join(" AND ") }
+        : {}),
+      Limit: limit,
+      ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+    });
+
+    result = await dynamodb.send(cmd);
   }
 
   const items = (result.Items ?? []).map(projectFinding);
@@ -528,31 +613,50 @@ async function listGovernanceFindings(args: ListFindingsArgs): Promise<{
 
 async function getGovernanceFinding(
   args: GetFindingArgs,
+  event: AppSyncResolverEvent<unknown>,
 ): Promise<GovernanceFindingProjected | null> {
-  return loadFinding(args.findingId);
+  const row = await loadFindingRow(args.findingId);
+  if (!row) return null;
+  if (!(await callerCanSeeRow(row, event))) return null;
+  return projectFinding(row);
 }
 
 /**
- * Shared helper: fetch a finding from the ledger and project it to the
- * GraphQL shape. Returns null when the row is missing. Centralised so
- * both `getGovernanceFinding` and `getDecisionTrace` use the same code
- * path — identical projection behaviour, identical missing-row policy.
+ * Row-visibility gate shared by the by-id governance reads
+ * (`getGovernanceFinding`, `getDecisionTrace`). Returns a boolean rather
+ * than throwing — per decisions 7b3f4fe2 / 2dd461f6, a foreign-org or
+ * un-stamped row must degrade to the SAME "not found" (null) response a
+ * caller gets for a missing row, so a thrown error never becomes an
+ * existence oracle that lets a caller distinguish "doesn't exist" from
+ * "exists but isn't yours".
+ *
+ * Admins always see the row (cross-org + un-stamped). Non-admins need a
+ * resolvable caller org AND a matching, present `orgId` on the row —
+ * fails closed (false) when either is missing, which is exactly the
+ * un-stamped-row case (2dd461f6: legacy/un-stamped rows are admin-only,
+ * not backfilled, not visible to everyone).
  */
-async function loadFinding(
-  findingId: string,
-): Promise<GovernanceFindingProjected | null> {
-  const raw = await loadFindingRow(findingId);
-  return raw ? projectFinding(raw) : null;
+async function callerCanSeeRow(
+  row: DdbRow,
+  event: AppSyncResolverEvent<unknown>,
+): Promise<boolean> {
+  if (isAdminFromEvent(event)) return true;
+
+  const rowOrgId = readLedgerAttr(row, "orgId", "org_id");
+  if (!rowOrgId) return false;
+
+  const callerOrgId = await extractOrgFromEvent(event);
+  return callerOrgId === rowOrgId;
 }
 
 /**
- * Internal variant of `loadFinding` that returns the raw (unprojected)
- * DDB row. `getDecisionTrace` needs the row's `orgId` — present on the
- * ledger row but intentionally NOT part of the public
- * `GovernanceFindingProjected` GraphQL shape — to org-check the
- * findings->execution pivot (`findExecutionIdByRunId`). Kept private so
- * the org attribute never leaks through `getGovernanceFinding`'s public
- * projection.
+ * Fetches the raw (unprojected) ledger row by findingId. Kept separate
+ * from `projectFinding` so `getDecisionTrace` and `callerCanSeeRow` can
+ * read the row's `orgId` — present on the ledger row but intentionally
+ * NOT part of the public `GovernanceFindingProjected` GraphQL shape — to
+ * org-check the row before (or independently of) building the public
+ * projection. The org attribute never leaks through `getGovernanceFinding`'s
+ * public projection.
  */
 async function loadFindingRow(findingId: string): Promise<DdbRow | null> {
   const tableName = process.env.GOVERNANCE_LEDGER_TABLE;
@@ -577,8 +681,10 @@ async function loadFindingRow(findingId: string): Promise<DdbRow | null> {
 // Reconstructs the engine's 8-step pipeline state from a single finding's
 // reason / scope / contract fields. Pure parsing — no extra DDB or registry
 // reads beyond loading the finding itself. Mirrors getGovernanceFinding's
-// auth posture (any authenticated user; admin gating not required because
-// the engine semantics are public to admins via the ledger anyway).
+// auth posture exactly (slice 3, decisions 7b3f4fe2 / 2dd461f6): non-admins
+// get null on a foreign-org, un-stamped, or missing finding — never a
+// thrown error, since a throw would let a caller distinguish "doesn't
+// exist" from "exists but isn't yours". Admins bypass the org check.
 //
 // Reason format is owned by the backend (arbiter/governance/engine.py). When
 // an unrecognised prefix arrives, the resolver degrades gracefully: every
@@ -965,9 +1071,15 @@ async function findExecutionIdByRunId(
 
 async function getDecisionTrace(
   args: GetDecisionTraceArgs,
+  event: AppSyncResolverEvent<unknown>,
 ): Promise<DecisionTraceProjected | null> {
   const findingRow = await loadFindingRow(args.findingId);
   if (!findingRow) return null;
+  // Row-org gate (decisions 7b3f4fe2 / 2dd461f6, slice 3): returns null
+  // rather than throwing — mirrors getGovernanceFinding's posture so a
+  // foreign-org or un-stamped finding is indistinguishable from a missing
+  // one. Checked BEFORE any further parsing/derivation work below.
+  if (!(await callerCanSeeRow(findingRow, event))) return null;
   const finding = projectFinding(findingRow);
 
   const tokens = parseReasonTokens(finding.reason);
@@ -980,11 +1092,10 @@ async function getDecisionTrace(
     scopeReduction,
   );
   // orgId is unified (decision 2dd461f6, slice 1) — see readLedgerAttr's
-  // doc comment. No live row is stamped with either name yet (org
-  // filtering is slice 2), so this currently always resolves to
-  // undefined either way — the fallback exists so this call site is
-  // ALREADY capable of reading a stamped value the moment slice 2 lands,
-  // without a further code change here.
+  // doc comment. By this point `callerCanSeeRow` above has already
+  // confirmed the caller may see this finding (same org, or admin), so
+  // `findingOrgId` here is just re-read for the findings->execution pivot
+  // below — it is never used as the access-control decision itself.
   const findingOrgId = readLedgerAttr(findingRow, "orgId", "org_id");
   const linkedExecutionId = await findExecutionIdByRunId(
     finding.runId,
@@ -7046,12 +7157,17 @@ export async function handler(
     case "listGovernanceFindings":
       return listGovernanceFindings(
         (event.arguments as ListFindingsArgs | undefined) ?? {},
+        event,
       );
     case "getGovernanceFinding":
-      return getGovernanceFinding(event.arguments as unknown as GetFindingArgs);
+      return getGovernanceFinding(
+        event.arguments as unknown as GetFindingArgs,
+        event,
+      );
     case "getDecisionTrace":
       return getDecisionTrace(
         event.arguments as unknown as GetDecisionTraceArgs,
+        event,
       );
     case "getReconcilerStatus":
       return getReconcilerStatus(event);

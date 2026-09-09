@@ -109,7 +109,7 @@ jest.mock("../../services/registry-service", () => {
   };
 });
 
-import { isAdminFromEvent } from "../../utils/auth-event";
+import { isAdminFromEvent, extractOrgFromEvent } from "../../utils/auth-event";
 import {
   getGovernanceEnforce,
   getGovernanceEffectiveAt,
@@ -150,6 +150,9 @@ const stsMock = mockClient(STSClient);
 const isAdminFromEventMock = isAdminFromEvent as jest.MockedFunction<
   typeof isAdminFromEvent
 >;
+const extractOrgFromEventMock = extractOrgFromEvent as jest.MockedFunction<
+  typeof extractOrgFromEvent
+>;
 const getGovernanceEnforceMock = getGovernanceEnforce as jest.MockedFunction<
   typeof getGovernanceEnforce
 >;
@@ -166,6 +169,7 @@ beforeEach(() => {
   iamMock.reset();
   stsMock.reset();
   isAdminFromEventMock.mockReset();
+  extractOrgFromEventMock.mockReset();
   getGovernanceEnforceMock.mockReset();
   getGovernanceEffectiveAtMock.mockReset();
   getResourceMock.mockReset();
@@ -419,21 +423,83 @@ describe("getGovernanceMode", () => {
 // ---------------------------------------------------------------------------
 
 describe("listGovernanceFindings", () => {
-  test("default Scan returns items + null cursor when no LastEvaluatedKey", async () => {
-    ddbMock.on(ScanCommand).resolves({
-      Items: [makeDdbRow({ findingId: "f1" }), makeDdbRow({ findingId: "f2" })],
+  test("non-admin caller: Queries org-index by server-derived orgId, never Scans", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(QueryCommand).resolves({
+      Items: [makeDdbRow({ findingId: "f1", orgId: "org-a" })],
     });
 
     const result = (await handler(
       makeEvent({ fieldName: "listGovernanceFindings", args: {} }),
     )) as { items: { findingId: string }[]; nextCursor: string | null };
 
-    expect(result.items).toHaveLength(2);
-    expect(result.items[0].findingId).toBe("f1");
+    expect(result.items).toHaveLength(1);
+    expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
+    const queryCalls = ddbMock.commandCalls(QueryCommand);
+    expect(queryCalls).toHaveLength(1);
+    const input = queryCalls[0].args[0].input;
+    expect(input.IndexName).toBe("org-index");
+    expect(input.KeyConditionExpression).toBe("orgId = :orgId");
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ":orgId": "org-a",
+    });
+  });
+
+  test("non-admin caller: client-supplied orgId-like args are ignored — org comes from the server", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    await handler(
+      makeEvent({
+        fieldName: "listGovernanceFindings",
+        // @ts-expect-error — args do not declare orgId; verifying it can't be smuggled in.
+        args: { orgId: "org-b" },
+      }),
+    );
+
+    const input = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ":orgId": "org-a",
+    });
+  });
+
+  test("non-admin caller with no resolvable org: returns empty page, does not Scan or Query without a key", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue(null);
+
+    const result = (await handler(
+      makeEvent({ fieldName: "listGovernanceFindings", args: {} }),
+    )) as { items: unknown[]; nextCursor: string | null };
+
+    expect(result.items).toHaveLength(0);
+    expect(result.nextCursor).toBeNull();
+    expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+
+  test("admin caller: still uses Scan (cross-org visibility retained), sees un-stamped rows", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
+    ddbMock.on(ScanCommand).resolves({
+      Items: [
+        makeDdbRow({ findingId: "f1", orgId: "org-a" }),
+        makeDdbRow({ findingId: "f2", orgId: "org-b" }),
+        makeDdbRow({ findingId: "f3" }), // un-stamped
+      ],
+    });
+
+    const result = (await handler(
+      makeEvent({ fieldName: "listGovernanceFindings", args: {} }),
+    )) as { items: { findingId: string }[]; nextCursor: string | null };
+
+    expect(result.items).toHaveLength(3);
+    expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
     expect(result.nextCursor).toBeNull();
   });
 
-  test("default Scan returns base64 cursor when LastEvaluatedKey present", async () => {
+  test("admin default Scan returns base64 cursor when LastEvaluatedKey present", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
     const lastKey = { findingId: "f-last" };
     ddbMock.on(ScanCommand).resolves({
       Items: [makeDdbRow({ findingId: "f1" })],
@@ -451,8 +517,40 @@ describe("listGovernanceFindings", () => {
     expect(decoded).toEqual(lastKey);
   });
 
-  test("workflowId path uses QueryCommand against workflow-index GSI", async () => {
-    ddbMock.on(QueryCommand).resolves({ Items: [makeDdbRow()] });
+  test("non-admin cursor never carries a foreign findingId across pages: LastEvaluatedKey is scoped to the org-index key shape", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    const lastKey = {
+      orgId: "org-a",
+      timestamp: 1700000001,
+      findingId: "f-last-a",
+    };
+    ddbMock.on(QueryCommand).resolves({
+      Items: [makeDdbRow({ findingId: "f1", orgId: "org-a" })],
+      LastEvaluatedKey: lastKey,
+    });
+
+    const result = (await handler(
+      makeEvent({ fieldName: "listGovernanceFindings", args: {} }),
+    )) as { nextCursor: string | null };
+
+    const decoded = JSON.parse(
+      Buffer.from(result.nextCursor as string, "base64").toString("utf8"),
+    );
+    // The returned cursor's key is exactly the org-scoped LastEvaluatedKey —
+    // it cannot be replayed against a different org's partition because
+    // orgId is baked into the key itself, and the resolver always re-derives
+    // orgId server-side on the next page rather than trusting the cursor.
+    expect(decoded).toEqual(lastKey);
+    expect(decoded.orgId).toBe("org-a");
+  });
+
+  test("workflowId path still uses QueryCommand against workflow-index GSI (unchanged) and is org-checked post-fetch for non-admins", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(QueryCommand).resolves({
+      Items: [makeDdbRow({ orgId: "org-a" })],
+    });
 
     await handler(
       makeEvent({
@@ -467,11 +565,33 @@ describe("listGovernanceFindings", () => {
     expect(input.IndexName).toBe("workflow-index");
     expect(input.KeyConditionExpression).toBe("workflowId = :wid");
     expect(input.ExpressionAttributeValues).toMatchObject({ ":wid": "wf-42" });
-    // Scan should NOT have been used.
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
   });
 
+  test("workflowId path filters out foreign-org rows for non-admin callers", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        makeDdbRow({ findingId: "f1", orgId: "org-a" }),
+        makeDdbRow({ findingId: "f2", orgId: "org-b" }),
+        makeDdbRow({ findingId: "f3" }), // un-stamped, admin-only
+      ],
+    });
+
+    const result = (await handler(
+      makeEvent({
+        fieldName: "listGovernanceFindings",
+        args: { workflowId: "wf-42" },
+      }),
+    )) as { items: { findingId: string }[] };
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].findingId).toBe("f1");
+  });
+
   test("workflowId path adds sinceTs as SK comparator with #ts placeholder", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
     ddbMock.on(QueryCommand).resolves({ Items: [] });
 
     await handler(
@@ -493,7 +613,30 @@ describe("listGovernanceFindings", () => {
     });
   });
 
-  test("decision filter applied on Scan path", async () => {
+  test("decision filter applied on org-index Query path for non-admins", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    await handler(
+      makeEvent({
+        fieldName: "listGovernanceFindings",
+        args: { decision: "deny" },
+      }),
+    );
+
+    const input = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(input.FilterExpression).toContain("#decision = :decision");
+    expect(input.ExpressionAttributeNames).toMatchObject({
+      "#decision": "decision",
+    });
+    expect(input.ExpressionAttributeValues).toMatchObject({
+      ":decision": "deny",
+    });
+  });
+
+  test("decision filter applied on admin Scan path", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
     ddbMock.on(ScanCommand).resolves({ Items: [] });
 
     await handler(
@@ -513,7 +656,8 @@ describe("listGovernanceFindings", () => {
     });
   });
 
-  test("limit is clamped to 200", async () => {
+  test("limit is clamped to 200 on both admin Scan and non-admin Query paths", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
     ddbMock.on(ScanCommand).resolves({ Items: [] });
 
     await handler(
@@ -524,9 +668,24 @@ describe("listGovernanceFindings", () => {
     );
 
     expect(ddbMock.commandCalls(ScanCommand)[0].args[0].input.Limit).toBe(200);
+
+    ddbMock.reset();
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    await handler(
+      makeEvent({
+        fieldName: "listGovernanceFindings",
+        args: { limit: 9999 },
+      }),
+    );
+
+    expect(ddbMock.commandCalls(QueryCommand)[0].args[0].input.Limit).toBe(200);
   });
 
-  test("cursor is base64-decoded into ExclusiveStartKey", async () => {
+  test("cursor is base64-decoded into ExclusiveStartKey on the admin Scan path", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
     ddbMock.on(ScanCommand).resolves({ Items: [] });
 
     const startKey = { findingId: "page-2-start" };
@@ -544,6 +703,31 @@ describe("listGovernanceFindings", () => {
     const input = ddbMock.commandCalls(ScanCommand)[0].args[0].input;
     expect(input.ExclusiveStartKey).toEqual(startKey);
   });
+
+  test("cursor is base64-decoded into ExclusiveStartKey on the non-admin org-index Query path", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+
+    const startKey = {
+      orgId: "org-a",
+      timestamp: 1700000000,
+      findingId: "page-2-start",
+    };
+    const cursor = Buffer.from(JSON.stringify(startKey), "utf8").toString(
+      "base64",
+    );
+
+    await handler(
+      makeEvent({
+        fieldName: "listGovernanceFindings",
+        args: { cursor },
+      }),
+    );
+
+    const input = ddbMock.commandCalls(QueryCommand)[0].args[0].input;
+    expect(input.ExclusiveStartKey).toEqual(startKey);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -552,6 +736,8 @@ describe("listGovernanceFindings", () => {
 
 describe("getGovernanceFinding", () => {
   test("returns null when DDB returns no item", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
     ddbMock.on(GetCommand).resolves({});
 
     const result = await handler(
@@ -563,8 +749,10 @@ describe("getGovernanceFinding", () => {
     expect(result).toBeNull();
   });
 
-  test("returns projected item with camelCase fields", async () => {
-    ddbMock.on(GetCommand).resolves({ Item: makeDdbRow() });
+  test("returns projected item with camelCase fields for same-org caller", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(GetCommand).resolves({ Item: makeDdbRow({ orgId: "org-a" }) });
 
     const result = (await handler(
       makeEvent({
@@ -576,6 +764,104 @@ describe("getGovernanceFinding", () => {
     expect(result.findingId).toBe("finding-1");
     expect(result.requestingAgent).toBe("agent-a");
     expect(result.targetAgent).toBe("agent-b");
+  });
+
+  test("returns null (not a throw) when row belongs to a foreign org", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(GetCommand).resolves({ Item: makeDdbRow({ orgId: "org-b" }) });
+
+    const result = await handler(
+      makeEvent({
+        fieldName: "getGovernanceFinding",
+        args: { findingId: "finding-1" },
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
+  test("returns null (not a throw) for an un-stamped row when caller is non-admin", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(GetCommand).resolves({ Item: makeDdbRow({ orgId: undefined }) });
+
+    const result = await handler(
+      makeEvent({
+        fieldName: "getGovernanceFinding",
+        args: { findingId: "finding-1" },
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
+  test("not-found and not-yours produce identical shape (null) — no existence oracle via error message", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+
+    ddbMock.on(GetCommand).resolves({});
+    const notFound = await handler(
+      makeEvent({
+        fieldName: "getGovernanceFinding",
+        args: { findingId: "missing" },
+      }),
+    );
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({ Item: makeDdbRow({ orgId: "org-b" }) });
+    const notYours = await handler(
+      makeEvent({
+        fieldName: "getGovernanceFinding",
+        args: { findingId: "finding-1" },
+      }),
+    );
+
+    expect(notFound).toBeNull();
+    expect(notYours).toBeNull();
+    expect(notFound).toEqual(notYours);
+  });
+
+  test("admin bypasses org check and sees a foreign-org row", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
+    ddbMock.on(GetCommand).resolves({ Item: makeDdbRow({ orgId: "org-b" }) });
+
+    const result = (await handler(
+      makeEvent({
+        fieldName: "getGovernanceFinding",
+        args: { findingId: "finding-1" },
+      }),
+    )) as { findingId: string };
+
+    expect(result.findingId).toBe("finding-1");
+    // Admin path must not need to resolve the caller's own org.
+    expect(extractOrgFromEventMock).not.toHaveBeenCalled();
+  });
+
+  test("admin sees an un-stamped row", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
+    ddbMock.on(GetCommand).resolves({ Item: makeDdbRow({ orgId: undefined }) });
+
+    const result = (await handler(
+      makeEvent({
+        fieldName: "getGovernanceFinding",
+        args: { findingId: "finding-1" },
+      }),
+    )) as { findingId: string };
+
+    expect(result.findingId).toBe("finding-1");
+  });
+
+  test("returns null (fail closed) when the row has an org but the caller org cannot be resolved", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue(null);
+    ddbMock.on(GetCommand).resolves({ Item: makeDdbRow({ orgId: "org-a" }) });
+
+    const result = await handler(
+      makeEvent({
+        fieldName: "getGovernanceFinding",
+        args: { findingId: "finding-1" },
+      }),
+    );
+    expect(result).toBeNull();
   });
 });
 
@@ -2745,6 +3031,15 @@ describe("getRolloutReadiness verification overlay (Wave 2.B.2)", () => {
 // ---------------------------------------------------------------------------
 
 describe("getDecisionTrace", () => {
+  // Default every pre-existing pipeline-mechanics test in this block to an
+  // admin caller so the org-isolation gate (added slice 3, decisions
+  // 7b3f4fe2 / 2dd461f6) doesn't interfere with tests that assert on step
+  // derivation and are indifferent to org. The dedicated org-isolation
+  // tests below override this to `false` explicitly.
+  beforeEach(() => {
+    isAdminFromEventMock.mockReturnValue(true);
+  });
+
   function ledgerRow(
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> {
@@ -2781,6 +3076,8 @@ describe("getDecisionTrace", () => {
   }
 
   test("returns null when finding not found", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
     ddbMock.on(GetCommand).resolves({});
 
     const result = await handler(
@@ -2790,6 +3087,50 @@ describe("getDecisionTrace", () => {
       }),
     );
     expect(result).toBeNull();
+  });
+
+  test("returns null (not a throw) when the finding belongs to a foreign org", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(GetCommand).resolves({
+      Item: ledgerRow({ orgId: "org-b" }),
+    });
+
+    const result = await handler(
+      makeEvent({
+        fieldName: "getDecisionTrace",
+        args: { findingId: "finding-1" },
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
+  test("returns null (not a throw) for an un-stamped finding when caller is non-admin", async () => {
+    isAdminFromEventMock.mockReturnValue(false);
+    extractOrgFromEventMock.mockResolvedValue("org-a");
+    ddbMock.on(GetCommand).resolves({ Item: ledgerRow({ orgId: undefined }) });
+
+    const result = await handler(
+      makeEvent({
+        fieldName: "getDecisionTrace",
+        args: { findingId: "finding-1" },
+      }),
+    );
+    expect(result).toBeNull();
+  });
+
+  test("admin bypasses org check and can trace a foreign-org / un-stamped finding", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
+    ddbMock.on(GetCommand).resolves({ Item: ledgerRow({ orgId: undefined }) });
+
+    const result = (await handler(
+      makeEvent({
+        fieldName: "getDecisionTrace",
+        args: { findingId: "finding-1" },
+      }),
+    )) as { findingId: string };
+
+    expect(result.findingId).toBe("finding-1");
   });
 
   test("case-law match: step 1 matched, terminal=1, others skipped", async () => {

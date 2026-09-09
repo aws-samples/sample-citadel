@@ -2406,6 +2406,25 @@ export class ArbiterStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // Governance ledger read-isolation (decisions 7b3f4fe2 / 2dd461f6,
+    // slice 3): listGovernanceFindings must Query by the caller's
+    // server-derived org rather than Scan-then-filter — a Scan's
+    // LastEvaluatedKey would leak a foreign findingId across a page
+    // boundary, and Limit-before-Filter would leak cross-org page
+    // density. `orgId` is populated on every ledger row that has one
+    // (arbiter/governance/ledger.py); the two permanently-unstamped
+    // write sites (eval-drift writer, supervisor path) simply omit the
+    // attribute, so they never appear in this index — those rows stay
+    // admin-only via the Scan path (getGovernanceMode-adjacent handlers
+    // are unaffected). Sort key mirrors workflow-index's `timestamp` so
+    // recency ordering/pagination behaves identically to the existing GSI.
+    governanceLedgerTable.addGlobalSecondaryIndex({
+      indexName: "org-index",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "timestamp", type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     // ============================================================
     // wire governance seed into SeedAgentConfigFunction
     // ============================================================
