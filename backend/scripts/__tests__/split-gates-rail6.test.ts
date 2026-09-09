@@ -220,4 +220,76 @@ describe("rail 6 — IAM privilege-equivalence (negative: doctored broadened sta
       result.violations.some((v) => v.logicalId === "MissingBaselineFn"),
     ).toBe(true);
   });
+
+  // Regression test for finding ef02d366: a manifest entry whose
+  // satelliteLogicalId is absent from the satellite-derived
+  // lambdaRolePolicies map (e.g. because the satellite template was
+  // synthesized stale, or the moved Lambda's construct ID drifted) must
+  // FAIL LOUD naming the missing entry — it must NEVER be treated as "zero
+  // statements, therefore trivially covered" and pass. This simulates
+  // removing one manifest entry's logical ID from a fixture template: the
+  // satelliteLambdaPolicies map here plays the role of "what was actually
+  // found by parsing the satellite templates", and
+  // AgentImportResolverFnSat is simply never populated in it — as if its
+  // template were stale/missing the moved Lambda.
+  it("FAILS LOUD when a manifest entry's satellite logical ID is entirely absent from the satellite templates (finding ef02d366 regression)", () => {
+    const baseline = makeBaseline({
+      AgentImportResolverFn: [
+        stmt(
+          ["secretsmanager:GetSecretValue"],
+          ["arn:aws:secretsmanager:*:*:secret:citadel/agent-import/*"],
+        ),
+      ],
+      RegistryAgentRecordResolverFn: [
+        stmt(
+          ["dynamodb:GetItem"],
+          ["arn:aws:dynamodb:*:*:table/citadel-apps-dev"],
+        ),
+      ],
+    });
+    // Only RegistryAgentRecordResolverFnSat was found in the (fixture)
+    // satellite templates — AgentImportResolverFnSat is completely absent,
+    // simulating a manifest entry that got "lost" (e.g. stale dist/synth or
+    // a construct-ID drift), NOT a Lambda with zero IAM statements.
+    const satelliteLambdaPolicies: Record<string, NormalizedPolicyStatement[]> =
+      {
+        RegistryAgentRecordResolverFnSat: [
+          stmt(
+            ["dynamodb:GetItem"],
+            ["arn:aws:dynamodb:*:*:table/citadel-apps-dev"],
+          ),
+        ],
+      };
+    const result = runIamEquivalence(baseline, satelliteLambdaPolicies, [
+      {
+        baselineLogicalId: "AgentImportResolverFn",
+        satelliteLogicalId: "AgentImportResolverFnSat",
+        satelliteStackName: "citadel-registry-dev",
+      },
+      {
+        baselineLogicalId: "RegistryAgentRecordResolverFn",
+        satelliteLogicalId: "RegistryAgentRecordResolverFnSat",
+        satelliteStackName: "citadel-registry-dev",
+      },
+    ]);
+    expect(result.passed).toBe(false);
+    // Names the missing entry explicitly rather than silently contributing
+    // zero violations for it.
+    expect(
+      result.violations.some(
+        (v) =>
+          v.logicalId === "AgentImportResolverFnSat" &&
+          /NOT FOUND/.test(v.message) &&
+          /AgentImportResolverFn/.test(v.message),
+      ),
+    ).toBe(true);
+    // The found entry must still pass on its own merits — this proves the
+    // fix doesn't just fail everything, it correctly isolates the missing
+    // entry.
+    expect(
+      result.violations.some(
+        (v) => v.logicalId === "RegistryAgentRecordResolverFnSat",
+      ),
+    ).toBe(false);
+  });
 });

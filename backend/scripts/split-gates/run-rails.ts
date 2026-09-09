@@ -19,6 +19,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { loadTemplate, extractArnRegions } from "./template-utils";
 import { buildBaseline } from "./baseline-builder";
+import { guardCdkOutInCi } from "../../test/helpers/cdk-out-guard";
 import { runRemovalsOnlyDiff } from "./rails/rail1-removals-only";
 import {
   runResolverParity,
@@ -180,12 +181,25 @@ function main(): void {
   );
 
   const satelliteTemplates: NamedTemplate[] = SATELLITE_STACK_NAMES.map(
-    (name) => ({
-      stackName: name,
-      template: loadTemplate(
-        path.join(backendDir, cdkOutDir, `${name}.template.json`),
-      ),
-    }),
+    (name) => {
+      const templatePath = path.join(
+        backendDir,
+        cdkOutDir,
+        `${name}.template.json`,
+      );
+      // guardCdkOutInCi throws under CI=true instead of letting a missing
+      // satellite template surface only as an opaque loadTemplate ENOENT
+      // (or, worse, silently letting rails 3/6/7 treat the whole satellite
+      // as if it moved nothing — finding ef02d366's rail 6 vacuous-pass
+      // shape). run-rails.ts previously never called this guard at all.
+      if (!fs.existsSync(templatePath)) {
+        guardCdkOutInCi(
+          `${name}.template.json (satellite stack for run-rails.ts rails 3/6/7)`,
+          `npx cdk synth ${stackName} ${SATELLITE_STACK_NAMES.join(" ")}`,
+        );
+      }
+      return { stackName: name, template: loadTemplate(templatePath) };
+    },
   );
   const rail3 = runResolverParity(
     baseline,

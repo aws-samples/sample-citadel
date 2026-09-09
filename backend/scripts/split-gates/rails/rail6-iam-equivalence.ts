@@ -74,8 +74,28 @@ export function runIamEquivalence(
       });
       continue;
     }
+    // Manifest-completeness guard (finding ef02d366): a manifest entry
+    // whose satelliteLogicalId is simply ABSENT from
+    // satelliteLambdaPolicies must FAIL LOUD, never be treated as "zero
+    // statements, therefore trivially covered". An absent entry means the
+    // satellite template didn't contain the moved Lambda's role at all —
+    // most likely because it was synthesized from a stale dist/cdk.out, or
+    // because the move never actually happened — and either way the rail
+    // must say so instead of silently passing.
+    if (!(mapping.satelliteLogicalId in satelliteLambdaPolicies)) {
+      violations.push({
+        rail: "rail6",
+        logicalId: mapping.satelliteLogicalId,
+        message:
+          `Satellite Lambda "${mapping.satelliteLogicalId}" (moved from baseline "${mapping.baselineLogicalId}") ` +
+          `was NOT FOUND in the synthesized ${mapping.satelliteStackName} template. This manifest entry could not ` +
+          `be located — the rail cannot verify IAM equivalence and treats this as a failure, not a pass. ` +
+          `Check for a stale synth/dist or a manifest logical-ID mismatch.`,
+      });
+      continue;
+    }
     const satelliteStatements =
-      satelliteLambdaPolicies[mapping.satelliteLogicalId] ?? [];
+      satelliteLambdaPolicies[mapping.satelliteLogicalId];
     // CIT-125 slice A: a moved consumer's new sqs:SendMessage grant on its
     // stack's shared async DLQ is a deliberate, justified broadening —
     // covered here per satellite logical ID (move-manifest.ts's
