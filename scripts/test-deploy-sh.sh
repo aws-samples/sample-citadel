@@ -618,8 +618,8 @@ LAYER_AND_JSON_DIFF='            [-]   "Resource": {
             [-]   }
  └─ [~] Layers
      └─ [~] .0:
-         ├─ [-] arn:aws:lambda:us-west-2:257192363080:layer:ArbiterCatalogLayer:58
-         └─ [+] arn:aws:lambda:us-west-2:257192363080:layer:ArbiterCatalogLayer:59'
+         ├─ [-] arn:aws:lambda:us-west-2:000000000000:layer:ArbiterCatalogLayer:58
+         └─ [+] arn:aws:lambda:us-west-2:000000000000:layer:ArbiterCatalogLayer:59'
 set +e
 layerjson_out=$(extract_cdk_deletions "$LAYER_AND_JSON_DIFF")
 set -e 2>/dev/null || true
