@@ -223,7 +223,7 @@
             }
           ]
         },
-        "BucketName": "citadel-s3-logs-dev-257192363080-us-west-2",
+        "BucketName": "citadel-s3-logs-dev-000000000000-us-west-2",
         "LifecycleConfiguration": {
           "Rules": [
             {
@@ -294,7 +294,7 @@
             }
           ]
         },
-        "BucketName": "citadel-documents-dev-257192363080-us-west-2",
+        "BucketName": "citadel-documents-dev-000000000000-us-west-2",
         "CorsConfiguration": {
           "CorsRules": [
             {
@@ -372,7 +372,7 @@
       "deletionPolicy": "Delete",
       "updateReplacePolicy": "Delete",
       "properties": {
-        "BucketName": "citadel-code-dev-257192363080-us-west-2",
+        "BucketName": "citadel-code-dev-000000000000-us-west-2",
         "LoggingConfiguration": {
           "DestinationBucketName": {
             "Ref": "AccessLogsBucket83982689"
@@ -1926,7 +1926,7 @@
             "ApiId"
           ]
         },
-        "DefinitionS3Location": "s3://cdk-hnb659fds-assets-257192363080-us-west-2/8a2064ed3d1346f5863ee2fb8e547295f378a699a3e896866d25e557d31b9bd5.graphql"
+        "DefinitionS3Location": "s3://cdk-hnb659fds-assets-000000000000-us-west-2/8a2064ed3d1346f5863ee2fb8e547295f378a699a3e896866d25e557d31b9bd5.graphql"
       }
     },
     "AgenticAIApiLogRetention0F17C899": {
@@ -4923,7 +4923,7 @@
           "dynamodb:PutItem"
         ],
         "resources": [
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-tools-dev"
+          "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-tools-dev"
         ],
         "conditionKeys": []
       },
@@ -5256,8 +5256,8 @@
           "ssm:GetParameter"
         ],
         "resources": [
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/knowledge-base-datasource-id-dev",
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/knowledge-base-id-dev"
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/knowledge-base-datasource-id-dev",
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/knowledge-base-id-dev"
         ],
         "conditionKeys": []
       },
@@ -5278,8 +5278,8 @@
           "dynamodb:Query"
         ],
         "resources": [
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-document-ingestion-dev",
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-document-ingestion-dev/index/status-index"
+          "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-document-ingestion-dev",
+          "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-document-ingestion-dev/index/status-index"
         ],
         "conditionKeys": []
       }
@@ -5294,8 +5294,8 @@
           "s3:ListBucketVersions"
         ],
         "resources": [
-          "arn:aws:s3:::citadel-sessions-dev-257192363080-us-west-2",
-          "arn:aws:s3:::citadel-sessions-dev-257192363080-us-west-2/*"
+          "arn:aws:s3:::citadel-sessions-dev-000000000000-us-west-2",
+          "arn:aws:s3:::citadel-sessions-dev-000000000000-us-west-2/*"
         ],
         "conditionKeys": []
       },
@@ -5305,7 +5305,7 @@
           "s3:PutObject"
         ],
         "resources": [
-          "arn:aws:s3:::citadel-sessions-dev-257192363080-us-west-2/*"
+          "arn:aws:s3:::citadel-sessions-dev-000000000000-us-west-2/*"
         ],
         "conditionKeys": []
       },
@@ -5315,7 +5315,7 @@
           "lambda:InvokeFunction"
         ],
         "resources": [
-          "arn:aws:lambda:us-west-2:257192363080:function:citadel-pdf-generator-dev"
+          "arn:aws:lambda:us-west-2:000000000000:function:citadel-pdf-generator-dev"
         ],
         "conditionKeys": []
       }
@@ -5375,8 +5375,8 @@
           "ssm:GetParameter"
         ],
         "resources": [
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/governance/effective_at/dev",
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/governance/enforce/dev"
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/governance/effective_at/dev",
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/governance/enforce/dev"
         ],
         "conditionKeys": []
       },
@@ -5389,7 +5389,7 @@
           "iam:ListRolePolicies"
         ],
         "resources": [
-          "arn:aws:iam::257192363080:role/*"
+          "arn:aws:iam::000000000000:role/*"
         ],
         "conditionKeys": []
       },
@@ -5400,7 +5400,7 @@
           "iam:GetPolicyVersion"
         ],
         "resources": [
-          "arn:aws:iam::257192363080:policy/*"
+          "arn:aws:iam::000000000000:policy/*"
         ],
         "conditionKeys": []
       },
@@ -5467,7 +5467,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-authority-units-dev"
+          "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-authority-units-dev"
         ],
         "conditionKeys": []
       },
@@ -5480,7 +5480,7 @@
           "secretsmanager:TagResource"
         ],
         "resources": [
-          "arn:aws:secretsmanager:us-west-2:257192363080:secret:/citadel/agents/*"
+          "arn:aws:secretsmanager:us-west-2:000000000000:secret:/citadel/agents/*"
         ],
         "conditionKeys": []
       },
@@ -5493,10 +5493,10 @@
           "lambda:InvokeFunction"
         ],
         "resources": [
-          "arn:aws:bedrock-agentcore:*:257192363080:runtime/*",
-          "arn:aws:bedrock:*:257192363080:agent-alias/*",
-          "arn:aws:execute-api:*:257192363080:*",
-          "arn:aws:lambda:*:257192363080:function:*"
+          "arn:aws:bedrock-agentcore:*:000000000000:runtime/*",
+          "arn:aws:bedrock:*:000000000000:agent-alias/*",
+          "arn:aws:execute-api:*:000000000000:*",
+          "arn:aws:lambda:*:000000000000:function:*"
         ],
         "conditionKeys": []
       },
@@ -5516,7 +5516,7 @@
           "sqs:SendMessage"
         ],
         "resources": [
-          "arn:aws:sqs:us-west-2:257192363080:citadel-fabricator-queue-dev"
+          "arn:aws:sqs:us-west-2:000000000000:citadel-fabricator-queue-dev"
         ],
         "conditionKeys": []
       },
@@ -5603,8 +5603,8 @@
           "bedrock-agentcore:DeleteGatewayTarget"
         ],
         "resources": [
-          "arn:aws:bedrock-agentcore:us-west-2:257192363080:gateway/*",
-          "arn:aws:bedrock-agentcore:us-west-2:257192363080:gateway/*/target/*"
+          "arn:aws:bedrock-agentcore:us-west-2:000000000000:gateway/*",
+          "arn:aws:bedrock-agentcore:us-west-2:000000000000:gateway/*/target/*"
         ],
         "conditionKeys": []
       },
@@ -5616,7 +5616,7 @@
           "bedrock-agentcore:UpdateApiKeyCredentialProvider"
         ],
         "resources": [
-          "arn:aws:bedrock-agentcore:us-west-2:257192363080:credential-provider/integration-*"
+          "arn:aws:bedrock-agentcore:us-west-2:000000000000:credential-provider/integration-*"
         ],
         "conditionKeys": []
       },
@@ -5626,7 +5626,7 @@
           "ssm:GetParameter"
         ],
         "resources": [
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/gateway-id-dev"
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/gateway-id-dev"
         ],
         "conditionKeys": []
       },
@@ -5691,8 +5691,8 @@
           "s3:PutObject"
         ],
         "resources": [
-          "arn:aws:s3:::citadel-code-dev-257192363080-us-west-2",
-          "arn:aws:s3:::citadel-code-dev-257192363080-us-west-2/agents/*"
+          "arn:aws:s3:::citadel-code-dev-000000000000-us-west-2",
+          "arn:aws:s3:::citadel-code-dev-000000000000-us-west-2/agents/*"
         ],
         "conditionKeys": []
       },
@@ -5724,7 +5724,7 @@
           "dynamodb:Scan"
         ],
         "resources": [
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-tools-dev"
+          "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-tools-dev"
         ],
         "conditionKeys": []
       },
@@ -5753,7 +5753,7 @@
           "dynamodb:PutItem"
         ],
         "resources": [
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-fabrication-jobs-dev"
+          "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-fabrication-jobs-dev"
         ],
         "conditionKeys": []
       },
@@ -5764,7 +5764,7 @@
           "sqs:SendMessage"
         ],
         "resources": [
-          "arn:aws:sqs:us-west-2:257192363080:citadel-fabricator-queue-dev"
+          "arn:aws:sqs:us-west-2:000000000000:citadel-fabricator-queue-dev"
         ],
         "conditionKeys": []
       }
@@ -5776,7 +5776,7 @@
           "dynamodb:Query"
         ],
         "resources": [
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-fabrication-jobs-dev/index/OrgIndex"
+          "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-fabrication-jobs-dev/index/OrgIndex"
         ],
         "conditionKeys": []
       },
@@ -5787,7 +5787,7 @@
           "sqs:ReceiveMessage"
         ],
         "resources": [
-          "arn:aws:sqs:us-west-2:257192363080:citadel-fabricator-queue-dev"
+          "arn:aws:sqs:us-west-2:000000000000:citadel-fabricator-queue-dev"
         ],
         "conditionKeys": []
       }
@@ -5874,7 +5874,7 @@
           "secretsmanager:UpdateSecret"
         ],
         "resources": [
-          "arn:aws:secretsmanager:us-west-2:257192363080:secret:/citadel/integrations/*"
+          "arn:aws:secretsmanager:us-west-2:000000000000:secret:/citadel/integrations/*"
         ],
         "conditionKeys": []
       },
@@ -5887,8 +5887,8 @@
           "ssm:PutParameter"
         ],
         "resources": [
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/gateway/*",
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/integrations/*"
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/gateway/*",
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/integrations/*"
         ],
         "conditionKeys": []
       },
@@ -5913,8 +5913,8 @@
           "bedrock-agentcore:UpdateGatewayTarget"
         ],
         "resources": [
-          "arn:aws:bedrock-agentcore:us-west-2:257192363080:gateway/*",
-          "arn:aws:bedrock-agentcore:us-west-2:257192363080:token-vault/default/apikeycredentialprovider/*"
+          "arn:aws:bedrock-agentcore:us-west-2:000000000000:gateway/*",
+          "arn:aws:bedrock-agentcore:us-west-2:000000000000:token-vault/default/apikeycredentialprovider/*"
         ],
         "conditionKeys": []
       },
@@ -5933,7 +5933,7 @@
           "bedrock-agentcore:UpdateOauth2CredentialProvider"
         ],
         "resources": [
-          "arn:aws:bedrock-agentcore:us-west-2:257192363080:credential-provider/integration-*"
+          "arn:aws:bedrock-agentcore:us-west-2:000000000000:credential-provider/integration-*"
         ],
         "conditionKeys": []
       },
@@ -5946,7 +5946,7 @@
           "ssm:GetParameters"
         ],
         "resources": [
-          "JOIN::arn:aws:ssm:us-west-2:257192363080:parameterGETATT:OAuthReturnUrlParam5C6CC3B4:Ref"
+          "JOIN::arn:aws:ssm:us-west-2:000000000000:parameterGETATT:OAuthReturnUrlParam5C6CC3B4:Ref"
         ],
         "conditionKeys": []
       },
@@ -5962,7 +5962,7 @@
           "sts:AssumeRole"
         ],
         "resources": [
-          "arn:aws:iam::257192363080:role/citadel-int-*"
+          "arn:aws:iam::000000000000:role/citadel-int-*"
         ],
         "conditionKeys": []
       },
@@ -6010,8 +6010,8 @@
           "ssm:PutParameter"
         ],
         "resources": [
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/gateway-id-*",
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/gateway/*"
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/gateway-id-*",
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/gateway/*"
         ],
         "conditionKeys": []
       },
@@ -6021,7 +6021,7 @@
           "secretsmanager:GetSecretValue"
         ],
         "resources": [
-          "arn:aws:secretsmanager:us-west-2:257192363080:secret:/citadel/integrations/*"
+          "arn:aws:secretsmanager:us-west-2:000000000000:secret:/citadel/integrations/*"
         ],
         "conditionKeys": []
       },
@@ -6033,8 +6033,8 @@
           "bedrock-agentcore:GetGatewayTarget"
         ],
         "resources": [
-          "arn:aws:bedrock-agentcore:us-west-2:257192363080:gateway/*",
-          "arn:aws:bedrock-agentcore:us-west-2:257192363080:gateway/*/target/*"
+          "arn:aws:bedrock-agentcore:us-west-2:000000000000:gateway/*",
+          "arn:aws:bedrock-agentcore:us-west-2:000000000000:gateway/*/target/*"
         ],
         "conditionKeys": []
       },
@@ -6047,7 +6047,7 @@
           "bedrock-agentcore:GetOauth2CredentialProvider"
         ],
         "resources": [
-          "arn:aws:bedrock-agentcore:us-west-2:257192363080:credential-provider/integration-*"
+          "arn:aws:bedrock-agentcore:us-west-2:000000000000:credential-provider/integration-*"
         ],
         "conditionKeys": []
       },
@@ -6060,7 +6060,7 @@
           "ssm:GetParameters"
         ],
         "resources": [
-          "JOIN::arn:aws:ssm:us-west-2:257192363080:parameterGETATT:OAuthReturnUrlParam5C6CC3B4:Ref"
+          "JOIN::arn:aws:ssm:us-west-2:000000000000:parameterGETATT:OAuthReturnUrlParam5C6CC3B4:Ref"
         ],
         "conditionKeys": []
       },
@@ -6070,7 +6070,7 @@
           "s3:GetObject"
         ],
         "resources": [
-          "arn:aws:s3:::citadel-schemas-dev-257192363080-us-west-2/*"
+          "arn:aws:s3:::citadel-schemas-dev-000000000000-us-west-2/*"
         ],
         "conditionKeys": []
       }
@@ -6307,7 +6307,7 @@
           "dynamodb:UpdateItem"
         ],
         "resources": [
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-authority-units-dev"
+          "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-authority-units-dev"
         ],
         "conditionKeys": []
       },
@@ -6334,7 +6334,7 @@
           "iam:UntagRole"
         ],
         "resources": [
-          "arn:aws:iam::257192363080:role/citadel-agent-*"
+          "arn:aws:iam::000000000000:role/citadel-agent-*"
         ],
         "conditionKeys": []
       },
@@ -6354,7 +6354,7 @@
           "ssm:GetParameter"
         ],
         "resources": [
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/dev/app-api-key-pepper"
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/dev/app-api-key-pepper"
         ],
         "conditionKeys": []
       },
@@ -6364,7 +6364,7 @@
           "kms:Decrypt"
         ],
         "resources": [
-          "arn:aws:kms:us-west-2:257192363080:alias/aws/ssm"
+          "arn:aws:kms:us-west-2:000000000000:alias/aws/ssm"
         ],
         "conditionKeys": []
       },
@@ -6538,7 +6538,7 @@
           "ssm:GetParameters"
         ],
         "resources": [
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/agents/*"
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/agents/*"
         ],
         "conditionKeys": []
       },
@@ -6548,7 +6548,7 @@
           "secretsmanager:GetSecretValue"
         ],
         "resources": [
-          "arn:aws:secretsmanager:us-west-2:257192363080:secret:/citadel/agents/*"
+          "arn:aws:secretsmanager:us-west-2:000000000000:secret:/citadel/agents/*"
         ],
         "conditionKeys": []
       },
@@ -6685,7 +6685,7 @@
           "appsync:GraphQL"
         ],
         "resources": [
-          "JOIN::arn:aws:appsync:us-west-2:257192363080:apis/GETATT:AgenticAIApiABAE82BE:ApiId/types/Mutation/fields/publishAssessmentCompletion"
+          "JOIN::arn:aws:appsync:us-west-2:000000000000:apis/GETATT:AgenticAIApiABAE82BE:ApiId/types/Mutation/fields/publishAssessmentCompletion"
         ],
         "conditionKeys": []
       }
@@ -6709,7 +6709,7 @@
           "appsync:GraphQL"
         ],
         "resources": [
-          "JOIN::arn:aws:appsync:us-west-2:257192363080:apis/GETATT:AgenticAIApiABAE82BE:ApiId/types/Mutation/fields/publishDesignProgress"
+          "JOIN::arn:aws:appsync:us-west-2:000000000000:apis/GETATT:AgenticAIApiABAE82BE:ApiId/types/Mutation/fields/publishDesignProgress"
         ],
         "conditionKeys": []
       }
@@ -6736,7 +6736,7 @@
           "dynamodb:Query"
         ],
         "resources": [
-          "arn:aws:dynamodb:us-west-2:257192363080:table/citadel-session-memory-dev"
+          "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-session-memory-dev"
         ],
         "conditionKeys": []
       }
@@ -6750,8 +6750,8 @@
           "s3:ListBucket"
         ],
         "resources": [
-          "arn:aws:s3:::citadel-sessions-dev-257192363080-us-west-2",
-          "arn:aws:s3:::citadel-sessions-dev-257192363080-us-west-2/*"
+          "arn:aws:s3:::citadel-sessions-dev-000000000000-us-west-2",
+          "arn:aws:s3:::citadel-sessions-dev-000000000000-us-west-2/*"
         ],
         "conditionKeys": []
       },
@@ -6806,7 +6806,7 @@
           "secretsmanager:UpdateSecret"
         ],
         "resources": [
-          "arn:aws:secretsmanager:us-west-2:257192363080:secret:/citadel/datastores/*"
+          "arn:aws:secretsmanager:us-west-2:000000000000:secret:/citadel/datastores/*"
         ],
         "conditionKeys": []
       },
@@ -6823,7 +6823,7 @@
           "sts:AssumeRole"
         ],
         "resources": [
-          "arn:aws:iam::257192363080:role/citadel-ds-*"
+          "arn:aws:iam::000000000000:role/citadel-ds-*"
         ],
         "conditionKeys": []
       },
@@ -6856,7 +6856,7 @@
           "ssm:GetParameter"
         ],
         "resources": [
-          "arn:aws:ssm:us-west-2:257192363080:parameter/citadel/health-monitor-role-dev"
+          "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/health-monitor-role-dev"
         ],
         "conditionKeys": []
       }
