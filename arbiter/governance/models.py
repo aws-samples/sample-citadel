@@ -244,6 +244,31 @@ class GovernanceFinding:
                                                    # the dispatch carries no evalRunId
                                                    # (the overwhelming majority of
                                                    # non-eval dispatches).
+    org_id: str | None = None                     # Governance ledger SLICE 2
+                                                   # (decision 7b3f4fe2 supplies the
+                                                   # read-side filter this stamps the
+                                                   # value for). Serialized as
+                                                   # camelCase `orgId` (ledger.py)
+                                                   # ONLY when present — same
+                                                   # additive, best-effort, never-
+                                                   # gates-decision discipline as
+                                                   # trace_id/run_id/eval_run_id
+                                                   # above. Sources vary by write
+                                                   # site (worker-tool-call path:
+                                                   # server-resolved from the
+                                                   # EXECUTIONS_TABLE row via
+                                                   # _resolve_execution_org_id;
+                                                   # tool-breaker transitions: the
+                                                   # same CITADEL_ORG_ID env
+                                                   # threaded to the subprocess).
+                                                   # None when no tenant context
+                                                   # exists at the write site (a
+                                                   # platform-internal finding) —
+                                                   # such findings are admin-only
+                                                   # by construction (decision
+                                                   # 2dd461f6's legacy-row ruling),
+                                                   # NEVER defaulted to a
+                                                   # placeholder org.
 
     @classmethod
     def create(

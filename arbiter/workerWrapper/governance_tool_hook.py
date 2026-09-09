@@ -240,6 +240,12 @@ class GovernanceEvaluator:
             workflow_id=self._workflow_id,
             denied_tools=self._denied_tools,
             eval_run_id=self._eval_run_id,
+            # Governance ledger SLICE 2: self._org_id defaults to "" (see
+            # __init__) as a valid "disabled" sentinel for approval-scope
+            # gating; normalise the empty string to None here so an
+            # unconfigured org never writes a placeholder value onto the
+            # finding — only a genuinely non-empty org id is stamped.
+            org_id=self._org_id or None,
         )
         if denied and error_result is not None:
             event.selected_tool = _GovernanceDeniedTool(selected, error_result)
@@ -302,6 +308,7 @@ class GovernanceEvaluator:
                     tool_name, permitted=False, reason_code=reason_code,
                     agent_id=self._agent_id, workflow_id=self._workflow_id,
                     eval_run_id=self._eval_run_id,
+                    org_id=self._org_id or None,
                 )
             except LedgerWriteError as write_exc:
                 if _record_governance_refusal is not None:
@@ -370,6 +377,7 @@ class GovernanceEvaluator:
                 tool_name, permitted=True, reason_code="approval_consumed",
                 agent_id=self._agent_id, workflow_id=self._workflow_id,
                 eval_run_id=self._eval_run_id,
+                org_id=self._org_id or None,
             )
         except LedgerWriteError as exc:
             return _refuse(exc, "approval_permit_finding_unwritable", infra=True)
@@ -392,10 +400,12 @@ class GovernanceToolHook:
         workflow_id: str,
         denied_tools: set[str] | None = None,
         eval_run_id: str | None = None,
+        org_id: str | None = None,
     ):
         self._evaluator = GovernanceEvaluator(
             agent_id=agent_id, workflow_id=workflow_id,
             denied_tools=denied_tools, eval_run_id=eval_run_id,
+            org_id=org_id or "",
         )
 
     @property

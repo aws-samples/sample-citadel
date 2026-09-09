@@ -261,6 +261,17 @@ def _emit_finding(
             scope_evaluated=SCOPE_TOOL_TARGET_BREAKER,
             contract_evaluated=None,
             eval_run_id=eval_run_id,
+            # Governance ledger SLICE 2: org_id is already threaded to this
+            # function's caller (build_transition_emitter's own org_id
+            # param, sourced from CITADEL_ORG_ID — see agent_runner.py) and
+            # was already being used for the EventBridge event below; it
+            # was never passed into the finding itself. Stamped here as an
+            # empty-string-to-None normalisation (mirrors org_id's "" ->
+            # unavailable convention already used by
+            # build_transition_emitter/_resolve_execution_org_id) so a
+            # deployment with no org configured writes a byte-identical,
+            # unstamped finding rather than an empty-string orgId.
+            org_id=org_id or None,
         ))
     except Exception as exc:  # noqa: BLE001 — best-effort; single-writer keeps it storm-proof
         logger.error("tool-breaker finding write failed %s->%s: %s", t.from_state, t.to_state, exc)

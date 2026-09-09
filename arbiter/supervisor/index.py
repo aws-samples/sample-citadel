@@ -773,6 +773,24 @@ def governed_process_agent_call(
 
     # 5. Write finding (fail-closed per D9). Any exception halts dispatch,
     # in every mode.
+    #
+    # Governance ledger SLICE 2 (decision 7b3f4fe2 / 2dd461f6): deliberately
+    # NOT stamping finding.org_id here. Unlike trace_id/run_id/eval_run_id
+    # immediately above, there is no genuine per-request org identity
+    # reaching this dispatch path today — see the "Named seam, not a
+    # fabricated multi-tenancy layer" comment near RELEASE_DEFAULT_ORG_ID's
+    # definition earlier in this module: neither `orchestration` nor
+    # load_config_from_dynamodb()/load_app_scoped_agents() (agent_config.py)
+    # carries an orgId anywhere. RELEASE_DEFAULT_ORG_ID is an explicit,
+    # documented DEPLOYMENT-WIDE seam (one org id per deployment's release
+    # pointers), not a per-request caller identity — stamping it onto every
+    # finding here would misrepresent a deployment-wide default as a
+    # genuine tenant attribution, which decision 2dd461f6's discipline
+    # (never invent/default an org) forbids. This finding is therefore
+    # written WITHOUT an org — admin-only by construction, consistent with
+    # the legacy-row ruling, until a future story threads real per-request
+    # org identity into the arbiter (the same future story
+    # RELEASE_DEFAULT_ORG_ID's own comment anticipates).
     write_finding(finding)
 
     # 5b. Release-aware dispatch (this story). A completely separate,
