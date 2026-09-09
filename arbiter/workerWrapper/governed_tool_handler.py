@@ -144,11 +144,20 @@ def build_approval_finding(
     agent_id: str,
     workflow_id: str,
     eval_run_id: str | None = None,
+    org_id: str | None = None,
 ) -> GovernanceFinding:
     """Build the ALWAYS-visible ``worker-tool-approval``-scope finding for an
     approval decision (decision c0ca4576: an APPROVAL_REQUIRED record is written
     either way — on a consumed approval AND on a refusal). ``permitted`` maps to
-    PERMIT (approval consumed) vs DENY (approval absent/expired/consumed)."""
+    PERMIT (approval consumed) vs DENY (approval absent/expired/consumed).
+
+    ``org_id`` (Governance ledger SLICE 2) is optional and additive, same
+    discipline as ``eval_run_id``: the caller is the ``GovernanceToolHook``/
+    ``GovernedToolHandler`` seam, which already receives ``org_id`` server
+    -resolved from the execution row (``_resolve_execution_org_id`` via
+    ``CITADEL_ORG_ID``) for approval-scope gating — this just threads the
+    same value onto the finding. ``None`` when no org context exists at the
+    call site (platform-internal invocation); never a placeholder."""
     decision = ArbitrationDecision.PERMIT if permitted else ArbitrationDecision.DENY
     return GovernanceFinding.create(
         workflow_id=workflow_id,
@@ -159,6 +168,7 @@ def build_approval_finding(
         scope_evaluated=SCOPE_WORKER_TOOL_APPROVAL,
         contract_evaluated=None,
         eval_run_id=eval_run_id,
+        org_id=org_id,
     )
 
 
@@ -264,12 +274,17 @@ def build_governance_finding(
     agent_id: str,
     workflow_id: str,
     eval_run_id: str | None = None,
+    org_id: str | None = None,
 ) -> GovernanceFinding:
     """Build the worker-tool-handler-scope ``GovernanceFinding`` for one tool
     call. Shared by the legacy ``GovernedToolHandler.preprocess`` and the
     hooks-based ``GovernanceToolHook`` so both layers emit byte-identical
     findings (QD-5: scope ``worker-tool-handler``, distinct from
-    ``worker-pre-filter``). PERMIT and DENY both produce a finding."""
+    ``worker-pre-filter``). PERMIT and DENY both produce a finding.
+
+    ``org_id`` (Governance ledger SLICE 2) is optional and additive — see
+    ``build_approval_finding``'s doc comment for the sourcing discipline
+    and the admin-only-when-absent rationale."""
     decision = ArbitrationDecision.DENY if denied else ArbitrationDecision.PERMIT
     return GovernanceFinding.create(
         workflow_id=workflow_id,
@@ -284,6 +299,7 @@ def build_governance_finding(
         scope_evaluated=SCOPE_WORKER_TOOL_HANDLER,
         contract_evaluated=None,
         eval_run_id=eval_run_id,
+        org_id=org_id,
     )
 
 
@@ -295,6 +311,7 @@ def record_governance_decision(
     workflow_id: str,
     denied_tools: set[str],
     eval_run_id: str | None = None,
+    org_id: str | None = None,
 ) -> tuple[bool, dict | None]:
     """Evaluate the deny-list decision, write the audit finding, and return
     ``(denied_or_blocked, error_result_or_None)``.
@@ -334,6 +351,7 @@ def record_governance_decision(
     finding = build_governance_finding(
         tool_name, denied,
         agent_id=agent_id, workflow_id=workflow_id, eval_run_id=eval_run_id,
+        org_id=org_id,
     )
     try:
         write_finding(finding)
@@ -360,6 +378,7 @@ def record_approval_finding(
     agent_id: str,
     workflow_id: str,
     eval_run_id: str | None = None,
+    org_id: str | None = None,
 ) -> None:
     """Write the ALWAYS-visible ``worker-tool-approval`` audit finding for an
     approval decision (decision c0ca4576). Uses the module-local ``write_finding``
@@ -369,6 +388,7 @@ def record_approval_finding(
     write_finding(build_approval_finding(
         tool_name, permitted, reason_code,
         agent_id=agent_id, workflow_id=workflow_id, eval_run_id=eval_run_id,
+        org_id=org_id,
     ))
 
 
@@ -388,6 +408,7 @@ class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]
         workflow_id: str = 'unknown-workflow',
         denied_tools: set[str] | None = None,
         eval_run_id: str | None = None,
+        org_id: str | None = None,
     ):
         # Strands ``AgentToolHandler.__init__`` may require specific kwargs
         # and the signature has drifted across SDK releases. Fall back
@@ -417,6 +438,13 @@ class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]
         # replay-package findings. None (the default) for every non-eval
         # invocation — byte-identical finding/ledger-write behavior.
         self.eval_run_id = eval_run_id
+        # Governance ledger SLICE 2: per-run org id, stamped on every
+        # finding this handler writes (PERMIT and DENY alike), same
+        # additive/optional discipline as eval_run_id above. None (the
+        # default) when no org context is available at this call site —
+        # such findings remain admin-only by construction, never a
+        # placeholder org.
+        self.org_id = org_id
 
     def preprocess(
         self,
@@ -449,6 +477,7 @@ class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]
             workflow_id=self.workflow_id,
             denied_tools=self.denied_tools,
             eval_run_id=self.eval_run_id,
+            org_id=self.org_id,
         )
         # error_result is the ToolResult-shaped deny dict on DENY, else None
         # (PERMIT → fall through to the default handler).

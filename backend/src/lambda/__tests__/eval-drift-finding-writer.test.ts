@@ -132,4 +132,13 @@ describe("handleDriftDetected", () => {
     const item = ddbMock.call(0).args[0].input.Item as Record<string, unknown>;
     expect(item.reason as string).toContain("0.42");
   });
+
+  it("SLICE 2 determination (decision 7b3f4fe2 / 2dd461f6): never emits an org attribute — the upstream detector has no org-scoped data to source it from", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    await handleDriftDetected(detail());
+
+    const item = ddbMock.call(0).args[0].input.Item as Record<string, unknown>;
+    expect(Object.prototype.hasOwnProperty.call(item, "orgId")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(item, "org_id")).toBe(false);
+  });
 });

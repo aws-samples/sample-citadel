@@ -206,6 +206,19 @@ def _serialize_finding(finding: GovernanceFinding) -> dict[str, Any]:
     # — byte-identical to the pre-CIT-102 shape.
     if finding.eval_run_id is not None:
         item["evalRunId"] = finding.eval_run_id
+
+    # Optional camelCase alias for the Governance ledger SLICE 2 org
+    # stamp. Same byte-identical-when-absent discipline as traceId/runId/
+    # evalRunId immediately above: emitted ONLY when finding.org_id is not
+    # None. The top-level loop already stripped the None-valued `org_id`
+    # dataclass field, so a finding with no tenant context available at
+    # its write site (a platform-internal finding — see per-site
+    # enumeration in the slice-2 write sites) writes an item with neither
+    # `org_id` nor `orgId` — byte-identical to the pre-org-stamping shape,
+    # and such rows remain admin-only by construction (decision 2dd461f6's
+    # legacy-row ruling), never defaulted to a placeholder org.
+    if finding.org_id is not None:
+        item["orgId"] = finding.org_id
     return item
 
 

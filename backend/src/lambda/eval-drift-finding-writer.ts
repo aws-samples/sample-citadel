@@ -155,6 +155,22 @@ export async function handleDriftDetected(
     category: "eval-drift",
     dimension: detail.dimension,
     ttl,
+    // Governance ledger SLICE 2 (decision 7b3f4fe2 / 2dd461f6) determination:
+    // deliberately NOT stamping orgId here. The upstream detector
+    // (eval-drift-detector.ts) resolves the `agentIds` it scans EXCLUSIVELY
+    // from an operator-supplied env var (`agentIdsFromEnv`) and queries the
+    // `EvalProdSamples.AgentDimTimeIndex` GSI without any org scoping
+    // anywhere in that query path or in the `governance.eval.drift.detected`
+    // event payload this writer consumes (see DriftDetectedDetail above —
+    // no orgId field). There is therefore no genuine per-finding org value
+    // available at this write site today; inventing one (e.g. from a
+    // registry lookup by agentId this writer has never done, or a
+    // deployment-wide default) is out of scope for this slice and would
+    // misrepresent an unverified guess as a tenant attribution. This
+    // finding is written WITHOUT an org — admin-only by construction,
+    // consistent with the legacy-row ruling (decision 2dd461f6) — until a
+    // future story threads a real per-agent org lookup (or an orgId field
+    // on the drift-detected event) through the detector.
   };
 
   try {
