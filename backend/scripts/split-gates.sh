@@ -36,6 +36,27 @@ cd "${BACKEND_DIR}"
 
 OVERALL_STATUS=0
 
+# --- Stale-dist guard (finding ef02d366) -----------------------------------
+# cdk.json runs the COMPILED app (`node dist/bin/app.js`), never the
+# TypeScript sources directly. If `dist/` is stale relative to `lib/`/`bin/`,
+# `cdk synth` happily synthesizes from the OLD compiled JS — producing
+# templates that are missing whatever logical IDs the newer source would
+# have produced (observed: dist/lib/registry-stack.js older than
+# lib/registry-stack.ts caused cdk.out to hide real IAM statements from
+# rail 6). A gate that synthesizes without ever rebuilding cannot be
+# trusted. We choose REBUILD-then-abort-on-failure over abort-only: a plain
+# staleness abort would make every local run of this script fail the first
+# time (dist is essentially always at least a few seconds older than the
+# sources you just edited), forcing a manual `npm run build` before every
+# invocation — friendlier to rebuild automatically. The honesty property is
+# preserved because we still abort, loudly, if that rebuild itself fails;
+# we never fall through to synthesizing from an old or partially-written
+# dist.
+log "=== split-gates: rebuilding dist/ before synth ==="
+if ! npm run build; then
+  die "npm run build failed — refusing to synth from a stale or partially-rebuilt dist/. The gate cannot be trusted on stale compiled output (finding ef02d366)."
+fi
+
 log "=== split-gates: synthesizing ${STACK_NAME} ==="
 if ! npx cdk synth "${STACK_NAME}" --quiet >/dev/null; then
   die "cdk synth failed for ${STACK_NAME}"
