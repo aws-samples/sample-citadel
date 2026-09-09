@@ -165,11 +165,94 @@ function toStringArray(
  * `GETATT:<LogicalId>:<Attr>` / `REF:<LogicalId>` canonical form
  * `Fn::GetAtt`/`Fn::Ref` produce directly.
  */
+/**
+ * Normalize the account-id segment of an ARN-shaped string to a fixed
+ * placeholder, leaving every other segment (partition, service, region,
+ * resource) untouched. Scoped to two specific shapes rather than a blanket
+ * 12-digit-run replace, so a resource name that happens to contain 12
+ * digits (unlikely but not impossible) is never silently rewritten:
+ *
+ *   1. The ARN's own account FIELD —
+ *      `arn:PARTITION:SERVICE:REGION:ACCOUNT:RESOURCE`. SERVICE/REGION may
+ *      themselves be `*` (a wildcard resource ARN, e.g.
+ *      `arn:aws:lambda:*:<account>:function:*`) or empty (S3/IAM ARNs have
+ *      no region field), so the field-boundary regex must tolerate `*` and
+ *      the empty string in those positions — NOT just alphanumerics.
+ *   2. The account id EMBEDDED IN THE RESOURCE NAME segment for the
+ *      project's `<base>-<env>-<account>-<region>` bucket-naming
+ *      convention (see `backend/lib/backend-stack.ts`'s `AccessLogsBucket`
+ *      / `DocumentBucket` / `CodeBucket`, and rail 2's identical
+ *      `BucketName` coupling, finding 389a16a) — this shows up in S3 ARNs
+ *      as `arn:aws:s3:::citadel-code-dev-<account>-<region>` where the
+ *      ARN's own account FIELD is empty and the account instead sits
+ *      inside the resource path, immediately followed by `-<region>`.
+ *      Matched by requiring the digit run to be bounded by `-` on both
+ *      sides and immediately followed by a known region literal, so this
+ *      narrow case can't accidentally consume an unrelated 12-digit
+ *      substring elsewhere in a resource name.
+ *
+ * Rail 6 (IAM privilege-equivalence, finding 9f09e845) compares Action /
+ * Resource strings verbatim between the committed baseline (captured with
+ * real credentials, so account-scoped ARNs carry the real account id) and
+ * a fresh satellite synth (which may run credential-less in CI with the
+ * fixed sandbox account `000000000000`). Without normalizing the account
+ * on both sides, every account-scoped ARN in every statement fails to
+ * match — a spurious rail-6 violation, not real IAM drift (same root cause
+ * class as finding 389a16a's rail-2 BucketName coupling). The REGION
+ * segment is deliberately left alone in both shapes — a genuine region
+ * misconfiguration must still be distinguishable; `run-rails.ts` asserts
+ * baseline/fresh region equality up front and aborts with a clear
+ * diagnostic before rails run, rather than masking it inside this
+ * per-string normalizer.
+ */
+export function normalizeArnAccount(value: string): string {
+  const withArnFieldNormalized = value.replace(
+    /^(arn:[a-zA-Z0-9-]+:[a-zA-Z0-9*-]*:[a-zA-Z0-9*-]*:)\d{12}(:.*)$/,
+    "$1000000000000$2",
+  );
+  // Same region-literal set as REGION_RE below, kept local since exporting
+  // a shared constant isn't worth the coupling for this one use site.
+  return withArnFieldNormalized.replace(
+    /-\d{12}-(?=(us|eu|ap|sa|ca|me|af|il)-(north|south|east|west|central|northeast|northwest|southeast|southwest)-\d\b)/,
+    "-000000000000-",
+  );
+}
+
+/**
+ * Extract every distinct region literal from the account-scoped ARN strings
+ * embedded in a stack's captured Lambda-role IAM policies. Used by
+ * `run-rails.ts`'s region-consistency guard (finding 9f09e845) to compare
+ * the baseline's region against a fresh synth's region BEFORE running the
+ * rails, so a genuine region misconfiguration surfaces as one clear
+ * "region mismatch" abort rather than a wall of unrelated-looking rail
+ * violations (that misdiagnosis previously cost hours — see finding
+ * history). Region-less ARNs (e.g. `arn:aws:s3:::bucket-name`, IAM ARNs)
+ * are ignored; only ARNs with a non-empty, non-wildcard region field
+ * contribute.
+ */
+export function extractArnRegions(
+  lambdaRolePolicies: Record<string, NormalizedPolicyStatement[]>,
+): Set<string> {
+  const regions = new Set<string>();
+  const arnRe = /^arn:[a-zA-Z0-9-]+:[a-zA-Z0-9-]*:([a-zA-Z0-9-]+):\d{12}:/;
+  for (const statements of Object.values(lambdaRolePolicies)) {
+    for (const stmt of statements) {
+      for (const resource of stmt.resources) {
+        const match = arnRe.exec(resource);
+        if (match && match[1]) {
+          regions.add(match[1]);
+        }
+      }
+    }
+  }
+  return regions;
+}
+
 function resourceToComparableString(
   value: unknown,
   knownLogicalIds?: ReadonlySet<string>,
 ): string {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return normalizeArnAccount(value);
   if (
     value !== null &&
     typeof value === "object" &&
@@ -320,9 +403,12 @@ function flattenConditionKeys(condition: Record<string, unknown>): string[] {
  * pattern, not a project bug. `ci.yml` synthesizes with a fixed sandbox
  * `CDK_DEFAULT_ACCOUNT=000000000000` / `CDK_DEFAULT_REGION=us-east-1` (no
  * real AWS credentials in CI), while `split-baseline/citadel-backend-test.json`
- * was captured on a host with real credentials — account 257192363080,
- * region us-west-2. No committed baseline can ever byte-match CI for this
- * prop; the mismatch is structural, not a regression.
+ * was captured on a host with real credentials — the real account id is
+ * replaced with the same `000000000000` placeholder before this baseline is
+ * committed (finding 9f09e845; see the guard test asserting no committed
+ * baseline carries a real 12-digit account id) — region us-west-2. No
+ * committed baseline can ever byte-match CI for this prop; the mismatch is
+ * structural, not a regression.
  *
  * A 12-digit run of digits is normalized to a placeholder (covers any AWS
  * account id, real or the `000000000000` sandbox value) and each known AWS

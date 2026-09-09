@@ -955,22 +955,6 @@ export class RegistryStack extends cdk.Stack {
     registryAgentRecordResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: [
-          "iam:CreateRole",
-          "iam:DeleteRole",
-          "iam:PutRolePolicy",
-          "iam:DeleteRolePolicy",
-          "iam:GetRole",
-          "iam:PassRole",
-          "iam:TagRole",
-          "iam:UntagRole",
-        ],
-        resources: [`arn:aws:iam::${this.account}:role/citadel-agent-*`],
-      }),
-    );
-    registryAgentRecordResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
         actions: ["sts:GetCallerIdentity"],
         resources: ["*"],
       }),

@@ -354,10 +354,45 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
 
   test("no other moved Lambda has functionName pinning (auto-named, invoked via in-stack grantInvoke)", () => {
     const fns = template.findResources("AWS::Lambda::Function");
-    for (const [logicalId, fn] of Object.entries(fns)) {
+    for (const [_logicalId, fn] of Object.entries(fns)) {
       const handler = (fn as any).Properties?.Handler;
       if (handler === "registry-agent-record-resolver.handler") continue;
       expect((fn as any).Properties?.FunctionName).toBeUndefined();
+    }
+  });
+
+  test("registry-agent-record-resolver's role has NO iam:CreateRole, iam:PutRolePolicy, or iam:PassRole statement (finding 7d7da47a: unused agent-role-provisioning grant removed)", () => {
+    const fns = template.findResources("AWS::Lambda::Function", {
+      Properties: Match.objectLike({
+        Handler: "registry-agent-record-resolver.handler",
+      }),
+    });
+    const fnIds = Object.keys(fns);
+    expect(fnIds.length).toBe(1);
+    const roleRef = JSON.stringify(
+      (fns[fnIds[0]] as any).Properties.Role,
+    );
+    const roleLogicalIdMatch = roleRef.match(
+      /([A-Za-z0-9]+ServiceRole[A-Za-z0-9]+)/,
+    );
+    expect(roleLogicalIdMatch).not.toBeNull();
+    const roleLogicalId = roleLogicalIdMatch![1];
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const forbidden = ["iam:CreateRole", "iam:PutRolePolicy", "iam:PassRole"];
+    for (const policy of Object.values(policies)) {
+      const rolesRef = JSON.stringify((policy as any).Properties?.Roles);
+      if (!rolesRef.includes(roleLogicalId)) continue;
+      const statements = (policy as any).Properties?.PolicyDocument?.Statement;
+      if (!Array.isArray(statements)) continue;
+      for (const stmt of statements) {
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        for (const forbiddenAction of forbidden) {
+          expect(actions).not.toContain(forbiddenAction);
+        }
+      }
     }
   });
 

@@ -17,8 +17,9 @@
  */
 import * as fs from "fs";
 import * as path from "path";
-import { loadTemplate } from "./template-utils";
+import { loadTemplate, extractArnRegions } from "./template-utils";
 import { buildBaseline } from "./baseline-builder";
+import { guardCdkOutInCi } from "../../test/helpers/cdk-out-guard";
 import { runRemovalsOnlyDiff } from "./rails/rail1-removals-only";
 import {
   runResolverParity,
@@ -116,6 +117,39 @@ function main(): void {
   const baseline = loadBaseline(baselinePath);
   const freshTemplate = loadTemplate(freshTemplatePath);
 
+  // Region-consistency guard (finding 9f09e845): compare the region
+  // embedded in the baseline's account-scoped ARNs against the region
+  // embedded in the fresh synth's ARNs BEFORE running any rail. Account ids
+  // are normalized for comparison purposes elsewhere (rail 6), but region
+  // is deliberately NOT normalized — a genuine region misconfiguration must
+  // stay detectable. Without this guard, a region mismatch previously
+  // surfaced as a wall of confusing, unrelated-looking rail-6 violations
+  // (one per account-scoped ARN) instead of the single, clear
+  // configuration error it actually is — that misdiagnosis cost hours.
+  // Ambiguous cases (zero or multiple distinct regions found in either
+  // template's ARNs) are treated as "cannot verify" and skipped rather than
+  // guessed at.
+  const freshBaselineForRegionCheck = buildBaseline(stackName, freshTemplate);
+  const baselineRegions = extractArnRegions(baseline.lambdaRolePolicies);
+  const freshRegions = extractArnRegions(
+    freshBaselineForRegionCheck.lambdaRolePolicies,
+  );
+  if (baselineRegions.size === 1 && freshRegions.size === 1) {
+    const [baselineRegion] = baselineRegions;
+    const [freshRegion] = freshRegions;
+    if (baselineRegion !== freshRegion) {
+      process.stderr.write(
+        `ERROR: region mismatch between baseline and fresh synth — this comparison is invalid.\n` +
+          `  baseline region:     ${baselineRegion} (from ${baselinePath})\n` +
+          `  fresh synth region:  ${freshRegion} (from ${freshTemplatePath})\n` +
+          `This is a configuration error, not IAM drift. Re-synthesize with ` +
+          `CDK_DEFAULT_REGION=${baselineRegion} (matching the baseline) and re-run, ` +
+          `or re-capture the baseline for the intended region via split-baseline.ts.\n`,
+      );
+      process.exit(1);
+    }
+  }
+
   // rail1 expects CfnTemplate-shaped inputs; build one from the committed
   // baseline's resources map (Type/DeletionPolicy/UpdateReplacePolicy/Properties)
   // plus its exports map, rather than requiring a second committed template file.
@@ -147,12 +181,25 @@ function main(): void {
   );
 
   const satelliteTemplates: NamedTemplate[] = SATELLITE_STACK_NAMES.map(
-    (name) => ({
-      stackName: name,
-      template: loadTemplate(
-        path.join(backendDir, cdkOutDir, `${name}.template.json`),
-      ),
-    }),
+    (name) => {
+      const templatePath = path.join(
+        backendDir,
+        cdkOutDir,
+        `${name}.template.json`,
+      );
+      // guardCdkOutInCi throws under CI=true instead of letting a missing
+      // satellite template surface only as an opaque loadTemplate ENOENT
+      // (or, worse, silently letting rails 3/6/7 treat the whole satellite
+      // as if it moved nothing — finding ef02d366's rail 6 vacuous-pass
+      // shape). run-rails.ts previously never called this guard at all.
+      if (!fs.existsSync(templatePath)) {
+        guardCdkOutInCi(
+          `${name}.template.json (satellite stack for run-rails.ts rails 3/6/7)`,
+          `npx cdk synth ${stackName} ${SATELLITE_STACK_NAMES.join(" ")}`,
+        );
+      }
+      return { stackName: name, template: loadTemplate(templatePath) };
+    },
   );
   const rail3 = runResolverParity(
     baseline,

@@ -116,7 +116,7 @@ describe("rail 2 — stateful logical-ID pin (negative: doctored templates must 
 describe("rail 2 — BucketName environment-token normalization (finding 389a16a)", () => {
   it("PASSES when only the account id and region segments of BucketName differ (CI sandbox vs baseline capture host)", () => {
     const baselineProps = {
-      BucketName: "citadel-documents-test-257192363080-us-west-2",
+      BucketName: "citadel-documents-test-000000000000-us-west-2",
     };
     const ciProps = {
       BucketName: "citadel-documents-test-000000000000-us-east-1",
@@ -129,12 +129,12 @@ describe("rail 2 — BucketName environment-token normalization (finding 389a16a
 
   it("BITE-PROOF: FAILS when the base bucket name itself changes, even with identical account/region", () => {
     const baselineProps = {
-      BucketName: "citadel-documents-test-257192363080-us-west-2",
+      BucketName: "citadel-documents-test-000000000000-us-west-2",
     };
     // Genuine rename: different base name, same account/region — must not
     // be masked by env-token normalization.
     const renamedProps = {
-      BucketName: "citadel-docs-renamed-test-257192363080-us-west-2",
+      BucketName: "citadel-docs-renamed-test-000000000000-us-west-2",
     };
     const { equal, diffs } = keyPropsEqual(baselineProps, renamedProps, [
       "BucketName",
@@ -144,7 +144,7 @@ describe("rail 2 — BucketName environment-token normalization (finding 389a16a
 
   it("BITE-PROOF: FAILS when both base name AND account/region differ (rename hiding behind an env mismatch)", () => {
     const baselineProps = {
-      BucketName: "citadel-documents-test-257192363080-us-west-2",
+      BucketName: "citadel-documents-test-000000000000-us-west-2",
     };
     const renamedInCiProps = {
       BucketName: "citadel-docs-renamed-test-000000000000-us-east-1",
@@ -163,7 +163,7 @@ describe("rail 2 — BucketName environment-token normalization (finding 389a16a
     // A 12-digit-looking table name segment must still be byte-compared —
     // TableName is not in ENV_DERIVED_KEYS.
     const freshProps = {
-      TableName: "citadel-projects-test-257192363080",
+      TableName: "citadel-projects-test-000000000000",
       KeySchema: [{ AttributeName: "id", KeyType: "HASH" }],
     };
     const { equal, diffs } = keyPropsEqual(baselineProps, freshProps, [
