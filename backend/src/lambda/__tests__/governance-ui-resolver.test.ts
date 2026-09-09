@@ -292,6 +292,31 @@ describe("projectFinding", () => {
     expect(projected.escalationTarget).toBeNull();
   });
 
+  // Decision 2dd461f6, slice 1: unified attribute naming. Live rows today
+  // carry BOTH workflowId and workflow_id (established fact), but the
+  // reader must tolerate a row that carries ONLY the legacy snake_case
+  // name — e.g. a row written by a pre-unification code path, or a
+  // future defensive scenario — for the 90-day TTL transition window.
+  // See readLedgerAttr's doc comment (governance-ui-resolver.ts) for the
+  // fallback/removal-date policy.
+  test("falls back to legacy workflow_id when camelCase workflowId is absent", () => {
+    const row = makeDdbRow({ workflowId: undefined, workflow_id: "wf-legacy" });
+    const projected = projectFinding(row);
+    expect(projected.workflowId).toBe("wf-legacy");
+  });
+
+  test("prefers camelCase workflowId over legacy workflow_id when both are present", () => {
+    const row = makeDdbRow({ workflowId: "wf-new", workflow_id: "wf-legacy" });
+    const projected = projectFinding(row);
+    expect(projected.workflowId).toBe("wf-new");
+  });
+
+  test("workflowId is empty string when neither camelCase nor legacy name is present", () => {
+    const row = makeDdbRow({ workflowId: undefined });
+    const projected = projectFinding(row);
+    expect(projected.workflowId).toBe("");
+  });
+
   // P1 test 6 (architect task 9b3f4f78 — decision<->runtime trace linking).
   test("maps traceId when present on the DDB row", () => {
     const row = makeDdbRow({ traceId: "1-5f2f0000-abcdef0123456789abcdef01" });
@@ -3389,6 +3414,85 @@ describe("getDecisionTrace", () => {
       )) as { linkedExecutionId: string | null };
 
       expect(result.linkedExecutionId).toBeNull();
+    });
+
+    // Decision 2dd461f6, slice 1, task item 4: proves the reader is
+    // CAPABLE of reading a stamped org value once slice 2 lands, without
+    // being able to add the value itself. No live row is stamped with
+    // either orgId or org_id today (established fact) — this test feeds
+    // a synthetic stamped row through the SAME code path
+    // (getDecisionTrace -> findExecutionIdByRunId's cross-org check) to
+    // prove both the new (camelCase) and legacy (snake_case) attribute
+    // names are read correctly.
+    test("ledger row stamped with legacy org_id (snake_case) is read via fallback and still enforces cross-org skip", async () => {
+      ddbMock
+        .on(GetCommand, { TableName: "citadel-governance-ledger-test" })
+        .resolves({
+          Item: ledgerRow({
+            findingId: "f-92",
+            decision: "permit",
+            reason: "scope_match:unit-1",
+            runId: "run-92929292-9292-9292-9292-929292929292",
+            org_id: "org-1", // legacy snake_case only — no camelCase orgId
+          }),
+        });
+      ddbMock.on(ScanCommand).resolves({
+        Items: [
+          {
+            executionId: "exec-run-92",
+            orgId: "org-2",
+            runId: "run-92929292-9292-9292-9292-929292929292",
+          },
+        ],
+      });
+
+      const result = (await handler(
+        makeEvent({
+          fieldName: "getDecisionTrace",
+          args: { findingId: "f-92" },
+        }),
+      )) as { linkedExecutionId: string | null };
+
+      // The legacy org_id ("org-1") was successfully read from the
+      // finding row and compared against the execution row's orgId
+      // ("org-2") -> mismatch -> skipped -> null. Had the fallback NOT
+      // worked, findingOrgId would resolve to undefined and the
+      // (deliberately permissive) undefined-expectedOrgId branch in
+      // findExecutionIdByRunId would instead RETURN the execution row —
+      // so a non-null result here would indicate the fallback is broken.
+      expect(result.linkedExecutionId).toBeNull();
+    });
+
+    test("ledger row stamped with new camelCase orgId matching the execution row's org resolves the link", async () => {
+      ddbMock
+        .on(GetCommand, { TableName: "citadel-governance-ledger-test" })
+        .resolves({
+          Item: ledgerRow({
+            findingId: "f-93",
+            decision: "permit",
+            reason: "scope_match:unit-1",
+            runId: "run-93939393-9393-9393-9393-939393939393",
+            orgId: "org-1",
+          }),
+        });
+      ddbMock.on(ScanCommand).resolves({
+        Items: [
+          {
+            executionId: "exec-run-93",
+            orgId: "org-1",
+            runId: "run-93939393-9393-9393-9393-939393939393",
+          },
+        ],
+      });
+
+      const result = (await handler(
+        makeEvent({
+          fieldName: "getDecisionTrace",
+          args: { findingId: "f-93" },
+        }),
+      )) as { linkedExecutionId: string | null };
+
+      expect(result.linkedExecutionId).toBe("exec-run-93");
     });
   });
 

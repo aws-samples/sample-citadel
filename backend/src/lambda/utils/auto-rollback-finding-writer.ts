@@ -118,18 +118,19 @@ export async function writeAutoRollbackFinding(
   const ttl = timestamp + TTL_DAYS * 86400;
 
   const item: Record<string, unknown> = {
+    // Unified camelCase convention (decision 2dd461f6, slice 1) — see
+    // release-gate-finding-writer.ts's identical comment and
+    // governance-ledger-attribute-convention.test.ts.
     findingId,
     workflowId,
     timestamp,
-    workflow_id: workflowId,
     decision: "deny",
     requesting_agent: REQUESTING_AGENT,
     target_agent: input.agentTargetId,
     reason: buildReason(input),
-    finding_id: findingId,
     decided_by: RELEASE_ROLLBACK_DECIDED_BY,
     category: "auto-rollback",
-    org_id: input.orgId,
+    orgId: input.orgId,
     environment: input.environment,
     release_id: input.evidence.fromReleaseId,
     rollback_evidence: input.evidence,

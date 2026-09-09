@@ -497,3 +497,47 @@ def test_serialize_finding_emits_camelcase_trace_id_when_present() -> None:
     # stamping.
     assert "ttl" not in item  # ttl is added by write_finding, not _serialize_finding
     assert item["findingId"] == finding.finding_id
+
+
+# ---------------------------------------------------------------------------
+# Attribute-naming convention pin (decision 2dd461f6, slice 1)
+# ---------------------------------------------------------------------------
+#
+# Structural check, not a string search over ledger.py's source text: this
+# builds a REAL item via `_serialize_finding` and inspects the actual dict
+# keys, so a future edit that resurrects a snake_case `finding_id` /
+# `workflow_id` duplicate on the item fails here immediately regardless of
+# what the source looks like on inspection. The TypeScript-side pin lives in
+# backend/src/lambda/utils/__tests__/governance-ledger-attribute-convention.test.ts
+# and covers the three TS writers; this is the Python-side half for the one
+# writer on this side of the boundary (ledger.py::write_finding).
+
+
+def test_serialize_finding_never_duplicates_finding_id_or_workflow_id_snake_case() -> None:
+    """Pins the unified camelCase convention for findingId/workflowId.
+
+    `finding_id`/`workflow_id` (snake_case) must NOT appear as item dict
+    keys — only their camelCase forms (`findingId`/`workflowId`), which are
+    also this table's own key-schema attributes. This does not affect any
+    OTHER dataclass field's existing snake_case name (e.g. `requesting_agent`,
+    `target_agent`, `reason`) — unifying those is out of scope for this
+    slice (decision 2dd461f6 scopes slice 1 to findingId/workflowId + org).
+    """
+    finding = _make_finding()
+    item = ledger._serialize_finding(finding)
+
+    assert "finding_id" not in item
+    assert "workflow_id" not in item
+    assert item["findingId"] == finding.finding_id
+    assert item["workflowId"] == finding.workflow_id
+
+
+def test_serialize_finding_has_no_org_attribute_in_any_form() -> None:
+    """`GovernanceFinding` has no org field (established fact, slice 1 scope
+    guard): neither `org_id` nor `orgId` should appear on the item. Adding
+    the org VALUE to the Python model/writer is slice 2, not this slice."""
+    finding = _make_finding()
+    item = ledger._serialize_finding(finding)
+
+    assert "org_id" not in item
+    assert "orgId" not in item

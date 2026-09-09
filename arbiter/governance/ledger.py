@@ -131,19 +131,40 @@ def _normalize_value(value: Any) -> Any:
 def _serialize_finding(finding: GovernanceFinding) -> dict[str, Any]:
     """Flatten a ``GovernanceFinding`` dataclass into a DDB item.
 
-    Dataclass field names are used as-is (``finding_id``, ``workflow_id``)
-    except for the three attributes that participate in the table's key
-    schema / GSI, which are also emitted in camelCase form:
+    Dataclass field names are used as-is for every attribute EXCEPT
+    ``finding_id`` / ``workflow_id``, which are unified to their camelCase
+    forms only (decision 2dd461f6, slice 1: attribute-naming unification
+    across the governance ledger). Historically this method dual-wrote
+    both ``finding_id``/``workflow_id`` (snake_case, straight off
+    ``dataclasses.asdict``) AND ``findingId``/``workflowId`` (camelCase
+    aliases) — every downstream reader across both languages already only
+    reads the camelCase forms for these two fields (they are also the
+    table's own key-schema attributes), so the snake_case duplicates were
+    pure write-time baggage with no reader. They are dropped here; the
+    three attributes that participate in the table's key schema / GSI are
+    emitted ONLY in camelCase form:
 
     * ``findingId``  — table HASH key (write-once condition target)
     * ``workflowId`` — ``workflow-index`` GSI HASH key
     * ``timestamp``  — ``workflow-index`` GSI RANGE key (NUMBER)
+
+    Every OTHER dataclass field (``requesting_agent``, ``target_agent``,
+    ``reason``, ``decided_by``-equivalents, ``scope_evaluated``, etc.) is
+    intentionally left in its existing snake_case form — unifying those is
+    out of scope for this slice (decision 2dd461f6 scopes slice 1 to the
+    org attribute plus findingId/workflowId only).
 
     ``None`` values are stripped because DDB rejects ``None`` for type S / N.
     """
     raw = dataclasses.asdict(finding)
     item: dict[str, Any] = {}
     for key, value in raw.items():
+        if key in ("finding_id", "workflow_id"):
+            # Unified to camelCase only — see docstring above. Skipped here
+            # (rather than written then deleted) so a future dataclass
+            # field rename can't silently resurrect the snake_case
+            # duplicate through this loop.
+            continue
         normalised = _normalize_value(value)
         if normalised is None:
             continue
@@ -151,7 +172,9 @@ def _serialize_finding(finding: GovernanceFinding) -> dict[str, Any]:
 
     # Key-schema aliases. These MUST always be present on the written item:
     # findingId is the table HASH and the write-once condition target;
-    # workflowId / timestamp are the workflow-index GSI keys.
+    # workflowId / timestamp are the workflow-index GSI keys. These are now
+    # the ONLY form in which finding_id/workflow_id appear on the item
+    # (decision 2dd461f6, slice 1) — see docstring above.
     item["findingId"] = finding.finding_id
     item["workflowId"] = finding.workflow_id
     item["timestamp"] = float(finding.timestamp)

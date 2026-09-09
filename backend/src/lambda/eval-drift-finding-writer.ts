@@ -136,18 +136,20 @@ export async function handleDriftDetected(
   const item: Record<string, unknown> = {
     // Key-schema aliases (camelCase), required by the table's key schema
     // and the workflow-index GSI — mirrors ledger.py::_serialize_finding.
+    // Unified camelCase convention (decision 2dd461f6, slice 1): the
+    // pre-slice-1 snake_case duplicates (finding_id/workflow_id) are
+    // retired — see release-gate-finding-writer.ts's identical comment
+    // and governance-ledger-attribute-convention.test.ts. This writer
+    // never had an org field, so there is no orgId to add here (slice 1
+    // is naming only — adding an org VALUE to this writer, if ever
+    // warranted, is out of scope).
     findingId,
     workflowId,
     timestamp,
-    // Dataclass field names (snake_case), matching every OTHER finding
-    // already in this ledger so governance-ui-resolver.ts's existing
-    // snake_case reads (requesting_agent/target_agent) work unmodified.
-    workflow_id: workflowId,
     decision: "escalate",
     requesting_agent: "eval-drift-detector",
     target_agent: detail.agentId,
     reason: buildReason(detail),
-    finding_id: findingId,
     // Additive, non-arbitration filter hint — see module doc. Never read
     // by projectFinding today; present only on drift findings.
     category: "eval-drift",
