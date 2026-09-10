@@ -436,10 +436,36 @@ async function createDataStore(
   // genuinely need to provision on a tenant's behalf, that requires an
   // EXPLICIT separate operator path — intentionally not built speculatively
   // here; this fix only removes the implicit bypass.
+  //
+  // Diagnosability fix (UX defect exposed by the above): a single check
+  // `!callerOrgId || callerOrgId !== input.orgId` threw the SAME message for
+  // two different fail-closed causes — no org claim resolved for the caller
+  // AT ALL (a provisioning gap: the account has nothing to compare against)
+  // versus a genuinely mismatched orgId (a cross-org write attempt). The
+  // former made a provisioning gap look like a security bug. Split into two
+  // branches with distinct, actionable messages. Neither branch echoes an
+  // org id back to the caller (no cross-tenant leak); logs carry only the
+  // caller's own resolved org (or its absence) and the caller's username —
+  // no PII, no other tenant's identifiers.
   const callerOrgId = await extractOrgFromEvent(event);
-  if (!callerOrgId || callerOrgId !== input.orgId) {
+  if (!callerOrgId) {
+    console.warn("createDataStore: no organization claim resolved for caller", {
+      createdBy,
+    });
     throw new PermissionError(
-      "Access denied: orgId does not match caller's organization",
+      "Access denied: no organization is provisioned for your account. Contact an administrator.",
+    );
+  }
+  if (callerOrgId !== input.orgId) {
+    console.warn(
+      "createDataStore: submitted orgId does not match caller's organization",
+      {
+        createdBy,
+        callerOrgId,
+      },
+    );
+    throw new PermissionError(
+      "Access denied: the requested organization does not match your organization.",
     );
   }
 
