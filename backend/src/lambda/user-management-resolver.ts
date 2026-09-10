@@ -39,6 +39,11 @@ interface AdminCreateUserInput {
   email: string;
   givenName: string;
   familyName: string;
+  // RATIFIED decision 228b3cc8 piece 5 (finding cbbc3be1): required, not
+  // optional. custom:organization must never be left unset at creation —
+  // see the adminCreateUser validation below for why no default is
+  // invented when this is omitted.
+  organization: string;
 }
 
 interface User {
@@ -615,7 +620,28 @@ async function adminCreateUser(
     throw new Error("Only administrators can create users");
   }
 
-  const { email, givenName, familyName } = input;
+  const { email, givenName, familyName, organization } = input;
+
+  // RATIFIED decision 228b3cc8 piece 5 (finding cbbc3be1): organization is
+  // REQUIRED at creation time, with NO invented default. Previously the
+  // organisation was applied solely by a separate, OPTIONAL assignUserRole
+  // call the frontend made only when a role was also chosen — an
+  // organisation-only, no-role creation left the user with NO
+  // custom:organization claim at all, which then fails closed (by design)
+  // across every org-scoped resolver with no clear signal of why. A silent
+  // default (e.g. "Default") would let a caller who forgot to pick an
+  // organisation create a user in the wrong tenant with no warning, which
+  // is worse than a clear upfront validation error — so this fails clearly
+  // instead. Team.tsx's Add User dialog already collects an organization
+  // from the name-valued `organizations` list (per the ratified
+  // NAME-is-canonical convention), so this is a required, not an
+  // impossible, ask of every caller.
+  if (!organization) {
+    return {
+      success: false,
+      message: "An organization is required to create a user.",
+    };
+  }
 
   try {
     // Create user with email as username
@@ -629,6 +655,11 @@ async function adminCreateUser(
           { Name: "email_verified", Value: "true" }, // Set to true so email is verified
           { Name: "given_name", Value: givenName },
           { Name: "family_name", Value: familyName },
+          // custom:organization stores the organisation NAME (ratified
+          // decision 228b3cc8) and remains an admin-API-only write (PR
+          // 146 keeps this attribute non-user-writable) — the value comes
+          // from this admin-supplied input, never from a self-service path.
+          { Name: "custom:organization", Value: organization },
         ],
         // Remove MessageAction to allow Cognito to send the welcome email
         DesiredDeliveryMediums: ["EMAIL"],

@@ -1305,6 +1305,7 @@ input AdminCreateUserInput {
   email: String!
   givenName: String!
   familyName: String!
+  organization: String!
 }
 
 input AssignUserRoleInput {

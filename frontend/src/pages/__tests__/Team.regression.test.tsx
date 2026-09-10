@@ -70,7 +70,9 @@ jest.mock('@/services/userManagementService', () => ({
     listAvailableRoles: jest.fn().mockResolvedValue(['admin', 'developer', 'viewer']),
     listOrganizations: jest.fn().mockResolvedValue(mockOrgs),
     createUser: jest.fn().mockResolvedValue({ username: 'new@example.com' }),
+    adminCreateUser: jest.fn().mockResolvedValue({ success: true, message: 'ok' }),
     assignRole: jest.fn().mockResolvedValue(undefined),
+    assignUserRole: jest.fn().mockResolvedValue({ success: true }),
     resetPassword: jest.fn().mockResolvedValue(undefined),
     createOrganization: jest.fn().mockResolvedValue({ name: 'NewOrg' }),
     changeOrganization: jest.fn().mockResolvedValue(undefined),
@@ -150,5 +152,25 @@ describe('Team page — regression', () => {
     await waitFor(() => {
       expect(screen.getByText(/failed|error|unavailable/i)).toBeInTheDocument();
     });
+  });
+
+  // Decision 228b3cc8 piece 5 (finding cbbc3be1): organization is required
+  // at user creation, with no invented default. The Create User button in
+  // the Add User dialog must stay disabled until an organization is
+  // selected, and adminCreateUser must never be called without one.
+  test('Create User button is disabled until an organization is selected', async () => {
+    render(<Team />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /add user|invite/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /add user|invite/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('dialog')).toBeInTheDocument();
+    });
+
+    const createButton = screen.getByRole('button', { name: /create user/i });
+    expect(createButton).toBeDisabled();
   });
 });
