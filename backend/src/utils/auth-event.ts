@@ -3,6 +3,25 @@ import {
   AdminGetUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 
+/**
+ * CANONICAL TENANCY RULE (ratified decision 228b3cc8): the organisation
+ * NAME — never the generated `orgId` — is canonical for the
+ * `custom:organization` Cognito claim and for EVERY tenancy comparison in
+ * this codebase (this file's `extractOrgFromEvent`/`lookupUserOrganization`,
+ * `assignUserRole`'s Cognito attribute write, `user-management-resolver.ts`'s
+ * org-scoping filters, the governance ledger, and the projects family).
+ * `assignUserRole` writes the organisation's NAME (never its orgId) into
+ * `custom:organization`; every reader of that claim MUST compare it against
+ * a row's `name` field, never against `orgId`. Organisation names are
+ * IMMUTABLE by design (no update/rename mutation exists — see
+ * org-name-canonical-guard.test.ts) precisely so this claim never needs to
+ * be re-synced after creation. Do NOT reintroduce a `row.orgId ===
+ * callerOrgClaim` comparison — that comparison is always false for a real
+ * row and was the root cause of a prior bug (a non-admin caller of
+ * `listOrganizations` always got an empty list). If you are about to write
+ * `something.orgId === <claim variable>`, you are almost certainly holding
+ * a NAME on one side and a UUID on the other.
+ */
 const cognitoClient = new CognitoIdentityProviderClient({});
 
 /**
