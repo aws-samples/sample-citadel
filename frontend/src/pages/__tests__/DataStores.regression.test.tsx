@@ -52,6 +52,12 @@ jest.mock('@/components/ui/label', () => ({
 jest.mock('@/components/ui/utils', () => ({
   cn: (...args: any[]) => args.filter(Boolean).join(' '),
 }));
+jest.mock('@/components/ui/tooltip', () => ({
+  Tooltip: ({ children }: any) => <>{children}</>,
+  TooltipContent: ({ children }: any) => <div role="tooltip">{children}</div>,
+  TooltipProvider: ({ children }: any) => <>{children}</>,
+  TooltipTrigger: ({ children }: any) => <>{children}</>,
+}));
 jest.mock('@/components/PageContainer', () => ({
   PageContainer: ({ children }: any) => <div>{children}</div>,
 }));
@@ -76,7 +82,12 @@ jest.mock('@/components/CreateDataStoreWizard', () => ({
   ),
 }));
 jest.mock('@/contexts/OrganizationContext', () => ({
-  useOrganization: () => ({ selectedOrganization: 'test-org' }),
+  useOrganization: () => ({
+    selectedOrganization: 'test-org',
+    currentUser: { organization: 'test-org', role: 'user' },
+    isAdmin: false,
+    loading: false,
+  }),
 }));
 jest.mock('sonner', () => ({
   toast: { success: jest.fn(), error: jest.fn() },

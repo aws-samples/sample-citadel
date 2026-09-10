@@ -9,6 +9,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Database,
   Search,
@@ -96,8 +97,21 @@ const statusIcons: Record<string, LucideIcon> = {
 };
 
 export function DataStores() {
-  const { selectedOrganization } = useOrganization();
+  const { selectedOrganization, currentUser } = useOrganization();
   const orgId = selectedOrganization || "default";
+
+  // Create-target org resolution (UX/diagnosability fix — b5d463f2 background):
+  // 'All Organizations' and a null selection are FILTER SCOPES for the list
+  // above, not valid creation targets. The create path must submit the
+  // CALLER'S OWN organisation (never the selector value), and must never
+  // fall back to a placeholder like "default" — createDataStore now rejects
+  // an org mismatch for everyone, including admins, so a placeholder can
+  // never succeed and only produces a confusing "access denied".
+  const callerOrgId = currentUser?.organization || null;
+  const canCreateDataStore = Boolean(callerOrgId);
+  const createDisabledReason = !callerOrgId
+    ? "No organization is provisioned for your account. Contact an administrator."
+    : null;
 
   const [dataStores, setDataStores] = useState<DataStore[]>([]);
   const [loading, setLoading] = useState(true);
@@ -178,16 +192,33 @@ export function DataStores() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            className="gap-1 text-xs py-1 px-2 h-7"
-            onClick={() => setWizardOpen(true)}
-          >
-            <Plus className="size-3" />
-            Add Data Store
-          </Button>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex">
+                  <Button
+                    variant="outline"
+                    className="gap-1 text-xs py-1 px-2 h-7"
+                    onClick={() => setWizardOpen(true)}
+                    disabled={!canCreateDataStore}
+                    aria-disabled={!canCreateDataStore}
+                  >
+                    <Plus className="size-3" />
+                    Add Data Store
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              {createDisabledReason && (
+                <TooltipContent>{createDisabledReason}</TooltipContent>
+              )}
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </div>
+
+      {!canCreateDataStore && createDisabledReason && (
+        <p className="text-muted-foreground text-xs mb-3 -mt-1">{createDisabledReason}</p>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-3 gap-4 mb-6">
@@ -470,9 +501,9 @@ export function DataStores() {
 
       {/* Create Data Store Wizard */}
       <CreateDataStoreWizard
-        open={wizardOpen}
+        open={wizardOpen && canCreateDataStore}
         onOpenChange={setWizardOpen}
-        orgId={orgId}
+        orgId={callerOrgId ?? ""}
         onCreated={loadDataStores}
       />
     </PageContainer>
