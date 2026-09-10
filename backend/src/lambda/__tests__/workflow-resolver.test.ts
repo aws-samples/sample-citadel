@@ -180,6 +180,78 @@ describe("workflow-resolver", () => {
       const queryCall = ddbMock.commandCalls(QueryCommand)[0];
       expect(queryCall.args[0].input.IndexName).toBe("OrgStatusIndex");
     });
+
+    // Fail-closed org scoping (finding f0ce2b00, high — same one-line
+    // inversion shape found in datastore-resolver.ts/integration-resolver.ts:
+    // `const queryOrgId = userOrg || orgId;` coerced an unresolvable caller
+    // org into the CLIENT-SUPPLIED orgId argument instead of denying).
+    test("DENIES a non-admin caller with no resolvable org claim, regardless of the orgId argument supplied — no rows leak", async () => {
+      cognitoMock.reset();
+      cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
+      ddbMock.on(QueryCommand).resolves({
+        Items: [
+          { workflowId: "wf-1", orgId: "org-real", isBlueprint: "false" },
+        ],
+      });
+
+      await expect(
+        invoke(makeEvent("listWorkflows", { orgId: "org-real" })),
+      ).rejects.toThrow();
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    });
+
+    test("DENIES a non-admin caller passing another tenant's orgId rather than returning that tenant's records", async () => {
+      // beforeEach already resolves the caller's own org to "org-1".
+      ddbMock.on(QueryCommand).resolves({
+        Items: [
+          { workflowId: "wf-real", orgId: "org-real", isBlueprint: "false" },
+        ],
+      });
+
+      await invoke(makeEvent("listWorkflows", { orgId: "org-real" }));
+
+      const queryCall = ddbMock.commandCalls(QueryCommand)[0];
+      expect(queryCall.args[0].input.ExpressionAttributeValues[":orgId"]).toBe(
+        "org-1",
+      );
+    });
+
+    test("a normal non-admin caller still sees their own org's workflows", async () => {
+      const items = [
+        { workflowId: "wf-1", orgId: "org-1", isBlueprint: "false" },
+      ];
+      ddbMock.on(QueryCommand).resolves({ Items: items });
+
+      const result = await invoke(
+        makeEvent("listWorkflows", { orgId: "org-1" }),
+      );
+      expect(result).toEqual({ items, nextToken: undefined });
+    });
+
+    test("an admin caller may still query a specified org explicitly", async () => {
+      cognitoMock.reset();
+      cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
+      const items = [
+        { workflowId: "wf-real", orgId: "org-real", isBlueprint: "false" },
+      ];
+      ddbMock.on(QueryCommand).resolves({ Items: items });
+
+      const adminEvent = {
+        info: { fieldName: "listWorkflows" },
+        arguments: { orgId: "org-real" },
+        identity: {
+          sub: "admin-1",
+          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result).toEqual({ items, nextToken: undefined });
+      const queryCall = ddbMock.commandCalls(QueryCommand)[0];
+      expect(queryCall.args[0].input.ExpressionAttributeValues[":orgId"]).toBe(
+        "org-real",
+      );
+    });
   });
 
   // ─── listBlueprints ────────────────────────────────────────────

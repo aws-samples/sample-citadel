@@ -122,6 +122,41 @@ interface AppSyncEvent extends Omit<
 
 // --- Handler ---
 
+/**
+ * Fail-closed resolution of the org a read-path query should be scoped to
+ * (finding f0ce2b00, high). Mirrors the `requireCallerOrg` pattern in
+ * user-management-resolver.ts, adapted for an explicit client-supplied
+ * `orgId` argument rather than a row lookup:
+ *
+ *   - Admin (explicit `isAdminFromEvent` check): use the supplied argument
+ *     as-is — admins may still query any org on request.
+ *   - Non-admin: use ONLY the caller's own server-derived org
+ *     (extractOrgFromEvent); the argument is never consulted.
+ *   - Unresolved effective org (non-admin with no resolvable
+ *     `custom:organization` claim — reachable, since adminCreateUser never
+ *     sets that attribute, finding cbbc3be1): DENY via PermissionError.
+ *
+ * The prior shape (`callerOrgId || event.arguments.orgId`) coerced an
+ * unresolvable caller org into the client-supplied argument instead of
+ * denying — inverting the trust direction. Never reintroduce that `||`
+ * fallback; see the `no-caller-org-fallback-idiom` guard test.
+ *
+ * The denial message intentionally does not confirm or deny whether the
+ * requested org exists.
+ */
+async function requireEffectiveOrgId(event: AppSyncEvent): Promise<string> {
+  if (isAdminFromEvent(event)) {
+    return event.arguments.orgId;
+  }
+  const callerOrgId = await extractOrgFromEvent(event);
+  if (!callerOrgId) {
+    throw new PermissionError(
+      "Access denied: no organization is provisioned for your account. Contact an administrator.",
+    );
+  }
+  return callerOrgId;
+}
+
 export async function handler(event: AppSyncEvent) {
   const sanitizedEvent = {
     ...event,
@@ -149,27 +184,23 @@ export async function handler(event: AppSyncEvent) {
   try {
     switch (fieldName) {
       case "listDataStores": {
-        // Org scoping (sweep finding 615aa5bb): a non-admin caller's
-        // server-derived org always wins over the requested orgId argument
-        // — same read-path tenant gate as listIntegrations
-        // (integration-resolver.ts) / listApps
-        // (registry-agent-record-resolver.ts) / listProjects
-        // (project-resolver.ts). Admins may pass an explicit orgId.
-        const admin = isAdminFromEvent(event);
-        const callerOrgId = admin ? null : await extractOrgFromEvent(event);
-        const effectiveOrgId = callerOrgId || event.arguments.orgId;
+        // Org scoping (finding f0ce2b00, high): fail closed, mirroring
+        // requireCallerOrg in user-management-resolver.ts. An admin uses the
+        // supplied argument explicitly; a non-admin uses ONLY their own
+        // resolved org; an unresolved effective org is a hard denial — it
+        // must never fall through to the client-supplied orgId argument
+        // (the prior `callerOrgId || event.arguments.orgId` coercion did
+        // exactly that, handing a caller with no org claim any tenant's
+        // rows on request).
+        const effectiveOrgId = await requireEffectiveOrgId(event);
         return await listDataStores(effectiveOrgId, event.arguments.category);
       }
       case "getDataStore":
         return await getDataStoreGuarded(event.arguments.dataStoreId, event);
       case "getDataStoreStats": {
-        // Org scoping (sweep finding 615aa5bb, filed as the getDataStoreStats
-        // defect): same coerce-not-reject read-path gate as listDataStores
-        // above — a read has no side effect to block, so silently scoping to
-        // the caller's real org is sufficient.
-        const admin = isAdminFromEvent(event);
-        const callerOrgId = admin ? null : await extractOrgFromEvent(event);
-        const effectiveOrgId = callerOrgId || event.arguments.orgId;
+        // Org scoping (finding f0ce2b00, high): same fail-closed gate as
+        // listDataStores above.
+        const effectiveOrgId = await requireEffectiveOrgId(event);
         return await getDataStoreStats(effectiveOrgId);
       }
       case "createDataStore":
@@ -192,11 +223,9 @@ export async function handler(event: AppSyncEvent) {
           event,
         );
       case "listAvailableDataSources": {
-        // Org scoping (sweep finding 615aa5bb): same coerce-not-reject
-        // read-path gate as listDataStores/getDataStoreStats above.
-        const admin = isAdminFromEvent(event);
-        const callerOrgId = admin ? null : await extractOrgFromEvent(event);
-        const effectiveOrgId = callerOrgId || event.arguments.orgId;
+        // Org scoping (finding f0ce2b00, high): same fail-closed gate as
+        // listDataStores/getDataStoreStats above.
+        const effectiveOrgId = await requireEffectiveOrgId(event);
         return await listAvailableDataSources(
           effectiveOrgId,
           event.arguments.usage,
