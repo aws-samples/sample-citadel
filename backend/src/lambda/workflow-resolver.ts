@@ -17,7 +17,8 @@ import {
 } from "@aws-sdk/client-eventbridge";
 import { v4 as uuidv4 } from "uuid";
 import { getUserId } from "../utils/appsync";
-import { extractOrgFromEvent } from "../utils/auth-event";
+import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import { PermissionError } from "./adapters/errors";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -209,8 +210,25 @@ async function listWorkflows(
   userId: string,
   event: WorkflowResolverEvent,
 ): Promise<{ items: unknown[]; nextToken?: string }> {
-  const userOrg = await extractOrgFromEvent(event);
-  const queryOrgId = userOrg || orgId;
+  // Org scoping (finding f0ce2b00, high): fail closed, mirroring
+  // requireEffectiveOrgId in datastore-resolver.ts/integration-resolver.ts.
+  // An admin uses the supplied argument explicitly; a non-admin uses ONLY
+  // their own resolved org; an unresolved effective org is a hard denial —
+  // it must never fall through to the client-supplied orgId argument (the
+  // prior `userOrg || orgId` coercion did exactly that, handing a caller
+  // with no org claim any tenant's workflows on request).
+  let queryOrgId: string;
+  if (isAdminFromEvent(event)) {
+    queryOrgId = orgId;
+  } else {
+    const userOrg = await extractOrgFromEvent(event);
+    if (!userOrg) {
+      throw new PermissionError(
+        "Access denied: no organization is provisioned for your account. Contact an administrator.",
+      );
+    }
+    queryOrgId = userOrg;
+  }
 
   const params: QueryCommandInput = {
     TableName: WORKFLOWS_TABLE,

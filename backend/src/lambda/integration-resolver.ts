@@ -47,6 +47,7 @@ import {
   provisionCredentialProvider,
   deprovisionCredentialProvider,
 } from "../utils/gateway-target-manager";
+import { PermissionError } from "./adapters/errors";
 
 const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const secretsManager = new SecretsManagerClient({});
@@ -361,6 +362,36 @@ function sanitizeIntegrationForResponse(
   return sanitized;
 }
 
+/**
+ * Fail-closed resolution of the org a read-path query should be scoped to
+ * (finding f0ce2b00, high). Mirrors `requireCallerOrg` in
+ * user-management-resolver.ts / `requireEffectiveOrgId` in
+ * datastore-resolver.ts:
+ *
+ *   - Admin (explicit `isAdminFromEvent` check): use the supplied argument
+ *     as-is.
+ *   - Non-admin: use ONLY the caller's own server-derived org
+ *     (extractOrgFromEvent); the argument is never consulted.
+ *   - Unresolved effective org (non-admin with no resolvable
+ *     `custom:organization` claim — reachable, since adminCreateUser never
+ *     sets that attribute, finding cbbc3be1): DENY via PermissionError.
+ *
+ * Never reintroduce a `callerOrgId || event.arguments.orgId` fallback; see
+ * the `no-caller-org-fallback-idiom` guard test.
+ */
+async function requireEffectiveOrgId(event: AppSyncEvent): Promise<string> {
+  if (isAdminFromEvent(event)) {
+    return event.arguments.orgId;
+  }
+  const callerOrgId = await extractOrgFromEvent(event);
+  if (!callerOrgId) {
+    throw new PermissionError(
+      "Access denied: no organization is provisioned for your account. Contact an administrator.",
+    );
+  }
+  return callerOrgId;
+}
+
 export async function handler(event: AppSyncEvent) {
   const sanitizedEvent = sanitizeEventForLogging(event);
   console.log(
@@ -392,14 +423,15 @@ export async function handler(event: AppSyncEvent) {
           event,
         );
       case "listIntegrations": {
-        // Org scoping (sweep finding under 615aa5bb): a non-admin caller's
-        // server-derived org always wins over the requested orgId argument
-        // — same read-path tenant gate as listApps
-        // (registry-agent-record-resolver.ts) / listProjects
-        // (project-resolver.ts). Admins may pass an explicit orgId.
-        const admin = isAdminFromEvent(event);
-        const callerOrgId = admin ? null : await extractOrgFromEvent(event);
-        const effectiveOrgId = callerOrgId || event.arguments.orgId;
+        // Org scoping (finding f0ce2b00, high): fail closed, mirroring
+        // requireCallerOrg in user-management-resolver.ts /
+        // requireEffectiveOrgId in datastore-resolver.ts. An admin uses the
+        // supplied argument explicitly; a non-admin uses ONLY their own
+        // resolved org; an unresolved effective org is a hard denial — it
+        // must never fall through to the client-supplied orgId argument
+        // (the prior `callerOrgId || event.arguments.orgId` coercion did
+        // exactly that).
+        const effectiveOrgId = await requireEffectiveOrgId(event);
         return await listIntegrations(
           effectiveOrgId,
           event.arguments.integrationType,
