@@ -465,8 +465,15 @@ async function listOrganizations(event: UserManagementResolverEvent) {
     }),
   );
 
+  // RATIFIED decision 228b3cc8: the organisation NAME is canonical for the
+  // `custom:organization` claim and every tenancy comparison in this
+  // codebase (assignUserRole writes the NAME, extractOrgFromEvent reads it
+  // back verbatim). `callerOrg` here is therefore always a NAME, never the
+  // generated `orgId` UUID — comparing it against `item.orgId` was always
+  // false for non-admins (see auth-event.ts's "Canonical tenancy claim"
+  // note for the shared rule). Compare NAME to NAME.
   return (response.Items || [])
-    .filter((item) => callerIsAdmin || item.orgId === callerOrg)
+    .filter((item) => callerIsAdmin || item.name === callerOrg)
     .map((item) => {
       console.log("Raw item from DynamoDB:", JSON.stringify(item));
 
