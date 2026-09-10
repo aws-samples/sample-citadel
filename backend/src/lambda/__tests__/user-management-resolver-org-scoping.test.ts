@@ -275,25 +275,45 @@ describe("getUser — org scoping", () => {
 // ---------------------------------------------------------------------------
 
 describe("listOrganizations — org scoping", () => {
+  // Realistic row shape: orgId is a generated UUID, distinct from name.
   const orgItems = [
-    { orgId: "org-a", name: "Org A", createdAt: "2024-01-01T00:00:00Z" },
-    { orgId: "org-b", name: "Org B", createdAt: "2024-01-01T00:00:00Z" },
+    {
+      orgId: "11111111-1111-1111-1111-111111111111",
+      name: "Org A",
+      createdAt: "2024-01-01T00:00:00Z",
+    },
+    {
+      orgId: "22222222-2222-2222-2222-222222222222",
+      name: "Org B",
+      createdAt: "2024-01-01T00:00:00Z",
+    },
   ];
 
-  test("non-admin caller sees only their own org", async () => {
+  // RATIFIED decision 228b3cc8, piece 1: the org-scoping filter at
+  // listOrganizations used to compare a DynamoDB row's `orgId` (a generated
+  // UUID) against the caller's `custom:organization` claim, which is ALWAYS
+  // the organisation NAME (per assignUserRole, extractOrgFromEvent, and
+  // every other tenancy comparison in this codebase — see auth-event.ts's
+  // "Canonical tenancy claim" note). `item.orgId === callerOrg` was
+  // therefore always false for a real, non-coincidental org row. This test
+  // uses a REALISTIC row shape (orgId is a UUID, distinct from name) and
+  // asserts the caller's NAME-valued claim resolves against the row's NAME.
+  test("non-admin caller sees only their own org (claim is the organisation NAME, orgId is a distinct UUID)", async () => {
     cognitoMock
       .on(AdminListGroupsForUserCommand, { Username: "alice" })
       .resolves({ Groups: [{ GroupName: "developer" }] });
     cognitoMock.on(AdminGetUserCommand, { Username: "alice" }).resolves({
       Username: "alice",
-      UserAttributes: [{ Name: "custom:organization", Value: "org-a" }],
+      // The claim is the org NAME, never the orgId — matches
+      // assignUserRole's Cognito attribute write and extractOrgFromEvent.
+      UserAttributes: [{ Name: "custom:organization", Value: "Org A" }],
     });
     dynamoMock.on(ScanCommand).resolves({ Items: orgItems });
 
     const event = buildEvent("listOrganizations", { username: "alice" });
     const result = (await handler(event)) as OrganizationResult[];
 
-    expect(result.map((o) => o.orgId)).toEqual(["org-a"]);
+    expect(result.map((o) => o.name)).toEqual(["Org A"]);
   });
 
   test("GLOBAL admin caller sees all organizations (deliberately preserved)", async () => {
@@ -305,7 +325,7 @@ describe("listOrganizations — org scoping", () => {
     const event = buildEvent("listOrganizations", { username: "admin-user" });
     const result = (await handler(event)) as OrganizationResult[];
 
-    expect(result.map((o) => o.orgId).sort()).toEqual(["org-a", "org-b"]);
+    expect(result.map((o) => o.name).sort()).toEqual(["Org A", "Org B"]);
   });
 
   test("fails closed when caller org cannot be resolved", async () => {

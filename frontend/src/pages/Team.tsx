@@ -190,8 +190,8 @@ export function Team() {
   };
 
   const handleAddUser = async () => {
-    if (!newUserEmail || !newUserFirstName || !newUserLastName) {
-      setError('Please fill in all fields');
+    if (!newUserEmail || !newUserFirstName || !newUserLastName || !newUserOrganization) {
+      setError('Please fill in all required fields, including organization');
       return;
     }
 
@@ -210,6 +210,7 @@ export function Team() {
         email: newUserEmail,
         givenName: newUserFirstName,
         familyName: newUserLastName,
+        organization: newUserOrganization,
       });
 
       console.log('Create user response:', response);
@@ -946,7 +947,7 @@ export function Team() {
               </div>
               <div>
                 <Label className="text-foreground text-sm font-medium mb-2 block">
-                  Organization (Optional)
+                  Organization
                 </Label>
                 <Select
                   value={newUserOrganization}
@@ -954,7 +955,7 @@ export function Team() {
                   disabled={creatingUser}
                 >
                   <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select an organization (optional)..." />
+                    <SelectValue placeholder="Select an organization..." />
                   </SelectTrigger>
                   <SelectContent>
                     {organizations.map((org) => (
@@ -969,7 +970,7 @@ export function Team() {
                 <Button
                   className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
                   onClick={handleAddUser}
-                  disabled={creatingUser}
+                  disabled={creatingUser || !newUserOrganization}
                 >
                   {creatingUser ? 'Creating...' : 'Create User'}
                 </Button>

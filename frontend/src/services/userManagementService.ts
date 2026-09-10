@@ -177,6 +177,7 @@ export interface AdminCreateUserInput {
   email: string;
   givenName: string;
   familyName: string;
+  organization: string;
 }
 
 export interface CreateOrganizationInput {
