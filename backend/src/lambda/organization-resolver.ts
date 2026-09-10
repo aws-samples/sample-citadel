@@ -194,6 +194,34 @@ async function createOrganization(
     );
   }
 
+  // DEFENCE IN DEPTH (finding 003a9234, mechanism 3) — BACKSTOP, not the
+  // primary guarantee. The conditional put below (ConditionExpression:
+  // attribute_not_exists(orgId) on the NAME# reservation row) remains the
+  // ATOMIC AUTHORITY for uniqueness — it is race-free under concurrent
+  // creates and is what actually prevents two callers from both winning.
+  // This row-level Scan exists ONLY because the reservation side table can
+  // drift from the organisation rows it is meant to describe: a seeder bug,
+  // a manually-inserted org row, a pre-existing org from before the
+  // reservation mechanism shipped, or a future migration could all leave an
+  // organisation with NO matching NAME# row. In that drifted state the
+  // conditional put alone would see attribute_not_exists(orgId) succeed and
+  // silently let a duplicate through even though a live org already holds
+  // the name. This Scan is NOT atomic (another create can race between this
+  // read and the Put below) — that race is still closed by the conditional
+  // Put's ConditionExpression, so this check is a correctness backstop
+  // against drift, not a concurrency control.
+  const existingOrgWithName = await docClient.send(
+    new ScanCommand({
+      TableName: ORGANIZATIONS_TABLE,
+      FilterExpression: "#name = :name AND attribute_not_exists(itemType)",
+      ExpressionAttributeNames: { "#name": "name" },
+      ExpressionAttributeValues: { ":name": input.name },
+    }),
+  );
+  if (existingOrgWithName.Items && existingOrgWithName.Items.length > 0) {
+    throw new Error(`Organization with name "${input.name}" already exists`);
+  }
+
   // Atomic name reservation: a conditional put keyed on `NAME#<name>` with
   // ConditionExpression: attribute_not_exists(orgId). This is the SAME
   // write-once idiom this codebase already uses (eval-comparison-resolver.ts,
