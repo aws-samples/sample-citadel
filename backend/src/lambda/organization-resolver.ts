@@ -3,7 +3,9 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   PutCommand,
+  UpdateCommand,
   DeleteCommand,
+  GetCommand,
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
@@ -40,6 +42,51 @@ interface Organization {
 interface UserManagementResponse {
   success: boolean;
   message?: string;
+}
+
+/**
+ * The key of the name-reservation/tombstone row for a given organisation
+ * NAME, stored in the SAME `OrganisationTable` (partition key `orgId` only
+ * — no separate table or GSI needed). This is the atomic uniqueness +
+ * anti-reuse mechanism for decision 228b3cc8 (pieces 2 and 3):
+ *
+ *  - `itemType: "name_reservation"` — written by `createOrganization` with
+ *    `ConditionExpression: attribute_not_exists(orgId)`, the SAME
+ *    write-once idiom used throughout this codebase (eval-comparison-
+ *    resolver.ts, eval-run-resolver.ts, execspec-resolver.ts, etc.) for
+ *    atomic create-if-absent. Because DynamoDB conditional puts are
+ *    evaluated atomically server-side, two concurrent `createOrganization`
+ *    calls for the same name can no longer both succeed — the loser gets a
+ *    `ConditionalCheckFailedException`, translated below into the existing
+ *    "already exists" error. This replaces the prior Scan-then-Put race.
+ *  - `itemType: "name_tombstone"` — the SAME row, flipped by
+ *    `deleteOrganization` instead of being deleted. A tombstoned name can
+ *    never be reserved again, closing the reuse gap the prior code's own
+ *    comment warned about (a zero-user deleted name could be recreated and
+ *    would inherit any surviving name-stamped rows in Projects/Workflows/
+ *    RegistryAgentRecord/etc. — those dependents are still a known,
+ *    separately-tracked gap; see the NOTE in deleteOrganization). Retaining
+ *    a tombstone (rather than refusing deletion while ANY name-stamped ROW
+ *    survives across every dependent table) is the safer AND simpler
+ *    choice here: enumerating "any row anywhere stamped with this name" would
+ *    require scanning tables this resolver has no handle on and no
+ *    consistency guarantee over, whereas the reservation row this resolver
+ *    already owns gives a single, race-free source of truth for whether a
+ *    name may be issued again — at the cost of names never becoming
+ *    available again once used, which matches the ratified "names are
+ *    immutable and canonical" model.
+ */
+function nameReservationKey(name: string): string {
+  return `NAME#${name}`;
+}
+
+interface NameReservationItem {
+  orgId: string;
+  itemType: "name_reservation" | "name_tombstone";
+  name: string;
+  reservedOrgId?: string;
+  createdAt: string;
+  tombstonedAt?: string;
 }
 
 /** AppSync event slice this resolver reads. */
@@ -124,26 +171,60 @@ async function createOrganization(
 ): Promise<Organization> {
   console.log("Creating organization:", input);
 
-  // Check if organization with same name already exists
-  const existingOrgs = await docClient.send(
-    new ScanCommand({
+  const reservationKey = nameReservationKey(input.name);
+  const now = new Date().toISOString();
+
+  // Reject a tombstoned name up front with a clear message, before
+  // attempting the reservation write. This is a plain read (not itself
+  // race-free against a concurrent tombstone), but the atomic reservation
+  // Put below is the actual uniqueness guarantee — this check only exists
+  // to give a clear, specific error instead of a generic "already exists"
+  // when the cause is reuse-of-a-deleted-name rather than a live duplicate.
+  const existingReservation = await docClient.send(
+    new GetCommand({
       TableName: ORGANIZATIONS_TABLE,
-      FilterExpression: "#name = :name",
-      ExpressionAttributeNames: {
-        "#name": "name",
-      },
-      ExpressionAttributeValues: {
-        ":name": input.name,
-      },
+      Key: { orgId: reservationKey },
     }),
   );
+  const existingItem = existingReservation.Item as
+    NameReservationItem | undefined;
+  if (existingItem?.itemType === "name_tombstone") {
+    throw new Error(
+      `Organization name "${input.name}" was previously used and deleted; it cannot be reused. Choose a different name.`,
+    );
+  }
 
-  if (existingOrgs.Items && existingOrgs.Items.length > 0) {
-    throw new Error(`Organization with name "${input.name}" already exists`);
+  // Atomic name reservation: a conditional put keyed on `NAME#<name>` with
+  // ConditionExpression: attribute_not_exists(orgId). This is the SAME
+  // write-once idiom this codebase already uses (eval-comparison-resolver.ts,
+  // eval-run-resolver.ts, execspec-resolver.ts, etc.) — DynamoDB evaluates the
+  // condition atomically server-side, so two concurrent creates for the same
+  // name can no longer both succeed. This replaces the prior
+  // Scan-then-Put (finding: non-atomic, race-prone).
+  try {
+    await docClient.send(
+      new PutCommand({
+        TableName: ORGANIZATIONS_TABLE,
+        Item: {
+          orgId: reservationKey,
+          itemType: "name_reservation",
+          name: input.name,
+          createdAt: now,
+        } satisfies NameReservationItem,
+        ConditionExpression: "attribute_not_exists(orgId)",
+      }),
+    );
+  } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      error.name === "ConditionalCheckFailedException"
+    ) {
+      throw new Error(`Organization with name "${input.name}" already exists`);
+    }
+    throw error;
   }
 
   const orgId = uuidv4();
-  const now = new Date().toISOString();
 
   const organization: Organization = {
     orgId,
@@ -153,6 +234,17 @@ async function createOrganization(
     description: input.description || "",
     createdAt: now,
   };
+
+  // Stamp the reservation row with the orgId it reserved for, so
+  // deleteOrganization can find/tombstone it without a Scan.
+  await docClient.send(
+    new UpdateCommand({
+      TableName: ORGANIZATIONS_TABLE,
+      Key: { orgId: reservationKey },
+      UpdateExpression: "SET reservedOrgId = :reservedOrgId",
+      ExpressionAttributeValues: { ":reservedOrgId": orgId },
+    }),
+  );
 
   await docClient.send(
     new PutCommand({
@@ -268,6 +360,46 @@ async function deleteOrganization(
       Key: { orgId },
     }),
   );
+
+  // 4. Tombstone the freed name so it can never be reserved again (decision
+  //    228b3cc8, piece 3). The name-reservation row created by
+  //    createOrganization is NOT deleted — it is flipped to
+  //    `itemType: "name_tombstone"` and retained permanently. This closes
+  //    the reuse gap the delete's own former comment warned about: a
+  //    zero-user deleted name could otherwise be recreated and would
+  //    inherit any surviving name-stamped rows in other tables (Projects,
+  //    Workflows, RegistryAgentRecord, ...) that this resolver does not own
+  //    and cannot clean up. Best-effort: if the org row was deleted but the
+  //    reservation cannot be found/tombstoned (e.g. it predates this
+  //    change), log and continue rather than leaving the org half-deleted.
+  try {
+    await docClient.send(
+      new UpdateCommand({
+        TableName: ORGANIZATIONS_TABLE,
+        Key: { orgId: nameReservationKey(orgName) },
+        UpdateExpression:
+          "SET itemType = :tombstone, tombstonedAt = :tombstonedAt",
+        ExpressionAttributeValues: {
+          ":tombstone": "name_tombstone",
+          ":tombstonedAt": new Date().toISOString(),
+        },
+        // The reservation row must already exist (created atomically by
+        // createOrganization) — if it doesn't, this is a pre-existing org
+        // created before this mechanism shipped. Don't silently create a
+        // reservation row here (that would race with a concurrent create
+        // using the same name that has no reservation to check against);
+        // just log and move on. The org itself is already deleted above.
+        ConditionExpression: "attribute_exists(orgId)",
+      }),
+    );
+  } catch (error: unknown) {
+    console.error(
+      `Could not tombstone name reservation for "${orgName}" (orgId ${orgId}); ` +
+        "the org row is deleted but the name may remain reusable if no " +
+        "reservation row pre-existed:",
+      error,
+    );
+  }
 
   console.log("Organization deleted:", orgId);
   return {
