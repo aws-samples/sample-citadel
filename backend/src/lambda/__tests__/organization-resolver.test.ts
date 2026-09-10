@@ -66,6 +66,10 @@ describe("organization-resolver", () => {
     dynamoMock.on(GetCommand).resolves({ Item: undefined });
     dynamoMock.on(PutCommand).resolves({});
     dynamoMock.on(UpdateCommand).resolves({});
+    // Defence-in-depth row-level Scan (finding 003a9234, mechanism 3):
+    // default to "no existing org row with this name" unless a test
+    // overrides this with a more specific `.on(ScanCommand, {...})` stub.
+    dynamoMock.on(ScanCommand).resolves({ Items: [] });
   });
 
   // REAL AppSync $context shape: the field name lives under `info.fieldName`,
@@ -253,6 +257,80 @@ describe("organization-resolver", () => {
       expect(putCalls).toHaveLength(1);
     });
 
+    // THE GAP (finding 003a9234): a duplicate of a name that already has a
+    // LIVE org row but NO NAME# reservation row (e.g. a seeded organisation
+    // from before the reservation mechanism covered seeded rows, or any
+    // drift between the org rows and the side table) must still be
+    // rejected. The reservation GetCommand/PutCommand alone would see no
+    // existing reservation and let this through — the row-level Scan
+    // (mechanism 3, defence in depth) is what catches it. This is the exact
+    // test that would have caught PR 159's gap: a duplicate of a SEEDED
+    // name (no reservation row backing it), not merely a duplicate created
+    // within the same test run (which always has a reservation row from its
+    // own earlier create).
+    test("rejects a duplicate of a SEEDED org name that has no NAME# reservation row (row-level defence in depth)", async () => {
+      // No reservation row exists for "Default" (as would be the case for
+      // a seeded org created before mechanism 1 shipped, or if the seeder
+      // and resolver ever drift).
+      dynamoMock.on(GetCommand).resolves({ Item: undefined });
+      // But a live org row named "Default" already exists (e.g. org-000,
+      // seeded by seed-organizations).
+      dynamoMock
+        .on(ScanCommand, {
+          TableName: "test-orgs",
+          FilterExpression: "#name = :name AND attribute_not_exists(itemType)",
+          ExpressionAttributeNames: { "#name": "name" },
+          ExpressionAttributeValues: { ":name": "Default" },
+        })
+        .resolves({
+          Items: [
+            {
+              orgId: "org-000",
+              name: "Default",
+              description: "Default organisation",
+              createdAt: "2024-01-01T00:00:00Z",
+            },
+          ],
+        });
+
+      await expect(
+        handler(
+          makeEvent(
+            "createOrganization",
+            { input: { name: "Default" } },
+            adminIdentity,
+          ),
+        ),
+      ).rejects.toThrow('Organization with name "Default" already exists');
+
+      // The reservation Put must NEVER be reached — the row-level check
+      // short-circuits before it.
+      expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    // The row-level Scan must exclude NAME# reservation/tombstone rows from
+    // its match — those carry `itemType` and must not be mistaken for a
+    // live org row sharing the same `name` attribute value.
+    test("row-level defence-in-depth Scan filters out itemType-bearing rows (reservation/tombstone), not just live orgs", async () => {
+      await handler(
+        makeEvent(
+          "createOrganization",
+          { input: { name: "Fresh Org" } },
+          adminIdentity,
+        ),
+      );
+
+      const scanCalls = dynamoMock.commandCalls(ScanCommand);
+      const orgNameScan = scanCalls.find(
+        (c) =>
+          c.args[0].input.ExpressionAttributeValues?.[":name"] === "Fresh Org",
+      );
+      expect(orgNameScan).toBeDefined();
+      expect(orgNameScan!.args[0].input.FilterExpression).toBe(
+        "#name = :name AND attribute_not_exists(itemType)",
+      );
+    });
+
     // RACE: two concurrent creates for the same name — the conditional put
     // ensures at most one can win. This test simulates the loser's path by
     // asserting the reservation Put carries the correct
@@ -279,8 +357,16 @@ describe("organization-resolver", () => {
       expect(reservationCall!.args[0].input.ConditionExpression).toBe(
         "attribute_not_exists(orgId)",
       );
-      // No Scan is used anywhere in the create path anymore.
-      expect(dynamoMock.commandCalls(ScanCommand)).toHaveLength(0);
+      // The reservation write itself is still a direct conditional Put, not
+      // a Scan-then-Put — the uniqueness AUTHORITY remains atomic. (A Scan
+      // now runs earlier as a defence-in-depth backstop — finding
+      // 003a9234, mechanism 3 — but it is not what makes this Put safe
+      // under concurrency; the ConditionExpression assertion above is.)
+      const scanCalls = dynamoMock.commandCalls(ScanCommand);
+      expect(scanCalls).toHaveLength(1);
+      expect(scanCalls[0].args[0].input.FilterExpression).toBe(
+        "#name = :name AND attribute_not_exists(itemType)",
+      );
     });
 
     // RATIFIED decision 228b3cc8, piece 3: a tombstoned name (previously
