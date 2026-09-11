@@ -20,9 +20,6 @@
     "inlineSources": true,
     "experimentalDecorators": true,
     "strictPropertyInitialization": false,
-    "typeRoots": [
-      "./node_modules/@types"
-    ],
     "outDir": "dist",
     "rootDir": ".",
     "resolveJsonModule": true,

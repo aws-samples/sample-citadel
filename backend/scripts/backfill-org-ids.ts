@@ -32,23 +32,24 @@
  *   - Per-record errors are logged and swallowed; the main loop never
  *     throws.
  */
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from "fs";
+import * as path from "path";
 import {
   CognitoIdentityProviderClient,
   AdminGetUserCommand,
-} from '@aws-sdk/client-cognito-identity-provider';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+} from "@aws-sdk/client-cognito-identity-provider";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   ScanCommand,
   UpdateCommand,
-} from '@aws-sdk/lib-dynamodb';
+  type NativeAttributeValue,
+} from "@aws-sdk/lib-dynamodb";
 import {
   RegistryService,
   ResourceType,
   RegistryRecord,
-} from '../src/services/registry-service';
+} from "../src/services/registry-service";
 
 // ---------------------------------------------------------------------------
 // Env auto-load helpers
@@ -88,16 +89,16 @@ function findUpwards(
  * human-readable key name.
  */
 export function loadEnvFromCdkOutputs(): void {
-  const outputsPath = findUpwards(process.cwd(), 'cdk-outputs.json');
+  const outputsPath = findUpwards(process.cwd(), "cdk-outputs.json");
   if (!outputsPath) return;
 
   let outputs: Record<string, Record<string, unknown>>;
   try {
-    outputs = JSON.parse(fs.readFileSync(outputsPath, 'utf8'));
+    outputs = JSON.parse(fs.readFileSync(outputsPath, "utf8"));
   } catch {
     return; // malformed; let the env-var requirement check surface the real error
   }
-  const backend = (outputs['citadel-backend-dev'] ?? {}) as Record<
+  const backend = (outputs["citadel-backend-dev"] ?? {}) as Record<
     string,
     unknown
   >;
@@ -107,13 +108,13 @@ export function loadEnvFromCdkOutputs(): void {
   const pickFirst = (...keys: string[]): string | undefined => {
     for (const k of keys) {
       const v = backend[k];
-      if (typeof v === 'string' && v) return v;
+      if (typeof v === "string" && v) return v;
     }
     for (const k of Object.keys(backend)) {
       for (const suffix of keys) {
         if (k.includes(suffix)) {
           const v = backend[k];
-          if (typeof v === 'string' && v) return v;
+          if (typeof v === "string" && v) return v;
         }
       }
     }
@@ -121,15 +122,15 @@ export function loadEnvFromCdkOutputs(): void {
   };
 
   if (!process.env.REGISTRY_ID) {
-    const v = pickFirst('AgentCoreRegistryId');
+    const v = pickFirst("AgentCoreRegistryId");
     if (v) process.env.REGISTRY_ID = v;
   }
   if (!process.env.USER_POOL_ID) {
-    const v = pickFirst('UserPoolId', 'UserPoolIdExport');
+    const v = pickFirst("UserPoolId", "UserPoolIdExport");
     if (v) process.env.USER_POOL_ID = v;
   }
   if (!process.env.AGENT_CONFIG_TABLE) {
-    const v = pickFirst('AgentConfigTable');
+    const v = pickFirst("AgentConfigTable");
     if (v) process.env.AGENT_CONFIG_TABLE = v;
   }
 }
@@ -143,28 +144,31 @@ export function loadEnvFromCdkOutputs(): void {
  */
 export function loadEnvFromDotenv(): void {
   const candidates = [
-    path.join(process.cwd(), 'backend', '.env'),
-    path.join(process.cwd(), '.env'),
+    path.join(process.cwd(), "backend", ".env"),
+    path.join(process.cwd(), ".env"),
   ];
   for (const dotenv of candidates) {
     if (!fs.existsSync(dotenv)) continue;
     let text: string;
     try {
-      text = fs.readFileSync(dotenv, 'utf8');
+      text = fs.readFileSync(dotenv, "utf8");
     } catch {
       continue;
     }
-    for (const line of text.split('\n')) {
+    for (const line of text.split("\n")) {
       const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eq = trimmed.indexOf('=');
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
       if (eq < 0) continue;
       const k = trimmed.slice(0, eq).trim();
-      const v = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
-      if (k === 'CDK_DEFAULT_REGION' && !process.env.AWS_REGION) {
+      const v = trimmed
+        .slice(eq + 1)
+        .trim()
+        .replace(/^["']|["']$/g, "");
+      if (k === "CDK_DEFAULT_REGION" && !process.env.AWS_REGION) {
         process.env.AWS_REGION = v;
       }
-      if (k === 'ENVIRONMENT' && !process.env.ENVIRONMENT) {
+      if (k === "ENVIRONMENT" && !process.env.ENVIRONMENT) {
         process.env.ENVIRONMENT = v;
       }
     }
@@ -180,7 +184,7 @@ export function loadEnvFromDotenv(): void {
  */
 export function deriveToolsTable(): void {
   if (process.env.TOOL_CONFIG_TABLE) return;
-  const env = process.env.ENVIRONMENT || 'dev';
+  const env = process.env.ENVIRONMENT || "dev";
   process.env.TOOL_CONFIG_TABLE = `citadel-tools-${env}`;
 }
 
@@ -199,7 +203,7 @@ export function bootstrapEnv(): void {
 // Pure logic helpers (exported for unit tests)
 // ---------------------------------------------------------------------------
 
-export type OrgSource = 'skip' | 'sentinel' | 'claim-copy' | 'cognito-lookup';
+export type OrgSource = "skip" | "sentinel" | "claim-copy" | "cognito-lookup";
 
 export interface MetaShape {
   orgId?: string | null;
@@ -227,23 +231,24 @@ export function classifyOrgSource(
   meta: MetaShape | null | undefined,
   cognitoUser: CognitoUserShape | null | undefined,
 ): OrgSource {
-  const existingOrgId = (meta?.orgId ?? '').toString().trim();
-  if (existingOrgId !== '') return 'skip';
+  const existingOrgId = (meta?.orgId ?? "").toString().trim();
+  if (existingOrgId !== "") return "skip";
 
-  const createdBy = (meta?.createdBy ?? '').toString().trim();
+  const createdBy = (meta?.createdBy ?? "").toString().trim();
   const isSentinelCreator =
-    !createdBy || createdBy === 'fabricator' || createdBy === 'unknown';
-  if (isSentinelCreator) return 'sentinel';
+    !createdBy || createdBy === "fabricator" || createdBy === "unknown";
+  if (isSentinelCreator) return "sentinel";
 
   // Real user identity. If caller has not supplied a resolved Cognito user
   // yet, signal that a lookup is required.
-  if (cognitoUser === null || cognitoUser === undefined) return 'cognito-lookup';
+  if (cognitoUser === null || cognitoUser === undefined)
+    return "cognito-lookup";
 
-  const cognitoOrgId = (cognitoUser.orgId ?? '').toString().trim();
-  if (cognitoOrgId !== '') return 'claim-copy';
+  const cognitoOrgId = (cognitoUser.orgId ?? "").toString().trim();
+  if (cognitoOrgId !== "") return "claim-copy";
 
   // Cognito resolved but user has no org attribute.
-  return 'sentinel';
+  return "sentinel";
 }
 
 /**
@@ -257,11 +262,11 @@ export function deriveOrgId(
   createdBy: string | null | undefined,
   cognitoUser: CognitoUserShape | null | undefined,
 ): string {
-  const cb = (createdBy ?? '').toString().trim();
-  if (!cb || cb === 'fabricator' || cb === 'unknown') return 'system';
-  const cognitoOrg = (cognitoUser?.orgId ?? '').toString().trim();
-  if (cognitoOrg !== '') return cognitoOrg;
-  return 'system';
+  const cb = (createdBy ?? "").toString().trim();
+  if (!cb || cb === "fabricator" || cb === "unknown") return "system";
+  const cognitoOrg = (cognitoUser?.orgId ?? "").toString().trim();
+  if (cognitoOrg !== "") return cognitoOrg;
+  return "system";
 }
 
 // ---------------------------------------------------------------------------
@@ -305,15 +310,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-type LogLevel = 'info' | 'warn' | 'error';
+type LogLevel = "info" | "warn" | "error";
 
 function log(level: LogLevel, msg: string): void {
   const ts = new Date().toISOString();
   const prefix =
-    level === 'error' ? 'ERROR' : level === 'warn' ? 'WARN' : 'INFO';
+    level === "error" ? "ERROR" : level === "warn" ? "WARN" : "INFO";
   // One line per event; use stdout for info/warn, stderr for error.
   const line = `${ts} [${prefix}] ${msg}`;
-  if (level === 'error') {
+  if (level === "error") {
     // eslint-disable-next-line no-console
     console.error(line);
   } else {
@@ -342,11 +347,11 @@ async function lookupCognitoOrg(
       }),
     );
     const attr = response.UserAttributes?.find(
-      (a) => a.Name === 'custom:organization',
+      (a) => a.Name === "custom:organization",
     );
     return { orgId: attr?.Value || null };
-  } catch (err: any) {
-    if (err?.name === 'UserNotFoundException') {
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === "UserNotFoundException") {
       return null;
     }
     throw err;
@@ -369,14 +374,14 @@ async function processRegistryRecord(
   summary.scanned++;
   const recordId = record.recordId;
 
-  let meta: Record<string, any>;
+  let meta: Record<string, unknown>;
   try {
     meta = record.customDescriptorContent
       ? JSON.parse(record.customDescriptorContent)
       : {};
   } catch (err) {
     log(
-      'error',
+      "error",
       `[${type}] recordId=${recordId} malformed customDescriptorContent: ${String(err)}`,
     );
     summary.errors++;
@@ -384,40 +389,40 @@ async function processRegistryRecord(
   }
 
   // Skip fast path.
-  if (classifyOrgSource(meta, undefined) === 'skip') {
+  if (classifyOrgSource(meta, undefined) === "skip") {
     summary.alreadyPopulated++;
     log(
-      'info',
-      `[${type}] recordId=${recordId} createdBy=${meta.createdBy || '<absent>'} -> already populated (orgId=${meta.orgId})`,
+      "info",
+      `[${type}] recordId=${recordId} createdBy=${meta.createdBy || "<absent>"} -> already populated (orgId=${meta.orgId})`,
     );
     return;
   }
 
-  const createdBy = (meta.createdBy ?? '').toString().trim();
+  const createdBy = (meta.createdBy ?? "").toString().trim();
   const isSentinelCreator =
-    !createdBy || createdBy === 'fabricator' || createdBy === 'unknown';
+    !createdBy || createdBy === "fabricator" || createdBy === "unknown";
 
   let cognitoUser: CognitoUserShape | null = null;
-  let source: 'sentinel' | 'cognito-lookup';
+  let source: "sentinel" | "cognito-lookup";
 
   if (isSentinelCreator) {
-    source = 'sentinel';
+    source = "sentinel";
   } else {
     try {
       cognitoUser = await lookupCognitoOrg(cognito, userPoolId, createdBy);
       await sleep(COGNITO_SLEEP_MS);
     } catch (err) {
       log(
-        'error',
+        "error",
         `[${type}] recordId=${recordId} Cognito lookup failed: ${String(err)}`,
       );
       summary.errors++;
       return;
     }
-    source = cognitoUser?.orgId ? 'cognito-lookup' : 'sentinel';
-    if (source === 'sentinel') {
+    source = cognitoUser?.orgId ? "cognito-lookup" : "sentinel";
+    if (source === "sentinel") {
       log(
-        'warn',
+        "warn",
         `[${type}] recordId=${recordId} createdBy=${createdBy} user missing or no org in Cognito; assigning sentinel`,
       );
     }
@@ -425,12 +430,12 @@ async function processRegistryRecord(
 
   const orgId = deriveOrgId(createdBy, cognitoUser);
   log(
-    'info',
-    `[${type}] recordId=${recordId} createdBy=${createdBy || '<absent>'} -> orgId=${orgId} (${source})`,
+    "info",
+    `[${type}] recordId=${recordId} createdBy=${createdBy || "<absent>"} -> orgId=${orgId} (${source})`,
   );
 
   if (!apply) {
-    if (source === 'sentinel') summary.sentinel++;
+    if (source === "sentinel") summary.sentinel++;
     summary.updated++;
     return;
   }
@@ -442,10 +447,10 @@ async function processRegistryRecord(
       customMetadata: JSON.stringify(updatedMeta),
     });
     summary.updated++;
-    if (source === 'sentinel') summary.sentinel++;
+    if (source === "sentinel") summary.sentinel++;
   } catch (err) {
     log(
-      'error',
+      "error",
       `[${type}] recordId=${recordId} registry write failed: ${String(err)}`,
     );
     summary.errors++;
@@ -460,13 +465,13 @@ async function processRegistry(
   apply: boolean,
 ): Promise<Summary> {
   const summary = emptySummary();
-  log('info', `--- Processing registry '${type}' records ---`);
+  log("info", `--- Processing registry '${type}' records ---`);
 
   let records: RegistryRecord[];
   try {
     records = await registry.listResources(type);
   } catch (err) {
-    log('error', `Failed to list ${type} registry records: ${String(err)}`);
+    log("error", `Failed to list ${type} registry records: ${String(err)}`);
     summary.errors++;
     return summary;
   }
@@ -484,7 +489,7 @@ async function processRegistry(
       );
     } catch (err) {
       log(
-        'error',
+        "error",
         `[${type}] recordId=${rec.recordId} unexpected error: ${String(err)}`,
       );
       summary.errors++;
@@ -499,7 +504,7 @@ async function processRegistry(
 // ---------------------------------------------------------------------------
 
 async function processDdbTable(
-  kind: 'agent' | 'tool',
+  kind: "agent" | "tool",
   tableName: string,
   docClient: DynamoDBDocumentClient,
   cognito: CognitoIdentityProviderClient,
@@ -507,10 +512,10 @@ async function processDdbTable(
   apply: boolean,
 ): Promise<Summary> {
   const summary = emptySummary();
-  log('info', `--- Processing DDB '${kind}' table: ${tableName} ---`);
+  log("info", `--- Processing DDB '${kind}' table: ${tableName} ---`);
 
-  const pkName = kind === 'agent' ? 'agentId' : 'toolId';
-  let exclusiveStartKey: Record<string, any> | undefined;
+  const pkName = kind === "agent" ? "agentId" : "toolId";
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
 
   do {
     let scanResult;
@@ -522,7 +527,7 @@ async function processDdbTable(
         }),
       );
     } catch (err) {
-      log('error', `DDB scan failed for ${tableName}: ${String(err)}`);
+      log("error", `DDB scan failed for ${tableName}: ${String(err)}`);
       summary.errors++;
       return summary;
     }
@@ -531,27 +536,25 @@ async function processDdbTable(
       summary.scanned++;
       const id = item[pkName];
       try {
-        const existingOrgId = (item.orgId ?? '').toString().trim();
-        if (existingOrgId !== '') {
+        const existingOrgId = (item.orgId ?? "").toString().trim();
+        if (existingOrgId !== "") {
           summary.alreadyPopulated++;
           log(
-            'info',
-            `[${kind}] recordId=${id} createdBy=${item.createdBy || '<absent>'} -> already populated (orgId=${existingOrgId})`,
+            "info",
+            `[${kind}] recordId=${id} createdBy=${item.createdBy || "<absent>"} -> already populated (orgId=${existingOrgId})`,
           );
           continue;
         }
 
-        const createdBy = (item.createdBy ?? '').toString().trim();
+        const createdBy = (item.createdBy ?? "").toString().trim();
         const isSentinelCreator =
-          !createdBy ||
-          createdBy === 'fabricator' ||
-          createdBy === 'unknown';
+          !createdBy || createdBy === "fabricator" || createdBy === "unknown";
 
         let cognitoUser: CognitoUserShape | null = null;
-        let source: 'sentinel' | 'cognito-lookup';
+        let source: "sentinel" | "cognito-lookup";
 
         if (isSentinelCreator) {
-          source = 'sentinel';
+          source = "sentinel";
         } else {
           try {
             cognitoUser = await lookupCognitoOrg(
@@ -562,16 +565,16 @@ async function processDdbTable(
             await sleep(COGNITO_SLEEP_MS);
           } catch (err) {
             log(
-              'error',
+              "error",
               `[${kind}] recordId=${id} Cognito lookup failed: ${String(err)}`,
             );
             summary.errors++;
             continue;
           }
-          source = cognitoUser?.orgId ? 'cognito-lookup' : 'sentinel';
-          if (source === 'sentinel') {
+          source = cognitoUser?.orgId ? "cognito-lookup" : "sentinel";
+          if (source === "sentinel") {
             log(
-              'warn',
+              "warn",
               `[${kind}] recordId=${id} createdBy=${createdBy} user missing or no org in Cognito; assigning sentinel`,
             );
           }
@@ -579,12 +582,12 @@ async function processDdbTable(
 
         const orgId = deriveOrgId(createdBy, cognitoUser);
         log(
-          'info',
-          `[${kind}] recordId=${id} createdBy=${createdBy || '<absent>'} -> orgId=${orgId} (${source})`,
+          "info",
+          `[${kind}] recordId=${id} createdBy=${createdBy || "<absent>"} -> orgId=${orgId} (${source})`,
         );
 
         if (!apply) {
-          if (source === 'sentinel') summary.sentinel++;
+          if (source === "sentinel") summary.sentinel++;
           summary.updated++;
           continue;
         }
@@ -594,31 +597,30 @@ async function processDdbTable(
             new UpdateCommand({
               TableName: tableName,
               Key: { [pkName]: id },
-              UpdateExpression:
-                'SET #orgId = :orgId, #updatedAt = :updatedAt',
+              UpdateExpression: "SET #orgId = :orgId, #updatedAt = :updatedAt",
               ExpressionAttributeNames: {
-                '#orgId': 'orgId',
-                '#updatedAt': 'updatedAt',
+                "#orgId": "orgId",
+                "#updatedAt": "updatedAt",
               },
               ExpressionAttributeValues: {
-                ':orgId': orgId,
-                ':updatedAt': new Date().toISOString(),
+                ":orgId": orgId,
+                ":updatedAt": new Date().toISOString(),
               },
-              ReturnValues: 'UPDATED_NEW',
+              ReturnValues: "UPDATED_NEW",
             }),
           );
           summary.updated++;
-          if (source === 'sentinel') summary.sentinel++;
+          if (source === "sentinel") summary.sentinel++;
         } catch (err) {
           log(
-            'error',
+            "error",
             `[${kind}] recordId=${id} DDB write failed: ${String(err)}`,
           );
           summary.errors++;
         }
       } catch (err) {
         log(
-          'error',
+          "error",
           `[${kind}] recordId=${id} unexpected error: ${String(err)}`,
         );
         summary.errors++;
@@ -641,7 +643,7 @@ async function processDdbTable(
  */
 export async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const apply = args.includes('--apply');
+  const apply = args.includes("--apply");
   const dryRun = !apply;
 
   // Auto-load env vars from cdk-outputs.json + backend/.env when not already
@@ -651,45 +653,43 @@ export async function main(): Promise<void> {
 
   const registryId = process.env.REGISTRY_ID;
   const userPoolId = process.env.USER_POOL_ID;
-  const region = process.env.AWS_REGION || 'us-west-2';
+  const region = process.env.AWS_REGION || "us-west-2";
   const agentTable = process.env.AGENT_CONFIG_TABLE;
   const toolTable = process.env.TOOL_CONFIG_TABLE;
 
-  if (!registryId) throw new Error('REGISTRY_ID env var required');
-  if (!userPoolId) throw new Error('USER_POOL_ID env var required');
-  if (!agentTable) throw new Error('AGENT_CONFIG_TABLE env var required');
-  if (!toolTable) throw new Error('TOOL_CONFIG_TABLE env var required');
+  if (!registryId) throw new Error("REGISTRY_ID env var required");
+  if (!userPoolId) throw new Error("USER_POOL_ID env var required");
+  if (!agentTable) throw new Error("AGENT_CONFIG_TABLE env var required");
+  if (!toolTable) throw new Error("TOOL_CONFIG_TABLE env var required");
 
-  log('info', `Mode: ${dryRun ? 'DRY-RUN' : 'APPLY'}`);
+  log("info", `Mode: ${dryRun ? "DRY-RUN" : "APPLY"}`);
   log(
-    'info',
+    "info",
     `REGISTRY_ID=${registryId} USER_POOL_ID=${userPoolId} REGION=${region}`,
   );
   log(
-    'info',
+    "info",
     `AGENT_CONFIG_TABLE=${agentTable} TOOL_CONFIG_TABLE=${toolTable}`,
   );
 
   const registry = new RegistryService({ registryId, region });
   const cognito = new CognitoIdentityProviderClient({ region });
-  const docClient = DynamoDBDocumentClient.from(
-    new DynamoDBClient({ region }),
-  );
+  const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
   const totals = emptySummary();
 
   addSummary(
     totals,
-    await processRegistry('agent', registry, cognito, userPoolId, apply),
+    await processRegistry("agent", registry, cognito, userPoolId, apply),
   );
   addSummary(
     totals,
-    await processRegistry('tool', registry, cognito, userPoolId, apply),
+    await processRegistry("tool", registry, cognito, userPoolId, apply),
   );
   addSummary(
     totals,
     await processDdbTable(
-      'agent',
+      "agent",
       agentTable,
       docClient,
       cognito,
@@ -700,7 +700,7 @@ export async function main(): Promise<void> {
   addSummary(
     totals,
     await processDdbTable(
-      'tool',
+      "tool",
       toolTable,
       docClient,
       cognito,
@@ -709,18 +709,35 @@ export async function main(): Promise<void> {
     ),
   );
 
-  log('info', '--- Backfill summary ---');
-  log('info', `mode:              ${dryRun ? 'dry-run' : 'apply'}`);
-  log('info', `scanned:           ${totals.scanned}`);
-  log('info', `updated:           ${totals.updated}`);
-  log('info', `sentinel-assigned: ${totals.sentinel}`);
-  log('info', `already-populated: ${totals.alreadyPopulated}`);
-  log('info', `errors:            ${totals.errors}`);
+  log("info", "--- Backfill summary ---");
+  log("info", `mode:              ${dryRun ? "dry-run" : "apply"}`);
+  log("info", `scanned:           ${totals.scanned}`);
+  log("info", `updated:           ${totals.updated}`);
+  log("info", `sentinel-assigned: ${totals.sentinel}`);
+  log("info", `already-populated: ${totals.alreadyPopulated}`);
+  log("info", `errors:            ${totals.errors}`);
 }
 
-if (require.main === module) {
+/**
+ * Entry-point guard that works under BOTH module systems this script is
+ * actually invoked with:
+ *   - ts-node / ts-jest, where the file is transpiled to CommonJS and
+ *     `require`/`module` exist — checked via `require.main === module`.
+ *   - Node's native TypeScript execution (Node 23+, strips types and runs
+ *     the file as ESM), where `require` is undefined — detected via
+ *     `typeof require === "undefined"` and treated as "this file is the
+ *     entrypoint" because these scripts are never imported by another ESM
+ *     module, only executed directly or required by CJS tests.
+ * `typeof require` (rather than a bare `require` reference) avoids a
+ * ReferenceError under ESM, where the identifier doesn't exist at all.
+ */
+const isCjsEntrypoint =
+  typeof require !== "undefined" && require.main === module;
+const isEsmEntrypoint = typeof require === "undefined";
+
+if (isCjsEntrypoint || isEsmEntrypoint) {
   main().catch((err) => {
-    log('error', `Fatal: ${String(err)}`);
+    log("error", `Fatal: ${String(err)}`);
     process.exit(1);
   });
 }

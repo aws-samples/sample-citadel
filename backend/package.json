@@ -23,7 +23,9 @@
     "deploy:all": "./scripts/deploy.sh --all",
     "deploy:quick": "npm run build && cdk deploy BackendStack",
     "nag": "cdk synth --all --quiet",
-    "split:gates": "bash scripts/split-gates.sh"
+    "split:gates": "bash scripts/split-gates.sh",
+    "backfill:org-ids": "ts-node scripts/backfill-org-ids.ts",
+    "backfill:org-name-reservations": "ts-node scripts/backfill-org-name-reservations.ts"
   },
   "dependencies": {
     "@aws-cdk/aws-bedrock-agentcore-alpha": "2.222.0-alpha.0",
