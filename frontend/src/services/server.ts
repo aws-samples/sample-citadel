@@ -49,12 +49,46 @@ interface SignInParams {
   password: string;
 }
 
+/**
+ * Amplify authorization-header override for AppSync (finding c7beb960).
+ *
+ * Amplify v6's default `userPool` auth mode sends Cognito's ACCESS token
+ * on every AppSync request (query, mutation, AND subscription — this
+ * header function is invoked uniformly by the client for all three). The
+ * backend's pre-token-generation trigger only decorates the ID token with
+ * `custom:organization` (`claimsOverrideDetails` targets ID-token claims
+ * only), so an access-token-authenticated request always arrives at
+ * `extractOrgFromEvent` with no `custom:organization` claim — every
+ * non-admin org gate fails closed, and admins pass only because
+ * `isAdminFromEvent`/`cognito:groups` happens to be present on both token
+ * types.
+ *
+ * Fix: explicitly fetch the current session's ID token and set it as the
+ * `Authorization` header, overriding Amplify's default access-token
+ * selection. `fetchAuthSession()` transparently refreshes an expired
+ * session, so this stays correct across the token lifetime.
+ *
+ * Falls back to no override (Amplify's default access-token behavior) if
+ * no session exists (e.g. unauthenticated API-key-mode requests) — Amplify
+ * ignores an empty Authorization header value for those callers.
+ */
+async function withIdTokenHeader(): Promise<Record<string, string>> {
+  try {
+    const session = await fetchAuthSession();
+    const idToken = session.tokens?.idToken?.toString();
+    return idToken ? { Authorization: idToken } : {};
+  } catch (error) {
+    console.warn("withIdTokenHeader: failed to fetch auth session:", error);
+    return {};
+  }
+}
+
 class ServerService {
   private client: any;
   private config: AmplifyConfig | null = null;
 
   constructor() {
-    this.client = generateClient();
+    this.client = generateClient({ headers: withIdTokenHeader });
   }
 
   /**
@@ -345,5 +379,5 @@ class ServerService {
 const serverService = new ServerService();
 
 export default serverService;
-export { ServerService };
+export { ServerService, withIdTokenHeader };
 export type { AmplifyConfig, SignUpParams, SignInParams, ResetPasswordOutput };
