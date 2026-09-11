@@ -1,6 +1,13 @@
 import { generateClient } from 'aws-amplify/api';
+import { withIdTokenHeader } from './server';
 
-const client = generateClient();
+// finding c7beb960: without this header override, Amplify's default
+// userPool auth mode sends the ACCESS token, which never carries
+// custom:organization (see server.ts's withIdTokenHeader for the full
+// explanation). This client is used for both queries/mutations and any
+// subscriptions issued through it, so the override must live here at
+// construction time rather than per-call.
+const client = generateClient({ headers: withIdTokenHeader });
 
 export interface Integration {
   integrationId: string;

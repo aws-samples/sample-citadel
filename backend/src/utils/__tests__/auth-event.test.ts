@@ -402,4 +402,78 @@ describe("auth-event", () => {
       );
     });
   });
+
+  // Regression coverage for finding c7beb960 (high): the frontend switched
+  // from sending the access token to the ID token on AppSync requests,
+  // because the pre-token-generation trigger's claimsOverrideDetails only
+  // decorates the ID token with custom:organization. These tests pin the
+  // claims shape AppSync produces from an ID token (as opposed to the
+  // access-token shape that was silently reaching this code before the
+  // fix) so a future regression back to access-token claims is caught here
+  // rather than only in production CloudWatch logs.
+  describe("finding c7beb960: ID-token-shaped claims", () => {
+    test("extractOrgFromEvent resolves custom:organization from an ID-token-shaped identity (token_use='id')", async () => {
+      const idTokenEvent = {
+        identity: {
+          sub: "user-123",
+          username: "user-123",
+          token_use: "id",
+          "custom:organization": "Acme Corp",
+          "cognito:groups": ["admin"],
+        },
+      };
+
+      const result = await extractOrgFromEvent(idTokenEvent);
+
+      expect(result).toBe("Acme Corp");
+      expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
+    });
+
+    test("extractOrgFromEvent returns null for an access-token-shaped identity lacking custom:organization (documents the bug this fix prevents)", async () => {
+      // An access token never carries custom:organization — this is the
+      // exact shape that reached extractOrgFromEvent for every caller
+      // before the frontend was switched to send the ID token. Without a
+      // resolvable USER_POOL_ID fallback match, this must resolve to null
+      // (fail closed), not silently succeed.
+      const accessTokenEvent = {
+        identity: {
+          sub: "user-123",
+          username: "user-123",
+          token_use: "access",
+          scope: "aws.cognito.signin.user.admin",
+          client_id: "abc123clientid",
+          "cognito:groups": ["admin"],
+        },
+      };
+      cognitoMock.rejects(new Error("user not found"));
+
+      const result = await extractOrgFromEvent(accessTokenEvent);
+
+      expect(result).toBeNull();
+    });
+
+    test("isAdminFromEvent resolves identically for ID-token-shaped and access-token-shaped identities (cognito:groups is present on both)", () => {
+      const idTokenEvent = {
+        identity: { token_use: "id", "cognito:groups": ["admin"] },
+      };
+      const accessTokenEvent = {
+        identity: { token_use: "access", "cognito:groups": ["admin"] },
+      };
+
+      expect(isAdminFromEvent(idTokenEvent)).toBe(true);
+      expect(isAdminFromEvent(accessTokenEvent)).toBe(true);
+    });
+
+    test("deriveRoles resolves identically for ID-token-shaped and access-token-shaped admin identities", () => {
+      const idTokenEvent = {
+        identity: { token_use: "id", "cognito:groups": ["admin"] },
+      };
+      const accessTokenEvent = {
+        identity: { token_use: "access", "cognito:groups": ["admin"] },
+      };
+
+      expect(deriveRoles(idTokenEvent)).toEqual(["admin"]);
+      expect(deriveRoles(accessTokenEvent)).toEqual(["admin"]);
+    });
+  });
 });
