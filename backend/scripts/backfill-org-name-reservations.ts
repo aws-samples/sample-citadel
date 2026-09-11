@@ -329,7 +329,24 @@ export async function main(): Promise<void> {
   }
 }
 
-if (require.main === module) {
+/**
+ * Entry-point guard that works under BOTH module systems this script is
+ * actually invoked with:
+ *   - ts-node / ts-jest, where the file is transpiled to CommonJS and
+ *     `require`/`module` exist — checked via `require.main === module`.
+ *   - Node's native TypeScript execution (Node 23+, strips types and runs
+ *     the file as ESM), where `require` is undefined — detected via
+ *     `typeof require === "undefined"` and treated as "this file is the
+ *     entrypoint" because these scripts are never imported by another ESM
+ *     module, only executed directly or required by CJS tests.
+ * `typeof require` (rather than a bare `require` reference) avoids a
+ * ReferenceError under ESM, where the identifier doesn't exist at all.
+ */
+const isCjsEntrypoint =
+  typeof require !== "undefined" && require.main === module;
+const isEsmEntrypoint = typeof require === "undefined";
+
+if (isCjsEntrypoint || isEsmEntrypoint) {
   main().catch((err) => {
     log("error", `Fatal: ${String(err)}`);
     process.exit(1);
