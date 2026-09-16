@@ -5,18 +5,23 @@
  * Uses aws-sdk-client-mock for SQS + DynamoDB, matching the style of the
  * existing fabricator-request-resolver.test.ts file.
  */
-import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
-import { mockClient } from 'aws-sdk-client-mock';
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
 
 const sqsMock = mockClient(SQSClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
-import { handler } from '../fabricator-request-resolver';
+import { handler } from "../fabricator-request-resolver";
 
 const makeEvent = (fieldName: string, args: Record<string, unknown>) => ({
   info: { fieldName },
   arguments: args,
+  // Tenancy fail-closed (design evidence, section C): the resolver now
+  // derives org via requireOrgId before any dispatch, so every fixture in
+  // this file must carry a resolvable caller org to reach the
+  // sourceProjectId-propagation behaviour under test.
+  identity: { sub: "user-123", "custom:organization": "org-caller" },
 });
 
 function parsePayload() {
@@ -25,16 +30,17 @@ function parsePayload() {
   return JSON.parse(calls[0].args[0].input.MessageBody!);
 }
 
-describe('fabricator-request-resolver — sourceProjectId propagation (US-ARB-017)', () => {
+describe("fabricator-request-resolver — sourceProjectId propagation (US-ARB-017)", () => {
   let warnSpy: jest.SpyInstance;
 
   beforeEach(() => {
     sqsMock.reset();
     ddbMock.reset();
-    process.env.FABRICATOR_QUEUE_URL = 'https://sqs.us-west-2.amazonaws.com/123/test-queue';
-    process.env.APPS_TABLE = 'citadel-apps-test';
+    process.env.FABRICATOR_QUEUE_URL =
+      "https://sqs.us-west-2.amazonaws.com/123/test-queue";
+    process.env.APPS_TABLE = "citadel-apps-test";
     sqsMock.on(SendMessageCommand).resolves({});
-    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
   });
 
   afterEach(() => {
@@ -43,116 +49,117 @@ describe('fabricator-request-resolver — sourceProjectId propagation (US-ARB-01
     warnSpy.mockRestore();
   });
 
-  test('agent creation for app with sourceProjectId → payload includes projectId', async () => {
+  test("agent creation for app with sourceProjectId → payload includes projectId", async () => {
     ddbMock.on(GetCommand).resolves({
-      Item: { appId: 'app-1', sourceProjectId: 'proj-1' },
+      Item: { appId: "app-1", sourceProjectId: "proj-1" },
     });
 
     const result = await handler(
-      makeEvent('requestAgentCreation', {
+      makeEvent("requestAgentCreation", {
         input: {
-          agentName: 'GovernedAgent',
-          taskDescription: 'Build me',
-          appId: 'app-1',
+          agentName: "GovernedAgent",
+          taskDescription: "Build me",
+          appId: "app-1",
         },
       }),
     );
 
     expect(result.success).toBe(true);
     const body = parsePayload();
-    expect(body.node).toBe('fabricator');
-    expect(body.agent_input.projectId).toBe('proj-1');
-    expect(body.agent_input.taskDetails).toContain('GovernedAgent');
+    expect(body.node).toBe("fabricator");
+    expect(body.agent_input.projectId).toBe("proj-1");
+    expect(body.agent_input.taskDetails).toContain("GovernedAgent");
 
     const getCalls = ddbMock.commandCalls(GetCommand);
     expect(getCalls).toHaveLength(1);
-    expect(getCalls[0].args[0].input.Key).toEqual({ appId: 'app-1' });
+    expect(getCalls[0].args[0].input.Key).toEqual({ appId: "app-1" });
   });
 
-  test('agent creation for app WITHOUT sourceProjectId → payload has no projectId', async () => {
+  test("agent creation for app WITHOUT sourceProjectId → payload has no projectId", async () => {
     ddbMock.on(GetCommand).resolves({
-      Item: { appId: 'app-1' }, // no sourceProjectId attribute
+      Item: { appId: "app-1" }, // no sourceProjectId attribute
     });
 
     await handler(
-      makeEvent('requestAgentCreation', {
+      makeEvent("requestAgentCreation", {
         input: {
-          agentName: 'UngovernedAgent',
-          taskDescription: 'Build me',
-          appId: 'app-1',
+          agentName: "UngovernedAgent",
+          taskDescription: "Build me",
+          appId: "app-1",
         },
       }),
     );
 
     const body = parsePayload();
-    expect(body.agent_input).not.toHaveProperty('projectId');
-    expect(body.agent_input.taskDetails).toContain('UngovernedAgent');
+    expect(body.agent_input).not.toHaveProperty("projectId");
+    expect(body.agent_input.taskDetails).toContain("UngovernedAgent");
   });
 
-  test('agent creation without appId → payload has no projectId and no DDB lookup', async () => {
+  test("agent creation without appId → payload has no projectId and no DDB lookup", async () => {
     await handler(
-      makeEvent('requestAgentCreation', {
+      makeEvent("requestAgentCreation", {
         input: {
-          agentName: 'StandaloneAgent',
-          taskDescription: 'Build me',
+          agentName: "StandaloneAgent",
+          taskDescription: "Build me",
           // no appId
         },
       }),
     );
 
     const body = parsePayload();
-    expect(body.agent_input).not.toHaveProperty('projectId');
+    expect(body.agent_input).not.toHaveProperty("projectId");
     // When appId is absent we must not hit DynamoDB at all.
     expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
   });
 
-  test('DDB GetItem failure → payload has no projectId and WARN is logged', async () => {
-    const boom = new Error('Simulated DynamoDB network failure');
+  test("DDB GetItem failure → payload has no projectId and WARN is logged", async () => {
+    const boom = new Error("Simulated DynamoDB network failure");
     ddbMock.on(GetCommand).rejects(boom);
 
     // Must not throw — the fabricator request must still succeed in degraded mode.
     const result = await handler(
-      makeEvent('requestAgentCreation', {
+      makeEvent("requestAgentCreation", {
         input: {
-          agentName: 'ResilientAgent',
-          taskDescription: 'Build me',
-          appId: 'app-err',
+          agentName: "ResilientAgent",
+          taskDescription: "Build me",
+          appId: "app-err",
         },
       }),
     );
 
     expect(result.success).toBe(true);
     const body = parsePayload();
-    expect(body.agent_input).not.toHaveProperty('projectId');
+    expect(body.agent_input).not.toHaveProperty("projectId");
 
     // A warning was produced to document the degraded lookup.
-    const warnedDegradedLookup = warnSpy.mock.calls.some(callArgs =>
+    const warnedDegradedLookup = warnSpy.mock.calls.some((callArgs) =>
       callArgs.some(
         (arg: unknown) =>
-          typeof arg === 'string' && arg.includes('Failed to look up sourceProjectId'),
+          typeof arg === "string" &&
+          arg.includes("Failed to look up sourceProjectId"),
       ),
     );
     expect(warnedDegradedLookup).toBe(true);
   });
 
-  test('tool creation forwards projectId when app has sourceProjectId', async () => {
+  test("tool creation forwards projectId when app has sourceProjectId", async () => {
     ddbMock.on(GetCommand).resolves({
-      Item: { appId: 'app-2', sourceProjectId: 'proj-xyz' },
+      Item: { appId: "app-2", sourceProjectId: "proj-xyz" },
     });
 
     await handler(
-      makeEvent('requestToolCreation', {
+      makeEvent("requestToolCreation", {
         input: {
-          toolName: 'MyTool',
-          toolDescription: 'A tool',
-          appId: 'app-2',
+          toolName: "MyTool",
+          toolDescription: "A tool",
+          appId: "app-2",
         },
       }),
     );
 
     const body = parsePayload();
-    expect(body.agent_input.projectId).toBe('proj-xyz');
-    expect(body.agent_input.taskDetails).toContain('MyTool');
+    expect(body.agent_input.projectId).toBe("proj-xyz");
+    expect(body.agent_input.taskDetails).toContain("MyTool");
   });
 });
 
@@ -170,17 +177,19 @@ describe('fabricator-request-resolver — sourceProjectId propagation (US-ARB-01
 // for assertion only, mirroring the file-private copy inside the resolver.
 // ---------------------------------------------------------------------------
 
-import type { RegistryRecord } from '../../services/registry-service';
+import type { RegistryRecord } from "../../services/registry-service";
 
-function projectIdFromRegistryRecord(record: RegistryRecord): string | undefined {
+function projectIdFromRegistryRecord(
+  record: RegistryRecord,
+): string | undefined {
   if (!record.customDescriptorContent) return undefined;
   try {
     const parsed = JSON.parse(record.customDescriptorContent);
     if (
       parsed &&
-      typeof parsed === 'object' &&
+      typeof parsed === "object" &&
       !Array.isArray(parsed) &&
-      typeof parsed.sourceProjectId === 'string'
+      typeof parsed.sourceProjectId === "string"
     ) {
       return parsed.sourceProjectId;
     }
@@ -190,46 +199,46 @@ function projectIdFromRegistryRecord(record: RegistryRecord): string | undefined
   return undefined;
 }
 
-describe('projectIdFromRegistryRecord (inlined helper — PR 6a)', () => {
-  test('returns undefined when customDescriptorContent is absent', () => {
+describe("projectIdFromRegistryRecord (inlined helper — PR 6a)", () => {
+  test("returns undefined when customDescriptorContent is absent", () => {
     const record: RegistryRecord = {
-      recordId: 'r',
-      name: 'n',
-      status: 'DRAFT',
+      recordId: "r",
+      name: "n",
+      status: "DRAFT",
     };
     expect(projectIdFromRegistryRecord(record)).toBeUndefined();
   });
 
-  test('returns undefined when sourceProjectId is missing from metadata', () => {
+  test("returns undefined when sourceProjectId is missing from metadata", () => {
     const record: RegistryRecord = {
-      recordId: 'r',
-      name: 'n',
-      status: 'DRAFT',
+      recordId: "r",
+      name: "n",
+      status: "DRAFT",
       customDescriptorContent: JSON.stringify({
         categories: [],
-        icon: '',
-        state: 'active',
+        icon: "",
+        state: "active",
       }),
     };
     expect(projectIdFromRegistryRecord(record)).toBeUndefined();
   });
 
-  test('returns the sourceProjectId string when present', () => {
+  test("returns the sourceProjectId string when present", () => {
     const record: RegistryRecord = {
-      recordId: 'r',
-      name: 'n',
-      status: 'DRAFT',
-      customDescriptorContent: JSON.stringify({ sourceProjectId: 'proj-99' }),
+      recordId: "r",
+      name: "n",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({ sourceProjectId: "proj-99" }),
     };
-    expect(projectIdFromRegistryRecord(record)).toBe('proj-99');
+    expect(projectIdFromRegistryRecord(record)).toBe("proj-99");
   });
 
-  test('returns undefined on malformed JSON rather than throwing', () => {
+  test("returns undefined on malformed JSON rather than throwing", () => {
     const record: RegistryRecord = {
-      recordId: 'r',
-      name: 'n',
-      status: 'DRAFT',
-      customDescriptorContent: 'definitely not json',
+      recordId: "r",
+      name: "n",
+      status: "DRAFT",
+      customDescriptorContent: "definitely not json",
     };
     expect(() => projectIdFromRegistryRecord(record)).not.toThrow();
     expect(projectIdFromRegistryRecord(record)).toBeUndefined();

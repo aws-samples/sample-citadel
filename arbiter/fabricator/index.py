@@ -2114,10 +2114,26 @@ def process_event(event, context, request_type=None):
     orchestration_id = event.get("orchestration_id", "0")
     agent_use_id = event.get("agent_use_id", "unknown")
     requested_by = event.get("requested_by") or "fabricator"
-    # Phase 2b: caller's org, stamped into registry custom metadata so
-    # registry-service can scope reads. '' mirrors the resolver's defensive
-    # null fallback so absent-org events still fabricate rather than block.
+    # Tenancy fail-closed (design evidence, section C): org_id is now
+    # REQUIRED and must be non-empty for every agent-creation/tool-creation
+    # (and legacy direct, request_type=None) message. The TS resolver
+    # (fabricator-request-resolver.ts) always stamps a server-derived,
+    # non-null org_id via requireOrgId before enqueueing -- a missing/empty
+    # org_id here means either a pre-migration message or a bypass of that
+    # resolver, and must be refused rather than silently fabricated without
+    # tenancy. Refuse = log at ERROR, do NOT process, do NOT create any
+    # registry/status records, and do NOT raise (safe no-op, mirrors the
+    # unrecognised-requestType poison-queue defence above: a raise would
+    # nack the SQS message and retry the poison forever).
     org_id = event.get("org_id") or ""
+    if not org_id:
+        logger.error(
+            "process_event: refusing message with missing/empty org_id "
+            "(orchestration_id=%s, agent_use_id=%s, requestType=%r) -- "
+            "no organization is provisioned for this request",
+            orchestration_id, agent_use_id, request_type,
+        )
+        return
     request = event.get("agent_input", {})
     agent_name = event.get('node', 'fabricator')
     agent_index = event.get("agent_index", 0)
