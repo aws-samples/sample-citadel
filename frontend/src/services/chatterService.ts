@@ -12,9 +12,13 @@ import { EVENT_TYPES, ChatterEvent } from './eventTypes';
 export type ChatterMessage = ChatterEvent;
 
 // GraphQL Subscription
+// orgId is required by the backend schema (onChatter(orgId: ID!)) and is
+// authorized against the caller's own custom:organization claim (admins
+// may pass any org). Callers must supply the caller's own organisation —
+// never a hardcoded value or the org-selector's filter scope.
 const onChatterSubscription = `
-  subscription OnChatter {
-    onChatter {
+  subscription OnChatter($orgId: ID!) {
+    onChatter(orgId: $orgId) {
       id
       timestamp
       source
@@ -24,23 +28,32 @@ const onChatterSubscription = `
   }
 `;
 
-// Track if backend subscription has been initialized
-let isInitialized = false;
+// Track which orgId the backend subscription was last initialized for, so a
+// change in orgId (e.g. user/session switch) can be detected and the stale
+// backend subscription torn down first. subscriptionManager itself already
+// guards against redundant re-initialization for the *same* orgId (see its
+// own isActive check), so this flag is only consulted for org changes.
+let initializedOrgId: string | null = null;
 
 /**
- * Initialize the backend subscription for chatter events
- * This is called once on the first local subscription
+ * Initialize the backend subscription for chatter events for the given
+ * organisation. Safe to call repeatedly — subscriptionManager no-ops if a
+ * subscription for the same orgId is already active. If a subscription is
+ * active for a *different* orgId, it is torn down first.
  */
-function initializeChatterSubscription(): void {
-  if (isInitialized) {
-    return;
+function initializeChatterSubscription(orgId: string): void {
+  if (initializedOrgId !== null && initializedOrgId !== orgId) {
+    // orgId changed (e.g. user/session switch) — tear down the stale
+    // backend subscription before creating one scoped to the new org.
+    subscriptionManager.cleanupSubscription(EVENT_TYPES.CHATTER);
   }
 
-  // Initialize backend subscription through SubscriptionManager
+  // Initialize backend subscription through SubscriptionManager. This is a
+  // no-op if a subscription for this orgId is already active.
   subscriptionManager.initializeSubscription(
     EVENT_TYPES.CHATTER,
     onChatterSubscription,
-    {}, // No variables needed for chatter subscription
+    { orgId },
     (data: any) => {
       // Transform backend data to ChatterEvent format
       if (data?.onChatter) {
@@ -50,21 +63,33 @@ function initializeChatterSubscription(): void {
     }
   );
 
-  isInitialized = true;
+  initializedOrgId = orgId;
 }
 
 /**
  * Subscribe to chatter messages
  * Returns an unsubscribe function
- * 
+ *
  * This function maintains backward compatibility with the previous API
  * while using the new event bus architecture internally.
+ *
+ * @param onMessage callback invoked with each chatter message
+ * @param orgId the caller's own organisation (from OrganizationContext /
+ *   getCurrentUserProfile — never a hardcoded placeholder, never the
+ *   org-selector filter value for non-admins). When falsy, no backend
+ *   subscription is created and the returned unsubscribe is a no-op.
  */
 export function subscribeToChatter(
-  onMessage: (message: ChatterMessage) => void
+  onMessage: (message: ChatterMessage) => void,
+  orgId?: string | null
 ): () => void {
+  if (!orgId) {
+    // No organisation available for this caller yet — do not subscribe.
+    return () => {};
+  }
+
   // Initialize backend subscription if needed
-  initializeChatterSubscription();
+  initializeChatterSubscription(orgId);
 
   // Add local subscriber to reference count
   subscriptionManager.addLocalSubscriber(EVENT_TYPES.CHATTER);
