@@ -297,6 +297,7 @@ class TestProcessAgentCallThreadsForbiddenToolsToWorkerDispatch:
         }
         orchestration = {
             "orchestrationId": "orch-1",
+            "orgId": "org-test",
             "evalRunId": "eval-run-7",
             "evalContext": True,
             "forbiddenTools": ["shell", "network"],
@@ -325,7 +326,7 @@ class TestProcessAgentCallThreadsForbiddenToolsToWorkerDispatch:
                 "action": {"type": "sqs", "target": "https://sqs.fake/q"},
             }]
         }
-        orchestration = {"orchestrationId": "orch-2"}
+        orchestration = {"orchestrationId": "orch-2", "orgId": "org-test"}
 
         with patch.object(index, "sqs") as mock_sqs, \
              patch.object(index, "EVENT_BUS_NAME", None):

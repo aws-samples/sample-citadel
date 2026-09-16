@@ -4,6 +4,8 @@
  * event, unsubscribes on unmount, and shows loading/empty states.
  *
  * The fabricator queue service is fully mocked; no network is hit.
+ * OrganizationContext is mocked so `useOrganization()` resolves without a
+ * real provider — tests control the caller's organisation directly.
  *
  * NOTE: requires the jsdom test environment. If `jest-environment-jsdom` is
  * not installed locally these component tests cannot execute — see the task
@@ -36,6 +38,12 @@ jest.mock('sonner', () => ({
   },
 }));
 
+const mockUseOrganization = jest.fn();
+jest.mock('../../contexts/OrganizationContext', () => ({
+  __esModule: true,
+  useOrganization: () => mockUseOrganization(),
+}));
+
 import {
   getFabricatorQueue,
   subscribeToFabricationEvents,
@@ -51,6 +59,19 @@ const mockSubscribe = subscribeToFabricationEvents as jest.MockedFunction<typeof
 const mockActivate = agentConfigService.activateProjectAgents as jest.MockedFunction<
   typeof agentConfigService.activateProjectAgents
 >;
+
+const CALLER_ORG_ID = 'org-caller-1';
+
+function withCallerOrg(organization: string | null = CALLER_ORG_ID) {
+  mockUseOrganization.mockReturnValue({
+    currentUser: organization ? { organization } : null,
+    selectedOrganization: null,
+    setSelectedOrganization: jest.fn(),
+    organizations: [],
+    isAdmin: false,
+    loading: false,
+  });
+}
 
 const COMPLETED_ITEMS: FabricationQueueItem[] = [
   {
@@ -91,11 +112,41 @@ describe('FabricationStatusPanel', () => {
     mockGetQueue.mockReset();
     mockSubscribe.mockReset();
     mockActivate.mockReset();
+    mockUseOrganization.mockReset();
     (toast.success as jest.Mock).mockReset();
     (toast.warning as jest.Mock).mockReset();
     (toast.error as jest.Mock).mockReset();
-    // Default: a no-op unsubscribe.
+    // Default: a no-op unsubscribe, caller has an organisation.
     mockSubscribe.mockReturnValue(() => {});
+    withCallerOrg();
+  });
+
+  describe('organisation-scoped subscription', () => {
+    it('subscribes with the caller\'s own organisation', async () => {
+      mockGetQueue.mockResolvedValue([]);
+      render(<FabricationStatusPanel projectId="proj-1" phaseActive />);
+      await waitFor(() =>
+        expect(mockSubscribe).toHaveBeenCalledWith(expect.any(Function), CALLER_ORG_ID),
+      );
+    });
+
+    it('does not subscribe when no organisation is available', async () => {
+      withCallerOrg(null);
+      mockGetQueue.mockResolvedValue([]);
+      render(<FabricationStatusPanel projectId="proj-1" phaseActive />);
+      await waitFor(() => expect(mockGetQueue).toHaveBeenCalled());
+      expect(mockSubscribe).not.toHaveBeenCalled();
+    });
+
+    it('shows a non-alarming empty state when no organisation is available', async () => {
+      withCallerOrg(null);
+      mockGetQueue.mockResolvedValue([]);
+      render(<FabricationStatusPanel projectId="proj-1" phaseActive />);
+      expect(
+        await screen.findByText(/live fabrication updates aren't available/i),
+      ).toBeInTheDocument();
+      expect(toast.error).not.toHaveBeenCalled();
+    });
   });
 
   it('passes the projectId to getFabricatorQueue', async () => {

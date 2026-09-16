@@ -8,6 +8,10 @@ import { eventBus } from '../eventBus';
 import { subscriptionManager } from '../subscriptionManager';
 import { EVENT_TYPES } from '../eventTypes';
 
+// The backend authorizes onChatter(orgId) against the caller's own
+// custom:organization claim; tests supply a stable stand-in org id.
+const TEST_ORG_ID = 'org-test-1';
+
 describe('ChatterService', () => {
   beforeEach(() => {
     // Clear event bus before each test
@@ -25,7 +29,7 @@ describe('ChatterService', () => {
   describe('subscribeToChatter', () => {
     it('should return an unsubscribe function', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToChatter(callback);
+      const unsubscribe = subscribeToChatter(callback, TEST_ORG_ID);
       
       expect(typeof unsubscribe).toBe('function');
       
@@ -34,7 +38,7 @@ describe('ChatterService', () => {
 
     it('should register callback with event bus', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToChatter(callback);
+      const unsubscribe = subscribeToChatter(callback, TEST_ORG_ID);
       
       // Check that subscriber was added
       expect(eventBus.getSubscriberCount(EVENT_TYPES.CHATTER)).toBe(1);
@@ -44,7 +48,7 @@ describe('ChatterService', () => {
 
     it('should receive messages through event bus', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToChatter(callback);
+      const unsubscribe = subscribeToChatter(callback, TEST_ORG_ID);
       
       const testMessage: ChatterMessage = {
         id: 'test-1',
@@ -66,7 +70,7 @@ describe('ChatterService', () => {
 
     it('should unsubscribe from event bus when unsubscribe is called', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToChatter(callback);
+      const unsubscribe = subscribeToChatter(callback, TEST_ORG_ID);
       
       expect(eventBus.getSubscriberCount(EVENT_TYPES.CHATTER)).toBe(1);
       
@@ -80,9 +84,9 @@ describe('ChatterService', () => {
       const callback2 = jest.fn();
       const callback3 = jest.fn();
       
-      const unsubscribe1 = subscribeToChatter(callback1);
-      const unsubscribe2 = subscribeToChatter(callback2);
-      const unsubscribe3 = subscribeToChatter(callback3);
+      const unsubscribe1 = subscribeToChatter(callback1, TEST_ORG_ID);
+      const unsubscribe2 = subscribeToChatter(callback2, TEST_ORG_ID);
+      const unsubscribe3 = subscribeToChatter(callback3, TEST_ORG_ID);
       
       expect(eventBus.getSubscriberCount(EVENT_TYPES.CHATTER)).toBe(3);
       
@@ -115,7 +119,7 @@ describe('ChatterService', () => {
         expect(message).toHaveProperty('detail');
       };
       
-      const unsubscribe = subscribeToChatter(callback);
+      const unsubscribe = subscribeToChatter(callback, TEST_ORG_ID);
       
       const testMessage: ChatterMessage = {
         id: 'test-1',
@@ -135,7 +139,7 @@ describe('ChatterService', () => {
       
       // Subscribe and unsubscribe multiple times
       for (let i = 0; i < 5; i++) {
-        const unsubscribe = subscribeToChatter(callback);
+        const unsubscribe = subscribeToChatter(callback, TEST_ORG_ID);
         expect(eventBus.getSubscriberCount(EVENT_TYPES.CHATTER)).toBe(1);
         unsubscribe();
         expect(eventBus.getSubscriberCount(EVENT_TYPES.CHATTER)).toBe(0);
@@ -144,7 +148,7 @@ describe('ChatterService', () => {
 
     it('should not receive messages after unsubscribe', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToChatter(callback);
+      const unsubscribe = subscribeToChatter(callback, TEST_ORG_ID);
       
       const testMessage: ChatterMessage = {
         id: 'test-1',
@@ -166,6 +170,44 @@ describe('ChatterService', () => {
       
       // Should still be called only once (from before unsubscribe)
       expect(callback).toHaveBeenCalledTimes(1);
+    });
+
+    it('subscribes with the caller org and creates a backend subscription scoped to it', () => {
+      const callback = jest.fn();
+      const unsubscribe = subscribeToChatter(callback, TEST_ORG_ID);
+
+      const activeSubscriptions = subscriptionManager.getActiveSubscriptions();
+      expect(activeSubscriptions).toHaveLength(1);
+      expect(activeSubscriptions[0].eventType).toBe(EVENT_TYPES.CHATTER);
+
+      unsubscribe();
+    });
+
+    it('does not subscribe when orgId is missing (null)', () => {
+      const callback = jest.fn();
+      const unsubscribe = subscribeToChatter(callback, null);
+
+      expect(eventBus.getSubscriberCount(EVENT_TYPES.CHATTER)).toBe(0);
+      expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(0);
+
+      // Returned unsubscribe is a safe no-op.
+      expect(() => unsubscribe()).not.toThrow();
+    });
+
+    it('does not subscribe when orgId is missing (undefined)', () => {
+      const callback = jest.fn();
+      subscribeToChatter(callback);
+
+      expect(eventBus.getSubscriberCount(EVENT_TYPES.CHATTER)).toBe(0);
+      expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(0);
+    });
+
+    it('does not subscribe when orgId is an empty string', () => {
+      const callback = jest.fn();
+      subscribeToChatter(callback, '');
+
+      expect(eventBus.getSubscriberCount(EVENT_TYPES.CHATTER)).toBe(0);
+      expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(0);
     });
   });
 });

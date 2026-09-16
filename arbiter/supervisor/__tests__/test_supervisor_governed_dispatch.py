@@ -117,7 +117,7 @@ def _make_state(enforcement_mode: str = "shadow") -> MagicMock:
 
 
 _AGENTS_CONFIG = {"agents": [{"name": "agent-a", "domain": "billing"}]}
-_ORCH = {"orchestrationId": "orch-123"}
+_ORCH = {"orchestrationId": "orch-123", "orgId": "org-test"}
 
 
 # ---------------------------------------------------------------------------

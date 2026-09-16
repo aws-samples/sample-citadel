@@ -26,6 +26,10 @@ const SKIP_INTEGRATION_TESTS =
 // Integration test timeout (longer for real network operations)
 const INTEGRATION_TIMEOUT = 30000;
 
+// The backend authorizes onChatter(orgId) against the caller's own
+// custom:organization claim; tests supply a stable stand-in org id.
+const TEST_ORG_ID = 'org-test-1';
+
 describe('Integration Tests with Real AppSync', () => {
   // Skip all tests if integration tests are disabled or not configured
   if (SKIP_INTEGRATION_TESTS) {
@@ -66,7 +70,7 @@ describe('Integration Tests with Real AppSync', () => {
         // Subscribe to chatter
         const unsubscribe = subscribeToChatter((message) => {
           receivedMessages.push(message);
-        });
+        }, TEST_ORG_ID);
 
         // Verify backend subscription was created
         const activeSubscriptions = subscriptionManager.getActiveSubscriptions();
@@ -99,7 +103,7 @@ describe('Integration Tests with Real AppSync', () => {
         // Requirement 3.1: Service initializes backend subscription
 
         // Subscribe
-        const unsubscribe = subscribeToChatter(() => {});
+        const unsubscribe = subscribeToChatter(() => {}, TEST_ORG_ID);
 
         // Verify subscription is active
         expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(1);
@@ -133,15 +137,15 @@ describe('Integration Tests with Real AppSync', () => {
         // Simulate three components subscribing
         const unsubscribe1 = subscribeToChatter((message) => {
           component1Messages.push(message);
-        });
+        }, TEST_ORG_ID);
 
         const unsubscribe2 = subscribeToChatter((message) => {
           component2Messages.push(message);
-        });
+        }, TEST_ORG_ID);
 
         const unsubscribe3 = subscribeToChatter((message) => {
           component3Messages.push(message);
-        });
+        }, TEST_ORG_ID);
 
         // Verify only one backend connection exists
         const activeSubscriptions = subscriptionManager.getActiveSubscriptions();
@@ -173,9 +177,9 @@ describe('Integration Tests with Real AppSync', () => {
       async () => {
         // Requirement: Backend subscription receives data and emits to all local subscribers
 
-        const unsubscribe1 = subscribeToChatter(() => {});
-        const unsubscribe2 = subscribeToChatter(() => {});
-        const unsubscribe3 = subscribeToChatter(() => {});
+        const unsubscribe1 = subscribeToChatter(() => {}, TEST_ORG_ID);
+        const unsubscribe2 = subscribeToChatter(() => {}, TEST_ORG_ID);
+        const unsubscribe3 = subscribeToChatter(() => {}, TEST_ORG_ID);
 
         // Verify connection exists with 3 subscribers
         expect(subscriptionManager.getActiveSubscriptions()[0].subscriberCount).toBe(3);
@@ -219,7 +223,7 @@ describe('Integration Tests with Real AppSync', () => {
         // Requirement: Component re-subscribes to recently closed event type
 
         // Subscribe and immediately unsubscribe
-        const unsubscribe = subscribeToChatter(() => {});
+        const unsubscribe = subscribeToChatter(() => {}, TEST_ORG_ID);
         unsubscribe();
 
         // Connection should still exist during debounce
@@ -240,7 +244,7 @@ describe('Integration Tests with Real AppSync', () => {
         // Requirement: Component re-subscribes to recently closed event type
 
         // Subscribe and unsubscribe
-        const unsubscribe1 = subscribeToChatter(() => {});
+        const unsubscribe1 = subscribeToChatter(() => {}, TEST_ORG_ID);
         unsubscribe1();
 
         // Connection should still exist during debounce
@@ -250,7 +254,7 @@ describe('Integration Tests with Real AppSync', () => {
         await wait(500);
 
         // Subscribe again before cleanup
-        const unsubscribe2 = subscribeToChatter(() => {});
+        const unsubscribe2 = subscribeToChatter(() => {}, TEST_ORG_ID);
 
         // Wait past original cleanup time
         await wait(1000);
@@ -274,7 +278,7 @@ describe('Integration Tests with Real AppSync', () => {
 
         // Perform multiple rapid subscribe/unsubscribe cycles
         for (let i = 0; i < 5; i++) {
-          const unsubscribe = subscribeToChatter(() => {});
+          const unsubscribe = subscribeToChatter(() => {}, TEST_ORG_ID);
           await wait(100);
           unsubscribe();
           await wait(100);
@@ -300,7 +304,7 @@ describe('Integration Tests with Real AppSync', () => {
         // Requirement: Component re-subscribes to recently closed event type
 
         // First subscription
-        const unsubscribe1 = subscribeToChatter(() => {});
+        const unsubscribe1 = subscribeToChatter(() => {}, TEST_ORG_ID);
         expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(1);
 
         // Unsubscribe and wait for cleanup
@@ -309,7 +313,7 @@ describe('Integration Tests with Real AppSync', () => {
         expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(0);
 
         // Subscribe again (simulates reconnection)
-        const unsubscribe2 = subscribeToChatter(() => {});
+        const unsubscribe2 = subscribeToChatter(() => {}, TEST_ORG_ID);
 
         // Verify new connection was established
         expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(1);
@@ -336,7 +340,7 @@ describe('Integration Tests with Real AppSync', () => {
         });
 
         // Subscribe to chatter
-        const unsubscribe = subscribeToChatter(() => {});
+        const unsubscribe = subscribeToChatter(() => {}, TEST_ORG_ID);
 
         // Wait for potential errors (in a real test, you might simulate network failure)
         await wait(5000);
@@ -360,8 +364,8 @@ describe('Integration Tests with Real AppSync', () => {
         // Requirement: Component re-subscribes to recently closed event type
 
         // First connection with 2 subscribers
-        const unsubscribe1 = subscribeToChatter(() => {});
-        const unsubscribe2 = subscribeToChatter(() => {});
+        const unsubscribe1 = subscribeToChatter(() => {}, TEST_ORG_ID);
+        const unsubscribe2 = subscribeToChatter(() => {}, TEST_ORG_ID);
         expect(subscriptionManager.getActiveSubscriptions()[0].subscriberCount).toBe(2);
 
         // Unsubscribe all and wait for cleanup
@@ -371,9 +375,9 @@ describe('Integration Tests with Real AppSync', () => {
         expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(0);
 
         // Reconnect with 3 subscribers
-        const unsubscribe3 = subscribeToChatter(() => {});
-        const unsubscribe4 = subscribeToChatter(() => {});
-        const unsubscribe5 = subscribeToChatter(() => {});
+        const unsubscribe3 = subscribeToChatter(() => {}, TEST_ORG_ID);
+        const unsubscribe4 = subscribeToChatter(() => {}, TEST_ORG_ID);
+        const unsubscribe5 = subscribeToChatter(() => {}, TEST_ORG_ID);
 
         // Verify new connection has correct count
         expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(1);
@@ -402,11 +406,11 @@ describe('Integration Tests with Real AppSync', () => {
         // Subscribe through service (which uses event bus internally)
         const unsubscribe1 = subscribeToChatter((message) => {
           messages1.push(message);
-        });
+        }, TEST_ORG_ID);
 
         const unsubscribe2 = subscribeToChatter((message) => {
           messages2.push(message);
-        });
+        }, TEST_ORG_ID);
 
         // Verify event bus has subscribers
         expect(eventBus.getSubscriberCount('chatter')).toBe(2);
@@ -440,12 +444,12 @@ describe('Integration Tests with Real AppSync', () => {
         const unsubscribe1 = subscribeToChatter((message) => {
           messages1.push(message);
           throw new Error('Subscriber error');
-        });
+        }, TEST_ORG_ID);
 
         // Second subscriber works normally
         const unsubscribe2 = subscribeToChatter((message) => {
           messages2.push(message);
-        });
+        }, TEST_ORG_ID);
 
         // Wait for potential messages
         await wait(5000);

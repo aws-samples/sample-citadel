@@ -258,7 +258,7 @@ class TestSendResponse:
     def test_no_callback_uses_event_bus(self, message):
         """Without callback, sends to default EVENT_BUS_NAME."""
         _mock_events.reset_mock()
-        send_response(message, callback=None)
+        send_response(message, callback=None, org_id="org-test")
         _mock_events.put_events.assert_called_once()
 
     @given(message=st.text(min_size=1, max_size=200))
@@ -268,7 +268,7 @@ class TestSendResponse:
         now an unknown type, logged and no-op, never calling sqs."""
         _mock_sqs.reset_mock()
         callback = {"type": "sqs", "queueUrl": "https://sqs.fake/my-queue"}
-        send_response(message, callback=callback)
+        send_response(message, callback=callback, org_id="org-test")
         _mock_sqs.send_message.assert_not_called()
 
     @given(message=st.text(min_size=1, max_size=200))
@@ -284,7 +284,7 @@ class TestSendResponse:
             "source": "test.source",
             "detailType": "test.detail",
         }
-        send_response(message, callback=callback)
+        send_response(message, callback=callback, org_id="org-test")
         _mock_events.put_events.assert_called_once()
         entries = _mock_events.put_events.call_args[1]["Entries"]
         assert entries[0]["EventBusName"] == index.EVENT_BUS_NAME
@@ -301,4 +301,4 @@ class TestSendResponse:
     def test_unknown_callback_type_does_not_raise(self, message, cb_type):
         """Unknown callback types (including the removed 'sqs') are
         handled gracefully (no exception)."""
-        send_response(message, callback={"type": cb_type})
+        send_response(message, callback={"type": cb_type}, org_id="org-test")

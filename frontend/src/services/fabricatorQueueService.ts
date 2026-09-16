@@ -40,9 +40,13 @@ const getFabricatorQueueQuery = /* GraphQL */ `
 `;
 
 // GraphQL Subscriptions
+// orgId is required by the backend schema (onFabricationEvent(orgId: ID!))
+// and is authorized against the caller's own custom:organization claim
+// (admins may pass any org). Callers must supply the caller's own
+// organisation — never a hardcoded value or the org-selector's filter scope.
 const onFabricationEventSubscription = /* GraphQL */ `
-  subscription OnFabricationEvent {
-    onFabricationEvent {
+  subscription OnFabricationEvent($orgId: ID!) {
+    onFabricationEvent(orgId: $orgId) {
       type
       requestId
       agentId
@@ -52,23 +56,32 @@ const onFabricationEventSubscription = /* GraphQL */ `
   }
 `;
 
-// Track if backend subscription has been initialized
-let isInitialized = false;
+// Track which orgId the backend subscription was last initialized for, so a
+// change in orgId (e.g. user/session switch) can be detected and the stale
+// backend subscription torn down first. subscriptionManager itself already
+// guards against redundant re-initialization for the *same* orgId (see its
+// own isActive check), so this flag is only consulted for org changes.
+let initializedOrgId: string | null = null;
 
 /**
- * Initialize the backend subscription for fabrication events
- * This is called once on the first local subscription
+ * Initialize the backend subscription for fabrication events for the given
+ * organisation. Safe to call repeatedly — subscriptionManager no-ops if a
+ * subscription for the same orgId is already active. If a subscription is
+ * active for a *different* orgId, it is torn down first.
  */
-function initializeFabricationSubscription(): void {
-  if (isInitialized) {
-    return;
+function initializeFabricationSubscription(orgId: string): void {
+  if (initializedOrgId !== null && initializedOrgId !== orgId) {
+    // orgId changed (e.g. user/session switch) — tear down the stale
+    // backend subscription before creating one scoped to the new org.
+    subscriptionManager.cleanupSubscription(EVENT_TYPES.FABRICATION);
   }
 
-  // Initialize backend subscription through SubscriptionManager
+  // Initialize backend subscription through SubscriptionManager. This is a
+  // no-op if a subscription for this orgId is already active.
   subscriptionManager.initializeSubscription(
     EVENT_TYPES.FABRICATION,
     onFabricationEventSubscription,
-    {}, // No variables needed for fabrication subscription
+    { orgId },
     (data: any) => {
       // Transform backend data to FabricationEvent format
       if (data?.onFabricationEvent) {
@@ -78,7 +91,7 @@ function initializeFabricationSubscription(): void {
     }
   );
 
-  isInitialized = true;
+  initializedOrgId = orgId;
 }
 
 /**
@@ -114,16 +127,30 @@ export async function getFabricatorQueue(projectId?: string): Promise<Fabricatio
 /**
  * Subscribe to fabrication events
  * Returns an unsubscribe function
- * 
+ *
  * This function maintains backward compatibility with the previous API
  * while using the new event bus architecture internally.
+ *
+ * @param onEvent callback invoked with each fabrication event
+ * @param orgId the caller's own organisation (from OrganizationContext /
+ *   getCurrentUserProfile — never a hardcoded placeholder, never the
+ *   org-selector filter value for non-admins). When falsy, no backend
+ *   subscription is created and the returned unsubscribe is a no-op.
+ * @param _onError optional error callback (currently unused, kept for
+ *   backward compatibility with existing call sites)
  */
 export function subscribeToFabricationEvents(
   onEvent: (event: FabricationEvent) => void,
+  orgId?: string | null,
   _onError?: (error: any) => void
 ): () => void {
+  if (!orgId) {
+    // No organisation available for this caller yet — do not subscribe.
+    return () => {};
+  }
+
   // Initialize backend subscription if needed
-  initializeFabricationSubscription();
+  initializeFabricationSubscription(orgId);
 
   // Add local subscriber to reference count
   subscriptionManager.addLocalSubscriber(EVENT_TYPES.FABRICATION);

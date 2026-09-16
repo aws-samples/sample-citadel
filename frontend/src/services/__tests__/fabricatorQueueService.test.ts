@@ -8,6 +8,10 @@ import { eventBus } from '../eventBus';
 import { subscriptionManager } from '../subscriptionManager';
 import { EVENT_TYPES } from '../eventTypes';
 
+// The backend authorizes onFabricationEvent(orgId) against the caller's own
+// custom:organization claim; tests supply a stable stand-in org id.
+const TEST_ORG_ID = 'org-test-1';
+
 describe('FabricatorQueueService', () => {
   beforeEach(() => {
     // Clear event bus before each test
@@ -25,7 +29,7 @@ describe('FabricatorQueueService', () => {
   describe('subscribeToFabricationEvents', () => {
     it('should return an unsubscribe function', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToFabricationEvents(callback);
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
       
       expect(typeof unsubscribe).toBe('function');
       
@@ -34,7 +38,7 @@ describe('FabricatorQueueService', () => {
 
     it('should register callback with event bus', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToFabricationEvents(callback);
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
       
       // Check that subscriber was added
       expect(eventBus.getSubscriberCount(EVENT_TYPES.FABRICATION)).toBe(1);
@@ -44,7 +48,7 @@ describe('FabricatorQueueService', () => {
 
     it('should receive events through event bus', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToFabricationEvents(callback);
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
       
       const testEvent: FabricationEvent = {
         type: 'COMPLETED',
@@ -65,7 +69,7 @@ describe('FabricatorQueueService', () => {
 
     it('should unsubscribe from event bus when unsubscribe is called', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToFabricationEvents(callback);
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
       
       expect(eventBus.getSubscriberCount(EVENT_TYPES.FABRICATION)).toBe(1);
       
@@ -79,9 +83,9 @@ describe('FabricatorQueueService', () => {
       const callback2 = jest.fn();
       const callback3 = jest.fn();
       
-      const unsubscribe1 = subscribeToFabricationEvents(callback1);
-      const unsubscribe2 = subscribeToFabricationEvents(callback2);
-      const unsubscribe3 = subscribeToFabricationEvents(callback3);
+      const unsubscribe1 = subscribeToFabricationEvents(callback1, TEST_ORG_ID);
+      const unsubscribe2 = subscribeToFabricationEvents(callback2, TEST_ORG_ID);
+      const unsubscribe3 = subscribeToFabricationEvents(callback3, TEST_ORG_ID);
       
       expect(eventBus.getSubscriberCount(EVENT_TYPES.FABRICATION)).toBe(3);
       
@@ -111,7 +115,7 @@ describe('FabricatorQueueService', () => {
         expect(event).toHaveProperty('timestamp');
       };
       
-      const unsubscribe = subscribeToFabricationEvents(callback);
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
       
       const testEvent: FabricationEvent = {
         type: 'COMPLETED',
@@ -130,7 +134,7 @@ describe('FabricatorQueueService', () => {
       
       // Subscribe and unsubscribe multiple times
       for (let i = 0; i < 5; i++) {
-        const unsubscribe = subscribeToFabricationEvents(callback);
+        const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
         expect(eventBus.getSubscriberCount(EVENT_TYPES.FABRICATION)).toBe(1);
         unsubscribe();
         expect(eventBus.getSubscriberCount(EVENT_TYPES.FABRICATION)).toBe(0);
@@ -139,7 +143,7 @@ describe('FabricatorQueueService', () => {
 
     it('should not receive events after unsubscribe', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToFabricationEvents(callback);
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
       
       const testEvent: FabricationEvent = {
         type: 'COMPLETED',
@@ -164,7 +168,7 @@ describe('FabricatorQueueService', () => {
 
     it('should handle COMPLETED events correctly', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToFabricationEvents(callback);
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
       
       const completedEvent: FabricationEvent = {
         type: 'COMPLETED',
@@ -183,7 +187,7 @@ describe('FabricatorQueueService', () => {
 
     it('should handle FAILED events correctly', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToFabricationEvents(callback);
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
       
       const failedEvent: FabricationEvent = {
         type: 'FAILED',
@@ -203,7 +207,7 @@ describe('FabricatorQueueService', () => {
 
     it('should handle events with optional fields', () => {
       const callback = jest.fn();
-      const unsubscribe = subscribeToFabricationEvents(callback);
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
       
       // Event without optional agentId
       const eventWithoutAgentId: FabricationEvent = {
@@ -218,6 +222,44 @@ describe('FabricatorQueueService', () => {
       expect(callback.mock.calls[0][0].agentId).toBeUndefined();
       
       unsubscribe();
+    });
+
+    it('subscribes with the caller org and creates a backend subscription scoped to it', () => {
+      const callback = jest.fn();
+      const unsubscribe = subscribeToFabricationEvents(callback, TEST_ORG_ID);
+
+      const activeSubscriptions = subscriptionManager.getActiveSubscriptions();
+      expect(activeSubscriptions).toHaveLength(1);
+      expect(activeSubscriptions[0].eventType).toBe(EVENT_TYPES.FABRICATION);
+
+      unsubscribe();
+    });
+
+    it('does not subscribe when orgId is missing (null)', () => {
+      const callback = jest.fn();
+      const unsubscribe = subscribeToFabricationEvents(callback, null);
+
+      expect(eventBus.getSubscriberCount(EVENT_TYPES.FABRICATION)).toBe(0);
+      expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(0);
+
+      // Returned unsubscribe is a safe no-op.
+      expect(() => unsubscribe()).not.toThrow();
+    });
+
+    it('does not subscribe when orgId is missing (undefined)', () => {
+      const callback = jest.fn();
+      subscribeToFabricationEvents(callback);
+
+      expect(eventBus.getSubscriberCount(EVENT_TYPES.FABRICATION)).toBe(0);
+      expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(0);
+    });
+
+    it('does not subscribe when orgId is an empty string', () => {
+      const callback = jest.fn();
+      subscribeToFabricationEvents(callback, '');
+
+      expect(eventBus.getSubscriberCount(EVENT_TYPES.FABRICATION)).toBe(0);
+      expect(subscriptionManager.getActiveSubscriptions()).toHaveLength(0);
     });
   });
 });

@@ -872,6 +872,54 @@ export class RegistryStack extends cdk.Stack {
       fabricationEventLambdaDataSource,
     );
 
+    // Wave-2a tenancy (finding 87a171ad section A): connect-time
+    // authorization gate for onFabricationEvent(orgId: ID!) — same
+    // handler/check as onChatter's authorizer in citadel-projects-dev,
+    // wired independently here since RegistryStack owns its own AppSync
+    // data source/resolver for this field.
+    const fabricationEventSubscriptionAuthorizerFunction = new lambda.Function(
+      this,
+      "FabricationEventSubscriptionAuthorizerFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "chatter-subscription-authorizer.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          USER_POOL_ID: props.userPool.userPoolId,
+        },
+        timeout: cdk.Duration.seconds(10),
+        logGroup: new logs.LogGroup(
+          this,
+          "FabricationEventSubscriptionAuthorizerFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    fabricationEventSubscriptionAuthorizerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cognito-idp:AdminGetUser"],
+        resources: [props.userPool.userPoolArn],
+      }),
+    );
+
+    const fabricationEventSubscriptionAuthorizerDataSource =
+      makeLambdaDataSource(
+        "FabricationEventSubscriptionAuthorizer",
+        fabricationEventSubscriptionAuthorizerFunction,
+      );
+
+    makeResolver(
+      "OnFabricationEventSubscriptionAuthorizerResolver",
+      "Subscription",
+      "onFabricationEvent",
+      fabricationEventSubscriptionAuthorizerDataSource,
+    );
+
     // The FabricationEventRule (agent.fabricated / agent.fabrication.failed on
     // the shared bus, targeting fabricationEventHandlerFunction) belongs here
     // per the task's explicit scope note ("the phase-1 exclusion that

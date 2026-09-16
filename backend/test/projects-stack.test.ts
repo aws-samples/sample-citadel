@@ -178,16 +178,16 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   });
 
   // --- Resolver count ---
-  test("defines exactly 24 AppSync resolvers (matching the move manifest + updateAgentStatus, finding 0018a6d7)", () => {
+  test("defines exactly 25 AppSync resolvers (matching the move manifest + updateAgentStatus, finding 0018a6d7, + wave-2a OnChatterSubscriptionAuthorizerResolver, finding 87a171ad)", () => {
     const resolvers = template.findResources("AWS::AppSync::Resolver");
-    expect(Object.keys(resolvers)).toHaveLength(24);
+    expect(Object.keys(resolvers)).toHaveLength(25);
   });
 
-  test("defines exactly 10 AppSync Lambda data sources", () => {
+  test("defines exactly 11 AppSync Lambda data sources", () => {
     const dataSources = template.findResources("AWS::AppSync::DataSource", {
       Properties: Match.objectLike({ Type: "AWS_LAMBDA" }),
     });
-    expect(Object.keys(dataSources)).toHaveLength(10);
+    expect(Object.keys(dataSources)).toHaveLength(11);
   });
 
   const expectedFields: Array<[string, string]> = [
@@ -327,9 +327,9 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   });
 
   // --- moved constructs present ---
-  test("defines exactly 14 Lambda functions (the moved set)", () => {
+  test("defines exactly 15 Lambda functions (the moved set)", () => {
     const fns = template.findResources("AWS::Lambda::Function");
-    expect(Object.keys(fns)).toHaveLength(14);
+    expect(Object.keys(fns)).toHaveLength(15);
   });
 
   test("defines exactly 2 CloudWatch alarms (ProjectResolver error + throttle)", () => {
@@ -375,8 +375,8 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
         }),
       }),
     });
-    // 10 Lambda data sources -> 10 appsync-assumable roles.
-    expect(Object.keys(roles)).toHaveLength(10);
+    // 11 Lambda data sources -> 11 appsync-assumable roles.
+    expect(Object.keys(roles)).toHaveLength(11);
   });
 });
 

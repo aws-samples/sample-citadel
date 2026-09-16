@@ -25,6 +25,7 @@ import {
   type FabricationQueueItem,
 } from '../services/fabricatorQueueService';
 import { agentConfigService } from '../services/agentConfigService';
+import { useOrganization } from '../contexts/OrganizationContext';
 
 interface FabricationStatusPanelProps {
   /** Project/orchestration id. Jobs are filtered to this project. */
@@ -95,6 +96,11 @@ export function FabricationStatusPanel({ projectId, phaseActive = false }: Fabri
   const [open, setOpen] = useState(true);
   const userToggledRef = useRef(false);
   const subscriptionRef = useRef<(() => void) | null>(null);
+  // Caller's own organisation claim — never the org-selector filter value.
+  // The backend authorizes onFabricationEvent(orgId) against the caller's
+  // custom:organization claim, so this must be identity, not a UI filter.
+  const { currentUser } = useOrganization();
+  const callerOrgId = currentUser?.organization ?? null;
 
   const loadQueue = useCallback(async () => {
     setLoading(true);
@@ -114,7 +120,16 @@ export function FabricationStatusPanel({ projectId, phaseActive = false }: Fabri
   }, [loadQueue]);
 
   // Subscribe to real-time fabrication events; update the matching row in place.
+  // No organisation available for this caller yet -> do not subscribe.
   useEffect(() => {
+    if (!callerOrgId) {
+      if (subscriptionRef.current) {
+        subscriptionRef.current();
+        subscriptionRef.current = null;
+      }
+      return;
+    }
+
     const unsubscribe = subscribeToFabricationEvents((event) => {
       setItems((prev) =>
         prev.map((item) =>
@@ -123,7 +138,7 @@ export function FabricationStatusPanel({ projectId, phaseActive = false }: Fabri
             : item,
         ),
       );
-    });
+    }, callerOrgId);
     subscriptionRef.current = unsubscribe;
     return () => {
       if (subscriptionRef.current) {
@@ -131,7 +146,7 @@ export function FabricationStatusPanel({ projectId, phaseActive = false }: Fabri
         subscriptionRef.current = null;
       }
     };
-  }, []);
+  }, [callerOrgId]);
 
   // Every fabrication job for this project has finished building. Only then
   // does bulk activation make sense.
@@ -256,6 +271,13 @@ export function FabricationStatusPanel({ projectId, phaseActive = false }: Fabri
             <div className="flex items-center gap-2 py-3 text-xs text-muted-foreground" role="status" aria-live="polite">
               <Loader2 className="size-4 animate-spin" aria-hidden="true" />
               <span>Loading fabrication status...</span>
+            </div>
+          ) : !callerOrgId ? (
+            <div className="flex flex-col items-center justify-center py-6 text-center gap-2">
+              <PackageOpen className="size-6 text-muted-foreground" aria-hidden="true" />
+              <p className="text-xs text-muted-foreground">
+                Live fabrication updates aren't available until your organisation is set up.
+              </p>
             </div>
           ) : items.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-6 text-center gap-2">

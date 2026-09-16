@@ -29,6 +29,42 @@ scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 
 import { RegistryStack } from "../lib/registry-stack";
 
+// Minimal shapes for the raw CloudFormation JSON returned by
+// Template.findResources()/findResources() — aws-cdk-lib/assertions does
+// not export types for this synthesized template JSON, so we model just
+// the fields these tests actually read.
+interface CfnIamStatement {
+  Action: string | string[];
+  Resource?: unknown;
+  [key: string]: unknown;
+}
+
+interface CfnIamPolicyResource {
+  Properties?: {
+    Roles?: Array<{ Ref?: string }>;
+    PolicyDocument?: {
+      Statement?: CfnIamStatement[];
+    };
+  };
+}
+
+interface CfnLambdaFunctionResource {
+  Properties?: {
+    Handler?: string;
+    FunctionName?: string;
+    Role?: { "Fn::GetAtt"?: [string, string] };
+    Environment?: {
+      Variables?: Record<string, unknown>;
+    };
+  };
+}
+
+interface CfnIamRoleResource {
+  Properties?: {
+    ManagedPolicyArns?: unknown[];
+  };
+}
+
 function createFixture(app: cdk.App) {
   const backendStack = new cdk.Stack(app, "MockBackendStack", {
     env: { account: "123456789012", region: "us-east-1" },
@@ -144,16 +180,16 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
   });
 
   // --- Resolver count ---
-  test("defines exactly 39 AppSync resolvers (matching the move manifest)", () => {
+  test("defines exactly 40 AppSync resolvers (matching the move manifest + wave-2a OnFabricationEventSubscriptionAuthorizerResolver, finding 87a171ad)", () => {
     const resolvers = template.findResources("AWS::AppSync::Resolver");
-    expect(Object.keys(resolvers)).toHaveLength(39);
+    expect(Object.keys(resolvers)).toHaveLength(40);
   });
 
-  test("defines exactly 6 AppSync Lambda data sources", () => {
+  test("defines exactly 7 AppSync Lambda data sources", () => {
     const dataSources = template.findResources("AWS::AppSync::DataSource", {
       Properties: Match.objectLike({ Type: "AWS_LAMBDA" }),
     });
-    expect(Object.keys(dataSources)).toHaveLength(6);
+    expect(Object.keys(dataSources)).toHaveLength(7);
   });
 
   const expectedFields: Array<[string, string]> = [
@@ -236,21 +272,24 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
   // (action set AND resource set) to the pre-split baseline — not merely a
   // subset, which rail 6's subset-or-equal check alone would tolerate.
   describe("agent-import Secrets Manager + STS verbatim equivalence", () => {
-    function agentImportPolicyStatements(): any[] {
+    function agentImportPolicyStatements(): CfnIamStatement[] {
       const fns = template.findResources("AWS::Lambda::Function", {
         Properties: { Handler: "agent-import-resolver.handler" },
       });
       const fnLogicalId = Object.keys(fns)[0];
       expect(fnLogicalId).toBeDefined();
-      const roleRef = fns[fnLogicalId].Properties.Role?.["Fn::GetAtt"]?.[0];
+      const roleRef = (fns[fnLogicalId] as CfnLambdaFunctionResource).Properties
+        ?.Role?.["Fn::GetAtt"]?.[0];
       expect(roleRef).toBeDefined();
 
       const policies = template.findResources("AWS::IAM::Policy");
-      const attached = Object.values(policies).filter((p: any) =>
-        (p.Properties?.Roles ?? []).some((r: any) => r?.Ref === roleRef),
+      const attached = Object.values(policies).filter(
+        (p: CfnIamPolicyResource) =>
+          (p.Properties?.Roles ?? []).some((r) => r?.Ref === roleRef),
       );
       return attached.flatMap(
-        (p: any) => p.Properties.PolicyDocument.Statement,
+        (p: CfnIamPolicyResource) =>
+          p.Properties?.PolicyDocument?.Statement ?? [],
       );
     }
 
@@ -337,11 +376,13 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     const matches = Object.values(policies);
     expect(matches.length).toBeGreaterThan(0);
     for (const policy of matches) {
-      const statements = (policy as any).Properties.PolicyDocument.Statement;
+      const statements =
+        (policy as CfnIamPolicyResource).Properties?.PolicyDocument
+          ?.Statement ?? [];
       const cognitoStmt = statements.find(
-        (s: any) => s.Action === "cognito-idp:AdminGetUser",
+        (s) => s.Action === "cognito-idp:AdminGetUser",
       );
-      expect(cognitoStmt.Resource).not.toBe("*");
+      expect(cognitoStmt?.Resource).not.toBe("*");
     }
   });
 
@@ -355,9 +396,11 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
   test("no other moved Lambda has functionName pinning (auto-named, invoked via in-stack grantInvoke)", () => {
     const fns = template.findResources("AWS::Lambda::Function");
     for (const [_logicalId, fn] of Object.entries(fns)) {
-      const handler = (fn as any).Properties?.Handler;
+      const handler = (fn as CfnLambdaFunctionResource).Properties?.Handler;
       if (handler === "registry-agent-record-resolver.handler") continue;
-      expect((fn as any).Properties?.FunctionName).toBeUndefined();
+      expect(
+        (fn as CfnLambdaFunctionResource).Properties?.FunctionName,
+      ).toBeUndefined();
     }
   });
 
@@ -370,7 +413,7 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     const fnIds = Object.keys(fns);
     expect(fnIds.length).toBe(1);
     const roleRef = JSON.stringify(
-      (fns[fnIds[0]] as any).Properties.Role,
+      (fns[fnIds[0]] as CfnLambdaFunctionResource).Properties?.Role,
     );
     const roleLogicalIdMatch = roleRef.match(
       /([A-Za-z0-9]+ServiceRole[A-Za-z0-9]+)/,
@@ -381,9 +424,12 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     const policies = template.findResources("AWS::IAM::Policy");
     const forbidden = ["iam:CreateRole", "iam:PutRolePolicy", "iam:PassRole"];
     for (const policy of Object.values(policies)) {
-      const rolesRef = JSON.stringify((policy as any).Properties?.Roles);
+      const rolesRef = JSON.stringify(
+        (policy as CfnIamPolicyResource).Properties?.Roles,
+      );
       if (!rolesRef.includes(roleLogicalId)) continue;
-      const statements = (policy as any).Properties?.PolicyDocument?.Statement;
+      const statements = (policy as CfnIamPolicyResource).Properties
+        ?.PolicyDocument?.Statement;
       if (!Array.isArray(statements)) continue;
       for (const stmt of statements) {
         const actions = Array.isArray(stmt.Action)
@@ -399,7 +445,8 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
   test("no IAM policy statement grants a full-service wildcard action (iam:*, dynamodb:*, or s3:*)", () => {
     const policies = template.findResources("AWS::IAM::Policy");
     for (const policy of Object.values(policies)) {
-      const statements = (policy as any).Properties?.PolicyDocument?.Statement;
+      const statements = (policy as CfnIamPolicyResource).Properties
+        ?.PolicyDocument?.Statement;
       if (!Array.isArray(statements)) continue;
       for (const stmt of statements) {
         const actions = Array.isArray(stmt.Action)
@@ -414,9 +461,9 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
   });
 
   // --- moved constructs present ---
-  test("defines exactly 8 Lambda functions (the moved set)", () => {
+  test("defines exactly 9 Lambda functions (the moved set)", () => {
     const fns = template.findResources("AWS::Lambda::Function");
-    expect(Object.keys(fns)).toHaveLength(8);
+    expect(Object.keys(fns)).toHaveLength(9);
   });
 
   test("defines exactly 3 EventBridge rules (AgentImportManifestResult, RegistrySync, FabricationEvent)", () => {
@@ -449,7 +496,8 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     const lambdaRoles = Object.values(roles);
     expect(lambdaRoles.length).toBeGreaterThan(0);
     for (const role of lambdaRoles) {
-      const managedArns = (role as any).Properties.ManagedPolicyArns;
+      const managedArns = (role as CfnIamRoleResource).Properties
+        ?.ManagedPolicyArns;
       expect(Array.isArray(managedArns)).toBe(true);
     }
   });
@@ -466,52 +514,54 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
         }),
       }),
     });
-    // 6 data sources => 6 appsync-assumable roles.
-    expect(Object.keys(roles)).toHaveLength(6);
+    // 7 data sources => 7 appsync-assumable roles.
+    expect(Object.keys(roles)).toHaveLength(7);
   });
 
   describe("agent-code-resolver org/role gate wiring (finding 1a9181a4)", () => {
-    function agentCodeResolverFn(): Record<string, any> {
+    function agentCodeResolverFn(): CfnLambdaFunctionResource {
       const fns = template.findResources("AWS::Lambda::Function", {
         Properties: { Handler: "agent-code-resolver.handler" },
       });
       const fnLogicalId = Object.keys(fns)[0];
       expect(fnLogicalId).toBeDefined();
-      return fns[fnLogicalId];
+      return fns[fnLogicalId] as CfnLambdaFunctionResource;
     }
 
     test("is wired with REGISTRY_ID, mirroring the publish handler's owner-gate wiring", () => {
       const fn = agentCodeResolverFn();
-      const envVars = fn.Properties.Environment?.Variables ?? {};
+      const envVars = fn.Properties?.Environment?.Variables ?? {};
       expect(envVars.REGISTRY_ID).toBeDefined();
     });
 
     test("has a READ-ONLY bedrock-agentcore:GetRegistryRecord statement scoped to the registry ARN — no Create/Update/Delete", () => {
       const fn = agentCodeResolverFn();
-      const roleRef = fn.Properties.Role?.["Fn::GetAtt"]?.[0];
+      const roleRef = fn.Properties?.Role?.["Fn::GetAtt"]?.[0];
       expect(roleRef).toBeDefined();
 
       const policies = template.findResources("AWS::IAM::Policy");
       const attached = Object.values(policies).filter(
-        (p: Record<string, any>) =>
-          (p.Properties?.Roles ?? []).some(
-            (r: Record<string, any>) => r?.Ref === roleRef,
-          ),
+        (p: CfnIamPolicyResource) =>
+          (p.Properties?.Roles ?? []).some((r) => r?.Ref === roleRef),
       );
       const statements = attached.flatMap(
-        (p: Record<string, any>) => p.Properties.PolicyDocument.Statement,
+        (p: CfnIamPolicyResource) =>
+          p.Properties?.PolicyDocument?.Statement ?? [],
       );
 
-      const registryStatements = statements.filter((s: Record<string, any>) => {
+      const registryStatements = statements.filter((s: CfnIamStatement) => {
         const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
         return actions.some(
-          (a: string) => typeof a === "string" && a.startsWith("bedrock-agentcore:"),
+          (a: string) =>
+            typeof a === "string" && a.startsWith("bedrock-agentcore:"),
         );
       });
       expect(registryStatements.length).toBeGreaterThan(0);
 
       for (const stmt of registryStatements) {
-        const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
         expect(new Set(actions)).toEqual(
           new Set(["bedrock-agentcore:GetRegistryRecord"]),
         );

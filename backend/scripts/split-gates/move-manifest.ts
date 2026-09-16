@@ -1582,6 +1582,28 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
       "doesn't see it) but rail 3's merged-set check spans all stacks, so " +
       "it needs the same expected-new-field exemption.",
   },
+  {
+    logicalId: "Subscription.onChatter",
+    justification:
+      "Wave-2a tenancy fix (finding 87a171ad section A): onChatter gained " +
+      "an orgId: ID! argument and an explicit connect-time authorization " +
+      "resolver (OnChatterSubscriptionAuthorizerResolver, " +
+      "chatter-subscription-authorizer.ts) in citadel-projects-dev. " +
+      "Previously this field had NO CfnResolver at all — it relied solely " +
+      "on the implicit @aws_subscribe(mutations:[...]) wiring, which never " +
+      "appears in the resolvers baseline. Attaching an explicit resolver " +
+      "is a genuinely new Subscription.onChatter key in the merged " +
+      "resolver set; not a backend-template addition (rail 1 doesn't see " +
+      "it, satellite-only).",
+  },
+  {
+    logicalId: "Subscription.onFabricationEvent",
+    justification:
+      "Wave-2a tenancy fix (finding 87a171ad section A): same rationale " +
+      "as Subscription.onChatter above, mirrored for onFabricationEvent " +
+      "via OnFabricationEventSubscriptionAuthorizerResolver in " +
+      "citadel-registry-dev.",
+  },
 ];
 
 /**

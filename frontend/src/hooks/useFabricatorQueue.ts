@@ -18,6 +18,7 @@ import {
   FabricationQueueItem,
   FabricationEvent,
 } from '../services/fabricatorQueueService';
+import { useOrganization } from '../contexts/OrganizationContext';
 
 interface UseFabricatorQueueReturn {
   queueItems: FabricationQueueItem[];
@@ -39,6 +40,9 @@ export function useFabricatorQueue(options?: UseFabricatorQueueOptions): UseFabr
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const subscriptionRef = useRef<(() => void) | null>(null);
+  // Caller's own organisation claim — never the org-selector filter value.
+  const { currentUser } = useOrganization();
+  const callerOrgId = currentUser?.organization ?? null;
   
   // Store the callback in a ref to avoid recreating the effect
   const onFabricationCompleteRef = useRef(options?.onFabricationComplete);
@@ -104,9 +108,20 @@ export function useFabricatorQueue(options?: UseFabricatorQueueOptions): UseFabr
     // Load initial queue state
     loadQueue();
 
+    if (!callerOrgId) {
+      // No organisation available for this caller yet — do not subscribe.
+      // Any prior subscription is torn down below via cleanup.
+      if (subscriptionRef.current) {
+        subscriptionRef.current();
+        subscriptionRef.current = null;
+      }
+      return;
+    }
+
     // Subscribe to real-time fabrication events
     const unsubscribe = fabricatorQueueService.subscribeToFabricationEvents(
       handleFabricationEvent,
+      callerOrgId,
       (subscriptionError) => {
         console.error('Subscription error:', subscriptionError);
         // Don't set error state for subscription errors to avoid disrupting UI
@@ -123,7 +138,7 @@ export function useFabricatorQueue(options?: UseFabricatorQueueOptions): UseFabr
         subscriptionRef.current = null;
       }
     };
-  }, [loadQueue, handleFabricationEvent]);
+  }, [loadQueue, handleFabricationEvent, callerOrgId]);
 
   /**
    * Add a pending item to the queue immediately (optimistic update)
