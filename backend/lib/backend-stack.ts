@@ -48,6 +48,13 @@ export class BackendStack extends cdk.Stack {
   public readonly workflowsTable: dynamodb.Table;
   public readonly appsTable: dynamodb.Table;
   /**
+   * Wave 2b (fix/vender-org-scoping): exposed publicly so ArbiterStack's
+   * AgentCredentialVender Lambda can be granted read-only access and
+   * resolve declared dataStore/integration ids to their owning org.
+   */
+  public readonly dataStoresTable: dynamodb.Table;
+  public readonly integrationsTable: dynamodb.Table;
+  /**
    * Model-config table — exposed publicly (CIT-026 replay package,
    * design §4) so TelemetryStack can grant read-only access for the
    * replay envelope's `modelConfig` section. Previously a local `const`
@@ -357,6 +364,7 @@ export class BackendStack extends cdk.Stack {
       },
       projectionType: dynamodb.ProjectionType.ALL,
     });
+    this.integrationsTable = integrationsTable;
 
     // Workflows Table
     this.workflowsTable = new dynamodb.Table(this, "WorkflowsTable", {
@@ -2745,6 +2753,7 @@ export class BackendStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
+    this.dataStoresTable = dataStoresTable;
 
     dataStoresTable.addGlobalSecondaryIndex({
       indexName: "OrgIndex",

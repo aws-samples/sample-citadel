@@ -115,6 +115,27 @@ export class PolicyManager {
       }
     }
 
+    // Wave 2b (fix/vender-org-scoping): a datastore/integration-scoped role
+    // must NEVER trust an agent role directly -- agents reach ds/int
+    // credentials exclusively through the credential vender's own
+    // sts:AssumeRole GRANT (computeAgentPolicies), never through the
+    // ds/int role's OWN trust policy. Reject even when a citadel-agent-*
+    // principal arrives via additionalTrustedPrincipals (e.g. a
+    // misconfigured caller), before any IAM call is made. Agent-scoped
+    // roles are exempt -- an agent role legitimately trusting another
+    // agent role (or itself) is not the invariant being enforced here.
+    if (scope !== "agent") {
+      const agentPrincipal = principals.find((p) => /citadel-agent-/.test(p));
+      if (agentPrincipal) {
+        throw new PermissionError(
+          `Refusing to create ${scope} role ${roleName}: trust policy would ` +
+            `include a citadel-agent-* principal (${agentPrincipal}), which ` +
+            `is never permitted to be trusted directly by a datastore/` +
+            `integration role.`,
+        );
+      }
+    }
+
     const trustStatement: Record<string, unknown> = {
       Effect: "Allow",
       Principal: { AWS: principals.length === 1 ? principals[0] : principals },
