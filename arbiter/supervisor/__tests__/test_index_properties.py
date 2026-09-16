@@ -42,6 +42,7 @@ with patch.multiple(
         "events": _mock_events,
     }.get(svc, _MagicMock())),
 ):
+    import index
     from index import (
         create_orchestration,
         create_workflow_tracking_record,
@@ -262,21 +263,20 @@ class TestSendResponse:
 
     @given(message=st.text(min_size=1, max_size=200))
     @settings(max_examples=30)
-    def test_sqs_callback_sends_to_queue(self, message):
-        """SQS callback sends message to the specified queue URL."""
+    def test_sqs_callback_type_is_removed_and_does_not_call_sqs(self, message):
+        """SQS callback type was removed (finding 87a171ad, item h): it is
+        now an unknown type, logged and no-op, never calling sqs."""
         _mock_sqs.reset_mock()
         callback = {"type": "sqs", "queueUrl": "https://sqs.fake/my-queue"}
         send_response(message, callback=callback)
-        _mock_sqs.send_message.assert_called_once()
-        call_kwargs = _mock_sqs.send_message.call_args[1]
-        assert call_kwargs["QueueUrl"] == "https://sqs.fake/my-queue"
-        body = json.loads(call_kwargs["MessageBody"])
-        assert body["message"] == message
+        _mock_sqs.send_message.assert_not_called()
 
     @given(message=st.text(min_size=1, max_size=200))
     @settings(max_examples=30)
-    def test_eventbridge_callback_sends_event(self, message):
-        """EventBridge callback publishes to the specified bus."""
+    def test_eventbridge_callback_ignores_caller_supplied_bus_source_detailtype(self, message):
+        """EventBridge callback publishes to the platform bus with the
+        pinned Source/DetailType, ignoring caller-supplied overrides
+        (finding 87a171ad, item g)."""
         _mock_events.reset_mock()
         callback = {
             "type": "eventbridge",
@@ -286,14 +286,19 @@ class TestSendResponse:
         }
         send_response(message, callback=callback)
         _mock_events.put_events.assert_called_once()
+        entries = _mock_events.put_events.call_args[1]["Entries"]
+        assert entries[0]["EventBusName"] == index.EVENT_BUS_NAME
+        assert entries[0]["Source"] == index.SUPERVISOR_RESPONSE_SOURCE
+        assert entries[0]["DetailType"] == "task.response"
 
     @given(
         message=st.text(min_size=1, max_size=100),
         cb_type=st.text(min_size=1, max_size=20).filter(
-            lambda s: s not in ("eventbridge", "sqs")
+            lambda s: s != "eventbridge"
         ),
     )
     @settings(max_examples=30)
     def test_unknown_callback_type_does_not_raise(self, message, cb_type):
-        """Unknown callback types are handled gracefully (no exception)."""
+        """Unknown callback types (including the removed 'sqs') are
+        handled gracefully (no exception)."""
         send_response(message, callback={"type": cb_type})

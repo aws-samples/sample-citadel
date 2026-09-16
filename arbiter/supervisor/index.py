@@ -210,6 +210,11 @@ MODEL_ID = load_model_id(
 )
 
 EVENT_BUS_NAME = os.environ.get('EVENT_BUS_NAME')
+# Reserved Source for every event send_response() emits (finding 87a171ad,
+# item g). Pinned so a caller-supplied callback.source can never forge a
+# response event carrying the Supervisor's own dispatch-trigger source
+# ('task.request') or any other value.
+SUPERVISOR_RESPONSE_SOURCE = 'citadel.supervisor'
 ORCHESTRATION_TABLE = os.environ.get('ORCHESTRATION_TABLE')
 WORKER_STATE_TABLE = os.environ.get('WORKER_STATE_TABLE')
 # CIT-125 slice B: shared idempotency table (backend-stack.ts:178-ish,
@@ -1269,8 +1274,19 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
     save_orchestration(orchestration=orchestration)
 
 def send_response(message, callback=None):
-    """Send response to the default event bus or to a specific callback address"""
-    
+    """Send response to the default event bus or to a specific callback address.
+
+    Security (finding 87a171ad, items g/h): every event this function emits
+    is pinned to the platform bus (EVENT_BUS_NAME), the reserved
+    SUPERVISOR_RESPONSE_SOURCE, and DetailType 'task.response' —
+    caller-supplied callback.eventBusName / source / detailType are never
+    honored. This makes it impossible for a callback to forge a Source of
+    'task.request' (the Supervisor's own dispatch-trigger rule) or target
+    an arbitrary event bus. Only the 'eventbridge' callback type is
+    supported; any other type (including the removed 'sqs') logs and
+    no-ops.
+    """
+
     # If no callback specified, send to default event bus
     if not callback:
         if not EVENT_BUS_NAME:
@@ -1281,7 +1297,7 @@ def send_response(message, callback=None):
             events_client.put_events(
                 Entries=[
                     {
-                        'Source': 'supervisor',
+                        'Source': SUPERVISOR_RESPONSE_SOURCE,
                         'DetailType': 'task.response',
                         'Detail': json.dumps({
                             'message': message,
@@ -1301,50 +1317,33 @@ def send_response(message, callback=None):
     
     if callback_type == 'eventbridge':
         try:
-            event_bus_name = callback.get('eventBusName', EVENT_BUS_NAME)
-            source = callback.get('source', 'supervisor')
-            detail_type = callback.get('detailType', 'task.response')
-            
+            if not EVENT_BUS_NAME:
+                print("EVENT_BUS_NAME not configured; cannot send eventbridge callback")
+                return
+
             events_client.put_events(
                 Entries=[
                     {
-                        'Source': source,
-                        'DetailType': detail_type,
+                        'Source': SUPERVISOR_RESPONSE_SOURCE,
+                        'DetailType': 'task.response',
                         'Detail': json.dumps({
                             'message': message,
                             'timestamp': time.time(),
                             'callback': callback
                         }, default=str),
-                        'EventBusName': event_bus_name
+                        'EventBusName': EVENT_BUS_NAME
                     }
                 ]
             )
-            print(f"Published task response to EventBridge {event_bus_name}: {message}")
+            print(f"Published task response to EventBridge {EVENT_BUS_NAME}: {message}")
         except Exception as e:
             print(f"Error publishing to EventBridge callback: {e}")
     
-    elif callback_type == 'sqs':
-        try:
-            queue_url = callback.get('queueUrl')
-            if not queue_url:
-                print("SQS callback missing queueUrl")
-                return
-            
-            sqs.send_message(
-                QueueUrl=queue_url,
-                MessageBody=json.dumps({
-                    'message': message,
-                    'timestamp': time.time(),
-                    'callback': callback
-                }, default=str)
-            )
-            print(f"Published task response to SQS {queue_url}: {message}")
-        except Exception as e:
-            print(f"Error publishing to SQS callback: {e}")
-    
     else:
-        # Removed: 'mcp' callback type (DDB recon: 0 production rows referenced it).
-        # Unknown / removed types fall through to no-op log.
+        # Removed: 'sqs' callback type (finding 87a171ad, item h — arbitrary
+        # caller-supplied queueUrl). Removed: 'mcp' callback type (DDB
+        # recon: 0 production rows referenced it). Unknown / removed types
+        # fall through to no-op log.
         print(f"Unknown callback type: {callback_type}")
 
 

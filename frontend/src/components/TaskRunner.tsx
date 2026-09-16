@@ -4,13 +4,6 @@ import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Textarea } from './ui/textarea';
 import { Input } from './ui/input';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from './ui/select';
 import { taskRunnerService } from '../services/taskRunnerService';
 import { AgentChatter } from './AgentChatter';
 import { useChatterSubscription } from '../hooks/useChatterSubscription';
@@ -37,7 +30,6 @@ export function TaskRunner() {
   const defaultDisplayValue = defaultEventBusArn ? extractEventBusName(defaultEventBusArn) : '';
   
   const [taskDetails, setTaskDetails] = useState('');
-  const [callbackType, setCallbackType] = useState<'eventbridge' | 'sqs' | 'mcp'>('eventbridge');
   const [callbackUrl, setCallbackUrl] = useState(defaultDisplayValue);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,40 +70,28 @@ export function TaskRunner() {
       setError(null);
       setSuccess(null);
 
-      // Prepare callback configuration based on type
+      // Prepare callback configuration (eventbridge only)
       let finalCallbackUrl = callbackUrl.trim();
-      
+
       // If using default display value (just event-bus/name), reconstruct full ARN
-      if (callbackType === 'eventbridge' && finalCallbackUrl === defaultDisplayValue && defaultEventBusArn) {
+      if (finalCallbackUrl === defaultDisplayValue && defaultEventBusArn) {
         finalCallbackUrl = defaultEventBusArn;
       }
-      
+
       // If empty, use default ARN
       if (!finalCallbackUrl && defaultEventBusArn) {
         finalCallbackUrl = defaultEventBusArn;
       }
-      
+
       let callback;
-      
+
       if (finalCallbackUrl) {
-        if (callbackType === 'eventbridge') {
-          callback = {
-            type: 'eventbridge',
-            eventBusName: finalCallbackUrl,
-            source: 'supervisor',
-            detailType: 'task.response'
-          };
-        } else if (callbackType === 'sqs') {
-          callback = {
-            type: 'sqs',
-            queueUrl: finalCallbackUrl
-          };
-        } else if (callbackType === 'mcp') {
-          callback = {
-            type: 'mcp',
-            endpoint: finalCallbackUrl
-          };
-        }
+        callback = {
+          type: 'eventbridge',
+          eventBusName: finalCallbackUrl,
+          source: 'supervisor',
+          detailType: 'task.response'
+        };
       }
 
       const response = await taskRunnerService.submitTask({
@@ -215,29 +195,6 @@ export function TaskRunner() {
                 </div>
 
                 <div>
-                  <label htmlFor="callbackType" className="block text-sm font-medium text-foreground mb-2">
-                    Callback Type
-                  </label>
-                  <Select
-                    value={callbackType}
-                    onValueChange={(v) => setCallbackType(v as 'eventbridge' | 'sqs' | 'mcp')}
-                    disabled={loading}
-                  >
-                    <SelectTrigger id="callbackType">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="eventbridge">EventBridge</SelectItem>
-                      <SelectItem value="sqs">SQS Queue</SelectItem>
-                      <SelectItem value="mcp">MCP Webhook</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    Choose where to send task completion results
-                  </p>
-                </div>
-
-                <div>
                   <label htmlFor="callbackUrl" className="block text-sm font-medium text-foreground mb-2">
                     Callback URL
                   </label>
@@ -246,19 +203,11 @@ export function TaskRunner() {
                     type="text"
                     value={callbackUrl}
                     onChange={(e) => setCallbackUrl(e.target.value)}
-                    placeholder={
-                      callbackType === 'eventbridge' 
-                        ? 'event-bus/bus-name or full ARN'
-                        : callbackType === 'sqs'
-                        ? 'https://sqs.region.amazonaws.com/account/queue-name'
-                        : 'https://your-mcp-server.com/webhook/endpoint'
-                    }
+                    placeholder="event-bus/bus-name or full ARN"
                     disabled={loading}
                   />
                   <p className="mt-2 text-xs text-muted-foreground">
-                    {callbackType === 'eventbridge' && 'Default shows bus name only. Provide full ARN for custom bus.'}
-                    {callbackType === 'sqs' && 'Full SQS queue URL'}
-                    {callbackType === 'mcp' && 'HTTP/HTTPS webhook endpoint for MCP server'}
+                    Default shows bus name only. Provide full ARN for custom bus.
                   </p>
                 </div>
 

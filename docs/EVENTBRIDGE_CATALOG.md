@@ -624,16 +624,21 @@ Published by the backend (task-runner-resolver) or by per-app API Gateways. Cons
   "detail-type": "System-Task",
   "detail": {
     "task": "string (user request text)",
+    "orgId": "string (required — server-derived; never accepted from the client, see backend task-runner-resolver's requireOrgId discipline)",
     "appId": "string (optional — scopes agent resolution)",
     "callback": {
-      "type": "eventbridge | sqs | mcp",
-      "eventBusName": "string (optional)",
-      "queueUrl": "string (optional)",
-      "endpoint": "string (optional)"
+      "type": "eventbridge (only supported type — sqs and mcp were removed)",
+      "eventBusName": "ignored — the Supervisor always targets its own platform bus (EVENT_BUS_NAME), never a caller-supplied bus",
+      "source": "ignored — the Supervisor always pins Source to the reserved constant 'citadel.supervisor', never a caller-supplied value (this makes it impossible for a callback to forge Source 'task.request' and re-enter the Supervisor's own dispatch rule)",
+      "detailType": "ignored — the Supervisor always pins DetailType to 'task.response'"
     }
   }
 }
 ```
+
+`detail.orgId` is required: `handler()` fails closed (no dispatch, no orchestration row) when it is absent or an empty string. The Supervisor never trusts a client-supplied org; callers must go through the backend's server-derived tenancy resolution.
+
+The `callback` block only supports `type: "eventbridge"`. Any other value — including the removed `sqs` and `mcp` types — is logged as an unknown callback type and results in a no-op (no event, message, or webhook is sent). Even for `type: "eventbridge"`, the caller-supplied `eventBusName`, `source`, and `detailType` fields are accepted in the payload but ignored: the Supervisor always publishes to its own platform event bus with the reserved `Source: 'citadel.supervisor'` and `DetailType: 'task.response'`.
 
 ### task.completion (source: `task.completion`)
 
