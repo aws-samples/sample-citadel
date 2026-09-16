@@ -248,6 +248,11 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   // forward-compatible wiring for the fabricator's
   // design-assessment precondition gate.
   agentDesignAssessmentsTable: backendStack.agentDesignAssessmentsTable,
+  // Wave 2b (fix/vender-org-scoping): the AgentCredentialVender Lambda
+  // resolves declared dataStore/integration ids to their owning org
+  // against these tables before granting any AssumeRole policy.
+  dataStoresTable: backendStack.dataStoresTable,
+  integrationsTable: backendStack.integrationsTable,
   registryArn: backendStack.registryArn,
   registryId: backendStack.registryId,
   // Governance UI Wave 1: the new governance-ui-resolver lives in

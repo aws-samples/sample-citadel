@@ -471,12 +471,18 @@ def _merge_required_permissions(agent_permissions: dict | None, tool_bindings: d
 
     return merged if merged else None
 
-def get_scoped_credentials(agent_name: str, required_permissions: dict, app_id: str | None = None) -> dict | None:
+def get_scoped_credentials(agent_name: str, required_permissions: dict, app_id: str | None = None, org_id: str | None = None) -> dict | None:
     """
     Invoke the credential vender Lambda to get scoped IAM credentials
     for this agent based on its declared permissions.
     When app_id is provided, the credential vender uses the app-scoped IAM role
     (citadel-agent-{appId}) instead of the agent-level role (Req 4 AC 5).
+
+    ``org_id`` is the SERVER-DERIVED org carried on the Supervisor's worker
+    dispatch payload (never trusted from agent/subprocess output). Wave 2b
+    (branch fix/vender-org-scoping): fail CLOSED — issue no credential
+    request at all, with a clear log — when org_id is missing/empty, rather
+    than letting the vender silently grant org-blind AssumeRole access.
     """
     if not CREDENTIAL_VENDER_FUNCTION:
         print("CREDENTIAL_VENDER_FUNCTION not set, skipping credential vending")
@@ -485,10 +491,22 @@ def get_scoped_credentials(agent_name: str, required_permissions: dict, app_id: 
     if not required_permissions:
         return None
 
+    if not isinstance(org_id, str) or not org_id:
+        print(json.dumps({
+            'level': 'ERROR',
+            'component': 'WorkerWrapper',
+            'action': 'credential_vend_refused_no_org',
+            'agentId': agent_name,
+            'error': 'org_id missing/empty on dispatch payload — refusing to '
+                     'request scoped credentials (fail closed, no vender call).',
+        }))
+        return None
+
     try:
         payload_data = {
             'agentId': agent_name,
             'requiredPermissions': required_permissions,
+            'org': org_id,
         }
         if app_id:
             payload_data['appId'] = app_id
@@ -1271,7 +1289,10 @@ def _process_workflow_node(event, message_attributes=None):
             )
 
         required_permissions = config.get('requiredPermissions')
-        scoped_credentials = get_scoped_credentials(msg.agent_id, required_permissions)
+        scoped_credentials = get_scoped_credentials(
+            msg.agent_id, required_permissions,
+            org_id=_resolve_execution_org_id(msg.execution_id),
+        )
 
         fileName = config['filename']
         load_file_from_s3_into_tmp(os.environ["AGENT_BUCKET_NAME"], fileName)
@@ -1420,6 +1441,11 @@ def process_event(event, context, message_attributes=None):
     model_override = event.get('modelOverride')
     system_prompt_addition = event.get('systemPromptAddition')
     app_id = event.get('appId') # App-scoped credential vending (Req 4 AC 5)
+    # Wave 2b (fix/vender-org-scoping): the Supervisor's process_agent_call
+    # dispatch payload already carries a server-derived, non-empty orgId
+    # (supervisor/index.py process_agent_call). Forward it verbatim to the
+    # credential vender — never re-derive or default it here.
+    org_id = event.get('orgId')
 
     # CIT-102 Pass B: frozen contract keys (Pass A dispatch payload —
     # supervisor.process_agent_call). Absent-tolerant reads: a non-eval
@@ -1553,7 +1579,7 @@ def process_event(event, context, message_attributes=None):
     # Vend scoped credentials based on merged permissions
     # When appId is present, use app-scoped IAM role (Req 4 AC 5)
     # Eventual consistency: binding updates are picked up on next invocation (Req 10.8)
-    scoped_credentials = get_scoped_credentials(agent_name, required_permissions, app_id=app_id)
+    scoped_credentials = get_scoped_credentials(agent_name, required_permissions, app_id=app_id, org_id=org_id)
 
     fileName = config['filename']
     print("loading file from s3...")

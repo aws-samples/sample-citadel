@@ -154,6 +154,14 @@ interface ArbiterStackProps extends cdk.StackProps {
   // gate is forward-compatible -- when the table/prop is absent the
   // gate's env-var fallback simply no-ops.
   agentDesignAssessmentsTable?: dynamodb.Table;
+  // Wave 2b (fix/vender-org-scoping): optional read handles so the
+  // AgentCredentialVender Lambda can resolve declared dataStore/integration
+  // ids to their owning org before granting any AssumeRole policy. Optional
+  // because some test paths construct ArbiterStack without them; when
+  // absent the vender's lookups resolve nothing and every org-scoped
+  // request that declares a dataStore/integration id fails closed.
+  dataStoresTable?: dynamodb.Table;
+  integrationsTable?: dynamodb.Table;
   registryArn?: string;
   registryId?: string;
   // Governance UI Wave 1: optional AppSync API handle so the new
@@ -543,6 +551,17 @@ export class ArbiterStack extends cdk.Stack {
         memorySize: 256,
         environment: {
           ENVIRONMENT: props.environment,
+          AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+          // Wave 2b (fix/vender-org-scoping): omitted entirely when the
+          // stack is constructed without these optional tables (test paths);
+          // the vender's org-resolution lookups then find nothing and
+          // every request declaring a dataStore/integration id fails closed.
+          ...(props.dataStoresTable && {
+            DATASTORES_TABLE: props.dataStoresTable.tableName,
+          }),
+          ...(props.integrationsTable && {
+            INTEGRATIONS_TABLE: props.integrationsTable.tableName,
+          }),
         },
         initialPolicy: [
           new PolicyStatement({
@@ -570,6 +589,14 @@ export class ArbiterStack extends cdk.Stack {
         ],
       },
     );
+
+    // Wave 2b (fix/vender-org-scoping): read-only access to the agent
+    // config table (agent's own orgId) and, when provisioned, the
+    // datastore/integration tables the vender resolves declared ids
+    // against before granting any AssumeRole policy.
+    props.agentConfigTable.grantReadData(credentialVenderLambda);
+    props.dataStoresTable?.grantReadData(credentialVenderLambda);
+    props.integrationsTable?.grantReadData(credentialVenderLambda);
 
     // Tool-call idempotency ledger (PR1). Org-scoped, TTL'd operational
     // dedupe table — NOT an audit artifact (distinct from the 90-day
