@@ -63,11 +63,16 @@ SEVEN_DAYS = 7 * 24 * 60 * 60  # design B.1 TTL
 
 
 def _task_request(event_id: str | None) -> dict:
-    """A minimal EventBridge task.request envelope (id optional)."""
+    """A minimal EventBridge task.request envelope (id optional).
+
+    `orgId` is included (finding 87a171ad): task.request now requires a
+    non-empty server-derived organisation or the handler refuses dispatch
+    before ever reaching orchestrate().
+    """
     event = {
         "source": "task.request",
         "detail-type": "System-Task",
-        "detail": {"task": "compose a plan", "appId": "app-1"},
+        "detail": {"task": "compose a plan", "appId": "app-1", "orgId": "org-1"},
     }
     if event_id is not None:
         event["id"] = event_id

@@ -33,6 +33,10 @@ jest.mock("uuid", () => ({ v4: jest.fn().mockReturnValue("msg-uuid-123") }));
 jest.mock("../../utils/appsync", () => ({
   getUserId: jest.fn().mockReturnValue("user-123"),
 }));
+jest.mock("../../utils/auth-event", () => ({
+  ...jest.requireActual("../../utils/auth-event"),
+  extractOrgFromEvent: jest.fn(),
+}));
 jest.mock("../../utils/idempotency", () => ({
   IdempotencyGuard: jest.fn().mockImplementation(() => ({
     withIdempotency: jest.fn(
@@ -48,6 +52,11 @@ import { handler as submitTaskHandler } from "../task-runner-resolver";
 import { handler as executionHandler } from "../execution-resolver";
 import { handler as conversationHandler } from "../conversation-resolver";
 import { handler as appInvokeHandler } from "../app-invoke-handler";
+import { extractOrgFromEvent } from "../../utils/auth-event";
+
+const mockExtractOrgFromEvent = extractOrgFromEvent as jest.MockedFunction<
+  typeof extractOrgFromEvent
+>;
 
 const RUN_ID_SHAPE = /^run-[0-9a-f-]{36}$/i;
 const ATTACKER_RUN_ID = "run-attacker-planted-0000";
@@ -58,6 +67,7 @@ const ebMock = mockClient(EventBridgeClient);
 beforeEach(() => {
   ddbMock.reset();
   ebMock.reset();
+  mockExtractOrgFromEvent.mockReset();
   jest.spyOn(console, "log").mockImplementation(() => undefined);
   jest.spyOn(console, "error").mockImplementation(() => undefined);
   jest.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -69,6 +79,7 @@ afterEach(() => {
 
 describe("runId client-strip — submitTask (task-runner-resolver)", () => {
   test("ignores a client-supplied runId planted anywhere in the input and mints a fresh one", async () => {
+    mockExtractOrgFromEvent.mockResolvedValue("org-1");
     ebMock.on(PutEventsCommand).resolves({});
 
     await submitTaskHandler({
@@ -82,7 +93,8 @@ describe("runId client-strip — submitTask (task-runner-resolver)", () => {
           runId: ATTACKER_RUN_ID,
         } as unknown as { taskDetails: string },
       },
-    });
+      identity: { sub: "user-1" },
+    } as unknown as Parameters<typeof submitTaskHandler>[0]);
 
     const detail = JSON.parse(
       ebMock.commandCalls(PutEventsCommand)[0].args[0].input.Entries![0]

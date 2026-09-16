@@ -63,7 +63,10 @@ class TestSupervisorTaskRequestDedupe:
     def test_first_delivery_dispatches_once(self):
         event = {
             "source": "task.request",
-            "detail": {"task": "do the thing", "appId": "app-1"},
+            # orgId added (finding 87a171ad): task.request now requires a
+            # non-empty server-derived organisation or the handler refuses
+            # dispatch before ever reaching orchestrate().
+            "detail": {"task": "do the thing", "appId": "app-1", "orgId": "org-1"},
             "id": "evt-aaa-111",
         }
         with patch("index._claim_event_id", return_value=True) as claim, \
@@ -79,7 +82,7 @@ class TestSupervisorTaskRequestDedupe:
         second time. This must become a no-op."""
         event = {
             "source": "task.request",
-            "detail": {"task": "do the thing", "appId": "app-1"},
+            "detail": {"task": "do the thing", "appId": "app-1", "orgId": "org-1"},
             "id": "evt-dup-222",
         }
         with patch("index._claim_event_id", return_value=False) as claim, \
@@ -93,12 +96,12 @@ class TestSupervisorTaskRequestDedupe:
         """No false-positive dedupe across genuinely distinct events."""
         event_a = {
             "source": "task.request",
-            "detail": {"task": "task A"},
+            "detail": {"task": "task A", "orgId": "org-1"},
             "id": "evt-distinct-a",
         }
         event_b = {
             "source": "task.request",
-            "detail": {"task": "task B"},
+            "detail": {"task": "task B", "orgId": "org-1"},
             "id": "evt-distinct-b",
         }
         with patch("index._claim_event_id", return_value=True) as claim, \
@@ -115,7 +118,7 @@ class TestSupervisorTaskRequestDedupe:
         rather than being treated as either success or duplicate."""
         event = {
             "source": "task.request",
-            "detail": {"task": "do the thing"},
+            "detail": {"task": "do the thing", "orgId": "org-1"},
             "id": "evt-transient-err",
         }
         with patch("index._claim_event_id", side_effect=_throttling_error()), \

@@ -44,7 +44,12 @@ with patch.multiple(
     import index
 
 
-def _make_task_request_event(task="do something", callback=None, app_id=None, run_id=None):
+def _make_task_request_event(task="do something", callback=None, app_id=None, run_id=None,
+                              org_id="org-fixture-default"):
+    """`org_id` defaults to a non-empty fixture value (finding 87a171ad):
+    every task.request the handler accepts now requires a non-empty
+    detail.orgId. Pass org_id=None explicitly for the (now-refused)
+    org-less negative-test shape."""
     detail = {"task": task}
     if callback is not None:
         detail["callback"] = callback
@@ -52,6 +57,8 @@ def _make_task_request_event(task="do something", callback=None, app_id=None, ru
         detail["appId"] = app_id
     if run_id is not None:
         detail["runId"] = run_id
+    if org_id is not None:
+        detail["orgId"] = org_id
     return {"source": "task.request", "detail": detail}
 
 
@@ -70,6 +77,7 @@ class TestHandlerExtractsRunId:
             callback=None,
             app_id=None,
             run_id="run-abc-123",
+            org_id="org-fixture-default",
             eval_run_id=None,
             eval_context=None,
             forbidden_tools=None,
@@ -87,6 +95,7 @@ class TestHandlerExtractsRunId:
             callback=None,
             app_id=None,
             run_id=None,
+            org_id="org-fixture-default",
             eval_run_id=None,
             eval_context=None,
             forbidden_tools=None,
