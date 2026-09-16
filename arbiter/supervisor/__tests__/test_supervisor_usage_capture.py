@@ -132,7 +132,7 @@ class TestOrchestrateSupervisorUsageCapture:
         mock_breaker.call.return_value = _bedrock_response_text_only("done")
 
         with caplog.at_level(logging.WARNING, logger=supervisor_mod.logger.name):
-            supervisor_mod.orchestrate(initial_message="hello")
+            supervisor_mod.orchestrate(initial_message="hello", org_id="org-test")
 
         # Must not have raised; the text-only (no agents invoked, no
         # callback) path still publishes supervisor feedback to EventBridge.
@@ -230,7 +230,7 @@ class TestProcessAgentCallSupervisorUsageStamping:
         with patch.object(supervisor_mod, "EVENT_BUS_NAME", None):
             result = supervisor_mod.process_agent_call(
                 self._agent_config(),
-                {"orchestrationId": "orch-1"},
+                {"orchestrationId": "orch-1", "orgId": "org-test"},
                 "agent-a",
                 {"x": 1},
                 "use-1",
@@ -251,7 +251,7 @@ class TestProcessAgentCallSupervisorUsageStamping:
         with patch.object(supervisor_mod, "EVENT_BUS_NAME", None):
             result = supervisor_mod.process_agent_call(
                 self._agent_config(),
-                {"orchestrationId": "orch-1"},
+                {"orchestrationId": "orch-1", "orgId": "org-test"},
                 "agent-a",
                 {"x": 1},
                 "use-1",
@@ -270,7 +270,7 @@ class TestProcessAgentCallSupervisorUsageStamping:
         with patch.object(supervisor_mod, "EVENT_BUS_NAME", None):
             supervisor_mod.process_agent_call(
                 self._agent_config(),
-                {"orchestrationId": "orch-1"},
+                {"orchestrationId": "orch-1", "orgId": "org-test"},
                 "agent-a",
                 {"x": 1},
                 "use-1",

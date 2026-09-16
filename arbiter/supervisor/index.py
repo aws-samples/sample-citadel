@@ -994,6 +994,25 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
         print(f"Agent {agent_name} not found in configuration.")
         return
 
+    # Wave-2a tenancy (finding 87a171ad, branch fix/chatter-tenancy):
+    # fail closed. `handler()` already refuses task.request dispatch
+    # without detail.orgId before an orchestration row is ever created, so
+    # in production this orchestration dict always carries a non-empty
+    # orgId by the time process_agent_call runs. This is still enforced
+    # here, one level down, so a caller of process_agent_call can never
+    # dispatch to the worker queue or emit chatter for an org-less
+    # orchestration — never silently proceed org-less.
+    org_id = orchestration.get('orgId')
+    if not isinstance(org_id, str) or not org_id:
+        logger.error(
+            "process_agent_call refused: orchestration %r carries no "
+            "orgId — refusing worker dispatch and chatter emission for "
+            "agent %r (no tenancy on this dispatch).",
+            orchestration.get("orchestrationId"),
+            agent_name,
+        )
+        return
+
     action = agent_config["action"]
     action_type = action["type"]
     target = action["target"]
@@ -1001,7 +1020,8 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
         "agent_input": agent_input,
         "orchestration_id": orchestration["orchestrationId"],
         "agent_use_id": agent_use_id,
-        "node": agent_name
+        "node": agent_name,
+        "orgId": org_id
     }
 
     # Additive: stamp the supervisor's own Converse-call usage record on the
@@ -1066,7 +1086,8 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
                             'orchestration_id': orchestration["orchestrationId"],
                             'agent_use_id': agent_use_id,
                             'target': target,
-                            'timestamp': time.time()
+                            'timestamp': time.time(),
+                            'orgId': org_id
                         }, default=str),
                         'EventBusName': EVENT_BUS_NAME
                     }
@@ -1125,31 +1146,44 @@ def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, s
         
         # Send final response to callback if orchestration is complete
         callback_info = orchestration.get('callback')
+        org_id = orchestration.get('orgId')
         if text_response and callback_info:
             print(f"Orchestration complete, sending response to callback")
-            send_response(text_response, callback=callback_info)
+            send_response(text_response, callback=callback_info, org_id=org_id)
         
-        # Publish supervisor feedback to EventBridge for chatter visibility
+        # Publish supervisor feedback to EventBridge for chatter visibility.
+        # Wave-2a tenancy (finding 87a171ad): fail closed — never emit
+        # chatter without orgId. An org-less orchestration row skips this
+        # emission entirely rather than publishing untenanted feedback.
         if EVENT_BUS_NAME and text_response:
-            try:
-                events_client.put_events(
-                    Entries=[
-                        {
-                            'Source': 'supervisor',
-                            'DetailType': 'supervisor.feedback',
-                            'Detail': json.dumps({
-                                'action': 'direct_response',
-                                'message': text_response,
-                                'orchestration_id': orchestration["orchestrationId"],
-                                'timestamp': time.time()
-                            }, default=str),
-                            'EventBusName': EVENT_BUS_NAME
-                        }
-                    ]
+            if not isinstance(org_id, str) or not org_id:
+                logger.error(
+                    "supervisor.feedback emission refused: orchestration "
+                    "%r carries no orgId — refusing to publish chatter "
+                    "without tenancy.",
+                    orchestration.get("orchestrationId"),
                 )
-                print(f"Published supervisor feedback to EventBridge")
-            except Exception as e:
-                print(f"Error publishing supervisor feedback to EventBridge: {e}")
+            else:
+                try:
+                    events_client.put_events(
+                        Entries=[
+                            {
+                                'Source': 'supervisor',
+                                'DetailType': 'supervisor.feedback',
+                                'Detail': json.dumps({
+                                    'action': 'direct_response',
+                                    'message': text_response,
+                                    'orchestration_id': orchestration["orchestrationId"],
+                                    'timestamp': time.time(),
+                                    'orgId': org_id
+                                }, default=str),
+                                'EventBusName': EVENT_BUS_NAME
+                            }
+                        ]
+                    )
+                    print(f"Published supervisor feedback to EventBridge")
+                except Exception as e:
+                    print(f"Error publishing supervisor feedback to EventBridge: {e}")
 
 
 def update_orchestration_with_results(results, orchestration):
@@ -1216,7 +1250,7 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
         # Send response back to requester that there are no active agents
         print("No active agents configured")
         callback_info = orchestration.get('callback')
-        send_response("No active agents configured", callback=callback_info)
+        send_response("No active agents configured", callback=callback_info, org_id=orchestration.get('orgId'))
         return
     
     agent_specs = create_agent_specs(agent_configs)
@@ -1273,7 +1307,7 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
 
     save_orchestration(orchestration=orchestration)
 
-def send_response(message, callback=None):
+def send_response(message, callback=None, org_id=None):
     """Send response to the default event bus or to a specific callback address.
 
     Security (finding 87a171ad, items g/h): every event this function emits
@@ -1285,7 +1319,24 @@ def send_response(message, callback=None):
     an arbitrary event bus. Only the 'eventbridge' callback type is
     supported; any other type (including the removed 'sqs') logs and
     no-ops.
+
+    Wave-2a tenancy (finding 87a171ad, branch fix/chatter-tenancy):
+    ``org_id`` is the orchestration row's server-derived orgId, threaded in
+    by every call site. Fail closed — never emit chatter without orgId: an
+    absent/empty org_id skips the EventBridge put entirely (both the
+    default-bus and 'eventbridge' callback branches), logged at error
+    level, rather than publishing an org-less task.response.
     """
+
+    if not isinstance(org_id, str) or not org_id:
+        logger.error(
+            "send_response refused: no orgId on this response — refusing "
+            "to publish task.response without tenancy. message=%r "
+            "callback=%r.",
+            message[:200] if isinstance(message, str) else message,
+            callback,
+        )
+        return
 
     # If no callback specified, send to default event bus
     if not callback:
@@ -1301,7 +1352,8 @@ def send_response(message, callback=None):
                         'DetailType': 'task.response',
                         'Detail': json.dumps({
                             'message': message,
-                            'timestamp': time.time()
+                            'timestamp': time.time(),
+                            'orgId': org_id
                         }, default=str),
                         'EventBusName': EVENT_BUS_NAME
                     }
@@ -1329,7 +1381,8 @@ def send_response(message, callback=None):
                         'Detail': json.dumps({
                             'message': message,
                             'timestamp': time.time(),
-                            'callback': callback
+                            'callback': callback,
+                            'orgId': org_id
                         }, default=str),
                         'EventBusName': EVENT_BUS_NAME
                     }

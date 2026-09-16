@@ -68,6 +68,7 @@ class TestEventBridgeCallbackIgnoresCallerSuppliedBusName:
                     "type": "eventbridge",
                     "eventBusName": "attacker-controlled-bus",
                 },
+                org_id="org-test",
             )
 
         mock_events.put_events.assert_called_once()
@@ -85,6 +86,7 @@ class TestEventBridgeCallbackPinsSourceAndDetailType:
             index.send_response(
                 "hello",
                 callback={"type": "eventbridge", "source": "attacker.source"},
+                org_id="org-test",
             )
 
         entries = mock_events.put_events.call_args.kwargs["Entries"]
@@ -96,6 +98,7 @@ class TestEventBridgeCallbackPinsSourceAndDetailType:
             index.send_response(
                 "hello",
                 callback={"type": "eventbridge", "detailType": "not.task.response"},
+                org_id="org-test",
             )
 
         entries = mock_events.put_events.call_args.kwargs["Entries"]
@@ -107,7 +110,7 @@ class TestEventBridgeCallbackPinsSourceAndDetailType:
         callback argument) must use the same reserved Source constant,
         not a bare literal that could drift from the callback branch."""
         with patch.object(index, "events_client") as mock_events:
-            index.send_response("hello", callback=None)
+            index.send_response("hello", callback=None, org_id="org-test")
 
         entries = mock_events.put_events.call_args.kwargs["Entries"]
         assert entries[0]["Source"] == index.SUPERVISOR_RESPONSE_SOURCE
@@ -132,6 +135,7 @@ class TestTaskRequestSourceCannotBeReEntered:
                     "eventBusName": "fake-bus",
                     "detailType": "System-Task",
                 },
+                org_id="org-test",
             )
 
         entries = mock_events.put_events.call_args.kwargs["Entries"]
@@ -167,6 +171,7 @@ class TestSqsCallbackBranchRemoved:
         index.send_response(
             "hello",
             callback={"type": "sqs", "queueUrl": "https://sqs.example/q"},
+            org_id="org-test",
         )
         captured = capsys.readouterr()
         assert "sqs" in captured.out.lower()

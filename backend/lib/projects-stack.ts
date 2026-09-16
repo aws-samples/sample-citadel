@@ -590,6 +590,58 @@ export class ProjectsStack extends cdk.Stack {
       chatterLambdaDataSource,
     );
 
+    // Wave-2a tenancy (finding 87a171ad section A): connect-time
+    // authorization gate for onChatter(orgId: ID!). AppSync's implicit
+    // subscription filter (orgId arg vs the published message's orgId
+    // field) is not isolation on its own — a client could subscribe with
+    // an arbitrary orgId. This resolver rejects the subscribe attempt
+    // when the requested orgId does not match the caller's own
+    // organization (unless the caller is an admin). Shared with
+    // onFabricationEvent in citadel-registry-dev — same handler code,
+    // wired independently per satellite stack since each owns its own
+    // AppSync data source/resolver.
+    const chatterSubscriptionAuthorizerFunction = new lambda.Function(
+      this,
+      "ChatterSubscriptionAuthorizerFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "chatter-subscription-authorizer.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          USER_POOL_ID: props.userPool.userPoolId,
+        },
+        timeout: cdk.Duration.seconds(10),
+        logGroup: new logs.LogGroup(
+          this,
+          "ChatterSubscriptionAuthorizerFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    chatterSubscriptionAuthorizerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cognito-idp:AdminGetUser"],
+        resources: [props.userPool.userPoolArn],
+      }),
+    );
+
+    const chatterSubscriptionAuthorizerDataSource = makeLambdaDataSource(
+      "ChatterSubscriptionAuthorizer",
+      chatterSubscriptionAuthorizerFunction,
+    );
+
+    makeResolver(
+      "OnChatterSubscriptionAuthorizerResolver",
+      "Subscription",
+      "onChatter",
+      chatterSubscriptionAuthorizerDataSource,
+    );
+
     // EventBridge rule for ALL agent chatter - captures all messages on the
     // shared bus. Matches all events by not specifying a source pattern.
     const chatterRule = new events.Rule(this, "ChatterRule", {

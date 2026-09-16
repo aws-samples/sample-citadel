@@ -467,10 +467,10 @@ type Subscription {
   onDesignProgress(projectId: ID!): DesignProgressEvent
     @aws_subscribe(mutations: ["publishDesignProgress"])
     @aws_iam @aws_cognito_user_pools
-  onChatter: AgentChatterMessage
+  onChatter(orgId: ID!): AgentChatterMessage
     @aws_subscribe(mutations: ["publishChatter"])
     @aws_cognito_user_pools
-  onFabricationEvent: FabricationEvent
+  onFabricationEvent(orgId: ID!): FabricationEvent
     @aws_subscribe(mutations: ["publishFabricationEvent"])
     @aws_iam @aws_cognito_user_pools
   onWorkflowProgress(executionId: ID!): WorkflowProgressEvent
@@ -1074,6 +1074,7 @@ type AgentChatterMessage @aws_iam @aws_cognito_user_pools {
   source: String!
   detailType: String!
   detail: AWSJSON!
+  orgId: ID!
 }
 
 type FabricationQueueItem {
@@ -1092,6 +1093,7 @@ type FabricationEvent {
   agentId: String
   errorMessage: String
   timestamp: AWSDateTime!
+  orgId: ID!
 }
 
 type ProjectConnection {
@@ -1342,6 +1344,7 @@ input AgentChatterInput {
   source: String!
   detailType: String!
   detail: AWSJSON!
+  orgId: ID!
 }
 
 input CreateIntegrationInput {
@@ -1377,6 +1380,7 @@ input FabricationEventInput {
   agentId: String
   errorMessage: String
   timestamp: AWSDateTime!
+  orgId: ID!
 }
 
 enum ProjectStatus {
