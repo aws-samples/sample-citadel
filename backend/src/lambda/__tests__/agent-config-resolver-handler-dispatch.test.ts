@@ -324,10 +324,23 @@ describe("handler switch dispatch (task 6.5)", () => {
     });
 
     test("deleteAgentConfig uses RegistryService.deleteResource", async () => {
+      // finding 1fcfd11e: delete now fetches the record first (tenancy gate)
+      // and requires admin/architect (decision 31ee5b5d).
+      mockGetResource.mockResolvedValue(sampleRegistryRecord);
       mockDeleteResource.mockResolvedValue(undefined);
 
       const result = await handler(
-        makeEvent("deleteAgentConfig", { agentId: "agent-r1" }),
+        makeEvent(
+          "deleteAgentConfig",
+          { agentId: "agent-r1" },
+          {
+            sub: "test-user",
+            claims: {
+              "custom:organization": "test-org-a",
+              "custom:role": "architect",
+            },
+          },
+        ),
       );
 
       expect(mockDeleteResource).toHaveBeenCalledWith("agent", "agent-r1");
@@ -343,11 +356,20 @@ describe("handler switch dispatch (task 6.5)", () => {
         version: "1.0.0",
       });
 
+      // finding 1fcfd11e: publish requires admin/architect (decision 31ee5b5d)
+      // in addition to same-org membership.
       const result = await handler(
-        makeEvent("publishAgentManifest", {
-          agentId: "agent-r1",
-          manifest,
-        }),
+        makeEvent(
+          "publishAgentManifest",
+          { agentId: "agent-r1", manifest },
+          {
+            sub: "test-user",
+            claims: {
+              "custom:organization": "test-org-a",
+              "custom:role": "architect",
+            },
+          },
+        ),
       );
 
       expect(mockUpdateResource).toHaveBeenCalled();
@@ -400,7 +422,30 @@ describe("handler switch dispatch (task 6.5)", () => {
       );
     });
 
-    test("(b) update: existing orgId is preserved, never overwritten by caller org", async () => {
+    test("(b) update: a caller from a DIFFERENT org than the existing record is rejected (finding 1fcfd11e)", async () => {
+      const ownedBySomeoneElse = {
+        ...sampleRegistryRecord,
+        customDescriptorContent: JSON.stringify({
+          orgId: "original-owner-org",
+        }),
+      };
+      mockGetResource.mockResolvedValue(ownedBySomeoneElse);
+      mockUpdateResource.mockResolvedValue(ownedBySomeoneElse);
+
+      await expect(
+        handler(
+          makeEvent(
+            "updateAgentConfig",
+            { input: { agentId: "agent-r1", categories: ["x"] } },
+            // different caller from the record owner
+            { claims: { "custom:organization": "different-caller-org" } },
+          ),
+        ),
+      ).rejects.toThrow();
+      expect(mockUpdateResource).not.toHaveBeenCalled();
+    });
+
+    test("(b) update: existing orgId is preserved for a SAME-org caller, never overwritten by caller org", async () => {
       const ownedBySomeoneElse = {
         ...sampleRegistryRecord,
         customDescriptorContent: JSON.stringify({
@@ -414,8 +459,7 @@ describe("handler switch dispatch (task 6.5)", () => {
         makeEvent(
           "updateAgentConfig",
           { input: { agentId: "agent-r1", categories: ["x"] } },
-          // different caller from the record owner
-          { claims: { "custom:organization": "different-caller-org" } },
+          { claims: { "custom:organization": "original-owner-org" } },
         ),
       );
 

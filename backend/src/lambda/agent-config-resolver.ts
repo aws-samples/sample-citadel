@@ -19,7 +19,13 @@ import type {
   RegistryRecord,
   ListResourcesOptions,
 } from "../services/registry-service";
-import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  hasRoleFromEvent,
+  assertRowOrg,
+} from "../utils/auth-event";
+import { assertProjectOrgAccess } from "../utils/project-org-access";
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { publishEvent } from "../utils/events";
 import {
@@ -58,6 +64,18 @@ const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
 
 const AGENT_CONFIG_TABLE = process.env.AGENT_CONFIG_TABLE!;
+
+/**
+ * Role required, in addition to admin, to delete an agent config or publish
+ * its manifest (decision 31ee5b5d). Mirrors agent-code-resolver.ts's
+ * REQUIRED_WRITE_ROLE: destructive/publishing agent-lifecycle mutations are
+ * architect-reserved, the same trust tier used for comparable mutations
+ * elsewhere in this codebase (agent-import-resolver.ts gates import/attest/
+ * activate/gateway-publish on isAdminFromEvent || hasRoleFromEvent(event,
+ * 'architect')). NOT applied to activate/update/create — those remain
+ * org-membership-gated only, per the same decision.
+ */
+const REQUIRED_WRITE_ROLE = "architect";
 
 // ---------------------------------------------------------------------------
 // Feature flag + Registry Service initialization (task 6.1)
@@ -214,7 +232,10 @@ export const handler = async (
 
       case "deleteAgentConfig":
         return registryEnabled
-          ? await deleteAgentConfigRegistry(event.arguments.agentId as string)
+          ? await deleteAgentConfigRegistry(
+              event.arguments.agentId as string,
+              event,
+            )
           : await deleteAgentConfig(event.arguments.agentId as string);
 
       case "publishAgentManifest":
@@ -222,6 +243,7 @@ export const handler = async (
           ? await publishAgentManifestRegistry(
               event.arguments.agentId as string,
               event.arguments.manifest as string,
+              event,
             )
           : await publishAgentManifest(
               event.arguments.agentId as string,
@@ -231,10 +253,14 @@ export const handler = async (
       case "searchAgentConfigs":
         return await searchAgentConfigsRegistry(
           event.arguments.query as string,
+          event,
         );
 
-      case "activateProjectAgents":
-        return await activateProjectAgents(event.arguments.projectId as string);
+      case "activateProjectAgents": {
+        const projectId = event.arguments.projectId as string;
+        await assertProjectOrgAccess(projectId, event);
+        return await activateProjectAgents(projectId);
+      }
 
       default:
         throw new Error(`Unknown field: ${fieldName}`);
@@ -547,6 +573,28 @@ export async function updateAgentConfigRegistry(
     orgId: undefined,
   });
 
+  // Tenancy reconciliation BEFORE any mutation (finding 1fcfd11e): compare the
+  // caller's org against the EXISTING record's orgId via assertRowOrg (admin
+  // bypass). A record with NO orgId is a legacy record predating Phase-2a —
+  // assertRowOrg's row shape only carries `orgId` when present, so we pass
+  // `existingMeta.orgId` verbatim and let a missing orgId fall through to the
+  // caller-org fallback below (see "falls back to caller JWT org when legacy
+  // record is missing orgId"), rather than fail-closed on it: fail-closing on
+  // every org-less legacy record would newly block the documented fallback
+  // behaviour this function already relies on. A record that DOES carry an
+  // orgId differing from the caller's IS rejected, fail-closed, same as every
+  // other assertRowOrg call site in this file.
+  if (typeof existingMeta.orgId === "string" && existingMeta.orgId.length > 0) {
+    await assertRowOrg({ orgId: existingMeta.orgId }, event);
+  } else if (!isAdminFromEvent(event)) {
+    const callerOrgId = await extractOrgFromEvent(event);
+    if (!callerOrgId) {
+      throw new Error(
+        `Access denied: cannot determine caller organization for agent ${input.agentId}`,
+      );
+    }
+  }
+
   // Merge config
   const newConfig = input.config
     ? typeof input.config === "string"
@@ -806,12 +854,42 @@ export async function updateAgentConfigRegistry(
 /**
  * Registry-backed delete: deletes the resource from the Registry.
  * Returns success/failure object matching the existing shape.
+ *
+ * Fetch-then-verify, fail-closed (finding 1fcfd11e): loads the target record
+ * and reconciles its `customMetadata.orgId` against the caller's org via
+ * `assertRowOrg` (admin bypass) BEFORE any delete — mirrors
+ * `assertAgentCodeAccess` in agent-code-resolver.ts. Additionally requires
+ * `isAdminFromEvent || hasRoleFromEvent(event, REQUIRED_WRITE_ROLE)` (decision
+ * 31ee5b5d), checked only after the org gate passes so a cross-org caller
+ * never learns whether they merely lack the role. A record not found in the
+ * Registry is treated as a normal delete failure (no gate to run).
  */
 export async function deleteAgentConfigRegistry(
   agentId: string,
+  event?: OrgScopedEvent,
 ): Promise<{ success: boolean; message?: string }> {
   const registryService = getRegistryService();
   try {
+    const existing = await registryService.getResource("agent", agentId);
+    if (!existing) {
+      return {
+        success: false,
+        message: `Failed to delete agent config: Agent config not found: ${agentId}`,
+      };
+    }
+
+    const mapped = registryService.mapToAgentConfig(existing);
+    await assertRowOrg(mapped, event);
+
+    if (
+      !isAdminFromEvent(event) &&
+      !hasRoleFromEvent(event, REQUIRED_WRITE_ROLE)
+    ) {
+      throw new Error(
+        `Access denied: requires ${REQUIRED_WRITE_ROLE} role to delete agent ${agentId}`,
+      );
+    }
+
     await registryService.deleteResource("agent", agentId);
     return {
       success: true,
@@ -830,10 +908,18 @@ export async function deleteAgentConfigRegistry(
  * Registry-backed manifest publish: validates the manifest, fetches the
  * existing record, updates custom metadata with the new manifest, and
  * calls updateResource. Returns the mapped AgentConfig.
+ *
+ * Fetch-then-verify, fail-closed (finding 1fcfd11e): the existing record is
+ * reconciled against the caller's org via `assertRowOrg` (admin bypass)
+ * BEFORE any mutation — mirrors `assertAgentCodeAccess` in
+ * agent-code-resolver.ts. Additionally requires `isAdminFromEvent ||
+ * hasRoleFromEvent(event, REQUIRED_WRITE_ROLE)` (decision 31ee5b5d), checked
+ * only after the org gate passes.
  */
 export async function publishAgentManifestRegistry(
   agentId: string,
   manifestStr: string,
+  event?: OrgScopedEvent,
 ): Promise<AgentConfig> {
   // Parse the AWSJSON manifest string
   let manifest: RawAgentManifest;
@@ -857,6 +943,18 @@ export async function publishAgentManifestRegistry(
   const existing = await registryService.getResource("agent", agentId);
   if (!existing) {
     throw new Error(`Agent config not found: ${agentId}`);
+  }
+
+  // Tenancy + role gate BEFORE any mutation (finding 1fcfd11e).
+  const mapped = registryService.mapToAgentConfig(existing);
+  await assertRowOrg(mapped, event);
+  if (
+    !isAdminFromEvent(event) &&
+    !hasRoleFromEvent(event, REQUIRED_WRITE_ROLE)
+  ) {
+    throw new Error(
+      `Access denied: requires ${REQUIRED_WRITE_ROLE} role to publish manifest for agent ${agentId}`,
+    );
   }
 
   // Deserialize existing custom metadata and merge in the new manifest
@@ -892,14 +990,36 @@ export async function publishAgentManifestRegistry(
 
 /**
  * Searches for agent configs via Registry semantic search.
- * Returns results mapped to the AgentConfig GraphQL type.
+ * Returns results mapped to the AgentConfig GraphQL type, filtered to the
+ * caller's organization (admin sees all) — exactly as
+ * `listAgentConfigsRegistry` filters results (finding 1fcfd11e: this search
+ * path previously returned unfiltered cross-org results). A non-admin caller
+ * with no resolvable org gets an empty list and the search is skipped
+ * entirely, mirroring `listAgentConfigsRegistry`'s no-org short-circuit.
  */
-async function searchAgentConfigsRegistry(
+export async function searchAgentConfigsRegistry(
   query: string,
+  event?: OrgScopedEvent,
 ): Promise<AgentConfig[]> {
+  const callerOrgId =
+    event !== undefined ? await extractOrgFromEvent(event) : null;
+  const admin = event !== undefined ? isAdminFromEvent(event) : false;
+
+  if (!admin && !callerOrgId) {
+    console.warn(
+      "searchAgentConfigsRegistry: no caller orgId and not admin; returning empty list",
+    );
+    return [];
+  }
+
   const registryService = getRegistryService();
   const records = await registryService.searchResources("agent", query);
-  return records.map((record) => registryService.mapToAgentConfig(record));
+  const configs = records.map((record) =>
+    registryService.mapToAgentConfig(record),
+  );
+  return admin
+    ? configs
+    : configs.filter((a) => a.orgId === callerOrgId || a.orgId === "");
 }
 
 /** Result of a bulk activation, grouped by per-agent outcome. */
