@@ -328,7 +328,7 @@ def update_workflow_tracking(node: str, request_id: str, data: Any) -> bool:
     return all_completed, response
 
 
-def create_orchestration(conversation, callback=None, run_id=None, eval_run_id=None,
+def create_orchestration(conversation, callback=None, run_id=None, org_id=None, eval_run_id=None,
                           eval_context=None, forbidden_tools=None):
     """Create a fresh orchestration row.
 
@@ -342,6 +342,17 @@ def create_orchestration(conversation, callback=None, run_id=None, eval_run_id=N
     ``governed_process_agent_call`` later reads ``orchestration.get('runId')``
     to stamp the finding, right where it already derives ``workflow_id``
     from the same dict.
+
+    ``org_id`` (finding 87a171ad, high) follows the SAME additive,
+    omit-when-absent pattern: persisted as ``orgId`` on the row ONLY when a
+    non-empty string is supplied. Unlike ``run_id``, the production
+    ``task.request`` branch of ``handler()`` REQUIRES a non-empty
+    ``org_id`` before ``orchestrate()``/``create_orchestration`` is ever
+    reached — the parameter here stays optional so this function itself
+    remains a pure, non-gating constructor (the gate lives in
+    ``handler()``), and so the ``task.completion`` resume branch (which
+    loads an EXISTING row rather than creating one) and any other caller
+    that doesn't yet have an org concept do not break.
 
     ``eval_run_id`` / ``eval_context`` / ``forbidden_tools`` (CIT-102 Pass B)
     are the frozen-contract keys read off the inbound ``task.request``
@@ -366,6 +377,9 @@ def create_orchestration(conversation, callback=None, run_id=None, eval_run_id=N
 
     if isinstance(run_id, str) and run_id:
         item['runId'] = run_id
+
+    if isinstance(org_id, str) and org_id:
+        item['orgId'] = org_id
 
     if isinstance(eval_run_id, str) and eval_run_id:
         item['evalRunId'] = eval_run_id
@@ -1154,7 +1168,7 @@ def update_orchestration_with_results(results, orchestration):
 
 
 def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=None, run_id=None,
-                 eval_run_id=None, eval_context=None, forbidden_tools=None):
+                 org_id=None, eval_run_id=None, eval_context=None, forbidden_tools=None):
     if orchestration is None:
         # Pass 1, decision f1cbd5ef: forward the server-minted run_id (read
         # from the inbound task.request detail by handler(), or None for
@@ -1162,6 +1176,13 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
         # row. Additive/nullable — create_orchestration already treats
         # run_id=None as "omit the runId key", so this is byte-identical
         # to the pre-runId shape when run_id is None.
+        #
+        # org_id (finding 87a171ad): forwarded the same additive way.
+        # handler()'s task.request branch already REQUIRES a non-empty
+        # org_id before orchestrate() is ever reached — this function
+        # itself stays a pure pass-through so other callers (e.g. the
+        # task.completion resume branch, which never calls this
+        # constructor at all) are unaffected.
         #
         # CIT-102 Pass B: eval_run_id/eval_context/forbidden_tools are the
         # same additive, absent-tolerant forwarding for the frozen eval
@@ -1173,6 +1194,7 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
             }],
             callback=callback,
             run_id=run_id,
+            org_id=org_id,
             eval_run_id=eval_run_id,
             eval_context=eval_context,
             forbidden_tools=forbidden_tools,
@@ -1419,6 +1441,30 @@ def handler(event, lambda_context):
         # detail shape) must not raise or change behavior.
         run_id = event['detail'].get('runId')
 
+        # Tenancy gate (finding 87a171ad, high). Unlike run_id/appId/
+        # callback above, orgId is NOT optional: every task.request MUST
+        # carry a server-derived organisation (stamped by the resolver
+        # side, e.g. task-runner-resolver.ts submitTask's `requireOrgId`)
+        # or dispatch is refused outright — no orchestrate() call, no
+        # orchestration row created. This is the consumer-side half of
+        # the fix; the producer-side half (the resolver) never accepts an
+        # orgId from client input, so a caller cannot forge this by
+        # crafting its own detail.orgId either — it can only be missing
+        # (an unfixed/legacy producer) or genuinely server-derived.
+        org_id = event['detail'].get('orgId')
+        if not isinstance(org_id, str) or not org_id:
+            logger.error(
+                "task.request refused: missing/empty detail.orgId — no "
+                "tenancy on this dispatch. task=%r appId=%r runId=%r. "
+                "Every task.request producer must stamp a server-derived "
+                "organisation before publishing (see "
+                "task-runner-resolver.ts submitTask's requireOrgId).",
+                task_details[:200] if isinstance(task_details, str) else task_details,
+                app_id,
+                run_id,
+            )
+            return
+
         # CIT-102 Pass B: frozen contract keys (Pass A, detail.evalRunId /
         # detail.evalContext / detail.forbiddenTools), absent-tolerant reads
         # exactly like run_id immediately above — absence (a non-eval
@@ -1434,21 +1480,64 @@ def handler(event, lambda_context):
         if task_details:
             orchestrate(
                 initial_message=task_details, callback=callback, app_id=app_id, run_id=run_id,
-                eval_run_id=eval_run_id, eval_context=eval_context, forbidden_tools=forbidden_tools,
+                org_id=org_id, eval_run_id=eval_run_id, eval_context=eval_context,
+                forbidden_tools=forbidden_tools,
             )
         else:
             print("No task details found in event")
-    
-    # Fallback for other event types with detail
-    elif 'detail' in event:
-        print("Processing generic detail event")
-        orchestrate(initial_message=json.dumps(event["detail"]))
+
+    # Generic-detail fallback: REMOVED (finding 87a171ad, item 3, decision
+    # made explicit here rather than left as an unremarked bypass).
+    #
+    # The prior `elif 'detail' in event: orchestrate(initial_message=
+    # json.dumps(event["detail"]))` branch orchestrated ARBITRARY event
+    # detail with NO source check at all — any event reaching this Lambda
+    # with a `detail` key, regardless of source, triggered full Supervisor
+    # orchestration with zero tenancy and zero validation. That is a
+    # second, independent bypass of the org-tenancy rule just added above:
+    # an attacker (or a misconfigured EventBridge rule) could route a
+    # non-`task.request` event straight past the new orgId gate.
+    #
+    # Decision: REMOVE it, not restrict-by-source or add tenancy to it.
+    # Checked backend/lib/arbiter-stack.ts's EventBridge rules: the
+    # Supervisor Lambda is invoked ONLY by TaskRequestRule (source
+    # `task.request`) and TaskCompletionRule (source `task.completion`) —
+    # both already have dedicated, now-gated branches above. No third
+    # production source targets this Lambda, so restricting this branch
+    # to `source == 'task.request'` would make it exactly equivalent to
+    # removal (any event that would still reach it is already handled by
+    # the `task.request` branch above) while leaving dead code that reads
+    # like a supported path. Removing it outright is the more honest
+    # contract: an event with a `detail` key but an unrecognised/absent
+    # `source` is now a logged no-op, not a silent orchestration trigger.
+    # The `__main__` local-dev harness below was updated to send a proper
+    # `task.request`-shaped event (with detail.task + detail.orgId)
+    # instead of relying on this removed fallback.
+    else:
+        print(
+            f"Unrecognised event shape (source={event.get('source')!r}); "
+            "no matching dispatch branch — no-op."
+        )
 
 
 if __name__ == "__main__":
+    # Fixture updated for the org-tenancy contract (finding 87a171ad):
+    # `detail` must be a dict with a `task` string and a non-empty `orgId`
+    # — the prior harness passed a JSON-STRING `detail` (not a dict) with
+    # no `task`/`orgId` keys at all, which relied on the now-removed
+    # generic-detail fallback rather than exercising the real
+    # `task.request` contract. This shape mirrors what
+    # task-runner-resolver.ts submitTask actually stamps on the bus.
     handler({
         "source": "task.request",
         "DetailType": "System-Task",
-        "detail": "{\"orderId\": \"12345\", \"customerId\": \"C-1234\", \"items\": [\"cheesecake\"]}",
+        "detail": {
+            "task": json.dumps({
+                "orderId": "12345",
+                "customerId": "C-1234",
+                "items": ["cheesecake"],
+            }),
+            "orgId": "org-local-dev",
+        },
         "EventBusName": "orchestration-bus"
     }, {})

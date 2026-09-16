@@ -44,13 +44,22 @@ with patch.multiple(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_task_request_event(task="do something", callback=None, app_id=None):
-    """Build a task.request EventBridge event."""
+def _make_task_request_event(task="do something", callback=None, app_id=None, org_id="org-fixture-default"):
+    """Build a task.request EventBridge event.
+
+    `org_id` defaults to a non-empty fixture value (finding 87a171ad): every
+    task.request the handler accepts now requires a non-empty detail.orgId,
+    so this helper stamps one by default the same way task-runner-resolver.ts
+    submitTask's requireOrgId does server-side. Pass org_id=None explicitly
+    to build the (now-refused) org-less shape for a dedicated negative test.
+    """
     detail = {"task": task}
     if callback is not None:
         detail["callback"] = callback
     if app_id is not None:
         detail["appId"] = app_id
+    if org_id is not None:
+        detail["orgId"] = org_id
     return {
         "source": "task.request",
         "detail": detail,
@@ -87,6 +96,7 @@ class TestHandlerExtractsAppId:
             callback=None,
             app_id="app-123",
             run_id=None,
+            org_id="org-fixture-default",
             eval_run_id=None,
             eval_context=None,
             forbidden_tools=None,
@@ -103,6 +113,7 @@ class TestHandlerExtractsAppId:
             callback=None,
             app_id=None,
             run_id=None,
+            org_id="org-fixture-default",
             eval_run_id=None,
             eval_context=None,
             forbidden_tools=None,
@@ -122,6 +133,7 @@ class TestHandlerExtractsAppId:
             callback=cb,
             app_id="app-456",
             run_id=None,
+            org_id="org-fixture-default",
             eval_run_id=None,
             eval_context=None,
             forbidden_tools=None,

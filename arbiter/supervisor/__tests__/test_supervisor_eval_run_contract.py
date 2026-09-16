@@ -42,7 +42,11 @@ with patch.multiple(
 
 
 def _make_task_request_event(task="do something", eval_run_id=None, eval_context=None,
-                              forbidden_tools=None):
+                              forbidden_tools=None, org_id="org-fixture-default"):
+    """`org_id` defaults to a non-empty fixture value (finding 87a171ad):
+    every task.request the handler accepts now requires a non-empty
+    detail.orgId. Pass org_id=None explicitly for the (now-refused)
+    org-less negative-test shape."""
     detail = {"task": task}
     if eval_run_id is not None:
         detail["evalRunId"] = eval_run_id
@@ -50,6 +54,8 @@ def _make_task_request_event(task="do something", eval_run_id=None, eval_context
         detail["evalContext"] = eval_context
     if forbidden_tools is not None:
         detail["forbiddenTools"] = forbidden_tools
+    if org_id is not None:
+        detail["orgId"] = org_id
     return {"source": "task.request", "detail": detail}
 
 
@@ -72,6 +78,7 @@ class TestHandlerExtractsEvalContractKeys:
             callback=None,
             app_id=None,
             run_id=None,
+            org_id="org-fixture-default",
             eval_run_id="eval-run-1",
             eval_context=True,
             forbidden_tools=["dangerous_tool"],
@@ -89,6 +96,7 @@ class TestHandlerExtractsEvalContractKeys:
             callback=None,
             app_id=None,
             run_id=None,
+            org_id="org-fixture-default",
             eval_run_id=None,
             eval_context=None,
             forbidden_tools=None,
