@@ -451,31 +451,24 @@ async function createDataStore(
   createdBy: string,
   event: unknown,
 ) {
-  // Org scoping (finding ca76d041, datastore half; CRE item 2): createDataStore
-  // trusted a client-supplied input.orgId outright. Mutation convention is
-  // reject-not-coerce (unlike the read-path collection queries above): derive
-  // the caller's org server-side and refuse a mismatched client value BEFORE
-  // any DynamoDB write, Secrets Manager call, or IAM change.
+  // Org scoping (finding ca76d041, datastore half; CRE item 2; superseded by
+  // Wave-3B design item 4): createDataStore now derives the caller's org
+  // server-side and uses it for EVERY write, ignoring a client-supplied
+  // input.orgId outright rather than comparing against it. The prior
+  // reject-not-coerce equality check (decision b5d463f2) closed the
+  // privilege-escalation angle (an admin writing an arbitrary orgId) but
+  // left a diagnosability/staleness trap: a caller whose cached profile org
+  // drifted from their live token org (e.g. right after an
+  // AdminUserGlobalSignOut-triggered re-auth) got a confusing
+  // "does not match your organization" rejection even though they were
+  // never trying to write into another tenant. Making the server the SOLE
+  // authority for orgId removes that failure mode without reopening the
+  // escalation: input.orgId is still REQUIRED on the wire (no schema
+  // change) but its value is now vestigial — accepted, never trusted.
   //
-  // Decision b5d463f2 (owner-ratified): this check does NOT honour the admin
-  // bypass that every other op in this file uses. An admin previously skipped
-  // the check entirely and could write an arbitrary orgId into the record AND
-  // the Secrets Manager path (/citadel/datastores/{orgId}/...) — the mismatch
-  // is now rejected for EVERYONE, admins included. If platform operators
-  // genuinely need to provision on a tenant's behalf, that requires an
-  // EXPLICIT separate operator path — intentionally not built speculatively
-  // here; this fix only removes the implicit bypass.
-  //
-  // Diagnosability fix (UX defect exposed by the above): a single check
-  // `!callerOrgId || callerOrgId !== input.orgId` threw the SAME message for
-  // two different fail-closed causes — no org claim resolved for the caller
-  // AT ALL (a provisioning gap: the account has nothing to compare against)
-  // versus a genuinely mismatched orgId (a cross-org write attempt). The
-  // former made a provisioning gap look like a security bug. Split into two
-  // branches with distinct, actionable messages. Neither branch echoes an
-  // org id back to the caller (no cross-tenant leak); logs carry only the
-  // caller's own resolved org (or its absence) and the caller's username —
-  // no PII, no other tenant's identifiers.
+  // Diagnosability: the only remaining fail-closed case is "no org claim
+  // resolved for the caller at all" — a genuine provisioning gap, not a
+  // security check to bypass.
   const callerOrgId = await extractOrgFromEvent(event);
   if (!callerOrgId) {
     console.warn("createDataStore: no organization claim resolved for caller", {
@@ -483,18 +476,6 @@ async function createDataStore(
     });
     throw new PermissionError(
       "Access denied: no organization is provisioned for your account. Contact an administrator.",
-    );
-  }
-  if (callerOrgId !== input.orgId) {
-    console.warn(
-      "createDataStore: submitted orgId does not match caller's organization",
-      {
-        createdBy,
-        callerOrgId,
-      },
-    );
-    throw new PermissionError(
-      "Access denied: the requested organization does not match your organization.",
     );
   }
 
@@ -510,7 +491,7 @@ async function createDataStore(
         KeyConditionExpression: "orgId = :orgId",
         FilterExpression: "clientRequestToken = :token",
         ExpressionAttributeValues: {
-          ":orgId": input.orgId,
+          ":orgId": callerOrgId,
           ":token": input.clientRequestToken,
         },
       }),
@@ -564,7 +545,7 @@ async function createDataStore(
     icon,
     provider,
     provisionMode: input.provisionMode,
-    orgId: input.orgId,
+    orgId: callerOrgId,
     createdBy,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -598,7 +579,7 @@ async function createDataStore(
     // Store credentials in Secrets Manager
     let secretArn: string | undefined;
     if (credentials) {
-      const secretName = `/citadel/datastores/${input.orgId}/${input.type.toLowerCase()}-${dataStoreId}`;
+      const secretName = `/citadel/datastores/${callerOrgId}/${input.type.toLowerCase()}-${dataStoreId}`;
       const createSecretResponse = await secretsManager.send(
         new CreateSecretCommand({
           Name: secretName,
