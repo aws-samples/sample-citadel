@@ -18,6 +18,8 @@ import {
   assertRowOrg,
   CrossOrgAccessError,
   deriveRoles,
+  resolveScopedOrgFromEvent,
+  canCallerSeeRow,
 } from "../auth-event";
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
@@ -474,6 +476,136 @@ describe("auth-event", () => {
 
       expect(deriveRoles(idTokenEvent)).toEqual(["admin"]);
       expect(deriveRoles(accessTokenEvent)).toEqual(["admin"]);
+    });
+  });
+
+  describe("resolveScopedOrgFromEvent (Wave-3A, board task a6ff10ff)", () => {
+    test("admin with an explicit requestedOrgId gets that org honoured", async () => {
+      const event = {
+        identity: {
+          sub: "admin-1",
+          "cognito:groups": ["admin"],
+          "custom:organization": "org-admin-home",
+        },
+      };
+      const result = await resolveScopedOrgFromEvent(event, "org-other");
+      expect(result).toEqual({ orgId: "org-other" });
+    });
+
+    test("admin with no requestedOrgId falls back to their own resolvable org", async () => {
+      const event = {
+        identity: {
+          sub: "admin-1",
+          "cognito:groups": ["admin"],
+          "custom:organization": "org-admin-home",
+        },
+      };
+      const result = await resolveScopedOrgFromEvent(event, undefined);
+      expect(result).toEqual({ orgId: "org-admin-home" });
+    });
+
+    test("admin with no requestedOrgId and no resolvable own org returns null", async () => {
+      const event = {
+        identity: { sub: "admin-1", "cognito:groups": ["admin"] },
+      };
+      cognitoMock.rejects(new Error("user not found"));
+      const result = await resolveScopedOrgFromEvent(event, undefined);
+      expect(result).toBeNull();
+    });
+
+    test("non-admin caller ignoring a client-supplied requestedOrgId gets their own caller org", async () => {
+      const event = {
+        identity: { sub: "u1", "custom:organization": "org-real" },
+      };
+      const result = await resolveScopedOrgFromEvent(event, "org-victim");
+      expect(result).toEqual({ orgId: "org-real" });
+    });
+
+    test("non-admin caller with no requestedOrgId gets their own caller org", async () => {
+      const event = {
+        identity: { sub: "u1", "custom:organization": "org-real" },
+      };
+      const result = await resolveScopedOrgFromEvent(event, undefined);
+      expect(result).toEqual({ orgId: "org-real" });
+    });
+
+    test("non-admin caller with an unresolvable org returns null (never forwards the client value)", async () => {
+      const event = { identity: { sub: "u1" } };
+      cognitoMock.rejects(new Error("user not found"));
+      const result = await resolveScopedOrgFromEvent(event, "org-victim");
+      expect(result).toBeNull();
+    });
+
+    test("KEY ESCALATION TEST: custom:role=admin without group membership is treated as non-admin (own org, client value ignored)", async () => {
+      const event = {
+        identity: {
+          sub: "u1",
+          "custom:role": "admin",
+          "custom:organization": "org-real",
+        },
+      };
+      const result = await resolveScopedOrgFromEvent(event, "org-victim");
+      expect(result).toEqual({ orgId: "org-real" });
+    });
+  });
+
+  describe("canCallerSeeRow (Wave-3A, mirrors governance-ui callerCanSeeRow)", () => {
+    test("admin sees any row, even cross-org and un-stamped, and never throws", async () => {
+      const event = {
+        identity: { sub: "admin-1", "cognito:groups": ["admin"] },
+      };
+      await expect(
+        canCallerSeeRow({ orgId: "org-other" }, event),
+      ).resolves.toBe(true);
+      await expect(canCallerSeeRow({}, event)).resolves.toBe(true);
+    });
+
+    test("non-admin sees a row whose orgId matches their caller org", async () => {
+      const event = {
+        identity: { sub: "u1", "custom:organization": "org-a" },
+      };
+      await expect(canCallerSeeRow({ orgId: "org-a" }, event)).resolves.toBe(
+        true,
+      );
+    });
+
+    test("non-admin does not see a cross-org row", async () => {
+      const event = {
+        identity: { sub: "u1", "custom:organization": "org-a" },
+      };
+      await expect(canCallerSeeRow({ orgId: "org-b" }, event)).resolves.toBe(
+        false,
+      );
+    });
+
+    test("returns false (never throws) for an un-stamped row with no orgId", async () => {
+      const event = {
+        identity: { sub: "u1", "custom:organization": "org-a" },
+      };
+      await expect(canCallerSeeRow({}, event)).resolves.toBe(false);
+      await expect(canCallerSeeRow(null, event)).resolves.toBe(false);
+      await expect(canCallerSeeRow(undefined, event)).resolves.toBe(false);
+    });
+
+    test("returns false when the caller org is unresolvable, even though the row has an orgId (fail closed)", async () => {
+      const event = { identity: { sub: "u1" } };
+      cognitoMock.rejects(new Error("user not found"));
+      await expect(canCallerSeeRow({ orgId: "org-a" }, event)).resolves.toBe(
+        false,
+      );
+    });
+
+    test("KEY ESCALATION TEST: custom:role=admin without group membership does not bypass the org check", async () => {
+      const event = {
+        identity: {
+          sub: "u1",
+          "custom:role": "admin",
+          "custom:organization": "org-a",
+        },
+      };
+      await expect(
+        canCallerSeeRow({ orgId: "org-completely-different" }, event),
+      ).resolves.toBe(false);
     });
   });
 });

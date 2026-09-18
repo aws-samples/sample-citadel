@@ -254,3 +254,63 @@ export async function assertRowOrg(
     throw new CrossOrgAccessError();
   }
 }
+
+/**
+ * AppSync-identity twin of `resolveScopedOrg` (cost-http-shared.ts), used
+ * by list-by-org reads that must resolve which org's key/filter condition
+ * to use (Wave-3A, board task a6ff10ff, "Helpers"):
+ *
+ *  - Admin: an explicit `requestedOrgId` is honoured verbatim; absent one,
+ *    falls back to the admin's own server-derived org.
+ *  - Non-admin: ALWAYS the caller's server-derived org
+ *    (`extractOrgFromEvent`) — `requestedOrgId` is read from the CLIENT and
+ *    is never trusted, so it is intentionally ignored rather than
+ *    verified-then-rejected.
+ *  - Returns null when no org can be resolved (unresolvable caller org, or
+ *    an admin with neither an explicit org nor a resolvable own org).
+ *
+ * Deliberate divergence from `resolveScopedOrg`: that HTTP helper returns
+ * `{ok:false}` (→ 403) on a non-admin/mismatch request, which is correct
+ * for a single-resource fetch but would turn a LIST read into an authz
+ * oracle ("that org exists / you're not in it"). This helper instead
+ * silently coerces to the caller's own org, matching the existing
+ * `listApps` (registry-agent-record-resolver.ts) coercion convention. Do
+ * not "harmonise" this back into a reject.
+ */
+export async function resolveScopedOrgFromEvent(
+  event: unknown,
+  requestedOrgId?: string,
+): Promise<{ orgId: string } | null> {
+  if (isAdminFromEvent(event)) {
+    if (requestedOrgId) return { orgId: requestedOrgId };
+    const ownOrgId = await extractOrgFromEvent(event);
+    return ownOrgId ? { orgId: ownOrgId } : null;
+  }
+
+  const callerOrgId = await extractOrgFromEvent(event);
+  return callerOrgId ? { orgId: callerOrgId } : null;
+}
+
+/**
+ * Return-null-friendly twin of {@link assertRowOrg}, mirroring
+ * governance-ui-resolver.ts's `callerCanSeeRow` (Wave-3A, board task
+ * a6ff10ff, "Helpers"). For BY-ID reads that must return `null`/`false`
+ * instead of throwing, so a cross-org id is indistinguishable from a
+ * missing one (no existence oracle).
+ *
+ * Admins always see the row (cross-org + un-stamped). Non-admins need a
+ * resolvable caller org AND a matching, present `orgId` on the row — fails
+ * closed (false) when either is missing. Never throws.
+ */
+export async function canCallerSeeRow(
+  row: { orgId?: unknown } | null | undefined,
+  event: unknown,
+): Promise<boolean> {
+  if (isAdminFromEvent(event)) return true;
+
+  const rowOrgId = typeof row?.orgId === "string" ? row.orgId : undefined;
+  if (!rowOrgId) return false;
+
+  const callerOrgId = await extractOrgFromEvent(event);
+  return callerOrgId === rowOrgId;
+}

@@ -532,7 +532,12 @@ describe("eval-resolver", () => {
       return {
         info: { fieldName },
         arguments: args,
-        identity: { sub: `user-${role}`, username: role, "custom:role": role },
+        identity: {
+          sub: `user-${role}`,
+          username: role,
+          "custom:role": role,
+          "custom:organization": "org-1",
+        },
       };
     }
 
