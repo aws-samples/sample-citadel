@@ -1,4 +1,8 @@
 import { deriveRoles } from "../utils/auth-event";
+import {
+  orgNameReservationKey as nameReservationKey,
+  type NameReservationItem,
+} from "../utils/org-name";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
@@ -75,19 +79,12 @@ interface UserManagementResponse {
  *    name may be issued again — at the cost of names never becoming
  *    available again once used, which matches the ratified "names are
  *    immutable and canonical" model.
+ *
+ * `nameReservationKey` and `NameReservationItem` now live in
+ * `../utils/org-name.ts` (moved for Wave-3B design item 1) so
+ * user-management-resolver.ts can share the same `NAME#` key/shape for its
+ * write-boundary validation without duplicating the prefix.
  */
-function nameReservationKey(name: string): string {
-  return `NAME#${name}`;
-}
-
-interface NameReservationItem {
-  orgId: string;
-  itemType: "name_reservation" | "name_tombstone";
-  name: string;
-  reservedOrgId?: string;
-  createdAt: string;
-  tombstonedAt?: string;
-}
 
 /** AppSync event slice this resolver reads. */
 interface OrganizationResolverEvent {

@@ -3,6 +3,7 @@ import {
   AdminAddUserToGroupCommand,
   AdminRemoveUserFromGroupCommand,
   AdminUpdateUserAttributesCommand,
+  AdminUserGlobalSignOutCommand,
   AdminGetUserCommand,
   ListUsersCommand,
   AdminListGroupsForUserCommand,
@@ -14,6 +15,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import * as crypto from "crypto";
 import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { extractOrgFromEvent } from "../utils/auth-event";
+import { assertOrgNameExists } from "../utils/org-name";
 
 const cognitoClient = new CognitoIdentityProviderClient({});
 const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -349,6 +351,17 @@ async function assignUserRole(
     `Assigning role ${role} and organization ${organization} to user ${userId}`,
   );
 
+  // Write-boundary validation (Wave-3B design item 1): reject a
+  // non-existent or tombstoned organization name BEFORE any Cognito write —
+  // including the group membership mutations below, which are also
+  // "Cognito writes" and must not be committed on an invalid organization.
+  // assertOrgNameExists throws with a distinct message for each case (see
+  // backend/src/utils/org-name.ts) and the error propagates to the
+  // resolver's own error handling.
+  if (organization) {
+    await assertOrgNameExists(dynamoClient, ORGANISATION_TABLE, organization);
+  }
+
   // Get current groups to remove user from old role
   const groupsResponse = await cognitoClient.send(
     new AdminListGroupsForUserCommand({
@@ -379,6 +392,21 @@ async function assignUserRole(
 
   // Update organization custom attribute if provided
   if (organization) {
+    // Detect a REAL organization change (Wave-3B design item 2): read the
+    // target's CURRENT custom:organization before writing the new value,
+    // using an exact string compare (no normalization — matches the
+    // canonical-name rule this codebase applies to every tenancy
+    // comparison; see auth-event.ts).
+    const currentUser = await cognitoClient.send(
+      new AdminGetUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: userId,
+      }),
+    );
+    const previousOrg = currentUser.UserAttributes?.find(
+      (attr) => attr.Name === "custom:organization",
+    )?.Value;
+
     await cognitoClient.send(
       new AdminUpdateUserAttributesCommand({
         UserPoolId: USER_POOL_ID,
@@ -391,6 +419,21 @@ async function assignUserRole(
         ],
       }),
     );
+
+    // Sign out the target's existing sessions ONLY on a real change, and
+    // ONLY AFTER the attribute write completes — the next login then
+    // regenerates a token carrying the NEW custom:organization claim (via
+    // the pre-token-generation trigger). This revokes refresh tokens; an
+    // already-issued, unexpired access/ID token remains valid at AppSync
+    // until its own TTL (known limitation, see design notes).
+    if (organization !== previousOrg) {
+      await cognitoClient.send(
+        new AdminUserGlobalSignOutCommand({
+          UserPoolId: USER_POOL_ID,
+          Username: userId,
+        }),
+      );
+    }
   }
 
   console.log(
@@ -642,6 +685,10 @@ async function adminCreateUser(
       message: "An organization is required to create a user.",
     };
   }
+
+  // Write-boundary validation (Wave-3B design item 1): reject a
+  // non-existent or tombstoned organization name BEFORE any Cognito write.
+  await assertOrgNameExists(dynamoClient, ORGANISATION_TABLE, organization);
 
   try {
     // Create user with email as username
