@@ -2125,7 +2125,17 @@ def process_event(event, context, request_type=None):
     # registry/status records, and do NOT raise (safe no-op, mirrors the
     # unrecognised-requestType poison-queue defence above: a raise would
     # nack the SQS message and retry the poison forever).
-    org_id = event.get("org_id") or ""
+    #
+    # Two producers stamp this value under DIFFERENT keys and both must be
+    # accepted: service/agent_intake_single/tools/fabricate.py's
+    # _send_to_fabricator sends snake_case "org_id" (matches this module's
+    # own DynamoDB/EventBridge attribute naming), while
+    # arbiter/supervisor/index.py's generic worker-dispatch payload (wave 2a)
+    # sends camelCase "orgId" (matches the orchestration row's `orgId`
+    # attribute it was read from). Reading only one key silently refuses
+    # Supervisor-originated fabrication requests, so both are checked here;
+    # snake_case is preferred when a message somehow carries both.
+    org_id = event.get("org_id") or event.get("orgId") or ""
     if not org_id:
         logger.error(
             "process_event: refusing message with missing/empty org_id "

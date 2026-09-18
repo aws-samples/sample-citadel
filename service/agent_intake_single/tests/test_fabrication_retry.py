@@ -101,6 +101,10 @@ def _live_rows(arbiter_updated_at=STALE_TS):
 @pytest.fixture
 def jobs_table(monkeypatch):
     table = mock.MagicMock()
+    # Terminating default: an unconfigured query() must return a page with no
+    # LastEvaluatedKey, otherwise fabricate.py's pagination loop spins forever
+    # on a truthy MagicMock and mock call history eats all memory.
+    table.query.return_value = {"Items": []}
     ddb = mock.MagicMock()
     ddb.Table.return_value = table
     monkeypatch.setattr(fab, "dynamodb", ddb)
@@ -108,6 +112,12 @@ def jobs_table(monkeypatch):
     monkeypatch.setattr(fab, "FABRICATOR_QUEUE_URL", "https://sqs.fake/queue")
     monkeypatch.setattr(fab, "FABRICATION_JOBS_TABLE", "jobs-test")
     monkeypatch.setattr(fab, "s3_get", lambda key: PLAN_MD)
+    # Every retry re-enqueue goes through _send_to_fabricator, which now
+    # fail-closed refuses to enqueue without a resolved organisation (see
+    # test_fabricate_org_tenancy.py). Mock a resolved org here so these
+    # fixture-driven tests exercise the retry logic itself rather than the
+    # tenancy gate — tenancy behavior has its own dedicated test module.
+    monkeypatch.setattr(fab, "_resolve_session_organization", lambda session_id: "org-retry-test")
     return table
 
 
@@ -273,3 +283,20 @@ def test_query_failure_returns_unavailable(jobs_table):
     assert result["ok"] is False
     assert result["status"] == "unavailable"
     assert fab.sqs.send_message.call_count == 0
+
+
+def test_retry_refuses_when_organisation_unresolved(jobs_table, monkeypatch):
+    # Explicit proof the fail-closed helper is NOT weakened by the fixture
+    # mock above: when the session's organisation cannot be resolved,
+    # _send_to_fabricator must raise and no SQS message must be sent for
+    # any eligible target, even though the row-eligibility logic itself
+    # would otherwise retry them.
+    monkeypatch.setattr(fab, "_resolve_session_organization", lambda session_id: None)
+    # Real rows (not a bare MagicMock) so the jobs-table pagination loop
+    # terminates and the eligible FAILED targets reach _send_to_fabricator.
+    jobs_table.query.return_value = {"Items": _live_rows()}
+
+    with pytest.raises(Exception, match=r"cannot fabricate: no organisation resolved"):
+        fab.retry_failed_fabrication(session_id="sess-1")
+
+    fab.sqs.send_message.assert_not_called()
