@@ -75,11 +75,9 @@ jest.mock("../adapters/registry", () => ({
       configuration: { required: [], optional: [], ssmParameters: [] },
     },
     requiredPolicies: jest.fn().mockReturnValue({ provision: [], connect: [] }),
-    provision: jest
-      .fn()
-      .mockResolvedValue({
-        resourceArn: "arn:aws:bedrock:us-east-1:123:knowledge-base/KB1",
-      }),
+    provision: jest.fn().mockResolvedValue({
+      resourceArn: "arn:aws:bedrock:us-east-1:123:knowledge-base/KB1",
+    }),
     connect: jest.fn().mockResolvedValue(undefined),
     disconnect: jest.fn().mockResolvedValue(undefined),
     deprovision: jest.fn().mockResolvedValue(undefined),
@@ -138,6 +136,11 @@ describe("createDataStore — distinct fail-closed org messages", () => {
     mockDynamoSend.mockImplementation((cmd: { _type?: string }) => {
       if (cmd._type === "Query") return Promise.resolve({ Items: [] });
       if (cmd._type === "Put") return Promise.resolve({});
+      if (cmd._type === "Update") {
+        return Promise.resolve({
+          Attributes: { orgId: "org-real", status: "CONNECTED" },
+        });
+      }
       return Promise.resolve({});
     });
   });
@@ -166,40 +169,32 @@ describe("createDataStore — distinct fail-closed org messages", () => {
     });
   });
 
-  test("resolved org differs from submitted orgId → mismatch message, without leaking either org id", async () => {
+  // SUPERSEDED by Wave-3B design item 4 (datastore-resolver-create-
+  // server-derived-org.test.ts): createDataStore no longer compares
+  // input.orgId against the caller's resolved org at all — it ignores the
+  // client-supplied value outright and stamps every record with the
+  // server-derived callerOrgId. A mismatching input.orgId therefore no
+  // longer produces a "does not match" rejection; it is silently ignored
+  // and the record still succeeds under the caller's own org. See the
+  // dedicated server-derived-org suite for the current behavior and the
+  // provisioning-gap ("no org resolves") case retained above, which is
+  // unaffected by this change.
+  test("resolved org differs from submitted orgId → no longer rejected, record proceeds under the caller's own org (superseded by server-derived-org design)", async () => {
     mockExtractOrgFromEvent.mockResolvedValue("org-real");
 
     const event = makeCreateEvent({ ...baseInput, orgId: "org-other-tenant" });
 
-    await expect(handler(event)).rejects.toMatchObject({
-      message: expect.stringMatching(/does not match/i),
-    });
-    await expect(handler(event)).rejects.not.toMatchObject({
-      message: expect.stringContaining("org-real"),
-    });
-    await expect(handler(event)).rejects.not.toMatchObject({
-      message: expect.stringContaining("org-other-tenant"),
-    });
-    // Must be distinguishable from the no-claim message.
-    await expect(handler(event)).rejects.not.toMatchObject({
-      message: expect.stringMatching(/contact.*administrator/i),
-    });
+    const result = (await handler(event)) as { orgId: string };
+    expect(result.orgId).toBe("org-real");
   });
 
-  test("both cases still reject — no admin bypass, no coercion to make the call succeed", async () => {
+  test("the no-claim provisioning gap still rejects regardless of caller role — no admin bypass on that branch", async () => {
     mockExtractOrgFromEvent.mockResolvedValue(null);
     const noClaimEvent = makeCreateEvent(
       { ...baseInput, orgId: "org-target" },
       { username: "admin-user", "custom:role": "admin" },
     );
     await expect(handler(noClaimEvent)).rejects.toBeTruthy();
-
-    mockExtractOrgFromEvent.mockResolvedValue("org-real");
-    const mismatchEvent = makeCreateEvent(
-      { ...baseInput, orgId: "org-other-tenant" },
-      { username: "admin-user", "custom:role": "admin" },
-    );
-    await expect(handler(mismatchEvent)).rejects.toBeTruthy();
   });
 });
 

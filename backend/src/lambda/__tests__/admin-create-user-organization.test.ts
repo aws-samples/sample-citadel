@@ -36,9 +36,11 @@ import {
   AdminCreateUserCommand,
   AdminListGroupsForUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
+const ddbMock = mockClient(DynamoDBDocumentClient);
 
 import { handler } from "../user-management-resolver";
 
@@ -61,6 +63,22 @@ beforeEach(() => {
   cognitoMock
     .on(AdminListGroupsForUserCommand, { Username: "admin-user" })
     .resolves({ Groups: [{ GroupName: "admin" }] });
+
+  // Write-boundary org validation (Wave-3B design item 1) does a point
+  // GetItem on the NAME# reservation row before any Cognito write. Stub a
+  // live name_reservation row so the pre-existing happy-path tests in this
+  // file (which predate assertOrgNameExists and never mocked DynamoDB)
+  // keep exercising adminCreateUser's own behaviour rather than failing on
+  // an unmocked DynamoDBDocumentClient call.
+  ddbMock.reset();
+  ddbMock.on(GetCommand).resolves({
+    Item: {
+      orgId: "NAME#Engineering",
+      itemType: "name_reservation",
+      name: "Engineering",
+      createdAt: new Date().toISOString(),
+    },
+  });
 });
 
 describe("adminCreateUser — organization is required and wired into custom:organization", () => {

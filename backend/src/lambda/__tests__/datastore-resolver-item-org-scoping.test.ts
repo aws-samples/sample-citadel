@@ -323,42 +323,54 @@ describe("legitimate same-org callers still succeed", () => {
   });
 });
 
-describe("createDataStore rejects a foreign/mismatched orgId", () => {
+describe("createDataStore — server-derived org supersedes client-supplied orgId (Wave-3B design item 4)", () => {
+  // SUPERSEDED: decision b5d463f2's equality-rejection branch has been
+  // removed. createDataStore now derives callerOrgId server-side and uses
+  // it for every write (record orgId, OrgIndex idempotency query, Secrets
+  // Manager path), ignoring input.orgId outright rather than comparing
+  // against it. See datastore-resolver-create-server-derived-org.test.ts
+  // for the dedicated suite. These three cases are kept here (renamed) so
+  // this file's full createDataStore coverage stays in one place and the
+  // superseded behavior is visible in history rather than silently
+  // deleted.
   beforeEach(() => {
-    mockDynamoSend.mockImplementation((cmd: { _type?: string }) => {
-      if (cmd._type === "Query") return Promise.resolve({ Items: [] });
-      return Promise.resolve({});
-    });
-  });
-
-  test("rejects when input.orgId does not match the server-derived caller org", async () => {
-    await expect(
-      handler(
-        makeEvent(
-          "createDataStore",
-          {
-            input: {
-              name: "sneaky",
-              type: "S3",
-              category: "S3_STORAGE",
-              provisionMode: "CONNECT_EXISTING",
-              orgId: "org-foreign",
-              config: JSON.stringify({ bucketName: "b" }),
-              clientRequestToken: "tok-reject-1",
-            },
-          },
-          { sub: "user-real", "custom:organization": "org-real" },
-        ),
-      ),
-    ).rejects.toThrow(/access denied|org/i);
-
-    const putCalls = mockDynamoSend.mock.calls.filter(
-      ([cmd]: [{ _type?: string }]) => cmd._type === "Put",
+    mockDynamoSend.mockImplementation(
+      (cmd: { _type?: string; input?: { Item?: Record<string, unknown> } }) => {
+        if (cmd._type === "Query") return Promise.resolve({ Items: [] });
+        if (cmd._type === "Put") return Promise.resolve({});
+        if (cmd._type === "Update") {
+          return Promise.resolve({
+            Attributes: { orgId: "org-real", status: "CONNECTED" },
+          });
+        }
+        return Promise.resolve({});
+      },
     );
-    expect(putCalls).toHaveLength(0);
   });
 
-  test("accepts when input.orgId matches the server-derived caller org", async () => {
+  test("a mismatched input.orgId no longer causes rejection — the record is written under the server-derived caller org, not input.orgId", async () => {
+    const result = (await handler(
+      makeEvent(
+        "createDataStore",
+        {
+          input: {
+            name: "sneaky",
+            type: "S3",
+            category: "S3_STORAGE",
+            provisionMode: "CONNECT_EXISTING",
+            orgId: "org-foreign",
+            config: JSON.stringify({ bucketName: "b" }),
+            clientRequestToken: "tok-reject-1",
+          },
+        },
+        { sub: "user-real", "custom:organization": "org-real" },
+      ),
+    )) as { orgId: string };
+
+    expect(result.orgId).toBe("org-real");
+  });
+
+  test("accepts when input.orgId matches the server-derived caller org (unaffected control case)", async () => {
     mockDynamoSend.mockImplementation((cmd: { _type?: string }) => {
       if (cmd._type === "Query") return Promise.resolve({ Items: [] });
       if (cmd._type === "Put") return Promise.resolve({});
@@ -395,9 +407,7 @@ describe("createDataStore rejects a foreign/mismatched orgId", () => {
     expect(result.dataStoreId).toBe("test-uuid");
   });
 
-  test("admin caller is REJECTED for a mismatched orgId — no implicit admin bypass on createDataStore (decision b5d463f2)", async () => {
-    const putBefore = mockDynamoSend.mock.calls.length;
-
+  test("admin caller with no organization claim still hits the provisioning-gap branch — the only remaining fail-closed case, not a mismatch check", async () => {
     await expect(
       handler(
         makeEvent(
@@ -416,18 +426,10 @@ describe("createDataStore rejects a foreign/mismatched orgId", () => {
           ADMIN_IDENTITY,
         ),
       ),
-    ).rejects.toThrow(/access denied|org/i);
-
-    // Prove fail-closed by mutation, not by asserting an empty result:
-    // zero DynamoDB calls of ANY kind (no Put, no Query, no Update), zero
-    // Secrets Manager calls, zero IAM/policy-manager calls — the rejection
-    // must happen before any of createDataStore's side effects, including
-    // the idempotency-check Query that normally runs first.
-    expect(mockDynamoSend.mock.calls.length).toBe(putBefore);
-    expect(mockSecretsSend).not.toHaveBeenCalled();
-    expect(mockPolicyManager.ensureRole).not.toHaveBeenCalled();
-    expect(mockPolicyManager.assumeScopedRole).not.toHaveBeenCalled();
-    expect(mockAdapter.provision).not.toHaveBeenCalled();
-    expect(mockAdapter.connect).not.toHaveBeenCalled();
+      // ADMIN_IDENTITY carries no custom:organization claim, so
+      // extractOrgFromEvent resolves null for this caller and the ONLY
+      // remaining fail-closed branch (no org claim at all) fires — this is
+      // the provisioning-gap case, not a security bypass being exercised.
+    ).rejects.toThrow(/organization is provisioned/i);
   });
 });
