@@ -8,3 +8,4 @@ hypothesis==6.161.5
 # Python, integrates directly with the existing pytest suite). Version resolved
 # from PyPI (latest, no advisories), not hand-written.
 moto[dynamodb]==5.2.3
+pytest-timeout==2.4.0
