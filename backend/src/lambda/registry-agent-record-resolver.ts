@@ -38,6 +38,7 @@
  * sole reader/writer of the manifest surface.
  */
 import type { AppSyncResolverHandler } from "aws-lambda";
+import { ORGLESS_CALLER_ORG as SENTINEL_ORGLESS_CALLER_ORG } from "./utils/org-sentinel";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
@@ -947,6 +948,16 @@ async function emitEvent(eventType: string, detail: unknown): Promise<void> {
 // Entry point — single handler dispatched on event.info.fieldName
 // ---------------------------------------------------------------------------
 
+/**
+ * Org value an org-less Cognito caller lands on. Re-exported from
+ * utils/org-sentinel.ts (the single source of truth for this literal — see
+ * that module's doc comment) so both the AppSync-direct path (this file's
+ * `createApp`) and the intake conversational path
+ * (intake-orchestration-resolver.ts) agree on one literal without either
+ * side hardcoding a second copy.
+ */
+export const ORGLESS_CALLER_ORG = SENTINEL_ORGLESS_CALLER_ORG;
+
 export interface CreateAppInput {
   orgId: string;
   name: string;
@@ -1049,7 +1060,7 @@ export const handler: AppSyncResolverHandler<
 
       // AgentApp-shape mutations (registry-backed, factory-projected)
       case "createApp":
-        return await createApp(args.input, userId);
+        return await createApp(args.input, userId, event);
       case "updateApp":
         return await updateApp(args.input, userId, event);
       case "deleteApp":
@@ -1116,11 +1127,16 @@ export const handler: AppSyncResolverHandler<
 
       // Non-AgentApp queries (preserved DDB / subscription paths)
       case "listAppApiKeys":
-        return await listAppApiKeys(args.appId);
+        return await listAppApiKeys(args.appId, event);
       case "listAppAccessEntries":
         return await listAppAccessEntries(args.appId, event);
       case "getAppMetrics":
-        return await getAppMetrics(args.appId, args.startTime, args.endTime);
+        return await getAppMetrics(
+          args.appId,
+          args.startTime,
+          args.endTime,
+          event,
+        );
 
       // Non-AgentApp mutations (EventBridge / DDB-backed API keys)
       case "publishAppStatusEvent":
@@ -1428,12 +1444,54 @@ export async function findAppBySourceProjectId(
 // mutations delegate to this core so app-creation governance — registry
 // record, #META mirror, fabricator authority grant, app.created event —
 // stays in exactly one place).
+//
+// `event` is OPTIONAL (finding 13ffaca1 / board task a6ff10ff, ITEM2). When
+// supplied (the AppSync dispatch path always supplies it), the caller's org
+// is derived server-side via `extractOrgFromEvent` and `input.orgId` is
+// validated against it rather than trusted outright:
+//   - callerOrg resolves to a real org: a mismatching `input.orgId` is
+//     rejected; the resolved callerOrg is stamped regardless of what the
+//     client sent.
+//   - callerOrg is null (org-less Cognito caller): the client-supplied
+//     `input.orgId` must be the `ORGLESS_CALLER_ORG` sentinel ('default')
+//     or absent — anything else is rejected. This matches the UI's own
+//     `selectedOrganization || 'default'` fallback (AppBuilderWizard.tsx)
+//     and the same sentinel intake's `resolveOrgId` falls back to.
+// When `event` is omitted (the intake-orchestration-resolver internal
+// path), `input.orgId` is trusted verbatim — intake resolves org
+// server-side upstream of this call (see `resolveOrgId`,
+// intake-orchestration-resolver.ts) — same optional-event trust convention
+// already used by bindWorkflowToApp/updateAgentBinding/addAppComponent.
 export async function createApp(
   input: CreateAppInput,
   userId: string,
+  event?: unknown,
 ): Promise<unknown> {
   const now = new Date().toISOString();
   const appId = uuidv4();
+
+  let resolvedOrgId = input.orgId;
+  if (event !== undefined) {
+    const callerOrgId = await extractOrgFromEvent(event);
+    if (callerOrgId) {
+      if (input.orgId !== undefined && input.orgId !== callerOrgId) {
+        throw new Error(
+          "ValidationError: orgId does not match caller organization",
+        );
+      }
+      resolvedOrgId = callerOrgId;
+    } else {
+      // Org-less caller — only the ORGLESS_CALLER_ORG sentinel ('default')
+      // or an absent orgId is accepted; anything else claims an org the
+      // caller cannot substantiate.
+      if (input.orgId !== undefined && input.orgId !== ORGLESS_CALLER_ORG) {
+        throw new Error(
+          "ValidationError: orgId does not match caller organization",
+        );
+      }
+      resolvedOrgId = ORGLESS_CALLER_ORG;
+    }
+  }
 
   // The AgentCore Registry API requires description length >= 1. The Import
   // Blueprint dialog's New App mode sends only { name, orgId }, so an
@@ -1446,7 +1504,7 @@ export async function createApp(
   // resolver stored as separate DDB rows (workflowIds, bindings, permissions).
   const agentAppInput = {
     appId,
-    orgId: input.orgId,
+    orgId: resolvedOrgId,
     name: input.name,
     description,
     status: "DRAFT",
@@ -1458,7 +1516,7 @@ export async function createApp(
   const skeleton = recordFromInput(agentAppInput);
 
   const initialManifest: AgentAppManifest = {
-    orgId: input.orgId,
+    orgId: resolvedOrgId,
     version: 1,
     status: "DRAFT",
     createdBy: userId,
@@ -1504,7 +1562,7 @@ export async function createApp(
   // reconciler runs, so surface it in the resolver log too.
   const metaMirrored = await upsertAppMeta(APPS_TABLE, {
     appId: record.recordId,
-    orgId: input.orgId,
+    orgId: resolvedOrgId,
     // The CREATED name (RegistryService sanitizes to the registry's
     // ^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$ constraint) — not the raw input — so
     // listApps (mirror) and getApp (registry) render the same name.
@@ -1540,7 +1598,7 @@ export async function createApp(
 
   await emitEvent("app.created", {
     appId: record.recordId,
-    orgId: input.orgId,
+    orgId: resolvedOrgId,
     userId,
   });
 
@@ -2686,7 +2744,18 @@ async function revokeAppAccess(
 // Non-AgentApp handlers — preserved DDB / EventBridge paths
 // ===========================================================================
 
-async function listAppApiKeys(appId: string): Promise<unknown> {
+async function listAppApiKeys(appId: string, event: unknown): Promise<unknown> {
+  // Viewer-gate (finding 13ffaca1 / board task a6ff10ff, ITEM2) — BEFORE any
+  // read. Previously took no event at all, so ANY authenticated caller
+  // could read any app's key metadata (no plaintext, but still cross-tenant
+  // metadata disclosure) regardless of org. Same 'viewer' tier as
+  // listAppAccessEntries/getApp/listApps — a non-mutating read.
+  const record = await getRegistryService().getResource("agent", appId);
+  if (!record) {
+    throw new Error("App not found");
+  }
+  await assertManifestAccess(appId, record, event, "viewer");
+
   return listAppApiKeysImpl(appId, getSharedDeps());
 }
 
@@ -2779,7 +2848,18 @@ async function getAppMetrics(
   appId: string,
   startTime: string,
   endTime: string,
+  event: unknown,
 ): Promise<unknown> {
+  // Viewer-gate (finding 13ffaca1 / board task a6ff10ff, ITEM2) — BEFORE any
+  // read. Previously took no event at all, so ANY authenticated caller
+  // could read any app's aggregated metrics regardless of org. Same
+  // 'viewer' tier as listAppApiKeys/listAppAccessEntries/getApp/listApps.
+  const record = await getRegistryService().getResource("agent", appId);
+  if (!record) {
+    throw new Error("App not found");
+  }
+  await assertManifestAccess(appId, record, event, "viewer");
+
   return getAppMetricsImpl(appId, startTime, endTime, getSharedDeps());
 }
 

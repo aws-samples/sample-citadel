@@ -508,6 +508,63 @@ describe("registry-agent-record-resolver — CRUD", () => {
       );
       expect(createdEvents.length).toBe(1);
     });
+
+    // ─── server-derived org (board task a6ff10ff, ITEM2) ────────────
+
+    test("stamps the caller's server-derived org even when input.orgId matches (same-org, no change in behaviour)", async () => {
+      const result = await invokeHandler(
+        makeEvent("createApp", {
+          input: { name: "Derived Org App", orgId: "org-1" },
+        }),
+      );
+      expect(result).toMatchObject({ orgId: "org-1" });
+    });
+
+    test("rejects a mismatching client input.orgId (caller's real org is org-1, input claims org-2)", async () => {
+      await expect(
+        invokeHandler(
+          makeEvent("createApp", {
+            input: { name: "Cross-org App", orgId: "org-2" },
+          }),
+        ),
+      ).rejects.toThrow(/org/i);
+    });
+
+    test("accepts the ORGLESS_CALLER_ORG 'default' sentinel for an org-less Cognito caller", async () => {
+      const orglessEvent = {
+        info: { fieldName: "createApp" },
+        arguments: {
+          input: { name: "Orgless App", orgId: "default" },
+        },
+        identity: { sub: "user-1", claims: { sub: "user-1" } },
+      } as unknown as HandlerEvent;
+
+      const result = await invokeHandler(orglessEvent);
+      expect(result).toMatchObject({ orgId: "default" });
+    });
+
+    test("rejects a non-default orgId claim from an org-less Cognito caller", async () => {
+      const orglessEvent = {
+        info: { fieldName: "createApp" },
+        arguments: {
+          input: { name: "Orgless App Claiming Org", orgId: "org-99" },
+        },
+        identity: { sub: "user-1", claims: { sub: "user-1" } },
+      } as unknown as HandlerEvent;
+
+      await expect(invokeHandler(orglessEvent)).rejects.toThrow(/org/i);
+    });
+
+    test("intake-style internal call (no event) still trusts input.orgId verbatim", async () => {
+      const { createApp } = jest.requireActual(
+        "../registry-agent-record-resolver",
+      );
+      const result = await createApp(
+        { name: "Intake App", orgId: "intake-org" },
+        "user-123",
+      );
+      expect(result).toMatchObject({ orgId: "intake-org" });
+    });
   });
 
   // ─── updateApp ─────────────────────────────────────────────────

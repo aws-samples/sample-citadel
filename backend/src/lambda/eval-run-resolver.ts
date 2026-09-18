@@ -1,4 +1,9 @@
-import { deriveRoles } from "../utils/auth-event";
+import {
+  deriveRoles,
+  resolveScopedOrgFromEvent,
+  canCallerSeeRow,
+  assertRowOrg,
+} from "../utils/auth-event";
 /**
  * EvalRun / EvalRunCaseResult resolver (CIT-102 Pass A).
  *
@@ -174,6 +179,7 @@ function isConditionalCheckFailed(err: unknown): boolean {
 export async function startEvalRun(
   input: StartEvalRunInput,
   authContext: AuthContext,
+  event?: EvalRunResolverEvent,
 ): Promise<EvalRun> {
   requireEvalRunPermission(authContext, "start eval runs");
   validateStartInput(input);
@@ -183,6 +189,9 @@ export async function startEvalRun(
   const suite = await getEvalSuite(input.suiteId);
   if (!suite) {
     throw new Error(`EvalSuite not found: ${input.suiteId}`);
+  }
+  if (event) {
+    await assertRowOrg(suite, event);
   }
   if (suite.status !== "FROZEN") {
     throw new Error(
@@ -305,17 +314,29 @@ export async function startEvalRun(
   return run;
 }
 
-export async function getEvalRun(evalRunId: string): Promise<EvalRun | null> {
+export async function getEvalRun(
+  evalRunId: string,
+  event?: EvalRunResolverEvent,
+): Promise<EvalRun | null> {
   const res = await docClient.send(
     new GetCommand({ TableName: EVAL_RUNS_TABLE, Key: { evalRunId } }),
   );
-  return (res.Item as EvalRun | undefined) ?? null;
+  const item = (res.Item as EvalRun | undefined) ?? null;
+  if (event && item && !(await canCallerSeeRow(item, event))) {
+    return null;
+  }
+  return item;
 }
 
 export async function listEvalRuns(
   orgId: string,
   suiteId?: string,
+  event?: EvalRunResolverEvent,
 ): Promise<EvalRun[]> {
+  const scoped = event
+    ? await resolveScopedOrgFromEvent(event, orgId)
+    : { orgId };
+  if (!scoped) return [];
   if (suiteId) {
     const res = await docClient.send(
       new QueryCommand({
@@ -325,22 +346,40 @@ export async function listEvalRuns(
         ExpressionAttributeValues: { ":sid": suiteId },
       }),
     );
-    return (res.Items as EvalRun[] | undefined) ?? [];
+    const items = (res.Items as EvalRun[] | undefined) ?? [];
+    return items.filter((i) => i.orgId === scoped.orgId);
   }
   const res = await docClient.send(
     new QueryCommand({
       TableName: EVAL_RUNS_TABLE,
       IndexName: "org-index",
       KeyConditionExpression: "orgId = :oid",
-      ExpressionAttributeValues: { ":oid": orgId },
+      ExpressionAttributeValues: { ":oid": scoped.orgId },
     }),
   );
   return (res.Items as EvalRun[] | undefined) ?? [];
 }
 
+/**
+ * listEvalRunCaseResults — by-id read keyed on evalRunId (case-result rows
+ * carry orgId, but the parent RUN's org is the authoritative gate, mirrors
+ * eval-resolver's listEvalCases parent-gate). When `event` is supplied,
+ * loads the parent run first and returns [] (no existence oracle) unless
+ * the caller can see it; each returned row is additionally belt-and-
+ * suspenders filtered to the parent's org.
+ */
 export async function listEvalRunCaseResults(
   evalRunId: string,
+  event?: EvalRunResolverEvent,
 ): Promise<EvalRunCaseResult[]> {
+  let parentOrgId: string | undefined;
+  if (event) {
+    const run = await getEvalRun(evalRunId);
+    if (!run || !(await canCallerSeeRow(run, event))) {
+      return [];
+    }
+    parentOrgId = run.orgId;
+  }
   const res = await docClient.send(
     new QueryCommand({
       TableName: EVAL_RUN_CASE_RESULTS_TABLE,
@@ -348,7 +387,11 @@ export async function listEvalRunCaseResults(
       ExpressionAttributeValues: { ":rid": evalRunId },
     }),
   );
-  return (res.Items as EvalRunCaseResult[] | undefined) ?? [];
+  const items = (res.Items as EvalRunCaseResult[] | undefined) ?? [];
+  if (parentOrgId) {
+    return items.filter((i) => i.orgId === parentOrgId);
+  }
+  return items;
 }
 
 export const handler = async (
@@ -359,16 +402,17 @@ export const handler = async (
   try {
     switch (fieldName) {
       case "startEvalRun":
-        return await startEvalRun(event.arguments.input, authContext);
+        return await startEvalRun(event.arguments.input, authContext, event);
       case "getEvalRun":
-        return await getEvalRun(event.arguments.evalRunId);
+        return await getEvalRun(event.arguments.evalRunId, event);
       case "listEvalRuns":
         return await listEvalRuns(
           event.arguments.orgId,
           event.arguments.suiteId,
+          event,
         );
       case "listEvalRunCaseResults":
-        return await listEvalRunCaseResults(event.arguments.evalRunId);
+        return await listEvalRunCaseResults(event.arguments.evalRunId, event);
       default:
         throw new Error(`Unsupported field: ${fieldName}`);
     }

@@ -75,7 +75,11 @@ import {
 import { v5 as uuidv5 } from "uuid";
 import { createHash } from "crypto";
 import { hasPermission } from "../utils/auth";
-import { extractOrgFromEvent, deriveRoles } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  deriveRoles,
+  resolveScopedOrgFromEvent,
+} from "../utils/auth-event";
 import { emitGovernanceEvent } from "../utils/notifier-base";
 import { resolveReplayBucketName } from "./utils/eval-artifact-store";
 import { scoreCase, type DimensionScore } from "./utils/eval-scoring";
@@ -257,6 +261,34 @@ function isConditionalCheckFailed(err: unknown): boolean {
   );
 }
 
+/**
+ * Derives the caller's server-derived org and reconciles it against a
+ * client-supplied `input.orgId` for eval-comparison writes (Wave-3A
+ * ITEM1): the caller org always wins; a non-admin mismatching input.orgId
+ * is rejected rather than silently overridden or trusted. Mirrors
+ * eval-resolver.ts's resolveWriteOrgId.
+ */
+async function resolveWriteOrgId(
+  inputOrgId: string | undefined,
+  event?: EvalComparisonResolverEvent,
+): Promise<string> {
+  if (!event) {
+    return inputOrgId ?? "";
+  }
+  const callerOrg = await extractOrgFromEvent(event);
+  if (!callerOrg) {
+    throw new Error(
+      "UnauthorizedError: caller organization could not be resolved",
+    );
+  }
+  if (inputOrgId && inputOrgId !== callerOrg) {
+    throw new Error(
+      "ValidationError: orgId does not match caller organization",
+    );
+  }
+  return callerOrg;
+}
+
 // ── EvalBaseline ───────────────────────────────────────────────────────────
 
 function baselineSortKey(agentTargetId: string, suiteId: string): string {
@@ -267,34 +299,44 @@ export async function getEvalBaseline(
   orgId: string,
   agentTargetId: string,
   suiteId: string,
+  event?: EvalComparisonResolverEvent,
 ): Promise<EvalBaseline | null> {
+  const scoped = event
+    ? await resolveScopedOrgFromEvent(event, orgId)
+    : { orgId };
+  if (!scoped) return null;
   const res = await docClient.send(
     new GetCommand({
       TableName: EVAL_BASELINES_TABLE,
       Key: {
-        orgId,
+        orgId: scoped.orgId,
         agentTargetId_suiteId: baselineSortKey(agentTargetId, suiteId),
       },
     }),
   );
   const item = (res.Item as EvalBaseline | undefined) ?? null;
-  assertRowOrg(EVAL_BASELINES_TABLE, item ?? undefined, orgId);
+  assertRowOrg(EVAL_BASELINES_TABLE, item ?? undefined, scoped.orgId);
   return item;
 }
 
 export async function listEvalBaselines(
   orgId: string,
+  event?: EvalComparisonResolverEvent,
 ): Promise<EvalBaseline[]> {
+  const scoped = event
+    ? await resolveScopedOrgFromEvent(event, orgId)
+    : { orgId };
+  if (!scoped) return [];
   const res = await docClient.send(
     new QueryCommand({
       TableName: EVAL_BASELINES_TABLE,
       KeyConditionExpression: "orgId = :oid",
-      ExpressionAttributeValues: { ":oid": orgId },
+      ExpressionAttributeValues: { ":oid": scoped.orgId },
     }),
   );
   const items = (res.Items as EvalBaseline[] | undefined) ?? [];
   for (const item of items) {
-    assertRowOrg(EVAL_BASELINES_TABLE, item, orgId);
+    assertRowOrg(EVAL_BASELINES_TABLE, item, scoped.orgId);
   }
   return items;
 }
@@ -340,8 +382,10 @@ function validateDesignateInput(input: DesignateEvalBaselineInput): void {
 export async function designateEvalBaseline(
   input: DesignateEvalBaselineInput,
   authContext: AuthContext,
+  event?: EvalComparisonResolverEvent,
 ): Promise<EvalBaseline> {
   validateDesignateInput(input);
+  const orgId = await resolveWriteOrgId(input.orgId, event);
 
   const attemptId = input.baselineEvalRunId;
   const attemptedAt = new Date().toISOString();
@@ -350,7 +394,7 @@ export async function designateEvalBaseline(
     phase: "audit",
     action: "designateEvalBaseline",
     attemptId,
-    orgId: input.orgId,
+    orgId,
     agentTargetId: input.agentTargetId,
     suiteId: input.suiteId,
     attemptedBy: authContext.userId,
@@ -378,7 +422,7 @@ export async function designateEvalBaseline(
   if (!baselineRun) {
     throw new Error(`EvalRun not found: ${input.baselineEvalRunId}`);
   }
-  assertRowOrg(EVAL_RUNS_TABLE, baselineRun, input.orgId);
+  assertRowOrg(EVAL_RUNS_TABLE, baselineRun, orgId);
   if (baselineRun.status !== "COMPLETED") {
     throw new Error(
       `ValidationError: baseline run ${input.baselineEvalRunId} must be COMPLETED (status=${baselineRun.status})`,
@@ -391,7 +435,7 @@ export async function designateEvalBaseline(
   }
 
   const existing = await getEvalBaseline(
-    input.orgId,
+    orgId,
     input.agentTargetId,
     input.suiteId,
   );
@@ -399,7 +443,7 @@ export async function designateEvalBaseline(
   const now = new Date().toISOString();
   const nextVersion = (existing?.version ?? 0) + 1;
   const baseline: EvalBaseline = {
-    orgId: input.orgId,
+    orgId,
     agentTargetId: input.agentTargetId,
     suiteId: input.suiteId,
     baselineEvalRunId: input.baselineEvalRunId,
@@ -417,7 +461,7 @@ export async function designateEvalBaseline(
       new UpdateCommand({
         TableName: EVAL_BASELINES_TABLE,
         Key: {
-          orgId: input.orgId,
+          orgId,
           agentTargetId_suiteId: baselineSortKey(
             input.agentTargetId,
             input.suiteId,
@@ -484,16 +528,21 @@ export async function designateEvalBaseline(
 export async function getEvalComparisonThresholdConfig(
   orgId: string,
   suiteId: string,
+  event?: EvalComparisonResolverEvent,
 ): Promise<EvalComparisonThresholdConfigRowType | null> {
+  const scoped = event
+    ? await resolveScopedOrgFromEvent(event, orgId)
+    : { orgId };
+  if (!scoped) return null;
   const res = await docClient.send(
     new GetCommand({
       TableName: EVAL_COMPARISON_CONFIG_TABLE,
-      Key: { orgId, suiteId },
+      Key: { orgId: scoped.orgId, suiteId },
     }),
   );
   const item =
     (res.Item as EvalComparisonThresholdConfigRowType | undefined) ?? null;
-  assertRowOrg(EVAL_COMPARISON_CONFIG_TABLE, item ?? undefined, orgId);
+  assertRowOrg(EVAL_COMPARISON_CONFIG_TABLE, item ?? undefined, scoped.orgId);
   return item;
 }
 
@@ -514,13 +563,15 @@ export async function setEvalComparisonThresholdConfig(
   suiteId: string,
   input: SetEvalComparisonThresholdConfigInput,
   authContext: AuthContext,
+  event?: EvalComparisonResolverEvent,
 ): Promise<EvalComparisonThresholdConfigRowType> {
+  const resolvedOrgId = await resolveWriteOrgId(orgId, event);
   const attemptedAt = new Date().toISOString();
 
   console.log({
     phase: "audit",
     action: "setEvalComparisonThresholdConfig",
-    orgId,
+    orgId: resolvedOrgId,
     suiteId,
     attemptedBy: authContext.userId,
     attemptedAt,
@@ -532,7 +583,7 @@ export async function setEvalComparisonThresholdConfig(
   console.log({
     phase: "audit-outcome",
     action: "setEvalComparisonThresholdConfig",
-    orgId,
+    orgId: resolvedOrgId,
     suiteId,
     attemptedBy: authContext.userId,
     authResult: authorised ? "ALLOWED" : "DENIED",
@@ -548,11 +599,14 @@ export async function setEvalComparisonThresholdConfig(
     throw new Error("ValidationError: thresholds is required");
   }
 
-  const existing = await getEvalComparisonThresholdConfig(orgId, suiteId);
+  const existing = await getEvalComparisonThresholdConfig(
+    resolvedOrgId,
+    suiteId,
+  );
   const now = new Date().toISOString();
   const nextVersion = (existing?.version ?? 0) + 1;
   const row: EvalComparisonThresholdConfigRowType = {
-    orgId,
+    orgId: resolvedOrgId,
     suiteId,
     thresholds: input.thresholds,
     updatedAt: now,
@@ -765,7 +819,12 @@ async function getEvalComparison(
 export async function listEvalComparisons(
   orgId: string,
   suiteId?: string,
+  event?: EvalComparisonResolverEvent,
 ): Promise<EvalComparisonRow[]> {
+  const scoped = event
+    ? await resolveScopedOrgFromEvent(event, orgId)
+    : { orgId };
+  if (!scoped) return [];
   if (suiteId) {
     const res = await docClient.send(
       new QueryCommand({
@@ -777,12 +836,12 @@ export async function listEvalComparisons(
         // FilterExpression (post-query, pre-return) rather than a
         // KeyConditionExpression predicate.
         FilterExpression: "orgId = :oid",
-        ExpressionAttributeValues: { ":sid": suiteId, ":oid": orgId },
+        ExpressionAttributeValues: { ":sid": suiteId, ":oid": scoped.orgId },
       }),
     );
     const items = (res.Items as EvalComparisonRow[] | undefined) ?? [];
     for (const item of items) {
-      assertRowOrg(EVAL_COMPARISONS_TABLE, item, orgId);
+      assertRowOrg(EVAL_COMPARISONS_TABLE, item, scoped.orgId);
     }
     return items;
   }
@@ -791,12 +850,12 @@ export async function listEvalComparisons(
       TableName: EVAL_COMPARISONS_TABLE,
       IndexName: "org-index",
       KeyConditionExpression: "orgId = :oid",
-      ExpressionAttributeValues: { ":oid": orgId },
+      ExpressionAttributeValues: { ":oid": scoped.orgId },
     }),
   );
   const items = (res.Items as EvalComparisonRow[] | undefined) ?? [];
   for (const item of items) {
-    assertRowOrg(EVAL_COMPARISONS_TABLE, item, orgId);
+    assertRowOrg(EVAL_COMPARISONS_TABLE, item, scoped.orgId);
   }
   return items;
 }
@@ -837,26 +896,28 @@ function splitVerdictForStorage(verdict: EvalComparisonVerdict): {
 export async function computeEvalComparison(
   input: ComputeEvalComparisonInput,
   authContext: AuthContext,
+  event?: EvalComparisonResolverEvent,
 ): Promise<EvalComparisonRow> {
   requireEvalRunPermission(authContext, "compute eval comparisons");
   validateComputeInput(input);
+  const orgId = await resolveWriteOrgId(input.orgId, event);
 
   const suite = await getEvalSuite(input.suiteId);
   if (!suite) {
     throw new Error(`EvalSuite not found: ${input.suiteId}`);
   }
-  assertRowOrg(EVAL_SUITES_TABLE, suite, input.orgId);
+  assertRowOrg(EVAL_SUITES_TABLE, suite, orgId);
 
   let baselineEvalRunId = input.baselineEvalRunId;
   if (!baselineEvalRunId) {
     const baseline = await getEvalBaseline(
-      input.orgId,
+      orgId,
       suite.agentTargetId,
       input.suiteId,
     );
     if (!baseline) {
       throw new Error(
-        `ValidationError: no baseline designated for (orgId=${input.orgId}, agentTargetId=${suite.agentTargetId}, suiteId=${input.suiteId})`,
+        `ValidationError: no baseline designated for (orgId=${orgId}, agentTargetId=${suite.agentTargetId}, suiteId=${input.suiteId})`,
       );
     }
     baselineEvalRunId = baseline.baselineEvalRunId;
@@ -866,7 +927,7 @@ export async function computeEvalComparison(
   if (!baselineRun) {
     throw new Error(`EvalRun not found: ${baselineEvalRunId}`);
   }
-  assertRowOrg(EVAL_RUNS_TABLE, baselineRun, input.orgId);
+  assertRowOrg(EVAL_RUNS_TABLE, baselineRun, orgId);
   if (baselineRun.status !== "COMPLETED") {
     throw new Error(
       `ValidationError: baseline run ${baselineEvalRunId} must be COMPLETED (status=${baselineRun.status})`,
@@ -879,7 +940,7 @@ export async function computeEvalComparison(
     if (!run) {
       throw new Error(`EvalRun not found: ${runId}`);
     }
-    assertRowOrg(EVAL_RUNS_TABLE, run, input.orgId);
+    assertRowOrg(EVAL_RUNS_TABLE, run, orgId);
     if (run.status !== "COMPLETED") {
       throw new Error(
         `ValidationError: candidate run ${runId} must be COMPLETED (status=${run.status})`,
@@ -894,10 +955,10 @@ export async function computeEvalComparison(
   ]);
 
   const perSuiteConfig = await getEvalComparisonThresholdConfig(
-    input.orgId,
+    orgId,
     input.suiteId,
   );
-  const perOrgDefaultConfig = await getOrgDefaultThresholdConfig(input.orgId);
+  const perOrgDefaultConfig = await getOrgDefaultThresholdConfig(orgId);
   const thresholds = resolveComparisonThresholds({
     overrides: input.thresholdOverride,
     perSuiteConfig: perSuiteConfig as ComparisonThresholdConfigRow | null,
@@ -927,7 +988,7 @@ export async function computeEvalComparison(
   const now = new Date().toISOString();
   const row: EvalComparisonRow = {
     comparisonId,
-    orgId: input.orgId,
+    orgId,
     suiteId: input.suiteId,
     suiteVersion: suite.version,
     agentTargetId: suite.agentTargetId,
@@ -1270,9 +1331,15 @@ async function loadArtifactSideView(
 export async function getEvalCaseArtifactDiff(
   input: GetEvalCaseArtifactDiffInput,
   authContext: AuthContext,
+  event?: EvalComparisonResolverEvent,
 ): Promise<EvalCaseArtifactDiff> {
   requireEvalRunPermission(authContext, "read eval case artifacts");
   validateArtifactDiffInput(input);
+  // Caller-derived org, never the client-supplied input.orgId (admin may
+  // pass an explicit org via resolveWriteOrgId's same-shaped reconciliation
+  // — a read still fails closed on a genuine mismatch here rather than
+  // silently trusting the client value).
+  const orgId = await resolveWriteOrgId(input.orgId, event);
 
   const cursors = {
     transcriptCursor: input.transcriptCursor,
@@ -1285,7 +1352,7 @@ export async function getEvalCaseArtifactDiff(
       input.baselineEvalRunId,
       input.suiteId,
       input.caseId,
-      input.orgId,
+      orgId,
       cursors,
     ),
     loadArtifactSideView(
@@ -1293,7 +1360,7 @@ export async function getEvalCaseArtifactDiff(
       input.candidateEvalRunId,
       input.suiteId,
       input.caseId,
-      input.orgId,
+      orgId,
       cursors,
     ),
   ]);
@@ -1319,11 +1386,13 @@ export const handler = async (
         return await designateEvalBaseline(
           event.arguments.input as DesignateEvalBaselineInput,
           authContext,
+          event,
         );
       case "computeEvalComparison":
         return await computeEvalComparison(
           event.arguments.input as ComputeEvalComparisonInput,
           authContext,
+          event,
         );
       case "setEvalComparisonThresholdConfig":
         return await setEvalComparisonThresholdConfig(
@@ -1331,15 +1400,17 @@ export const handler = async (
           event.arguments.suiteId,
           event.arguments.input as SetEvalComparisonThresholdConfigInput,
           authContext,
+          event,
         );
       case "getEvalBaseline":
         return await getEvalBaseline(
           event.arguments.orgId,
           event.arguments.agentTargetId,
           event.arguments.suiteId,
+          event,
         );
       case "listEvalBaselines":
-        return await listEvalBaselines(event.arguments.orgId);
+        return await listEvalBaselines(event.arguments.orgId, event);
       case "getEvalComparison":
         return await getEvalComparisonHydrated(
           event.arguments.comparisonId,
@@ -1349,11 +1420,13 @@ export const handler = async (
         return await listEvalComparisons(
           event.arguments.orgId,
           event.arguments.suiteId,
+          event,
         );
       case "getEvalComparisonThresholdConfig":
         return await getEvalComparisonThresholdConfig(
           event.arguments.orgId,
           event.arguments.suiteId,
+          event,
         );
       case "getEvalCaseArtifactDiff":
         return await getEvalCaseArtifactDiff(
@@ -1367,6 +1440,7 @@ export const handler = async (
             trajectoryCursor: event.arguments.trajectoryCursor,
           },
           authContext,
+          event,
         );
       default:
         throw new Error(`Unsupported field: ${fieldName}`);

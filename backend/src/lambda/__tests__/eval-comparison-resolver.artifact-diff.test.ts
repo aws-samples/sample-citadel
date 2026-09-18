@@ -641,7 +641,11 @@ describe("handler dispatch — getEvalCaseArtifactDiff field", () => {
     const result = (await handler({
       info: { fieldName: "getEvalCaseArtifactDiff" },
       arguments: baseArgs,
-      identity: { sub: "user-1", "custom:role": "developer" },
+      identity: {
+        sub: "user-1",
+        "custom:role": "developer",
+        "custom:organization": "org-1",
+      },
     } as never)) as { baseline: { availability: string } };
 
     expect(result.baseline.availability).toBe("ARTIFACT_MISSING");

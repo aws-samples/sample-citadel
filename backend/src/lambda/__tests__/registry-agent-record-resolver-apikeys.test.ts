@@ -209,6 +209,7 @@ describe("registry-agent-record-resolver — API key surfaces", () => {
   });
 
   test("listAppApiKeys items have no apiKey field", async () => {
+    seedAppForKeyOps("app-1");
     mockList.mockResolvedValueOnce([
       {
         keyId: "k1",
@@ -272,6 +273,7 @@ describe("registry-agent-record-resolver — API key surfaces", () => {
   });
 
   test("listAppApiKeys invokes impl with deps struct (no mutation of args)", async () => {
+    seedAppForKeyOps("app-42");
     mockList.mockResolvedValueOnce([]);
 
     await invokeHandler(makeEvent("listAppApiKeys", { appId: "app-42" }));

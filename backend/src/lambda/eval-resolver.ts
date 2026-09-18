@@ -1,4 +1,10 @@
-import { deriveRoles } from "../utils/auth-event";
+import {
+  deriveRoles,
+  extractOrgFromEvent,
+  resolveScopedOrgFromEvent,
+  canCallerSeeRow,
+  assertRowOrg,
+} from "../utils/auth-event";
 /**
  * EvalSuite / EvalCase resolver (CIT-101).
  *
@@ -205,10 +211,16 @@ function validateCaseInput(input: EvalCaseInput): void {
  * routes through this guard first. Returns the loaded suite so callers
  * don't re-fetch.
  */
-async function assertSuiteMutable(suiteId: string): Promise<EvalSuite> {
+async function assertSuiteMutable(
+  suiteId: string,
+  event?: EvalResolverEvent,
+): Promise<EvalSuite> {
   const suite = await getEvalSuite(suiteId);
   if (!suite) {
     throw new Error(`EvalSuite not found: ${suiteId}`);
+  }
+  if (event) {
+    await assertRowOrg(suite, event);
   }
   if (suite.status === "FROZEN" || (suite.references?.length ?? 0) > 0) {
     throw new Error(
@@ -218,19 +230,50 @@ async function assertSuiteMutable(suiteId: string): Promise<EvalSuite> {
   return suite;
 }
 
+/**
+ * Derives the caller's server-derived org and reconciles it against a
+ * client-supplied `input.orgId` for eval suite writes (Wave-3A ITEM1):
+ * the caller org always wins; a non-admin mismatching input.orgId is
+ * rejected rather than silently overridden or trusted.
+ */
+async function resolveWriteOrgId(
+  input: { orgId?: string },
+  event?: EvalResolverEvent,
+): Promise<string> {
+  if (!event) {
+    // Internal/no-event callers keep trusting input.orgId (pre-existing
+    // convention for same-file internal reuse paths).
+    return input.orgId ?? "";
+  }
+  const callerOrg = await extractOrgFromEvent(event);
+  if (!callerOrg) {
+    throw new Error(
+      "UnauthorizedError: caller organization could not be resolved",
+    );
+  }
+  if (input.orgId && input.orgId !== callerOrg) {
+    throw new Error(
+      "ValidationError: orgId does not match caller organization",
+    );
+  }
+  return callerOrg;
+}
+
 // ── EvalSuite CRUD ─────────────────────────────────────────────────────────
 
 export async function createEvalSuite(
   input: EvalSuiteInput,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<EvalSuite> {
   requireEvalAuthorPermission(authContext, "create eval suites");
   validateSuiteInput(input);
+  const orgId = await resolveWriteOrgId(input, event);
 
   const now = new Date().toISOString();
   const suite: EvalSuite = {
     suiteId: uuidv4(),
-    orgId: input.orgId,
+    orgId,
     agentTargetId: input.agentTargetId,
     name: input.name,
     description: input.description ?? "",
@@ -254,17 +297,29 @@ export async function createEvalSuite(
   return suite;
 }
 
-export async function getEvalSuite(suiteId: string): Promise<EvalSuite | null> {
+export async function getEvalSuite(
+  suiteId: string,
+  event?: EvalResolverEvent,
+): Promise<EvalSuite | null> {
   const res = await docClient.send(
     new GetCommand({ TableName: EVAL_SUITES_TABLE, Key: { suiteId } }),
   );
-  return (res.Item as EvalSuite | undefined) ?? null;
+  const item = (res.Item as EvalSuite | undefined) ?? null;
+  if (event && item && !(await canCallerSeeRow(item, event))) {
+    return null;
+  }
+  return item;
 }
 
 export async function listEvalSuites(
   orgId: string,
   agentTargetId?: string,
+  event?: EvalResolverEvent,
 ): Promise<EvalSuite[]> {
+  const scoped = event
+    ? await resolveScopedOrgFromEvent(event, orgId)
+    : { orgId };
+  if (!scoped) return [];
   if (agentTargetId) {
     const res = await docClient.send(
       new QueryCommand({
@@ -274,14 +329,15 @@ export async function listEvalSuites(
         ExpressionAttributeValues: { ":aid": agentTargetId },
       }),
     );
-    return (res.Items as EvalSuite[] | undefined) ?? [];
+    const items = (res.Items as EvalSuite[] | undefined) ?? [];
+    return items.filter((i) => i.orgId === scoped.orgId);
   }
   const res = await docClient.send(
     new QueryCommand({
       TableName: EVAL_SUITES_TABLE,
       IndexName: "org-index",
       KeyConditionExpression: "orgId = :oid",
-      ExpressionAttributeValues: { ":oid": orgId },
+      ExpressionAttributeValues: { ":oid": scoped.orgId },
     }),
   );
   return (res.Items as EvalSuite[] | undefined) ?? [];
@@ -373,13 +429,20 @@ export async function updateEvalSuite(
   suiteId: string,
   input: EvalSuiteInput,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<EvalSuite> {
   requireEvalAuthorPermission(authContext, "update eval suites");
   validateSuiteInput(input);
   // Immutability guard FIRST — before any write, mirrors assert_spec_approved.
-  const suite = await assertSuiteMutable(suiteId);
+  const suite = await assertSuiteMutable(suiteId, event);
+  const orgId = await resolveWriteOrgId(input, event);
+  if (orgId !== suite.orgId) {
+    throw new Error(
+      "ValidationError: orgId cannot be changed on an existing eval suite",
+    );
+  }
   return updateSuiteFields(suiteId, suite.version, {
-    orgId: input.orgId,
+    orgId,
     agentTargetId: input.agentTargetId,
     name: input.name,
     description: input.description ?? "",
@@ -390,6 +453,7 @@ export async function updateEvalSuite(
 export async function freezeEvalSuite(
   suiteId: string,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<EvalSuite> {
   // AUDIT-BEFORE-AUTH per execspec-resolver rejectExecutionSpecification
   // parity — a governance freeze/approve action needs a durable trail
@@ -427,6 +491,9 @@ export async function freezeEvalSuite(
   if (!suite) {
     throw new Error(`EvalSuite not found: ${suiteId}`);
   }
+  if (event) {
+    await assertRowOrg(suite, event);
+  }
   evalSuiteLifecycle.validateTransition(suite.status, "FROZEN");
 
   const updated = await updateSuiteStatus(suiteId, suite.version, "FROZEN", {
@@ -447,11 +514,15 @@ export async function freezeEvalSuite(
 export async function archiveEvalSuite(
   suiteId: string,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<EvalSuite> {
   requireEvalAuthorPermission(authContext, "archive eval suites");
   const suite = await getEvalSuite(suiteId);
   if (!suite) {
     throw new Error(`EvalSuite not found: ${suiteId}`);
+  }
+  if (event) {
+    await assertRowOrg(suite, event);
   }
   evalSuiteLifecycle.validateTransition(suite.status, "ARCHIVED");
   return updateSuiteStatus(suiteId, suite.version, "ARCHIVED");
@@ -461,11 +532,15 @@ export async function cloneEvalSuite(
   suiteId: string,
   semver: string,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<EvalSuite> {
   requireEvalAuthorPermission(authContext, "clone eval suites");
   const source = await getEvalSuite(suiteId);
   if (!source) {
     throw new Error(`EvalSuite not found: ${suiteId}`);
+  }
+  if (event) {
+    await assertRowOrg(source, event);
   }
   const cases = await listEvalCases(suiteId);
 
@@ -521,11 +596,15 @@ export async function markEvalSuiteReferenced(
   suiteId: string,
   referenceId: string,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<EvalSuite> {
   requireEvalApprovePermission(authContext, "mark eval suites referenced");
   const suite = await getEvalSuite(suiteId);
   if (!suite) {
     throw new Error(`EvalSuite not found: ${suiteId}`);
+  }
+  if (event) {
+    await assertRowOrg(suite, event);
   }
   const nextReferences = Array.from(
     new Set([...(suite.references ?? []), referenceId]),
@@ -541,11 +620,12 @@ export async function addEvalCase(
   suiteId: string,
   input: EvalCaseInput,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<EvalCase> {
   requireEvalAuthorPermission(authContext, "add eval cases");
   validateCaseInput(input);
   // Immutability guard FIRST — before any write.
-  await assertSuiteMutable(suiteId);
+  await assertSuiteMutable(suiteId, event);
 
   const now = new Date().toISOString();
   const evalCase: EvalCase = {
@@ -590,7 +670,25 @@ export async function getEvalCase(
   return (res.Item as EvalCase | undefined) ?? null;
 }
 
-export async function listEvalCases(suiteId: string): Promise<EvalCase[]> {
+/**
+ * listEvalCases — by-id read keyed on suiteId (EvalCase rows carry no
+ * orgId of their own). When `event` is supplied, gates via the PARENT
+ * suite's visibility (canCallerSeeRow) rather than trusting the raw
+ * suiteId — a cross-org caller gets [] (no existence oracle), never a
+ * thrown error. Internal callers (assertSuiteMutable, cloneEvalSuite,
+ * write paths that already enforced their own permission gate) omit
+ * `event` and keep the unfiltered read.
+ */
+export async function listEvalCases(
+  suiteId: string,
+  event?: EvalResolverEvent,
+): Promise<EvalCase[]> {
+  if (event) {
+    const suite = await getEvalSuite(suiteId);
+    if (!suite || !(await canCallerSeeRow(suite, event))) {
+      return [];
+    }
+  }
   const res = await docClient.send(
     new QueryCommand({
       TableName: EVAL_CASES_TABLE,
@@ -606,11 +704,12 @@ export async function updateEvalCase(
   caseId: string,
   input: EvalCaseInput,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<EvalCase> {
   requireEvalAuthorPermission(authContext, "update eval cases");
   validateCaseInput(input);
   // Immutability guard FIRST — before any write.
-  await assertSuiteMutable(suiteId);
+  await assertSuiteMutable(suiteId, event);
 
   const existing = await getEvalCase(suiteId, caseId);
   if (!existing) {
@@ -671,10 +770,11 @@ export async function deleteEvalCase(
   suiteId: string,
   caseId: string,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<{ success: boolean }> {
   requireEvalAuthorPermission(authContext, "delete eval cases");
   // Immutability guard FIRST — before any write.
-  await assertSuiteMutable(suiteId);
+  await assertSuiteMutable(suiteId, event);
 
   await docClient.send(
     new DeleteCommand({
@@ -865,6 +965,7 @@ export async function importReplayAsEvalCase(
   suiteId: string,
   pkg: unknown,
   authContext: AuthContext,
+  event?: EvalResolverEvent,
 ): Promise<EvalCase> {
   requireEvalAuthorPermission(
     authContext,
@@ -872,7 +973,7 @@ export async function importReplayAsEvalCase(
   );
   // Immutability guard FIRST — before any write. Import into a frozen suite
   // is rejected by the same guard as any other mutation.
-  await assertSuiteMutable(suiteId);
+  await assertSuiteMutable(suiteId, event);
 
   const mapped = mapReplayPackageToEvalCase(pkg);
   const now = new Date().toISOString();
@@ -915,34 +1016,47 @@ export const handler = async (event: EvalResolverEvent): Promise<unknown> => {
         return await createEvalSuite(
           event.arguments.input as EvalSuiteInput,
           authContext,
+          event,
         );
       case "updateEvalSuite":
         return await updateEvalSuite(
           event.arguments.suiteId,
           event.arguments.input as EvalSuiteInput,
           authContext,
+          event,
         );
       case "freezeEvalSuite":
-        return await freezeEvalSuite(event.arguments.suiteId, authContext);
+        return await freezeEvalSuite(
+          event.arguments.suiteId,
+          authContext,
+          event,
+        );
       case "archiveEvalSuite":
-        return await archiveEvalSuite(event.arguments.suiteId, authContext);
+        return await archiveEvalSuite(
+          event.arguments.suiteId,
+          authContext,
+          event,
+        );
       case "cloneEvalSuite":
         return await cloneEvalSuite(
           event.arguments.suiteId,
           event.arguments.semver,
           authContext,
+          event,
         );
       case "markEvalSuiteReferenced":
         return await markEvalSuiteReferenced(
           event.arguments.suiteId,
           event.arguments.referenceId,
           authContext,
+          event,
         );
       case "addEvalCase":
         return await addEvalCase(
           event.arguments.suiteId,
           event.arguments.input as EvalCaseInput,
           authContext,
+          event,
         );
       case "updateEvalCase":
         return await updateEvalCase(
@@ -950,28 +1064,32 @@ export const handler = async (event: EvalResolverEvent): Promise<unknown> => {
           event.arguments.caseId,
           event.arguments.input as EvalCaseInput,
           authContext,
+          event,
         );
       case "deleteEvalCase":
         return await deleteEvalCase(
           event.arguments.suiteId,
           event.arguments.caseId,
           authContext,
+          event,
         );
       case "importReplayAsEvalCase":
         return await importReplayAsEvalCase(
           event.arguments.suiteId,
           event.arguments.package,
           authContext,
+          event,
         );
       case "getEvalSuite":
-        return await getEvalSuite(event.arguments.suiteId);
+        return await getEvalSuite(event.arguments.suiteId, event);
       case "listEvalSuites":
         return await listEvalSuites(
           event.arguments.orgId,
           event.arguments.agentTargetId,
+          event,
         );
       case "listEvalCases":
-        return await listEvalCases(event.arguments.suiteId);
+        return await listEvalCases(event.arguments.suiteId, event);
       default:
         throw new Error(`Unsupported field: ${fieldName}`);
     }

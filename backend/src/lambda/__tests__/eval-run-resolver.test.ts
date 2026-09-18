@@ -393,7 +393,9 @@ describe("getEvalRun / listEvalRuns / listEvalRunCaseResults", () => {
   });
 
   test("listEvalRuns queries suite-index when suiteId given", async () => {
-    ddbMock.on(QueryCommand).resolves({ Items: [{ evalRunId: "r1" }] });
+    ddbMock
+      .on(QueryCommand)
+      .resolves({ Items: [{ evalRunId: "r1", orgId: "org-1" }] });
     const items = await listEvalRuns("org-1", "suite-1");
     expect(items).toHaveLength(1);
     const call = ddbMock.commandCalls(QueryCommand)[0];
