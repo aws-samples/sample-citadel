@@ -20,8 +20,16 @@ const makeEvent = (fieldName: string, args: Record<string, unknown>) => ({
   // Tenancy fail-closed (design evidence, section C): the resolver now
   // derives org via requireOrgId before any dispatch, so every fixture in
   // this file must carry a resolvable caller org to reach the
-  // sourceProjectId-propagation behaviour under test.
-  identity: { sub: "user-123", "custom:organization": "org-caller" },
+  // sourceProjectId-propagation behaviour under test. `custom:role:
+  // "architect"` satisfies the decision-2763e85f role gate (added after
+  // this file was written) so these unrelated propagation tests keep
+  // exercising their intended behaviour rather than being rejected by the
+  // role check.
+  identity: {
+    sub: "user-123",
+    "custom:organization": "org-caller",
+    "custom:role": "architect",
+  },
 });
 
 function parsePayload() {

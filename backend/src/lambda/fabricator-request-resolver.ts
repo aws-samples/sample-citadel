@@ -7,7 +7,11 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "crypto";
 import type { RegistryRecord } from "../services/registry-service";
-import { extractOrgFromEvent } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  hasRoleFromEvent,
+} from "../utils/auth-event";
 
 const sqsClient = new SQSClient({});
 const dynamoClient = new DynamoDBClient({});
@@ -198,7 +202,7 @@ interface FabricatorRequestResolverEvent {
  * write, and never fall back to client input or a default org.
  *
  * Throws (fails closed) when no organisation resolves — never returns
- * null. Owner decision: tenancy-only, NO platform-role gate.
+ * null.
  */
 async function requireOrgId(
   event: FabricatorRequestResolverEvent,
@@ -210,6 +214,35 @@ async function requireOrgId(
     );
   }
   return orgId;
+}
+
+/**
+ * Platform-role gate (decision 2763e85f, 2026-09-18): requestAgentCreation
+ * and requestToolCreation require the caller be an admin or hold the
+ * architect role, in addition to the server-derived org check above.
+ * Fabrication drives Bedrock spend and creates agent/tool Registry
+ * records, the same trust tier already required for comparable
+ * agent-lifecycle mutations elsewhere in this codebase (see
+ * agent-code-resolver.ts's `assertAgentCodeAccess`
+ * `requiredWriteRole`/`REQUIRED_WRITE_ROLE` gate and
+ * agent-import-resolver.ts's `requireDiscoveryRole`, both of which gate on
+ * `isAdminFromEvent(event) || hasRoleFromEvent(event, "architect")`).
+ *
+ * Applied AFTER the org check (`requireOrgId`) in both operations, so a
+ * cross-org caller never learns whether they merely lack the right role.
+ * `action` names the operation in the error message so a rejected caller
+ * knows which mutation was denied.
+ */
+function requireArchitectOrAdmin(
+  event: FabricatorRequestResolverEvent,
+  action: "request agent creation" | "request tool creation",
+): void {
+  if (isAdminFromEvent(event) || hasRoleFromEvent(event, "architect")) {
+    return;
+  }
+  throw new Error(
+    `Access denied: requires architect or admin role to ${action}`,
+  );
 }
 
 export const handler = async (event: FabricatorRequestResolverEvent) => {
@@ -228,6 +261,7 @@ export const handler = async (event: FabricatorRequestResolverEvent) => {
         event.arguments.input as CreateAgentRequest,
         requestedBy,
         orgId,
+        event,
       );
     }
 
@@ -236,6 +270,7 @@ export const handler = async (event: FabricatorRequestResolverEvent) => {
         event.arguments.input as CreateToolRequest,
         requestedBy,
         orgId,
+        event,
       );
     }
 
@@ -356,7 +391,10 @@ async function requestAgentCreation(
   input: CreateAgentRequest,
   requestedBy: string,
   orgId: string,
+  event: FabricatorRequestResolverEvent,
 ) {
+  requireArchitectOrAdmin(event, "request agent creation");
+
   const requestId = randomUUID();
 
   // Build the task details with all the information
@@ -400,7 +438,10 @@ async function requestToolCreation(
   input: CreateToolRequest,
   requestedBy: string,
   orgId: string,
+  event: FabricatorRequestResolverEvent,
 ) {
+  requireArchitectOrAdmin(event, "request tool creation");
+
   const requestId = randomUUID();
 
   // Build the task details for tool creation

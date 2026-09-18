@@ -25,6 +25,7 @@ const makeEvent = (
   identity: Record<string, unknown> = {
     sub: "user-123",
     "custom:organization": "org-caller",
+    "custom:role": "architect",
   },
 ) => ({
   info: { fieldName },
@@ -113,6 +114,98 @@ describe("fabricator-request-resolver", () => {
 
       const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item!;
       expect(item.orgId).toBe("org-caller");
+    });
+  });
+
+  describe("role gate (decision 2763e85f — architect or admin, after the org check)", () => {
+    test("requestAgentCreation rejects a non-architect non-admin caller with a valid org, before any SQS send", async () => {
+      await expect(
+        handler(
+          makeEvent(
+            "requestAgentCreation",
+            { agentName: "DeveloperAgent", taskDescription: "desc" },
+            {
+              sub: "user-dev",
+              "custom:organization": "org-caller",
+              "custom:role": "developer",
+            },
+          ),
+        ),
+      ).rejects.toThrow(
+        "Access denied: requires architect or admin role to request agent creation",
+      );
+
+      expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test("requestToolCreation rejects a non-architect non-admin caller with a valid org, before any SQS send", async () => {
+      await expect(
+        handler(
+          makeEvent(
+            "requestToolCreation",
+            { toolName: "DeveloperTool", toolDescription: "desc" },
+            {
+              sub: "user-dev",
+              "custom:organization": "org-caller",
+              "custom:role": "developer",
+            },
+          ),
+        ),
+      ).rejects.toThrow(
+        "Access denied: requires architect or admin role to request tool creation",
+      );
+
+      expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test("requestAgentCreation still rejects a role-less caller missing an org (org check runs first)", async () => {
+      await expect(
+        handler(
+          makeEvent(
+            "requestAgentCreation",
+            { agentName: "NoOrgAgent", taskDescription: "desc" },
+            { sub: "user-no-org", "custom:role": "developer" },
+          ),
+        ),
+      ).rejects.toThrow("Access denied: no organization is provisioned");
+
+      expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
+    });
+
+    test("architect caller (custom:role) passes for requestAgentCreation", async () => {
+      const result = await handler(
+        makeEvent(
+          "requestAgentCreation",
+          { agentName: "ArchitectAgent", taskDescription: "desc" },
+          {
+            sub: "user-arch",
+            "custom:organization": "org-caller",
+            "custom:role": "architect",
+          },
+        ),
+      );
+
+      expect(result.success).toBe(true);
+      expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
+    });
+
+    test("admin caller (cognito:groups) passes for requestToolCreation", async () => {
+      const result = await handler(
+        makeEvent(
+          "requestToolCreation",
+          { toolName: "AdminTool", toolDescription: "desc" },
+          {
+            sub: "user-admin",
+            "custom:organization": "org-caller",
+            "cognito:groups": ["admin"],
+          },
+        ),
+      );
+
+      expect(result.success).toBe(true);
+      expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
     });
   });
 
