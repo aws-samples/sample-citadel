@@ -21,6 +21,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '../components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '../components/ui/alert-dialog';
 import { userManagementService, User, Organization } from '../services/userManagementService';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { PageContainer } from '../components/PageContainer';
@@ -58,6 +68,7 @@ export function Team() {
   const [showManageOrgsModal, setShowManageOrgsModal] = useState(false);
   const [newOrganizationValue, setNewOrganizationValue] = useState('');
   const [changingOrg, setChangingOrg] = useState(false);
+  const [orgChangeTarget, setOrgChangeTarget] = useState<User | null>(null);
 
   useEffect(() => {
     loadData();
@@ -781,7 +792,7 @@ export function Team() {
                                     </Select>
                                     <Button
                                       className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
-                                      onClick={() => handleChangeOrganization(user)}
+                                      onClick={() => setOrgChangeTarget(user)}
                                       disabled={changingOrg || !newOrganizationValue}
                                     >
                                       {changingOrg ? 'Changing...' : 'Change Organization'}
@@ -841,7 +852,7 @@ export function Team() {
                                   </Select>
                                   <Button
                                     className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
-                                    onClick={() => handleChangeOrganization(user)}
+                                    onClick={() => setOrgChangeTarget(user)}
                                     disabled={changingOrg || !newOrganizationValue}
                                   >
                                     {changingOrg ? 'Changing...' : 'Change Organization'}
@@ -1204,6 +1215,41 @@ export function Team() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Change Organization Confirmation Dialog */}
+      <AlertDialog
+        open={!!orgChangeTarget}
+        onOpenChange={(o) => { if (!o) setOrgChangeTarget(null); }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reassign organization?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Reassign {orgChangeTarget?.email || orgChangeTarget?.name} from "{orgChangeTarget?.organization || 'None'}" to "{newOrganizationValue}".
+              They will be signed out of all sessions and must sign in again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={changingOrg}
+              onClick={() => setOrgChangeTarget(null)}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={changingOrg}
+              onClick={async (e) => {
+                e.preventDefault();
+                if (!orgChangeTarget) return;
+                await handleChangeOrganization(orgChangeTarget);
+                setOrgChangeTarget(null);
+              }}
+            >
+              {changingOrg ? 'Changing...' : 'Change Organization'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </PageContainer>
   );
 }
