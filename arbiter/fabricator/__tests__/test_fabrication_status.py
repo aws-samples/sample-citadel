@@ -39,6 +39,10 @@ def _base_event():
         "agent_input": {"taskDetails": "Create an agent that does things"},
         "agent_index": 0,
         "total_agents": 1,
+        # Tenancy fail-closed (design evidence, section C): process_event now
+        # refuses org-less messages outright, so every fixture must carry a
+        # non-empty org_id to reach the fabrication path this file tests.
+        "org_id": "org-test",
     }
 
 

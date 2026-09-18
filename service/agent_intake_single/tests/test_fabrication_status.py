@@ -34,6 +34,13 @@ def _stub_io(monkeypatch):
     # tools.state import inside confirm_fabrication_plan
     state_mod = mock.MagicMock()
     monkeypatch.setitem(sys.modules, "tools.state", state_mod)
+    # confirm_fabrication_plan enqueues each 'build' agent via
+    # _send_to_fabricator, which now fail-closed refuses to enqueue without
+    # a resolved organisation (see test_fabricate_org_tenancy.py). Mock a
+    # resolved org here so these status-write tests exercise status-write
+    # behavior rather than the tenancy gate — a dedicated test below proves
+    # the unresolved case still refuses.
+    monkeypatch.setattr(fab, "_resolve_session_organization", lambda session_id: "org-status-test")
     yield
 
 
@@ -87,4 +94,20 @@ def test_skips_status_write_when_table_unset(monkeypatch):
     fab.confirm_fabrication_plan("sess-1", _plan())
 
     assert fab.sqs.send_message.call_count == 2
+    table.put_item.assert_not_called()
+
+
+def test_enqueue_refuses_when_organisation_unresolved(monkeypatch):
+    # Explicit proof the fail-closed helper is NOT weakened by the
+    # autouse fixture's mock above: with no resolvable organisation,
+    # confirm_fabrication_plan must raise before any SQS send.
+    monkeypatch.setattr(fab, "FABRICATION_JOBS_TABLE", "citadel-fabrication-jobs-test")
+    monkeypatch.setattr(fab, "_resolve_session_organization", lambda session_id: None)
+    table = mock.MagicMock()
+    monkeypatch.setattr(fab.dynamodb, "Table", mock.MagicMock(return_value=table))
+
+    with pytest.raises(Exception, match=r"cannot fabricate: no organisation resolved"):
+        fab.confirm_fabrication_plan("sess-1", _plan())
+
+    fab.sqs.send_message.assert_not_called()
     table.put_item.assert_not_called()

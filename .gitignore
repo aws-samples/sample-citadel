@@ -16,6 +16,7 @@ ENV/
 .venv
 .venv-test/
 .venv-check/
+.venv-arbiter-test/
 
 # E2E test artifacts
 scripts/*

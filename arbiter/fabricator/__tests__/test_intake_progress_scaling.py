@@ -103,6 +103,9 @@ def test_process_event_emits_failure_signal_once_only_after_final_attempt():
         "agent_input": {"taskDetails": "Create an agent"},
         "agent_index": 0,
         "total_agents": 1,
+        # Tenancy fail-closed (design evidence, section C): process_event now
+        # refuses org-less messages outright.
+        "org_id": "org-test",
     }
     with patch.object(index, "_write_fabrication_status"), \
             patch.object(index, "check_design_assessment"), \

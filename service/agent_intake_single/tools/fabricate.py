@@ -397,7 +397,26 @@ def _get_existing_agents() -> dict[str, dict]:
     return agents
 
 
+def _require_session_organization(session_id: str) -> str:
+    """Resolve the session's organization or raise, never enqueuing a
+    fabrication request without a tenant.
+
+    Shared by every fabricator-enqueue call site (initial send and retry)
+    so tenancy is enforced identically regardless of path.
+    """
+    org_id = _resolve_session_organization(session_id)
+    if not org_id:
+        logger.error(
+            "cannot fabricate: no organisation resolved for session %s", session_id,
+        )
+        raise ValueError(
+            f"cannot fabricate: no organisation resolved for session {session_id}"
+        )
+    return org_id
+
+
 def _send_to_fabricator(session_id: str, agent: dict, agent_index: int = 0, total_agents: int = 1):
+    org_id = _require_session_organization(session_id)
     sqs.send_message(
         QueueUrl=FABRICATOR_QUEUE_URL,
         MessageBody=json.dumps({
@@ -407,6 +426,7 @@ def _send_to_fabricator(session_id: str, agent: dict, agent_index: int = 0, tota
             "agent_input": {"taskDetails": f"Create an agent with the following specification:\n\n{agent['spec']}"},
             "agent_index": agent_index,
             "total_agents": total_agents,
+            "org_id": org_id,
         }),
         MessageAttributes={
             "requestType": {"DataType": "String", "StringValue": "agent-creation"},

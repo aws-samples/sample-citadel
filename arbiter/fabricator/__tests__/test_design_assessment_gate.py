@@ -320,6 +320,10 @@ class TestProjectIdFallback:
             "agent_use_id": "use-1",
             "node": "fabricator",
             "agent_input": agent_input,
+            # Tenancy fail-closed (design evidence, section C): process_event
+            # now refuses org-less messages before it ever reaches the
+            # projectId-fallback / design-assessment gate this class tests.
+            "org_id": "org-test",
         }
 
     # ------------------------------------------------------------------

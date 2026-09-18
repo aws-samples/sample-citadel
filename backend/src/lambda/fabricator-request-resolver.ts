@@ -65,7 +65,7 @@ async function writePendingFabricationStatus(
   taskDetails: string,
   requestType: "agent-creation" | "tool-creation",
   requestedBy: string,
-  orgId: string | null,
+  orgId: string,
 ): Promise<void> {
   const table = getFabricationJobsTable();
   if (!table) {
@@ -82,12 +82,10 @@ async function writePendingFabricationStatus(
         Item: {
           orchestrationId: "0",
           agentUseId: requestId,
-          // Server-derived caller org (Phase 2b already resolves this via
-          // extractOrgFromEvent for the SQS org_id field) — stamped onto the
-          // row so the org-scoped getFabricatorQueue GSI query can find it.
-          // Omitted (never a blank string) when unresolvable so a missing
-          // orgId reads as absent, not as a false empty-string match.
-          ...(orgId ? { orgId } : {}),
+          // Server-derived caller org (requireOrgId, fail-closed — never
+          // null) — stamped onto the row so the org-scoped
+          // getFabricatorQueue GSI query can find it.
+          orgId,
           status: "PENDING",
           agentName: deriveAgentName(taskDetails),
           taskDescription: taskDetails.slice(0, TASK_DESCRIPTION_MAX),
@@ -187,15 +185,42 @@ interface FabricatorRequestResolverEvent {
   arguments: Record<string, unknown>;
 }
 
+/**
+ * Fail-closed server-side organisation derivation (mirrors
+ * `task-runner-resolver.ts`'s `requireOrgId` exactly — same primitive
+ * (`extractOrgFromEvent`, JWT `custom:organization` claim with a Cognito
+ * AdminGetUser fallback), same error message, same fail-closed contract).
+ *
+ * Replaces the prior null-tolerant `extractOrgFromEvent` call ("Null is
+ * acceptable during the transition") now that the transition window is
+ * over (design evidence, section C): both `requestAgentCreation` and
+ * `requestToolCreation` must derive org BEFORE any SQS send / status
+ * write, and never fall back to client input or a default org.
+ *
+ * Throws (fails closed) when no organisation resolves — never returns
+ * null. Owner decision: tenancy-only, NO platform-role gate.
+ */
+async function requireOrgId(
+  event: FabricatorRequestResolverEvent,
+): Promise<string> {
+  const orgId = await extractOrgFromEvent(event);
+  if (!orgId) {
+    throw new Error(
+      "Access denied: no organization is provisioned for your account. Contact an administrator.",
+    );
+  }
+  return orgId;
+}
+
 export const handler = async (event: FabricatorRequestResolverEvent) => {
   console.log("Event:", JSON.stringify(event, null, 2));
 
   const fieldName = event.info.fieldName;
   const requestedBy = extractRequestedBy(event);
-  // Phase 2b: thread the caller's orgId so the fabricator can stamp it into
-  // custom metadata. Null is acceptable during the transition — the Python
-  // side falls back to '' rather than blocking fabrication.
-  const orgId = await extractOrgFromEvent(event);
+  // Fail closed BEFORE any SQS send / status write — an unresolved
+  // organisation must never reach the queue (design evidence, section C).
+  // Never derived from client input (`event.arguments.input`).
+  const orgId = await requireOrgId(event);
 
   try {
     if (fieldName === "requestAgentCreation") {
@@ -226,7 +251,7 @@ async function sendToFabricatorQueue(
   taskDetails: string,
   requestType: "agent-creation" | "tool-creation",
   requestedBy: string,
-  orgId: string | null,
+  orgId: string,
   sourceProjectId?: string,
 ) {
   const agent_input: Record<string, unknown> = { taskDetails };
@@ -242,9 +267,10 @@ async function sendToFabricatorQueue(
     node: "fabricator",
     agent_input,
     requested_by: requestedBy,
-    // Phase 2b: carry caller org through the SQS boundary. Python fabricator
-    // falls back to '' when this is null, so no blocking during transition.
-    org_id: orgId || null,
+    // Server-derived caller org (requireOrgId, fail-closed) — never null,
+    // never client input. The Python fabricator now requires this to be
+    // non-empty and refuses to process otherwise.
+    org_id: orgId,
   };
 
   console.log("Sending message to Fabricator queue:", fabricatorMessage);
@@ -329,7 +355,7 @@ async function resolveSourceProjectId(
 async function requestAgentCreation(
   input: CreateAgentRequest,
   requestedBy: string,
-  orgId: string | null,
+  orgId: string,
 ) {
   const requestId = randomUUID();
 
@@ -373,7 +399,7 @@ ${input.taskDescription}`;
 async function requestToolCreation(
   input: CreateToolRequest,
   requestedBy: string,
-  orgId: string | null,
+  orgId: string,
 ) {
   const requestId = randomUUID();
 
