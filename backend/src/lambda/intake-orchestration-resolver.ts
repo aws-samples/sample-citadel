@@ -51,6 +51,7 @@ import {
   ensureAppAgentBindings,
   findAppBySourceProjectId,
 } from "./registry-agent-record-resolver";
+import { ORGLESS_CALLER_ORG } from "./utils/org-sentinel";
 import {
   createWorkflow,
   publishWorkflow,
@@ -244,18 +245,6 @@ async function deriveSessionContext(
 
   return { sessionId, projectId, orgId, projectName, owner, runId };
 }
-
-/**
- * Org value an org-less Cognito caller lands on. The delegated cores never
- * derive or validate org — `createApp` consumes `input.orgId` verbatim
- * (registry-agent-record-resolver.ts) and the schema makes it a required
- * client-supplied string (`CreateAppInput.orgId: String!`). Users without
- * an organization send the UI's literal fallback `selectedOrganization ||
- * 'default'` (AppBuilderWizard.tsx), so the same literal keeps intake-made
- * apps on exactly the downstream semantics (OrgIndex visibility, org-scoped
- * listing) the UI path produces.
- */
-const ORGLESS_CALLER_ORG = "default";
 
 /**
  * Org derivation fallback chain (self-healing — no data patch needed):
