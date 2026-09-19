@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Users, UserPlus, Shield, Building2, Mail, Calendar, MoreVertical, Eye, EyeOff, Send, Trash2, Plus } from 'lucide-react';
+import { Users, UserPlus, Shield, ShieldOff, Building2, Mail, Calendar, MoreVertical, Eye, EyeOff, Send, Trash2, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
@@ -69,6 +69,11 @@ export function Team() {
   const [newOrganizationValue, setNewOrganizationValue] = useState('');
   const [changingOrg, setChangingOrg] = useState(false);
   const [orgChangeTarget, setOrgChangeTarget] = useState<User | null>(null);
+  const [roleChangeTarget, setRoleChangeTarget] = useState<User | null>(null);
+  const [selfRoleChangeConfirmOpen, setSelfRoleChangeConfirmOpen] = useState(false);
+  const [removingRole, setRemovingRole] = useState(false);
+  const [removeRoleTarget, setRemoveRoleTarget] = useState<User | null>(null);
+  const [selfRemoveRoleConfirmOpen, setSelfRemoveRoleConfirmOpen] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -104,7 +109,14 @@ export function Team() {
     }
   };
 
-  const handleAssignRole = async () => {
+  const closeRoleChangeModal = () => {
+    setSelectedUser(null);
+    setRoleChangeTarget(null);
+    setSelectedRole('');
+    setSelectedOrganization('');
+  };
+
+  const submitAssignRole = async () => {
     if (!selectedUser || !selectedRole) {
       setError('Please select both a role and organization');
       return;
@@ -124,15 +136,38 @@ export function Team() {
       await loadData();
 
       // Close modal and reset
-      setSelectedUser(null);
-      setSelectedRole('');
-      setSelectedOrganization('');
+      closeRoleChangeModal();
     } catch (err: any) {
       console.error('Failed to assign role:', err);
       setError(err.message || 'Failed to assign role');
     } finally {
       setAssigning(false);
     }
+  };
+
+  const handleAssignRole = () => {
+    if (!selectedUser || !selectedRole) {
+      setError('Please select both a role and organization');
+      return;
+    }
+
+    // Refuse demoting the last remaining admin away from the admin role.
+    if (isLastRemainingAdmin(selectedUser) && selectedRole !== 'admin') {
+      setError('This is the last remaining admin. Assign another admin before changing this role.');
+      return;
+    }
+
+    // Self-demotion (changing away from admin, or to a different role than
+    // currently held) requires an explicit confirmation — the user may lose
+    // access to this page.
+    const isSelf = selectedUser.userId === currentUser?.userId;
+    const isRoleChange = !!selectedUser.role && selectedUser.role !== selectedRole;
+    if (isSelf && isRoleChange) {
+      setSelfRoleChangeConfirmOpen(true);
+      return;
+    }
+
+    void submitAssignRole();
   };
 
   const handleChangePassword = async () => {
@@ -361,6 +396,56 @@ export function Team() {
       setError(err.message || 'Failed to change organization');
     } finally {
       setChangingOrg(false);
+    }
+  };
+
+  // Admin role is a single, org-blind global tier (see
+  // backend/test/single-global-admin-tier-tripwire.test.ts) — count across
+  // ALL users, never scoped to the currently selected/filtered organization.
+  const adminCount = users.filter(u => u.role === 'admin').length;
+
+  const isLastRemainingAdmin = (user: User) => user.role === 'admin' && adminCount <= 1;
+
+  const openRoleChangeModal = (user: User) => {
+    setRoleChangeTarget(user);
+    setSelectedUser(user);
+    setSelectedRole(user.role || '');
+    setSelectedOrganization(user.organization || '');
+  };
+
+  const requestRemoveRole = (user: User) => {
+    if (isLastRemainingAdmin(user)) return;
+    if (user.userId === currentUser?.userId) {
+      setSelfRemoveRoleConfirmOpen(true);
+      setRemoveRoleTarget(user);
+      return;
+    }
+    setRemoveRoleTarget(user);
+  };
+
+  const handleRemoveRole = async (user: User) => {
+    if (!user.role) return;
+
+    try {
+      setRemovingRole(true);
+      setError(null);
+
+      const response = await userManagementService.removeUserRole(user.userId, user.role);
+
+      if (response.success) {
+        await loadData();
+        setExpandedUserId(null);
+        toast.success('Role removed successfully');
+      } else {
+        setError(response.message || 'Failed to remove role');
+      }
+    } catch (err: any) {
+      console.error('Failed to remove role:', err);
+      setError(err.message || 'Failed to remove role');
+    } finally {
+      setRemovingRole(false);
+      setRemoveRoleTarget(null);
+      setSelfRemoveRoleConfirmOpen(false);
     }
   };
 
@@ -801,6 +886,45 @@ export function Team() {
                                 </AccordionContent>
                               </AccordionItem>
                             )}
+                            {isAdmin && (
+                              <AccordionItem value="manage-role" className="border-border">
+                                <AccordionTrigger className="text-foreground hover:text-primary">
+                                  Manage Role
+                                </AccordionTrigger>
+                                <AccordionContent>
+                                  <div className="flex flex-col gap-4 pt-2">
+                                    <p className="text-muted-foreground text-sm">
+                                      Current role: {user.role || 'None'}
+                                    </p>
+                                    {isLastRemainingAdmin(user) && (
+                                      <p className="text-muted-foreground text-xs">
+                                        This is the last remaining admin. Assign another admin before
+                                        changing or removing this role.
+                                      </p>
+                                    )}
+                                    <div className="flex gap-2">
+                                      <Button
+                                        variant="outline"
+                                        className="flex-1 gap-1"
+                                        onClick={() => openRoleChangeModal(user)}
+                                      >
+                                        <Shield className="size-4 mr-2" />
+                                        Change Role
+                                      </Button>
+                                      <Button
+                                        variant="outline"
+                                        className="flex-1 gap-1 border-destructive/50 text-destructive hover:bg-destructive/10"
+                                        onClick={() => requestRemoveRole(user)}
+                                        disabled={isLastRemainingAdmin(user)}
+                                      >
+                                        <ShieldOff className="size-4 mr-2" />
+                                        Remove Role
+                                      </Button>
+                                    </div>
+                                  </div>
+                                </AccordionContent>
+                              </AccordionItem>
+                            )}
                             </>
                           ) : isAdmin && user.userId !== currentUser?.userId ? (
                             <>
@@ -857,6 +981,43 @@ export function Team() {
                                   >
                                     {changingOrg ? 'Changing...' : 'Change Organization'}
                                   </Button>
+                                </div>
+                              </AccordionContent>
+                            </AccordionItem>
+                            <AccordionItem value="manage-role" className="border-border">
+                              <AccordionTrigger className="text-foreground hover:text-primary">
+                                Manage Role
+                              </AccordionTrigger>
+                              <AccordionContent>
+                                <div className="flex flex-col gap-4 pt-2">
+                                  <p className="text-muted-foreground text-sm">
+                                    Current role: {user.role || 'None'}
+                                  </p>
+                                  {isLastRemainingAdmin(user) && (
+                                    <p className="text-muted-foreground text-xs">
+                                      This is the last remaining admin. Assign another admin before
+                                      changing or removing this role.
+                                    </p>
+                                  )}
+                                  <div className="flex gap-2">
+                                    <Button
+                                      variant="outline"
+                                      className="flex-1 gap-1"
+                                      onClick={() => openRoleChangeModal(user)}
+                                    >
+                                      <Shield className="size-4 mr-2" />
+                                      Change Role
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      className="flex-1 gap-1 border-destructive/50 text-destructive hover:bg-destructive/10"
+                                      onClick={() => requestRemoveRole(user)}
+                                      disabled={isLastRemainingAdmin(user)}
+                                    >
+                                      <ShieldOff className="size-4 mr-2" />
+                                      Remove Role
+                                    </Button>
+                                  </div>
                                 </div>
                               </AccordionContent>
                             </AccordionItem>
@@ -1009,14 +1170,18 @@ export function Team() {
       {/* Assignment Modal */}
       <Dialog
         open={!!selectedUser}
-        onOpenChange={(o) => { if (!o) setSelectedUser(null); }}
+        onOpenChange={(o) => { if (!o) closeRoleChangeModal(); }}
       >
         <DialogContent className="bg-accent border-border max-w-md">
           <DialogHeader>
-            <DialogTitle>Assign Role &amp; Organization</DialogTitle>
+            <DialogTitle>
+              {roleChangeTarget ? 'Change Role & Organization' : 'Assign Role & Organization'}
+            </DialogTitle>
             <DialogDescription>
               {selectedUser
-                ? `Assign ${selectedUser.name} to a role and organization`
+                ? roleChangeTarget
+                  ? `Change ${selectedUser.name}'s role and organization`
+                  : `Assign ${selectedUser.name} to a role and organization`
                 : 'Assign a role and organization'}
             </DialogDescription>
           </DialogHeader>
@@ -1063,12 +1228,12 @@ export function Team() {
                   onClick={handleAssignRole}
                   disabled={assigning || !selectedRole}
                 >
-                  {assigning ? 'Assigning...' : 'Assign'}
+                  {assigning ? 'Assigning...' : roleChangeTarget ? 'Change Role' : 'Assign'}
                 </Button>
                 <Button
                   variant="outline"
                   className="flex-1 border-border text-foreground hover:bg-accent"
-                  onClick={() => setSelectedUser(null)}
+                  onClick={closeRoleChangeModal}
                 >
                   Cancel
                 </Button>
@@ -1246,6 +1411,83 @@ export function Team() {
               }}
             >
               {changingOrg ? 'Changing...' : 'Change Organization'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Self Role-Change Confirmation Dialog */}
+      <AlertDialog
+        open={selfRoleChangeConfirmOpen}
+        onOpenChange={(o) => { if (!o) setSelfRoleChangeConfirmOpen(false); }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Change your own role?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You are changing your own role from "{selectedUser?.role || 'None'}" to "{selectedRole}".
+              You may lose access to this page.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={assigning}
+              onClick={() => setSelfRoleChangeConfirmOpen(false)}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={assigning}
+              onClick={async (e) => {
+                e.preventDefault();
+                setSelfRoleChangeConfirmOpen(false);
+                await submitAssignRole();
+              }}
+            >
+              {assigning ? 'Changing...' : 'Change Role'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Remove Role Confirmation Dialog (covers both self-removal and admin-initiated removal) */}
+      <AlertDialog
+        open={!!removeRoleTarget}
+        onOpenChange={(o) => {
+          if (!o) {
+            setRemoveRoleTarget(null);
+            setSelfRemoveRoleConfirmOpen(false);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove role?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {selfRemoveRoleConfirmOpen
+                ? `You are removing your own "${removeRoleTarget?.role || ''}" role. You may lose access to this page.`
+                : `Remove the "${removeRoleTarget?.role || ''}" role from ${removeRoleTarget?.email || removeRoleTarget?.name}? They will lose access until a new role is assigned.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              disabled={removingRole}
+              onClick={() => {
+                setRemoveRoleTarget(null);
+                setSelfRemoveRoleConfirmOpen(false);
+              }}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={removingRole}
+              onClick={async (e) => {
+                e.preventDefault();
+                if (!removeRoleTarget) return;
+                await handleRemoveRole(removeRoleTarget);
+              }}
+            >
+              {removingRole ? 'Removing...' : 'Remove Role'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
