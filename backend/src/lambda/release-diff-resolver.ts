@@ -86,13 +86,36 @@ export class ReleaseNotFoundError extends Error {
 /** Distinct from the generic ValidationError bucket — mirrors this
  * codebase's "malformed input" vs "attempted to read another tenant's
  * data" distinction (release-resolver.ts / environment-release-pointer-
- * resolver.ts module docs). */
+ * resolver.ts module docs). Used internally (and by direct unit tests of
+ * `releaseDiff`) to distinguish the two causes for logging; the
+ * caller-facing GraphQL surface never sees this distinction — see
+ * `OpaqueReleaseNotFoundError` and the handler's translation below. */
 export class CrossOrgReleaseDiffError extends Error {
   constructor(public readonly releaseId: string) {
     super(
       `SecurityError: release ${releaseId} belongs to a different org — releaseDiff must never compare across tenants`,
     );
     this.name = "CrossOrgReleaseDiffError";
+  }
+}
+
+/**
+ * The ONLY release-diff error a caller can observe through the GraphQL
+ * handler (finding ce470ab0). `ReleaseNotFoundError` and
+ * `CrossOrgReleaseDiffError` both carry a `releaseId`, so the handler
+ * catches either one and re-throws this single opaque shape instead —
+ * a cross-org caller and a caller of a genuinely missing releaseId get
+ * byte-identical error text, closing the existence-oracle that let a
+ * caller distinguish "exists but not yours" from "does not exist" by
+ * diffing against their own known-good release. The original distinct
+ * error (with its `releaseId` and `name`) is still logged server-side via
+ * the handler's existing `console.error` call — only the value that
+ * reaches the caller is collapsed.
+ */
+export class OpaqueReleaseDiffNotFoundError extends Error {
+  constructor() {
+    super("ValidationError: release not found");
+    this.name = "OpaqueReleaseDiffNotFoundError";
   }
 }
 
@@ -187,11 +210,32 @@ export const handler = async (
             "ValidationError: caller organization could not be determined",
           );
         }
-        return await releaseDiff(
-          event.arguments.releaseIdA,
-          event.arguments.releaseIdB,
-          callerOrgId,
-        );
+        try {
+          return await releaseDiff(
+            event.arguments.releaseIdA,
+            event.arguments.releaseIdB,
+            callerOrgId,
+          );
+        } catch (err) {
+          // Opaque-not-found collapse (finding ce470ab0): a cross-org
+          // release and a genuinely missing release must be
+          // indistinguishable to the caller — both become the SAME
+          // opaque error, closing an existence oracle. The real cause
+          // (ReleaseNotFoundError vs CrossOrgReleaseDiffError, with its
+          // releaseId) is still preserved for the outer catch's
+          // console.error below; only the re-thrown value changes.
+          if (
+            err instanceof ReleaseNotFoundError ||
+            err instanceof CrossOrgReleaseDiffError
+          ) {
+            console.error("release-diff-resolver: not-found (opaque)", {
+              cause: err.name,
+              releaseId: err.releaseId,
+            });
+            throw new OpaqueReleaseDiffNotFoundError();
+          }
+          throw err;
+        }
       }
       default:
         throw new Error(`Unsupported field: ${fieldName}`);

@@ -40,7 +40,14 @@ describe("tool-config-resolver", () => {
   describe("listToolConfigs", () => {
     test("returns all tool configs", async () => {
       dynamoMock.on(ScanCommand).resolves({
-        Items: [{ toolId: "t1", config: { name: "Tool1" }, state: "active" }],
+        Items: [
+          {
+            toolId: "t1",
+            orgId: "test-org-a",
+            config: { name: "Tool1" },
+            state: "active",
+          },
+        ],
       });
 
       const result = await handler(makeEvent("listToolConfigs", {}));
@@ -59,7 +66,12 @@ describe("tool-config-resolver", () => {
   describe("getToolConfig", () => {
     test("returns tool when found", async () => {
       dynamoMock.on(GetCommand).resolves({
-        Item: { toolId: "t1", config: { name: "Tool1" }, state: "active" },
+        Item: {
+          toolId: "t1",
+          orgId: "test-org-a",
+          config: { name: "Tool1" },
+          state: "active",
+        },
       });
 
       const result = await handler(

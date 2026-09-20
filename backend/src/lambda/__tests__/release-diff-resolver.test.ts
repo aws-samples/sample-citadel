@@ -285,4 +285,68 @@ describe("releaseDiff-resolver handler dispatch", () => {
       } as never),
     ).rejects.toThrow("Unsupported field");
   });
+
+  // ─── Opaque not-found collapse (finding ce470ab0, item 4) ────────────
+
+  test("cross-org release and a missing release produce the SAME opaque error through the handler", async () => {
+    const releaseA = release({ releaseId: "release-a", orgId: "org-1" });
+    const releaseB = release({ releaseId: "release-b", orgId: "org-2" });
+
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-agent-releases-test",
+        Key: { releaseId: "release-a" },
+      })
+      .resolves({ Item: releaseA });
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-agent-releases-test",
+        Key: { releaseId: "release-b" },
+      })
+      .resolves({ Item: releaseB });
+
+    const crossOrgEvent = {
+      info: { fieldName: "releaseDiff" },
+      arguments: { releaseIdA: "release-a", releaseIdB: "release-b" },
+      identity: { claims: { "custom:organization": "org-1" } },
+    } as never;
+
+    let crossOrgError: unknown;
+    try {
+      await handler(crossOrgEvent);
+    } catch (err) {
+      crossOrgError = err;
+    }
+
+    ddbMock
+      .on(GetCommand, { TableName: "citadel-agent-releases-test" })
+      .resolves({ Item: undefined });
+
+    const missingEvent = {
+      info: { fieldName: "releaseDiff" },
+      arguments: { releaseIdA: "missing-a", releaseIdB: "missing-b" },
+      identity: { claims: { "custom:organization": "org-1" } },
+    } as never;
+
+    let missingError: unknown;
+    try {
+      await handler(missingEvent);
+    } catch (err) {
+      missingError = err;
+    }
+
+    expect(crossOrgError).toBeInstanceOf(Error);
+    expect(missingError).toBeInstanceOf(Error);
+    expect((crossOrgError as Error).message).toBe(
+      (missingError as Error).message,
+    );
+    expect((crossOrgError as Error).name).toBe(
+      "OpaqueReleaseDiffNotFoundError",
+    );
+    expect((missingError as Error).name).toBe("OpaqueReleaseDiffNotFoundError");
+    // Neither the cross-org nor the not-found original message/releaseId
+    // leaks into the caller-facing error.
+    expect((crossOrgError as Error).message).not.toContain("release-b");
+    expect((missingError as Error).message).not.toContain("missing-a");
+  });
 });

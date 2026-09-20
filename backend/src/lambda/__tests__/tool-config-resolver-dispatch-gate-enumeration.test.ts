@@ -155,9 +155,10 @@ const GATE_CALL_RE = /assertRowOrg\s*\(/;
  * Ops verified to thread `event` into BOTH their registry and legacy
  * callees, each of which calls the shared `assertRowOrg` gate (fetch existing
  * row/record, then verify) before any write/delete side effect. Read ops
- * (getToolConfig*, listToolConfigs*) are handled by the pre-existing
- * org-filter/404-shape and are NOT re-verified by this guard — it exists
- * specifically to close the update/delete write-path gap.
+ * (getToolConfig*, listToolConfigs*, searchToolConfigs) are handled by the
+ * org-filter/404-shape on their own read path and are NOT re-verified by
+ * this guard — it exists specifically to close the update/delete write-path
+ * gap.
  */
 const GATED_OPS: Record<string, { registryFn: string; legacyFn: string }> = {
   updateToolConfig: {
@@ -172,25 +173,38 @@ const GATED_OPS: Record<string, { registryFn: string; legacyFn: string }> = {
 
 /**
  * Ops on this dispatch surface that are legitimately NOT org-write-gated:
- *  - listToolConfigs / getToolConfig: reads, already org-filtered/404-shaped
- *    at the collection/record level (not a write, no assertRowOrg needed).
+ *  - listToolConfigs / getToolConfig: reads, org-filtered/404-shaped at the
+ *    collection/record level (not a write, no assertRowOrg needed). Per
+ *    finding ce470ab0, the legacy (REGISTRY_ENABLED!='true') path now
+ *    applies the same org reconciliation the registry read path uses
+ *    (getToolConfig -> canCallerSeeRow, listToolConfigs -> filter to
+ *    caller org), and getToolConfigRegistry no longer treats an absent
+ *    row/record orgId as visible to a non-admin.
  *  - createToolConfig: no client-supplied orgId to reconcile (Registry path
  *    derives orgId from the caller via extractOrgFromEvent; the legacy path
  *    was fixed in the same change to do the same rather than leaving orgId
  *    blank — see createToolConfig's server-derived-orgId comment). There is
  *    no existing row to fetch-then-verify against on a create.
  *  - listIntegrationOperations: static lookup table, not tenant data.
- *  - searchToolConfigs: Registry semantic search, pre-existing scope (not
- *    part of this finding; tracked separately if it needs org filtering).
+ *  - searchToolConfigs: per finding ce470ab0, this is NO LONGER exempt — it
+ *    now filters Registry search results to the caller's server-derived
+ *    org (admin sees all), failing closed to an empty result when the
+ *    caller's own org is unresolvable. It stays out of GATED_OPS because
+ *    it is a read (a query, not a fetch-then-verify-then-write), so the
+ *    assertRowOrg-shaped checks below don't apply to it; its org-filter
+ *    behavior is covered directly by tool-config-resolver-org-scoping.test.ts
+ *    rather than by this guard's callee-shape assertions.
  */
 const EXEMPT_OPS: Record<string, string> = {
-  listToolConfigs: "read, already org-filtered (listToolConfigsRegistry)",
+  listToolConfigs:
+    "read, org-filtered per finding ce470ab0 (canCallerSeeRow / caller-org filter)",
   getToolConfig:
-    "read, already org-filtered/404-shaped (getToolConfigRegistry)",
+    "read, org-filtered/404-shaped per finding ce470ab0 (canCallerSeeRow)",
   createToolConfig:
     "no client orgId to reconcile; orgId is server-derived on both paths",
   listIntegrationOperations: "static lookup table, not tenant data",
-  searchToolConfigs: "Registry semantic search, out of scope for this finding",
+  searchToolConfigs:
+    "read; org-filtered to caller org per finding ce470ab0, not assertRowOrg-shaped",
 };
 
 describe("tool-config-resolver — dispatch enumeration completeness", () => {

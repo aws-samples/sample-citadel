@@ -1129,7 +1129,14 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
 
     test("listToolConfigs dispatches to DynamoDB path", async () => {
       dynamoMock.on(ScanCommand).resolves({
-        Items: [{ toolId: "t1", config: { name: "Tool1" }, state: "active" }],
+        Items: [
+          {
+            toolId: "t1",
+            orgId: "test-org-a",
+            config: { name: "Tool1" },
+            state: "active",
+          },
+        ],
       });
 
       const result = await handler(makeEvent("listToolConfigs", {}));
@@ -1139,7 +1146,12 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
 
     test("getToolConfig dispatches to DynamoDB path", async () => {
       dynamoMock.on(GetCommand).resolves({
-        Item: { toolId: "t1", config: { name: "Tool1" }, state: "active" },
+        Item: {
+          toolId: "t1",
+          orgId: "test-org-a",
+          config: { name: "Tool1" },
+          state: "active",
+        },
       });
 
       const result = await handler(
@@ -1160,7 +1172,7 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
           name: "Tool1",
           description: "{}",
           status: "APPROVED",
-          customDescriptorContent: "{}",
+          customDescriptorContent: JSON.stringify({ orgId: "test-org-a" }),
         },
       ]);
 
