@@ -917,6 +917,58 @@ export class ProjectsStack extends cdk.Stack {
       designProgressLambdaDataSource,
     );
 
+    // Finding 195b2a58 item b: connect-time authorization gate for
+    // onDesignProgress(projectId: ID!), mirroring the onChatter wiring
+    // above. Reconciles the requested projectId against the caller via the
+    // shared assertProjectAccess gate (project-scoped, not org-scoped —
+    // see design-progress-subscription-authorizer.ts's doc comment) before
+    // AppSync registers the subscription's implicit filter.
+    const designProgressSubscriptionAuthorizerFunction = new lambda.Function(
+      this,
+      "DesignProgressSubscriptionAuthorizerFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "design-progress-subscription-authorizer.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          PROJECTS_TABLE: props.projectsTable.tableName,
+          USER_POOL_ID: props.userPool.userPoolId,
+        },
+        timeout: cdk.Duration.seconds(10),
+        logGroup: new logs.LogGroup(
+          this,
+          "DesignProgressSubscriptionAuthorizerFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    props.projectsTable.grantReadData(
+      designProgressSubscriptionAuthorizerFunction,
+    );
+    designProgressSubscriptionAuthorizerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cognito-idp:AdminGetUser"],
+        resources: [props.userPool.userPoolArn],
+      }),
+    );
+
+    const designProgressSubscriptionAuthorizerDataSource = makeLambdaDataSource(
+      "DesignProgressSubscriptionAuthorizer",
+      designProgressSubscriptionAuthorizerFunction,
+    );
+
+    makeResolver(
+      "OnDesignProgressSubscriptionAuthorizerResolver",
+      "Subscription",
+      "onDesignProgress",
+      designProgressSubscriptionAuthorizerDataSource,
+    );
+
     // ============================================================
     // Report Download URL Generator
     // ============================================================

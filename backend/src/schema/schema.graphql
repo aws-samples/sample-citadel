@@ -286,7 +286,7 @@ type Mutation {
   createOrganization(input: CreateOrganizationInput!): Organization
   deleteOrganization(orgId: String!): UserManagementResponse
   publishAssessmentCompletion(input: AssessmentCompletionInput!): AssessmentCompletionEvent @aws_iam
-  publishDesignProgress(input: DesignProgressInput!): DesignProgressEvent @aws_iam @aws_cognito_user_pools
+  publishDesignProgress(input: DesignProgressInput!): DesignProgressEvent @aws_iam
   publishChatter(input: AgentChatterInput!): AgentChatterMessage @aws_iam
   createIntegration(input: CreateIntegrationInput!): Integration
   updateIntegration(input: UpdateIntegrationInput!): Integration
