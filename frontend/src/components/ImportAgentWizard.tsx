@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from './ui/select';
 import { agentImportService } from '../services/agentImportService';
+import { useOrganization } from '../contexts/OrganizationContext';
 import { Tier3ProposalPanel } from './Tier3ProposalPanel';
 import type {
   AgentCandidate,
@@ -172,6 +173,16 @@ const confidenceClass = (level: string): string => {
 
 export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps) {
   const [currentStep, setCurrentStep] = useState<Step>('source');
+
+  // Client-side mirror of the backend's importAgent role gate (decision
+  // ff48d6f9, finding 234cda06): only an architect or admin may import an
+  // agent. This never replaces the resolver's own gate — it exists purely so
+  // a non-privileged caller sees a clear, actionable message here instead of
+  // the resolver's raw "Access denied…" error surfacing after they've
+  // stepped through the whole wizard.
+  const { currentUser } = useOrganization();
+  const canImportAgent =
+    currentUser?.role === 'admin' || currentUser?.role === 'architect';
 
   // Step 1 — Source
   const [source, setSource] = useState<DiscoverySource>('SCAN');
@@ -709,7 +720,12 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
           <Button
             type="button"
             onClick={handleBatchImport}
-            disabled={batchImporting}
+            disabled={batchImporting || !canImportAgent}
+            title={
+              canImportAgent
+                ? undefined
+                : 'You need the architect or admin role to import agents'
+            }
             className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
           >
             {batchImporting ? <Loader2 className="size-4 mr-2 animate-spin" /> : null}
@@ -1380,6 +1396,19 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
         <h1 className="text-2xl font-semibold text-foreground">Import Agent</h1>
       </div>
 
+      {!canImportAgent && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive"
+        >
+          <AlertTriangle className="size-4 mt-0.5" />
+          <span className="text-sm">
+            You need the architect or admin role to import agents. You can browse
+            discovery and review steps, but registering an import is disabled.
+          </span>
+        </div>
+      )}
+
       {/* Progress */}
       <ol className="flex flex-wrap items-center gap-2">
         {STEPS.map((step, index) => {
@@ -1465,7 +1494,12 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
             ) : conflict ? (
               <Button
                 onClick={() => handleRegister(conflictChoice ?? undefined)}
-                disabled={registering || !conflictChoice}
+                disabled={registering || !conflictChoice || !canImportAgent}
+                title={
+                  canImportAgent
+                    ? undefined
+                    : 'You need the architect or admin role to import agents'
+                }
                 className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
               >
                 {registering ? 'Resubmitting…' : 'Resubmit import'}
@@ -1473,7 +1507,12 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
             ) : (
               <Button
                 onClick={() => handleRegister()}
-                disabled={registering}
+                disabled={registering || !canImportAgent}
+                title={
+                  canImportAgent
+                    ? undefined
+                    : 'You need the architect or admin role to import agents'
+                }
                 className="bg-primary text-primary-foreground hover:bg-primary/90 cursor-pointer"
               >
                 {registering ? 'Registering…' : 'Register agent'}
