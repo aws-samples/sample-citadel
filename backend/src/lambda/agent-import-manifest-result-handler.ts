@@ -27,22 +27,22 @@
  *   5. No raw proposed payload (and no secret/credential) is ever logged — only
  *      sizes, the truncation flag, and stable injection-pattern IDs.
  */
-import { EventBridgeEvent } from 'aws-lambda';
-import { IdempotencyGuard } from '../utils/idempotency';
+import { EventBridgeEvent } from "aws-lambda";
+import { IdempotencyGuard } from "../utils/idempotency";
 import {
   sanitizeUntrustedJson,
   JsonValue,
-} from '../utils/sanitize-untrusted-json';
-import { RegistryService } from '../services/registry-service';
+} from "../utils/sanitize-untrusted-json";
+import { RegistryService } from "../services/registry-service";
 import type {
   AgentCustomMetadata,
   ProposedManifestMetadata,
   ProposedManifestConfidence,
-} from '../services/registry-service';
+} from "../services/registry-service";
 
 /** Detail-types this handler consumes on the agent bus. */
-export const PROPOSED_DETAIL_TYPE = 'agent.import.manifest.proposed';
-export const FAILED_DETAIL_TYPE = 'agent.import.manifest.failed';
+export const PROPOSED_DETAIL_TYPE = "agent.import.manifest.proposed";
+export const FAILED_DETAIL_TYPE = "agent.import.manifest.failed";
 
 /** Length cap for a stored failure detail (sanitized + truncated). */
 const MAX_ERROR_LENGTH = 2000;
@@ -56,8 +56,8 @@ const idempotencyGuard = new IdempotencyGuard(process.env.IDEMPOTENCY_TABLE!);
  */
 const META_DEFAULTS: AgentCustomMetadata = {
   categories: [],
-  icon: '',
-  state: 'active',
+  icon: "",
+  state: "active",
 };
 
 interface ProposedDetail {
@@ -66,6 +66,7 @@ interface ProposedDetail {
   importId?: string;
   proposedManifest?: unknown;
   status?: string;
+  orgId?: string | null;
 }
 
 interface FailedDetail {
@@ -74,6 +75,7 @@ interface FailedDetail {
   importId?: string;
   error?: unknown;
   status?: string;
+  orgId?: string | null;
 }
 
 type ResultDetail = ProposedDetail & FailedDetail;
@@ -82,9 +84,9 @@ type ResultDetail = ProposedDetail & FailedDetail;
 function getRegistryService(): RegistryService {
   const registryId = process.env.REGISTRY_ID;
   if (!registryId) {
-    throw new Error('REGISTRY_ID is not configured');
+    throw new Error("REGISTRY_ID is not configured");
   }
-  const region = process.env.AWS_REGION || 'us-east-1';
+  const region = process.env.AWS_REGION || "us-east-1";
   return new RegistryService({ registryId, region });
 }
 
@@ -96,9 +98,9 @@ function buildAllLowFieldConfidence(
   manifest: JsonValue,
 ): Record<string, ProposedManifestConfidence> {
   const out: Record<string, ProposedManifestConfidence> = {};
-  if (manifest && typeof manifest === 'object' && !Array.isArray(manifest)) {
+  if (manifest && typeof manifest === "object" && !Array.isArray(manifest)) {
     for (const key of Object.keys(manifest)) {
-      out[key] = 'low';
+      out[key] = "low";
     }
   }
   return out;
@@ -106,15 +108,18 @@ function buildAllLowFieldConfidence(
 
 /** Coerces an untrusted error value to a sanitized, length-capped string. */
 function sanitizeError(error: unknown): string {
-  const raw = typeof error === 'string' ? error : JSON.stringify(error ?? 'unknown error');
+  const raw =
+    typeof error === "string"
+      ? error
+      : JSON.stringify(error ?? "unknown error");
   const res = sanitizeUntrustedJson(raw, { maxStringLength: MAX_ERROR_LENGTH });
-  return typeof res.value === 'string' ? res.value : '[sanitized]';
+  return typeof res.value === "string" ? res.value : "[sanitized]";
 }
 
 export const handler = async (
   event: EventBridgeEvent<string, ResultDetail>,
 ): Promise<void> => {
-  const detailType = event['detail-type'];
+  const detailType = event["detail-type"];
   const detail = event.detail ?? {};
   const correlationId = detail.correlationId || detail.requestId || event.id;
   const importId = detail.importId;
@@ -122,19 +127,22 @@ export const handler = async (
   // Structured log — metadata only, NEVER the raw payload.
   console.log(
     JSON.stringify({
-      level: 'info',
-      msg: 'agent-import-manifest-result: received',
+      level: "info",
+      msg: "agent-import-manifest-result: received",
       detailType,
       importId: importId ?? null,
       correlationId,
     }),
   );
 
-  if (detailType !== PROPOSED_DETAIL_TYPE && detailType !== FAILED_DETAIL_TYPE) {
+  if (
+    detailType !== PROPOSED_DETAIL_TYPE &&
+    detailType !== FAILED_DETAIL_TYPE
+  ) {
     console.log(
       JSON.stringify({
-        level: 'info',
-        msg: 'agent-import-manifest-result: ignoring unrelated detail-type',
+        level: "info",
+        msg: "agent-import-manifest-result: ignoring unrelated detail-type",
         detailType,
       }),
     );
@@ -147,8 +155,8 @@ export const handler = async (
     // meaningful retry — log (no payload) and drop the malformed event.
     console.error(
       JSON.stringify({
-        level: 'error',
-        msg: 'agent-import-manifest-result: missing importId; dropping event',
+        level: "error",
+        msg: "agent-import-manifest-result: missing importId; dropping event",
         detailType,
         correlationId,
       }),
@@ -163,12 +171,12 @@ export const handler = async (
 
       // Load the DRAFT import record so the write preserves every existing
       // field (manifest/invocation/state/governanceAttestation/...).
-      const record = await registryService.getResource('agent', importId);
+      const record = await registryService.getResource("agent", importId);
       if (!record) {
         console.error(
           JSON.stringify({
-            level: 'error',
-            msg: 'agent-import-manifest-result: import record not found; nothing to write',
+            level: "error",
+            msg: "agent-import-manifest-result: import record not found; nothing to write",
             importId,
             correlationId,
           }),
@@ -176,10 +184,36 @@ export const handler = async (
         return;
       }
 
-      const meta = registryService.deserializeCustomMetadata<AgentCustomMetadata>(
-        record.customDescriptorContent ?? null,
-        META_DEFAULTS,
-      );
+      const meta =
+        registryService.deserializeCustomMetadata<AgentCustomMetadata>(
+          record.customDescriptorContent ?? null,
+          META_DEFAULTS,
+        );
+
+      // Org reconciliation (finding ce470ab0): the envelope's `orgId` is the
+      // ORIGINATING CALLER's server-derived org, threaded through by
+      // proposeAgentManifestTier3 and echoed back verbatim by the
+      // Fabricator on this async result. It must match the TARGET
+      // record's own `meta.orgId` before the proposal is parked. Without
+      // this, a party controlling (or replaying/racing) a Fabricator
+      // result could park an LLM-proposed manifest onto ANOTHER org's
+      // DRAFT import record just by supplying that record's `importId` —
+      // the correlationId-keyed idempotency guard authenticates the
+      // *event*, not which tenant is allowed to write to that record.
+      // Fail closed: a missing envelope orgId is treated the same as a
+      // mismatch (log, no write) — never interpreted as "no boundary to
+      // enforce".
+      if (!detail.orgId || detail.orgId !== meta.orgId) {
+        console.error(
+          JSON.stringify({
+            level: "error",
+            msg: "agent-import-manifest-result: envelope orgId missing or does not match record; skipping park (no write)",
+            importId,
+            correlationId,
+          }),
+        );
+        return;
+      }
 
       const proposedAt = new Date().toISOString();
       let proposedManifest: ProposedManifestMetadata;
@@ -189,9 +223,9 @@ export const handler = async (
         const sanitized = sanitizeUntrustedJson(detail.proposedManifest);
         proposedManifest = {
           manifest: sanitized.value as Record<string, unknown>,
-          confidence: 'low',
-          reviewState: 'pending_review',
-          source: 'llm_tier3',
+          confidence: "low",
+          reviewState: "pending_review",
+          source: "llm_tier3",
           fieldConfidence: buildAllLowFieldConfidence(sanitized.value),
           proposedAt,
           correlationId,
@@ -200,8 +234,8 @@ export const handler = async (
         };
         console.log(
           JSON.stringify({
-            level: 'info',
-            msg: 'agent-import-manifest-result: storing proposed manifest (pending review)',
+            level: "info",
+            msg: "agent-import-manifest-result: storing proposed manifest (pending review)",
             importId,
             correlationId,
             truncated: sanitized.truncated,
@@ -213,8 +247,8 @@ export const handler = async (
       } else {
         // Minimal failure marker — no manifest body.
         proposedManifest = {
-          reviewState: 'failed',
-          source: 'llm_tier3',
+          reviewState: "failed",
+          source: "llm_tier3",
           error: sanitizeError(detail.error),
           correlationId,
           proposedAt,
@@ -222,8 +256,8 @@ export const handler = async (
         };
         console.log(
           JSON.stringify({
-            level: 'info',
-            msg: 'agent-import-manifest-result: recording failure marker',
+            level: "info",
+            msg: "agent-import-manifest-result: recording failure marker",
             importId,
             correlationId,
           }),
@@ -237,7 +271,7 @@ export const handler = async (
         ...meta,
         proposedManifest,
       };
-      await registryService.updateResource('agent', importId, {
+      await registryService.updateResource("agent", importId, {
         customMetadata: registryService.serializeCustomMetadata(mergedMeta),
       });
     },
@@ -246,8 +280,8 @@ export const handler = async (
   if (!executed) {
     console.log(
       JSON.stringify({
-        level: 'info',
-        msg: 'agent-import-manifest-result: duplicate event skipped',
+        level: "info",
+        msg: "agent-import-manifest-result: duplicate event skipped",
         correlationId,
       }),
     );

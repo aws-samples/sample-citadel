@@ -590,6 +590,7 @@ describe("Property 4: Direction Field Backward Compatibility", () => {
 
           const legacyItem: Record<string, unknown> = {
             toolId,
+            orgId: "property-test-org",
             config: {
               name: `tool_${toolId}`,
               filename: `${toolId}.py`,

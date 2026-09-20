@@ -2512,14 +2512,25 @@ function buildTier3ProposalSignals(
  * `agent.import.manifest.proposed` result and the B1 handler can correlate it
  * back to the DRAFT record. SECURITY INVARIANT 3/5: logs ONLY secret-free
  * identifiers — NEVER the body, the signals, or any credential.
+ *
+ * `orgId` (finding ce470ab0) is the ORIGINATING CALLER's server-derived
+ * organisation, threaded through so the async result-side handler
+ * (agent-import-manifest-result-handler.ts) can verify — once the
+ * Fabricator echoes it back on the result event — that the record it is
+ * about to park a proposal onto still belongs to the SAME org that
+ * requested the proposal. Never a client-suppliable value: it is resolved
+ * here from the request-side caller's identity, not read from `ref`/`event`
+ * again on the result side (the result side has no AppSync identity at all
+ * — it is an EventBridge consumer).
  */
 async function sendManifestProposalToFabricator(
   requestId: string,
   correlationId: string,
   importId: string,
   signals: Tier3ProposalSignals,
+  orgId: string | null,
 ): Promise<void> {
-  const body = { requestId, correlationId, importId, signals };
+  const body = { requestId, correlationId, importId, signals, orgId };
   console.log(
     JSON.stringify({
       level: "info",
@@ -2599,6 +2610,16 @@ export async function proposeAgentManifestTier3(
   ) as DescribedDescriptor;
   const signals = buildTier3ProposalSignals(ref, descriptor);
 
+  // 2b. Server-derive the ORIGINATING CALLER's org (finding ce470ab0) —
+  //     never trusted from the client — so it can be threaded through the
+  //     Fabricator envelope and checked against the target record's org on
+  //     the async result side. An admin caller may legitimately have no
+  //     resolvable org; that is threaded through as `null` rather than
+  //     defaulted to some sentinel, and the result-side handler treats a
+  //     `null`/missing envelope orgId the same as a mismatch (skip, log,
+  //     no write) — it is not a bypass.
+  const callerOrgId = (await extractOrgFromEvent(event)) ?? null;
+
   // 3. Enqueue the proposal request. `importId := ref` flows through to the
   //    async result so the B1 handler targets the right DRAFT record.
   const requestId = uuidv4();
@@ -2607,6 +2628,7 @@ export async function proposeAgentManifestTier3(
     correlationId,
     ref,
     signals,
+    callerOrgId,
   );
 
   return { requestId, status: "PENDING" };

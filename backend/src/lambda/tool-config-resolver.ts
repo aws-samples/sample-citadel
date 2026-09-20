@@ -16,6 +16,7 @@ import {
   extractOrgFromEvent,
   isAdminFromEvent,
   assertRowOrg,
+  canCallerSeeRow,
 } from "../utils/auth-event";
 
 const client = new DynamoDBClient({});
@@ -298,12 +299,12 @@ export const handler = async (
       case "listToolConfigs":
         return registryEnabled
           ? await listToolConfigsRegistry(event, context)
-          : await listToolConfigs();
+          : await listToolConfigs(event);
 
       case "getToolConfig":
         return registryEnabled
           ? await getToolConfigRegistry(event.arguments.toolId as string, event)
-          : await getToolConfig(event.arguments.toolId as string);
+          : await getToolConfig(event.arguments.toolId as string, event);
 
       case "createToolConfig":
         return registryEnabled
@@ -341,7 +342,7 @@ export const handler = async (
         return getOperations(event.arguments.integrationType as string);
 
       case "searchToolConfigs":
-        return await searchToolConfigs(event.arguments.query as string);
+        return await searchToolConfigs(event.arguments.query as string, event);
 
       default:
         throw new Error(`Unknown field: ${fieldName}`);
@@ -432,6 +433,14 @@ export async function listToolConfigsRegistry(
  *
  * Cross-org access is reported as not-found (404-style, not 403) so we
  * don't leak existence across tenants. Admins bypass the org check.
+ *
+ * Fail-closed (finding ce470ab0): a record with NO orgId in its metadata is
+ * now ALSO treated as not-found for non-admins, not just a mismatched one.
+ * The previous `mapped.orgId && mapped.orgId !== callerOrgId` guard was
+ * false whenever `mapped.orgId` was falsy (absent/empty), so an org-less
+ * record — legacy data, or a record whose customMetadata never got an
+ * orgId — was handed to every authenticated non-admin caller regardless of
+ * their own org.
  */
 export async function getToolConfigRegistry(
   toolId: string,
@@ -445,7 +454,7 @@ export async function getToolConfigRegistry(
   const record = await registryService.getResource("tool", toolId);
   if (record) {
     const mapped = registryService.mapToToolConfig(record);
-    if (!admin && mapped.orgId && mapped.orgId !== callerOrgId) {
+    if (!admin && (!mapped.orgId || mapped.orgId !== callerOrgId)) {
       return null;
     }
     return mapped;
@@ -453,7 +462,7 @@ export async function getToolConfigRegistry(
   // Fallback to DynamoDB for legacy records
   const legacy = await getToolConfig(toolId);
   if (!legacy) return null;
-  if (!admin && legacy.orgId && legacy.orgId !== callerOrgId) {
+  if (!admin && (!legacy.orgId || legacy.orgId !== callerOrgId)) {
     return null;
   }
   return legacy;
@@ -725,27 +734,60 @@ export async function deleteToolConfigRegistry(
 // ---------------------------------------------------------------------------
 
 /**
- * Searches for tool configs via Registry semantic search.
- * Returns results mapped to the ToolConfig GraphQL type.
+ * Searches for tool configs via Registry semantic search, then filters to
+ * the server-derived caller org (finding ce470ab0) exactly like
+ * `listToolConfigsRegistry`: admins see every match; non-admins are
+ * filtered to rows whose `orgId` equals their own, fail closed (empty
+ * result) when their own org cannot be resolved. Previously this returned
+ * every match across every tenant to any authenticated caller — the
+ * dispatch-gate-enumeration guard's EXEMPT_OPS entry documenting that as
+ * "out of scope" is removed in the same change.
  */
-async function searchToolConfigs(query: string): Promise<ToolConfig[]> {
+async function searchToolConfigs(
+  query: string,
+  event?: OrgScopedEvent,
+): Promise<ToolConfig[]> {
   const registryService = getRegistryService();
   const records = await registryService.searchResources("tool", query);
-  return records.map((record) => registryService.mapToToolConfig(record));
+  const mapped = records.map((record) =>
+    registryService.mapToToolConfig(record),
+  );
+
+  if (event === undefined) return mapped;
+
+  if (isAdminFromEvent(event)) return mapped;
+
+  const callerOrgId = await extractOrgFromEvent(event);
+  if (!callerOrgId) return [];
+
+  return mapped.filter((t) => t.orgId && t.orgId === callerOrgId);
 }
 
 // ---------------------------------------------------------------------------
 // DynamoDB-backed implementations (existing / legacy)
 // ---------------------------------------------------------------------------
 
-async function listToolConfigs(): Promise<ToolConfig[]> {
+/**
+ * Legacy DynamoDB-backed list, org-filtered exactly like the Registry path
+ * (finding ce470ab0): admins see every row; non-admins see only rows whose
+ * `orgId` matches their server-derived org, and fail closed (empty list) if
+ * their own org cannot be resolved. Rows without an `orgId` are excluded
+ * from a non-admin's results — legacy blank orgId is not a wildcard.
+ *
+ * `event` is optional so the Registry path (`listToolConfigsRegistry`,
+ * which already computed and applied its own org filter to the merged
+ * result) can keep reusing this as an unfiltered raw-rows fetch by omitting
+ * it; every REGISTRY_ENABLED!='true' caller through the dispatch switch
+ * always supplies `event`.
+ */
+async function listToolConfigs(event?: OrgScopedEvent): Promise<ToolConfig[]> {
   const result = await docClient.send(
     new ScanCommand({
       TableName: TOOLS_CONFIG_TABLE,
     }),
   );
 
-  return (result.Items || []).map((item) => ({
+  const items = (result.Items || []).map((item) => ({
     toolId: item.toolId,
     orgId: item.orgId || "",
     // AWSJSON type expects a JSON string, so ensure it's stringified
@@ -760,9 +802,34 @@ async function listToolConfigs(): Promise<ToolConfig[]> {
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   }));
+
+  if (event === undefined) return items;
+
+  const admin = isAdminFromEvent(event);
+  if (admin) return items;
+
+  const callerOrgId = await extractOrgFromEvent(event);
+  if (!callerOrgId) return [];
+
+  return items.filter((item) => item.orgId && item.orgId === callerOrgId);
 }
 
-async function getToolConfig(toolId: string): Promise<ToolConfig | null> {
+/**
+ * Legacy DynamoDB-backed single-record get, org-reconciled exactly like
+ * `getToolConfigRegistry`'s DynamoDB fallback (finding ce470ab0): a
+ * cross-org or org-less row is reported as not-found (null, 404-style, not
+ * a thrown 403) so a caller cannot use this read to distinguish "wrong
+ * org" from "doesn't exist". Admins bypass the check.
+ *
+ * `event` is optional: `getToolConfigRegistry`'s own DynamoDB-fallback call
+ * site does its OWN reconciliation against the mapped legacy row (so it
+ * calls this without `event` to get the raw row first) — every
+ * REGISTRY_ENABLED!='true' caller through the dispatch switch supplies it.
+ */
+async function getToolConfig(
+  toolId: string,
+  event?: OrgScopedEvent,
+): Promise<ToolConfig | null> {
   const result = await docClient.send(
     new GetCommand({
       TableName: TOOLS_CONFIG_TABLE,
@@ -774,7 +841,7 @@ async function getToolConfig(toolId: string): Promise<ToolConfig | null> {
     return null;
   }
 
-  return {
+  const item: ToolConfig = {
     toolId: result.Item.toolId,
     orgId: result.Item.orgId || "",
     // AWSJSON type expects a JSON string, so ensure it's stringified
@@ -791,6 +858,14 @@ async function getToolConfig(toolId: string): Promise<ToolConfig | null> {
     createdAt: result.Item.createdAt,
     updatedAt: result.Item.updatedAt,
   };
+
+  if (event === undefined) return item;
+
+  if (!(await canCallerSeeRow(item, event))) {
+    return null;
+  }
+
+  return item;
 }
 
 async function createToolConfig(

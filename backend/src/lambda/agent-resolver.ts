@@ -1,9 +1,16 @@
-import { AppSyncResolverHandler, AppSyncResolverEvent } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { getUserId } from '../utils/appsync';
-import { extractOrgFromEvent } from '../utils/auth-event';
+import { AppSyncResolverHandler, AppSyncResolverEvent } from "aws-lambda";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+} from "@aws-sdk/lib-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { getUserId } from "../utils/appsync";
+import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -42,8 +49,11 @@ interface AgentResolverArguments {
 
 type AgentResolverEvent = AppSyncResolverEvent<AgentResolverArguments>;
 
-export const handler: AppSyncResolverHandler<AgentResolverArguments, unknown> = async (event) => {
-  console.log('Agent resolver event:', JSON.stringify(event, null, 2));
+export const handler: AppSyncResolverHandler<
+  AgentResolverArguments,
+  unknown
+> = async (event) => {
+  console.log("Agent resolver event:", JSON.stringify(event, null, 2));
 
   const { info, arguments: args, identity } = event;
   const fieldName = info.fieldName;
@@ -51,15 +61,26 @@ export const handler: AppSyncResolverHandler<AgentResolverArguments, unknown> = 
 
   try {
     switch (fieldName) {
-      case 'getAgentStatus':
-        return await getAgentStatus(args.projectId, args.agentId, userId, event);
-      case 'updateAgentStatus':
-        return await updateAgentStatus(args.projectId, args.agentId, args.status, userId, event);
+      case "getAgentStatus":
+        return await getAgentStatus(
+          args.projectId,
+          args.agentId,
+          userId,
+          event,
+        );
+      case "updateAgentStatus":
+        return await updateAgentStatus(
+          args.projectId,
+          args.agentId,
+          args.status,
+          userId,
+          event,
+        );
       default:
         throw new Error(`Unknown field: ${fieldName}`);
     }
   } catch (error) {
-    console.error('Agent resolver error:', error);
+    console.error("Agent resolver error:", error);
     throw error;
   }
 };
@@ -70,19 +91,25 @@ async function getAgentStatus(
   _userId: string,
   event: AgentResolverEvent,
 ): Promise<AgentStatus | null> {
-  // Project-membership check (tenant isolation).
+  // Project-membership check (tenant isolation), fail-closed.
   //
   // AgentStatus rows have no orgId — the tenant boundary lives on the parent
   // Project (`project.organization`, set from the caller's `custom:organization`
-  // claim at create time). Mirror the pattern used by workflow-resolver.getWorkflow,
-  // execution-resolver.getExecution, and project-resolver.getProject:
-  //   1. load the parent resource,
-  //   2. compare its org to the caller's org,
-  //   3. throw 'Access denied' on mismatch.
+  // claim at create time). Load the project ourselves (rather than routing
+  // through `assertProjectOrgAccess`, which would re-fetch the same row and
+  // cannot distinguish "missing" from "denied" the way this resolver's
+  // existing null-vs-throw contract requires) but reconcile the org via the
+  // same fail-closed rule the shared helper encodes: deny whenever the
+  // caller's org cannot be resolved, deny on mismatch, admin bypass only.
   //
-  // Returning null when the project is missing closes the existence-oracle leak
-  // the previous default-IDLE path created (a caller could probe arbitrary
-  // projectIds and infer existence from the agent-status default).
+  // The previous inline gate — `if (userOrg && project.organization !==
+  // userOrg)` — only ever denied when `userOrg` was truthy, so an org-less
+  // caller (unresolvable `custom:organization` claim) sailed through with
+  // full access to any project's agent status.
+  //
+  // Returning null when the project is missing closes the existence-oracle
+  // leak the previous default-IDLE path created (a caller could probe
+  // arbitrary projectIds and infer existence from the agent-status default).
   const projectResult = await docClient.send(
     new GetCommand({
       TableName: PROJECTS_TABLE,
@@ -94,9 +121,11 @@ async function getAgentStatus(
     return null;
   }
 
-  const userOrg = await extractOrgFromEvent(event);
-  if (userOrg && projectResult.Item.organization !== userOrg) {
-    throw new Error('Access denied');
+  if (!isAdminFromEvent(event)) {
+    const userOrg = await extractOrgFromEvent(event);
+    if (!userOrg || projectResult.Item.organization !== userOrg) {
+      throw new Error("Access denied");
+    }
   }
 
   const command = new GetCommand({
@@ -114,7 +143,7 @@ async function getAgentStatus(
     return {
       agentId,
       projectId,
-      status: 'IDLE',
+      status: "IDLE",
       lastUpdate: new Date().toISOString(),
     };
   }
@@ -129,12 +158,12 @@ async function updateAgentStatus(
   _userId: string,
   event: AgentResolverEvent,
 ): Promise<AgentStatus | null> {
-  // Project-membership check (tenant isolation) — write path.
+  // Project-membership check (tenant isolation) — write path, fail-closed.
   //
   // Mirrors getAgentStatus: load the parent Project, return null if missing
   // (closes the existence-oracle leak — a caller cannot probe arbitrary
-  // projectIds via successful writes), then compare project.organization to
-  // the caller's org and throw 'Access denied' on mismatch. The check MUST
+  // projectIds via successful writes), then require a resolvable caller org
+  // that matches project.organization, admin bypass only. The check MUST
   // precede PutItem to prevent cross-tenant writes into AGENT_STATUS_TABLE.
   const projectResult = await docClient.send(
     new GetCommand({
@@ -147,9 +176,11 @@ async function updateAgentStatus(
     return null;
   }
 
-  const userOrg = await extractOrgFromEvent(event);
-  if (userOrg && projectResult.Item.organization !== userOrg) {
-    throw new Error('Access denied');
+  if (!isAdminFromEvent(event)) {
+    const userOrg = await extractOrgFromEvent(event);
+    if (!userOrg || projectResult.Item.organization !== userOrg) {
+      throw new Error("Access denied");
+    }
   }
 
   const now = new Date().toISOString();
@@ -173,7 +204,7 @@ async function updateAgentStatus(
   await docClient.send(command);
 
   // Emit event for real-time subscriptions
-  await emitEvent('agent.status_updated', {
+  await emitEvent("agent.status_updated", {
     projectId,
     agentId,
     status: agentStatus,
@@ -183,11 +214,14 @@ async function updateAgentStatus(
   return agentStatus;
 }
 
-async function emitEvent(eventType: string, detail: Record<string, unknown>): Promise<void> {
+async function emitEvent(
+  eventType: string,
+  detail: Record<string, unknown>,
+): Promise<void> {
   const command = new PutEventsCommand({
     Entries: [
       {
-        Source: 'citadel.backend',
+        Source: "citadel.backend",
         DetailType: eventType,
         Detail: JSON.stringify(detail),
         EventBusName: EVENT_BUS_NAME,

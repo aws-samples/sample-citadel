@@ -183,6 +183,7 @@ describe("tool-config-resolver handler switch dispatch (task 7.5)", () => {
         Items: [
           {
             toolId: "t1",
+            orgId: "test-org-a",
             config: { name: "T1" },
             state: "active",
             integrationBindings: [
@@ -221,6 +222,7 @@ describe("tool-config-resolver handler switch dispatch (task 7.5)", () => {
       dynamoMock.on(GetCommand).resolves({
         Item: {
           toolId: "t1",
+          orgId: "test-org-a",
           config: { name: "T1" },
           state: "active",
           integrationBindings: [

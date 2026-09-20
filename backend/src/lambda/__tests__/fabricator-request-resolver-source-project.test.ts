@@ -59,7 +59,7 @@ describe("fabricator-request-resolver — sourceProjectId propagation (US-ARB-01
 
   test("agent creation for app with sourceProjectId → payload includes projectId", async () => {
     ddbMock.on(GetCommand).resolves({
-      Item: { appId: "app-1", sourceProjectId: "proj-1" },
+      Item: { appId: "app-1", orgId: "org-caller", sourceProjectId: "proj-1" },
     });
 
     const result = await handler(
@@ -152,7 +152,11 @@ describe("fabricator-request-resolver — sourceProjectId propagation (US-ARB-01
 
   test("tool creation forwards projectId when app has sourceProjectId", async () => {
     ddbMock.on(GetCommand).resolves({
-      Item: { appId: "app-2", sourceProjectId: "proj-xyz" },
+      Item: {
+        appId: "app-2",
+        orgId: "org-caller",
+        sourceProjectId: "proj-xyz",
+      },
     });
 
     await handler(
@@ -168,6 +172,62 @@ describe("fabricator-request-resolver — sourceProjectId propagation (US-ARB-01
     const body = parsePayload();
     expect(body.agent_input.projectId).toBe("proj-xyz");
     expect(body.agent_input.taskDetails).toContain("MyTool");
+  });
+
+  // ─── Org reconciliation (finding ce470ab0, item 3) ───────────────────
+
+  test("cross-org appId → sourceProjectId is NOT forwarded, and the request still succeeds (degraded, not blocked)", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        appId: "app-other-org",
+        orgId: "org-other",
+        sourceProjectId: "proj-other-orgs-secret",
+      },
+    });
+
+    const result = await handler(
+      makeEvent("requestAgentCreation", {
+        input: {
+          agentName: "CrossOrgProbeAgent",
+          taskDescription: "Build me",
+          appId: "app-other-org",
+        },
+      }),
+    );
+
+    // The agent-creation request itself is unaffected — resolveSourceProjectId
+    // degrades to undefined rather than throwing (mirrors the existing
+    // missing-row / DDB-failure degraded paths).
+    expect(result.success).toBe(true);
+    const body = parsePayload();
+    expect(body.agent_input).not.toHaveProperty("projectId");
+
+    const warnedOrgMismatch = warnSpy.mock.calls.some((callArgs) =>
+      callArgs.some(
+        (arg: unknown) =>
+          typeof arg === "string" && arg.includes("org mismatch"),
+      ),
+    );
+    expect(warnedOrgMismatch).toBe(true);
+  });
+
+  test("app row with no orgId at all → sourceProjectId is NOT forwarded (fail closed, not a wildcard)", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { appId: "app-no-org", sourceProjectId: "proj-orphan" },
+    });
+
+    await handler(
+      makeEvent("requestToolCreation", {
+        input: {
+          toolName: "OrphanProbeTool",
+          toolDescription: "A tool",
+          appId: "app-no-org",
+        },
+      }),
+    );
+
+    const body = parsePayload();
+    expect(body.agent_input).not.toHaveProperty("projectId");
   });
 });
 

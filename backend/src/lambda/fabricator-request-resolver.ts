@@ -11,6 +11,7 @@ import {
   extractOrgFromEvent,
   isAdminFromEvent,
   hasRoleFromEvent,
+  canCallerSeeRow,
 } from "../utils/auth-event";
 
 const sqsClient = new SQSClient({});
@@ -351,9 +352,20 @@ async function sendToFabricatorQueue(
  * Degraded-mode safe: returns undefined on any failure and logs a warning.
  * A missing projectId means the fabricator design-assessment gate is a no-op,
  * which is the forward-compatible default.
+ *
+ * Org-reconciled (finding ce470ab0): the apps row is verified against the
+ * caller's server-derived org via the shared `canCallerSeeRow` helper
+ * BEFORE its `sourceProjectId` is forwarded. Without this, a caller could
+ * supply another tenant's `appId` and have THAT app's sourceProjectId
+ * threaded into `agent_input.projectId`, letting a cross-org caller ride
+ * on that project's fabricator design-assessment gate context. A cross-org
+ * or org-less-row appId is treated the same as "not found" — degrades to
+ * undefined rather than throwing, since a failed lookup here must never
+ * block the (already separately authorized) creation request itself.
  */
 async function resolveSourceProjectId(
-  appId?: string,
+  appId: string | undefined,
+  event: FabricatorRequestResolverEvent,
 ): Promise<string | undefined> {
   if (!appId) return undefined;
   const appsTable = getAppsTable();
@@ -374,6 +386,13 @@ async function resolveSourceProjectId(
     const row = result.Item;
     if (!row) {
       console.warn("App row not found for sourceProjectId lookup:", appId);
+      return undefined;
+    }
+    if (!(await canCallerSeeRow(row, event))) {
+      console.warn(
+        "App row org mismatch for sourceProjectId lookup; skipping:",
+        appId,
+      );
       return undefined;
     }
     return row.sourceProjectId || undefined;
@@ -417,7 +436,7 @@ ${input.taskDescription}`;
     taskDetails += `\n\nRequired Data Stores:\n${input.dataStores.map((d) => `- ${d}`).join("\n")}`;
   }
 
-  const sourceProjectId = await resolveSourceProjectId(input.appId);
+  const sourceProjectId = await resolveSourceProjectId(input.appId, event);
   await sendToFabricatorQueue(
     requestId,
     taskDetails,
@@ -460,7 +479,7 @@ ${input.toolDescription}`;
     taskDetails += `\n\nRequired Data Stores:\n${input.dataStores.map((d) => `- ${d}`).join("\n")}`;
   }
 
-  const sourceProjectId = await resolveSourceProjectId(input.appId);
+  const sourceProjectId = await resolveSourceProjectId(input.appId, event);
   await sendToFabricatorQueue(
     requestId,
     taskDetails,
