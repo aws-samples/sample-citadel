@@ -25,6 +25,7 @@ const eventBridgeMock = mockClient(EventBridgeClient);
 process.env.AGENT_EVENT_BUS_NAME = "test-event-bus";
 
 jest.mock("../../utils/auth-event", () => ({
+  ...jest.requireActual("../../utils/auth-event"),
   extractOrgFromEvent: jest.fn(),
 }));
 
@@ -44,7 +45,10 @@ describe("task-runner-resolver", () => {
   const makeEvent = (
     fieldName: string,
     args: Record<string, unknown>,
-    identity: Record<string, unknown> | null = { sub: "user-1" },
+    identity: Record<string, unknown> | null = {
+      sub: "user-1",
+      "cognito:groups": ["admin"],
+    },
   ) => ({
     info: { fieldName },
     arguments: args,
@@ -120,6 +124,7 @@ describe("task-runner-resolver", () => {
         const [calledWithEvent] = mockExtractOrgFromEvent.mock.calls[0];
         expect((calledWithEvent as { identity: unknown }).identity).toEqual({
           sub: "user-1",
+          "cognito:groups": ["admin"],
         });
 
         const detail = JSON.parse(
@@ -161,6 +166,88 @@ describe("task-runner-resolver", () => {
             .Entries![0].Detail!,
         );
         expect(detail.orgId).toBe("org-server-side");
+      });
+    });
+
+    describe("role gate (decision 9b48bdc8 — architect or admin, after the org check)", () => {
+      const makeIdentityEvent = (
+        args: Record<string, unknown>,
+        identity: Record<string, unknown>,
+      ) => ({ info: { fieldName: "submitTask" }, arguments: args, identity });
+
+      test("rejects a non-architect non-admin org member, before any EventBridge send", async () => {
+        mockExtractOrgFromEvent.mockResolvedValue("org-caller");
+        eventBridgeMock.on(PutEventsCommand).resolves({});
+
+        await expect(
+          handler(
+            makeIdentityEvent(
+              { input: { taskDetails: "should be blocked" } },
+              {
+                sub: "user-dev",
+                "custom:organization": "org-caller",
+                "custom:role": "developer",
+              },
+            ),
+          ),
+        ).rejects.toThrow(
+          "Access denied: requires architect or admin role to submit a task",
+        );
+
+        expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(0);
+      });
+
+      test("architect caller (custom:role) passes", async () => {
+        mockExtractOrgFromEvent.mockResolvedValue("org-caller");
+        eventBridgeMock.on(PutEventsCommand).resolves({});
+
+        const result = await handler(
+          makeIdentityEvent(
+            { input: { taskDetails: "architect task" } },
+            {
+              sub: "user-arch",
+              "custom:organization": "org-caller",
+              "custom:role": "architect",
+            },
+          ),
+        );
+
+        expect(result.success).toBe(true);
+        expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(1);
+      });
+
+      test("admin caller (cognito:groups) passes", async () => {
+        mockExtractOrgFromEvent.mockResolvedValue("org-caller");
+        eventBridgeMock.on(PutEventsCommand).resolves({});
+
+        const result = await handler(
+          makeIdentityEvent(
+            { input: { taskDetails: "admin task" } },
+            {
+              sub: "user-admin",
+              "custom:organization": "org-caller",
+              "cognito:groups": ["admin"],
+            },
+          ),
+        );
+
+        expect(result.success).toBe(true);
+        expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(1);
+      });
+
+      test("still rejects on a missing organisation before the role gate ever runs (org check is first)", async () => {
+        mockExtractOrgFromEvent.mockResolvedValue(null);
+
+        await expect(
+          handler(
+            makeIdentityEvent(
+              { input: { taskDetails: "orphan task, no role either" } },
+              { sub: "user-no-org" },
+            ),
+          ),
+        ).rejects.toThrow("Access denied: no organization is provisioned");
+
+        expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(0);
       });
     });
   });

@@ -93,7 +93,7 @@ describe("runId client-strip — submitTask (task-runner-resolver)", () => {
           runId: ATTACKER_RUN_ID,
         } as unknown as { taskDetails: string },
       },
-      identity: { sub: "user-1" },
+      identity: { sub: "user-1", "cognito:groups": ["admin"] },
     } as unknown as Parameters<typeof submitTaskHandler>[0]);
 
     const detail = JSON.parse(

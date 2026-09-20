@@ -2,7 +2,9 @@
  * promotion-policy-resolver.test.ts — decision ada70113 (promotion
  * policy becomes per-org config). Admin-only gate:
  * `roles.includes("admin")` directly, mirroring
- * eval-sampling-config-resolver.test.ts's structure.
+ * eval-sampling-config-resolver.test.ts's structure. Also covers decision
+ * c5c8429a's org reconciliation gate (client-supplied orgId vs the
+ * caller's server-derived org).
  */
 import { mockClient } from "aws-sdk-client-mock";
 import {
@@ -17,14 +19,25 @@ process.env.PROMOTION_POLICY_CONFIG_TABLE =
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
+jest.mock("../../utils/auth-event", () => ({
+  ...jest.requireActual("../../utils/auth-event"),
+  extractOrgFromEvent: jest.fn(),
+}));
+
 import {
   getPromotionPolicy,
   setPromotionPolicy,
   handler,
 } from "../promotion-policy-resolver";
+import { extractOrgFromEvent } from "../../utils/auth-event";
+
+const mockExtractOrgFromEvent = extractOrgFromEvent as jest.MockedFunction<
+  typeof extractOrgFromEvent
+>;
 
 beforeEach(() => {
   ddbMock.reset();
+  mockExtractOrgFromEvent.mockReset();
 });
 
 const adminAuth: AuthContext = {
@@ -152,6 +165,7 @@ describe("handler — AppSync dispatch", () => {
   }
 
   test("routes setPromotionPolicy for an admin", async () => {
+    mockExtractOrgFromEvent.mockResolvedValue("org-1");
     ddbMock.on(PutCommand).resolves({});
 
     const result = (await handler(
@@ -165,6 +179,7 @@ describe("handler — AppSync dispatch", () => {
   });
 
   test("routes getPromotionPolicy for an admin", async () => {
+    mockExtractOrgFromEvent.mockResolvedValue("org-1");
     ddbMock.on(GetCommand).resolves({ Item: undefined });
 
     const result = await handler(
@@ -175,6 +190,7 @@ describe("handler — AppSync dispatch", () => {
   });
 
   test("rejects setPromotionPolicy for a non-admin caller via the handler", async () => {
+    mockExtractOrgFromEvent.mockResolvedValue("org-1");
     const event = {
       info: { fieldName: "setPromotionPolicy" },
       identity: { sub: "user-1", "custom:role": "developer" },
@@ -191,6 +207,93 @@ describe("handler — AppSync dispatch", () => {
       arguments: {},
     };
     await expect(handler(event as never)).rejects.toThrow(/Unknown field/);
+  });
+
+  describe("org reconciliation (decision c5c8429a)", () => {
+    test("setPromotionPolicy rejects a mismatched orgId argument before any write or read", async () => {
+      mockExtractOrgFromEvent.mockResolvedValue("org-caller");
+
+      await expect(
+        handler(
+          eventFor("setPromotionPolicy", {
+            orgId: "org-foreign",
+            input: { policy: { taskSuccessMin: 0.95 } },
+          }) as never,
+        ),
+      ).rejects.toThrow(/AccessDeniedError/);
+
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+      expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    });
+
+    test("getPromotionPolicy rejects a mismatched orgId argument before any read", async () => {
+      mockExtractOrgFromEvent.mockResolvedValue("org-caller");
+
+      await expect(
+        handler(
+          eventFor("getPromotionPolicy", { orgId: "org-foreign" }) as never,
+        ),
+      ).rejects.toThrow(/AccessDeniedError/);
+
+      expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    });
+
+    test("setPromotionPolicy passes when the argument orgId matches the caller's server-derived org", async () => {
+      mockExtractOrgFromEvent.mockResolvedValue("org-caller");
+      ddbMock.on(PutCommand).resolves({});
+
+      const result = (await handler(
+        eventFor("setPromotionPolicy", {
+          orgId: "org-caller",
+          input: { policy: { taskSuccessMin: 0.95 } },
+        }) as never,
+      )) as { orgId: string };
+
+      expect(result.orgId).toBe("org-caller");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+
+    test("getPromotionPolicy passes when the argument orgId matches the caller's server-derived org", async () => {
+      mockExtractOrgFromEvent.mockResolvedValue("org-caller");
+      ddbMock.on(GetCommand).resolves({ Item: undefined });
+
+      await expect(
+        handler(
+          eventFor("getPromotionPolicy", { orgId: "org-caller" }) as never,
+        ),
+      ).resolves.toBeUndefined();
+      expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
+    });
+
+    test("setPromotionPolicy rejects when the caller's own org cannot be resolved, even with a matching-looking orgId argument", async () => {
+      mockExtractOrgFromEvent.mockResolvedValue(null);
+
+      await expect(
+        handler(
+          eventFor("setPromotionPolicy", {
+            orgId: "org-caller",
+            input: { policy: { taskSuccessMin: 0.95 } },
+          }) as never,
+        ),
+      ).rejects.toThrow(/AccessDeniedError/);
+
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test("an admin can no longer write another org's promotion policy — the reconciliation gate has no admin bypass", async () => {
+      mockExtractOrgFromEvent.mockResolvedValue("org-admins-own-org");
+
+      await expect(
+        handler(
+          eventFor("setPromotionPolicy", {
+            orgId: "org-some-other-org",
+            input: { policy: { taskSuccessMin: 0.99 } },
+          }) as never,
+        ),
+      ).rejects.toThrow(/AccessDeniedError/);
+
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
   });
 });
 

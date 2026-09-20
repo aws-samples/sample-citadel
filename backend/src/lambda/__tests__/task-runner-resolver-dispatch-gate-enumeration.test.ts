@@ -24,6 +24,16 @@
  * This handler has exactly one op (`submitTask`). The EXEMPT_OPS list is
  * intentionally empty — there is no legitimately ungated op on this
  * dispatch surface.
+ *
+ * STRENGTHENED (decision 9b48bdc8, mirroring the fabricator guard's
+ * strengthening in PR #174): `submitTask` additionally requires the
+ * architect-or-admin platform role, applied after `requireOrgId` and
+ * before any Supervisor/SQS/Bedrock dispatch. The "requireArchitectOrAdmin
+ * role gate" describe block below verifies the gated function calls
+ * requireArchitectOrAdmin with its exact action literal AFTER requireOrgId
+ * and BEFORE the EventBridge side effect, and that the gate helper itself
+ * checks `isAdminFromEvent(event) || hasRoleFromEvent(event, "architect")`
+ * and throws otherwise.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -65,13 +75,16 @@ function extractDispatchBranches(
 }
 
 /**
- * Extracts a top-level `async function <name>(...) { ... }` body by
+ * Extracts a top-level `(async )?function <name>(...) { ... }` body by
  * brace-counting from the `function` keyword, matching the parameter
  * list's closing paren first (parameter type annotations can contain
- * object-literal-shaped braces).
+ * object-literal-shaped braces). `async` is optional so this also covers
+ * the synchronous `requireArchitectOrAdmin` role gate.
  */
 function extractFunctionBody(source: string, fnName: string): string {
-  const declRe = new RegExp(`(?:export\\s+)?async function ${fnName}\\s*\\(`);
+  const declRe = new RegExp(
+    `(?:export\\s+)?(?:async\\s+)?function ${fnName}\\s*\\(`,
+  );
   const declMatch = declRe.exec(source);
   if (!declMatch) {
     throw new Error(
@@ -188,4 +201,45 @@ describe("task-runner-resolver — dispatch enumeration completeness", () => {
       });
     },
   );
+
+  describe("requireArchitectOrAdmin role gate (decision 9b48bdc8)", () => {
+    const ROLE_GATE_ACTIONS: Record<string, string> = {
+      submitTask: "submit a task",
+    };
+
+    test.each(Object.entries(ROLE_GATE_ACTIONS))(
+      "%s calls requireArchitectOrAdmin with its exact action literal",
+      (fn, action) => {
+        const body = extractFunctionBody(source, fn);
+        const gateRe = new RegExp(
+          `requireArchitectOrAdmin\\(\\s*event\\s*,\\s*"${action}"\\s*\\)`,
+        );
+        expect(gateRe.test(body)).toBe(true);
+      },
+    );
+
+    test.each(Object.keys(ROLE_GATE_ACTIONS).map((k) => [k]))(
+      "%s's role gate runs after requireOrgId and before the EventBridge side effect (bite: ordering)",
+      (fn) => {
+        const body = extractFunctionBody(source, fn);
+        const orgGateIdx = body.search(GATE_CALL_RE);
+        const roleGateIdx = body.search(/requireArchitectOrAdmin\s*\(/);
+        const sendIdx = body.indexOf("eventBridgeClient.send(");
+        expect(orgGateIdx).toBeGreaterThan(-1);
+        expect(roleGateIdx).toBeGreaterThan(-1);
+        expect(sendIdx).toBeGreaterThan(-1);
+        expect(orgGateIdx).toBeLessThan(roleGateIdx);
+        expect(roleGateIdx).toBeLessThan(sendIdx);
+      },
+    );
+
+    test("requireArchitectOrAdmin itself enforces admin-or-architect and throws otherwise (the gate has teeth)", () => {
+      const body = extractFunctionBody(source, "requireArchitectOrAdmin");
+      expect(/isAdminFromEvent\s*\(\s*event\s*\)/.test(body)).toBe(true);
+      expect(
+        /hasRoleFromEvent\s*\(\s*event\s*,\s*"architect"\s*\)/.test(body),
+      ).toBe(true);
+      expect(/throw new Error\(/.test(body)).toBe(true);
+    });
+  });
 });

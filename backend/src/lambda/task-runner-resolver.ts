@@ -5,7 +5,11 @@ import {
 import { randomUUID } from "crypto";
 import type { AppSyncResolverEvent } from "aws-lambda";
 import { mintRunId, buildDispatchContext } from "../utils/run-id";
-import { extractOrgFromEvent } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  hasRoleFromEvent,
+} from "../utils/auth-event";
 
 const eventBridgeClient = new EventBridgeClient({});
 const EVENT_BUS_NAME = process.env.AGENT_EVENT_BUS_NAME!;
@@ -72,6 +76,31 @@ async function requireOrgId(event: TaskRunnerEvent): Promise<string> {
   return orgId;
 }
 
+/**
+ * Platform-role gate (decision 9b48bdc8, mirroring
+ * fabricator-request-resolver.ts's `requireArchitectOrAdmin`, decision
+ * 2763e85f, commit e845f44): `submitTask` requires the caller be an admin
+ * or hold the architect role, in addition to the org check above.
+ * Dispatching a task drives Supervisor/SQS/Bedrock spend, the same trust
+ * tier already required for the fabricator's agent/tool-creation
+ * mutations.
+ *
+ * Applied AFTER the org check (`requireOrgId`), so a cross-org caller
+ * never learns whether they merely lack the right role. Same error-text
+ * convention as `requireArchitectOrAdmin` (`action` names the operation).
+ */
+function requireArchitectOrAdmin(
+  event: TaskRunnerEvent,
+  action: "submit a task",
+): void {
+  if (isAdminFromEvent(event) || hasRoleFromEvent(event, "architect")) {
+    return;
+  }
+  throw new Error(
+    `Access denied: requires architect or admin role to ${action}`,
+  );
+}
+
 export const handler = async (event: TaskRunnerEvent) => {
   console.log("Event:", JSON.stringify(event, null, 2));
 
@@ -93,6 +122,10 @@ async function submitTask(input: SubmitTaskInput, event: TaskRunnerEvent) {
   // Fail closed BEFORE minting any ids or touching EventBridge — an
   // unresolved organisation must never reach the bus (finding 87a171ad).
   const orgId = await requireOrgId(event);
+
+  // Platform-role gate (decision 9b48bdc8) — after the org gate, before
+  // any Supervisor/SQS/Bedrock dispatch.
+  requireArchitectOrAdmin(event, "submit a task");
 
   const orchestrationId = randomUUID();
   // Server-minted only — never read from `input` (SubmitTaskInput has no

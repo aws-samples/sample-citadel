@@ -15,6 +15,13 @@
  *    source-position ordering vs docClient.send);
  *  - the persisted config's `updatedBy:` is the server-derived
  *    authContext.userId, never caller input.
+ *
+ * STRENGTHENED (decision c5c8429a): the handler's dispatch case for each
+ * op now calls `requireCallerOrgMatches` (reconciling the client-supplied
+ * `arguments.orgId` against the caller's server-derived org) BEFORE
+ * delegating to `setPromotionPolicy`/`getPromotionPolicy` — i.e. before
+ * either op's own read/write. This deliberately removes the prior
+ * global-admin cross-org policy write.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -156,5 +163,74 @@ describe("promotion-policy-resolver — dispatch enumeration completeness", () =
       sf,
     );
     expect(assignments).toEqual(["authContext.userId"]);
+  });
+
+  describe("org reconciliation (decision c5c8429a)", () => {
+    test.each(Object.keys(GATED_OPS))(
+      "the '%s' dispatch case calls requireCallerOrgMatches with the client-supplied orgId",
+      (fieldName) => {
+        const clause = dispatch.cases.get(fieldName);
+        expect(clause).toBeDefined();
+        const calls = collectCalls(clause as ts.Node, sf);
+        const target = calls.filter(
+          (c) => c.callee === "requireCallerOrgMatches",
+        );
+        expect(target.length).toBeGreaterThanOrEqual(1);
+        // Second positional argument is the orgId being reconciled — must
+        // be the caller-supplied event.arguments.orgId, not a hardcoded
+        // or admin-overridable value.
+        expect(
+          target.some((c) =>
+            c.node.arguments.some((a) =>
+              a.getText(sf).includes("event.arguments.orgId"),
+            ),
+          ),
+        ).toBe(true);
+      },
+    );
+
+    test.each(Object.entries(GATED_OPS))(
+      "the '%s' dispatch case's requireCallerOrgMatches precedes its delegation to %s (bite: before any read/write)",
+      (fieldName, meta) => {
+        const clause = dispatch.cases.get(fieldName);
+        expect(clause).toBeDefined();
+        const calls = collectCalls(clause as ts.Node, sf);
+        const gates = calls.filter(
+          (c) => c.callee === "requireCallerOrgMatches",
+        );
+        const delegations = calls.filter((c) => c.callee === meta.fn);
+        expect(gates.length).toBeGreaterThanOrEqual(1);
+        expect(delegations.length).toBeGreaterThanOrEqual(1);
+        expect(Math.min(...gates.map((c) => c.start))).toBeLessThan(
+          Math.min(...delegations.map((c) => c.start)),
+        );
+      },
+    );
+
+    test("requireCallerOrgMatches itself rejects on mismatch or an unresolvable caller org (the gate has teeth)", () => {
+      const fn = findTopLevelFunction(sf, "requireCallerOrgMatches");
+      const body = functionBody(fn);
+      const calls = collectCalls(body, sf);
+      expect(calls.some((c) => c.callee === "extractOrgFromEvent")).toBe(true);
+      expect(containsThrow(body)).toBe(true);
+      // Must compare the resolved caller org against the requested org
+      // (not merely check truthiness) — a strict inequality on the two
+      // identifiers is the structural signal that a mismatch is rejected.
+      let comparesOrgs = false;
+      const visit = (n: ts.Node): void => {
+        if (
+          ts.isBinaryExpression(n) &&
+          n.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken
+        ) {
+          const text = n.getText(sf);
+          if (text.includes("callerOrgId") && text.includes("requestedOrgId")) {
+            comparesOrgs = true;
+          }
+        }
+        n.forEachChild(visit);
+      };
+      visit(body);
+      expect(comparesOrgs).toBe(true);
+    });
   });
 });
