@@ -1,4 +1,4 @@
-import { deriveRoles } from "../utils/auth-event";
+import { deriveRoles, extractOrgFromEvent } from "../utils/auth-event";
 /**
  * promotion-policy-resolver.ts — admin-only GraphQL resolver for
  * PromotionPolicyConfig storage/reads. Mirrors
@@ -20,6 +20,16 @@ import { deriveRoles } from "../utils/auth-event";
  * resolvePromotionPolicy) is a SEPARATE, dependency-light module; this
  * resolver is not on that read path and never imports it, so a change
  * here cannot alter the gate's fail-closed contract.
+ *
+ * ORG RECONCILIATION (decision c5c8429a): the client-supplied
+ * `arguments.orgId` is reconciled against the caller's server-derived org
+ * (`extractOrgFromEvent`) in the handler, BEFORE either op reads or
+ * writes anything. A mismatch, or an unresolvable caller org, is rejected
+ * with a structured access-denied error. Admin remains required
+ * (unchanged, `requireAdmin` below) — this DELIBERATELY removes the prior
+ * global-admin cross-org policy write (an admin could previously pass any
+ * `orgId` and mutate/read another org's promotion policy floor); admins
+ * are now scoped to their own organisation like every other caller.
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
@@ -41,6 +51,33 @@ const PROMOTION_POLICY_CONFIG_TABLE =
 function requireAdmin(authContext: AuthContext, action: string): void {
   if (!authContext.roles?.includes("admin")) {
     throw new Error(`UnauthorizedError: admin role required to ${action}`);
+  }
+}
+
+/**
+ * Reconciles the client-supplied `arguments.orgId` against the caller's
+ * server-derived organisation (decision c5c8429a). Rejects with a
+ * structured access-denied error on mismatch OR when the caller's own
+ * org cannot be resolved — never falls back to trusting the client
+ * value. Called in the handler BEFORE either op's read/write, so a
+ * cross-org `orgId` argument never reaches `setPromotionPolicy` /
+ * `getPromotionPolicy` at all.
+ */
+async function requireCallerOrgMatches(
+  event: unknown,
+  requestedOrgId: string,
+  action: string,
+): Promise<void> {
+  const callerOrgId = await extractOrgFromEvent(event);
+  if (!callerOrgId) {
+    throw new Error(
+      `AccessDeniedError: no organization is provisioned for your account; cannot ${action}.`,
+    );
+  }
+  if (callerOrgId !== requestedOrgId) {
+    throw new Error(
+      `AccessDeniedError: orgId does not match your organization; cannot ${action}.`,
+    );
   }
 }
 
@@ -184,12 +221,22 @@ export const handler = async (
   const authContext = authContextFromEvent(event);
   switch (fieldName) {
     case "setPromotionPolicy":
+      await requireCallerOrgMatches(
+        event,
+        event.arguments.orgId,
+        "modify promotion policy configuration",
+      );
       return await setPromotionPolicy(
         event.arguments.orgId,
         event.arguments.input,
         authContext,
       );
     case "getPromotionPolicy":
+      await requireCallerOrgMatches(
+        event,
+        event.arguments.orgId,
+        "read promotion policy configuration",
+      );
       return await getPromotionPolicy(event.arguments.orgId, authContext);
     default:
       throw new Error(`Unknown field: ${fieldName}`);

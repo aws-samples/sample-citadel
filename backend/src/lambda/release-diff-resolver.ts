@@ -89,7 +89,7 @@ export class ReleaseNotFoundError extends Error {
  * resolver.ts module docs). Used internally (and by direct unit tests of
  * `releaseDiff`) to distinguish the two causes for logging; the
  * caller-facing GraphQL surface never sees this distinction — see
- * `OpaqueReleaseNotFoundError` and the handler's translation below. */
+ * `OpaqueReleaseDiffNotFoundError` and the handler's translation below. */
 export class CrossOrgReleaseDiffError extends Error {
   constructor(public readonly releaseId: string) {
     super(
