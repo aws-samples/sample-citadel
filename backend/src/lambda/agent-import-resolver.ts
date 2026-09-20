@@ -797,8 +797,10 @@ function requireAuthenticated(event: ImportAgentEvent): void {
  * {@link isAdminFromEvent} (custom:role or cognito:groups); architect via
  * {@link hasRoleFromEvent}. Throws an authorization error otherwise.
  *
- * `importAgent` is intentionally NOT gated by this check — it keeps its
- * existing org-scoped flow (tenant derived from the caller's identity).
+ * `importAgent` keeps its own org-scoped flow (tenant derived from the
+ * caller's identity) and is gated separately, inline in {@link importAgent}
+ * itself (gated per decision ff48d6f9, finding 234cda06), after its
+ * required-org check — not by this helper.
  */
 function requireDiscoveryRole(event: ImportAgentEvent): void {
   if (isAdminFromEvent(event) || hasRoleFromEvent(event, "architect")) {
@@ -1107,6 +1109,13 @@ export async function importAgent(
   const orgId = await extractOrgFromEvent(event);
   if (!orgId) {
     throw new Error("Cannot determine caller organization");
+  }
+
+  // gated per decision ff48d6f9 (finding 234cda06)
+  if (!isAdminFromEvent(event) && !hasRoleFromEvent(event, "architect")) {
+    throw new Error(
+      "Access denied: requires architect or admin role to import agents",
+    );
   }
 
   // Build the typed descriptor blocks. validateImportDescriptor confirmed

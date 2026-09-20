@@ -31,6 +31,18 @@ jest.mock('../../services/agentImportService', () => ({
   },
 }));
 
+// --- Mock useOrganization: the wizard reads currentUser.role for its
+// client-side mirror of the backend's importAgent role gate (decision
+// ff48d6f9, finding 234cda06). Defaults to an architect so every existing
+// (pre-gate) test below keeps exercising the wizard as an authorized caller;
+// the dedicated role-gate test overrides this to a non-privileged role.
+let mockCurrentUserRole: string | undefined = 'architect';
+jest.mock('../../contexts/OrganizationContext', () => ({
+  useOrganization: () => ({
+    currentUser: { role: mockCurrentUserRole },
+  }),
+}));
+
 // --- Flatten shadcn Select to a native <select> ---
 jest.mock('../ui/select', () => {
   const ReactLib = require('react');
@@ -558,6 +570,29 @@ describe('ImportAgentWizard — step 5 (Governance & register)', () => {
     expect(await screen.findByText(/draft/i)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /^done$/i }));
     expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables registration and shows a clear message for a non-architect non-admin caller, without calling importAgent', async () => {
+    mockCurrentUserRole = 'developer';
+    try {
+      const user = userEvent.setup();
+      renderWizard();
+      svc.discoverAgents.mockResolvedValue([candidate]);
+      svc.describeAgentCandidate.mockResolvedValue(descriptor);
+      await gotoRegister(user);
+
+      expect(
+        screen.getByText(/need the architect or admin role to import agents/i),
+      ).toBeInTheDocument();
+
+      const registerBtn = screen.getByRole('button', { name: /register agent/i });
+      expect(registerBtn).toBeDisabled();
+
+      await user.click(registerBtn);
+      expect(svc.importAgent).not.toHaveBeenCalled();
+    } finally {
+      mockCurrentUserRole = 'architect';
+    }
   });
 });
 
