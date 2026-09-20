@@ -19,6 +19,15 @@
  *
  * This handler has exactly two ops. The EXEMPT_OPS list is intentionally
  * empty — there is no legitimately ungated op on this dispatch surface.
+ *
+ * STRENGTHENED (board task b418dfdb, decision 2763e85f): both ops
+ * additionally require the architect-or-admin platform role — fabrication
+ * drives Bedrock spend and creates agent/tool Registry records. The
+ * "requireArchitectOrAdmin role gate" describe block below verifies each
+ * gated function calls requireArchitectOrAdmin with its exact action
+ * literal BEFORE its sendToFabricatorQueue side effect, and that the gate
+ * helper itself checks `isAdminFromEvent(event) ||
+ * hasRoleFromEvent(event, "architect")` and throws otherwise.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -195,5 +204,84 @@ describe("fabricator-request-resolver — dispatch enumeration completeness", ()
     // client call site is renamed/moved, this test flags it rather than the
     // marker-based checks above silently no-oping.
     expect(source.includes(SQS_SEND_MARKER)).toBe(true);
+  });
+
+  describe("requireArchitectOrAdmin role gate (decision 2763e85f)", () => {
+    /**
+     * Extracts a top-level `(export )?(async )?function <name>(...) {...}`
+     * body by brace-counting from the parameter list's closing paren.
+     * Template-literal `${...}` interpolations inside the bodies are
+     * brace-balanced, so plain counting stays correct. Word-bounded so
+     * `requestAgentCreation` never matches inside a longer name.
+     */
+    function extractFunctionBody(fnName: string): string {
+      const declRe = new RegExp(
+        `(?:export\\s+)?(?:async\\s+)?function ${fnName}\\b\\s*\\(`,
+      );
+      const declMatch = declRe.exec(source);
+      if (!declMatch) {
+        throw new Error(
+          `Could not locate function declaration for '${fnName}' in fabricator-request-resolver.ts`,
+        );
+      }
+      const paramsOpenIdx = source.indexOf("(", declMatch.index);
+      let parenDepth = 0;
+      let j = paramsOpenIdx;
+      for (; j < source.length; j++) {
+        if (source[j] === "(") parenDepth++;
+        else if (source[j] === ")") {
+          parenDepth--;
+          if (parenDepth === 0) break;
+        }
+      }
+      const bodyStart = source.indexOf("{", j);
+      let depth = 0;
+      let i = bodyStart;
+      for (; i < source.length; i++) {
+        if (source[i] === "{") depth++;
+        else if (source[i] === "}") {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
+      return source.slice(bodyStart, i + 1);
+    }
+
+    const ROLE_GATE_ACTIONS: Record<string, string> = {
+      requestAgentCreation: "request agent creation",
+      requestToolCreation: "request tool creation",
+    };
+
+    test.each(Object.entries(ROLE_GATE_ACTIONS))(
+      "%s calls requireArchitectOrAdmin with its exact action literal",
+      (fn, action) => {
+        const body = extractFunctionBody(fn);
+        const gateRe = new RegExp(
+          `requireArchitectOrAdmin\\(\\s*event\\s*,\\s*"${action}"\\s*\\)`,
+        );
+        expect(gateRe.test(body)).toBe(true);
+      },
+    );
+
+    test.each(Object.keys(ROLE_GATE_ACTIONS).map((k) => [k]))(
+      "%s's role gate precedes its sendToFabricatorQueue side effect (bite: ordering)",
+      (fn) => {
+        const body = extractFunctionBody(fn);
+        const gateIdx = body.search(/requireArchitectOrAdmin\s*\(/);
+        const sendIdx = body.indexOf("sendToFabricatorQueue(");
+        expect(gateIdx).toBeGreaterThan(-1);
+        expect(sendIdx).toBeGreaterThan(-1);
+        expect(gateIdx).toBeLessThan(sendIdx);
+      },
+    );
+
+    test("requireArchitectOrAdmin itself enforces admin-or-architect and throws otherwise (the gate has teeth)", () => {
+      const body = extractFunctionBody("requireArchitectOrAdmin");
+      expect(/isAdminFromEvent\s*\(\s*event\s*\)/.test(body)).toBe(true);
+      expect(
+        /hasRoleFromEvent\s*\(\s*event\s*,\s*"architect"\s*\)/.test(body),
+      ).toBe(true);
+      expect(/throw new Error\(/.test(body)).toBe(true);
+    });
   });
 });

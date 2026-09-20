@@ -24,6 +24,17 @@
  * are expected to receive it, then verifies that callee's own function
  * body actually contains an `assertRowOrg(` call before its first
  * DynamoDB/Registry side effect.
+ *
+ * STRENGTHENED (board task b418dfdb): the read ops' org reconciliation
+ * (finding ce470ab0) was previously described in EXEMPT_OPS prose but
+ * never structurally checked — exactly the hole the registry-agent-record
+ * guard's history warns about ("the EXEMPT list was the hole"). The
+ * "READ ops org reconciliation" describe block below now verifies, per
+ * read function on BOTH paths (registry + legacy), the real gate content:
+ * extractOrgFromEvent/isAdminFromEvent derivation, fail-closed empty/null
+ * results for an unresolvable caller org, canCallerSeeRow on the legacy
+ * single get, org-filtering of list/search results, and that each read
+ * case threads `event` into its callees.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -313,4 +324,85 @@ describe("tool-config-resolver — dispatch enumeration completeness", () => {
       });
     },
   );
+
+  describe("READ ops org reconciliation (finding ce470ab0, strengthened per board task b418dfdb)", () => {
+    /** Read ops whose dispatch case must thread `event` into every callee
+     * that performs its own org reconciliation. */
+    const READ_OP_CALLEES: Record<string, string[]> = {
+      listToolConfigs: ["listToolConfigsRegistry", "listToolConfigs"],
+      getToolConfig: ["getToolConfigRegistry", "getToolConfig"],
+      searchToolConfigs: ["searchToolConfigs"],
+    };
+
+    describe.each(Object.entries(READ_OP_CALLEES))(
+      "case '%s' threads `event` into its org-reconciling callee(s)",
+      (fieldName, callees) => {
+        test.each(callees.map((c) => [c]))(
+          "passes `event` as an argument to %s",
+          (callee) => {
+            const caseBody = extractCaseBody(source, fieldName);
+            const callRe = new RegExp(`${callee}\\s*\\([^)]*\\bevent\\b`);
+            expect(callRe.test(caseBody)).toBe(true);
+          },
+        );
+      },
+    );
+
+    test.each([
+      ["listToolConfigsRegistry"],
+      ["listToolConfigs"],
+      ["searchToolConfigs"],
+    ])(
+      "%s derives caller identity server-side (extractOrgFromEvent + isAdminFromEvent) and fails closed to an empty list",
+      (fn) => {
+        const body = extractFunctionBody(source, fn);
+        expect(/extractOrgFromEvent\s*\(/.test(body)).toBe(true);
+        expect(/isAdminFromEvent\s*\(/.test(body)).toBe(true);
+        // Fail-closed: an unresolvable caller org returns [] — never the
+        // unfiltered set.
+        expect(/return \[\];/.test(body)).toBe(true);
+        // The non-admin result set is org-filtered against the derived org.
+        expect(/\.filter\(/.test(body)).toBe(true);
+        expect(/callerOrgId/.test(body)).toBe(true);
+      },
+    );
+
+    test("getToolConfigRegistry treats cross-org AND org-less records as not-found for non-admins (both paths)", () => {
+      const body = extractFunctionBody(source, "getToolConfigRegistry");
+      expect(/extractOrgFromEvent\s*\(/.test(body)).toBe(true);
+      expect(/isAdminFromEvent\s*\(/.test(body)).toBe(true);
+      // The fail-closed disjunction (absent orgId OR mismatch → null) must
+      // exist on BOTH the registry-mapped and the legacy-fallback branch —
+      // the pre-fix bug was the truthy-only `mapped.orgId && ...` guard.
+      expect(
+        /!mapped\.orgId\s*\|\|\s*mapped\.orgId\s*!==\s*callerOrgId/.test(body),
+      ).toBe(true);
+      expect(
+        /!legacy\.orgId\s*\|\|\s*legacy\.orgId\s*!==\s*callerOrgId/.test(body),
+      ).toBe(true);
+      expect(/return null;/.test(body)).toBe(true);
+    });
+
+    test("legacy getToolConfig reconciles via the shared canCallerSeeRow helper and 404-shapes the denial (null)", () => {
+      const body = extractFunctionBody(source, "getToolConfig");
+      expect(/canCallerSeeRow\s*\(/.test(body)).toBe(true);
+      // Denial is a null return (not-found shape), not a thrown 403 — no
+      // existence oracle.
+      expect(/return null;/.test(body)).toBe(true);
+    });
+
+    test("searchToolConfigs org-filters results to the caller's own org with an explicit orgId equality", () => {
+      const body = extractFunctionBody(source, "searchToolConfigs");
+      expect(/t\.orgId\s*&&\s*t\.orgId\s*===\s*callerOrgId/.test(body)).toBe(
+        true,
+      );
+    });
+
+    test("bite: the fail-closed empty-list return in searchToolConfigs is guarded by the unresolvable-org check", () => {
+      const body = extractFunctionBody(source, "searchToolConfigs");
+      // `if (!callerOrgId) return [];` — the exact fail-closed shape; a
+      // future edit that inverts or drops the guard fails here.
+      expect(/if\s*\(!callerOrgId\)\s*return \[\];/.test(body)).toBe(true);
+    });
+  });
 });
