@@ -68,6 +68,7 @@ import {
   RegistryService,
   TypeMismatchError,
   RegistryLifecycleError,
+  RecordResolutionTimeoutError,
   type RegistryRecord,
   type RegistryRecordStatusValue,
   type AgentCustomMetadata,
@@ -369,6 +370,23 @@ function getCognitoClient(): CognitoIdentityProviderClient {
 const createdByNameCache = new Map<string, Promise<string>>();
 
 /**
+ * Cognito's documented username constraint is a maximum of 128 characters.
+ * An ARN (`arn:aws:...`) is never a Cognito username — it identifies a
+ * system/service principal (e.g. an internal automation role that stamped
+ * `createdBy`), not a human user in the pool. Both shapes are treated as a
+ * system actor rather than attempted against AdminGetUser (finding
+ * ce7daab8): the call would only ever fail, and skipping it removes a
+ * guaranteed-miss Cognito call (with its own retry/backoff cost) from the
+ * read path for every record created by a non-human principal.
+ */
+const COGNITO_USERNAME_MAX_LENGTH = 128;
+function isPlausibleCognitoUsername(userId: string): boolean {
+  if (userId.length > COGNITO_USERNAME_MAX_LENGTH) return false;
+  if (userId.startsWith("arn:")) return false;
+  return true;
+}
+
+/**
  * Resolves a Cognito user ID to a human-readable display name via
  * AdminGetUser. Falls back to the raw userId on any failure (missing
  * USER_POOL_ID, user not found, Cognito error) — this must never throw,
@@ -391,6 +409,17 @@ async function resolveCreatedByName(
 
   const lookup = (async (): Promise<string> => {
     if (!USER_POOL_ID) {
+      return userId;
+    }
+    // Skip the AdminGetUser call entirely for a `createdBy` value that
+    // cannot plausibly be a Cognito username (finding ce7daab8): an
+    // ARN-shaped value (a system/service principal, not a human Cognito
+    // user) or a value exceeding Cognito's 128-character username limit.
+    // Both shapes would only ever produce a UserNotFoundException from
+    // AdminGetUser, so treating them as a system actor up front avoids a
+    // guaranteed-to-fail Cognito call (and its retry/backoff cost) on every
+    // read of a record created by a non-human principal.
+    if (!isPlausibleCognitoUsername(userId)) {
       return userId;
     }
     try {
@@ -2076,6 +2105,14 @@ export async function updateAgentBinding(
         throw new Error(
           "Agent must be active before it can be marked as ready",
         );
+      }
+      // A bounded resolveRecordId fallback that exhausted its time/page
+      // budget (finding ce7daab8) is NOT the same failure as "not found" —
+      // rethrow the structured RecordResolutionTimeoutError as-is so the
+      // caller sees a distinct, actionable error (retry with the agent's
+      // recordId/ARN) instead of a misleading activation-gate message.
+      if (err instanceof RecordResolutionTimeoutError) {
+        throw err;
       }
       // Distinguish 'not found' (resolveRecordId failure) from 'not active'
       // so the user sees a useful message rather than a misleading

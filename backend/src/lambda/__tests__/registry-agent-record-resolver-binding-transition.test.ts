@@ -357,6 +357,54 @@ describe("updateAgentBinding — READY transition agentId resolution", () => {
     expect(agentLookups).toHaveLength(0);
   });
 
+  test("propagates RecordResolutionTimeoutError unchanged (finding ce7daab8) instead of a misleading activation-gate message", async () => {
+    // The bounded enumeration fallback in resolveRecordId throws a
+    // structured, distinct error when its time/page budget is exhausted —
+    // this must reach the caller as-is, not be remapped to "not found" or
+    // "must be active", so the client can tell a timeout apart from either.
+    const { RecordResolutionTimeoutError } = jest.requireActual(
+      "../../services/registry-service",
+    );
+    seedAppWithBinding(AGENT_NAME);
+    resolveRecordIdMock.mockRejectedValueOnce(
+      new RecordResolutionTimeoutError("agent", AGENT_NAME),
+    );
+    getResourceMock.mockResolvedValueOnce({
+      recordId: APP_RECORD_ID,
+      name: "Test App",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({
+        appId: APP_RECORD_ID,
+        manifest: {
+          orgId: "org-1",
+          createdBy: "user-123",
+          version: 1,
+          status: "DRAFT",
+          agentBindings: [
+            { agentId: AGENT_NAME, status: "DESIGN", addedAt: "t" },
+          ],
+        },
+      }),
+    });
+
+    await expect(
+      invokeHandler(
+        makeEvent("updateAgentBinding", {
+          input: {
+            appId: APP_RECORD_ID,
+            agentId: AGENT_NAME,
+            status: "READY",
+          },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(RecordResolutionTimeoutError);
+    // The agent getResource path must not be reached when resolution timed out.
+    const agentLookups = getResourceMock.mock.calls.filter(
+      ([type, id]) => type === "agent" && id !== APP_RECORD_ID,
+    );
+    expect(agentLookups).toHaveLength(0);
+  });
+
   test("surfaces the activation-gate error when getResource throws TypeMismatchError on the resolved agent", async () => {
     // Simulates the case where the resolved recordId exists but is not an
     // agent record (or the SDK otherwise rejects the lookup with a type

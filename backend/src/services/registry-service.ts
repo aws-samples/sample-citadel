@@ -57,6 +57,33 @@ export class RegistryLifecycleError extends ConnectorError {
   }
 }
 
+/**
+ * Thrown by {@link RegistryService.resolveRecordId} when a name-based
+ * lookup cannot be resolved via direct lookup and the bounded enumeration
+ * fallback exhausts its time budget or page limit (finding ce7daab8: the
+ * unbounded fallback previously ran GetRegistryRecord once per record in
+ * the WHOLE registry with no time budget, triggering a
+ * 'Request rate exceeded' retry storm that blew the Lambda's 30s timeout).
+ *
+ * `retryable: false` — an immediate retry repeats the same enumeration
+ * cost and reproduces the same timeout; that retry-without-backoff pattern
+ * is the mechanism that caused the incident, so it must not be encouraged
+ * here. Callers should surface this to the user (e.g. "try again with the
+ * agent's recordId/ARN") rather than looping.
+ */
+export class RecordResolutionTimeoutError extends ConnectorError {
+  constructor(type: ResourceType, id: string) {
+    super(
+      `Timed out resolving registry record for ${type}: ${id} — the registry ` +
+        `is too large to enumerate within budget. Provide the record's ` +
+        `recordId or ARN directly, or narrow the lookup.`,
+      "RECORD_RESOLUTION_TIMEOUT",
+      false,
+    );
+    this.name = "RecordResolutionTimeoutError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types & Interfaces
 // ---------------------------------------------------------------------------
@@ -119,12 +146,7 @@ export type AgentInvocationProtocol =
 
 /** Authentication mode used when reaching an invocation target. */
 export type AgentInvocationAuthMode =
-  | "SIGV4"
-  | "API_KEY"
-  | "OAUTH2"
-  | "COGNITO"
-  | "NONE"
-  | "BEARER";
+  "SIGV4" | "API_KEY" | "OAUTH2" | "COGNITO" | "NONE" | "BEARER";
 
 /** Synchronous request/response vs. asynchronous callback delivery. */
 export type AgentInvocationMode = "sync" | "async_callback";
@@ -249,10 +271,7 @@ export interface ProposedManifestMetadata {
  * {@link ProposedManifestConfidence}.
  */
 export type AgentReachabilityClassification =
-  | "reachable"
-  | "unreachable"
-  | "unverifiable_private"
-  | "no_endpoint";
+  "reachable" | "unreachable" | "unverifiable_private" | "no_endpoint";
 
 /**
  * Result of a BACKEND-ONLY best-effort reachability probe of an imported
@@ -804,17 +823,66 @@ export class RegistryService {
   }
 
   /**
+   * Upper bound on how long the enumeration fallback in
+   * {@link resolveRecordId} is allowed to run before giving up. Chosen well
+   * under the 30s Lambda timeout so a structured
+   * {@link RecordResolutionTimeoutError} always has time to propagate and
+   * be handled by the caller instead of the invocation hard-timing-out.
+   */
+  private static readonly RESOLVE_FALLBACK_TIME_BUDGET_MS = 8000;
+
+  /**
+   * Upper bound on the number of ListRegistryRecords pages the enumeration
+   * fallback in {@link resolveRecordId} will consume. A second, independent
+   * cap alongside the time budget — protects against a pathological case
+   * where individual list calls stay fast (so the time budget alone would
+   * allow many pages) but the registry has an extreme number of pages.
+   */
+  private static readonly RESOLVE_FALLBACK_MAX_PAGES = 50;
+
+  /**
+   * Extracts the recordId from a Registry record ARN
+   * (`arn:aws:bedrock-agentcore:<region>:<account>:registry/<registryId>/record/<recordId>`).
+   * Returns undefined if `id` is not ARN-shaped.
+   */
+  private static extractRecordIdFromArn(id: string): string | undefined {
+    if (!id.startsWith("arn:")) return undefined;
+    const match = /\/record\/([a-zA-Z0-9]{12})$/.exec(id);
+    return match?.[1];
+  }
+
+  /**
    * Resolves a resource name (toolId/agentId) to its Registry recordId.
-   * If the id is already a valid 12-char recordId, returns it as-is.
    *
-   * Name-based lookups are cached for {@link RECORD_ID_CACHE_TTL_MS} ms
-   * keyed on `${type}:${name}` to avoid re-listing the entire registry on
-   * every call. The 12-char fast path bypasses the cache.
+   * Resolution order (finding ce7daab8 — direct lookup first, bounded
+   * enumeration only as a last resort):
+   *   1. Already a 12-char recordId — O(1), returned as-is.
+   *   2. A Registry record ARN — O(1), the recordId is extracted directly
+   *      from the ARN without any Registry call.
+   *   3. LRU cache hit for a previously-resolved name (see
+   *      {@link RECORD_ID_CACHE_TTL_MS}).
+   *   4. Bounded enumeration fallback: paginates `ListRegistryRecords`
+   *      summaries directly (id/name only — no per-record
+   *      `GetRegistryRecord`, unlike `listResources`, whose per-record
+   *      detail hydration is what triggered the incident's
+   *      'Request rate exceeded' storm) until a name match is found, or
+   *      until the {@link RESOLVE_FALLBACK_TIME_BUDGET_MS} time budget or
+   *      {@link RESOLVE_FALLBACK_MAX_PAGES} page cap is hit, whichever
+   *      comes first. Exhausting either bound throws a structured
+   *      {@link RecordResolutionTimeoutError} rather than continuing to
+   *      retry into the Lambda's own timeout.
    */
   async resolveRecordId(type: ResourceType, id: string): Promise<string> {
-    // Fast path: already a recordId. Do not cache — already O(1).
+    // Fast path 1: already a recordId. Do not cache — already O(1).
     if (/^[a-zA-Z0-9]{12}$/.test(id)) {
       return id;
+    }
+
+    // Fast path 2: a Registry record ARN. Do not cache — already O(1) and
+    // the recordId is embedded in the input itself.
+    const arnRecordId = RegistryService.extractRecordIdFromArn(id);
+    if (arnRecordId) {
+      return arnRecordId;
     }
 
     // Cache hit?
@@ -822,14 +890,45 @@ export class RegistryService {
     const hit = this.cacheGet(cacheKey);
     if (hit) return hit;
 
-    // Miss: existing list-and-find logic.
-    const records = await this.listResources(type);
-    const match = records.find((r) => r.name === id);
-    if (!match) {
-      throw new Error(`Registry record not found for ${type}: ${id}`);
-    }
-    this.cacheSet(cacheKey, match.recordId);
-    return match.recordId;
+    // Miss: bounded enumeration fallback. Paginate summaries (cheap — no
+    // per-record detail GET) rather than listResources (which issues one
+    // GetRegistryRecord per record and is the mechanism behind the
+    // incident), stopping as soon as a match is found or a bound is hit.
+    const deadline =
+      Date.now() + RegistryService.RESOLVE_FALLBACK_TIME_BUDGET_MS;
+    let nextToken: string | undefined;
+    let pages = 0;
+
+    do {
+      if (
+        Date.now() >= deadline ||
+        pages >= RegistryService.RESOLVE_FALLBACK_MAX_PAGES
+      ) {
+        throw new RecordResolutionTimeoutError(type, id);
+      }
+      pages += 1;
+
+      const result: ListRegistryRecordsCommandOutput = await this.withRetry(
+        () =>
+          this.client.send(
+            new ListRegistryRecordsCommand({
+              registryId: this.registryId,
+              descriptorType: "CUSTOM",
+              nextToken,
+            }),
+          ),
+      );
+
+      const match = (result.registryRecords ?? []).find((r) => r.name === id);
+      if (match?.recordId) {
+        this.cacheSet(cacheKey, match.recordId);
+        return match.recordId;
+      }
+
+      nextToken = result.nextToken;
+    } while (nextToken);
+
+    throw new Error(`Registry record not found for ${type}: ${id}`);
   }
 
   /**
@@ -1510,9 +1609,7 @@ export class RegistryService {
     const cleaned = bindings.filter(
       (
         b:
-          | { dataStoreId?: unknown; dataStoreType?: unknown }
-          | null
-          | undefined,
+          { dataStoreId?: unknown; dataStoreType?: unknown } | null | undefined,
       ) =>
         b &&
         typeof b.dataStoreId === "string" &&
@@ -1564,7 +1661,10 @@ export class RegistryService {
    * This ensures the frontend ToolCard always has a human-readable name
    * to display instead of falling back to the raw record GUID.
    */
-  private static ensureConfigName(configJson: string, recordName: string): string {
+  private static ensureConfigName(
+    configJson: string,
+    recordName: string,
+  ): string {
     if (!recordName) return configJson;
     try {
       const parsed = JSON.parse(configJson);
@@ -1573,7 +1673,10 @@ export class RegistryService {
         parsed !== null &&
         !Array.isArray(parsed)
       ) {
-        if (!parsed.name || (typeof parsed.name === "string" && parsed.name.trim() === "")) {
+        if (
+          !parsed.name ||
+          (typeof parsed.name === "string" && parsed.name.trim() === "")
+        ) {
           parsed.name = recordName;
           return JSON.stringify(parsed);
         }

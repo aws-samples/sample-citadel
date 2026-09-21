@@ -280,6 +280,46 @@ describe("registry-agent-record-resolver — server-side name resolution", () =>
       // test file/module instance with USER_POOL_ID unset BEFORE import).
       expect(true).toBe(true);
     });
+
+    test("skips AdminGetUser and returns the raw value when createdBy is ARN-shaped (system principal, finding ce7daab8)", async () => {
+      const systemArn =
+        "arn:aws:iam::123456789012:role/citadel-internal-automation";
+      seedApp({ createdBy: systemArn });
+
+      const result = await invokeHandler(
+        makeEvent("getApp", { appId: "app-1" }),
+      );
+
+      expect(result.createdByName).toBe(systemArn);
+      expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
+    });
+
+    test("skips AdminGetUser and returns the raw value when createdBy exceeds 128 characters (finding ce7daab8)", async () => {
+      const overlong = `user-${"x".repeat(130)}`;
+      seedApp({ createdBy: overlong });
+
+      const result = await invokeHandler(
+        makeEvent("getApp", { appId: "app-1" }),
+      );
+
+      expect(result.createdByName).toBe(overlong);
+      expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
+    });
+
+    test("still calls AdminGetUser for a plausible Cognito username at exactly the 128-character boundary", async () => {
+      const boundary = "u".repeat(128);
+      seedApp({ createdBy: boundary });
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [{ Name: "email", Value: "boundary@example.com" }],
+      });
+
+      const result = await invokeHandler(
+        makeEvent("getApp", { appId: "app-1" }),
+      );
+
+      expect(result.createdByName).toBe("boundary@example.com");
+      expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(1);
+    });
   });
 
   describe("getApp — agentBindings[].name", () => {
