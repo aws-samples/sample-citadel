@@ -1924,14 +1924,37 @@ async function bindWorkflowToApp(
     return projectAgentAppNormalized(record);
   }
 
+  const nextWorkflowIds = [...existingIds, workflowId];
   const updatedContent = writeManifestMutation(record, (m) => {
-    m.workflowIds = [...existingIds, workflowId];
+    m.workflowIds = nextWorkflowIds;
     m.version = (m.version ?? 1) + 1;
   });
 
   const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: updatedContent,
   });
+
+  // Mirror to the AppsTable #META row (finding 4d69104a): the Agent Apps
+  // list reads workflowIds from the #META row (via OrgIndex), and the
+  // detail-view projection SHADOWS the manifest whenever the mirror's
+  // workflowIds list is non-empty — so a bind that only updates the
+  // manifest goes invisible to both the list and (once any prior bind has
+  // populated the mirror) the detail view. Registry manifest stays
+  // authoritative; this is a best-effort, eventually-consistent write
+  // (updateAppMetaFields logs and returns false on failure rather than
+  // throwing — see apps-table-meta.ts) — a failed write is caught by the
+  // 6-hourly reconciler's workflowIds drift check rather than failing this
+  // mutation.
+  const mirrored = await updateAppMetaFields(APPS_TABLE, appId, {
+    workflowIds: nextWorkflowIds,
+    updatedAt: new Date().toISOString(),
+  });
+  if (!mirrored) {
+    console.error("bindWorkflowToApp: AppsTable #META mirror write failed", {
+      appId,
+      workflowId,
+    });
+  }
 
   await emitEvent("app.workflow.bound", { appId, workflowId, userId });
 
@@ -1967,6 +1990,20 @@ async function unbindWorkflowFromApp(
   const updated = await getRegistryService().updateResource("agent", appId, {
     customMetadata: updatedContent,
   });
+
+  // Mirror to the AppsTable #META row (finding 4d69104a) — see
+  // bindWorkflowToApp's comment for why this mirror write is required and
+  // why a failure here is non-fatal (reconciler backstop).
+  const mirrored = await updateAppMetaFields(APPS_TABLE, appId, {
+    workflowIds: remaining,
+    updatedAt: new Date().toISOString(),
+  });
+  if (!mirrored) {
+    console.error(
+      "unbindWorkflowFromApp: AppsTable #META mirror write failed",
+      { appId, workflowId },
+    );
+  }
 
   await emitEvent("app.workflow.unbound", { appId, workflowId, userId });
 

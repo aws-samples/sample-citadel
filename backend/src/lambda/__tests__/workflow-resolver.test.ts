@@ -149,6 +149,68 @@ describe("workflow-resolver", () => {
       expect(result).toEqual(workflow);
       expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
     });
+
+    // Admin cross-org read bypass (finding 4d69104a): an admin caller may
+    // read a workflow belonging to a different org.
+    test("an admin caller may read a workflow belonging to a different org", async () => {
+      const workflow = {
+        workflowId: "wf-other",
+        orgId: "org-other",
+        name: "Other Org Workflow",
+        status: "DRAFT",
+        version: 1,
+      };
+      ddbMock.on(GetCommand).resolves({ Item: workflow });
+
+      const adminEvent = {
+        info: { fieldName: "getWorkflow" },
+        arguments: { workflowId: "wf-other" },
+        identity: {
+          sub: "admin-1",
+          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result).toEqual(workflow);
+    });
+
+    // The comparison stays strict/case-sensitive (finding 4d69104a says the
+    // data was fixed — do not loosen). A non-admin caller with a
+    // differently-cased org claim is still denied.
+    test("non-admin cross-org read is still denied (strict, case-sensitive compare)", async () => {
+      mockCognitoOrg("ORG-1");
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-case",
+          orgId: "org-1",
+          name: "Case Workflow",
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("getWorkflow", { workflowId: "wf-case" })),
+      ).rejects.toThrow("Access denied");
+    });
+
+    // Fail-closed for an org-less non-admin caller (finding 4d69104a):
+    // previously `userOrg && ...` let an unresolvable caller org through
+    // unchecked. assertRowOrg denies instead.
+    test("denies a non-admin caller whose org cannot be resolved", async () => {
+      cognitoMock.reset();
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          name: "Test Workflow",
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("getWorkflow", { workflowId: "wf-1" })),
+      ).rejects.toThrow("Access denied");
+    });
   });
 
   // ─── listWorkflows ─────────────────────────────────────────────

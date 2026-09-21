@@ -403,6 +403,55 @@ describe("execution-resolver", () => {
       ).rejects.toThrow("Access denied");
       expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
     });
+
+    // Admin cross-org read bypass (finding 4d69104a): an admin caller may
+    // list executions for a workflow belonging to a different org.
+    test("an admin caller may list executions for a workflow belonging to a different org", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-other",
+          orgId: "org-other",
+          status: "PUBLISHED",
+        },
+      });
+      const items = [
+        {
+          executionId: "exec-other",
+          workflowId: "wf-other",
+          orgId: "org-other",
+          status: "completed",
+          startedAt: "2024-01-01T00:00:00Z",
+        },
+      ];
+      ddbMock.on(QueryCommand).resolves({ Items: items });
+
+      const adminEvent = {
+        info: { fieldName: "listExecutions" },
+        arguments: { workflowId: "wf-other" },
+        identity: {
+          sub: "admin-1",
+          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result).toEqual({ items, nextToken: undefined });
+    });
+
+    // The comparison stays strict/case-sensitive (finding 4d69104a says the
+    // data was fixed — do not loosen). A non-admin caller with a
+    // differently-cased org claim is still denied.
+    test("non-admin cross-org read is still denied (strict, case-sensitive compare)", async () => {
+      mockCognitoOrg("ORG-1");
+      ddbMock.on(GetCommand).resolves({
+        Item: { workflowId: "wf-1", orgId: "org-1", status: "PUBLISHED" },
+      });
+
+      await expect(
+        invoke(makeEvent("listExecutions", { workflowId: "wf-1" })),
+      ).rejects.toThrow("Access denied");
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    });
   });
 
   // ─── startExecution ────────────────────────────────────────────

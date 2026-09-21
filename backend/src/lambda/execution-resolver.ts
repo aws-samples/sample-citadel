@@ -17,7 +17,7 @@ import {
 } from "@aws-sdk/client-cloudwatch";
 import { v4 as uuidv4 } from "uuid";
 import { getUserId } from "../utils/appsync";
-import { extractOrgFromEvent } from "../utils/auth-event";
+import { extractOrgFromEvent, assertRowOrg } from "../utils/auth-event";
 import { mintRunId, buildDispatchContext } from "../utils/run-id";
 import {
   METRIC_NAMESPACE,
@@ -330,10 +330,12 @@ async function listExecutions(
     throw new Error("Workflow not found");
   }
 
-  const userOrg = await extractOrgFromEvent(event);
-  if (!userOrg || workflow.orgId !== userOrg) {
-    throw new Error("Access denied");
-  }
+  // Admin cross-org read bypass (finding 4d69104a), mirroring the shared
+  // assertRowOrg gate (auth-event.ts): admins may list any org's
+  // executions; non-admins are reconciled against their server-derived org
+  // and denied (fail-closed) when that org is unresolvable, matching this
+  // function's existing fail-closed contract for an org-less caller.
+  await assertRowOrg(workflow as { orgId?: unknown }, event);
 
   const result = await docClient.send(
     new QueryCommand({

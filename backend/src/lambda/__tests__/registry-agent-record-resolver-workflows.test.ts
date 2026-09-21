@@ -16,9 +16,11 @@ import {
   EventBridgeClient,
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
+import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
+const ddbMock = mockClient(DynamoDBDocumentClient);
 
 import {
   seedMockRegistry,
@@ -110,7 +112,9 @@ describe("registry-agent-record-resolver — workflow binding", () => {
   beforeEach(() => {
     resetMockRegistry();
     ebMock.reset();
+    ddbMock.reset();
     ebMock.on(PutEventsCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
   });
 
   afterAll(() => {
@@ -146,6 +150,35 @@ describe("registry-agent-record-resolver — workflow binding", () => {
       expect(boundEvents.length).toBe(1);
     });
 
+    // Finding 4d69104a: bind must update BOTH the registry manifest AND
+    // the AppsTable #META mirror's workflowIds — the Agent Apps list reads
+    // the mirror (via OrgIndex), and the detail view shadows the manifest
+    // whenever the mirror's workflowIds list is non-empty.
+    test("mirrors the updated workflowIds onto the AppsTable #META row", async () => {
+      seedApp({ manifest: { workflowIds: ["wf-existing"] } });
+
+      await invokeHandler(
+        makeEvent("bindWorkflowToApp", {
+          appId: "app-1",
+          workflowId: "wf-new",
+        }),
+      );
+
+      const metaUpdate = ddbMock
+        .commandCalls(UpdateCommand)
+        .find(
+          (c) =>
+            c.args[0].input.TableName === "citadel-apps-test" &&
+            (c.args[0].input.Key as Record<string, unknown> | undefined)
+              ?.appId === "app-1",
+        );
+      expect(metaUpdate).toBeDefined();
+      const values = metaUpdate!.args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[":v_workflowIds"]).toEqual(["wf-existing", "wf-new"]);
+      expect(typeof values[":v_updatedAt"]).toBe("string");
+    });
+
     test("is idempotent when workflow already bound to same app", async () => {
       seedApp({ manifest: { workflowIds: ["wf-1"] } });
 
@@ -159,6 +192,9 @@ describe("registry-agent-record-resolver — workflow binding", () => {
       ).resolves.toBeDefined();
 
       expect(ebMock.commandCalls(PutEventsCommand).length).toBe(0);
+      // Idempotent short-circuit returns before any write — no mirror
+      // update should be issued either.
+      expect(ddbMock.commandCalls(UpdateCommand).length).toBe(0);
     });
 
     test("throws when app not found", async () => {
@@ -170,6 +206,23 @@ describe("registry-agent-record-resolver — workflow binding", () => {
           }),
         ),
       ).rejects.toThrow("App not found");
+    });
+
+    // Eventually-consistent contract (matches createApp/updateApp/deleteApp
+    // in registry-agent-record-resolver-meta-writes.test.ts): a mirror
+    // write failure must not fail the mutation itself.
+    test("succeeds even if the AppsTable #META mirror write fails", async () => {
+      seedApp({ manifest: { workflowIds: [] } });
+      ddbMock.on(UpdateCommand).rejects(new Error("AppsTable down"));
+
+      await expect(
+        invokeHandler(
+          makeEvent("bindWorkflowToApp", {
+            appId: "app-1",
+            workflowId: "wf-1",
+          }),
+        ),
+      ).resolves.toBeDefined();
     });
   });
 
@@ -196,6 +249,32 @@ describe("registry-agent-record-resolver — workflow binding", () => {
       expect(unboundEvents.length).toBe(1);
     });
 
+    // Finding 4d69104a: unbind must also update the AppsTable #META
+    // mirror's workflowIds, keeping it in sync with the registry manifest.
+    test("mirrors the updated workflowIds onto the AppsTable #META row", async () => {
+      seedApp({ manifest: { workflowIds: ["wf-1", "wf-2"] } });
+
+      await invokeHandler(
+        makeEvent("unbindWorkflowFromApp", {
+          appId: "app-1",
+          workflowId: "wf-1",
+        }),
+      );
+
+      const metaUpdate = ddbMock
+        .commandCalls(UpdateCommand)
+        .find(
+          (c) =>
+            c.args[0].input.TableName === "citadel-apps-test" &&
+            (c.args[0].input.Key as Record<string, unknown> | undefined)
+              ?.appId === "app-1",
+        );
+      expect(metaUpdate).toBeDefined();
+      const values = metaUpdate!.args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[":v_workflowIds"]).toEqual(["wf-2"]);
+    });
+
     test("throws when app not found", async () => {
       await expect(
         invokeHandler(
@@ -205,6 +284,20 @@ describe("registry-agent-record-resolver — workflow binding", () => {
           }),
         ),
       ).rejects.toThrow("App not found");
+    });
+
+    test("succeeds even if the AppsTable #META mirror write fails", async () => {
+      seedApp({ manifest: { workflowIds: ["wf-1"] } });
+      ddbMock.on(UpdateCommand).rejects(new Error("AppsTable down"));
+
+      await expect(
+        invokeHandler(
+          makeEvent("unbindWorkflowFromApp", {
+            appId: "app-1",
+            workflowId: "wf-1",
+          }),
+        ),
+      ).resolves.toBeDefined();
     });
   });
 });

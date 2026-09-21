@@ -38,39 +38,52 @@
  *   - Rate-limit friendly: small sleep between Registry GetItem calls so
  *     large registries do not burst the DDB GetItem capacity.
  */
-import * as fs from 'fs';
-import * as path from 'path';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import * as fs from "fs";
+import * as path from "path";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
   ScanCommand,
-} from '@aws-sdk/lib-dynamodb';
+  NativeAttributeValue,
+} from "@aws-sdk/lib-dynamodb";
 
-import { bootstrapEnv } from './backfill-org-ids';
+import { bootstrapEnv } from "./backfill-org-ids";
 import {
   RegistryService,
   RegistryRecord,
-} from '../src/services/registry-service';
+} from "../src/services/registry-service";
 import {
   AppMetaRow,
   upsertAppMeta,
   APP_META_SORT_VALUE,
-} from '../src/utils/apps-table-meta';
+} from "../src/utils/apps-table-meta";
 
 // ---------------------------------------------------------------------------
 // Pure logic helpers (exported for unit tests)
 // ---------------------------------------------------------------------------
 
-export type DriftKind = 'missing' | 'stale' | 'in-sync' | 'orphan';
+export type DriftKind = "missing" | "stale" | "in-sync" | "orphan";
 
 /**
- * Comparison set: the only fields that drive 'stale' classification. Matches
- * the contract called out in the Step 4 task description. Differences in
- * other fields (description, workflowIds, routingConfig, …) are tolerated to
- * keep noise low.
+ * Comparison set: the fields that drive 'stale' classification. Matches
+ * the contract called out in the Step 4 task description, plus
+ * `workflowIds` (finding 4d69104a): `bindWorkflowToApp`/
+ * `unbindWorkflowFromApp` now write `workflowIds` to BOTH the registry
+ * manifest and this mirror synchronously, but a failed/partial mirror
+ * write (upsertAppMeta/updateAppMetaFields return false rather than throw)
+ * would otherwise drift silently forever — the reconciler is the only
+ * backstop for that case, so `workflowIds` must be a comparison field, not
+ * a tolerated one. Differences in other fields (description,
+ * routingConfig, …) are still tolerated to keep noise low.
  */
-const DRIFT_FIELDS = ['name', 'status', 'orgId', 'version'] as const;
+const DRIFT_FIELDS = [
+  "name",
+  "status",
+  "orgId",
+  "version",
+  "workflowIds",
+] as const;
 export type DriftField = (typeof DRIFT_FIELDS)[number];
 
 /**
@@ -78,12 +91,20 @@ export type DriftField = (typeof DRIFT_FIELDS)[number];
  * are coerced (DDB DocumentClient returns JS numbers; the projection is
  * always a JS number) and null/undefined are normalised to '' so a missing
  * field on either side compares equal to an empty string on the other.
+ * Arrays (workflowIds) are compared order-insensitively by value — the
+ * registry manifest and the mirror do not guarantee identical insertion
+ * order for the same logical set of bound workflow ids.
  */
 function fieldsEqual(_field: DriftField, a: unknown, b: unknown): boolean {
-  if (typeof a === 'number' || typeof b === 'number') {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    const aArr = Array.isArray(a) ? [...a].map(String).sort() : [];
+    const bArr = Array.isArray(b) ? [...b].map(String).sort() : [];
+    return aArr.length === bArr.length && aArr.every((v, i) => v === bArr[i]);
+  }
+  if (typeof a === "number" || typeof b === "number") {
     return Number(a) === Number(b);
   }
-  return (a ?? '') === (b ?? '');
+  return (a ?? "") === (b ?? "");
 }
 
 /**
@@ -103,9 +124,9 @@ export function classifyDrift(
   const haveProjection = projection != null;
   const haveMeta = metaRow != null;
 
-  if (haveProjection && !haveMeta) return 'missing';
-  if (!haveProjection && haveMeta) return 'orphan';
-  if (!haveProjection && !haveMeta) return 'in-sync'; // no-op pathological case
+  if (haveProjection && !haveMeta) return "missing";
+  if (!haveProjection && haveMeta) return "orphan";
+  if (!haveProjection && !haveMeta) return "in-sync"; // no-op pathological case
 
   const proj = projection as AppMetaRow;
   const row = metaRow as Partial<AppMetaRow>;
@@ -113,9 +134,9 @@ export function classifyDrift(
   for (const field of DRIFT_FIELDS) {
     const a = (proj as unknown as Record<string, unknown>)[field];
     const b = (row as unknown as Record<string, unknown>)[field];
-    if (!fieldsEqual(field, a, b)) return 'stale';
+    if (!fieldsEqual(field, a, b)) return "stale";
   }
-  return 'in-sync';
+  return "in-sync";
 }
 
 /**
@@ -144,16 +165,16 @@ export function firstDifferingField(
  * raw value when not JSON / no nested description is present.
  */
 function extractHumanDescription(raw: string | null | undefined): string {
-  if (!raw) return '';
+  if (!raw) return "";
   const trimmed = raw.trim();
-  if (!trimmed.startsWith('{')) return raw;
+  if (!trimmed.startsWith("{")) return raw;
   try {
     const parsed = JSON.parse(trimmed);
-    if (typeof parsed?.description === 'string' && parsed.description.trim()) {
+    if (typeof parsed?.description === "string" && parsed.description.trim()) {
       return parsed.description;
     }
     if (
-      typeof parsed?.info?.description === 'string' &&
+      typeof parsed?.info?.description === "string" &&
       parsed.info.description.trim()
     ) {
       return parsed.info.description;
@@ -189,20 +210,29 @@ function extractHumanDescription(raw: string | null | undefined): string {
 export function projectRegistryRecordToMeta(
   record: Pick<
     RegistryRecord,
-    | 'recordId'
-    | 'name'
-    | 'description'
-    | 'status'
-    | 'customDescriptorContent'
-    | 'createdAt'
-    | 'updatedAt'
+    | "recordId"
+    | "name"
+    | "description"
+    | "status"
+    | "customDescriptorContent"
+    | "createdAt"
+    | "updatedAt"
   >,
 ): AppMetaRow {
+  // Pre-existing dynamic-shape typing (predates finding 4d69104a): the
+  // descriptor/manifest blob is untyped JSON with dozens of dotted
+  // accesses below (manifest.orgId, .status, .createdBy, .version,
+  // .workflowIds, .routingConfig, …) — narrowing to Record<string,
+  // unknown> here would just push an `as` cast onto every one of those
+  // accesses with no behavior change. Left as `any` with an explicit
+  // suppression rather than a drive-by retype unrelated to this fix.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let descriptor: Record<string, any> = {};
   if (record.customDescriptorContent) {
     try {
       const parsed = JSON.parse(record.customDescriptorContent);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         descriptor = parsed as Record<string, any>;
       }
     } catch {
@@ -211,18 +241,19 @@ export function projectRegistryRecordToMeta(
   }
 
   const manifest =
-    descriptor.manifest && typeof descriptor.manifest === 'object'
-      ? (descriptor.manifest as Record<string, any>)
+    descriptor.manifest && typeof descriptor.manifest === "object"
+      ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (descriptor.manifest as Record<string, any>)
       : {};
 
-  const orgId = String(manifest.orgId ?? descriptor.orgId ?? '');
-  const status = String(manifest.status ?? record.status ?? 'DRAFT');
-  const createdBy = String(manifest.createdBy ?? descriptor.createdBy ?? '');
+  const orgId = String(manifest.orgId ?? descriptor.orgId ?? "");
+  const status = String(manifest.status ?? record.status ?? "DRAFT");
+  const createdBy = String(manifest.createdBy ?? descriptor.createdBy ?? "");
 
   const version =
-    typeof manifest.version === 'number'
+    typeof manifest.version === "number"
       ? manifest.version
-      : typeof descriptor.version === 'number'
+      : typeof descriptor.version === "number"
         ? descriptor.version
         : 1;
 
@@ -233,10 +264,10 @@ export function projectRegistryRecordToMeta(
   // routingConfig is stored as a serialised JSON string in the META row.
   // The manifest may carry it as a structured object; normalise either form.
   const routingConfigRaw = manifest.routingConfig;
-  let routingConfig = '';
+  let routingConfig = "";
   if (routingConfigRaw != null) {
     routingConfig =
-      typeof routingConfigRaw === 'string'
+      typeof routingConfigRaw === "string"
         ? routingConfigRaw
         : JSON.stringify(routingConfigRaw);
   }
@@ -246,20 +277,20 @@ export function projectRegistryRecordToMeta(
   const createdAt =
     record.createdAt instanceof Date
       ? record.createdAt.toISOString()
-      : typeof record.createdAt === 'string'
+      : typeof record.createdAt === "string"
         ? record.createdAt
-        : '';
+        : "";
   const updatedAt =
     record.updatedAt instanceof Date
       ? record.updatedAt.toISOString()
-      : typeof record.updatedAt === 'string'
+      : typeof record.updatedAt === "string"
         ? record.updatedAt
-        : '';
+        : "";
 
   return {
     appId: record.recordId,
     orgId,
-    name: record.name ?? '',
+    name: record.name ?? "",
     description,
     status,
     workflowIds,
@@ -306,22 +337,22 @@ function findUpwards(
  */
 export function loadAppsTableFromCdkOutputs(): void {
   if (process.env.APPS_TABLE) return;
-  const outputsPath = findUpwards(process.cwd(), 'cdk-outputs.json');
+  const outputsPath = findUpwards(process.cwd(), "cdk-outputs.json");
   if (!outputsPath) return;
   let outputs: Record<string, Record<string, unknown>>;
   try {
-    outputs = JSON.parse(fs.readFileSync(outputsPath, 'utf8'));
+    outputs = JSON.parse(fs.readFileSync(outputsPath, "utf8"));
   } catch {
     return;
   }
-  const backend = (outputs['citadel-backend-dev'] ?? {}) as Record<
+  const backend = (outputs["citadel-backend-dev"] ?? {}) as Record<
     string,
     unknown
   >;
   for (const k of Object.keys(backend)) {
-    if (k.includes('AppsTable')) {
+    if (k.includes("AppsTable")) {
       const v = backend[k];
-      if (typeof v === 'string' && v) {
+      if (typeof v === "string" && v) {
         process.env.APPS_TABLE = v;
         return;
       }
@@ -336,7 +367,7 @@ export function loadAppsTableFromCdkOutputs(): void {
  */
 export function deriveAppsTable(): void {
   if (process.env.APPS_TABLE) return;
-  const env = process.env.ENVIRONMENT || 'dev';
+  const env = process.env.ENVIRONMENT || "dev";
   process.env.APPS_TABLE = `citadel-apps-${env}`;
 }
 
@@ -379,14 +410,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-type LogLevel = 'info' | 'warn' | 'error';
+type LogLevel = "info" | "warn" | "error";
 
 function log(level: LogLevel, msg: string): void {
   const ts = new Date().toISOString();
   const prefix =
-    level === 'error' ? 'ERROR' : level === 'warn' ? 'WARN' : 'INFO';
+    level === "error" ? "ERROR" : level === "warn" ? "WARN" : "INFO";
   const line = `${ts} [${prefix}] ${msg}`;
-  if (level === 'error') {
+  if (level === "error") {
     // eslint-disable-next-line no-console
     console.error(line);
   } else {
@@ -404,7 +435,7 @@ async function getAppMetaRow(
   docClient: DynamoDBDocumentClient,
   tableName: string,
   appId: string,
-): Promise<Record<string, any> | null> {
+): Promise<Record<string, NativeAttributeValue> | null> {
   const result = await docClient.send(
     new GetCommand({
       TableName: tableName,
@@ -423,14 +454,14 @@ async function getAppMetaRow(
 async function* scanMetaRows(
   docClient: DynamoDBDocumentClient,
   tableName: string,
-): AsyncGenerator<Record<string, any>> {
-  let exclusiveStartKey: Record<string, any> | undefined;
+): AsyncGenerator<Record<string, NativeAttributeValue>> {
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
   do {
     const result = await docClient.send(
       new ScanCommand({
         TableName: tableName,
-        FilterExpression: 'sortId = :meta',
-        ExpressionAttributeValues: { ':meta': APP_META_SORT_VALUE },
+        FilterExpression: "sortId = :meta",
+        ExpressionAttributeValues: { ":meta": APP_META_SORT_VALUE },
         ExclusiveStartKey: exclusiveStartKey,
       }),
     );
@@ -455,13 +486,13 @@ async function reconcileFromRegistry(
   summary: Summary,
   seenAppIds: Set<string>,
 ): Promise<void> {
-  log('info', '--- Pass 1: Registry → AppsTable #META ---');
+  log("info", "--- Pass 1: Registry → AppsTable #META ---");
 
   let records: RegistryRecord[];
   try {
-    records = await registry.listResources('agent');
+    records = await registry.listResources("agent");
   } catch (err) {
-    log('error', `Failed to list Registry agent records: ${String(err)}`);
+    log("error", `Failed to list Registry agent records: ${String(err)}`);
     summary.errors++;
     return;
   }
@@ -475,22 +506,16 @@ async function reconcileFromRegistry(
     try {
       projection = projectRegistryRecordToMeta(record);
     } catch (err) {
-      log(
-        'error',
-        `[agent] appId=${appId} projection failed: ${String(err)}`,
-      );
+      log("error", `[agent] appId=${appId} projection failed: ${String(err)}`);
       summary.errors++;
       continue;
     }
 
-    let metaRow: Record<string, any> | null;
+    let metaRow: Record<string, NativeAttributeValue> | null;
     try {
       metaRow = await getAppMetaRow(docClient, tableName, appId);
     } catch (err) {
-      log(
-        'error',
-        `[agent] appId=${appId} GetItem failed: ${String(err)}`,
-      );
+      log("error", `[agent] appId=${appId} GetItem failed: ${String(err)}`);
       summary.errors++;
       await sleep(REGISTRY_SLEEP_MS);
       continue;
@@ -499,14 +524,14 @@ async function reconcileFromRegistry(
 
     const drift = classifyDrift(projection, metaRow);
     switch (drift) {
-      case 'in-sync':
+      case "in-sync":
         summary.inSync++;
         // No log for in-sync rows; keep the output focused on drift.
         break;
-      case 'missing':
+      case "missing":
         summary.missing++;
         log(
-          'info',
+          "info",
           `[agent] appId=${appId} drift=missing  -> mirroring from Registry`,
         );
         if (apply) {
@@ -518,28 +543,28 @@ async function reconcileFromRegistry(
           }
         }
         break;
-      case 'stale': {
+      case "stale": {
         summary.stale++;
         const field = firstDifferingField(projection, metaRow!);
         const registryValue =
           field !== null
             ? (projection as unknown as Record<string, unknown>)[field]
-            : '<unknown>';
+            : "<unknown>";
         const metaValue =
           field !== null
             ? (metaRow as unknown as Record<string, unknown>)[field]
-            : '<unknown>';
+            : "<unknown>";
         log(
-          'info',
-          `[agent] appId=${appId} drift=stale    field=${field ?? '<none>'} registry=${String(registryValue)} meta=${String(metaValue)}`,
+          "info",
+          `[agent] appId=${appId} drift=stale    field=${field ?? "<none>"} registry=${String(registryValue)} meta=${String(metaValue)}`,
         );
         break;
       }
-      case 'orphan':
+      case "orphan":
         // Pass 1 cannot produce an 'orphan' classification — it always has
         // a Registry projection. Defensive default.
         log(
-          'warn',
+          "warn",
           `[agent] appId=${appId} drift=orphan  unexpected in registry pass`,
         );
         break;
@@ -557,25 +582,25 @@ async function reconcileFromMeta(
   summary: Summary,
   seenAppIds: Set<string>,
 ): Promise<void> {
-  log('info', '--- Pass 2: AppsTable #META → Registry ---');
+  log("info", "--- Pass 2: AppsTable #META → Registry ---");
 
   try {
     for await (const item of scanMetaRows(docClient, tableName)) {
       summary.scannedMeta++;
-      const appId = String(item.appId ?? '');
+      const appId = String(item.appId ?? "");
       if (!appId) {
-        log('warn', `[agent] appId=<missing> skipping #META row with no appId`);
+        log("warn", `[agent] appId=<missing> skipping #META row with no appId`);
         continue;
       }
       if (seenAppIds.has(appId)) continue; // matched in Pass 1 already
       summary.orphan++;
       log(
-        'info',
+        "info",
         `[agent] appId=${appId} drift=orphan   in #META but not in Registry`,
       );
     }
   } catch (err) {
-    log('error', `AppsTable scan failed: ${String(err)}`);
+    log("error", `AppsTable scan failed: ${String(err)}`);
     summary.errors++;
   }
 }
@@ -597,7 +622,7 @@ export interface ReconciliationOptions {
 }
 
 export interface ReconciliationSummary {
-  mode: 'dry-run' | 'apply';
+  mode: "dry-run" | "apply";
   scannedRegistry: number;
   scannedMeta: number;
   inSync: number;
@@ -627,22 +652,20 @@ export async function runReconciliation(
   const dryRun = !apply;
 
   const registryId = process.env.REGISTRY_ID;
-  const region = process.env.AWS_REGION || 'us-west-2';
+  const region = process.env.AWS_REGION || "us-west-2";
   const appsTable = process.env.APPS_TABLE;
 
-  if (!registryId) throw new Error('REGISTRY_ID env var required');
-  if (!appsTable) throw new Error('APPS_TABLE env var required');
+  if (!registryId) throw new Error("REGISTRY_ID env var required");
+  if (!appsTable) throw new Error("APPS_TABLE env var required");
 
-  log('info', `Mode: ${dryRun ? 'DRY-RUN' : 'APPLY'}`);
+  log("info", `Mode: ${dryRun ? "DRY-RUN" : "APPLY"}`);
   log(
-    'info',
+    "info",
     `REGISTRY_ID=${registryId} APPS_TABLE=${appsTable} REGION=${region}`,
   );
 
   const registry = new RegistryService({ registryId, region });
-  const docClient = DynamoDBDocumentClient.from(
-    new DynamoDBClient({ region }),
-  );
+  const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
   const summary = emptySummary();
   const seenAppIds = new Set<string>();
@@ -658,7 +681,7 @@ export async function runReconciliation(
   await reconcileFromMeta(docClient, appsTable, summary, seenAppIds);
 
   return {
-    mode: dryRun ? 'dry-run' : 'apply',
+    mode: dryRun ? "dry-run" : "apply",
     scannedRegistry: summary.scannedRegistry,
     scannedMeta: summary.scannedMeta,
     inSync: summary.inSync,
@@ -680,7 +703,7 @@ export async function runReconciliation(
  */
 export async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const apply = args.includes('--apply');
+  const apply = args.includes("--apply");
 
   // Reuse backfill-org-ids' env loaders for REGISTRY_ID / AWS_REGION /
   // ENVIRONMENT, then layer on APPS_TABLE-specific loaders.
@@ -690,23 +713,23 @@ export async function main(): Promise<void> {
 
   const summary = await runReconciliation({ apply });
 
-  log('info', '--- Reconciler summary ---');
-  log('info', `mode:             ${summary.mode}`);
-  log('info', `scanned-registry: ${summary.scannedRegistry}`);
-  log('info', `scanned-meta:     ${summary.scannedMeta}`);
-  log('info', `in-sync:          ${summary.inSync}`);
-  log('info', `missing:          ${summary.missing}`);
-  log('info', `stale:            ${summary.stale}`);
-  log('info', `orphan:           ${summary.orphan}`);
+  log("info", "--- Reconciler summary ---");
+  log("info", `mode:             ${summary.mode}`);
+  log("info", `scanned-registry: ${summary.scannedRegistry}`);
+  log("info", `scanned-meta:     ${summary.scannedMeta}`);
+  log("info", `in-sync:          ${summary.inSync}`);
+  log("info", `missing:          ${summary.missing}`);
+  log("info", `stale:            ${summary.stale}`);
+  log("info", `orphan:           ${summary.orphan}`);
   if (apply) {
-    log('info', `fixed:            ${summary.fixed}`);
+    log("info", `fixed:            ${summary.fixed}`);
   }
-  log('info', `errors:           ${summary.errors}`);
+  log("info", `errors:           ${summary.errors}`);
 }
 
 if (require.main === module) {
   main().catch((err) => {
-    log('error', `Fatal: ${String(err)}`);
+    log("error", `Fatal: ${String(err)}`);
     process.exit(1);
   });
 }
