@@ -1394,6 +1394,112 @@ describe("workflow-resolver", () => {
       ).rejects.toThrow(/Access denied/i);
     });
 
+    // Finding b7ef1a41: importBlueprint's inline org compare had no admin
+    // bypass. Converted to the shared assertRowOrg gate.
+    test("admin caller may import a blueprint into an app belonging to a different org", async () => {
+      ddbMock
+        .on(GetCommand)
+        .resolvesOnce({
+          Item: {
+            workflowId: "bp-1",
+            orgId: "org-1",
+            name: "Blueprint",
+            status: "PUBLISHED",
+            isBlueprint: "true",
+            definition: blueprintDef,
+            version: 2,
+          },
+        })
+        .resolvesOnce({
+          Item: {
+            appId: "app-1",
+            orgId: "org-other",
+            name: "Other App",
+            workflowIds: [],
+            version: 1,
+          },
+        });
+      ddbMock.on(PutCommand).resolves({});
+      ddbMock.on(UpdateCommand).resolves({});
+
+      const adminEvent = {
+        info: { fieldName: "importBlueprint" },
+        arguments: { blueprintId: "bp-1", appId: "app-1" },
+        identity: {
+          sub: "admin-1",
+          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result.appId).toBe("app-1");
+      expect(result.orgId).toBe("org-other");
+    });
+
+    test("org-less (unresolvable) caller is denied", async () => {
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      ddbMock
+        .on(GetCommand)
+        .resolvesOnce({
+          Item: {
+            workflowId: "bp-1",
+            orgId: "org-1",
+            name: "Blueprint",
+            status: "PUBLISHED",
+            isBlueprint: "true",
+            definition: blueprintDef,
+            version: 2,
+          },
+        })
+        .resolvesOnce({
+          Item: {
+            appId: "app-1",
+            orgId: "org-1",
+            name: "App",
+            workflowIds: [],
+            version: 1,
+          },
+        });
+
+      await expect(
+        invoke(
+          makeEvent("importBlueprint", { blueprintId: "bp-1", appId: "app-1" }),
+        ),
+      ).rejects.toThrow(/Access denied/i);
+    });
+
+    test("non-admin same-org caller may import the blueprint", async () => {
+      ddbMock
+        .on(GetCommand)
+        .resolvesOnce({
+          Item: {
+            workflowId: "bp-1",
+            orgId: "org-1",
+            name: "Blueprint",
+            status: "PUBLISHED",
+            isBlueprint: "true",
+            definition: blueprintDef,
+            version: 2,
+          },
+        })
+        .resolvesOnce({
+          Item: {
+            appId: "app-1",
+            orgId: "org-1",
+            name: "App",
+            workflowIds: [],
+            version: 1,
+          },
+        });
+      ddbMock.on(PutCommand).resolves({});
+      ddbMock.on(UpdateCommand).resolves({});
+
+      const result = await invoke(
+        makeEvent("importBlueprint", { blueprintId: "bp-1", appId: "app-1" }),
+      );
+      expect(result.orgId).toBe("org-1");
+    });
+
     test("applies agentMapping to rewrite placeholder node agentIds to real agentIds", async () => {
       const placeholderDef = JSON.stringify({
         nodes: [
@@ -1849,6 +1955,79 @@ describe("workflow-resolver", () => {
 
       // Verify BatchGetCommand was called
       expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(1);
+    });
+
+    // Finding b7ef1a41: listAppWorkflows's inline org compare had no admin
+    // bypass. Converted to the shared assertRowOrg gate.
+    test("admin caller may list workflows for an app belonging to a different org", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          appId: "app-1",
+          orgId: "org-other",
+          name: "Other App",
+          workflowIds: ["wf-1"],
+          version: 1,
+        },
+      });
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {
+          "citadel-workflows-test": [
+            {
+              workflowId: "wf-1",
+              orgId: "org-other",
+              name: "Workflow 1",
+              status: "DRAFT",
+            },
+          ],
+        },
+      });
+
+      const adminEvent = {
+        info: { fieldName: "listAppWorkflows" },
+        arguments: { appId: "app-1" },
+        identity: {
+          sub: "admin-1",
+          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke<Record<string, unknown>[]>(adminEvent);
+      expect(result).toHaveLength(1);
+    });
+
+    test("non-admin cross-org caller is denied and issues zero BatchGetCommands", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          appId: "app-1",
+          orgId: "org-other",
+          name: "Other App",
+          workflowIds: ["wf-1"],
+          version: 1,
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("listAppWorkflows", { appId: "app-1" })),
+      ).rejects.toThrow(/Access denied/i);
+      expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(0);
+    });
+
+    test("org-less (unresolvable) caller is denied", async () => {
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          appId: "app-1",
+          orgId: "org-1",
+          name: "My App",
+          workflowIds: ["wf-1"],
+          version: 1,
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("listAppWorkflows", { appId: "app-1" })),
+      ).rejects.toThrow(/Access denied/i);
+      expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(0);
     });
   });
 });

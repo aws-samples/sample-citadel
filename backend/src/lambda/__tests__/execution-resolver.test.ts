@@ -135,6 +135,66 @@ describe("execution-resolver", () => {
       ).rejects.toThrow("Access denied");
     });
 
+    // Admin cross-org read bypass (finding b7ef1a41), via the shared
+    // assertRowOrg gate now used here (mirrors listExecutions/getWorkflow).
+    test("admin caller may read an execution belonging to a different org", async () => {
+      const execution = {
+        executionId: "exec-admin",
+        workflowId: "wf-1",
+        orgId: "org-other",
+        status: "pending",
+        nodeResults: {},
+        startedAt: "2024-01-01T00:00:00Z",
+        triggeredBy: "user-123",
+      };
+      ddbMock.on(GetCommand).resolves({ Item: { ...execution } });
+
+      const adminEvent = {
+        info: { fieldName: "getExecution" },
+        arguments: { executionId: "exec-admin" },
+        identity: {
+          sub: "admin-1",
+          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result).toEqual({ ...execution, usageTotals: null });
+    });
+
+    test("non-admin same-org caller may read the execution", async () => {
+      const execution = {
+        executionId: "exec-same-org",
+        workflowId: "wf-1",
+        orgId: "org-1",
+        status: "pending",
+        nodeResults: {},
+        startedAt: "2024-01-01T00:00:00Z",
+        triggeredBy: "user-123",
+      };
+      ddbMock.on(GetCommand).resolves({ Item: { ...execution } });
+
+      const result = await invoke(
+        makeEvent("getExecution", { executionId: "exec-same-org" }),
+      );
+      expect(result).toEqual({ ...execution, usageTotals: null });
+    });
+
+    test("org-less (unresolvable) non-admin caller is denied even for a row with no orgId", async () => {
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          executionId: "exec-orgless",
+          workflowId: "wf-1",
+          status: "pending",
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("getExecution", { executionId: "exec-orgless" })),
+      ).rejects.toThrow("Access denied");
+    });
+
     test("claim-first path: reads custom:organization from identity and skips Cognito", async () => {
       const execution = {
         executionId: "exec-claim",
@@ -539,6 +599,67 @@ describe("execution-resolver", () => {
       await expect(
         invoke(makeEvent("startExecution", { workflowId: "wf-draft" })),
       ).rejects.toThrow(/published/i);
+    });
+
+    // Finding b7ef1a41: startExecution threw "Access denied" via an inline
+    // org compare with NO admin bypass, unlike getWorkflow/listExecutions
+    // (assertRowOrg, since PR #178). Converted to the shared assertRowOrg
+    // gate so admins can start executions across organisations.
+    test("admin caller may start an execution for a workflow belonging to a different org", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: { ...publishedWorkflow, orgId: "org-other" },
+      });
+      ddbMock.on(PutCommand).resolves({});
+
+      const adminEvent = {
+        info: { fieldName: "startExecution" },
+        arguments: { workflowId: "wf-1" },
+        identity: {
+          sub: "admin-1",
+          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result.orgId).toBe("org-other");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+
+    test("non-admin cross-org caller is denied and no execution row is written", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: { ...publishedWorkflow, orgId: "org-other" },
+      });
+      ddbMock.on(PutCommand).resolves({});
+
+      await expect(
+        invoke(makeEvent("startExecution", { workflowId: "wf-1" })),
+      ).rejects.toThrow("Access denied");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+      expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(0);
+    });
+
+    test("org-less (unresolvable) caller is denied and no execution row is written", async () => {
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      ddbMock.on(GetCommand).resolves({ Item: publishedWorkflow });
+      ddbMock.on(PutCommand).resolves({});
+
+      await expect(
+        invoke(makeEvent("startExecution", { workflowId: "wf-1" })),
+      ).rejects.toThrow("Access denied");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+      expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(0);
+    });
+
+    test("non-admin same-org caller starts the execution and the row is written only after the gate passes", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: publishedWorkflow });
+      ddbMock.on(PutCommand).resolves({});
+
+      const result = await invoke(
+        makeEvent("startExecution", { workflowId: "wf-1" }),
+      );
+
+      expect(result.orgId).toBe("org-1");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
     });
   });
 
