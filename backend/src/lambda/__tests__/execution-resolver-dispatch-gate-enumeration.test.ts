@@ -15,6 +15,16 @@
  * GSI, only WorkflowIndex on workflowId+startedAt) and reconciles it
  * against the caller's derived org BEFORE running the executions query —
  * refuse, not filter-and-return.
+ *
+ * finding 4d69104a: listExecutions's inline `extractOrgFromEvent` +
+ * `Access denied` check was replaced with the shared `assertRowOrg` gate
+ * (auth-event.ts) to add the standard admin cross-org read bypass,
+ * consistent with every other assertRowOrg call site. `assertRowOrg`
+ * itself calls `extractOrgFromEvent` and throws `CrossOrgAccessError`
+ * (message "Access denied") on a non-admin mismatch/unresolvable-org
+ * caller — GATE_CALL_RE/DENY_RE below accept either the inline shape or a
+ * call to the shared helper so this guard keeps working across both
+ * styles used in this codebase.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -129,8 +139,8 @@ function extractFunctionBody(source: string, fnName: string): string {
   return source.slice(bodyStart, i + 1);
 }
 
-const GATE_CALL_RE = /extractOrgFromEvent\s*\(/;
-const DENY_RE = /Access denied/;
+const GATE_CALL_RE = /extractOrgFromEvent\s*\(|assertRowOrg\s*\(/;
+const DENY_RE = /Access denied|assertRowOrg\s*\(/;
 
 /**
  * Every op on this dispatch surface that touches tenant-scoped execution

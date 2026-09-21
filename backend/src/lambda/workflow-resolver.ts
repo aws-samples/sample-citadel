@@ -17,7 +17,11 @@ import {
 } from "@aws-sdk/client-eventbridge";
 import { v4 as uuidv4 } from "uuid";
 import { getUserId } from "../utils/appsync";
-import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  assertRowOrg,
+} from "../utils/auth-event";
 import { PermissionError } from "./adapters/errors";
 
 const dynamoClient = new DynamoDBClient({});
@@ -196,10 +200,13 @@ async function getWorkflow(
     return null;
   }
 
-  const userOrg = await extractOrgFromEvent(event);
-  if (userOrg && result.Item.orgId !== userOrg) {
-    throw new Error("Access denied");
-  }
+  // Admin cross-org read bypass (finding 4d69104a), mirroring the shared
+  // assertRowOrg gate (auth-event.ts): admins may read any org's workflow;
+  // non-admins are reconciled against their server-derived org and denied
+  // (fail-closed) when that org is unresolvable, matching assertRowOrg's
+  // own contract rather than this function's previous fail-open behavior
+  // for an org-less caller.
+  await assertRowOrg(result.Item as { orgId?: unknown }, event);
 
   return result.Item as WorkflowRecord;
 }
