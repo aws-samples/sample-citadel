@@ -31,9 +31,11 @@ import {
   EventBridgeClient,
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
+const ddbMock = mockClient(DynamoDBDocumentClient);
 
 import {
   seedMockRegistry,
@@ -595,6 +597,10 @@ describe("registry-agent-record-resolver — updateAgentBinding", () => {
     resetMockRegistry();
     ebMock.reset();
     ebMock.on(PutEventsCommand).resolves({});
+    ddbMock.reset();
+    // Default: no legacy row for the READY-gate fallback (finding
+    // 8304fa1b) — individual tests override with a seeded Item as needed.
+    ddbMock.on(GetCommand).resolves({});
   });
 
   test("throws when agent binding does not exist for the app", async () => {
@@ -668,7 +674,7 @@ describe("registry-agent-record-resolver — updateAgentBinding", () => {
     expect(result).toBeDefined();
   });
 
-  test("throws when target agent record does not exist", async () => {
+  test("throws a distinct not-found message when the target agent exists in neither the registry nor the legacy catalog", async () => {
     seedAppWithBinding();
 
     await expect(
@@ -681,7 +687,12 @@ describe("registry-agent-record-resolver — updateAgentBinding", () => {
           },
         }),
       ),
-    ).rejects.toThrow("Agent must be active before it can be marked as ready");
+    ).rejects.toThrow("Agent not found in registry or legacy catalog");
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input).toMatchObject({
+      TableName: "citadel-agents-test",
+      Key: { agentId: "agent-1" },
+    });
   });
 
   test("throws when target agent record status is not active-mapping", async () => {

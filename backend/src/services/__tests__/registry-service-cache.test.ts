@@ -8,11 +8,13 @@
  * - Manual clearRecordIdCache() empties the cache
  *
  * The cache is per-instance and bounded by size + TTL. These tests stub the
- * SDK client's `send` directly (ListRegistryRecordsCommand only — the
- * bounded enumeration fallback in resolveRecordId issues no
- * GetRegistryRecord calls, unlike listResources) so the assertions focus on
- * caching/resolution-order behaviour rather than SDK pagination/filtering
- * already covered elsewhere.
+ * SDK client's `send` directly. Most cases here (ListRegistryRecordsCommand
+ * only) confirm the bounded enumeration fallback issues no GetRegistryRecord
+ * calls when a name has a single exact match — the "keeps separate cache
+ * entries per resource type" case below is the one exception: it exercises
+ * resolveRecordId's per-collision disambiguation (finding 8304fa1b, decision
+ * 84ee7227), which DOES issue a bounded GetRegistryRecord per colliding
+ * candidate, so that test also stubs GetRegistryRecordCommand.
  */
 
 import { RegistryService } from "../registry-service";
@@ -24,7 +26,7 @@ jest.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
     send: sendMock,
   })),
   CreateRegistryRecordCommand: jest.fn(),
-  GetRegistryRecordCommand: jest.fn(),
+  GetRegistryRecordCommand: jest.fn((input) => ({ __type: "Get", input })),
   UpdateRegistryRecordCommand: jest.fn(),
   UpdateRegistryRecordStatusCommand: jest.fn(),
   DeleteRegistryRecordCommand: jest.fn(),
@@ -96,30 +98,57 @@ describe("RegistryService.resolveRecordId — LRU cache", () => {
     expect(sendMock).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps separate cache entries per resource type", async () => {
-    sendMock.mockImplementation(async () => ({
-      registryRecords: [
-        makeSummary("shared_name", "agt000000001"),
-        makeSummary("shared_name", "tol000000001"),
-      ],
-    }));
+  it("keeps separate cache entries per resource type, resolving each to its own matching record (finding 8304fa1b, decision 84ee7227)", async () => {
+    sendMock.mockImplementation(async (command: { input?: unknown }) => {
+      const input = (command?.input ?? {}) as {
+        recordId?: string;
+        nextToken?: string;
+      };
+      if (input.recordId === "agt000000001") {
+        return {
+          recordId: "agt000000001",
+          name: "shared_name",
+          status: "APPROVED",
+          descriptors: {
+            custom: { inlineContent: JSON.stringify({ manifest: {} }) },
+          },
+        };
+      }
+      if (input.recordId === "tol000000001") {
+        return {
+          recordId: "tol000000001",
+          name: "shared_name",
+          status: "APPROVED",
+          descriptors: { custom: { inlineContent: JSON.stringify({}) } },
+        };
+      }
+      return {
+        registryRecords: [
+          makeSummary("shared_name", "agt000000001"),
+          makeSummary("shared_name", "tol000000001"),
+        ],
+      };
+    });
 
     const agentId = await service.resolveRecordId("agent", "shared_name");
     const toolId = await service.resolveRecordId("tool", "shared_name");
-    // Same first match is returned for both types since the summary list
-    // is not type-filtered (summaries carry no type discriminator) — this
-    // mirrors production: resolveRecordId's fallback matches on `name`
-    // only, same as the pre-existing behaviour.
+    // Each type now resolves to its OWN matching record — summaries carry
+    // no type discriminator, so resolveRecordId disambiguates a same-name
+    // collision with a bounded GetRegistryRecord per candidate rather than
+    // returning the first summary hit for both types.
     expect(agentId).toBe("agt000000001");
-    expect(toolId).toBe("agt000000001");
-    // Two distinct cache keys (agent:shared_name, tool:shared_name) → two
-    // registry calls even though both resolve via the same page.
-    expect(sendMock).toHaveBeenCalledTimes(2);
+    expect(toolId).toBe("tol000000001");
+    // Two distinct cache keys (agent:shared_name, tool:shared_name). The
+    // agent lookup matches on its first candidate check (1 List + 1 Get);
+    // the tool lookup must reject the agent candidate before matching the
+    // tool candidate (1 List + 2 Get) — 5 calls total, bounded by the
+    // collision count, not unbounded.
+    expect(sendMock).toHaveBeenCalledTimes(5);
 
-    // Repeats served from cache.
+    // Repeats served from cache — zero additional registry calls.
     await service.resolveRecordId("agent", "shared_name");
     await service.resolveRecordId("tool", "shared_name");
-    expect(sendMock).toHaveBeenCalledTimes(2);
+    expect(sendMock).toHaveBeenCalledTimes(5);
   });
 
   it("re-lists after the TTL expires", async () => {

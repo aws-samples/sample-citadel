@@ -10,9 +10,14 @@
  *   - A name-based lookup that never finds a match stops within the
  *     time budget and throws the same structured error, even when pages
  *     remain available (a "slow but not yet at the page cap" registry).
- *   - The fallback never issues a GetRegistryRecord — only
- *     ListRegistryRecords — matching the incident root cause (per-record
- *     GETs under withRetry caused the 'Request rate exceeded' storm).
+ *   - The fallback never issues a GetRegistryRecord for a name with a
+ *     single exact match — only ListRegistryRecords — matching the
+ *     incident root cause (per-record GETs under withRetry caused the
+ *     'Request rate exceeded' storm). A GetRegistryRecord IS issued, but
+ *     only per colliding candidate, when two or more summaries on the same
+ *     page share the exact name (see the disambiguation test below) —
+ *     summaries never carry enough information to tell an agent and a tool
+ *     of the same name apart otherwise.
  */
 
 import {
@@ -196,5 +201,56 @@ describe("RegistryService.resolveRecordId — bounded enumeration fallback", () 
       expect(cached).toBe("agt000000001");
     }
     expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("prefers the exact-name summary whose type is agent over a same-named tool (finding 8304fa1b decision 84ee7227)", async () => {
+    // Two summaries share the exact name "shared_name" — one is the agent
+    // record (recordId "agtshared001"), the other a tool record with the
+    // same display name (recordId "toolshared01"). Summaries alone cannot
+    // tell them apart (no descriptor content), so resolveRecordId must pay
+    // for a bounded GetRegistryRecord per colliding candidate to find the
+    // one whose descriptor content matches the requested type.
+    sendMock.mockImplementation(async (command: { input: unknown }) => {
+      const input = command.input as {
+        recordId?: string;
+        nextToken?: string;
+      };
+      if (input.recordId === "toolshared01") {
+        // Tool record: description-based config, no manifest.
+        return {
+          recordId: "toolshared01",
+          name: "shared_name",
+          status: "APPROVED",
+          descriptors: { custom: { inlineContent: JSON.stringify({}) } },
+        };
+      }
+      if (input.recordId === "agtshared001") {
+        // Agent record: always carries a manifest.
+        return {
+          recordId: "agtshared001",
+          name: "shared_name",
+          status: "APPROVED",
+          descriptors: {
+            custom: { inlineContent: JSON.stringify({ manifest: {} }) },
+          },
+        };
+      }
+      // ListRegistryRecords page — return the tool summary FIRST so a
+      // naive "first hit wins" implementation would pick the wrong one.
+      return {
+        registryRecords: [
+          makeSummary("shared_name", "toolshared01"),
+          makeSummary("shared_name", "agtshared001"),
+        ],
+      };
+    });
+
+    const resolved = await service.resolveRecordId("agent", "shared_name");
+
+    expect(resolved).toBe("agtshared001");
+    // Bounded by the number of colliding candidates (2 here), never a
+    // per-summary GET across the whole page (which could hold far more
+    // than 2 unrelated summaries).
+    expect(getRegistryRecordCtor).toHaveBeenCalledTimes(2);
   });
 });

@@ -316,6 +316,37 @@ function getDocClient(): DynamoDBDocumentClient {
   return _docClient;
 }
 
+/**
+ * Legacy-catalog fallback for the READY gate (finding 8304fa1b, decision
+ * 84ee7227 option (a)). Legacy agents live ONLY in the DynamoDB agents
+ * table (env AGENT_CONFIG_TABLE — the same table agent-config-resolver's
+ * getAgentConfig reads, keyed by `agentId`, with a `state` column) and
+ * therefore never have a Registry record. Returns null (never throws) when
+ * the table isn't configured or the row doesn't exist, so the caller can
+ * distinguish "not found anywhere" from "found but inactive".
+ */
+async function getLegacyAgentRow(
+  agentId: string,
+): Promise<{ state: string } | null> {
+  if (!AGENT_CONFIG_TABLE) return null;
+  try {
+    const result = await getDocClient().send(
+      new GetCommand({
+        TableName: AGENT_CONFIG_TABLE,
+        Key: { agentId },
+      }),
+    );
+    if (!result.Item) return null;
+    return { state: result.Item.state || "active" };
+  } catch (err) {
+    console.warn("getLegacyAgentRow: DynamoDB lookup failed", {
+      agentId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 /** Lazy EventBridge singleton for publishAppStatusEvent and emitEvent. */
 let _eventBridgeClient: EventBridgeClient | undefined;
 function getEventBridgeClient(): EventBridgeClient {
@@ -2091,6 +2122,11 @@ export async function updateAgentBinding(
     // as "agent not found" so the user sees the normal activation-gate error
     // rather than a raw regex violation.
     let targetAgent;
+    // True only for a genuine not-found (resolveRecordId's name-lookup
+    // exhausted, or getResource returned null) — never for a
+    // TypeMismatchError, which means a record DOES exist but is the wrong
+    // type and must keep surfacing the activation-gate message as before.
+    let notFoundInRegistry = false;
     try {
       const targetRecordId = await getRegistryService().resolveRecordId(
         "agent",
@@ -2100,6 +2136,9 @@ export async function updateAgentBinding(
         "agent",
         targetRecordId,
       );
+      if (!targetAgent) {
+        notFoundInRegistry = true;
+      }
     } catch (err) {
       if (err instanceof TypeMismatchError) {
         throw new Error(
@@ -2114,28 +2153,52 @@ export async function updateAgentBinding(
       if (err instanceof RecordResolutionTimeoutError) {
         throw err;
       }
-      // Distinguish 'not found' (resolveRecordId failure) from 'not active'
-      // so the user sees a useful message rather than a misleading
-      // activation-gate error for a missing agent.
+      // Distinguish 'not found' (resolveRecordId failure) from 'not active'.
+      // A genuine not-found here means the agent may still exist ONLY in
+      // the legacy DynamoDB agents table (finding 8304fa1b) — defer to the
+      // legacy fallback below instead of failing immediately.
       if (err instanceof Error && /not found/i.test(err.message)) {
-        throw new Error(`Agent ${input.agentId} not found`);
+        notFoundInRegistry = true;
+      } else {
+        throw err;
       }
-      throw err;
     }
-    // The agent's state is derived from the AUTHORITATIVE record.status via
-    // toInternalState — never from the descriptor's `state` mirror, which
-    // drifts: the fabricator writes `state: 'inactive'` and activation
-    // (SubmitRegistryRecordForApproval) flips only record.status, so
-    // registry-fabricated agents carry a stale inactive descriptor while
-    // being genuinely active. The inverse drift (descriptor stuck 'active'
-    // on a DRAFT record) must equally not let a half-wired agent flip live.
-    // Matches the state-authority rule documented in agent-config-resolver's
-    // updateAgentConfig.
-    if (
-      !targetAgent ||
-      getRegistryService().toInternalState(targetAgent.status) !== "active"
-    ) {
-      throw new Error("Agent must be active before it can be marked as ready");
+    if (notFoundInRegistry) {
+      // No Registry record resolved. Legacy agents live ONLY in the
+      // DynamoDB agents table (env AGENT_CONFIG_TABLE) and therefore can
+      // never have a Registry record — without this fallback they could
+      // never pass the READY gate (finding 8304fa1b, decision 84ee7227
+      // option (a)). Accept iff the legacy row's state is 'active'.
+      const legacyRow = await getLegacyAgentRow(input.agentId);
+      if (!legacyRow) {
+        throw new Error("Agent not found in registry or legacy catalog");
+      }
+      if (legacyRow.state !== "active") {
+        throw new Error(
+          "Agent must be active before it can be marked as ready",
+        );
+      }
+      console.info(
+        "updateAgentBinding: READY gate satisfied by legacy agents table",
+        { agentId: input.agentId },
+      );
+    } else {
+      // The agent's state is derived from the AUTHORITATIVE record.status
+      // via toInternalState — never from the descriptor's `state` mirror,
+      // which drifts: the fabricator writes `state: 'inactive'` and
+      // activation (SubmitRegistryRecordForApproval) flips only
+      // record.status, so registry-fabricated agents carry a stale
+      // inactive descriptor while being genuinely active. The inverse
+      // drift (descriptor stuck 'active' on a DRAFT record) must equally
+      // not let a half-wired agent flip live. Matches the state-authority
+      // rule documented in agent-config-resolver's updateAgentConfig.
+      if (
+        getRegistryService().toInternalState(targetAgent?.status) !== "active"
+      ) {
+        throw new Error(
+          "Agent must be active before it can be marked as ready",
+        );
+      }
     }
   }
 

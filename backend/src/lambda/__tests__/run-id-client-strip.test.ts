@@ -107,6 +107,14 @@ describe("runId client-strip — submitTask (task-runner-resolver)", () => {
 
 describe("runId client-strip — startExecution (execution-resolver)", () => {
   test("ignores a client-supplied runId planted in startExecution arguments and mints a fresh one", async () => {
+    // startExecution now gates via the shared assertRowOrg (finding
+    // b7ef1a41) instead of the old fail-open inline compare. assertRowOrg
+    // calls extractOrgFromEvent via a same-module reference internal to
+    // auth-event.ts, which bypasses this file's `jest.mock` override of
+    // the exported extractOrgFromEvent — so the REAL implementation runs
+    // and reads the claim straight off `identity`. This test is about
+    // runId stripping, not access control, so satisfy the gate with a
+    // same-org caller via the real custom:organization claim.
     ddbMock.on(GetCommand).resolves({
       Item: {
         workflowId: "wf-1",
@@ -130,7 +138,11 @@ describe("runId client-strip — startExecution (execution-resolver)", () => {
         // payload with a cast.
         runId: ATTACKER_RUN_ID,
       } as unknown as Record<string, unknown>,
-      identity: { sub: "user-123", claims: { sub: "user-123" } },
+      identity: {
+        sub: "user-123",
+        claims: { sub: "user-123" },
+        "custom:organization": "org-1",
+      },
     } as unknown as Parameters<typeof executionHandler>[0]);
 
     const putCalls = ddbMock.commandCalls(PutCommand);

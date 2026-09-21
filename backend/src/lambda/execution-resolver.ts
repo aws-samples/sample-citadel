@@ -17,7 +17,7 @@ import {
 } from "@aws-sdk/client-cloudwatch";
 import { v4 as uuidv4 } from "uuid";
 import { getUserId } from "../utils/appsync";
-import { extractOrgFromEvent, assertRowOrg } from "../utils/auth-event";
+import { assertRowOrg } from "../utils/auth-event";
 import { mintRunId, buildDispatchContext } from "../utils/run-id";
 import {
   METRIC_NAMESPACE,
@@ -290,10 +290,12 @@ async function getExecution(
     return null;
   }
 
-  const userOrg = await extractOrgFromEvent(event);
-  if (userOrg && result.Item.orgId !== userOrg) {
-    throw new Error("Access denied");
-  }
+  // Admin cross-org read bypass (finding b7ef1a41), mirroring the shared
+  // assertRowOrg gate (auth-event.ts) already used by
+  // getWorkflow/listExecutions: admins may read any org's execution;
+  // non-admins are reconciled against their server-derived org and denied
+  // (fail-closed) when that org is unresolvable.
+  await assertRowOrg(result.Item as { orgId?: unknown }, event);
 
   const item = result.Item as ExecutionRecord;
   // Additive: fold per-node usage into an execution-level total on read.
@@ -376,10 +378,13 @@ async function startExecution(
     throw new Error("Workflow not found");
   }
 
-  const userOrg = await extractOrgFromEvent(event);
-  if (userOrg && workflow.orgId !== userOrg) {
-    throw new Error("Access denied");
-  }
+  // Admin cross-org bypass (finding b7ef1a41), mirroring the shared
+  // assertRowOrg gate (auth-event.ts) already used by
+  // getWorkflow/listExecutions: admins may start executions of any org's
+  // workflow; non-admins are reconciled against their server-derived org
+  // and denied (fail-closed) when that org is unresolvable. This must run
+  // before the execution row is written (PutCommand below).
+  await assertRowOrg(workflow as { orgId?: unknown }, event);
 
   if (workflow.status !== "PUBLISHED") {
     throw new Error("Only published workflows can be executed");

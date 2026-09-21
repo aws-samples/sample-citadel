@@ -938,11 +938,12 @@ export async function importBlueprint(
     throw new Error("App not found");
   }
 
-  // Verify org access
-  const userOrg = await extractOrgFromEvent(event);
-  if (userOrg && app.orgId !== userOrg) {
-    throw new Error("Access denied");
-  }
+  // Admin cross-org bypass (finding b7ef1a41), mirroring the shared
+  // assertRowOrg gate (auth-event.ts) already used by getWorkflow: admins
+  // may import a blueprint into any org's app; non-admins are reconciled
+  // against their server-derived org and denied (fail-closed) when that
+  // org is unresolvable.
+  await assertRowOrg(app as { orgId?: unknown }, event);
 
   const now = new Date().toISOString();
   const workflowId = uuidv4();
@@ -1187,11 +1188,12 @@ async function listAppWorkflows(
     throw new Error("App not found");
   }
 
-  // Verify org access
-  const userOrg = await extractOrgFromEvent(event);
-  if (userOrg && app.orgId !== userOrg) {
-    throw new Error("Access denied");
-  }
+  // Admin cross-org read bypass (finding b7ef1a41), mirroring the shared
+  // assertRowOrg gate (auth-event.ts) already used by getWorkflow: admins
+  // may list any org's app workflows; non-admins are reconciled against
+  // their server-derived org and denied (fail-closed) when that org is
+  // unresolvable.
+  await assertRowOrg(app as { orgId?: unknown }, event);
 
   const workflowIds: string[] = app.workflowIds || [];
   if (workflowIds.length === 0) {
