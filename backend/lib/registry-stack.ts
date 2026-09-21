@@ -966,6 +966,14 @@ export class RegistryStack extends cdk.Stack {
           ENVIRONMENT: props.environment,
         },
         timeout: cdk.Duration.seconds(30),
+        // 128MB default was a contributing factor in the retry-storm
+        // timeout of finding ce7daab8 — Lambda allocates CPU proportionally
+        // to memorySize, so the smallest tier left this resolver's
+        // Registry-call-bound work (now bounded by resolveRecordId's own
+        // 8s budget) with less headroom than the 30s function timeout
+        // assumes. 512MB keeps CPU-bound retry/backoff and JSON parsing
+        // work from adding avoidable latency on top of that budget.
+        memorySize: 512,
         logGroup: new logs.LogGroup(
           this,
           "RegistryAgentRecordResolverFunctionLogs",
