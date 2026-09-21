@@ -919,16 +919,61 @@ export class RegistryService {
           ),
       );
 
-      const match = (result.registryRecords ?? []).find((r) => r.name === id);
-      if (match?.recordId) {
-        this.cacheSet(cacheKey, match.recordId);
-        return match.recordId;
+      const nameMatches = (result.registryRecords ?? []).filter(
+        (r) => r.name === id && r.recordId,
+      );
+      if (nameMatches.length > 0) {
+        const resolvedId = await this.pickBestNameMatch(type, nameMatches);
+        if (resolvedId) {
+          this.cacheSet(cacheKey, resolvedId);
+          return resolvedId;
+        }
       }
 
       nextToken = result.nextToken;
     } while (nextToken);
 
     throw new Error(`Registry record not found for ${type}: ${id}`);
+  }
+
+  /**
+   * Disambiguates a page's exact-name matches for {@link resolveRecordId}'s
+   * enumeration fallback. Summaries never carry descriptor content (see
+   * {@link summaryToRecord}), so a single exact name can legitimately
+   * belong to both an agent and a tool record with no way to tell them
+   * apart from the summary alone. When exactly one match exists, return it
+   * with zero extra calls (the common case, and what preserves the
+   * existing no-per-record-GET bound for a clean name). Only when two or
+   * more summaries share the exact name do we pay for a bounded number of
+   * `getResource` calls (one per colliding candidate — never one per
+   * summary on the page) to find the candidate whose type matches the
+   * caller's requested `type`, preferring it over the first hit. Returns
+   * undefined (not throw) on total lookup failure so the caller's loop can
+   * continue to the next page rather than aborting the whole resolution.
+   */
+  private async pickBestNameMatch(
+    type: ResourceType,
+    nameMatches: RegistryRecordSummary[],
+  ): Promise<string | undefined> {
+    if (nameMatches.length === 1) {
+      return nameMatches[0].recordId;
+    }
+    for (const candidate of nameMatches) {
+      const candidateId = candidate.recordId;
+      if (!candidateId) continue;
+      try {
+        const record = await this.getResource(type, candidateId);
+        if (record) return candidateId;
+      } catch {
+        // TypeMismatchError (or any other getResource failure) means this
+        // candidate is not a `type` record — try the next collision rather
+        // than failing the whole resolution.
+        continue;
+      }
+    }
+    // No candidate matched `type` — fall back to the first summary hit so
+    // behaviour degrades to the pre-fix result rather than a hard failure.
+    return nameMatches[0].recordId;
   }
 
   /**

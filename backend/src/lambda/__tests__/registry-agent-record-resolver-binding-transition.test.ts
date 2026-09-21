@@ -185,6 +185,7 @@ describe("updateAgentBinding — READY transition agentId resolution", () => {
     resetMockRegistry();
     ebMock.reset();
     ebMock.on(PutEventsCommand).resolves({});
+    ddbMock.reset();
     resolveRecordIdMock.mockReset();
     getResourceMock.mockReset();
     updateResourceMock.mockReset();
@@ -314,10 +315,14 @@ describe("updateAgentBinding — READY transition agentId resolution", () => {
     expect(rawNameLookup).toBeUndefined();
   });
 
-  test('surfaces "Agent not found" when resolveRecordId throws not-found', async () => {
-    // Distinguishes the genuine missing-agent case from the activation-gate
-    // failure. Previously both surfaced the same "must be active" message.
+  test('surfaces "not found in registry or legacy catalog" when neither resolves', async () => {
+    // Distinguishes the genuine missing-agent case (checked against BOTH the
+    // registry and the legacy DynamoDB agents table, finding 8304fa1b) from
+    // the activation-gate failure. Previously both surfaced the same "must
+    // be active" message.
     seedAppWithBinding(AGENT_NAME);
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({}); // no legacy row either
     resolveRecordIdMock.mockRejectedValueOnce(
       new Error(`Registry record not found for agent: ${AGENT_NAME}`),
     );
@@ -349,12 +354,108 @@ describe("updateAgentBinding — READY transition agentId resolution", () => {
           },
         }),
       ),
-    ).rejects.toThrow(`Agent ${AGENT_NAME} not found`);
+    ).rejects.toThrow("Agent not found in registry or legacy catalog");
     // The agent getResource path must not be reached when resolution failed.
     const agentLookups = getResourceMock.mock.calls.filter(
       ([type, id]) => type === "agent" && id !== APP_RECORD_ID,
     );
     expect(agentLookups).toHaveLength(0);
+    // The legacy fallback WAS consulted, keyed by the raw agentId.
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(GetCommand)[0].args[0].input).toMatchObject({
+      TableName: "citadel-agents-test",
+      Key: { agentId: AGENT_NAME },
+    });
+  });
+
+  test("promotes to READY for a legacy agent found only in the DynamoDB agents table with state=active", async () => {
+    seedAppWithBinding(AGENT_NAME);
+    ddbMock.reset();
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-agents-test",
+        Key: { agentId: AGENT_NAME },
+      })
+      .resolves({ Item: { agentId: AGENT_NAME, state: "active" } });
+    resolveRecordIdMock.mockRejectedValueOnce(
+      new Error(`Registry record not found for agent: ${AGENT_NAME}`),
+    );
+    getResourceMock.mockResolvedValueOnce({
+      recordId: APP_RECORD_ID,
+      name: "Test App",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({
+        appId: APP_RECORD_ID,
+        manifest: {
+          orgId: "org-1",
+          createdBy: "user-123",
+          version: 1,
+          status: "DRAFT",
+          agentBindings: [
+            { agentId: AGENT_NAME, status: "DESIGN", addedAt: "t" },
+          ],
+        },
+      }),
+    });
+
+    const result = await invokeHandler(
+      makeEvent("updateAgentBinding", {
+        input: {
+          appId: APP_RECORD_ID,
+          agentId: AGENT_NAME,
+          status: "READY",
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      agentBindings: [
+        expect.objectContaining({ agentId: AGENT_NAME, status: "READY" }),
+      ],
+    });
+  });
+
+  test("throws the activation-gate message for a legacy agent found only in the DynamoDB agents table with a non-active state", async () => {
+    seedAppWithBinding(AGENT_NAME);
+    ddbMock.reset();
+    ddbMock
+      .on(GetCommand, {
+        TableName: "citadel-agents-test",
+        Key: { agentId: AGENT_NAME },
+      })
+      .resolves({ Item: { agentId: AGENT_NAME, state: "inactive" } });
+    resolveRecordIdMock.mockRejectedValueOnce(
+      new Error(`Registry record not found for agent: ${AGENT_NAME}`),
+    );
+    getResourceMock.mockResolvedValueOnce({
+      recordId: APP_RECORD_ID,
+      name: "Test App",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({
+        appId: APP_RECORD_ID,
+        manifest: {
+          orgId: "org-1",
+          createdBy: "user-123",
+          version: 1,
+          status: "DRAFT",
+          agentBindings: [
+            { agentId: AGENT_NAME, status: "DESIGN", addedAt: "t" },
+          ],
+        },
+      }),
+    });
+
+    await expect(
+      invokeHandler(
+        makeEvent("updateAgentBinding", {
+          input: {
+            appId: APP_RECORD_ID,
+            agentId: AGENT_NAME,
+            status: "READY",
+          },
+        }),
+      ),
+    ).rejects.toThrow("Agent must be active before it can be marked as ready");
   });
 
   test("propagates RecordResolutionTimeoutError unchanged (finding ce7daab8) instead of a misleading activation-gate message", async () => {
