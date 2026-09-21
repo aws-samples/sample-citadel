@@ -1604,6 +1604,20 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
       "via OnFabricationEventSubscriptionAuthorizerResolver in " +
       "citadel-registry-dev.",
   },
+  {
+    logicalId: "Subscription.onDesignProgress",
+    justification:
+      "Finding 195b2a58 item b: onDesignProgress gained an explicit " +
+      "connect-time authorization resolver " +
+      "(OnDesignProgressSubscriptionAuthorizerResolver, " +
+      "design-progress-subscription-authorizer.ts) in citadel-projects-dev, " +
+      "reconciling the requested projectId against the caller via the " +
+      "shared assertProjectAccess gate. Previously this field had NO " +
+      "CfnResolver at all — it relied solely on the implicit " +
+      "@aws_subscribe(mutations:[...]) wiring, which never appears in the " +
+      "resolvers baseline. Same shape as the Subscription.onChatter " +
+      "exemption above (satellite-only addition; rail 1 doesn't see it).",
+  },
 ];
 
 /**

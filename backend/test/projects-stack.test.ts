@@ -178,16 +178,16 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   });
 
   // --- Resolver count ---
-  test("defines exactly 25 AppSync resolvers (matching the move manifest + updateAgentStatus, finding 0018a6d7, + wave-2a OnChatterSubscriptionAuthorizerResolver, finding 87a171ad)", () => {
+  test("defines exactly 26 AppSync resolvers (matching the move manifest + updateAgentStatus, finding 0018a6d7, + wave-2a OnChatterSubscriptionAuthorizerResolver, finding 87a171ad, + OnDesignProgressSubscriptionAuthorizerResolver, finding 195b2a58)", () => {
     const resolvers = template.findResources("AWS::AppSync::Resolver");
-    expect(Object.keys(resolvers)).toHaveLength(25);
+    expect(Object.keys(resolvers)).toHaveLength(26);
   });
 
-  test("defines exactly 11 AppSync Lambda data sources", () => {
+  test("defines exactly 12 AppSync Lambda data sources", () => {
     const dataSources = template.findResources("AWS::AppSync::DataSource", {
       Properties: Match.objectLike({ Type: "AWS_LAMBDA" }),
     });
-    expect(Object.keys(dataSources)).toHaveLength(11);
+    expect(Object.keys(dataSources)).toHaveLength(12);
   });
 
   const expectedFields: Array<[string, string]> = [
@@ -214,6 +214,7 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
     ["Mutation", "publishAssessmentCompletion"],
     ["Query", "getAssessmentProgress"],
     ["Mutation", "publishDesignProgress"],
+    ["Subscription", "onDesignProgress"],
     ["Query", "generateReportDownloadUrl"],
   ];
 
@@ -327,9 +328,9 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   });
 
   // --- moved constructs present ---
-  test("defines exactly 15 Lambda functions (the moved set)", () => {
+  test("defines exactly 16 Lambda functions (the moved set + DesignProgressSubscriptionAuthorizerFunction, finding 195b2a58)", () => {
     const fns = template.findResources("AWS::Lambda::Function");
-    expect(Object.keys(fns)).toHaveLength(15);
+    expect(Object.keys(fns)).toHaveLength(16);
   });
 
   test("defines exactly 2 CloudWatch alarms (ProjectResolver error + throttle)", () => {
@@ -375,8 +376,8 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
         }),
       }),
     });
-    // 11 Lambda data sources -> 11 appsync-assumable roles.
-    expect(Object.keys(roles)).toHaveLength(11);
+    // 12 Lambda data sources -> 12 appsync-assumable roles.
+    expect(Object.keys(roles)).toHaveLength(12);
   });
 });
 

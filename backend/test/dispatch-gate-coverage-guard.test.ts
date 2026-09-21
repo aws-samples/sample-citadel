@@ -98,24 +98,22 @@ const DOCUMENTED_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
       "inside chatter-resolver-dispatch-gate-enumeration.test.ts.",
   ],
   [
+    "design-progress-subscription-authorizer",
+    "Connect-time subscription authorizer for Subscription.onDesignProgress " +
+      "(finding 195b2a58 item b), not a field resolver with a dispatch to " +
+      "enumerate; its fail-closed legs (assertProjectAccess gate, " +
+      "CrossOrgDesignProgressSubscriptionError) and its CDK wiring in " +
+      "projects-stack.ts are pinned inside " +
+      "design-progress-resolver-dispatch-gate-enumeration.test.ts, mirroring " +
+      "how chatter-subscription-authorizer is pinned in the chatter guard.",
+  ],
+  [
     "fabrication-event-handler",
     "IAM-only publisher: Mutation.publishFabricationEvent is @aws_iam in " +
       "the schema (pinned below) with no end-user access; doubles as the " +
       "EventBridge fabrication-event consumer. The subscription it feeds " +
       "(onFabricationEvent) is connect-gated by the shared " +
       "chatter-subscription-authorizer (pinned in the chatter guard).",
-  ],
-  [
-    "generate-report-url",
-    "Read-only single-field Query (generateReportDownloadUrl) — no " +
-      "dispatch to enumerate, no mutations. TODO(finding): it presigns an " +
-      "S3 GET for a client-supplied projectId WITHOUT the shared " +
-      "assertProjectAccess reconciliation its sibling document resolvers " +
-      "use (cross-tenant assessment-report disclosure to any " +
-      "authenticated user who knows/guesses a projectId). The fix is a " +
-      "production change (call assertProjectAccess before presigning), " +
-      "out of scope for this test-only guard; once fixed this module " +
-      "should get a small guard and leave this list.",
   ],
 ]);
 
