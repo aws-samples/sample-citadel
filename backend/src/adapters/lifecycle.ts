@@ -231,7 +231,11 @@ export const REGISTRY_TRANSITIONS: TransitionMap = {
     DRAFT: ["PENDING_APPROVAL", "DEPRECATED"],
     PENDING_APPROVAL: ["APPROVED", "REJECTED"],
     REJECTED: ["DRAFT", "DEPRECATED"], // resubmit or abandon
-    APPROVED: ["DEPRECATED"],
+    // Decision a3fb5542: Catalog Deactivate returns an APPROVED record to
+    // DRAFT (reversible — reactivation resubmits for approval), instead of
+    // the terminal DEPRECATED. DEPRECATED remains reachable from APPROVED
+    // for the Archive action (AppDetailView), which stays terminal.
+    APPROVED: ["DRAFT", "DEPRECATED"],
     DEPRECATED: [], // terminal
   },
   actions: {

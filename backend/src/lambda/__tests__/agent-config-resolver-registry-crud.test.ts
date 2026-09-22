@@ -37,10 +37,12 @@ const mockDeserializeCustomMetadata = jest.fn(
 const mockToRegistryStatus = jest.fn((state: string) => {
   const map: Record<string, string> = {
     active: "APPROVED",
-    inactive: "DEPRECATED",
+    // Decision a3fb5542: Deactivate is reversible — 'inactive' now maps to
+    // DRAFT, not the terminal DEPRECATED.
+    inactive: "DRAFT",
     maintenance: "DRAFT",
   };
-  return map[state] || "DEPRECATED";
+  return map[state] || "DRAFT";
 });
 
 /** Registry record fixture shape consumed by the mock mapper. */
@@ -368,10 +370,15 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       );
 
       expect(mockToRegistryStatus).toHaveBeenCalledWith("inactive");
+      // Decision a3fb5542: Deactivate issues DRAFT (not DEPRECATED), routed
+      // through the validated-transition gate — existing.status ("APPROVED")
+      // is passed as currentStatus.
       expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
         "agent",
         "agent-1",
-        "DEPRECATED",
+        "DRAFT",
+        undefined,
+        "APPROVED",
       );
     });
 
@@ -388,6 +395,31 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       );
 
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+    });
+
+    test("Deactivate on an already-DRAFT record is an idempotent no-op (decision a3fb5542)", async () => {
+      const draftExistingRecord = { ...existingRecord, status: "DRAFT" };
+      mockGetResource.mockResolvedValue(draftExistingRecord);
+      mockUpdateResource.mockResolvedValue({
+        ...updatedRecord,
+        status: "DRAFT",
+      });
+
+      await updateAgentConfigRegistry(
+        {
+          agentId: "agent-1",
+          state: "inactive",
+        },
+        eventWithOrg,
+      );
+
+      // toRegistryStatus("inactive") -> "DRAFT", which equals the existing
+      // record's status, so the outer `desiredRegistryStatus !== existing.status`
+      // guard skips the entire status-write branch: no gate check, no
+      // UpdateRegistryRecordStatus call, no re-fetch.
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+      // Only the single initial getResource call — no post-transition refetch.
+      expect(mockGetResource).toHaveBeenCalledTimes(1);
     });
 
     test("preserves existing config when no new config provided", async () => {

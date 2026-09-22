@@ -59,10 +59,12 @@ const mockDeserializeCustomMetadata = jest.fn(
 const mockToRegistryStatus = jest.fn((state: string) => {
   const map: Record<string, string> = {
     active: "APPROVED",
-    inactive: "DEPRECATED",
+    // Decision a3fb5542: Deactivate is reversible — 'inactive' now maps to
+    // DRAFT, not the terminal DEPRECATED.
+    inactive: "DRAFT",
     maintenance: "DRAFT",
   };
-  return map[state] || "DEPRECATED";
+  return map[state] || "DRAFT";
 });
 
 interface RegistryRecordFixture {

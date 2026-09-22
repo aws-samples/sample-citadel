@@ -41,10 +41,12 @@ const mockDeserializeCustomMetadata = jest.fn(
 const mockToRegistryStatus = jest.fn((state: string) => {
   const map: Record<string, string> = {
     active: "APPROVED",
-    inactive: "DEPRECATED",
+    // Decision a3fb5542: Deactivate is reversible — 'inactive' now maps to
+    // DRAFT, not the terminal DEPRECATED.
+    inactive: "DRAFT",
     maintenance: "DRAFT",
   };
-  return map[state] || "DEPRECATED";
+  return map[state] || "DRAFT";
 });
 const mockToInternalState = jest.fn((status: string) => {
   const map: Record<string, string> = {
@@ -608,10 +610,15 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       );
 
       expect(mockToRegistryStatus).toHaveBeenCalledWith("inactive");
+      // Decision a3fb5542: Deactivate issues DRAFT (not DEPRECATED), routed
+      // through the validated-transition gate — existing.status ("APPROVED")
+      // is passed as currentStatus.
       expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
         "tool",
         "tool-1",
-        "DEPRECATED",
+        "DRAFT",
+        undefined,
+        "APPROVED",
       );
     });
 
@@ -788,7 +795,9 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
         "tool",
         "tool-1",
-        "DEPRECATED",
+        "DRAFT",
+        undefined,
+        "APPROVED",
       );
       // mapToToolConfig receives the refreshed record (not the stale updatedRecord).
       expect(mockMapToToolConfig).toHaveBeenCalledWith(refreshedRecord);
