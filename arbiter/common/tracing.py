@@ -65,7 +65,12 @@ def configure() -> None:
 
         patch_all()
     except Exception:  # noqa: BLE001 — tracing activation must never break dispatch
-        logger.exception("Failed to activate X-Ray tracing (patch_all); continuing untraced.")
+        logger.error(
+            "Failed to activate X-Ray tracing (patch_all); continuing untraced. "
+            "aws_xray_sdk is missing from the shared Lambda layer — check "
+            "arbiter/layers/common/requirements.txt lists aws-xray-sdk.",
+            exc_info=True,
+        )
     finally:
         _configured = True
 
