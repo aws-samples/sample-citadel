@@ -38,10 +38,12 @@ const mockDeserializeCustomMetadata = jest.fn(
 const mockToRegistryStatus = jest.fn((state: string) => {
   const map: Record<string, string> = {
     active: "APPROVED",
-    inactive: "DEPRECATED",
+    // Decision a3fb5542: Deactivate is reversible — 'inactive' now maps to
+    // DRAFT, not the terminal DEPRECATED.
+    inactive: "DRAFT",
     maintenance: "DRAFT",
   };
-  return map[state] || "DEPRECATED";
+  return map[state] || "DRAFT";
 });
 const mockMapToAgentConfig = jest.fn(
   (record: { recordId: string; description?: string }) => ({
@@ -250,7 +252,9 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
     });
 
     test("imported + pending + strict + DEACTIVATION (state→inactive) → gate does NOT fire", async () => {
-      // Record is currently APPROVED; transition target is DEPRECATED, not APPROVED.
+      // Record is currently APPROVED; transition target is now DRAFT (decision
+      // a3fb5542 — reversible Deactivate), not APPROVED, so the activation
+      // gate stays a no-op.
       mockGetResource.mockResolvedValue(importedRecord("pending", "APPROVED"));
       mockUpdateResource.mockResolvedValue(
         importedRecord("pending", "APPROVED"),
@@ -265,7 +269,9 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
       expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
         "agent",
         "agent-imp-1",
-        "DEPRECATED",
+        "DRAFT",
+        undefined,
+        "APPROVED",
       );
       expect(mockGetGovernanceEnforce).not.toHaveBeenCalled();
       expect(mockPublishEvent).not.toHaveBeenCalled();

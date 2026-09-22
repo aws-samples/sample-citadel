@@ -182,6 +182,8 @@ interface StatusTransition {
   icon: typeof Play;
   className: string;
   disabled?: boolean;
+  /** Shown as the button's title (tooltip) when disabled. */
+  disabledReason?: string;
 }
 
 interface Precondition {
@@ -224,7 +226,13 @@ function getStatusTransition(status: string): StatusTransition | null {
     case 'APPROVED':
       return { label: 'Archive', targetStatus: 'DEPRECATED', icon: Archive, className: 'bg-chart-3 hover:bg-chart-3/90' };
     case 'DEPRECATED':
-      return { label: 'Reactivate', targetStatus: 'DRAFT', icon: RotateCcw, className: 'bg-chart-2 hover:bg-chart-2/90' };
+      // DEPRECATED is terminal (REGISTRY_TRANSITIONS['DEPRECATED'] === []) —
+      // the validated-transition gate rejects DEPRECATED -> DRAFT, so
+      // Reactivate must not be offered here. Deactivating an APPROVED record
+      // instead returns it to DRAFT (decision a3fb5542), which keeps its own
+      // 'Activate' transition and is reversible; DEPRECATED (Archive) is the
+      // one-way path.
+      return { label: 'Reactivate', targetStatus: 'DRAFT', icon: RotateCcw, className: 'bg-chart-2 opacity-50 cursor-not-allowed', disabled: true, disabledReason: 'Deprecated records cannot be reactivated' };
     case 'REJECTED':
       return { label: 'Resubmit', targetStatus: 'DRAFT', icon: RotateCcw, className: 'bg-chart-2 hover:bg-chart-2/90' };
     case 'CREATING':
@@ -1991,7 +1999,9 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
               <Button
                 size="sm"
                 className={cn('gap-1 text-xs flex-shrink-0 ml-4', transition.className)}
-                onClick={() => openTransitionDialog(transition)}
+                onClick={() => !transition.disabled && openTransitionDialog(transition)}
+                disabled={transition.disabled}
+                title={transition.disabled ? transition.disabledReason : undefined}
               >
                 <transition.icon className="size-4" />
                 {transition.label}

@@ -318,6 +318,27 @@ describe('AppDetailView', () => {
     });
   });
 
+  // DEPRECATED is terminal (REGISTRY_TRANSITIONS['DEPRECATED'] === []); the
+  // validated-transition gate rejects DEPRECATED -> DRAFT, so Reactivate must
+  // be disabled with an explanatory tooltip rather than offered as a live
+  // action.
+  it('disables Reactivate on DEPRECATED with a tooltip explaining why', async () => {
+    (appApiService.getApp as jest.Mock).mockResolvedValue({ ...mockApp, status: 'DEPRECATED' });
+
+    render(<AppDetailView {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Reactivate')).toBeInTheDocument();
+    });
+
+    const reactivateButton = screen.getByText('Reactivate').closest('button');
+    expect(reactivateButton).toBeDisabled();
+    expect(reactivateButton).toHaveAttribute(
+      'title',
+      'Deprecated records cannot be reactivated',
+    );
+  });
+
   // Req 11.10: Confirmation dialog with preconditions
   it('opens confirmation dialog with preconditions when Publish is clicked', async () => {
     // Publish button only renders for APPROVED status

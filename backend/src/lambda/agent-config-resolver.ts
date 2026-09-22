@@ -860,10 +860,17 @@ export async function updateAgentConfigRegistry(
       }
       await registryService.submitForApproval(input.agentId);
     } else {
+      // Route through the validated-transition gate: pass existing.status as
+      // currentStatus so registry-service.updateResourceStatus enforces
+      // REGISTRY_TRANSITIONS (decision a3fb5542) instead of silently
+      // coercing an unvalidated transition (e.g. Deactivate on an APPROVED
+      // record now issuing DRAFT, and DEPRECATED staying terminal).
       await registryService.updateResourceStatus(
         "agent",
         input.agentId,
         desiredRegistryStatus,
+        undefined,
+        existing.status,
       );
     }
 

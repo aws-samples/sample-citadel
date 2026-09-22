@@ -1056,13 +1056,15 @@ export class RegistryService {
   ): Promise<RegistryRecord> {
     const recordId = id;
 
-    // Validated-transition gate (agent-record approval lifecycle). Only
-    // enforced when the caller supplies the record's current status — the
-    // legacy tri-state (active/inactive/maintenance) callers in
-    // agent-config-resolver.ts / tool-config-resolver.ts do not pass this
-    // and are unaffected. Callers that DO know the current status (the
-    // RegistryAgentRecord governance resolver) must pass it so every
-    // transition is validated, never silently coerced.
+    // Validated-transition gate (agent-record approval lifecycle). Enforced
+    // whenever the caller supplies the record's current status. The Catalog
+    // update path (agent-config-resolver.ts / tool-config-resolver.ts) now
+    // passes existing.status for every non-APPROVED transition — including
+    // Deactivate — so REGISTRY_TRANSITIONS governs it too (decision
+    // a3fb5542), never silently coercing an unvalidated transition. Same-
+    // status calls (e.g. Deactivate issued twice on an already-DRAFT record)
+    // are a no-op per isValidTransition's `current === next` shortcut, then
+    // still forwarded to the registry as an idempotent status write.
     if (currentStatus !== undefined) {
       if (
         !RegistryService.lifecycleManager.isValidTransition(
@@ -1514,25 +1516,27 @@ export class RegistryService {
    * | Internal   | Registry     |
    * |------------|--------------|
    * | active     | APPROVED     |
-   * | inactive   | DEPRECATED   |
+   * | inactive   | DRAFT        |
    * | maintenance| DRAFT        |
    *
-   * Unknown internal states default to DEPRECATED (inactive equivalent) with
-   * a warning log.
+   * Decision a3fb5542: Catalog Deactivate ('inactive') now maps to DRAFT, not
+   * the terminal DEPRECATED — deactivation is reversible and reactivation
+   * resubmits the record for approval. DEPRECATED is reserved for the
+   * separate, terminal Archive action and is never produced from this
+   * mapping. Unknown internal states default to DRAFT with a warning log.
    */
   toRegistryStatus(internalState: string): RegistryRecordStatusValue {
     switch (internalState) {
       case "active":
         return RegistryRecordStatusValues.APPROVED;
       case "inactive":
-        return RegistryRecordStatusValues.DEPRECATED;
       case "maintenance":
         return RegistryRecordStatusValues.DRAFT;
       default:
         console.warn(
-          `Unknown internal state "${internalState}", mapping to DEPRECATED`,
+          `Unknown internal state "${internalState}", mapping to DRAFT`,
         );
-        return RegistryRecordStatusValues.DEPRECATED;
+        return RegistryRecordStatusValues.DRAFT;
     }
   }
 

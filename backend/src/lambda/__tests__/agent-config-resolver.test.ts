@@ -41,9 +41,9 @@ const mockSerializeCustomMetadata = jest.fn((meta: unknown) =>
 const mockToRegistryStatus = jest.fn((state: string) =>
   state === "active"
     ? "APPROVED"
-    : state === "inactive"
-      ? "DEPRECATED"
-      : "DRAFT",
+    : // Decision a3fb5542: Deactivate is reversible — 'inactive' now maps to
+      // DRAFT, not the terminal DEPRECATED.
+      "DRAFT",
 );
 // Faithful to the real registry-service: the activation gate (US-IMP) added to
 // activateProjectAgents reads customMetadata via deserializeCustomMetadata.

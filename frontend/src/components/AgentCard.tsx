@@ -21,6 +21,16 @@ export function AgentCard({ agent, onToggleState, onConfigure, userRole }: Agent
   // Only show config button for admin and developer roles
   const canConfigure = userRole === 'admin' || userRole === 'developer';
 
+  // Decision a3fb5542: Catalog Deactivate now returns an APPROVED registry
+  // record to DRAFT (internal state 'maintenance') rather than the terminal
+  // DEPRECATED, so a deactivated agent surfaces here with state
+  // 'maintenance'. The Catalog must label that as "Inactive" — not
+  // "Maintenance" (a distinct, unrelated meaning used elsewhere, e.g.
+  // AgentNode/AgentTrayItem on the workflow canvas) and not "Activated".
+  // This is a display-only relabel local to the Catalog; it does not change
+  // agent.state itself or the Activate button's copy/behavior.
+  const stateLabel = agent.state === 'maintenance' ? 'inactive' : agent.state;
+
   return (
     <Card 
       className="hover:shadow-lg transition-shadow border-input bg-accent"
@@ -58,7 +68,7 @@ export function AgentCard({ agent, onToggleState, onConfigure, userRole }: Agent
                   : 'bg-muted/20 text-muted-foreground border-0'
               }
             >
-              {agent.state}
+              {stateLabel}
             </Badge>
           </div>
         </div>

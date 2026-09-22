@@ -186,6 +186,9 @@ describe("registry-agent-record-resolver — approval lifecycle gate", () => {
       ["REJECTED", "DRAFT", false],
       ["REJECTED", "DEPRECATED", false],
       ["APPROVED", "DEPRECATED", false],
+      // Decision a3fb5542: Catalog Deactivate returns an APPROVED record to
+      // DRAFT (reversible — reactivation resubmits for approval).
+      ["APPROVED", "DRAFT", false],
     ])("%s -> %s succeeds", async (current, next, admin) => {
       seedApp(current, 1);
       const input: Record<string, unknown> = {
@@ -207,9 +210,11 @@ describe("registry-agent-record-resolver — approval lifecycle gate", () => {
     it.each([
       ["DRAFT", "APPROVED"],
       ["DRAFT", "REJECTED"],
-      ["APPROVED", "DRAFT"],
       ["APPROVED", "PENDING_APPROVAL"],
       ["DEPRECATED", "DRAFT"],
+      ["DEPRECATED", "APPROVED"],
+      ["DEPRECATED", "PENDING_APPROVAL"],
+      ["DEPRECATED", "REJECTED"],
       ["PENDING_APPROVAL", "DRAFT"],
     ])("%s -> %s throws INVALID_TRANSITION", async (current, next) => {
       seedApp(current, 1);

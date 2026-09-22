@@ -697,10 +697,16 @@ export async function updateToolConfigRegistry(
       }
       await registryService.submitForApproval(input.toolId);
     } else {
+      // Route through the validated-transition gate: pass existing.status as
+      // currentStatus so registry-service.updateResourceStatus enforces
+      // REGISTRY_TRANSITIONS (decision a3fb5542) instead of silently
+      // coercing an unvalidated transition.
       await registryService.updateResourceStatus(
         "tool",
         input.toolId,
         desiredRegistryStatus,
+        undefined,
+        existing.status,
       );
     }
 
