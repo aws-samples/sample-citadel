@@ -10,6 +10,7 @@ import {
   GetRegistryRecordCommand,
   UpdateRegistryRecordCommand,
   UpdateRegistryRecordStatusCommand,
+  SubmitRegistryRecordForApprovalCommand,
   DeleteRegistryRecordCommand,
   ListRegistryRecordsCommand,
   RegistryRecordStatus,
@@ -1101,6 +1102,52 @@ export class RegistryService {
       name: "",
       status: result.status ?? status,
       updatedAt: result.updatedAt,
+    };
+  }
+
+  /**
+   * Submits a DRAFT (or REJECTED-then-DRAFT) registry record for approval via
+   * the dedicated `SubmitRegistryRecordForApproval` operation — the only
+   * legal path from DRAFT towards APPROVED. The AWS registry rejects a
+   * direct `UpdateRegistryRecordStatus(DRAFT -> APPROVED)` call (and even the
+   * two-step DRAFT -> PENDING_APPROVAL -> APPROVED sequence via that same
+   * operation), so activation callers MUST route through this method instead
+   * of {@link updateResourceStatus} for the DRAFT/REJECTED -> active
+   * transition. Mirrors the Python fabricator's `_approve` helper
+   * (arbiter/fabricator/index.py).
+   *
+   * When the registry has autoApproval configured, the record advances
+   * straight to APPROVED synchronously; otherwise it lands on
+   * PENDING_APPROVAL and a human/governance step must approve it later. The
+   * submit response's `status` is not fully trusted on its own — we always
+   * re-fetch the record afterwards so the caller sees the authoritative
+   * post-submit state.
+   */
+  async submitForApproval(recordId: string): Promise<RegistryRecord> {
+    await this.withRetry(() =>
+      this.client.send(
+        new SubmitRegistryRecordForApprovalCommand({
+          registryId: this.registryId,
+          recordId,
+        }),
+      ),
+    );
+
+    const refreshed = await this.client.send(
+      new GetRegistryRecordCommand({
+        registryId: this.registryId,
+        recordId,
+      }),
+    );
+
+    return {
+      recordId: refreshed.recordId ?? recordId,
+      name: refreshed.name ?? "",
+      description: refreshed.description,
+      status: refreshed.status ?? "",
+      customDescriptorContent: refreshed.descriptors?.custom?.inlineContent,
+      createdAt: refreshed.createdAt,
+      updatedAt: refreshed.updatedAt,
     };
   }
 

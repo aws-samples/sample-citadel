@@ -23,6 +23,7 @@ const mockUpdateResource = jest.fn();
 const mockDeleteResource = jest.fn();
 const mockListResources = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
+const mockSubmitForApproval = jest.fn();
 const mockSearchResources = jest.fn();
 const mockSerializeCustomMetadata = jest.fn((meta: unknown) =>
   JSON.stringify(meta),
@@ -105,6 +106,7 @@ jest.mock("../../services/registry-service", () => ({
     deleteResource: mockDeleteResource,
     listResources: mockListResources,
     updateResourceStatus: mockUpdateResourceStatus,
+    submitForApproval: mockSubmitForApproval,
     searchResources: mockSearchResources,
     serializeCustomMetadata: mockSerializeCustomMetadata,
     deserializeCustomMetadata: mockDeserializeCustomMetadata,
@@ -113,6 +115,21 @@ jest.mock("../../services/registry-service", () => ({
     mapToToolConfig: mockMapToToolConfig,
     mapToAgentConfig: mockMapToAgentConfig,
   })),
+  // The submit-not-approve activation path (finding adde5b79) guards on
+  // RegistryRecordStatusValues.APPROVED/REJECTED; the real registry-service
+  // exports these enum values, so the test double must export them too
+  // (mirrors agent-config-resolver-registry-crud.test.ts).
+  RegistryRecordStatusValues: {
+    DRAFT: "DRAFT",
+    PENDING_APPROVAL: "PENDING_APPROVAL",
+    APPROVED: "APPROVED",
+    REJECTED: "REJECTED",
+    DEPRECATED: "DEPRECATED",
+    CREATING: "CREATING",
+    UPDATING: "UPDATING",
+    CREATE_FAILED: "CREATE_FAILED",
+    UPDATE_FAILED: "UPDATE_FAILED",
+  },
 }));
 
 // Mock DynamoDB for fallback paths
@@ -422,6 +439,10 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
 
     test("updates status when initial state is provided", async () => {
       mockCreateResource.mockResolvedValue(baseRecord);
+      mockSubmitForApproval.mockResolvedValue({
+        ...baseRecord,
+        status: "APPROVED",
+      });
 
       await createToolConfigRegistry(
         {
@@ -434,7 +455,10 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       );
 
       expect(mockToRegistryStatus).toHaveBeenCalledWith("active");
-      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+      // Activation must go through SubmitRegistryRecordForApproval, never a
+      // direct UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+      expect(mockSubmitForApproval).toHaveBeenCalledWith("tool-1");
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalledWith(
         "tool",
         "tool-1",
         "APPROVED",
@@ -773,6 +797,78 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       const statusOrder = mockUpdateResourceStatus.mock.invocationCallOrder[0];
       const getOrder = mockGetResource.mock.invocationCallOrder[1];
       expect(getOrder).toBeGreaterThan(statusOrder);
+    });
+
+    // ─── finding adde5b79: submit-not-approve activation (tool parity) ─────
+
+    test("DRAFT + active → submits for approval, never issues a direct UpdateRegistryRecordStatus(APPROVED)", async () => {
+      const draftRecord = { ...existingRecord, status: "DRAFT" };
+      mockGetResource
+        .mockResolvedValueOnce(draftRecord)
+        .mockResolvedValueOnce({ ...draftRecord, status: "PENDING_APPROVAL" });
+      mockUpdateResource.mockResolvedValue(draftRecord);
+      mockSubmitForApproval.mockResolvedValue({
+        ...draftRecord,
+        status: "PENDING_APPROVAL",
+      });
+
+      await updateToolConfigRegistry(
+        { toolId: "tool-1", state: "active" },
+        "unknown",
+        eventWithOrg,
+      );
+
+      expect(mockSubmitForApproval).toHaveBeenCalledWith("tool-1");
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+    });
+
+    test("REJECTED + active → resubmits (DRAFT transition) before submitting for approval", async () => {
+      const rejectedRecord = { ...existingRecord, status: "REJECTED" };
+      mockGetResource
+        .mockResolvedValueOnce(rejectedRecord)
+        .mockResolvedValueOnce({
+          ...rejectedRecord,
+          status: "PENDING_APPROVAL",
+        });
+      mockUpdateResource.mockResolvedValue(rejectedRecord);
+      mockUpdateResourceStatus.mockResolvedValue(undefined);
+      mockSubmitForApproval.mockResolvedValue({
+        ...rejectedRecord,
+        status: "PENDING_APPROVAL",
+      });
+
+      await updateToolConfigRegistry(
+        { toolId: "tool-1", state: "active" },
+        "unknown",
+        eventWithOrg,
+      );
+
+      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+        "tool",
+        "tool-1",
+        "DRAFT",
+      );
+      expect(mockSubmitForApproval).toHaveBeenCalledWith("tool-1");
+      const draftCallOrder =
+        mockUpdateResourceStatus.mock.invocationCallOrder[0];
+      const submitCallOrder = mockSubmitForApproval.mock.invocationCallOrder[0];
+      expect(draftCallOrder).toBeLessThan(submitCallOrder);
+    });
+
+    test("metadata is left untouched when submitForApproval fails (no partial drift)", async () => {
+      const draftRecord = { ...existingRecord, status: "DRAFT" };
+      mockGetResource.mockResolvedValue(draftRecord);
+      mockSubmitForApproval.mockRejectedValue(new Error("submit failed"));
+
+      await expect(
+        updateToolConfigRegistry(
+          { toolId: "tool-1", state: "active" },
+          "unknown",
+          eventWithOrg,
+        ),
+      ).rejects.toThrow("submit failed");
+
+      expect(mockUpdateResource).not.toHaveBeenCalled();
     });
 
     // ── Phase-2a: update preserves existingMeta.orgId, never derives from input ──

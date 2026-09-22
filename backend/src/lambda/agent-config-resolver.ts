@@ -440,11 +440,20 @@ export async function createAgentConfigRegistry(
   // If an initial state is provided, update the status accordingly
   if (input.state) {
     const registryStatus = registryService.toRegistryStatus(input.state);
-    await registryService.updateResourceStatus(
-      "agent",
-      input.agentId,
-      registryStatus,
-    );
+    // DRAFT -> APPROVED is rejected by the registry directly; the sanctioned
+    // path for activation is SubmitRegistryRecordForApproval, which
+    // auto-advances to APPROVED when the registry has autoApproval, else
+    // lands on PENDING_APPROVAL (finding adde5b79). Non-activation initial
+    // states (DEPRECATED/inactive, DRAFT/maintenance) are unaffected.
+    if (registryStatus === RegistryRecordStatusValues.APPROVED) {
+      await registryService.submitForApproval(input.agentId);
+    } else {
+      await registryService.updateResourceStatus(
+        "agent",
+        input.agentId,
+        registryStatus,
+      );
+    }
     // Re-fetch after status transition so the returned state reflects the
     // post-SubmitForApproval record (PENDING_APPROVAL or APPROVED) rather
     // than the stale DRAFT snapshot from createResource above.
@@ -806,13 +815,9 @@ export async function updateAgentConfigRegistry(
     gateContentOverride = updatedMeta;
   }
 
-  const record = await registryService.updateResource("agent", input.agentId, {
-    name: (parsedNewConfig.name as string | undefined) || existing.name,
-    description: newConfig,
-    customMetadata: updatedMeta,
-  });
-
-  // If the caller changed state, propagate to the Registry status as well.
+  // Status transition BEFORE metadata write (finding adde5b79 ordering
+  // requirement): if the transition below fails, updateResource (metadata)
+  // never runs, so a failed activation leaves no partial metadata drift.
   // Gate on the actual Registry status, not the metadata — customMetadata.state
   // can drift out of sync with record.status (e.g. when deserialize falls back
   // to its 'active' default for records missing the field). The user-facing
@@ -826,7 +831,7 @@ export async function updateAgentConfigRegistry(
     // Governance activation gate (US-IMP): runs ONLY on the APPROVED transition
     // for an imported, unattested record. A no-op for every other record and
     // transition, so all non-activation / non-imported update paths are
-    // unchanged. In strict mode it throws here, BEFORE the APPROVED status write.
+    // unchanged. In strict mode it throws here, BEFORE any status write.
     // When the lazy trust-path auto-attested above, gateContentOverride carries
     // the attested metadata so this gate sees 'attested' and is a no-op.
     if (desiredRegistryStatus === RegistryRecordStatusValues.APPROVED) {
@@ -836,17 +841,54 @@ export async function updateAgentConfigRegistry(
         gateContentOverride ?? existing.customDescriptorContent ?? undefined,
       );
     }
-    await registryService.updateResourceStatus(
+
+    // Activation (-> APPROVED) must go through SubmitRegistryRecordForApproval,
+    // never a direct UpdateRegistryRecordStatus(APPROVED) — the AWS registry
+    // rejects DRAFT -> APPROVED (finding adde5b79). DRAFT submits directly;
+    // REJECTED must first transition back to DRAFT (resubmit) before it can
+    // be submitted; APPROVED is already active and is a no-op handled by the
+    // outer `desiredRegistryStatus !== existing.status` guard above. Every
+    // other transition (e.g. -> DEPRECATED) is unaffected and keeps using
+    // updateResourceStatus directly.
+    if (desiredRegistryStatus === RegistryRecordStatusValues.APPROVED) {
+      if (existing.status === RegistryRecordStatusValues.REJECTED) {
+        await registryService.updateResourceStatus(
+          "agent",
+          input.agentId,
+          RegistryRecordStatusValues.DRAFT,
+        );
+      }
+      await registryService.submitForApproval(input.agentId);
+    } else {
+      await registryService.updateResourceStatus(
+        "agent",
+        input.agentId,
+        desiredRegistryStatus,
+      );
+    }
+
+    // Status transition succeeded — now write metadata, then re-fetch so the
+    // returned state reflects the post-SubmitForApproval record
+    // (PENDING_APPROVAL or APPROVED) rather than the stale DRAFT/UPDATING
+    // snapshot from updateResource.
+    const record = await registryService.updateResource(
       "agent",
       input.agentId,
-      desiredRegistryStatus,
+      {
+        name: (parsedNewConfig.name as string | undefined) || existing.name,
+        description: newConfig,
+        customMetadata: updatedMeta,
+      },
     );
-    // Re-fetch after status transition so the returned state reflects the
-    // post-SubmitForApproval record (PENDING_APPROVAL or APPROVED) rather
-    // than the stale DRAFT/UPDATING snapshot from updateResource above.
     const refreshed = await registryService.getResource("agent", input.agentId);
     return registryService.mapToAgentConfig(refreshed ?? record);
   }
+
+  const record = await registryService.updateResource("agent", input.agentId, {
+    name: (parsedNewConfig.name as string | undefined) || existing.name,
+    description: newConfig,
+    customMetadata: updatedMeta,
+  });
 
   return registryService.mapToAgentConfig(record);
 }
@@ -1108,7 +1150,7 @@ export async function activateProjectAgents(
 
     try {
       // Governance activation gate (US-IMP): strict-blocks imported, unattested
-      // agents BEFORE the APPROVED write. The throw is caught below so a blocked
+      // agents BEFORE the status write. The throw is caught below so a blocked
       // agent lands in `failed` without aborting activation of the rest of the
       // batch; shadow/permissive emits telemetry and proceeds as before.
       await enforceImportActivationGate(
@@ -1116,11 +1158,18 @@ export async function activateProjectAgents(
         record.recordId,
         record.customDescriptorContent ?? undefined,
       );
-      await registryService.updateResourceStatus(
-        "agent",
-        record.recordId,
-        RegistryRecordStatusValues.APPROVED,
-      );
+      // Activation must go through SubmitRegistryRecordForApproval, never a
+      // direct UpdateRegistryRecordStatus(APPROVED) — the AWS registry
+      // rejects DRAFT -> APPROVED (finding adde5b79). REJECTED records must
+      // first transition back to DRAFT (resubmit) before submitting.
+      if (record.status === RegistryRecordStatusValues.REJECTED) {
+        await registryService.updateResourceStatus(
+          "agent",
+          record.recordId,
+          RegistryRecordStatusValues.DRAFT,
+        );
+      }
+      await registryService.submitForApproval(record.recordId);
       result.activated.push(name);
     } catch (err) {
       console.error(

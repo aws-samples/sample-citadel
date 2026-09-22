@@ -17,6 +17,7 @@ const dynamoMock = mockClient(DynamoDBDocumentClient);
 // tests never construct a RegistryService, so this mock does not affect them.
 const mockListResources = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
+const mockSubmitForApproval = jest.fn();
 const mockGetResource = jest.fn();
 const mockUpdateResource = jest.fn();
 /** Registry record fixture shape consumed by the mock mapper. */
@@ -62,6 +63,7 @@ jest.mock("../../services/registry-service", () => ({
   RegistryService: jest.fn().mockImplementation(() => ({
     listResources: mockListResources,
     updateResourceStatus: mockUpdateResourceStatus,
+    submitForApproval: mockSubmitForApproval,
     deserializeCustomMetadata: mockDeserializeCustomMetadata,
     getResource: mockGetResource,
     updateResource: mockUpdateResource,
@@ -257,6 +259,7 @@ describe("agent-config-resolver", () => {
       _resetRegistryService();
       mockListResources.mockReset();
       mockUpdateResourceStatus.mockReset();
+      mockSubmitForApproval.mockReset();
     });
 
     afterEach(() => {
@@ -284,19 +287,18 @@ describe("agent-config-resolver", () => {
         agentRecord("r2", "Agent Two", "proj-1", "APPROVED"),
         agentRecord("r3", "Other Project", "proj-2", "DRAFT"),
       ]);
-      mockUpdateResourceStatus.mockResolvedValue({});
+      mockSubmitForApproval.mockResolvedValue({});
 
       const result = await handler(
         makeEvent("activateProjectAgents", { projectId: "proj-1" }),
       );
 
       expect(mockListResources).toHaveBeenCalledWith("agent");
-      expect(mockUpdateResourceStatus).toHaveBeenCalledTimes(1);
-      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
-        "agent",
-        "r1",
-        "APPROVED",
-      );
+      // Activation must go through SubmitRegistryRecordForApproval, never a
+      // direct UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+      expect(mockSubmitForApproval).toHaveBeenCalledTimes(1);
+      expect(mockSubmitForApproval).toHaveBeenCalledWith("r1");
       expect(result.activated).toEqual(["Agent One"]);
       expect(result.alreadyActive).toEqual(["Agent Two"]);
       expect(result.failed).toEqual([]);
@@ -307,7 +309,7 @@ describe("agent-config-resolver", () => {
         agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
         agentRecord("r2", "Agent Two", "proj-1", "DRAFT"),
       ]);
-      mockUpdateResourceStatus
+      mockSubmitForApproval
         .mockRejectedValueOnce(new Error("boom"))
         .mockResolvedValueOnce({});
 
@@ -353,26 +355,25 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
     _resetRegistryService();
     mockListResources.mockReset();
     mockUpdateResourceStatus.mockReset().mockResolvedValue({});
+    mockSubmitForApproval.mockReset().mockResolvedValue({});
     mockGetResource.mockReset();
-    mockUpdateResource
-      .mockReset()
-      .mockImplementation(
-        async (
-          _type: string,
-          id: string,
-          input: {
-            name?: string;
-            description?: string;
-            customMetadata?: string;
-          },
-        ) => ({
-          recordId: id,
-          name: input.name,
-          description: input.description,
-          status: "UPDATING",
-          customDescriptorContent: input.customMetadata,
-        }),
-      );
+    mockUpdateResource.mockReset().mockImplementation(
+      async (
+        _type: string,
+        id: string,
+        input: {
+          name?: string;
+          description?: string;
+          customMetadata?: string;
+        },
+      ) => ({
+        recordId: id,
+        name: input.name,
+        description: input.description,
+        status: "UPDATING",
+        customDescriptorContent: input.customMetadata,
+      }),
+    );
     mockComputeTrustPath.mockReset();
     mockAssumeAnalysisRoleClient.mockReset();
     mockGetGovernanceEnforce.mockReset().mockResolvedValue("strict");
@@ -477,14 +478,17 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
     expect(persisted.governanceAttestation.attestedAt).toBeDefined();
     expect(persisted.governanceAttestation.trustPath.clean).toBe(true);
     // strict mode, yet activation proceeds because the gate now sees 'attested'.
-    expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+    // Activation goes through SubmitRegistryRecordForApproval, never a direct
+    // UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+    expect(mockSubmitForApproval).toHaveBeenCalledWith(AGENT_ID);
+    expect(mockUpdateResourceStatus).not.toHaveBeenCalledWith(
       "agent",
       AGENT_ID,
       "APPROVED",
     );
   });
 
-  test("imported+pending+roleArn+findings → stays pending, findings stored, strict gate blocks", async () => {
+  test("imported+pending+roleArn+findings → stays pending, findings not persisted, strict gate blocks before any write", async () => {
     mockGetResource.mockResolvedValue(importedRecord({ roleArn: ROLE_ARN }));
     mockComputeTrustPath.mockResolvedValue({
       hops: [],
@@ -498,15 +502,12 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
     );
 
     expect(mockComputeTrustPath).toHaveBeenCalledWith(ROLE_ARN);
-    const persisted = JSON.parse(
-      mockUpdateResource.mock.calls[0][2].customMetadata,
-    );
-    expect(persisted.governanceAttestation.status).toBe("pending");
-    expect(persisted.governanceAttestation.trustPath.clean).toBe(false);
-    expect(persisted.governanceAttestation.trustPath.findings).toEqual([
-      "over-broad-action: arn:...:role/imported-agent-role",
-    ]);
+    // Ordering (finding adde5b79): the governance gate and the registry
+    // status transition both run BEFORE any metadata write, so a blocked
+    // activation leaves no partial metadata drift — updateResource never runs.
+    expect(mockUpdateResource).not.toHaveBeenCalled();
     expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+    expect(mockSubmitForApproval).not.toHaveBeenCalled();
   });
 
   test("trust-path throws → activation not crashed, no auto-attest (permissive proceeds)", async () => {
@@ -526,8 +527,11 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
       mockUpdateResource.mock.calls[0][2].customMetadata,
     );
     expect(persisted.governanceAttestation).toBeUndefined();
-    // permissive gate proceeds (telemetry only), so activation still happens.
-    expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+    // permissive gate proceeds (telemetry only), so activation still happens
+    // via SubmitRegistryRecordForApproval, never a direct
+    // UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+    expect(mockSubmitForApproval).toHaveBeenCalledWith(AGENT_ID);
+    expect(mockUpdateResourceStatus).not.toHaveBeenCalledWith(
       "agent",
       AGENT_ID,
       "APPROVED",
@@ -562,7 +566,10 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
     await handler(activateEvent());
 
     expect(mockComputeTrustPath).not.toHaveBeenCalled();
-    expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+    // DRAFT -> active submits for approval, never a direct
+    // UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+    expect(mockSubmitForApproval).toHaveBeenCalledWith(AGENT_ID);
+    expect(mockUpdateResourceStatus).not.toHaveBeenCalledWith(
       "agent",
       AGENT_ID,
       "APPROVED",
@@ -576,7 +583,7 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
   // the check is skipped and the attestation stays 'pending' for the gate.
   const CROSS_ACCOUNT_DEPLOYMENT = "999999999999";
 
-  test("imported+pending+CROSS-ACCOUNT roleArn → skips computeTrustPath, records crossAccount, stays pending, strict gate blocks (not crashed)", async () => {
+  test("imported+pending+CROSS-ACCOUNT roleArn → skips computeTrustPath, strict gate blocks before any write (not crashed)", async () => {
     process.env.ACCOUNT_ID = CROSS_ACCOUNT_DEPLOYMENT;
     mockGetResource.mockResolvedValue(importedRecord({ roleArn: ROLE_ARN }));
     // strict is the beforeEach default — the gate must block on the still-pending record.
@@ -588,20 +595,13 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
     // The same-account IAM check is never attempted for a cross-account role.
     expect(mockComputeTrustPath).not.toHaveBeenCalled();
 
-    // The crossAccount trust-path summary IS persisted (updateResource runs before
-    // the gate throws), leaving the attestation 'pending' with a manual finding.
-    const persisted = JSON.parse(
-      mockUpdateResource.mock.calls[0][2].customMetadata,
-    );
-    expect(persisted.governanceAttestation.status).toBe("pending");
-    expect(persisted.governanceAttestation.trustPath.crossAccount).toBe(true);
-    expect(persisted.governanceAttestation.trustPath.clean).toBe(false);
-    expect(persisted.governanceAttestation.trustPath.findings).toEqual([
-      "cross-account-role: automated trust-path unavailable; manual attestation required",
-    ]);
-
-    // Gated: the APPROVED status write never happened.
+    // Ordering (finding adde5b79): the governance gate runs BEFORE any
+    // metadata write, so a blocked activation leaves no partial metadata
+    // drift — updateResource never runs, and the crossAccount trust-path
+    // summary computed in-memory this request is discarded, not persisted.
+    expect(mockUpdateResource).not.toHaveBeenCalled();
     expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+    expect(mockSubmitForApproval).not.toHaveBeenCalled();
   });
 
   test("REGRESSION: imported+pending+SAME-ACCOUNT roleArn (ACCOUNT_ID set) + clean → computeTrustPath runs and auto-attests", async () => {
@@ -631,7 +631,10 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
     expect(
       persisted.governanceAttestation.trustPath.crossAccount,
     ).toBeUndefined();
-    expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+    // Activation goes through SubmitRegistryRecordForApproval, never a direct
+    // UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+    expect(mockSubmitForApproval).toHaveBeenCalledWith(AGENT_ID);
+    expect(mockUpdateResourceStatus).not.toHaveBeenCalledWith(
       "agent",
       AGENT_ID,
       "APPROVED",
@@ -686,14 +689,17 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
     expect(persisted.governanceAttestation.attestedAt).toBeDefined();
     expect(persisted.governanceAttestation.trustPath.crossAccount).toBe(true);
     expect(persisted.governanceAttestation.trustPath.clean).toBe(true);
-    expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+    // Activation goes through SubmitRegistryRecordForApproval, never a direct
+    // UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+    expect(mockSubmitForApproval).toHaveBeenCalledWith(AGENT_ID);
+    expect(mockUpdateResourceStatus).not.toHaveBeenCalledWith(
       "agent",
       AGENT_ID,
       "APPROVED",
     );
   });
 
-  test("CROSS-ACCOUNT + analysisRoleArn + findings → stays pending with findings, strict gate blocks", async () => {
+  test("CROSS-ACCOUNT + analysisRoleArn + findings → stays pending, strict gate blocks before any write", async () => {
     process.env.ACCOUNT_ID = CROSS_ACCOUNT_DEPLOYMENT;
     mockAssumeAnalysisRoleClient.mockResolvedValue({
       __brand: "x-acct-iam-client",
@@ -725,16 +731,12 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
     expect(mockComputeTrustPath).toHaveBeenCalledWith(ROLE_ARN, {
       iamClient: expect.anything(),
     });
-    const persisted = JSON.parse(
-      mockUpdateResource.mock.calls[0][2].customMetadata,
-    );
-    expect(persisted.governanceAttestation.status).toBe("pending");
-    expect(persisted.governanceAttestation.trustPath.crossAccount).toBe(true);
-    expect(persisted.governanceAttestation.trustPath.clean).toBe(false);
-    expect(persisted.governanceAttestation.trustPath.findings).toEqual([
-      "over-broad-action: arn:aws:iam::123456789012:role/imported-agent-role",
-    ]);
+    // Ordering (finding adde5b79): the governance gate runs BEFORE any
+    // metadata write, so a blocked activation leaves no partial metadata
+    // drift — updateResource never runs.
+    expect(mockUpdateResource).not.toHaveBeenCalled();
     expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+    expect(mockSubmitForApproval).not.toHaveBeenCalled();
   });
 
   test("CROSS-ACCOUNT + analysisRoleArn but assume THROWS → finding recorded, pending, NOT crashed (permissive proceeds), no computeTrustPath, creds not logged", async () => {
@@ -772,8 +774,11 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
       expect(persisted.governanceAttestation.trustPath.findings).toEqual([
         "cross-account analysis-role assume failed; manual attestation required",
       ]);
-      // permissive gate proceeds (telemetry only), so activation still happens.
-      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+      // permissive gate proceeds (telemetry only), so activation still
+      // happens via SubmitRegistryRecordForApproval, never a direct
+      // UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+      expect(mockSubmitForApproval).toHaveBeenCalledWith(AGENT_ID);
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalledWith(
         "agent",
         AGENT_ID,
         "APPROVED",
