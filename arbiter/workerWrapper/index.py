@@ -298,6 +298,71 @@ class SpecificationNotBoundError(Exception):
     is the equivalent dispatch-time failure mode (Requirement 5.8).
     """
 
+
+class InvalidAgentConfigError(Exception):
+    """Raised when the agent record's ``config`` field is a string that does
+    not parse as JSON (or fails some other type expectation while decoding).
+
+    The class NAME is the classification key ``failure_taxonomy`` maps to
+    ``FailureClass.INVALID_AGENT_CONFIG`` (finding c4cb69f9), disposition
+    NEVER — a malformed stored config cannot self-heal on retry.
+    """
+
+
+#: Cap on how much of the offending ``config`` value is ever logged. Agent
+#: config values can be arbitrarily large (a full agent definition blob);
+#: logging it whole would flood the log stream and could leak unrelated
+#: config content. 200 chars is enough to identify the malformed value
+#: without ever logging more.
+_INVALID_CONFIG_LOG_CHARS = 200
+
+
+def _parse_agent_config(config, *, agent_id, field_name='config'):
+    """Parse a possibly-string ``config`` value into a dict, raising
+    :class:`InvalidAgentConfigError` on failure.
+
+    Mirrors the pre-existing ``if isinstance(config, str): config =
+    json.loads(config)`` shape at both call sites, but never lets a raw
+    ``JSONDecodeError``/``TypeError`` escape unclassified: those exception
+    class names have no entry in ``failure_taxonomy``, so an unguarded raise
+    would classify as UNKNOWN and defer to the per-node ``retryableErrors``
+    list — the opposite of the required never-retry disposition. Logs
+    agentId, the field name, and at most the first
+    ``_INVALID_CONFIG_LOG_CHARS`` characters of the offending value (never
+    more), then raises so the caller's existing failure path takes over.
+    """
+    if not isinstance(config, str):
+        return config
+    try:
+        parsed = json.loads(config)
+    except (json.JSONDecodeError, TypeError) as exc:
+        print(json.dumps({
+            'level': 'ERROR',
+            'component': 'WorkerWrapper',
+            'action': 'invalid_agent_config',
+            'agentId': agent_id,
+            'field': field_name,
+            'value': str(config)[:_INVALID_CONFIG_LOG_CHARS],
+            'error': str(exc),
+        }))
+        raise InvalidAgentConfigError(
+            f"agent {agent_id!r} field {field_name!r} is not valid JSON"
+        ) from exc
+    if not isinstance(parsed, dict):
+        print(json.dumps({
+            'level': 'ERROR',
+            'component': 'WorkerWrapper',
+            'action': 'invalid_agent_config',
+            'agentId': agent_id,
+            'field': field_name,
+            'value': str(config)[:_INVALID_CONFIG_LOG_CHARS],
+            'error': f'parsed to {type(parsed).__name__}, expected an object',
+        }))
+        raise InvalidAgentConfigError(
+            f"agent {agent_id!r} field {field_name!r} did not parse to an object"
+        )
+    return parsed
+
 def assert_tool_spec_binding(tool_config: dict, spec_id: str | None) -> None:
     """Dispatch-time enforcement mirroring fabricator's validate_code_tool_binding.
 
@@ -1306,8 +1371,7 @@ def _process_workflow_node(event, message_attributes=None):
 
             agent = load_config_from_dynamodb(msg.agent_id)
             config = agent['config']
-            if isinstance(config, str):
-                config = json.loads(config)
+            config = _parse_agent_config(config, agent_id=msg.agent_id, field_name='config')
 
             # Same mechanism as the supervisor task path (Req 3.6): append the
             # addition to the agent's description via worker_governance.
@@ -1486,8 +1550,7 @@ def process_event(event, context, message_attributes=None):
     agent = load_config_from_dynamodb(agent_name)
     config = agent['config']
 
-    if isinstance(config, str):
-        config = json.loads(config)
+    config = _parse_agent_config(config, agent_id=agent_name, field_name='config')
 
     # Apply step constraints tool filtering (Req 13.2)
     tool_ids = config.get('tools', [])
@@ -1678,6 +1741,18 @@ def lambda_handler(event, context):
             # absent on any record that predates this change (defaults to {}).
             process_event(message_body, context, message_attributes=record.get('messageAttributes'))
             print(f"Successfully processed message: {record['messageId']}")
+        except InvalidAgentConfigError as e:
+            # Never-retry disposition (failure_taxonomy.FailureClass.
+            # INVALID_AGENT_CONFIG): a malformed stored config fails
+            # identically on every redelivery, so this message is treated as
+            # successfully processed for SQS purposes (acked, NOT added to
+            # batchItemFailures) rather than retried. _parse_agent_config
+            # already logged agentId/field/truncated value before raising;
+            # this is the terminal, no-retry outcome for the legacy
+            # (non-workflow-node) supervisor task path, mirroring how
+            # _process_workflow_node's own except-block never re-raises for a
+            # classified node failure.
+            print(f"Invalid agent config for message {record['messageId']}: {e}")
         except Exception as e:
             print(f"Error processing message {record['messageId']}: {e}")
             batch_item_failures.append({"itemIdentifier": record['messageId']})

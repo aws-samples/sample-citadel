@@ -77,6 +77,39 @@ class TestCircuitOpenClass:
         assert ft.classify(CircuitBreakerOpen("x")) is FC.CIRCUIT_OPEN
 
 
+class TestInvalidAgentConfigClass:
+    """The NEW INVALID_AGENT_CONFIG class (finding c4cb69f9): disposition
+    NEVER, reusing the existing NEVER disposition (no parallel disposition
+    invented) — a malformed stored config cannot self-heal on retry."""
+
+    def test_invalid_agent_config_is_never_and_not_auto_retryable(self):
+        assert ft.disposition(FC.INVALID_AGENT_CONFIG) is RD.NEVER
+        assert ft.is_auto_retryable(FC.INVALID_AGENT_CONFIG) is False
+
+    def test_invalid_agent_config_is_forbidden_by_taxonomy_cannot_be_widened(self):
+        # A stale per-node retryableErrors list can NEVER widen a malformed
+        # config into an in-line retry (narrow-only veto).
+        assert ft.is_retry_forbidden_by_taxonomy("InvalidAgentConfigError") is True
+
+    def test_invalid_agent_config_is_not_a_governance_smell(self):
+        # A data/authoring defect, not a settled denial.
+        assert ft.is_governance_smell_on_retry(FC.INVALID_AGENT_CONFIG) is False
+
+    def test_invalid_agent_config_classname_and_value_string(self):
+        assert ft.classify("InvalidAgentConfigError") is FC.INVALID_AGENT_CONFIG
+        # value string round-trips via the lower index.
+        assert ft.classify("invalid-agent-config") is FC.INVALID_AGENT_CONFIG
+
+    def test_invalid_agent_config_exception_matches_string_parity(self):
+        class InvalidAgentConfigError(Exception):
+            pass
+
+        assert ft.classify(InvalidAgentConfigError("x")) == ft.classify(
+            "InvalidAgentConfigError"
+        )
+        assert ft.classify(InvalidAgentConfigError("x")) is FC.INVALID_AGENT_CONFIG
+
+
 # ---------------------------------------------------------------------------
 # Every inventory error type maps as decided
 # ---------------------------------------------------------------------------
@@ -177,6 +210,7 @@ class TestNarrowOnlyVeto:
             "OutcomeIndeterminateError",  # indeterminate
             "ApprovalRequiredError",      # approval-absent (retry-after-human, not auto)
             "CrossOrgResultRefError",     # authz
+            "InvalidAgentConfigError",    # invalid-agent-config
         ):
             assert ft.is_retry_forbidden_by_taxonomy(token) is True, token
 
