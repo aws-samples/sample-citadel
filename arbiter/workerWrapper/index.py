@@ -14,16 +14,23 @@ from botocore.exceptions import ClientError
 # bundle currently ships only arbiter/workerWrapper/. A missing import
 # must NOT break dispatch: tracing is best-effort, never required.
 try:
-    from common.tracing import annotate_execution, annotate_from_carried, extract_carried  # noqa: E402 — import activates tracing as a side effect
+    from common.tracing import annotate_from_carried, execution_trace_scope, extract_carried  # noqa: E402 — import activates tracing as a side effect
 except ImportError: # pragma: no cover — Lambda bundle path before follow-up
-    def annotate_execution(**_kwargs): # type: ignore[no-redef]
-        pass
-
     def annotate_from_carried(carried): # type: ignore[no-redef]
         pass
 
     def extract_carried(detail): # type: ignore[no-redef]
         return None
+
+    class execution_trace_scope: # type: ignore[no-redef] # noqa: N801 — matches real no-op contract
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return None
 
 from worker_governance import (
     apply_step_constraints,
@@ -1263,19 +1270,6 @@ def _process_workflow_node(event, message_attributes=None):
     _emit_cold_start_metric_if_applicable(msg.agent_id)
     carried_ctx = _extract_worker_trace_context(event, message_attributes)
     annotate_from_carried(carried_ctx)
-    # Finding 3d92ef6b (CIT-181): annotate_from_carried above only fires
-    # when the dispatch carried a traceContext/AWSTraceHeader; stamp the
-    # ids the parsed NodeDispatchMessage already carries directly so the
-    # worker span is queryable even on a plain (non-carried-context)
-    # dispatch. msg.run_id/msg.correlation_id are None on a pre-runId
-    # dispatcher — annotate_execution omits those keys when absent.
-    annotate_execution(
-        run_id=msg.run_id,
-        execution_id=msg.execution_id,
-        correlation_id=msg.correlation_id,
-        node_id=msg.node_id,
-        workflow_id=msg.workflow_id,
-    )
     print(json.dumps({
         'level': 'INFO',
         'component': 'WorkerWrapper',
@@ -1285,145 +1279,163 @@ def _process_workflow_node(event, message_attributes=None):
         'workflowId': msg.workflow_id,
         'agentId': msg.agent_id,
     }))
-    try:
-        # Per-node configuration overrides (decision 59376546): consume exactly
-        # modelOverride + systemPromptAddition from the merged configuration
-        # dict the step runner dispatched. Unknown keys are ignored; malformed
-        # values warn and the node executes without overrides.
-        model_override, system_prompt_addition = extract_node_overrides(msg.configuration)
+    # Finding 40061019 (supersedes 3d92ef6b / CIT-181): annotate_from_carried
+    # above only fires when the dispatch carried a traceContext/AWSTraceHeader;
+    # execution_trace_scope keeps a single annotated SUBSEGMENT open for the
+    # agent-execution work below, stamping the ids the parsed
+    # NodeDispatchMessage already carries so the worker span is queryable
+    # even on a plain (non-carried-context) dispatch. Annotating
+    # current_segment() (the prior design) silently drops the annotation in
+    # Lambda, since that is the service-owned FacadeSegment and
+    # FacadeSegment.put_annotation always raises. msg.run_id/msg.correlation_id
+    # are None on a pre-runId dispatcher — annotate_execution omits those
+    # keys when absent.
+    with execution_trace_scope(
+        run_id=msg.run_id,
+        execution_id=msg.execution_id,
+        correlation_id=msg.correlation_id,
+        node_id=msg.node_id,
+        workflow_id=msg.workflow_id,
+    ):
+        try:
+            # Per-node configuration overrides (decision 59376546): consume exactly
+            # modelOverride + systemPromptAddition from the merged configuration
+            # dict the step runner dispatched. Unknown keys are ignored; malformed
+            # values warn and the node executes without overrides.
+            model_override, system_prompt_addition = extract_node_overrides(msg.configuration)
 
-        agent = load_config_from_dynamodb(msg.agent_id)
-        config = agent['config']
-        if isinstance(config, str):
-            config = json.loads(config)
+            agent = load_config_from_dynamodb(msg.agent_id)
+            config = agent['config']
+            if isinstance(config, str):
+                config = json.loads(config)
 
-        # Same mechanism as the supervisor task path (Req 3.6): append the
-        # addition to the agent's description via worker_governance.
-        if system_prompt_addition:
-            config['description'] = apply_system_prompt_addition(
-                config.get('description', ''), system_prompt_addition
+            # Same mechanism as the supervisor task path (Req 3.6): append the
+            # addition to the agent's description via worker_governance.
+            if system_prompt_addition:
+                config['description'] = apply_system_prompt_addition(
+                    config.get('description', ''), system_prompt_addition
+                )
+
+            required_permissions = config.get('requiredPermissions')
+            scoped_credentials = get_scoped_credentials(
+                msg.agent_id, required_permissions,
+                org_id=_resolve_execution_org_id(msg.execution_id),
             )
 
-        required_permissions = config.get('requiredPermissions')
-        scoped_credentials = get_scoped_credentials(
-            msg.agent_id, required_permissions,
-            org_id=_resolve_execution_org_id(msg.execution_id),
-        )
+            fileName = config['filename']
+            load_file_from_s3_into_tmp(os.environ["AGENT_BUCKET_NAME"], fileName)
 
-        fileName = config['filename']
-        load_file_from_s3_into_tmp(os.environ["AGENT_BUCKET_NAME"], fileName)
+            # Layer-2 governance parity with the supervisor task path: build the
+            # same governance-carrying subprocess env so the subprocess layer-2
+            # governance hook is installed for workflow-dispatched agents instead
+            # of being silently bypassed. CITADEL_AGENT_ID is the trigger
+            # (agent_runner._install_tool_call_hooks builds the GovernanceEvaluator
+            # only when it is set, composed with idempotency on one
+            # BeforeToolCallEvent seam — finding 027c4a89); without it the
+            # governance hook is never installed and layer-2 tool governance is
+            # skipped.
+            # The workflow-node per-run correlation id is execution_id — mirroring
+            # the supervisor path, which feeds its per-run orchestration_id into the
+            # same slot — so ledger findings stay correlatable to a single
+            # execution rather than the reusable workflow template id.
+            # modelOverride rides the exact supervisor-path mechanism: the
+            # MODEL_OVERRIDE env var consumed by agent_runner._install_model_override.
+            extra_env = build_subprocess_env(
+                {},
+                model_override=model_override,
+                agent_id=msg.agent_id,
+                workflow_id=msg.execution_id,
+                # Tool-call idempotency (PR1) context. orgId is resolved
+                # SERVER-SIDE from the execution row (never trusted from the
+                # dispatch payload); executionId/nodeId come from the validated
+                # node-dispatch message. When these are threaded, agent_runner
+                # installs the idempotency hook in the subprocess.
+                execution_id=msg.execution_id,
+                node_id=msg.node_id,
+                org_id=_resolve_execution_org_id(msg.execution_id),
+                # PR2 dispatch-generation fence: carried on the validated
+                # node-dispatch message (server-minted by the step runner's
+                # dispatch guard). When present, agent_runner fences the tool-call
+                # reserve against it; when None (pre-fence dispatch) the reserve is
+                # unfenced, preserving back-compat.
+                dispatch_generation=msg.dispatch_generation,
+                # Approval-required tool gating (finding c947aa77). The OPT-IN set
+                # is assembled SERVER-SIDE here (never the S3 tool module). The
+                # grant scope's workflow-DEFINITION id is msg.workflow_id (the
+                # reusable template), distinct from the per-run execution_id above;
+                # the evaluator single-use-consumes the (org, workflowDef, node,
+                # tool) grant against execution_id.
+                approval_required_tools=_approval_required_tools(),
+                workflow_definition_id=msg.workflow_id,
+            )
 
-        # Layer-2 governance parity with the supervisor task path: build the
-        # same governance-carrying subprocess env so the subprocess layer-2
-        # governance hook is installed for workflow-dispatched agents instead
-        # of being silently bypassed. CITADEL_AGENT_ID is the trigger
-        # (agent_runner._install_tool_call_hooks builds the GovernanceEvaluator
-        # only when it is set, composed with idempotency on one
-        # BeforeToolCallEvent seam — finding 027c4a89); without it the
-        # governance hook is never installed and layer-2 tool governance is
-        # skipped.
-        # The workflow-node per-run correlation id is execution_id — mirroring
-        # the supervisor path, which feeds its per-run orchestration_id into the
-        # same slot — so ledger findings stay correlatable to a single
-        # execution rather than the reusable workflow template id.
-        # modelOverride rides the exact supervisor-path mechanism: the
-        # MODEL_OVERRIDE env var consumed by agent_runner._install_model_override.
-        extra_env = build_subprocess_env(
-            {},
-            model_override=model_override,
-            agent_id=msg.agent_id,
-            workflow_id=msg.execution_id,
-            # Tool-call idempotency (PR1) context. orgId is resolved
-            # SERVER-SIDE from the execution row (never trusted from the
-            # dispatch payload); executionId/nodeId come from the validated
-            # node-dispatch message. When these are threaded, agent_runner
-            # installs the idempotency hook in the subprocess.
-            execution_id=msg.execution_id,
-            node_id=msg.node_id,
-            org_id=_resolve_execution_org_id(msg.execution_id),
-            # PR2 dispatch-generation fence: carried on the validated
-            # node-dispatch message (server-minted by the step runner's
-            # dispatch guard). When present, agent_runner fences the tool-call
-            # reserve against it; when None (pre-fence dispatch) the reserve is
-            # unfenced, preserving back-compat.
-            dispatch_generation=msg.dispatch_generation,
-            # Approval-required tool gating (finding c947aa77). The OPT-IN set
-            # is assembled SERVER-SIDE here (never the S3 tool module). The
-            # grant scope's workflow-DEFINITION id is msg.workflow_id (the
-            # reusable template), distinct from the per-run execution_id above;
-            # the evaluator single-use-consumes the (org, workflowDef, node,
-            # tool) grant against execution_id.
-            approval_required_tools=_approval_required_tools(),
-            workflow_definition_id=msg.workflow_id,
-        )
+            usage_sink: list = []
+            response = run_agent_in_subprocess(
+                msg.input, scoped_credentials, extra_env, raise_on_error=True,
+                usage_sink=usage_sink,
+            )
+        except Exception as exc:  # noqa: BLE001 — any failure becomes node.failed
+            # finding 56d763d4: carry the exception CLASS as the node-result error
+            # so the step runner's retry.py failure-class logic (should_retry:
+            # ``error_type in retryableErrors``) can act on it. An
+            # AgentExecutionError from run_agent_in_subprocess carries the
+            # agent-body class (e.g. 'TypeError' for the ground-truth
+            # "'dict' object can't be awaited"); any other exception (config /
+            # module / credential error) uses its own type name. The full
+            # human-readable diagnostic is preserved in the ERROR log below — a
+            # failed node has no ``output`` to carry the message, and the
+            # node-result ``error`` field is the retry classification KEY, so it
+            # must be the class, not the free-form message (which would never match
+            # a retryableErrors entry).
+            error_class = getattr(exc, 'error_class', None) or type(exc).__name__
+            diagnostic = getattr(exc, 'message', None) or str(exc)
+            print(json.dumps({
+                'level': 'ERROR',
+                'component': 'WorkerWrapper',
+                'action': 'workflow_node_failed',
+                'executionId': msg.execution_id,
+                'nodeId': msg.node_id,
+                'workflowId': msg.workflow_id,
+                'agentId': msg.agent_id,
+                'errorClass': error_class,
+                'error': diagnostic,
+            }))
+            _emit_node_result(
+                msg,
+                status=workflow_contract.STATUS_FAILED,
+                error=error_class,
+                trace_context=carried_ctx,
+                worker_started_at=worker_started_at,
+            )
+            return
 
-        usage_sink: list = []
-        response = run_agent_in_subprocess(
-            msg.input, scoped_credentials, extra_env, raise_on_error=True,
-            usage_sink=usage_sink,
-        )
-    except Exception as exc:  # noqa: BLE001 — any failure becomes node.failed
-        # finding 56d763d4: carry the exception CLASS as the node-result error
-        # so the step runner's retry.py failure-class logic (should_retry:
-        # ``error_type in retryableErrors``) can act on it. An
-        # AgentExecutionError from run_agent_in_subprocess carries the
-        # agent-body class (e.g. 'TypeError' for the ground-truth
-        # "'dict' object can't be awaited"); any other exception (config /
-        # module / credential error) uses its own type name. The full
-        # human-readable diagnostic is preserved in the ERROR log below — a
-        # failed node has no ``output`` to carry the message, and the
-        # node-result ``error`` field is the retry classification KEY, so it
-        # must be the class, not the free-form message (which would never match
-        # a retryableErrors entry).
-        error_class = getattr(exc, 'error_class', None) or type(exc).__name__
-        diagnostic = getattr(exc, 'message', None) or str(exc)
         print(json.dumps({
-            'level': 'ERROR',
+            'level': 'INFO',
             'component': 'WorkerWrapper',
-            'action': 'workflow_node_failed',
+            'action': 'workflow_node_completed',
             'executionId': msg.execution_id,
             'nodeId': msg.node_id,
             'workflowId': msg.workflow_id,
             'agentId': msg.agent_id,
-            'errorClass': error_class,
-            'error': diagnostic,
         }))
+        # Write-then-signal (decision O2): persist this node's completed result to
+        # EXECUTIONS_TABLE.nodeResults[nodeId] BEFORE emitting the signal, so a lost
+        # event leaves a durable, reconcilable checkpoint (never a
+        # signaled-but-unpersisted black hole). The signal below is emitted only
+        # after this durable write commits.
+        _persist_node_completion(
+            msg,
+            output={'response': response, 'usage': usage_sink},
+            usage=usage_sink,
+        )
         _emit_node_result(
             msg,
-            status=workflow_contract.STATUS_FAILED,
-            error=error_class,
+            status=workflow_contract.STATUS_COMPLETED,
+            output={'response': response, 'usage': usage_sink},
+            usage=usage_sink,
             trace_context=carried_ctx,
             worker_started_at=worker_started_at,
         )
-        return
-
-    print(json.dumps({
-        'level': 'INFO',
-        'component': 'WorkerWrapper',
-        'action': 'workflow_node_completed',
-        'executionId': msg.execution_id,
-        'nodeId': msg.node_id,
-        'workflowId': msg.workflow_id,
-        'agentId': msg.agent_id,
-    }))
-    # Write-then-signal (decision O2): persist this node's completed result to
-    # EXECUTIONS_TABLE.nodeResults[nodeId] BEFORE emitting the signal, so a lost
-    # event leaves a durable, reconcilable checkpoint (never a
-    # signaled-but-unpersisted black hole). The signal below is emitted only
-    # after this durable write commits.
-    _persist_node_completion(
-        msg,
-        output={'response': response, 'usage': usage_sink},
-        usage=usage_sink,
-    )
-    _emit_node_result(
-        msg,
-        status=workflow_contract.STATUS_COMPLETED,
-        output={'response': response, 'usage': usage_sink},
-        usage=usage_sink,
-        trace_context=carried_ctx,
-        worker_started_at=worker_started_at,
-    )
 
 def process_event(event, context, message_attributes=None):
     print("processing...")

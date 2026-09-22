@@ -402,3 +402,64 @@ def test_annotate_from_carried_stamps_literal_trace_context_metadata_namespace(m
     tracing_mod.annotate_from_carried(carried)
     assert segment.metadata["trace_context"] == carried
 
+
+# ---------------------------------------------------------------------------
+# Layer requirements tripwire (finding 616dc6e6 / 40061019): the shared
+# Lambda layer's bundling command (backend/lib/arbiter-stack.ts,
+# ArbiterCatalogLayer) installs from arbiter/layers/common/requirements.txt
+# into /opt/python. If aws-xray-sdk is ever dropped from that file, every
+# `from aws_xray_sdk.core import patch_all` in configure() above fails with
+# ModuleNotFoundError at /opt/python/common/tracing.py, and tracing goes
+# silently untraced. This test fails fast in CI if that regresses, without
+# needing an actual Lambda deploy to notice.
+# ---------------------------------------------------------------------------
+
+
+def test_layer_requirements_lists_aws_xray_sdk():
+    import os
+    import re
+
+    layer_requirements = os.path.join(
+        os.path.dirname(__file__), "..", "..", "layers", "common", "requirements.txt"
+    )
+    assert os.path.isfile(layer_requirements), (
+        f"expected layer requirements file at {layer_requirements} — "
+        "the ArbiterCatalogLayer bundling command in backend/lib/arbiter-stack.ts "
+        "installs from this path into /opt/python"
+    )
+    with open(layer_requirements, encoding="utf-8") as fh:
+        contents = fh.read()
+
+    assert re.search(r"^aws-xray-sdk==", contents, re.MULTILINE), (
+        "arbiter/layers/common/requirements.txt must pin aws-xray-sdk "
+        "(pinned, not a bare/range requirement) or common/tracing.py's "
+        "patch_all() will raise ModuleNotFoundError at /opt/python — see "
+        "finding 616dc6e6/40061019"
+    )
+
+
+def test_configure_logs_error_once_naming_layer_requirements_file(monkeypatch, caplog):
+    """A missing SDK must log at ERROR (not just be swallowed silently) and
+    name the layer requirements file to fix, exactly once per cold start —
+    guarded by the existing `_configured` flag, not a separate counter."""
+    import logging
+
+    import common.tracing as tracing_mod
+
+    def _raising_import(*_args, **_kwargs):
+        raise ModuleNotFoundError("No module named 'aws_xray_sdk'")
+
+    monkeypatch.setattr(
+        "aws_xray_sdk.core.patch_all", _raising_import, raising=True
+    )
+
+    tracing_mod._configured = False
+    with caplog.at_level(logging.ERROR, logger="common.tracing"):
+        tracing_mod.configure()
+        tracing_mod.configure()  # second call must not log again — no daemon spam
+
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1, "the ERROR must be logged exactly once per cold start"
+    assert "arbiter/layers/common/requirements.txt" in error_records[0].message
+    assert "aws-xray-sdk" in error_records[0].message
+

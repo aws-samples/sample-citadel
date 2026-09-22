@@ -288,6 +288,17 @@ export class ArbiterStack extends cdk.Stack {
     // catalog/common packages, and staging governance/ alongside them
     // keeps a single copy shared by every governance-aware Python Lambda
     // rather than duplicating the package per-function asset.
+    // aws-xray-sdk is installed here (arbiter/layers/common/requirements.txt)
+    // rather than relying on each Lambda's own requirements.txt, because
+    // common/tracing.py's module-level `configure()` (imported by every
+    // arbiter entry point) is staged into THIS layer at /opt/python/common,
+    // so its `from aws_xray_sdk.core import patch_all` import must resolve
+    // from the same /opt/python site the layer populates — a per-function
+    // requirements.txt pin only affects that function's own bundled asset
+    // dir, not /opt/python. Finding 616dc6e6/40061019: prior to this pin,
+    // the layer's bundling command only copied source directories with no
+    // pip install step, so aws_xray_sdk was never actually present at
+    // /opt/python and every patch_all() call raised ModuleNotFoundError.
     const catalogLayer = new lambda.LayerVersion(this, "ArbiterCatalogLayer", {
       layerVersionName: `citadel-arbiter-catalog-${props.environment}`,
       code: lambda.Code.fromAsset(ARBITER_ROOT, {
@@ -296,7 +307,7 @@ export class ArbiterStack extends cdk.Stack {
           command: [
             "bash",
             "-c",
-            "mkdir -p /asset-output/python && cp -r /asset-input/catalog /asset-output/python/catalog && cp -r /asset-input/common /asset-output/python/common && cp -r /asset-input/governance /asset-output/python/governance",
+            "mkdir -p /asset-output/python && cp -r /asset-input/catalog /asset-output/python/catalog && cp -r /asset-input/common /asset-output/python/common && cp -r /asset-input/governance /asset-output/python/governance && pip install -r /asset-input/layers/common/requirements.txt -t /asset-output/python",
           ],
         },
       }),
@@ -304,7 +315,8 @@ export class ArbiterStack extends cdk.Stack {
       description:
         "Shared arbiter Python packages (catalog: registry_client and utilities; " +
         "common: cross-region prefix helper; governance: release resolution + " +
-        "grandfathering for release-aware dispatch).",
+        "grandfathering for release-aware dispatch) plus aws-xray-sdk so " +
+        "common.tracing's patch_all() activation succeeds at /opt/python.",
     });
 
     // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
