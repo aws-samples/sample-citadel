@@ -185,6 +185,33 @@ export interface RawAgentManifest {
   version?: unknown;
 }
 
+/**
+ * Parses a mutation input's `config` field when it arrives as a string,
+ * enforcing that it is valid JSON that decodes to an object (not a bare
+ * string/number/array/null). Objects pass through untouched. Shared by every
+ * create/update/import write path in this file so a prose (non-JSON) config
+ * is rejected uniformly with the same message, following this file's
+ * existing `ValidationError: <message>` convention (see
+ * `Cannot determine caller organization`-style throws above).
+ */
+function parseConfigOrThrow(
+  config: string | Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (typeof config !== "string") {
+    return config;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(config);
+  } catch {
+    throw new Error("ValidationError: config must be valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("ValidationError: config must be valid JSON");
+  }
+  return parsed as Record<string, unknown>;
+}
+
 export const handler = async (
   event: AgentConfigResolverEvent,
   context?: LambdaContextLike,
@@ -416,12 +443,11 @@ export async function createAgentConfigRegistry(
     throw new Error("Cannot determine caller organization");
   }
 
-  const config =
+  const parsedConfig = parseConfigOrThrow(input.config) ?? {};
+  const config: string =
     typeof input.config === "string"
       ? input.config
-      : JSON.stringify(input.config);
-  const parsedConfig =
-    typeof input.config === "string" ? JSON.parse(input.config) : input.config;
+      : JSON.stringify(parsedConfig);
 
   const customMetadata = registryService.serializeCustomMetadata({
     categories: input.categories || [],
@@ -432,7 +458,7 @@ export async function createAgentConfigRegistry(
   } as AgentCustomMetadata);
 
   const record = await registryService.createResource("agent", input.agentId, {
-    name: parsedConfig.name || input.agentId,
+    name: (parsedConfig.name as string | undefined) || input.agentId,
     description: config,
     customMetadata,
   });
@@ -604,7 +630,13 @@ export async function updateAgentConfigRegistry(
     }
   }
 
-  // Merge config
+  // Merge config. `input.config` is validated here (create/update write path);
+  // `existing.description` (legacy free-text description) is intentionally
+  // NOT re-validated — a state-only toggle with no input.config must not
+  // start throwing on a pre-existing malformed legacy record.
+  if (input.config !== undefined) {
+    parseConfigOrThrow(input.config);
+  }
   const newConfig = input.config
     ? typeof input.config === "string"
       ? input.config
@@ -1242,8 +1274,7 @@ async function createAgentConfig(
   input: AgentConfigMutationInput,
 ): Promise<AgentConfig> {
   const now = new Date().toISOString();
-  const config =
-    typeof input.config === "string" ? JSON.parse(input.config) : input.config;
+  const config = parseConfigOrThrow(input.config) ?? {};
 
   const agentConfig: AgentConfig = {
     agentId: input.agentId,
@@ -1287,15 +1318,7 @@ async function updateAgentConfig(
     }
   })();
   const newConfig = input.config
-    ? typeof input.config === "string"
-      ? (() => {
-          try {
-            return JSON.parse(input.config);
-          } catch {
-            return {};
-          }
-        })()
-      : input.config
+    ? parseConfigOrThrow(input.config)
     : existingConfig;
 
   // D-02: Optimistic locking — increment version and use conditional write

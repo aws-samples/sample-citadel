@@ -207,6 +207,39 @@ describe("agent-config-resolver", () => {
       expect(typeof result.config).toBe("string");
       expect(result.createdAt).toBeDefined();
     });
+
+    test("accepts config passed as an object", async () => {
+      dynamoMock.on(PutCommand).resolves({});
+
+      const result = await handler(
+        makeEvent("createAgentConfig", {
+          input: {
+            agentId: "new-agent-obj",
+            config: { name: "New" },
+            state: "active",
+          },
+        }),
+      );
+
+      expect(result.agentId).toBe("new-agent-obj");
+      expect(JSON.parse(result.config)).toEqual({ name: "New" });
+    });
+
+    test("rejects prose (non-JSON) config", async () => {
+      dynamoMock.on(PutCommand).resolves({});
+
+      await expect(
+        handler(
+          makeEvent("createAgentConfig", {
+            input: {
+              agentId: "bad-agent",
+              config: "this is not json",
+              state: "active",
+            },
+          }),
+        ),
+      ).rejects.toThrow("config must be valid JSON");
+    });
   });
 
   describe("updateAgentConfig", () => {
@@ -239,6 +272,47 @@ describe("agent-config-resolver", () => {
 
       expect(result.agentId).toBe("a1");
       expect(JSON.parse(result.config)).toEqual({ new: true });
+    });
+
+    test("accepts config passed as an object", async () => {
+      dynamoMock.on(GetCommand).resolves({
+        Item: {
+          agentId: "a1",
+          config: '{"old":true}',
+          state: "active",
+          createdAt: "2025-01-01",
+        },
+      });
+      dynamoMock.on(PutCommand).resolves({});
+
+      const result = await handler(
+        makeEvent("updateAgentConfig", {
+          input: { agentId: "a1", config: { new: true } },
+        }),
+      );
+
+      expect(result.agentId).toBe("a1");
+      expect(JSON.parse(result.config)).toEqual({ new: true });
+    });
+
+    test("rejects prose (non-JSON) config", async () => {
+      dynamoMock.on(GetCommand).resolves({
+        Item: {
+          agentId: "a1",
+          config: '{"old":true}',
+          state: "active",
+          createdAt: "2025-01-01",
+        },
+      });
+      dynamoMock.on(PutCommand).resolves({});
+
+      await expect(
+        handler(
+          makeEvent("updateAgentConfig", {
+            input: { agentId: "a1", config: "this is not json" },
+          }),
+        ),
+      ).rejects.toThrow("config must be valid JSON");
     });
   });
 
