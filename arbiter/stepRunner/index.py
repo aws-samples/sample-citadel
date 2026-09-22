@@ -9,7 +9,7 @@ from executor import (
     resume_execution,
 )
 from common import workflow_contract
-from common.tracing import annotate_from_carried, extract_carried
+from common.tracing import annotate_execution, annotate_from_carried, extract_carried
 
 
 def handler(event, context):
@@ -22,6 +22,20 @@ def handler(event, context):
     # traceContext or a malformed one (property-tested in
     # common/__tests__/test_tracing.py).
     annotate_from_carried(extract_carried(detail))
+
+    # Finding 3d92ef6b (CIT-181): annotate_from_carried above only fires
+    # when the detail carries a traceContext (carried-context hops); the
+    # plain EventBridge workflow-dispatch path did not otherwise stamp
+    # run_id/execution_id/correlation_id, leaving StepRunner spans
+    # unqueryable. Stamp the ids this handler already has in the detail
+    # payload directly, independent of traceContext presence.
+    annotate_execution(
+        run_id=detail.get('runId'),
+        execution_id=detail.get('executionId'),
+        correlation_id=detail.get('correlationId') or detail.get('executionId'),
+        node_id=detail.get('nodeId'),
+        workflow_id=detail.get('workflowId'),
+    )
 
     if detail_type == 'execution.start.requested':
         start_execution(detail['executionId'], detail['workflowId'])

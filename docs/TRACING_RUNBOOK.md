@@ -69,16 +69,22 @@ interval, `StopQuery` on early exit) → `GetQueryResults`) and shapes rows
 into the SAME `TraceEntry`/`TraceSpan` types the X-Ray path emits
 (`utils/spans-waterfall.ts`) — the frontend cannot tell which backend
 produced a response. `utils/trace-span-query.ts` builds the Logs Insights
-filter clauses (`annotation.correlation_id`/`annotation.run_id`) with the
+filter clauses (`attributes.correlation_id`/`attributes.run_id`) with the
 same allowlist/reject-first discipline as `xray-filter.ts`.
 
 > ⚠️ **`utils/spans-waterfall.ts` carries an unverified-schema warning at
-> every field-name assumption** (`spanId`, `parentSpanId`, `traceId`,
-> `startTimeUnixNano`/`endTimeUnixNano`, the `attributes.*`/`annotation.*`
-> attribute-key shapes). These are design-time assumptions, not values
-> confirmed against a real Transaction Search span. See "Cutover
-> procedure" below — do not select `TRACE_BACKEND=spans` in any real
-> account before completing the schema-verification step.
+> most field-name assumptions** (`spanId`, `parentSpanId`, `traceId`,
+> `startTimeUnixNano`/`endTimeUnixNano`). One piece IS verified (evidence
+> report finding a3d8a2ea): X-Ray annotations — written via
+> `put_annotation` on either a segment or a subsegment — export into
+> `aws/spans` as `attributes.<key>`, never `annotation.<key>`;
+> `utils/trace-span-query.ts`'s filter-clause builders already use
+> `` `attributes.*` ``. The REMAINING attribute-key shapes (e.g.
+> `attributes.http.response.status_code` / `attributes.exception.*`) and
+> every other field-name assumption above are still unconfirmed against a
+> real Transaction Search span. See "Cutover procedure" below — do not
+> select `TRACE_BACKEND=spans` in any real account before completing the
+> schema-verification step for those remaining fields.
 
 ### Cutover procedure (switching an environment's `TRACE_BACKEND` from `xray` to `spans`)
 
@@ -100,8 +106,13 @@ regardless of the env value (`telemetry-stack.ts`), so this change is an
    column names against every field-name assumption listed in
    `utils/spans-waterfall.ts`'s module header (`spanId`, `parentSpanId`,
    `traceId`, `startTimeUnixNano`/`endTimeUnixNano`, the
-   `attributes.http.response.status_code` / `attributes.exception.*` /
-   `annotation.*` attribute keys, `statusCode`). Update the constants in
+   `attributes.http.response.status_code` / `attributes.exception.*`
+   attribute keys, `statusCode`). The `attributes.correlation_id`/
+   `attributes.run_id` keys are already verified (evidence report finding
+   a3d8a2ea) — annotations export at `attributes.<key>` on both segments
+   and subsegments, never `annotation.<key>` — so this step does not need
+   to re-check those two; it remains blocking for every other field-name
+   assumption above. Update the constants in
    `spans-waterfall.ts` (and the query text in `trace-span-query.ts` if the
    annotation attribute key differs) to match reality; add/adjust the Red
    fixture in `spans-waterfall.test.ts` to the verified shape before
@@ -337,16 +348,27 @@ backfill (write-once/immutable data, see design §5).
 **CloudWatch Logs Insights span query (trace side, `TRACE_BACKEND=spans`
 — post-cutover):** the equivalent filter clauses over the `aws/spans` log
 group (`utils/trace-span-query.ts`), same runId-primary/correlation_id-
-fallback split, same `linkedBy` reporting:
+fallback split, same `linkedBy` reporting. Verified (evidence report
+finding a3d8a2ea): `aws/spans` merges X-Ray annotations into
+`attributes.<key>` on BOTH segments and subsegments — there is no
+`annotation.*` field on this side, so the filter clauses use
+`` `attributes.*` ``, not `` `annotation.*` ``:
 ```
-filter `annotation.run_id` = "<runId>"
+filter `attributes.run_id` = "<runId>"
 ```
 ```
-filter `annotation.correlation_id` = "<executionId-or-sessionId>"
+filter `attributes.correlation_id` = "<executionId-or-sessionId>"
 ```
-Field names (`annotation.run_id`/`annotation.correlation_id` as Logs
-Insights attribute keys) are the SAME unverified-schema assumption flagged
-in `utils/spans-waterfall.ts` — see "Cutover procedure" above.
+Field names (`attributes.run_id`/`attributes.correlation_id` as Logs
+Insights attribute keys, not `annotation.*` — see the verified mapping
+noted above) are confirmed against `utils/trace-span-query.ts`'s own
+filter-clause builders; the field-NAME mapping is settled, but the
+remaining unverified-schema assumptions in `utils/spans-waterfall.ts`
+(`spanId`, `parentSpanId`, `traceId`, `startTimeUnixNano`/
+`endTimeUnixNano`, `statusCode`) are unaffected by this fix — see
+"Cutover procedure" above. Do NOT read this fix as completing that
+cutover; it only closes the `annotation.*` → `attributes.*` operator-query
+drift.
 
 **Deferred:** a *global* "given only a runId, find everything across
 findings + cost-ledger with no other key" lookup requires two new GSIs
