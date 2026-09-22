@@ -205,6 +205,63 @@ def annotate_from_carried(carried: Optional[dict]) -> None:
         logger.debug("annotate_from_carried failed; continuing untraced.", exc_info=True)
 
 
+def annotate_execution(
+    run_id: Optional[str] = None,
+    execution_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    node_id: Optional[str] = None,
+    workflow_id: Optional[str] = None,
+) -> None:
+    """Annotate the CURRENT SEGMENT with the workflow-execution identity
+    (finding 3d92ef6b / CIT-181): a live execution's StepRunner/Worker spans
+    carried no ``run_id``/``execution_id``/``correlation_id`` because
+    ``annotate_from_carried`` only fires on carried-context hops, never on
+    the plain workflow dispatch path. This helper fills that gap by
+    stamping the handler's own ids directly, independent of whether a
+    carried ``traceContext`` was present.
+
+    Unlike ``annotate_from_carried`` (which prefers the current
+    *subsegment*, matching the carried-context hop's boto3-call framing),
+    this stamps the CURRENT SEGMENT first — the annotation must be visible
+    on the Lambda invocation's root segment, not scoped to one nested
+    downstream call — and falls back to the current subsegment only when
+    no segment is active (e.g. a call site inside an already-open
+    subsegment before the root segment reference is reachable).
+
+    Each parameter is optional and independently nullable; only non-empty
+    string values are written via ``put_annotation``, mirroring
+    ``annotate_from_carried``'s per-key omit-when-absent discipline — a
+    handler that only has ``execution_id`` and ``node_id`` available
+    annotates just those two keys. No-op when there is no active
+    segment/subsegment (R10 discipline) and no-op-safe when the X-Ray SDK
+    itself is unavailable/disabled — never raises.
+
+    Key names match the TS-side query filters in
+    ``backend/src/lambda/utils/trace-span-query.ts`` (``run_id``,
+    ``correlation_id``) plus the additional ``execution_id``/``node_id``/
+    ``workflow_id`` keys already used by ``annotate_from_carried``.
+    """
+    try:
+        from aws_xray_sdk.core import xray_recorder
+
+        segment = xray_recorder.current_segment() or xray_recorder.current_subsegment()
+        if not segment:
+            return
+
+        if run_id:
+            segment.put_annotation("run_id", run_id)
+        if execution_id:
+            segment.put_annotation("execution_id", execution_id)
+        if correlation_id:
+            segment.put_annotation("correlation_id", correlation_id)
+        if node_id:
+            segment.put_annotation("node_id", node_id)
+        if workflow_id:
+            segment.put_annotation("workflow_id", workflow_id)
+    except Exception:  # noqa: BLE001 — annotation failure must never break the consumer
+        logger.debug("annotate_execution failed; continuing untraced.", exc_info=True)
+
+
 class TraceIdLogFilter(logging.Filter):
     """Logging filter injecting `trace_id` into every record (stable
     contract, mirrors the TS `logger.ts` behaviour): read the active

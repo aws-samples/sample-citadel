@@ -14,8 +14,11 @@ from botocore.exceptions import ClientError
 # bundle currently ships only arbiter/workerWrapper/. A missing import
 # must NOT break dispatch: tracing is best-effort, never required.
 try:
-    from common.tracing import annotate_from_carried, extract_carried  # noqa: E402 — import activates tracing as a side effect
+    from common.tracing import annotate_execution, annotate_from_carried, extract_carried  # noqa: E402 — import activates tracing as a side effect
 except ImportError: # pragma: no cover — Lambda bundle path before follow-up
+    def annotate_execution(**_kwargs): # type: ignore[no-redef]
+        pass
+
     def annotate_from_carried(carried): # type: ignore[no-redef]
         pass
 
@@ -1260,6 +1263,19 @@ def _process_workflow_node(event, message_attributes=None):
     _emit_cold_start_metric_if_applicable(msg.agent_id)
     carried_ctx = _extract_worker_trace_context(event, message_attributes)
     annotate_from_carried(carried_ctx)
+    # Finding 3d92ef6b (CIT-181): annotate_from_carried above only fires
+    # when the dispatch carried a traceContext/AWSTraceHeader; stamp the
+    # ids the parsed NodeDispatchMessage already carries directly so the
+    # worker span is queryable even on a plain (non-carried-context)
+    # dispatch. msg.run_id/msg.correlation_id are None on a pre-runId
+    # dispatcher — annotate_execution omits those keys when absent.
+    annotate_execution(
+        run_id=msg.run_id,
+        execution_id=msg.execution_id,
+        correlation_id=msg.correlation_id,
+        node_id=msg.node_id,
+        workflow_id=msg.workflow_id,
+    )
     print(json.dumps({
         'level': 'INFO',
         'component': 'WorkerWrapper',
