@@ -85,6 +85,12 @@ class FailureClass(str, Enum):
     # retry seam). Until that queue lands the node fails terminally for the
     # attempt, which is the conservative, verifiable-today behaviour (D1).
     CIRCUIT_OPEN = "circuit-open"
+    # The agent record's ``config`` field is a string that does not parse as
+    # JSON (or parses to a non-object). This is an authoring/data defect, not
+    # an infrastructure fault — re-executing the same node against the same
+    # stored config would fail identically every time, so disposition is
+    # NEVER, same as VALIDATION (finding c4cb69f9).
+    INVALID_AGENT_CONFIG = "invalid-agent-config"
     UNKNOWN = "unknown"  # unrecognised — fail-safe default for the AUTO path
 
 
@@ -112,6 +118,9 @@ DISPOSITION: dict[FailureClass, RetryDisposition] = {
     # disposition): the auto path never re-hits a known-bad target, and a stale
     # per-node retryableErrors list can never widen it (is_retry_forbidden).
     FailureClass.CIRCUIT_OPEN: RetryDisposition.NEVER,
+    # Same NEVER disposition reused (no parallel disposition) — a malformed
+    # stored config cannot self-heal on retry.
+    FailureClass.INVALID_AGENT_CONFIG: RetryDisposition.NEVER,
     FailureClass.UNKNOWN: RetryDisposition.NEVER,
 }
 
@@ -170,6 +179,10 @@ _CLASSNAME_TO_CLASS: dict[str, FailureClass] = {
     "CircuitBreakerOpen": FailureClass.CIRCUIT_OPEN,
     "CircuitOpenError": FailureClass.CIRCUIT_OPEN,
     "ToolTargetCircuitOpen": FailureClass.CIRCUIT_OPEN,
+    # --- malformed agent record config (finding c4cb69f9) -------------------
+    # Raised by the worker when the agent record's ``config`` field is a
+    # string that fails ``json.loads`` or does not parse to an object.
+    "InvalidAgentConfigError": FailureClass.INVALID_AGENT_CONFIG,
 }
 
 # Case-insensitive fallback index. Includes every canonical class-name AND the
