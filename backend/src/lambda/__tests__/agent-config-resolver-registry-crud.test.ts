@@ -20,6 +20,7 @@ const mockGetResource = jest.fn();
 const mockUpdateResource = jest.fn();
 const mockDeleteResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
+const mockSubmitForApproval = jest.fn();
 const mockSerializeCustomMetadata = jest.fn((meta: unknown) =>
   JSON.stringify(meta),
 );
@@ -85,6 +86,7 @@ jest.mock("../../services/registry-service", () => ({
     updateResource: mockUpdateResource,
     deleteResource: mockDeleteResource,
     updateResourceStatus: mockUpdateResourceStatus,
+    submitForApproval: mockSubmitForApproval,
     serializeCustomMetadata: mockSerializeCustomMetadata,
     deserializeCustomMetadata: mockDeserializeCustomMetadata,
     toRegistryStatus: mockToRegistryStatus,
@@ -176,6 +178,10 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
     test("updates status when initial state is provided", async () => {
       mockCreateResource.mockResolvedValue(baseRecord);
       mockGetResource.mockResolvedValue(baseRecord);
+      mockSubmitForApproval.mockResolvedValue({
+        ...baseRecord,
+        status: "APPROVED",
+      });
 
       await createAgentConfigRegistry(
         {
@@ -187,7 +193,10 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       );
 
       expect(mockToRegistryStatus).toHaveBeenCalledWith("active");
-      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+      // Activation must go through SubmitRegistryRecordForApproval, never a
+      // direct UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+      expect(mockSubmitForApproval).toHaveBeenCalledWith("agent-1");
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalledWith(
         "agent",
         "agent-1",
         "APPROVED",
@@ -521,6 +530,7 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       // updateResource returns the stale DRAFT record — simulating the bug
       mockUpdateResource.mockResolvedValue(draftRecord);
       mockUpdateResourceStatus.mockResolvedValue(undefined);
+      mockSubmitForApproval.mockResolvedValue(pendingRecord);
 
       // Stub mapToAgentConfig to map status → state using the same logic as
       // the real implementation for the statuses this test exercises.
@@ -552,7 +562,10 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
         eventWithOrg,
       );
 
-      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+      // Activation must go through SubmitRegistryRecordForApproval, never a
+      // direct UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
+      expect(mockSubmitForApproval).toHaveBeenCalledWith("agent-1");
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalledWith(
         "agent",
         "agent-1",
         "APPROVED",
@@ -581,6 +594,77 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       // Returns the record from updateResource, not a refetched one.
       expect(mockMapToAgentConfig).toHaveBeenCalledWith(updatedRecord);
       expect(result.agentId).toBe("agent-1");
+    });
+
+    // ─── finding adde5b79: submit-not-approve activation ─────────────
+
+    test("DRAFT + active → submits for approval, never issues a direct UpdateRegistryRecordStatus(APPROVED)", async () => {
+      const draftRecord = { ...existingRecord, status: "DRAFT" };
+      mockGetResource
+        .mockResolvedValueOnce(draftRecord)
+        .mockResolvedValueOnce({ ...draftRecord, status: "PENDING_APPROVAL" });
+      mockUpdateResource.mockResolvedValue(draftRecord);
+      mockSubmitForApproval.mockResolvedValue({
+        ...draftRecord,
+        status: "PENDING_APPROVAL",
+      });
+
+      await updateAgentConfigRegistry(
+        { agentId: "agent-1", state: "active" },
+        eventWithOrg,
+      );
+
+      expect(mockSubmitForApproval).toHaveBeenCalledWith("agent-1");
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+    });
+
+    test("REJECTED + active → resubmits (DRAFT transition) before submitting for approval", async () => {
+      const rejectedRecord = { ...existingRecord, status: "REJECTED" };
+      mockGetResource
+        .mockResolvedValueOnce(rejectedRecord)
+        .mockResolvedValueOnce({
+          ...rejectedRecord,
+          status: "PENDING_APPROVAL",
+        });
+      mockUpdateResource.mockResolvedValue(rejectedRecord);
+      mockUpdateResourceStatus.mockResolvedValue(undefined);
+      mockSubmitForApproval.mockResolvedValue({
+        ...rejectedRecord,
+        status: "PENDING_APPROVAL",
+      });
+
+      await updateAgentConfigRegistry(
+        { agentId: "agent-1", state: "active" },
+        eventWithOrg,
+      );
+
+      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+        "agent",
+        "agent-1",
+        "DRAFT",
+      );
+      expect(mockSubmitForApproval).toHaveBeenCalledWith("agent-1");
+      // Resubmit happens BEFORE submit.
+      const draftCallOrder =
+        mockUpdateResourceStatus.mock.invocationCallOrder[0];
+      const submitCallOrder = mockSubmitForApproval.mock.invocationCallOrder[0];
+      expect(draftCallOrder).toBeLessThan(submitCallOrder);
+    });
+
+    test("metadata is left untouched when submitForApproval fails (no partial drift)", async () => {
+      const draftRecord = { ...existingRecord, status: "DRAFT" };
+      mockGetResource.mockResolvedValue(draftRecord);
+      mockSubmitForApproval.mockRejectedValue(new Error("submit failed"));
+
+      await expect(
+        updateAgentConfigRegistry(
+          { agentId: "agent-1", state: "active" },
+          eventWithOrg,
+        ),
+      ).rejects.toThrow("submit failed");
+
+      // The status transition ran and failed BEFORE any metadata write.
+      expect(mockUpdateResource).not.toHaveBeenCalled();
     });
   });
 

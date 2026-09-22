@@ -9,6 +9,7 @@ import {
 import { getOperations } from "../utils/operations-registry";
 import {
   RegistryService,
+  RegistryRecordStatusValues,
   type ToolCustomMetadata,
   type ListResourcesOptions,
 } from "../services/registry-service";
@@ -525,11 +526,18 @@ export async function createToolConfigRegistry(
   // If an initial state is provided, update the status accordingly
   if (input.state) {
     const registryStatus = registryService.toRegistryStatus(input.state);
-    await registryService.updateResourceStatus(
-      "tool",
-      input.toolId,
-      registryStatus,
-    );
+    // DRAFT -> APPROVED is rejected by the registry directly; the sanctioned
+    // path for activation is SubmitRegistryRecordForApproval (finding
+    // adde5b79). Non-activation initial states are unaffected.
+    if (registryStatus === RegistryRecordStatusValues.APPROVED) {
+      await registryService.submitForApproval(input.toolId);
+    } else {
+      await registryService.updateResourceStatus(
+        "tool",
+        input.toolId,
+        registryStatus,
+      );
+    }
     // Re-fetch so the returned state reflects the post-transition record
     // rather than the stale DRAFT snapshot from createResource above. Matches
     // the fix in agent-config-resolver (0715f73).
@@ -656,19 +664,16 @@ export async function updateToolConfigRegistry(
     orgId: preservedOrgId,
   } as ToolCustomMetadata);
 
-  const record = await registryService.updateResource("tool", input.toolId, {
-    name: (parsedNewConfig.name as string | undefined) || existing.name,
-    description: (parsedNewConfig.description as string | undefined) ?? "",
-    customMetadata: updatedMeta,
-  });
-
-  // If state is being changed, update the Registry status. The condition
-  // compares against the actual Registry status — gating on metadata is
-  // unreliable because customMetadata.state can drift out of sync with
-  // record.status (e.g. when deserializeCustomMetadata falls back to its
-  // 'active' default for records missing the field). The user-facing state
-  // is derived from record.status via toInternalState, so that's what must
-  // change for the toggle to actually take effect.
+  // If state is being changed, update the Registry status BEFORE writing
+  // metadata (finding adde5b79 ordering requirement): if the transition
+  // fails, updateResource (metadata) never runs, so a failed activation
+  // leaves no partial metadata drift. The condition compares against the
+  // actual Registry status — gating on metadata is unreliable because
+  // customMetadata.state can drift out of sync with record.status (e.g.
+  // when deserializeCustomMetadata falls back to its 'active' default for
+  // records missing the field). The user-facing state is derived from
+  // record.status via toInternalState, so that's what must change for the
+  // toggle to actually take effect.
   const desiredRegistryStatus = input.state
     ? registryService.toRegistryStatus(input.state)
     : undefined;
@@ -677,17 +682,45 @@ export async function updateToolConfigRegistry(
     desiredRegistryStatus &&
     desiredRegistryStatus !== existing.status
   ) {
-    await registryService.updateResourceStatus(
-      "tool",
-      input.toolId,
-      desiredRegistryStatus,
-    );
+    // Activation (-> APPROVED) must go through SubmitRegistryRecordForApproval,
+    // never a direct UpdateRegistryRecordStatus(APPROVED) — the AWS registry
+    // rejects DRAFT -> APPROVED (finding adde5b79). REJECTED must first
+    // transition back to DRAFT (resubmit) before it can be submitted. Every
+    // other transition (e.g. -> DEPRECATED) is unaffected.
+    if (desiredRegistryStatus === RegistryRecordStatusValues.APPROVED) {
+      if (existing.status === RegistryRecordStatusValues.REJECTED) {
+        await registryService.updateResourceStatus(
+          "tool",
+          input.toolId,
+          RegistryRecordStatusValues.DRAFT,
+        );
+      }
+      await registryService.submitForApproval(input.toolId);
+    } else {
+      await registryService.updateResourceStatus(
+        "tool",
+        input.toolId,
+        desiredRegistryStatus,
+      );
+    }
+
+    const record = await registryService.updateResource("tool", input.toolId, {
+      name: (parsedNewConfig.name as string | undefined) || existing.name,
+      description: (parsedNewConfig.description as string | undefined) ?? "",
+      customMetadata: updatedMeta,
+    });
     // Re-fetch so the returned state reflects the post-transition record
     // rather than the stale snapshot from updateResource above. Matches the
     // fix in agent-config-resolver (0715f73).
     const refreshed = await registryService.getResource("tool", input.toolId);
     return registryService.mapToToolConfig(refreshed ?? record);
   }
+
+  const record = await registryService.updateResource("tool", input.toolId, {
+    name: (parsedNewConfig.name as string | undefined) || existing.name,
+    description: (parsedNewConfig.description as string | undefined) ?? "",
+    customMetadata: updatedMeta,
+  });
 
   return registryService.mapToToolConfig(record);
 }
