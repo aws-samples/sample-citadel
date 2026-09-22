@@ -205,6 +205,58 @@ def annotate_from_carried(carried: Optional[dict]) -> None:
         logger.debug("annotate_from_carried failed; continuing untraced.", exc_info=True)
 
 
+def _is_facade_segment(entity: Any) -> bool:
+    """True when *entity* is the Lambda-service-owned ``FacadeSegment`` —
+    the root segment X-Ray hands a Lambda invocation, whose ``put_annotation``
+    (and every other mutator) unconditionally raises
+    ``FacadeSegmentMutationException`` ("FacadeSegment cannot be modified").
+    Only its *subsegments* are mutable and exported.
+
+    Import-safe: imports ``FacadeSegment`` lazily so a missing/old X-Ray SDK
+    degrades to ``False`` (treated as a plain, presumably-mutable segment)
+    rather than raising here — the caller's own try/except plus the
+    put_annotation-raises fallback below still protects against a facade
+    slipping through.
+    """
+    try:
+        from aws_xray_sdk.core.models.facade_segment import FacadeSegment
+
+        return isinstance(entity, FacadeSegment)
+    except Exception:  # noqa: BLE001 — detection failure must never break the caller
+        return False
+
+
+def _annotate_target(
+    target: Any,
+    *,
+    run_id: Optional[str],
+    execution_id: Optional[str],
+    correlation_id: Optional[str],
+    node_id: Optional[str],
+    workflow_id: Optional[str],
+) -> None:
+    """Write the non-empty annotation keys onto *target* (a subsegment).
+    Never raises: a ``FacadeSegment`` type-checks away via
+    ``_is_facade_segment``, and any exception ``put_annotation`` itself
+    raises (including a ``FacadeSegmentMutationException`` that somehow
+    reaches here despite the type check) is swallowed by the caller's own
+    try/except — this helper does not catch, by design, so callers must
+    wrap it.
+    """
+    if target is None or _is_facade_segment(target):
+        return
+    if run_id:
+        target.put_annotation("run_id", run_id)
+    if execution_id:
+        target.put_annotation("execution_id", execution_id)
+    if correlation_id:
+        target.put_annotation("correlation_id", correlation_id)
+    if node_id:
+        target.put_annotation("node_id", node_id)
+    if workflow_id:
+        target.put_annotation("workflow_id", workflow_id)
+
+
 def annotate_execution(
     run_id: Optional[str] = None,
     execution_id: Optional[str] = None,
@@ -212,29 +264,36 @@ def annotate_execution(
     node_id: Optional[str] = None,
     workflow_id: Optional[str] = None,
 ) -> None:
-    """Annotate the CURRENT SEGMENT with the workflow-execution identity
-    (finding 3d92ef6b / CIT-181): a live execution's StepRunner/Worker spans
-    carried no ``run_id``/``execution_id``/``correlation_id`` because
-    ``annotate_from_carried`` only fires on carried-context hops, never on
-    the plain workflow dispatch path. This helper fills that gap by
-    stamping the handler's own ids directly, independent of whether a
-    carried ``traceContext`` was present.
+    """Annotate a SUBSEGMENT with the workflow-execution identity (finding
+    40061019, superseding the current-*segment*-first design from finding
+    3d92ef6b / CIT-181): in a Lambda invocation ``xray_recorder.current_segment()``
+    is the service-owned ``FacadeSegment``, whose ``put_annotation`` always
+    raises ``FacadeSegmentMutationException`` ("FacadeSegment cannot be
+    modified") — so the CIT-181 design silently dropped every annotation in
+    Lambda (the exception is swallowed by this function's own outer
+    try/except) even though the deploy looked healthy. Subsegment
+    annotations DO export, so this now annotates ``current_subsegment()``
+    when one is open, and otherwise opens a fresh subsegment (named
+    ``citadel.execution``) to annotate. This function never leaves that
+    fresh subsegment open — callers that want one held for a handler's
+    duration must use ``execution_trace_scope`` instead (below), which owns
+    the open/close lifecycle; a bare ``annotate_execution()`` call always
+    closes anything it itself opened before returning.
 
-    Unlike ``annotate_from_carried`` (which prefers the current
-    *subsegment*, matching the carried-context hop's boto3-call framing),
-    this stamps the CURRENT SEGMENT first — the annotation must be visible
-    on the Lambda invocation's root segment, not scoped to one nested
-    downstream call — and falls back to the current subsegment only when
-    no segment is active (e.g. a call site inside an already-open
-    subsegment before the root segment reference is reachable).
+    A ``FacadeSegment`` is never annotated, defense in depth: even if a
+    caller somehow passes one in (or a future SDK version changes what
+    ``current_subsegment()`` returns), ``_is_facade_segment`` type-checks it
+    away from the annotation attempt, and the ``FacadeSegmentMutationException``
+    /generic-exception catch around the whole body is a second backstop.
 
     Each parameter is optional and independently nullable; only non-empty
     string values are written via ``put_annotation``, mirroring
     ``annotate_from_carried``'s per-key omit-when-absent discipline — a
     handler that only has ``execution_id`` and ``node_id`` available
     annotates just those two keys. No-op when there is no active
-    segment/subsegment (R10 discipline) and no-op-safe when the X-Ray SDK
-    itself is unavailable/disabled — never raises.
+    segment/subsegment and a fresh subsegment cannot be opened either (R10
+    discipline), and no-op-safe when the X-Ray SDK itself is
+    unavailable/disabled — never raises.
 
     Key names match the TS-side query filters in
     ``backend/src/lambda/utils/trace-span-query.ts`` (``run_id``,
@@ -244,22 +303,109 @@ def annotate_execution(
     try:
         from aws_xray_sdk.core import xray_recorder
 
-        segment = xray_recorder.current_segment() or xray_recorder.current_subsegment()
-        if not segment:
-            return
+        target = xray_recorder.current_subsegment()
+        opened_here = False
+        if target is None:
+            target = xray_recorder.begin_subsegment("citadel.execution")
+            opened_here = True
 
-        if run_id:
-            segment.put_annotation("run_id", run_id)
-        if execution_id:
-            segment.put_annotation("execution_id", execution_id)
-        if correlation_id:
-            segment.put_annotation("correlation_id", correlation_id)
-        if node_id:
-            segment.put_annotation("node_id", node_id)
-        if workflow_id:
-            segment.put_annotation("workflow_id", workflow_id)
+        try:
+            _annotate_target(
+                target,
+                run_id=run_id,
+                execution_id=execution_id,
+                correlation_id=correlation_id,
+                node_id=node_id,
+                workflow_id=workflow_id,
+            )
+        finally:
+            if opened_here:
+                xray_recorder.end_subsegment()
     except Exception:  # noqa: BLE001 — annotation failure must never break the consumer
         logger.debug("annotate_execution failed; continuing untraced.", exc_info=True)
+
+
+class execution_trace_scope:  # noqa: N801 — lowercase context-manager name matches contextlib convention
+    """Context manager keeping ONE ``citadel.execution`` subsegment open for
+    the duration of a handler's work (finding 40061019), so every SDK
+    subsegment the handler's own code opens (e.g. patched boto3 calls)
+    nests under a single annotated parent instead of each call site
+    re-annotating (or, worse, re-opening/closing) its own transient
+    subsegment.
+
+    Usage::
+
+        with execution_trace_scope(run_id=..., execution_id=..., node_id=...):
+            do_the_work()
+
+    Behavior:
+      - If a subsegment is ALREADY open when the scope is entered, this
+        annotates that existing subsegment directly and does NOT open (or
+        later close) a new one — the caller's existing subsegment keeps its
+        own lifecycle untouched.
+      - Otherwise opens a fresh ``citadel.execution`` subsegment, annotates
+        it, and ends it in a ``finally`` on scope exit — on success AND on
+        exception. Never suppresses an exception raised inside the ``with``
+        body (the exception's original type/traceback propagates
+        unchanged).
+      - Never raises: opening/annotating/closing failures (missing X-Ray
+        SDK, disabled tracing, no active segment to attach a subsegment to)
+        are swallowed, mirroring every other helper in this module. A
+        handler's business logic must never fail because tracing failed.
+    """
+
+    def __init__(
+        self,
+        run_id: Optional[str] = None,
+        execution_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        node_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
+    ) -> None:
+        self._run_id = run_id
+        self._execution_id = execution_id
+        self._correlation_id = correlation_id
+        self._node_id = node_id
+        self._workflow_id = workflow_id
+        self._opened_here = False
+
+    def __enter__(self) -> "execution_trace_scope":
+        target = None
+        try:
+            from aws_xray_sdk.core import xray_recorder
+
+            target = xray_recorder.current_subsegment()
+            if target is None:
+                target = xray_recorder.begin_subsegment("citadel.execution")
+                self._opened_here = True
+        except Exception:  # noqa: BLE001 — scope entry must never break the caller
+            logger.debug("execution_trace_scope failed to open; continuing untraced.", exc_info=True)
+            self._opened_here = False
+            target = None
+
+        try:
+            _annotate_target(
+                target,
+                run_id=self._run_id,
+                execution_id=self._execution_id,
+                correlation_id=self._correlation_id,
+                node_id=self._node_id,
+                workflow_id=self._workflow_id,
+            )
+        except Exception:  # noqa: BLE001 — annotation failure must never break the caller
+            logger.debug("execution_trace_scope failed to annotate; continuing untraced.", exc_info=True)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self._opened_here:
+            try:
+                from aws_xray_sdk.core import xray_recorder
+
+                xray_recorder.end_subsegment()
+            except Exception:  # noqa: BLE001 — scope exit must never break the caller
+                logger.debug("execution_trace_scope failed to close; continuing untraced.", exc_info=True)
+        # Never suppress the caller's exception (if any) — return falsy/None.
+        return None
 
 
 class TraceIdLogFilter(logging.Filter):
