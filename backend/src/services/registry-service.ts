@@ -1588,8 +1588,10 @@ export class RegistryService {
    * | CREATE_FAILED     | inactive    |
    * | UPDATE_FAILED     | inactive    |
    *
-   * PENDING_APPROVAL surfaces as 'active' because SubmitRegistryRecordForApproval
-   * is async and reflecting user intent avoids UI flicker during auto-approval.
+   * PENDING_APPROVAL surfaces as 'active' because approval is pending:
+   * submission resolves through registry auto-approval when configured, or
+   * an admin decision. Reflecting the caller's activation intent avoids UI
+   * flicker while the decision is outstanding.
    *
    * Unknown Registry statuses default to 'inactive' with a warning log.
    */
@@ -1598,8 +1600,9 @@ export class RegistryService {
   ): string {
     // Map every RegistryRecordStatus value to the 3-value AgentState enum
     // (active | inactive | maintenance). PENDING_APPROVAL surfaces as 'active'
-    // because SubmitRegistryRecordForApproval is async and reflecting user
-    // intent avoids UI flicker during auto-approval.
+    // because approval is pending (registry auto-approval when configured, or
+    // an admin decision) and reflecting the caller's activation intent avoids
+    // UI flicker while the decision is outstanding.
     switch (registryStatus) {
       case RegistryRecordStatusValues.APPROVED:
       case RegistryRecordStatusValues.UPDATING:

@@ -35,7 +35,7 @@ State is event-driven and eventually consistent: EventBridge carries `citadel.*`
 
 ## Capabilities
 
-**Agent Apps.** Build, configure, and publish multi-agent applications. Publishing provisions a dedicated API Gateway endpoint with API-key authentication, forwards requests to EventBridge for async processing, and tracks per-app request counts, latency percentiles, and error rates. Apps follow the registry-native status lifecycle: `DRAFT → APPROVED` (the Activate action in the UI) `→ PUBLISHED`.
+**Agent Apps.** Build, configure, and publish multi-agent applications. Publishing provisions a dedicated API Gateway endpoint with API-key authentication, forwards requests to EventBridge for async processing, and tracks per-app request counts, latency percentiles, and error rates. Apps follow the registry-native status lifecycle: `DRAFT → PENDING_APPROVAL` (the Activate action submits the app for approval) `→ APPROVED` (registry auto-approval when configured, or an admin decision) `→ PUBLISHED`.
 
 **Agent Fabrication.** A Fabricator dynamically generates agents and custom tools at runtime from specifications, registers them, and binds them to data stores and integrations. After a fabrication completes, the intake agent closes the loop conversationally: with the user's consent at each step, it activates the fabricated agents, creates an Agent App, generates a process blueprint from the technical design, and imports it into the app as a draft workflow. It then guides the user through the real publish path — publish the workflow, activate the app, then publish it to get the endpoint URL and one-time API key.
 

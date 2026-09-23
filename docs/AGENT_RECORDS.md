@@ -87,7 +87,8 @@ The governance retrofit lands across six numbered PRs. PR 0 merged
 - **PR 0 — Merge.** `chore(merge): merge origin/main into feat/ai-governance`
   at commit `2f24f520`.
 - **PR 1 — Adapters and rename.** Forward-compatible adapters
-  (`agent-record-factory.ts`, `registry_client.py`), the
+  (`agent-record-factory.ts` — since deleted in PR 6a, its projections now
+  inlined in the consuming resolvers — and `registry_client.py`), the
   `REGISTRY_TRANSITIONS` state machine, registry permissions in the role
   model, this document. Tasks T1 through T9.
 - **PR 2 — CDK swap.** Replace the `AppsTable` CDK construct with an
@@ -116,10 +117,11 @@ four transient/error statuses reported by the underlying AgentCore Registry
 service itself — nine `RegistryRecordStatusValue`s in total (see
 `RegistryRecordStatusValues` in `backend/src/services/registry-service.ts`).
 The governed-state machine is defined in `backend/src/adapters/lifecycle.ts`
-as the `REGISTRY_TRANSITIONS` transition map (added in PR 1-T2, extended by
-decision a3fb5542) and is enforced today: the `updateApp` mutation in
+as the `REGISTRY_TRANSITIONS` transition map (added in PR 1-T2, revised by
+decision 3d5843e9, which supersedes a3fb5542) and is enforced today: the
+`updateApp` mutation in
 `backend/src/lambda/registry-agent-record-resolver.ts` and the Catalog
-Deactivate path (`agent-config-resolver.ts` / `tool-config-resolver.ts`) both
+Deprecate path (`agent-config-resolver.ts` / `tool-config-resolver.ts`) both
 route every status change through `LifecycleManager.isValidTransition` before
 the Registry write. An illegal transition throws a `RegistryLifecycleError`
 with code `INVALID_TRANSITION` rather than being silently coerced.
@@ -157,16 +159,18 @@ them):
 - **CREATE_FAILED** — Record creation failed on the Registry side.
 - **UPDATE_FAILED** — A content update failed on the Registry side.
 
-### Deactivate vs Archive (decision a3fb5542)
+### Deactivate vs Archive (decision 3d5843e9, supersedes a3fb5542)
 
 **Deactivation of registry-backed records is not supported**. The Registry
 service (`UpdateRegistryRecordStatus`) accepts only three target statuses:
 `APPROVED`, `REJECTED`, and `DEPRECATED`. There is no deactivate or
 disable transition that would return a record to `DRAFT` for reactivation.
 
-The Catalog's Archive action transitions from `APPROVED` to `DEPRECATED`:
+The Catalog's Deprecate action (`AgentCard`) and the app detail view's
+Archive action both transition `APPROVED` to `DEPRECATED`:
 
-- **Archive** (`APPROVED` → `DEPRECATED`) is **terminal and irreversible**.
+- **Deprecate / Archive** (`APPROVED` → `DEPRECATED`) is **terminal and
+  irreversible**.
   Once a record is `DEPRECATED` it can never be reactivated; the
   validated-transition gate rejects any transition out of `DEPRECATED`.
   `AppDetailView`'s "Reactivate" affordance is disabled with the tooltip
@@ -213,10 +217,13 @@ no-op: the caller-side guard in `agent-config-resolver.ts` /
 the status write, the validated-transition gate, and the post-transition
 re-fetch entirely.
 
-There is no auto-approval: submitting leaves the record `PENDING_APPROVAL`
-until an admin records a decision. Approve/reject is admin-only (server-side
-role check), rejecting requires a non-empty `statusReason`, and `decidedBy`
-is always derived from the caller's auth context — never from client input.
+Submission resolves in one of two ways: when the registry has auto-approval
+configured, the Submit call itself advances the record straight to
+`APPROVED` (no separate `UpdateRegistryRecordStatus` write); otherwise the
+record stays `PENDING_APPROVAL` until an admin records a decision. The
+admin approve/reject path is admin-only (server-side role check), rejecting
+requires a non-empty `statusReason`, and `decidedBy` is always derived from
+the caller's auth context — never from client input.
 While `PENDING_APPROVAL`, content edits (name, description, routing config,
 source project) are refused with a `RegistryLifecycleError`
 (`RECORD_IMMUTABLE`); only a status decision may proceed.
@@ -236,14 +243,15 @@ await registryService.updateResourceStatus(
 
 Callers that know the record's current status (the Catalog update path and
 the `RegistryAgentRecord` governance resolver) pass it as the fifth
-argument so every transition — including Deactivate — is validated against
+argument so every transition — including Deprecate — is validated against
 `REGISTRY_TRANSITIONS`, never silently coerced.
 
-For the `DRAFT` → `PENDING_APPROVAL` transition specifically, the service
-uses `SubmitRegistryRecordForApprovalCommand` instead of
-`UpdateRegistryRecordStatusCommand` because the SDK models submission as a
-distinct operation. See `updateResourceStatus` in
-`backend/src/services/registry-service.ts` for the branching logic.
+The `DRAFT` → `PENDING_APPROVAL` transition never goes through
+`updateResourceStatus`: the SDK models submission as a distinct operation
+(`SubmitRegistryRecordForApprovalCommand`), and callers reach it through the
+dedicated `RegistryService.submitForApproval` method — see the `updateApp`
+submit special-case in
+`backend/src/lambda/registry-agent-record-resolver.ts`.
 
 ### State Machine
 
@@ -281,8 +289,8 @@ When an architect creates an agent from a project, the governance layer
 writes `sourceProjectId` into the record's `customDescriptorContent` JSON.
 The deprecated `AgentApp.sourceProjectId` column is preserved on the
 `DeprecatedAgentAppShape` interface in
-`backend/src/lambda/agent-record-factory.ts` so callers that still read the
-legacy shape during PR 1–PR 3 receive the same value.
+`backend/src/lambda/registry-agent-record-resolver.ts` so callers that
+still read the legacy shape receive the same value.
 
 Lookup path, in order of precedence:
 
@@ -290,11 +298,13 @@ Lookup path, in order of precedence:
 2. Parse `record.customDescriptorContent` as JSON.
 3. Return `parsed.sourceProjectId` if it is a string.
 
-The reference implementation is `projectIdFromRegistryRecord` in
-`backend/src/lambda/agent-record-factory.ts`:
+The reference implementation is the file-private
+`_projectIdFromRegistryRecord` helper in
+`backend/src/lambda/fabricator-request-resolver.ts` (PR 6a inlined it there
+from the deleted `agent-record-factory.ts` module):
 
 ```typescript
-export function projectIdFromRegistryRecord(
+function _projectIdFromRegistryRecord(
   record: RegistryRecord,
 ): string | undefined;
 ```
@@ -306,10 +316,10 @@ Malformed JSON is swallowed and treated as "no link".
 The design-assessment gate (US-ARB-017) enforces that an agent cannot be
 fabricated unless its source project has a completed `AgentDesignAssessment`.
 The gate resolves the `sourceProjectId` from the registry record (via
-`projectIdFromRegistryRecord` in TypeScript, `get_source_project_id` in
-Python), then reads `AgentDesignAssessmentsTable` by `projectId`. In PR 1 the
-gate still reads from `AppsTable.sourceProjectId` — PR 4 swaps it to the
-registry path.
+`_projectIdFromRegistryRecord` in
+`backend/src/lambda/fabricator-request-resolver.ts` on the TypeScript side,
+`get_source_project_id` in Python), then reads
+`AgentDesignAssessmentsTable` by `projectId`.
 
 ### Per-registryId authority units (US-ARB-014, Decision #9)
 
@@ -354,8 +364,8 @@ retrofit does not introduce one.
 
 This boundary matters for any resolver that reads governance evidence for a
 registry record: it must first resolve `sourceProjectId`, then query the
-project-keyed table. See the `projectIdFromRegistryRecord` / `get_source_project_id`
-helpers in both language bindings.
+project-keyed table. See the `_projectIdFromRegistryRecord` /
+`get_source_project_id` helpers in both language bindings.
 
 ### Registry vs AppsTable — Complementary model
 
@@ -445,7 +455,7 @@ An **imported** agent (see [docs/AGENT_IMPORT.md](AGENT_IMPORT.md)) is an ordina
 Two invariants hold for every imported record:
 
 - **`origin.ownership === 'external'`** — Citadel orchestrates the agent but never owns its infrastructure. The lifecycle layer never deletes, redeploys, or scales the customer's Lambda/cluster/agent; the strongest action is deprecating the catalog record.
-- **DRAFT by default, never auto-activated** — `importAgent` lands the record DRAFT/inactive; activation (DRAFT→APPROVED) is a separate, explicit step gated on governance attestation. A record with **no** `invocation` block is treated as `protocol = AGENTCORE_RUNTIME` (`getInvocationProtocol`), so every pre-import record behaves exactly as before (back-compat).
+- **DRAFT by default, never auto-activated** — `importAgent` lands the record in `DRAFT` (surfaced as the internal `maintenance` state); activation is a separate, explicit step gated on governance attestation. Activate submits the record for approval (`DRAFT → PENDING_APPROVAL`); it becomes `APPROVED` through registry auto-approval when configured, or an admin decision. A record with **no** `invocation` block is treated as `protocol = AGENTCORE_RUNTIME` (`getInvocationProtocol`), so every pre-import record behaves exactly as before (back-compat).
 
 ### Invocation + origin blocks
 
@@ -496,11 +506,13 @@ Each sub-block lives inside the serialized `AgentCustomMetadata`, is written by 
 
 ## Migration Guide — AgentApp to RegistryRecord
 
-The `AgentApp` shape is deprecated (Decision #5) but remains readable during
-the grace period through the adapter module
-`backend/src/lambda/agent-record-factory.ts` (added in PR 1-T5). Use this
-module to incrementally migrate call sites off `AppsTable` without a
-single-PR rewrite.
+The `AgentApp` shape is deprecated (Decision #5). The standalone adapter
+module that carried these projections (`agent-record-factory.ts`, added in
+PR 1-T5) was deleted in PR 6a; its logic now lives inline, file-private, in
+the two resolvers that consume it — see
+[Where the adapter logic lives now](#where-the-adapter-logic-lives-now).
+The field mapping below still describes how the legacy shape projects onto
+a registry record.
 
 ### Field Mapping
 
@@ -510,84 +522,70 @@ single-PR rewrite.
 | `name`                   | `name`                                                    |
 | `description`            | `description`                                             |
 | `status` (enum `AppStatus`) | `status` (`RegistryRecordStatusValues`)                |
-| `version`                | `version` (reserved; not written by the factory in PR 1) |
+| `version`                | `version` (not written by the projection helpers; the resolver coerces legacy values with `toIntVersion` on read) |
 | `createdAt` / `updatedAt` (ISO strings) | `createdAt` / `updatedAt` (`Date` objects) |
-| `orgId`                  | `customDescriptorContent.appId` (string FK in the metadata JSON) |
+| `orgId`                  | `customDescriptorContent.manifest.orgId` (inside the manifest JSON) |
 | `routingConfig`          | `customDescriptorContent.manifest` (JSON object, typed as `AgentCustomMetadata.manifest`) |
 | `sourceProjectId`        | `customDescriptorContent.sourceProjectId`                 |
 
 Two notes on the mapping:
 
-- `orgId` is carried inside the descriptor JSON as a field named `appId`
-  because the descriptor shape predates the rename. The factory preserves
-  this legacy key name.
+- The descriptor JSON also carries a top-level `appId` field that mirrors
+  the record's own id (`recordFromInput` writes `appId: app.appId`); the
+  key name predates the `recordId` rename. Org scoping lives inside the
+  manifest (`manifest.orgId`) — see the manifest schema documented at the
+  top of `backend/src/lambda/registry-agent-record-resolver.ts`.
 - `createdAt` and `updatedAt` change type: `AgentApp` stored ISO 8601 strings
   on DynamoDB, `RegistryRecord` receives SDK-native `Date` objects. The
-  factory converts between the two. Malformed date strings are dropped
-  silently (see `registryRecordFromAgentApp`).
+  projection helpers convert between the two. Malformed date strings are
+  dropped silently (see `recordFromInput`).
 
-### The agent-record-factory.ts adapter
+### Where the adapter logic lives now
 
-The factory exposes three pure functions. None of them read or write to the
-Registry — they are in-memory projections. Callers combine them with
-`RegistryService` calls as needed.
+PR 6a deleted the standalone `agent-record-factory.ts` module and inlined
+its three pure projections as file-private helpers in the resolvers that
+consume them. They are deliberately not exported: the PR 6a code comments
+keep them file-private to avoid re-introducing a cross-module dependency.
+None of them read or write to the Registry — they are in-memory projections
+the resolvers combine with `RegistryService` calls.
 
-#### agentAppFromRegistryRecord
+| Former factory function        | Current helper                  | Lives in                                                |
+|--------------------------------|---------------------------------|---------------------------------------------------------|
+| `agentAppFromRegistryRecord`   | `projectAgentAppShape`          | `backend/src/lambda/registry-agent-record-resolver.ts` |
+| `registryRecordFromAgentApp`   | `recordFromInput`               | `backend/src/lambda/registry-agent-record-resolver.ts` |
+| `projectIdFromRegistryRecord`  | `_projectIdFromRegistryRecord`  | `backend/src/lambda/fabricator-request-resolver.ts`    |
+
+#### projectAgentAppShape
 
 ```typescript
-export function agentAppFromRegistryRecord(
+function projectAgentAppShape(
   record: RegistryRecord,
 ): Partial<DeprecatedAgentAppShape>;
 ```
 
 Projects a registry record into the fields downstream code previously read
 from `AgentApp`. Returns `Partial` because not every legacy field is
-recoverable (for example, `version` is not carried in the custom descriptor
-in PR 1). Malformed `customDescriptorContent` JSON is swallowed — the
+recoverable. Malformed `customDescriptorContent` JSON is swallowed — the
 function returns whatever has been populated rather than throwing.
 
-```typescript
-import { agentAppFromRegistryRecord } from './agent-record-factory';
-import { RegistryService } from '../services/registry-service';
-
-const service = new RegistryService({ registryId, region });
-const record = await service.getResource('agent', agentId);
-if (record) {
-  const legacyView = agentAppFromRegistryRecord(record);
-  return legacyView.sourceProjectId;
-}
-```
-
-#### registryRecordFromAgentApp
+#### recordFromInput
 
 ```typescript
-export function registryRecordFromAgentApp(
+function recordFromInput(
   app: DeprecatedAgentAppShape,
 ): Partial<RegistryRecord>;
 ```
 
-Builds a registry record skeleton from an `AgentApp`. Used by PR 3 when
-migrating existing `AppsTable` rows into the registry. The function embeds
+Builds a registry record skeleton from an `AgentApp`-shaped input. Embeds
 `appId` and `sourceProjectId` into `customDescriptorContent` via the
-`AgentCustomMetadata` shape (extended with `sourceProjectId` since the base
-interface in `backend/src/services/registry-service.ts` does not declare it).
+`AgentCustomMetadata` shape (extended with `sourceProjectId`, which the
+base interface in `backend/src/services/registry-service.ts` does not
+declare). Malformed date strings are dropped silently.
+
+#### _projectIdFromRegistryRecord
 
 ```typescript
-import { registryRecordFromAgentApp } from './agent-record-factory';
-
-const legacyApp = await getLegacyAgentApp(appId);
-const seed = registryRecordFromAgentApp(legacyApp);
-await service.createResource('agent', seed.recordId!, {
-  name: seed.name!,
-  description: seed.description,
-  customMetadata: seed.customDescriptorContent!,
-});
-```
-
-#### projectIdFromRegistryRecord
-
-```typescript
-export function projectIdFromRegistryRecord(
+function _projectIdFromRegistryRecord(
   record: RegistryRecord,
 ): string | undefined;
 ```
@@ -596,17 +594,6 @@ Extracts the governance `sourceProjectId` from a record's
 `customDescriptorContent`. Used by the fabricator design-assessment gate to
 resolve the originating project. Returns `undefined` when the descriptor is
 absent, malformed, or lacks a `sourceProjectId` field.
-
-```typescript
-import { projectIdFromRegistryRecord } from './agent-record-factory';
-
-const record = await service.getResource('agent', agentId);
-const projectId = record ? projectIdFromRegistryRecord(record) : undefined;
-if (!projectId) {
-  return { ok: false, reason: 'no_source_project' };
-}
-const assessment = await getAgentDesignAssessment(projectId);
-```
 
 ## Python Bridge — `arbiter/catalog/registry_client.py`
 
@@ -649,8 +636,9 @@ def get_source_project_id(registry_id: str, record_id: str) -> str | None:
 
 Calls `get_agent_record`, parses `customDescriptorContent` as JSON, and
 returns the `sourceProjectId` field if it is a string. Symmetric to the
-TypeScript `projectIdFromRegistryRecord` helper — both read the same JSON
-written by `registryRecordFromAgentApp`.
+TypeScript `_projectIdFromRegistryRecord` helper in
+`backend/src/lambda/fabricator-request-resolver.ts` — both read the same
+JSON written by `recordFromInput`.
 
 #### list_agent_records
 
@@ -747,7 +735,10 @@ forward-compatible adapters that PRs 2–4 call into. Task breakdown:
   receives create/update/submit; developer receives read.
 - T4 — `AuthorityUnit.appId` → `AuthorityUnit.registryId` rename
   (Decision #9) in the Python arbiter model and seed data.
-- T5 — `backend/src/lambda/agent-record-factory.ts` adapter.
+- T5 — The `agent-record-factory.ts` adapter (since deleted in PR 6a; its
+  projections now live file-private in
+  `backend/src/lambda/registry-agent-record-resolver.ts` and
+  `backend/src/lambda/fabricator-request-resolver.ts`).
 - T6 — `arbiter/catalog/registry_client.py` read-only Python bridge.
 - T7 — `docs/AGENT_RECORDS.md` (this document).
 - T8 — Unit tests for the adapters under `backend/src/adapters/__tests__/`
@@ -831,14 +822,19 @@ These follow-ups surfaced in the Path A audit but PR 1 does not resolve them:
 - `backend/src/services/registry-service.ts` — type definitions and
   `RegistryService` class.
 - `backend/src/adapters/lifecycle.ts` — `REGISTRY_TRANSITIONS` (PR 1-T2).
-- `backend/src/lambda/agent-record-factory.ts` — `AgentApp` ⇄
-  `RegistryRecord` adapter (PR 1-T5).
+- `backend/src/lambda/registry-agent-record-resolver.ts` — AgentApp-shape
+  projection helpers (`projectAgentAppShape`, `recordFromInput`), inlined
+  from the deleted `agent-record-factory.ts` adapter (PR 1-T5, deleted in
+  PR 6a).
+- `backend/src/lambda/fabricator-request-resolver.ts` —
+  `_projectIdFromRegistryRecord` (inlined from the same deleted adapter).
 - `backend/src/utils/auth.ts` — role → permission matrix (PR 1-T3).
 - `arbiter/catalog/registry_client.py` — Python read-only bridge (PR 1-T6).
 - `arbiter/fabricator/design_assessment_gate.py` — PR 4 consumer of the
   Python bridge.
-- PR 3 resolver migration targets: `backend/src/lambda/app-resolver.ts`,
-  `agent-config-resolver.ts`, `fabricator-request-resolver.ts`.
+- PR 3 resolver migration targets (historical): `app-resolver.ts` (since
+  replaced by `backend/src/lambda/registry-agent-record-resolver.ts` in
+  PR 6a), `agent-config-resolver.ts`, `fabricator-request-resolver.ts`.
 - PR 4 arbiter rewire targets: `arbiter/fabricator/tools_config.py`,
   `arbiter/workerWrapper/index.py`, `arbiter/workerWrapper/agent_runner.py`,
   `arbiter/supervisor/index.py`, `arbiter/seedConfig/index.py`.

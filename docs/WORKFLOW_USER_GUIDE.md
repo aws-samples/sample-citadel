@@ -70,8 +70,10 @@ The imported workflow arrives as a `DRAFT` named `<app name> Process` on the
 app's Workflows tab, exactly like a catalog import. From there the standard
 flow in the rest of this guide applies: publish the workflow to enable Run,
 then publish the app itself when you want the endpoint. The conversation
-walks you through those same steps — including that the app's Publish button
-appears only after you Activate the app, and that the API key is shown only
+walks you through those same steps — including that Activate submits the app for
+approval, that the app's Publish button appears only once the app is approved
+(registry auto-approval when configured, or an admin decision), and that the
+API key is shown only
 once — but the agent never publishes on your behalf; you publish from the
 app's pages.
 

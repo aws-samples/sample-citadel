@@ -275,7 +275,7 @@ Component responsibilities:
 
 ## The Import Pipeline
 
-Import is a four-stage pipeline with a mandatory human review gate between capability determination and activation.
+Import is a four-stage pipeline with a mandatory human review gate between capability determination and activation. Activate itself submits the record for approval (`DRAFT → PENDING_APPROVAL`); the record becomes `APPROVED` through registry auto-approval when configured, or an admin decision.
 
 ```
 DIAGRAM 3 — Import pipeline (as-built)
@@ -288,8 +288,8 @@ DIAGRAM 3 — Import pipeline (as-built)
                                                            ▼
  ┌────────────┐   ┌──────────────────────────┐   ┌───────────────────────┐
  │  Activate  │◀──│ Governance attest        │◀──│ Configure Invocation  │
- │ (APPROVED) │   │ (ADR, authority unit,    │   │ + Test (sandbox)      │
- │            │   │  trust-path/drift)       │   │ Register (DRAFT)      │
+ │ (submit for│   │ (ADR, authority unit,    │   │ + Test (sandbox)      │
+ │  approval) │   │  trust-path/drift)       │   │ Register (DRAFT)      │
  └────────────┘   └──────────────────────────┘   └───────────────────────┘
 ```
 
@@ -738,7 +738,7 @@ Network reachability is the largest hidden cost, and it is handled honestly. The
 4. Human review gate: the operator edits the proposed schema and accepts. Low-confidence fields are badged.
 5. Configure invocation: protocol `LAMBDA_INVOKE`, `mode: sync`. PolicyManager vends a role scoped to the one function ARN. The operator runs a dry-run in `ToolTestingSandbox`; real I/O confirms the schema.
 6. Register: `RegistryService.createResource('agent', ...)` writes a DRAFT record with `origin.ownership = 'external'`. `agent.import.registered` fires.
-7. Governance attests (ADR, trust-path analysis). The operator activates; status moves to APPROVED (active).
+7. Governance attests (ADR, trust-path analysis). The operator activates, which submits the record for approval (PENDING_APPROVAL); registry auto-approval when configured, or an admin decision, moves it to APPROVED (active).
 
 ### Walkthrough 2: Import a Bedrock Agent (alias)
 
@@ -772,7 +772,7 @@ Network reachability is the largest hidden cost, and it is handled honestly. The
 | Foreign output injection | Sanitizer flags instruction-like content | Strip/escape before re-entry; log the event |
 | Cross-account trust broken | Trust-path/drift analysis | Block activation; raise a governance finding |
 
-Drift detection and contract validation reuse the api-contract-agent/OpenAPI tooling and the Services-stack health monitor. Auto-deprecation honors the orchestrate-never-own tenet: the catalog record is deactivated; the customer's infrastructure is untouched.
+Drift detection and contract validation reuse the api-contract-agent/OpenAPI tooling and the Services-stack health monitor. Auto-deprecation honors the orchestrate-never-own tenet: the catalog record is deprecated; the customer's infrastructure is untouched.
 
 ## User Experience: The Import Wizard
 
@@ -794,7 +794,7 @@ The wizard ships as `frontend/src/components/ImportAgentWizard.tsx` (mirroring `
 2. Select candidates: multi-select from the discovered list (scan mode) or confirm the single pasted reference. Selecting several drives a batch DRAFT import.
 3. Review/edit the inferred descriptor: name, categories, schemas, skills — annotated with `high`/`medium`/`low` confidence badges; low-confidence/thin descriptors surface the Tier-3 propose option.
 4. Configure invocation + test: protocol, target, auth mode (`NONE`/`SIGV4`/`API_KEY`/`BEARER`/`OAUTH2`/`COGNITO`), optional custom API-key header, a transient secret, sync/async mode, and optional cross-account `invocationRoleArn`/`invocationExternalId`/`analysisRoleArn`, then a pre-activation **test-invoke** (`testImportedAgent`) that actually reaches the target and returns a sanitized result without persisting anything.
-5. Governance & register: register (DRAFT) via `importAgent`; on a conflict the wizard surfaces `LINK`/`REPLACE`/`COPY`. The success screen exposes the Tier-3 `Tier3ProposalPanel`, reachability probe, and attest actions. Activation (DRAFT→APPROVED) is a separate, explicit action gated on attestation.
+5. Governance & register: register (DRAFT) via `importAgent`; on a conflict the wizard surfaces `LINK`/`REPLACE`/`COPY`. The success screen exposes the Tier-3 `Tier3ProposalPanel`, reachability probe, and attest actions. Activation is a separate, explicit action gated on attestation: Activate submits the record for approval (DRAFT→PENDING_APPROVAL), and registry auto-approval when configured, or an admin decision, makes it APPROVED.
 
 ## Eventing
 
