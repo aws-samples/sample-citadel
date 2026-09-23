@@ -77,7 +77,19 @@ export function AgentCatalog() {
   const handleToggleState = async (agent: AgentConfig) => {
     try {
       setError(null);
-      const newState = agent.state === 'active' ? 'inactive' : 'active';
+      // Registry-backed records (agent.name is present — see AgentCard's
+      // isRegistryBacked) reject the legacy Deactivate target 'inactive'
+      // (decision 3d5843e9). AgentCard now only invokes onToggleState for a
+      // registry-backed active agent after the user confirms the Deprecate
+      // dialog, so the deprecate-intent wire value 'maintenance' is the
+      // correct target here. Legacy agents keep the original toggle.
+      const isRegistryBacked = (agent as { name?: string }).name !== undefined;
+      const newState =
+        agent.state === 'active'
+          ? isRegistryBacked
+            ? 'maintenance'
+            : 'inactive'
+          : 'active';
       await agentConfigService.updateAgentConfig({
         agentId: agent.agentId,
         state: newState,
