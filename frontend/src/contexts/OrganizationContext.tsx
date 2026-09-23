@@ -57,8 +57,11 @@ export function OrganizationProvider({ children }: { children: ReactNode }) {
         // Add "All Organizations" option for admins
         const orgsWithAll = ['All Organizations', ...orgNames];
         setOrganizations(orgsWithAll);
-        // Default to "All Organizations"
-        setSelectedOrganization('All Organizations');
+        // Default to "All Organizations". This is an admin-only client-side
+        // FILTER SCOPE for the org selector, never a server argument — the
+        // caller org for create/import actions must come from
+        // currentUser.organization instead.
+        setSelectedOrganization('All Organizations'); // tripwire-exempt: filter-scope-literal
         console.log('OrganizationContext: Set organizations:', orgsWithAll);
       } else {
         // Non-admin: Only show their organization

@@ -46,7 +46,7 @@ jest.mock('../WorkflowToolbar', () => ({ WorkflowToolbar: () => <div data-testid
 jest.mock('../NodeConfigurationPanel', () => ({ NodeConfigurationPanel: () => null }));
 
 jest.mock('../../contexts/OrganizationContext', () => ({
-  useOrganization: () => ({ selectedOrganization: 'org-1' }),
+  useOrganization: () => ({ selectedOrganization: 'org-1', currentUser: { organization: 'org-1' } }),
 }));
 
 jest.mock('../../services/workflowApiService', () => ({

@@ -44,6 +44,10 @@ jest.mock('../../services/agentConfigService', () => ({
   agentConfigService: { listAgentConfigs: jest.fn() },
 }));
 
+jest.mock('../../contexts/OrganizationContext', () => ({
+  useOrganization: () => ({ currentUser: { organization: 'caller-org' } }),
+}));
+
 import { ImportBlueprintDialog } from '../ImportBlueprintDialog';
 import type { BlueprintData } from '../BlueprintCard';
 import { workflowApiService } from '../../services/workflowApiService';

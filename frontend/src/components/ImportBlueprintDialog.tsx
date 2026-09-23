@@ -34,6 +34,7 @@ import { workflowApiService } from '../services/workflowApiService';
 import { appApiService } from '../services/appApiService';
 import { agentConfigService, type AgentConfig } from '../services/agentConfigService';
 import { isPlaceholderAgentId } from '../utils/blueprintPlaceholders';
+import { useOrganization } from '../contexts/OrganizationContext';
 
 interface ImportBlueprintDialogProps {
   blueprint: BlueprintData | null;
@@ -86,6 +87,13 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [agentMapping, setAgentMapping] = useState<Record<string, string>>({});
 
+  // The server rejects any client-supplied orgId that does not match the
+  // caller's own organization, so every app lookup/create must use the
+  // caller's real org (currentUser.organization), never a placeholder.
+  const { currentUser } = useOrganization();
+  const callerOrgId = currentUser?.organization || null;
+  const orgMissingMessage = 'Your account has no organisation; ask an admin to assign one';
+
   const workflowId = blueprint?.workflowId;
 
   // Distinct agent slots referenced by this blueprint's nodes.
@@ -95,12 +103,12 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
   );
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !callerOrgId) return;
     appApiService
-      .listApps('default-org')
+      .listApps(callerOrgId)
       .then((result) => setApps(result.items || []))
       .catch(() => setApps([]));
-  }, [open]);
+  }, [open, callerOrgId]);
 
   // Load the real-agent catalog and seed the slot→agent mapping when the dialog
   // opens for a blueprint. Placeholder slots start unmapped (force a choice);
@@ -135,6 +143,10 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
 
   const handleImport = async () => {
     if (hasUnmappedPlaceholders) return;
+    if (!callerOrgId) {
+      setError(orgMissingMessage);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
@@ -143,7 +155,7 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
       if (mode === 'create' && newAppName.trim()) {
         const newApp = await appApiService.createApp({
           name: newAppName.trim(),
-          orgId: 'default-org',
+          orgId: callerOrgId,
         });
         appId = newApp.appId;
       }
@@ -289,6 +301,12 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
           )}
 
           {error && <p className="text-destructive text-xs">{error}</p>}
+
+          {!callerOrgId && (
+            <p className="text-destructive text-xs" role="alert">
+              {orgMissingMessage}
+            </p>
+          )}
         </div>
 
         <DialogFooter>
@@ -302,7 +320,9 @@ export function ImportBlueprintDialog({ blueprint, open, onClose, onImported }: 
           <Button
             size="sm"
             onClick={handleImport}
-            disabled={loading || hasUnmappedPlaceholders}
+            disabled={loading || hasUnmappedPlaceholders || !callerOrgId}
+            aria-disabled={loading || hasUnmappedPlaceholders || !callerOrgId}
+            title={!callerOrgId ? orgMissingMessage : undefined}
           >
             {loading ? 'Importing...' : 'Import'}
           </Button>

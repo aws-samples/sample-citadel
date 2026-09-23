@@ -32,6 +32,13 @@ jest.mock('../../services/agentConfigService', () => ({
   },
 }));
 
+// ImportBlueprintDialog sources the create-target org from the caller's own
+// organization (finding 51772063); BlueprintCatalog renders no
+// OrganizationProvider, so useOrganization() must be mocked here too.
+jest.mock('../../contexts/OrganizationContext', () => ({
+  useOrganization: () => ({ currentUser: { organization: 'caller-org' } }),
+}));
+
 import { BlueprintCatalog } from '../BlueprintCatalog';
 import { workflowApiService } from '../../services/workflowApiService';
 import { appApiService } from '../../services/appApiService';
