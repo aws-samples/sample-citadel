@@ -38,12 +38,13 @@ const mockDeserializeCustomMetadata = jest.fn(
 const mockToRegistryStatus = jest.fn((state: string) => {
   const map: Record<string, string> = {
     active: "APPROVED",
-    // Decision a3fb5542: Deactivate is reversible — 'inactive' now maps to
-    // DRAFT, not the terminal DEPRECATED.
-    inactive: "DRAFT",
-    maintenance: "DRAFT",
+    // Decision 3d5843e9 (supersedes a3fb5542; finding 462c17ad): 'maintenance'
+    // is the deprecate-intent value -> DEPRECATED. 'inactive' now throws in
+    // the real toRegistryStatus, but the resolver's own early guard rejects
+    // it before this mock would ever be reached.
+    maintenance: "DEPRECATED",
   };
-  return map[state] || "DRAFT";
+  return map[state] || "DEPRECATED";
 });
 const mockMapToAgentConfig = jest.fn(
   (record: { recordId: string; description?: string }) => ({
@@ -251,9 +252,12 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
       expect(mockPublishEvent).not.toHaveBeenCalled();
     });
 
-    test("imported + pending + strict + DEACTIVATION (state→inactive) → gate does NOT fire", async () => {
-      // Record is currently APPROVED; transition target is now DRAFT (decision
-      // a3fb5542 — reversible Deactivate), not APPROVED, so the activation
+    test("imported + pending + strict + DEPRECATE (state→maintenance) → gate does NOT fire", async () => {
+      // Record is currently APPROVED; transition target is DEPRECATED
+      // (decision 3d5843e9/finding 462c17ad — deprecate intent expressed via
+      // state:"maintenance", since the registry rejects DRAFT as an
+      // UpdateRegistryRecordStatus target and 'inactive' is now a structured
+      // error before any registry call), not APPROVED, so the activation
       // gate stays a no-op.
       mockGetResource.mockResolvedValue(importedRecord("pending", "APPROVED"));
       mockUpdateResource.mockResolvedValue(
@@ -262,14 +266,14 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
       mockGetGovernanceEnforce.mockResolvedValue("strict");
 
       await updateAgentConfigRegistry(
-        { agentId: "agent-imp-1", state: "inactive" },
+        { agentId: "agent-imp-1", state: "maintenance" },
         eventWithOrg,
       );
 
       expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
         "agent",
         "agent-imp-1",
-        "DRAFT",
+        "DEPRECATED",
         undefined,
         "APPROVED",
       );

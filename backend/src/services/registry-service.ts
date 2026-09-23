@@ -1513,30 +1513,49 @@ export class RegistryService {
   /**
    * Maps an internal application state to the corresponding Registry status.
    *
-   * | Internal   | Registry     |
-   * |------------|--------------|
-   * | active     | APPROVED     |
-   * | inactive   | DRAFT        |
-   * | maintenance| DRAFT        |
+   * | Internal    | Registry     |
+   * |-------------|--------------|
+   * | active      | APPROVED     |
+   * | maintenance | DEPRECATED   |
+   * | inactive    | throws — see below |
    *
-   * Decision a3fb5542: Catalog Deactivate ('inactive') now maps to DRAFT, not
-   * the terminal DEPRECATED — deactivation is reversible and reactivation
-   * resubmits the record for approval. DEPRECATED is reserved for the
-   * separate, terminal Archive action and is never produced from this
-   * mapping. Unknown internal states default to DRAFT with a warning log.
+   * Decision 3d5843e9 (supersedes a3fb5542; finding 462c17ad): the AWS
+   * registry's UpdateRegistryRecordStatus operation rejects DRAFT as a
+   * target. 'inactive' therefore can no longer map to DRAFT — doing so would
+   * either throw at the registry call (dishonest UX: the mapping "succeeds"
+   * but the write fails) or, worse, invite a caller to swallow that error and
+   * silently substitute a different transition. Instead this throws a
+   * structured error immediately so every caller is forced through the
+   * explicit, documented deprecate path rather than deactivate.
+   *
+   * 'maintenance' is repurposed as the deprecate-intent input value (finding
+   * 462c17ad remediation): it is not sent by any current frontend write path
+   * (frontend only ever sends 'active'/'inactive' on update; 'maintenance' is
+   * a READ-only display state derived from DRAFT via toInternalState), so
+   * reusing it here as the one available AgentState/ToolState enum value for
+   * "deprecate" carries no schema change and no collision with any existing
+   * caller. See agent-config-resolver.ts / tool-config-resolver.ts's
+   * deprecate-intent handling for the call site.
+   *
+   * Unknown internal states also throw — there is no more safe default
+   * status to fall back to now that DRAFT is off the table.
    */
   toRegistryStatus(internalState: string): RegistryRecordStatusValue {
     switch (internalState) {
       case "active":
         return RegistryRecordStatusValues.APPROVED;
-      case "inactive":
       case "maintenance":
-        return RegistryRecordStatusValues.DRAFT;
-      default:
-        console.warn(
-          `Unknown internal state "${internalState}", mapping to DRAFT`,
+        return RegistryRecordStatusValues.DEPRECATED;
+      case "inactive":
+        throw new RegistryLifecycleError(
+          "inactive is not a registry-backed transition; use deprecate",
+          "INVALID_TRANSITION",
         );
-        return RegistryRecordStatusValues.DRAFT;
+      default:
+        throw new RegistryLifecycleError(
+          `Unknown internal state "${internalState}" has no registry-backed transition; use deprecate`,
+          "INVALID_TRANSITION",
+        );
     }
   }
 

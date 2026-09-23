@@ -22,6 +22,8 @@ jest.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
   ListRegistryRecordsCommand: jest.fn(),
 }));
 
+import { RegistryLifecycleError } from "../registry-service";
+
 describe("RegistryService state mapping", () => {
   let service: RegistryService;
 
@@ -46,32 +48,32 @@ describe("RegistryService state mapping", () => {
       );
     });
 
-    it('maps "inactive" to DRAFT (decision a3fb5542: Deactivate is reversible)', () => {
-      expect(service.toRegistryStatus("inactive")).toBe(
-        RegistryRecordStatusValues.DRAFT,
-      );
-    });
-
-    it('maps "maintenance" to DRAFT', () => {
+    it('maps "maintenance" to DEPRECATED (deprecate intent, decision 3d5843e9/finding 462c17ad)', () => {
       expect(service.toRegistryStatus("maintenance")).toBe(
-        RegistryRecordStatusValues.DRAFT,
+        RegistryRecordStatusValues.DEPRECATED,
       );
     });
 
-    it("maps unknown state to DRAFT with warning", () => {
-      expect(service.toRegistryStatus("bogus")).toBe(
-        RegistryRecordStatusValues.DRAFT,
+    it('throws a structured RegistryLifecycleError for "inactive" (decision 3d5843e9 supersedes a3fb5542; finding 462c17ad: the registry rejects DRAFT as an UpdateRegistryRecordStatus target)', () => {
+      expect(() => service.toRegistryStatus("inactive")).toThrow(
+        RegistryLifecycleError,
       );
-      expect(console.warn).toHaveBeenCalledWith(
-        expect.stringContaining("bogus"),
+      expect(() => service.toRegistryStatus("inactive")).toThrow(
+        "inactive is not a registry-backed transition; use deprecate",
       );
     });
 
-    it("maps empty string to DRAFT with warning", () => {
-      expect(service.toRegistryStatus("")).toBe(
-        RegistryRecordStatusValues.DRAFT,
+    it("throws a structured RegistryLifecycleError for an unknown state", () => {
+      expect(() => service.toRegistryStatus("bogus")).toThrow(
+        RegistryLifecycleError,
       );
-      expect(console.warn).toHaveBeenCalled();
+      expect(() => service.toRegistryStatus("bogus")).toThrow(/bogus/);
+    });
+
+    it("throws a structured RegistryLifecycleError for an empty string", () => {
+      expect(() => service.toRegistryStatus("")).toThrow(
+        RegistryLifecycleError,
+      );
     });
   });
 
