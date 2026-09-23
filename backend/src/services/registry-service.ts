@@ -1047,6 +1047,17 @@ export class RegistryService {
     }
   }
 
+  /**
+   * Updates a resource status via `UpdateRegistryRecordStatus`. Accepts only
+   * three target statuses: APPROVED, REJECTED, and DEPRECATED. For the
+   * DRAFT → PENDING_APPROVAL Submit transition, callers must use
+   * {@link submitForApproval} instead, which uses the dedicated SDK operation.
+   *
+   * When currentStatus is supplied (Catalog update path), every transition —
+   * including Archive (APPROVED → DEPRECATED) — is validated against
+   * REGISTRY_TRANSITIONS before the write (decision a3fb5542). Same-state
+   * calls are idempotent no-ops via the isValidTransition shortcut.
+   */
   async updateResourceStatus(
     type: ResourceType,
     id: string,
