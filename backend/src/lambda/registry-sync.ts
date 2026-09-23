@@ -195,7 +195,7 @@ export function toInternalState(registryStatus: string): string {
 const AGENT_METADATA_DEFAULTS = {
   categories: [] as string[],
   icon: "",
-  state: "active" as string,
+  state: "APPROVED" as string,
   appId: undefined as string | undefined,
   manifest: undefined as Record<string, unknown> | undefined,
   // Deliberately `undefined`, NOT `''` — the cache-record builder below must
@@ -204,6 +204,9 @@ const AGENT_METADATA_DEFAULTS = {
   // RegistryService.AGENT_METADATA_DEFAULTS. Collapsing the two would let a
   // record that merely omits orgId fail OPEN as globally visible.
   orgId: undefined as string | undefined,
+  config: undefined as Record<string, unknown> | undefined,
+  createdBy: undefined as string | undefined,
+  sourceProjectId: undefined as string | undefined,
 };
 
 const TOOL_METADATA_DEFAULTS = {
@@ -249,6 +252,51 @@ export function deserializeCustomMetadata<T extends Record<string, unknown>>(
 // DynamoDB key helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Coerces a deserialized meta.config value into a plain object, or
+ * `undefined` if it is absent / not representable as one. Accepts either an
+ * already-parsed object (the common case, since customDescriptorContent as a
+ * whole is JSON-parsed upstream) or a JSON-string-encoded object (in case the
+ * registry nests config as a serialized string within the metadata). Never
+ * falls back to prose — logs a WARN naming the record instead.
+ */
+export function coerceAgentConfig(
+  recordId: string,
+  rawConfig: unknown,
+): Record<string, unknown> | undefined {
+  if (rawConfig == null) {
+    console.warn(
+      `Agent record "${recordId}": meta.config is missing, leaving config undefined`,
+    );
+    return undefined;
+  }
+
+  let candidate: unknown = rawConfig;
+  if (typeof candidate === "string") {
+    try {
+      candidate = JSON.parse(candidate);
+    } catch {
+      console.warn(
+        `Agent record "${recordId}": meta.config is a non-JSON string, leaving config undefined`,
+      );
+      return undefined;
+    }
+  }
+
+  if (
+    typeof candidate === "object" &&
+    candidate !== null &&
+    !Array.isArray(candidate)
+  ) {
+    return candidate as Record<string, unknown>;
+  }
+
+  console.warn(
+    `Agent record "${recordId}": meta.config is not a JSON object, leaving config undefined`,
+  );
+  return undefined;
+}
+
 function getKeyForResource(
   resourceType: ResourceType,
   resourceId: string,
@@ -267,7 +315,8 @@ function getKeyForResource(
  */
 export type AgentCacheRecord = {
   agentId: string;
-  config: string;
+  config: Record<string, unknown> | undefined;
+  description: string;
   state: string;
   categories: string[];
   icon: string;
@@ -289,6 +338,8 @@ export type AgentCacheRecord = {
    * as NOT system-shared, only an explicit `''` counts as shared.
    */
   orgId: string | undefined;
+  createdBy: string | undefined;
+  sourceProjectId: string | undefined;
 };
 
 /**
@@ -322,14 +373,17 @@ export function buildAgentCacheRecord(
 
   return {
     agentId: resourceId,
-    config: resource.description ?? "",
-    state: meta.state,
+    config: coerceAgentConfig(resourceId, meta.config),
+    description: resource.description ?? "",
+    state: toInternalState(meta.state),
     categories: meta.categories,
     icon: meta.icon,
     appId: meta.appId,
     manifest: meta.manifest,
     name: typeof resource.name === "string" ? resource.name : "",
     orgId: meta.orgId,
+    createdBy: meta.createdBy,
+    sourceProjectId: meta.sourceProjectId,
     createdAt: resource.createdAt
       ? new Date(resource.createdAt).toISOString()
       : new Date().toISOString(),
