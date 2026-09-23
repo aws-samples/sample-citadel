@@ -159,27 +159,25 @@ them):
 
 ### Deactivate vs Archive (decision a3fb5542)
 
-The Catalog's Deactivate action (`AgentCard`/`AgentCatalog`,
-`ToolCard`/`ToolCatalog`) and `AppDetailView`'s Archive action both start
-from `APPROVED`, but they are semantically different and target different
-states:
+**Deactivation of registry-backed records is not supported**. The Registry
+service (`UpdateRegistryRecordStatus`) accepts only three target statuses:
+`APPROVED`, `REJECTED`, and `DEPRECATED`. There is no deactivate transition.
 
-- **Deactivate** (`APPROVED` → `DRAFT`) is **reversible**. Reactivating a
-  deactivated record means resubmitting it for approval
-  (`SubmitRegistryRecordForApproval`, the normal `DRAFT` → `PENDING_APPROVAL`
-  path) — there is no separate "reactivate" status write. The Catalog labels
-  a `DRAFT` record reached this way as **"Inactive"**, not "Maintenance" (a
-  distinct label used elsewhere for other `DRAFT` contexts, e.g. workflow
-  canvas nodes) and not "Activated".
-  Internally this reuses the existing `DRAFT` state — `toRegistryStatus`
-  maps both the `inactive` and `maintenance` legacy tri-state values to
-  `DRAFT` — there is no fourth state introduced.
+The Catalog's Archive action transitions from `APPROVED` to `DEPRECATED`:
+
 - **Archive** (`APPROVED` → `DEPRECATED`) is **terminal and one-way**. Once a
   record is `DEPRECATED` it can never be reactivated; the validated-
   transition gate rejects any transition out of `DEPRECATED`.
   `AppDetailView`'s "Reactivate" affordance is disabled with the tooltip
   "Deprecated records cannot be reactivated" specifically because the gate
   would reject it.
+
+**Note on reversible deactivation**: A future capability (E4) may support a
+reversible app-level `disabled` flag independent of the Registry status
+machine. Such a flag would be managed by the application (Citadel), not by
+the Registry service, and would allow an agent to be temporarily disabled
+without transitioning its record status. This is explicitly deferred outside
+the Registry lifecycle scope.
 
 ### Transition Matrix
 
@@ -189,15 +187,27 @@ states:
 | `DRAFT`            | `DEPRECATED`         | architect  | `UpdateRegistryRecordStatus` with `status=DEPRECATED`            |
 | `PENDING_APPROVAL` | `APPROVED`           | admin      | `UpdateRegistryRecordStatus` with `status=APPROVED`; `decidedBy` stamped server-side |
 | `PENDING_APPROVAL` | `REJECTED`           | admin      | `UpdateRegistryRecordStatus` with `status=REJECTED`, `statusReason` required |
-| `REJECTED`         | `DRAFT`              | architect  | `UpdateRegistryRecordStatus` with `status=DRAFT` (resubmit path) |
+| `REJECTED`         | `DRAFT`              | architect  | `UpdateRegistryRecordStatus` with `status=DRAFT` (revise path); cannot resubmit same record |
 | `REJECTED`         | `DEPRECATED`         | architect  | `UpdateRegistryRecordStatus` with `status=DEPRECATED` (abandon)  |
-| `APPROVED`         | `DRAFT`              | architect / admin | `UpdateRegistryRecordStatus` with `status=DRAFT` (Catalog Deactivate; reversible — reactivation resubmits for approval) |
 | `APPROVED`         | `DEPRECATED`         | architect / admin | `UpdateRegistryRecordStatus` with `status=DEPRECATED` (Archive; terminal) |
 | `DEPRECATED`       | —                    | —          | Terminal; no outbound transitions                                |
 
+**Resubmission after rejection:** When a record is `REJECTED`, the architect
+may revise the application (project, manifest, etc.) and transition to `DRAFT`
+via `UpdateRegistryRecordStatus` with `status=DRAFT`. However, this is a
+revision within the **same record** (`recordId` stays the same), not a new
+submission. REJECTED records cannot be resubmitted to the Registry; the
+architect must create a new record if the revision scope is substantial.
+
+**UpdateRegistryRecordStatus target constraints:** The Registry's
+`UpdateRegistryRecordStatus` API accepts only three valid target statuses:
+`APPROVED`, `REJECTED`, and `DEPRECATED`. Status transitions are validated
+against `REGISTRY_TRANSITIONS` before the write, and any invalid transition
+is rejected with a `RegistryLifecycleError` (`INVALID_TRANSITION`).
+
 Idempotent same-state transitions are permitted and produce no side effect —
 `LifecycleManager.isValidTransition` returns `true` when `current === next`.
-In particular, issuing Deactivate on a record that is already `DRAFT` is a
+In particular, issuing Archive on a record that is already `DEPRECATED` is a
 no-op: the caller-side guard in `agent-config-resolver.ts` /
 `tool-config-resolver.ts` (`desiredRegistryStatus !== existing.status`) skips
 the status write, the validated-transition gate, and the post-transition
@@ -244,9 +254,8 @@ stateDiagram-v2
     DRAFT --> DEPRECATED: abandon
     PENDING_APPROVAL --> APPROVED: admin approve
     PENDING_APPROVAL --> REJECTED: admin reject
-    REJECTED --> DRAFT: revise + resubmit
+    REJECTED --> DRAFT: revise
     REJECTED --> DEPRECATED: abandon
-    APPROVED --> DRAFT: Deactivate (reversible)
     APPROVED --> DEPRECATED: Archive (terminal)
     DEPRECATED --> [*]
 ```
@@ -255,7 +264,8 @@ Not shown: the transient `CREATING`/`UPDATING` statuses (polled past by
 `waitForStableState` before any status write) and the `CREATE_FAILED`/
 `UPDATE_FAILED` error statuses reported directly by the Registry service.
 These four are not targets of `updateResourceStatus` and are therefore
-outside `REGISTRY_TRANSITIONS`.
+outside `REGISTRY_TRANSITIONS`. All nine statuses (five governed states +
+four transient/error) are documented in the [States](#states) section.
 
 ## Governance Integration
 
