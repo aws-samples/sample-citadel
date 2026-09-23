@@ -695,6 +695,12 @@ type AgentConfig {
   categories: [String]
   createdAt: AWSDateTime
   updatedAt: AWSDateTime
+  # Raw Registry record status (e.g. "DRAFT", "APPROVED"), present only on
+  # records backed by a Registry record. Null on legacy, non-registry rows.
+  # This is the explicit, non-heuristic discriminator clients should use to
+  # tell registry-backed records from legacy ones — do not infer it from
+  # `name` or any other field.
+  registryStatus: String
   manifest: AgentManifest
   # UNTRUSTED, LLM-proposed manifest parked for human review (Tier-3 agent
   # import). READ-only; never an active/trusted manifest. Absent unless a
@@ -1000,6 +1006,12 @@ type ToolConfig {
   dataStoreBindings: [DataStoreBinding]
   createdAt: AWSDateTime
   updatedAt: AWSDateTime
+  # Raw Registry record status (e.g. "DRAFT", "APPROVED"), present only on
+  # records backed by a Registry record. Null on legacy, non-registry rows.
+  # This is the explicit, non-heuristic discriminator clients should use to
+  # tell registry-backed records from legacy ones — do not infer it from
+  # any other field.
+  registryStatus: String
 }
 
 type DeleteToolConfigResult {

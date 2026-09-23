@@ -178,6 +178,9 @@ describe("agent-config-resolver", () => {
       );
       expect(result).toBeDefined();
       expect(result!.agentId).toBe("a1");
+      // Legacy DynamoDB rows are not registry-backed (finding 414f8013):
+      // registryStatus must stay absent, never inferred.
+      expect(result!.registryStatus).toBeUndefined();
     });
 
     test("returns null when not found", async () => {
@@ -206,6 +209,9 @@ describe("agent-config-resolver", () => {
       expect(result.agentId).toBe("new-agent");
       expect(typeof result.config).toBe("string");
       expect(result.createdAt).toBeDefined();
+      // Legacy DynamoDB rows are not registry-backed (finding 414f8013):
+      // registryStatus must stay absent, never inferred.
+      expect(result.registryStatus).toBeUndefined();
     });
 
     test("accepts config passed as an object", async () => {

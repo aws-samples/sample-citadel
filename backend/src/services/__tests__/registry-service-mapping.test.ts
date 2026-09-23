@@ -74,6 +74,18 @@ describe("RegistryService record mapping", () => {
       expect(result.createdAt).toBe("2024-06-15T10:00:00.000Z");
       expect(result.updatedAt).toBe("2024-06-16T12:00:00.000Z");
       expect(result.manifest).toEqual({ name: "TestAgent", version: "1.0" });
+      expect(result.registryStatus).toBe(RegistryRecordStatusValues.APPROVED);
+    });
+
+    it("exposes registryStatus from the record's raw status (finding 414f8013)", () => {
+      const record: RegistryRecord = {
+        recordId: "a1",
+        name: "A",
+        status: RegistryRecordStatusValues.DRAFT,
+      };
+      expect(service.mapToAgentConfig(record).registryStatus).toBe(
+        RegistryRecordStatusValues.DRAFT,
+      );
     });
 
     it("maps recordId to agentId", () => {
@@ -298,6 +310,18 @@ describe("RegistryService record mapping", () => {
       ]);
       expect(result.createdAt).toBe("2024-07-01T08:00:00.000Z");
       expect(result.updatedAt).toBe("2024-07-02T09:30:00.000Z");
+      expect(result.registryStatus).toBe(RegistryRecordStatusValues.APPROVED);
+    });
+
+    it("exposes registryStatus from the record's raw status (finding 414f8013)", () => {
+      const record: RegistryRecord = {
+        recordId: "t1",
+        name: "T",
+        status: RegistryRecordStatusValues.PENDING_APPROVAL,
+      };
+      expect(service.mapToToolConfig(record).registryStatus).toBe(
+        RegistryRecordStatusValues.PENDING_APPROVAL,
+      );
     });
 
     it("maps recordId to toolId", () => {
