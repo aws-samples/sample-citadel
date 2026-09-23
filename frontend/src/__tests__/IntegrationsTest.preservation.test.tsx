@@ -123,6 +123,12 @@ jest.mock('@/components/DynamicConnectorForm', () => ({
   },
 }));
 
+// finding 5b8638f8: orgId must be sourced from the caller's organization,
+// never the 'default' placeholder.
+jest.mock('@/contexts/OrganizationContext', () => ({
+  useOrganization: () => ({ currentUser: { organization: 'caller-org' } }),
+}));
+
 // ---- Import the component AFTER all mocks are set up ----
 import Integrations from '@/pages/Integrations';
 
@@ -396,7 +402,7 @@ describe('Property 2: Preservation – Integration Actions and UI Behavior Uncha
       expect(mockCreateIntegration).toHaveBeenCalledWith(
         expect.objectContaining({
           integrationType: 'CONFLUENCE',
-          orgId: 'default',
+          orgId: 'caller-org',
         }),
       );
     });

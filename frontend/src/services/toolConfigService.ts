@@ -25,6 +25,14 @@ export interface ToolConfig {
   dataStoreBindings?: DataStoreBinding[] | null;
   createdAt?: string;
   updatedAt?: string;
+  /**
+   * Raw Registry record status (e.g. "DRAFT", "APPROVED"), present only on
+   * records backed by a Registry record. Null/undefined on legacy,
+   * non-registry rows. This is the explicit, non-heuristic discriminator
+   * clients should use to tell registry-backed records from legacy ones —
+   * do not infer it from any other field (finding 414f8013).
+   */
+  registryStatus?: string | null;
 }
 
 const listToolConfigsQuery = `
@@ -36,6 +44,7 @@ const listToolConfigsQuery = `
       categories
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
+      registryStatus
       createdAt
       updatedAt
     }
@@ -51,6 +60,7 @@ const getToolConfigQuery = `
       categories
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
+      registryStatus
       createdAt
       updatedAt
     }
@@ -66,6 +76,7 @@ const searchToolConfigsQuery = `
       categories
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
+      registryStatus
       createdAt
       updatedAt
     }

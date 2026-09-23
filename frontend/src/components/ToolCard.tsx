@@ -1,4 +1,4 @@
-import { Pause, Play, Settings, Wrench } from 'lucide-react';
+import { Pause, Play, Settings, Wrench, AlertTriangle } from 'lucide-react';
 import { useState } from 'react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -9,11 +9,22 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from './ui/tooltip';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './ui/alert-dialog';
 import { ToolConfig } from '../services/toolConfigService';
 import { extractBindingBadges } from './tool-card-badge-helpers';
 import { ToolTestingSandbox } from './ToolTestingSandbox';
 import { ErrorBoundary } from './ErrorBoundary';
 import { useOrganization } from '../contexts/OrganizationContext';
+import { registryStatusLabel } from './registry-status-label';
 
 interface ToolCardProps {
   tool: ToolConfig;
@@ -27,6 +38,18 @@ interface ToolCardProps {
    * unspecified; pass false once a ToolDetails view exists.
    */
   configureDisabled?: boolean;
+}
+
+/**
+ * A tool is registry-backed iff it carries the explicit `registryStatus`
+ * discriminator (finding 414f8013) — the raw Registry record status, set
+ * only by RegistryService.mapToToolConfig. Legacy DynamoDB rows never set
+ * it, so it stays null/undefined there. Mirrors AgentCard's
+ * isRegistryBacked, now sourced from the non-heuristic field rather than
+ * inferring registry-backing from `name` presence.
+ */
+function isRegistryBacked(tool: ToolConfig): boolean {
+  return tool.registryStatus !== undefined && tool.registryStatus !== null;
 }
 
 /** Minimal shape ToolCard reads off a tool's parsed config. */
@@ -63,10 +86,25 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
   const { selectedOrganization } = useOrganization();
   const resolvedOrgId = orgId || selectedOrganization || 'default';
   const [showSandbox, setShowSandbox] = useState(false);
+  const [showDeprecateConfirm, setShowDeprecateConfirm] = useState(false);
   const config = toRenderableConfig(tool.config);
 
   // Only show config button for admin and developer roles
   const canConfigure = userRole === 'admin' || userRole === 'developer';
+
+  const registryBacked = isRegistryBacked(tool);
+  // Registry-backed DEPRECATED/REJECTED records surface as internal state
+  // 'inactive' (toInternalState) but are terminal at the registry — no
+  // action can move them anywhere. Legacy 'inactive' stays reversible
+  // (Activate). Mirrors AgentCard's isTerminalDeprecated.
+  const isTerminalDeprecated = registryBacked && tool.state === 'inactive';
+
+  const handleDeprecateConfirm = () => {
+    setShowDeprecateConfirm(false);
+    onToggleState(tool);
+  };
+
+  const badgeLabel = registryStatusLabel(tool.registryStatus);
 
   return (
     <Card 
@@ -95,6 +133,14 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
             </div>
           </div>
           <div className="flex items-center gap-1">
+            {/* Registry status badge (finding c5df5322): distinct from the
+                legacy state toggle below, shown only when registryStatus is
+                present. */}
+            {badgeLabel && (
+              <Badge className="bg-primary/10 text-primary border-0">
+                {badgeLabel}
+              </Badge>
+            )}
             <Badge 
               className={
                 tool.state === 'active'
@@ -102,7 +148,7 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
                   : 'bg-muted/20 text-muted-foreground border-0'
               }
             >
-              {tool.state}
+              {isTerminalDeprecated ? 'Deprecated' : tool.state}
             </Badge>
           </div>
         </div>
@@ -194,7 +240,36 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
         )}
         
         <div className="flex gap-2 pt-2">
-          {tool.state === 'active' ? (
+          {isTerminalDeprecated ? null : tool.state === 'active' && registryBacked ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 bg-transparent border-border text-foreground hover:bg-accent"
+                onClick={() => setShowDeprecateConfirm(true)}
+              >
+                <AlertTriangle className="size-4 mr-1" />
+                Deprecate
+              </Button>
+              <AlertDialog open={showDeprecateConfirm} onOpenChange={setShowDeprecateConfirm}>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Deprecate {config?.name || tool.toolId}?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This is irreversible. Once deprecated, this tool will no longer be
+                      usable or bindable, and it cannot be reactivated.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={handleDeprecateConfirm}>
+                      Deprecate
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </>
+          ) : tool.state === 'active' ? (
             <Button
               variant="outline"
               size="sm"
@@ -215,7 +290,7 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
               Activate
             </Button>
           )}
-          {canConfigure && (
+          {!isTerminalDeprecated && canConfigure && (
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>

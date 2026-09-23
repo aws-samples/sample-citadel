@@ -11,6 +11,14 @@ export interface AgentConfig {
   categories?: string[];
   createdAt?: string;
   updatedAt?: string;
+  /**
+   * Raw Registry record status (e.g. "DRAFT", "APPROVED"), present only on
+   * records backed by a Registry record. Null/undefined on legacy,
+   * non-registry rows. This is the explicit, non-heuristic discriminator
+   * clients should use to tell registry-backed records from legacy ones —
+   * do not infer it from `name` or any other field (finding 414f8013).
+   */
+  registryStatus?: string | null;
 }
 
 /** Outcome of a bulk project-agent activation, grouped by per-agent result. */
@@ -28,6 +36,7 @@ const listAgentConfigsQuery = `
       config
       state
       categories
+      registryStatus
       createdAt
       updatedAt
     }
@@ -42,6 +51,7 @@ const getAgentConfigQuery = `
       config
       state
       categories
+      registryStatus
       createdAt
       updatedAt
     }
@@ -56,6 +66,7 @@ const searchAgentConfigsQuery = `
       config
       state
       categories
+      registryStatus
       createdAt
       updatedAt
     }

@@ -109,7 +109,21 @@ export function Tools() {
   const handleToggleState = async (tool: ToolConfig) => {
     try {
       setError(null);
-      const newState = tool.state === 'active' ? 'inactive' : 'active';
+      // Registry-backed records (tool.registryStatus is present — finding
+      // 414f8013's explicit discriminator, mirrors AgentCatalog's
+      // handleToggleState / ToolCard's isRegistryBacked) reject the legacy
+      // Deactivate target 'inactive' (decision 3d5843e9). ToolCard only
+      // invokes onToggleState for a registry-backed active tool after the
+      // user confirms the Deprecate dialog, so the deprecate-intent wire
+      // value 'maintenance' is the correct target here. Legacy tools keep
+      // the original toggle.
+      const isRegistryBacked = tool.registryStatus !== undefined && tool.registryStatus !== null;
+      const newState =
+        tool.state === 'active'
+          ? isRegistryBacked
+            ? 'maintenance'
+            : 'inactive'
+          : 'active';
       await toolConfigService.updateToolConfig({ toolId: tool.toolId, state: newState });
       await loadTools();
     } catch (err: any) { setError(err.message || 'Failed to update tool state'); }
