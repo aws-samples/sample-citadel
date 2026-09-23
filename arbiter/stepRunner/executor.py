@@ -737,6 +737,15 @@ def invoke_node(
         # response did not surface a parseable generation, keeping the message
         # byte-identical to a pre-fence dispatch.
         dispatch_generation=_extract_dispatch_generation(_dispatch_write, node_id),
+        # correlation_id: same fallback the step runner's own event-handler
+        # span already applies (index.py:
+        # ``detail.get('correlationId') or detail.get('executionId')``) —
+        # run_id is the server-minted correlation id when present, else
+        # execution_id, so the worker's execution_trace_scope span is never
+        # left with an empty correlation_id. execution_id is always a
+        # non-empty string here (validated at execution start), so this
+        # never degrades to None.
+        correlation_id=run_id or execution_id,
         **_run_id_kwargs,
     )
 
