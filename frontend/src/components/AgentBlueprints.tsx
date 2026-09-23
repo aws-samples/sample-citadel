@@ -49,8 +49,9 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   const [isPublishing, setIsPublishing] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
-  const { selectedOrganization } = useOrganization();
-  const orgId = selectedOrganization || 'default';
+  const { currentUser } = useOrganization();
+  const orgId = currentUser?.organization || null;
+  const orgMissingMessage = 'Your account has no organisation; ask an admin to assign one';
 
   // Server-side autosave (debounced update + conflict handling + offline fallback).
   const { save, isSaving, lastSaved, conflict, workflow } = useWorkflowPersistence(workflowId);
@@ -180,7 +181,6 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
     if (workflowId) return;
     if (nodes.length === 0 && edges.length === 0) return;
     if (!orgId) return;
-
     const timer = setTimeout(async () => {
       if (creatingRef.current || workflowIdRef.current) return;
       creatingRef.current = true;
@@ -400,7 +400,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
           edges={edges}
           onLoad={handleLoad}
           onClear={handleClear}
-          orgId={orgId}
+          orgId={orgId ?? ''}
           workflowName={nameRef.current}
           validationResult={validationResult}
         />
@@ -470,6 +470,16 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
             className="px-4 py-2 text-sm text-destructive bg-destructive/10 border-b border-destructive/20"
           >
             Failed to load workflow: {loadError}
+          </div>
+        )}
+
+        {/* No caller organization: block server persistence, tell the user why */}
+        {!orgId && (
+          <div
+            role="alert"
+            className="px-4 py-2 text-sm text-destructive bg-destructive/10 border-b border-destructive/20"
+          >
+            {orgMissingMessage}
           </div>
         )}
 
