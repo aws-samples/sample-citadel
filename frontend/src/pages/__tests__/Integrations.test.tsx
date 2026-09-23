@@ -173,6 +173,13 @@ jest.mock('@/utils/navigation', () => ({
   navigateExternal: jest.fn(),
 }));
 
+// Caller organization context — see finding 5b8638f8: createIntegration/
+// listIntegrations must source orgId from currentUser.organization, never
+// the 'default' placeholder.
+jest.mock('@/contexts/OrganizationContext', () => ({
+  useOrganization: () => ({ currentUser: { organization: 'caller-org' } }),
+}));
+
 import { integrationServiceBackend } from '@/services/integrationServiceBackend';
 import { navigateExternal } from '@/utils/navigation';
 import { Integrations } from '../Integrations';
@@ -197,7 +204,7 @@ describe('Integrations page — Connect 3LO redirect behaviour', () => {
         integrationId: 'int-auth-code',
         name: 'My Auth Code MCP',
         integrationType: 'MCP_SERVER',
-        orgId: 'default',
+        orgId: 'caller-org',
         status: 'TESTED',
         config: '{}',
         createdAt: 't',
@@ -230,6 +237,8 @@ describe('Integrations page — Connect 3LO redirect behaviour', () => {
         'https://idp.example.com/authorize?client_id=cid&redirect_uri=...&state=abc',
       );
     });
+    // Initial load call sources orgId from the caller's organization.
+    expect(svc.listIntegrations).toHaveBeenCalledWith('caller-org');
   });
 
   it('CLIENT_CREDENTIALS integration: no redirect; state moves to Connecting', async () => {
@@ -238,7 +247,7 @@ describe('Integrations page — Connect 3LO redirect behaviour', () => {
         integrationId: 'int-cc',
         name: 'My CC MCP',
         integrationType: 'MCP_SERVER',
-        orgId: 'default',
+        orgId: 'caller-org',
         status: 'TESTED',
         config: '{}',
         createdAt: 't',
@@ -283,7 +292,7 @@ describe('Integrations page — post-create AgentCore callback URL UX', () => {
       integrationId: 'int-1',
       name: 'My MCP',
       integrationType: 'MCP_SERVER',
-      orgId: 'default',
+      orgId: 'caller-org',
       status: 'CREATED',
       config: '{}',
       createdAt: 't',
@@ -312,6 +321,10 @@ describe('Integrations page — post-create AgentCore callback URL UX', () => {
     await waitFor(() => {
       expect(svc.createIntegration).toHaveBeenCalledTimes(1);
     });
+    // finding 5b8638f8: orgId sourced from currentUser.organization, not 'default'.
+    expect(svc.createIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId: 'caller-org' }),
+    );
 
     // The post-create callback URL dialog appears with the URL and copy button.
     const callbackDialog = await screen.findByTestId('callback-url-dialog');
@@ -328,7 +341,7 @@ describe('Integrations page — post-create AgentCore callback URL UX', () => {
       integrationId: 'int-2',
       name: 'My MCP',
       integrationType: 'MCP_SERVER',
-      orgId: 'default',
+      orgId: 'caller-org',
       status: 'CREATED',
       config: '{}',
       createdAt: 't',

@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/components/ui/utils";
 import { 
   CheckCircle,
@@ -38,6 +39,7 @@ import { type ConnectorType, getConnectorDefinition, type IntegrationType } from
 import { PageContainer } from "@/components/PageContainer";
 import { SearchInput } from "@/components/SearchInput";
 import { navigateExternal } from "@/utils/navigation";
+import { useOrganization } from "@/contexts/OrganizationContext";
 
 // Extended Integration type that includes UI properties
 interface Integration extends Partial<BackendIntegration> {
@@ -185,6 +187,12 @@ const mapBackendToUIIntegration = (backend: BackendIntegration, index: number): 
 };
 
 export function Integrations() {
+  // Caller organization, sourced the same way as finding d8fb2286 / PR #188
+  // (AgentBlueprints.tsx): currentUser.organization, never
+  // selectedOrganization (an admin's filter-scope selection, which can be
+  // "All Organizations") and never the 'default' placeholder.
+  const { currentUser } = useOrganization();
+  const orgId = currentUser?.organization || null;
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState("all");
@@ -210,13 +218,24 @@ export function Integrations() {
 
   useEffect(() => {
     loadIntegrations();
-  }, []);
+  }, [orgId]);
 
   const loadIntegrations = async () => {
+    // No caller organization: block server calls, tell the user why
+    // (mirrors AgentBlueprints' "no caller organization" block).
+    if (!orgId) {
+      setIntegrations([]);
+      setLoading(false);
+      setMessage({
+        type: 'error',
+        text: 'Your account has no organisation; ask an admin to assign one',
+      });
+      return;
+    }
     try {
       setLoading(true);
       // Fetch all integrations from the backend (any status)
-      const backendIntegrations = await integrationServiceBackend.listIntegrations('default');
+      const backendIntegrations = await integrationServiceBackend.listIntegrations(orgId);
       
       // Map ALL backend integrations to UI representations
       const uiIntegrations = backendIntegrations.map((backend, index) =>
@@ -290,6 +309,14 @@ export function Integrations() {
       console.error('No connector type selected!');
       return;
     }
+
+    if (!orgId) {
+      setMessage({
+        type: 'error',
+        text: 'Your account has no organisation; ask an admin to assign one',
+      });
+      return;
+    }
     
     setActionLoading('add');
     setMessage(null);
@@ -312,7 +339,7 @@ export function Integrations() {
       const integrationInput = {
         name: formData.name,
         integrationType: selectedConnectorType.id,
-        orgId: "default",
+        orgId,
         config,
         credentials: formData.credentials
       };
@@ -423,7 +450,7 @@ export function Integrations() {
       
       // Poll for status updates
       const pollInterval = setInterval(async () => {
-        const backendIntegrations = await integrationServiceBackend.listIntegrations();
+        const backendIntegrations = await integrationServiceBackend.listIntegrations(orgId || undefined);
         const updated = backendIntegrations.find(i => i.integrationId === integration.integrationId);
         if (updated) {
           await loadIntegrations();
@@ -534,18 +561,33 @@ export function Integrations() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button 
-            variant="outline" 
-            className="gap-1 text-xs py-1 px-2 h-7"
-            onClick={() => {
-              setSelectedConnectorType(null);
-              setShowConnectorSelector(true);
-              setAddDialogOpen(true);
-            }}
-          >
-            <Plug className="size-3" />
-            Add Connectors
-          </Button>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex">
+                  <Button 
+                    variant="outline" 
+                    className="gap-1 text-xs py-1 px-2 h-7"
+                    disabled={!orgId}
+                    aria-disabled={!orgId}
+                    onClick={() => {
+                      setSelectedConnectorType(null);
+                      setShowConnectorSelector(true);
+                      setAddDialogOpen(true);
+                    }}
+                  >
+                    <Plug className="size-3" />
+                    Add Connectors
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              {!orgId && (
+                <TooltipContent>
+                  Your account has no organisation; ask an admin to assign one
+                </TooltipContent>
+              )}
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </div>
 

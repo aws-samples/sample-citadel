@@ -79,6 +79,9 @@ describe("tool-config-resolver", () => {
       );
       expect(result).toBeDefined();
       expect(result!.toolId).toBe("t1");
+      // Legacy DynamoDB rows are not registry-backed (finding 414f8013):
+      // registryStatus must stay absent, never inferred.
+      expect(result!.registryStatus).toBeUndefined();
     });
 
     test("returns null when not found", async () => {
@@ -102,6 +105,9 @@ describe("tool-config-resolver", () => {
 
       expect(result.toolId).toBe("new-tool");
       expect(result.createdAt).toBeDefined();
+      // Legacy DynamoDB rows are not registry-backed (finding 414f8013):
+      // registryStatus must stay absent, never inferred.
+      expect(result.registryStatus).toBeUndefined();
     });
   });
 

@@ -14,6 +14,7 @@ import {
   AlertDialogTitle,
 } from './ui/alert-dialog';
 import { AgentConfig } from '../services/agentConfigService';
+import { registryStatusLabel } from './registry-status-label';
 
 interface AgentCardProps {
   agent: AgentConfig;
@@ -23,9 +24,10 @@ interface AgentCardProps {
 }
 
 /**
- * A record is registry-backed iff it carries a `name` key at all (registry
- * mapper `mapToAgentConfig` always sets `name: record.name ?? ""`; legacy
- * DynamoDB `getAgentConfig` never sets `name`, see
+ * A record is registry-backed iff it carries the explicit `registryStatus`
+ * discriminator (finding 414f8013) — the raw Registry record status, set
+ * only by RegistryService.mapToAgentConfig. Legacy DynamoDB
+ * `getAgentConfig` never sets it, so it stays null/undefined there (see
  * backend/src/lambda/agent-config-resolver.ts). Decision 3d5843e9: the
  * registry rejects APPROVED -> DRAFT (the old Deactivate target), so
  * registry-backed APPROVED agents no longer offer Deactivate at all — only
@@ -33,7 +35,7 @@ interface AgentCardProps {
  * see registry-service.ts's toRegistryStatus).
  */
 function isRegistryBacked(agent: AgentConfig): boolean {
-  return (agent as { name?: string }).name !== undefined;
+  return agent.registryStatus !== undefined && agent.registryStatus !== null;
 }
 
 export function AgentCard({ agent, onToggleState, onConfigure, userRole }: AgentCardProps) {
@@ -62,6 +64,8 @@ export function AgentCard({ agent, onToggleState, onConfigure, userRole }: Agent
     setShowDeprecateConfirm(false);
     onToggleState(agent);
   };
+
+  const badgeLabel = registryStatusLabel(agent.registryStatus);
 
   return (
     <Card 
@@ -93,6 +97,14 @@ export function AgentCard({ agent, onToggleState, onConfigure, userRole }: Agent
             </div>
           </div>
           <div className="flex items-center gap-1">
+            {/* Registry status badge (finding c5df5322): distinct from the
+                legacy state toggle below, shown only when registryStatus is
+                present. */}
+            {badgeLabel && (
+              <Badge className="bg-primary/10 text-primary border-0">
+                {badgeLabel}
+              </Badge>
+            )}
             <Badge 
               className={
                 agent.state === 'active'

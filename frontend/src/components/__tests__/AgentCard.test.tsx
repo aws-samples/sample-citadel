@@ -8,11 +8,11 @@
  * (-> DEPRECATED, irreversible). Legacy (non-registry) agents keep the
  * original Deactivate/Activate toggle unchanged.
  *
- * A record is registry-backed iff it carries a `name` key at all (registry
- * mapper always sets `name: record.name ?? ""`; legacy DynamoDB rows never
- * set `name` — see backend/src/lambda/agent-config-resolver.ts's
- * getAgentConfig). Fixtures below omit `name` entirely to model legacy
- * agents, mirroring AgentCatalog.regression.test.tsx's legacy fixture shape.
+ * A record is registry-backed iff it carries the explicit `registryStatus`
+ * discriminator (finding 414f8013) — the raw Registry record status set
+ * only by RegistryService.mapToAgentConfig. Legacy DynamoDB rows never set
+ * it (see backend/src/lambda/agent-config-resolver.ts's getAgentConfig).
+ * Fixtures below omit `registryStatus` to model legacy agents.
  */
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -52,18 +52,19 @@ jest.mock('../ui/alert-dialog', () => ({
     React.createElement('button', { onClick, 'data-testid': 'deprecate-cancel' }, children),
 }));
 
-/** Registry-backed fixture: always carries a `name` key. */
-function makeRegistryAgent(state: AgentConfig['state']): AgentConfig {
+/** Registry-backed fixture: always carries the explicit registryStatus discriminator. */
+function makeRegistryAgent(state: AgentConfig['state'], registryStatus: string = 'APPROVED'): AgentConfig {
   return {
     agentId: 'agent-1',
     name: 'Test Agent',
     config: {},
     state,
     categories: [],
+    registryStatus,
   };
 }
 
-/** Legacy fixture: no `name` key at all, matching getAgentConfig's shape. */
+/** Legacy fixture: no registryStatus at all, matching getAgentConfig's shape. */
 function makeLegacyAgent(state: AgentConfig['state']): AgentConfig {
   return {
     agentId: 'legacy-agent-1',
@@ -142,15 +143,16 @@ describe('AgentCard — DEPRECATED registry-backed agents (terminal)', () => {
   const noop = () => {};
 
   it('renders the state badge as "Deprecated"', () => {
-    render(<AgentCard agent={makeRegistryAgent('inactive')} onToggleState={noop} onConfigure={noop} />);
+    render(<AgentCard agent={makeRegistryAgent('inactive', 'DEPRECATED')} onToggleState={noop} onConfigure={noop} />);
 
-    expect(screen.getByTestId('state-badge')).toHaveTextContent('Deprecated');
+    const badges = screen.getAllByTestId('state-badge');
+    expect(badges.some((b) => b.textContent === 'Deprecated')).toBe(true);
   });
 
   it('shows no actions (no Activate, no Deprecate, no Configure)', () => {
     render(
       <AgentCard
-        agent={makeRegistryAgent('inactive')}
+        agent={makeRegistryAgent('inactive', 'DEPRECATED')}
         onToggleState={noop}
         onConfigure={noop}
         userRole="admin"
@@ -195,5 +197,34 @@ describe('AgentCard — legacy (non-registry) agents unchanged', () => {
     render(<AgentCard agent={makeLegacyAgent('maintenance')} onToggleState={noop} onConfigure={noop} />);
 
     expect(screen.getByTestId('state-badge')).toHaveTextContent('maintenance');
+  });
+});
+
+describe('AgentCard — registry status badge (finding c5df5322)', () => {
+  const noop = () => {};
+
+  it('shows a "Draft" badge distinct from the state toggle badge for a DRAFT registry agent', () => {
+    render(<AgentCard agent={makeRegistryAgent('maintenance', 'DRAFT')} onToggleState={noop} onConfigure={noop} />);
+
+    expect(screen.getByText('Draft')).toBeInTheDocument();
+  });
+
+  it('shows a "Pending approval" badge for a PENDING_APPROVAL registry agent', () => {
+    render(<AgentCard agent={makeRegistryAgent('active', 'PENDING_APPROVAL')} onToggleState={noop} onConfigure={noop} />);
+
+    expect(screen.getByText('Pending approval')).toBeInTheDocument();
+  });
+
+  it('shows an "Approved" badge for an APPROVED registry agent', () => {
+    render(<AgentCard agent={makeRegistryAgent('active', 'APPROVED')} onToggleState={noop} onConfigure={noop} />);
+
+    expect(screen.getByText('Approved')).toBeInTheDocument();
+  });
+
+  it('renders no registry status badge for a legacy agent', () => {
+    render(<AgentCard agent={makeLegacyAgent('active')} onToggleState={noop} onConfigure={noop} />);
+
+    expect(screen.queryByText('Draft')).not.toBeInTheDocument();
+    expect(screen.queryByText('Approved')).not.toBeInTheDocument();
   });
 });

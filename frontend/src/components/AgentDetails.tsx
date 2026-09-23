@@ -1,10 +1,21 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, AlertTriangle } from 'lucide-react';
 import { agentConfigService, AgentConfig } from '../services/agentConfigService';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './ui/alert-dialog';
 import { AgentConfigTab } from './AgentConfig';
 import { AgentCodeTab } from './AgentCode';
+import { registryStatusLabel } from './registry-status-label';
 import './AgentDetails.css';
 
 type TabType = 'details' | 'code';
@@ -14,6 +25,14 @@ interface AgentDetailsProps {
   isCreating?: boolean;
   onBack: () => void;
   onSave?: () => void;
+}
+
+/**
+ * A record is registry-backed iff it carries the explicit `registryStatus`
+ * discriminator (finding 414f8013), mirroring AgentCard's isRegistryBacked.
+ */
+function isRegistryBacked(agent: AgentConfig): boolean {
+  return agent.registryStatus !== undefined && agent.registryStatus !== null;
 }
 
 export const AgentDetails: React.FC<AgentDetailsProps> = ({
@@ -30,6 +49,7 @@ export const AgentDetails: React.FC<AgentDetailsProps> = ({
   const [activeTab, setActiveTab] = useState<TabType>('details');
   const [agentCode, setAgentCode] = useState<string>('// Agent code goes here\n');
   const [originalAgentCode, setOriginalAgentCode] = useState<string>('// Agent code goes here\n');
+  const [showDeprecateConfirm, setShowDeprecateConfirm] = useState(false);
   const [formData, setFormData] = useState({
     agentId: '',
     config: {} as any,
@@ -294,6 +314,12 @@ def handler(event, context):
 
     try {
       setError(null);
+      // Mirrors AgentCard's pattern (finding 414f8013): registry-backed
+      // APPROVED agents reject the legacy Deactivate target 'inactive'
+      // (decision 3d5843e9) — Deactivate here only ever fires for a legacy
+      // agent, or for a registry-backed agent transitioning back to
+      // 'active'. The registry-backed 'active' -> Deprecate path is routed
+      // through handleDeprecateConfirm below instead.
       const newState = agent.state === 'active' ? 'inactive' : 'active';
       await agentConfigService.updateAgentConfig({
         agentId: agent.agentId,
@@ -305,6 +331,24 @@ def handler(event, context):
       }
     } catch (err: any) {
       setError(err.message || 'Failed to update agent state');
+    }
+  };
+
+  const handleDeprecateConfirm = async () => {
+    if (!agent) return;
+    setShowDeprecateConfirm(false);
+    try {
+      setError(null);
+      await agentConfigService.updateAgentConfig({
+        agentId: agent.agentId,
+        state: 'maintenance',
+      });
+      await loadAgent();
+      if (onSave) {
+        onSave();
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to deprecate agent');
     }
   };
 
@@ -346,6 +390,11 @@ def handler(event, context):
             </h2>
             {agent && !isCreating && (
               <div className="agent-details-meta">
+                {registryStatusLabel(agent.registryStatus) && (
+                  <Badge className="bg-primary/10 text-primary border-0">
+                    {registryStatusLabel(agent.registryStatus)}
+                  </Badge>
+                )}
                 <Badge
                   variant={agent.state === 'active' ? 'default' : 'secondary'}
                   className={
@@ -354,7 +403,7 @@ def handler(event, context):
                       : 'bg-muted/20 text-muted-foreground'
                   }
                 >
-                  {agent.state}
+                  {isRegistryBacked(agent) && agent.state === 'inactive' ? 'Deprecated' : agent.state}
                 </Badge>
               </div>
             )}
@@ -363,13 +412,43 @@ def handler(event, context):
           <div className="agent-details-actions">
             {!isCreating && (
               <>
-                <Button
-                  variant="outline"
-                  onClick={handleToggleState}
-                  className="border-border text-foreground hover:bg-accent"
-                >
-                  {agent?.state === 'active' ? 'Deactivate' : 'Activate'}
-                </Button>
+                {isRegistryBacked(agent!) && agent?.state === 'inactive' ? null : agent?.state === 'active' && isRegistryBacked(agent!) ? (
+                  <>
+                    <Button
+                      variant="outline"
+                      onClick={() => setShowDeprecateConfirm(true)}
+                      className="border-border text-foreground hover:bg-accent"
+                    >
+                      <AlertTriangle className="size-4 mr-2" />
+                      Deprecate
+                    </Button>
+                    <AlertDialog open={showDeprecateConfirm} onOpenChange={setShowDeprecateConfirm}>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Deprecate {agent?.name || (agent?.config as any)?.name || agent?.agentId}?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This is irreversible. Once deprecated, this agent will no longer be
+                            dispatchable or releasable, and it cannot be reactivated.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction onClick={handleDeprecateConfirm}>
+                            Deprecate
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </>
+                ) : (
+                  <Button
+                    variant="outline"
+                    onClick={handleToggleState}
+                    className="border-border text-foreground hover:bg-accent"
+                  >
+                    {agent?.state === 'active' ? 'Deactivate' : 'Activate'}
+                  </Button>
+                )}
                 {!agent?.categories?.includes('built-in') && (
                   <Button
                     variant="outline"

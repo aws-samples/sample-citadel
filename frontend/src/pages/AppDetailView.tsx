@@ -220,7 +220,18 @@ const EXECUTION_STATUS_COLORS: Record<string, { bg: string; text: string }> = {
 function getStatusTransition(status: string): StatusTransition | null {
   switch (status) {
     case 'DRAFT':
-      return { label: 'Activate', targetStatus: 'APPROVED', icon: Play, className: 'bg-chart-1 hover:bg-chart-1/90' };
+      // Backend note (registry-agent-record-resolver.ts): the only legal
+      // path from DRAFT towards approval is submitting for approval
+      // (status: 'PENDING_APPROVAL'), which the backend's `isSubmit`
+      // special-case routes to RegistryService.submitForApproval rather
+      // than the validated-transition UpdateRegistryRecordStatus gate.
+      // DRAFT -> APPROVED directly is never a legal target
+      // (REGISTRY_TRANSITIONS['DRAFT'] === ['DEPRECATED'] only) — the AWS
+      // registry itself rejects it. "Activate" therefore submits for
+      // approval; the record lands on PENDING_APPROVAL (or APPROVED
+      // directly if the registry has autoApproval configured, which this
+      // deployment does not enable).
+      return { label: 'Activate', targetStatus: 'PENDING_APPROVAL', icon: Play, className: 'bg-chart-1 hover:bg-chart-1/90' };
     case 'PENDING_APPROVAL':
       return { label: 'Awaiting Approval', targetStatus: 'PENDING_APPROVAL', icon: Play, className: 'bg-chart-4 opacity-50 cursor-not-allowed', disabled: true };
     case 'APPROVED':
@@ -234,13 +245,23 @@ function getStatusTransition(status: string): StatusTransition | null {
       // one-way path.
       return { label: 'Reactivate', targetStatus: 'DRAFT', icon: RotateCcw, className: 'bg-chart-2 opacity-50 cursor-not-allowed', disabled: true, disabledReason: 'Deprecated records cannot be reactivated' };
     case 'REJECTED':
-      return { label: 'Resubmit', targetStatus: 'DRAFT', icon: RotateCcw, className: 'bg-chart-2 hover:bg-chart-2/90' };
+      // No resubmit path: REGISTRY_TRANSITIONS['REJECTED'] === ['DEPRECATED']
+      // only. A rejected record's sole status-update target is DEPRECATED —
+      // there is no DRAFT (or any other) target the backend will accept, so
+      // "Resubmit" is removed rather than offered as a dead action. Archive
+      // is offered instead, mirroring the APPROVED -> DEPRECATED path.
+      return { label: 'Archive', targetStatus: 'DEPRECATED', icon: Archive, className: 'bg-chart-3 hover:bg-chart-3/90' };
     case 'CREATING':
     case 'UPDATING':
       return { label: 'In Progress...', targetStatus: status, icon: Play, className: 'bg-muted opacity-50 cursor-not-allowed', disabled: true };
     case 'CREATE_FAILED':
     case 'UPDATE_FAILED':
-      return { label: 'Retry', targetStatus: 'DRAFT', icon: RotateCcw, className: 'bg-destructive hover:bg-destructive/90' };
+      // No backend-supported retry target: REGISTRY_TRANSITIONS has no
+      // CREATE_FAILED/UPDATE_FAILED entries at all, and updateApp's
+      // validated-transition gate would reject any target from these
+      // statuses. There is no "Retry to DRAFT" the backend will accept, so
+      // no transition action is offered for these statuses.
+      return null;
     default:
       return null;
   }
@@ -994,8 +1015,11 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   const executeTransition = async () => {
     if (!app || !pendingTransition) return;
 
-    // For publish, check preconditions first
-    if (pendingTransition.targetStatus === 'APPROVED') {
+    // For submit-for-approval, check preconditions first (frontend-only UX
+    // gate — the backend's isSubmit special-case bypasses
+    // REGISTRY_TRANSITIONS entirely for DRAFT -> PENDING_APPROVAL, so this
+    // is advisory, not a mirror of a server-side check).
+    if (pendingTransition.targetStatus === 'PENDING_APPROVAL') {
       const preconditions = buildPreconditions(app, workflows);
       const failing = preconditions.filter((p) => !p.passed);
       if (failing.length > 0) {
@@ -1854,7 +1878,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   const renderTransitionDialog = () => {
     if (!pendingTransition || !app) return null;
 
-    const preconditions = pendingTransition.targetStatus === 'APPROVED'
+    const preconditions = pendingTransition.targetStatus === 'PENDING_APPROVAL'
       ? (failedPreconditions.length > 0 ? failedPreconditions : buildPreconditions(app, workflows))
       : [];
 
@@ -1866,13 +1890,14 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
               {pendingTransition.label} App
             </DialogTitle>
             <DialogDescription className="text-muted-foreground">
-              {pendingTransition.targetStatus === 'APPROVED' && 'Transition this app from DRAFT to APPROVED. All preconditions must pass.'}
-              {pendingTransition.targetStatus === 'DEPRECATED' && 'Archive this app. The scoped IAM role will be deleted and all agent bindings reset to DESIGN.'}
-              {pendingTransition.targetStatus === 'DRAFT' && 'Reactivate this app to DRAFT status for further editing.'}
+              {pendingTransition.targetStatus === 'PENDING_APPROVAL' && 'Submit this app for approval. All preconditions must pass.'}
+              {pendingTransition.targetStatus === 'DEPRECATED' && app.status === 'REJECTED' && 'Archive this rejected app. Rejected records cannot be resubmitted; create a new record if you want to try again.'}
+              {pendingTransition.targetStatus === 'DEPRECATED' && app.status !== 'REJECTED' && 'Archive this app. The scoped IAM role will be deleted and all agent bindings reset to DESIGN.'}
+              {pendingTransition.targetStatus === 'DRAFT' && 'Deprecated records cannot be reactivated. This action is unavailable.'}
             </DialogDescription>
           </DialogHeader>
 
-          {/* Preconditions for publish */}
+          {/* Preconditions for submit-for-approval */}
           {preconditions.length > 0 && (
             <div className="flex flex-col gap-2 my-2">
               <p className="text-xs font-medium text-muted-foreground">Preconditions:</p>
@@ -1919,7 +1944,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
               size="sm"
               className={cn('text-xs', pendingTransition.className)}
               onClick={executeTransition}
-              disabled={transitionLoading || (pendingTransition.targetStatus === 'APPROVED' && failedPreconditions.some((p) => !p.passed))}
+              disabled={transitionLoading || (pendingTransition.targetStatus === 'PENDING_APPROVAL' && failedPreconditions.some((p) => !p.passed))}
             >
               {transitionLoading ? <Loader2 className="size-3 animate-spin mr-1" /> : null}
               {pendingTransition.label}

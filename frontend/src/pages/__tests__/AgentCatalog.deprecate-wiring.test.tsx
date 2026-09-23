@@ -7,7 +7,9 @@
  * (state: "maintenance", per registry-service.ts's toRegistryStatus) rather
  * than the legacy Deactivate value ("inactive"), which the registry now
  * rejects (decision 3d5843e9 / finding 462c17ad). Legacy (non-registry)
- * agents must keep sending "inactive" unchanged.
+ * agents must keep sending "inactive" unchanged. Registry-backing is
+ * determined by the explicit `registryStatus` discriminator (finding
+ * 414f8013), not by `name` presence.
  */
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -69,6 +71,7 @@ describe('AgentCatalog — handleToggleState wire value routing', () => {
         state: 'active',
         categories: [],
         config: {},
+        registryStatus: 'APPROVED',
       },
     ]);
 
@@ -118,6 +121,7 @@ describe('AgentCatalog — handleToggleState wire value routing', () => {
         state: 'inactive',
         categories: [],
         config: {},
+        registryStatus: 'DRAFT',
       },
     ]);
 

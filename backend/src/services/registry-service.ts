@@ -465,6 +465,13 @@ export interface AgentConfig {
   categories?: string[];
   createdAt?: string;
   updatedAt?: string;
+  /**
+   * Raw Registry record status (e.g. "DRAFT", "APPROVED"), present only when
+   * this AgentConfig was built from a Registry record via mapToAgentConfig.
+   * Left undefined on legacy, non-registry rows — the explicit discriminator
+   * clients use to tell registry-backed records from legacy ones.
+   */
+  registryStatus?: string;
   manifest?: Record<string, unknown>;
   /**
    * UNTRUSTED, LLM-proposed manifest surfaced READ-ONLY for review UIs
@@ -491,6 +498,13 @@ export interface ToolConfig {
   orgId: string;
   config: string;
   state: string;
+  /**
+   * Raw Registry record status (e.g. "DRAFT", "APPROVED"), present only when
+   * this ToolConfig was built from a Registry record via mapToToolConfig.
+   * Left undefined on legacy, non-registry rows — the explicit discriminator
+   * clients use to tell registry-backed records from legacy ones.
+   */
+  registryStatus?: string;
   categories?: string[];
   integrationBindings?: IntegrationBinding[] | null;
   dataStoreBindings?: DataStoreBinding[] | null;
@@ -1837,6 +1851,10 @@ export class RegistryService {
       categories: meta.categories,
       createdAt: record.createdAt?.toISOString(),
       updatedAt: record.updatedAt?.toISOString(),
+      // Explicit, non-heuristic discriminator (finding 414f8013): the raw
+      // Registry status, present only on registry-backed records. Legacy
+      // rows built outside this mapper leave the field undefined/null.
+      registryStatus: record.status ?? null,
       manifest: meta.manifest,
       // Surface the UNTRUSTED proposed manifest READ-ONLY when present so review
       // UIs can read it. This never promotes it into `manifest` or activates it.
@@ -1890,6 +1908,10 @@ export class RegistryService {
       ),
       createdAt: record.createdAt?.toISOString(),
       updatedAt: record.updatedAt?.toISOString(),
+      // Explicit, non-heuristic discriminator (finding 414f8013): the raw
+      // Registry status, present only on registry-backed records. Legacy
+      // rows built outside this mapper leave the field undefined/null.
+      registryStatus: record.status ?? null,
     };
   }
 }

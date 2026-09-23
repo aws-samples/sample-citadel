@@ -287,7 +287,8 @@ describe('AppDetailView', () => {
   });
 
   // Req 11.9: Status transition actions — DRAFT shows the "Activate" transition button
-  // (DRAFT → APPROVED). The "Publish" button only renders for APPROVED status.
+  // (DRAFT -> PENDING_APPROVAL, submit-for-approval). The "Publish" button only
+  // renders for APPROVED status.
   it('shows Activate button when app is in DRAFT status', async () => {
     render(<AppDetailView {...defaultProps} />);
 
@@ -339,9 +340,109 @@ describe('AppDetailView', () => {
     );
   });
 
-  // Req 11.10: Confirmation dialog with preconditions
-  it('opens confirmation dialog with preconditions when Publish is clicked', async () => {
-    // Publish button only renders for APPROVED status
+  // REGISTRY_TRANSITIONS['REJECTED'] === ['DEPRECATED'] only — there is no
+  // backend-supported resubmit path. "Resubmit" must not be offered; Archive
+  // (-> DEPRECATED) is the only action, same as APPROVED.
+  it('shows Archive (not Resubmit) for a REJECTED app, with honest copy', async () => {
+    (appApiService.getApp as jest.Mock).mockResolvedValue({ ...mockApp, status: 'REJECTED' });
+
+    render(<AppDetailView {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Archive')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Resubmit')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Archive'));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Rejected records cannot be resubmitted; create a new record/),
+      ).toBeInTheDocument();
+    });
+  });
+
+  // REGISTRY_TRANSITIONS has no CREATE_FAILED/UPDATE_FAILED entries — there
+  // is no backend-supported "Retry to DRAFT" target, so no transition action
+  // should be offered for these statuses.
+  it('shows no transition action for CREATE_FAILED', async () => {
+    (appApiService.getApp as jest.Mock).mockResolvedValue({ ...mockApp, status: 'CREATE_FAILED' });
+
+    render(<AppDetailView {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Test App')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Retry')).not.toBeInTheDocument();
+  });
+
+  it('shows no transition action for UPDATE_FAILED', async () => {
+    (appApiService.getApp as jest.Mock).mockResolvedValue({ ...mockApp, status: 'UPDATE_FAILED' });
+
+    render(<AppDetailView {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Test App')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Retry')).not.toBeInTheDocument();
+  });
+
+  // Activate (submit-for-approval) sends status: 'PENDING_APPROVAL', never
+  // 'APPROVED' directly — the AWS registry rejects DRAFT -> APPROVED.
+  it('calls updateApp with status PENDING_APPROVAL when Activate is confirmed', async () => {
+    (appApiService.updateApp as jest.Mock).mockResolvedValue({ ...mockApp, status: 'PENDING_APPROVAL' });
+    // All-READY app so preconditions pass and the confirm button is enabled.
+    (appApiService.getApp as jest.Mock).mockResolvedValue({
+      ...mockApp,
+      agentBindings: [mockApp.agentBindings[0]],
+    });
+
+    render(<AppDetailView {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Activate')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText('Activate'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Activate App')).toBeInTheDocument();
+    });
+
+    const dialogs = screen.queryAllByText('Activate');
+    const confirmButton = dialogs[dialogs.length - 1];
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(appApiService.updateApp).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'PENDING_APPROVAL' }),
+      );
+    });
+  });
+
+  // Req 11.10: Confirmation dialog with preconditions — Activate now submits
+  // for approval (targetStatus PENDING_APPROVAL) rather than targeting
+  // APPROVED directly (backend's isSubmit special-case).
+  it('opens confirmation dialog with preconditions when Activate is clicked on a DRAFT app', async () => {
+    render(<AppDetailView {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Activate')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Activate'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Activate App')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('All agents are READY')).toBeInTheDocument();
+    expect(screen.getByText('Configuration values provided')).toBeInTheDocument();
+  });
+
+  // Publish button/dialog only appears for APPROVED apps and calls
+  // publishApp (separate flow from the DRAFT Activate submit-for-approval
+  // transition tested above).
+  it('opens the publish dialog with preconditions when Publish is clicked on an APPROVED app', async () => {
     (appApiService.getApp as jest.Mock).mockResolvedValue({ ...mockApp, status: 'APPROVED' });
     render(<AppDetailView {...defaultProps} />);
 
@@ -359,17 +460,16 @@ describe('AppDetailView', () => {
     expect(screen.getByText('Configuration values provided')).toBeInTheDocument();
   });
 
-  // Req 11.11: Error display with failing preconditions
-  it('shows failing preconditions when DESIGN agents exist', async () => {
-    // Publish button only renders for APPROVED status; mockApp already includes a DESIGN agent
-    (appApiService.getApp as jest.Mock).mockResolvedValue({ ...mockApp, status: 'APPROVED' });
+  // Req 11.11: Error display with failing preconditions — Activate (submit-for-approval)
+  it('shows failing preconditions when DESIGN agents exist and Activate is clicked', async () => {
+    // mockApp is DRAFT by default and already includes a DESIGN agent
     render(<AppDetailView {...defaultProps} />);
 
     await waitFor(() => {
-      expect(screen.getByText('Publish')).toBeInTheDocument();
+      expect(screen.getByText('Activate')).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByText('Publish'));
+    fireEvent.click(screen.getByText('Activate'));
 
     await waitFor(() => {
       expect(screen.getByText('1 agent(s) still in DESIGN status')).toBeInTheDocument();

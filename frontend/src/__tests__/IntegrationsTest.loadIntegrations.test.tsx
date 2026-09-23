@@ -92,6 +92,12 @@ jest.mock('@/components/DynamicConnectorForm', () => ({
   DynamicConnectorForm: () => React.createElement('div', { 'data-testid': 'dynamic-connector-form' }),
 }));
 
+// finding 5b8638f8: orgId must be sourced from the caller's organization,
+// never the 'default' placeholder.
+jest.mock('@/contexts/OrganizationContext', () => ({
+  useOrganization: () => ({ currentUser: { organization: 'caller-org' } }),
+}));
+
 // ---- Import the component AFTER all mocks are set up ----
 import Integrations from '@/pages/Integrations';
 
@@ -211,7 +217,7 @@ describe('Property 1: Fault Condition – Hardcoded Mocks Displayed Instead of B
     });
 
     // Property: listIntegrations is called with orgId only; CONNECTED filter is client-side
-    expect(mockListIntegrations).toHaveBeenCalledWith('default');
+    expect(mockListIntegrations).toHaveBeenCalledWith('caller-org');
   });
 
   /**
