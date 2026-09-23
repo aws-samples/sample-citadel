@@ -739,38 +739,25 @@ describe("TelemetryStack — TraceQueryHandler (waterfall trace viewer, pass 1)"
     });
   });
 
-  test("TraceQueryHandler role grants xray:GetTraceSummaries and xray:BatchGetTraces with Resource:* (nag-suppressed)", () => {
+  test("TraceQueryHandler role grants NO xray:Get* actions (X-Ray read grant removed post-cutover, CIT-181)", () => {
     const { template } = buildStack();
     const allPolicies = template.findResources("AWS::IAM::Policy");
-    let sawSummaries = false;
-    let sawBatchGet = false;
+    let sawTraceQueryRole = false;
     for (const [, resource] of Object.entries(allPolicies)) {
       const roles = resource.Properties?.Roles ?? [];
       const roleRefs = JSON.stringify(roles);
       if (!roleRefs.includes("TraceQueryHandler")) continue;
+      sawTraceQueryRole = true;
       const statements = resource.Properties?.PolicyDocument?.Statement ?? [];
       for (const stmt of statements) {
         const actions = Array.isArray(stmt.Action)
           ? stmt.Action
           : [stmt.Action];
-        if (actions.includes("xray:GetTraceSummaries")) {
-          sawSummaries = true;
-          const resources = Array.isArray(stmt.Resource)
-            ? stmt.Resource
-            : [stmt.Resource];
-          expect(resources).toContain("*");
-        }
-        if (actions.includes("xray:BatchGetTraces")) {
-          sawBatchGet = true;
-          const resources = Array.isArray(stmt.Resource)
-            ? stmt.Resource
-            : [stmt.Resource];
-          expect(resources).toContain("*");
-        }
+        expect(actions.includes("xray:GetTraceSummaries")).toBe(false);
+        expect(actions.includes("xray:BatchGetTraces")).toBe(false);
       }
     }
-    expect(sawSummaries).toBe(true);
-    expect(sawBatchGet).toBe(true);
+    expect(sawTraceQueryRole).toBe(true);
   });
 
   test("TraceQueryHandler role holds ZERO write actions and ZERO xray:Put* (invariant 3)", () => {
@@ -827,7 +814,7 @@ describe("TelemetryStack — TraceQueryHandler (waterfall trace viewer, pass 1)"
     ).toBe(true);
   });
 
-  test("a NagSuppressions IAM5 entry exists for the TraceQueryHandler's X-Ray Resource:* actions", () => {
+  test("a NagSuppressions IAM5 entry exists for the TraceQueryHandler's Logs Insights Resource:* actions (GetQueryResults/StopQuery)", () => {
     const { stack } = buildStack();
     const role = stack.traceQueryHandlerFunction.role!;
     const cfn = role.node.defaultChild as {
@@ -849,7 +836,7 @@ describe("TelemetryStack — TraceQueryHandler (waterfall trace viewer, pass 1)"
     const iam5Rule = rules.find((r) => r.id === "AwsSolutions-IAM5");
     expect(iam5Rule).toBeDefined();
     expect((iam5Rule?.applies_to as string[]) ?? []).toContain("Resource::*");
-    expect(decodedReasons.join(" ").toLowerCase()).toContain("x-ray");
+    expect(decodedReasons.join(" ").toLowerCase()).toContain("logs insights");
   });
 
   test("TraceQueryHandler role grants logs:StartQuery scoped to the aws/spans log-group ARN, plus GetQueryResults/StopQuery, nag-suppressed (design §4 dual-backend port)", () => {

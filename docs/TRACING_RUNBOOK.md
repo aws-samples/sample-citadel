@@ -72,19 +72,27 @@ produced a response. `utils/trace-span-query.ts` builds the Logs Insights
 filter clauses (`attributes.correlation_id`/`attributes.run_id`) with the
 same allowlist/reject-first discipline as `xray-filter.ts`.
 
-> ⚠️ **`utils/spans-waterfall.ts` carries an unverified-schema warning at
-> most field-name assumptions** (`spanId`, `parentSpanId`, `traceId`,
-> `startTimeUnixNano`/`endTimeUnixNano`). One piece IS verified (evidence
-> report finding a3d8a2ea): X-Ray annotations — written via
-> `put_annotation` on either a segment or a subsegment — export into
-> `aws/spans` as `attributes.<key>`, never `annotation.<key>`;
-> `utils/trace-span-query.ts`'s filter-clause builders already use
-> `` `attributes.*` ``. The REMAINING attribute-key shapes (e.g.
-> `attributes.http.response.status_code` / `attributes.exception.*`) and
-> every other field-name assumption above are still unconfirmed against a
-> real Transaction Search span. See "Cutover procedure" below — do not
-> select `TRACE_BACKEND=spans` in any real account before completing the
-> schema-verification step for those remaining fields.
+> ⚠️ **Schema verification complete (2026-09-21/23).** All remaining
+> field-name assumptions in `utils/spans-waterfall.ts`
+> (`spanId`, `parentSpanId`, `traceId`,
+> `startTimeUnixNano`/`endTimeUnixNano`, the
+> `attributes.http.response.status_code` / `attributes.exception.*`
+> attribute keys, `statusCode`) were diffed against a real `aws/spans`
+> Logs Insights sample and confirmed correct. Combined with the
+> already-verified `attributes.correlation_id`/`attributes.run_id`
+> annotation keys (evidence report finding a3d8a2ea — annotations written
+> via `put_annotation` on either a segment or a subsegment export into
+> `aws/spans` as `attributes.<key>`, never `annotation.<key>`), the
+> `spans` backend's schema is fully verified. **The cutover is complete in
+> dev**: `TRACE_BACKEND=spans` is live in dev, spans are annotated, and the
+> waterfall viewer was verified 2026-09-23 against execution `b0931a17`
+> with governance ledger links rendering correctly. The `xray:Get*` IAM
+> grant on the `TraceQueryHandler` role was removed in the same PR that
+> marked this cutover complete — see "Cutover procedure" step 6 below.
+> Rollback: set `TRACE_BACKEND=xray` **and** re-add the
+> `xray:GetTraceSummaries`/`BatchGetTraces` grant (+ NagSuppression) to
+> `telemetry-stack.ts` in a deploy — the grant is no longer present by
+> default, so rollback requires an IAM change, not just an env flip.
 
 ### Cutover procedure (switching an environment's `TRACE_BACKEND` from `xray` to `spans`)
 
@@ -93,10 +101,15 @@ same allowlist/reject-first discipline as `xray-filter.ts`.
 procedure is the recommended path for any adopter choosing `spans` over the
 default `xray`, not merely an internal cutover.
 
-Both IAM permission sets (X-Ray read + Logs Insights StartQuery/
-GetQueryResults/StopQuery) are granted on the `TraceQueryHandler` role
-regardless of the env value (`telemetry-stack.ts`), so this change is an
-**env-only** change — no IAM/CDK-permission deploy is needed at switch time.
+Both IAM permission sets were granted on the `TraceQueryHandler` role during
+the transition; as of the dev cutover (2026-09-23, see the warning above),
+the `xray:Get*` grant has been removed and only the Logs Insights
+permission set (`StartQuery`/`GetQueryResults`/`StopQuery`) remains. In an
+environment that has not yet completed the cutover cleanup, both sets are
+still present, so switching `TRACE_BACKEND` there is an env-only change —
+no IAM/CDK-permission deploy needed at switch time. Once the `xray:Get*`
+grant is removed (step 6), rolling back to `xray` in that environment
+requires re-adding the grant in a deploy, not just an env flip.
 
 1. **Verify the aws/spans schema with a real sample** (blocking,
    pre-requisite — do this BEFORE step 2). In a dev account with
@@ -137,13 +150,24 @@ regardless of the env value (`telemetry-stack.ts`), so this change is an
 5. **Reversible**: set `TRACE_BACKEND` back to `xray` instantly if the
    `spans` path misbehaves — this works right up until the account-wide
    Transaction Search switch itself is reverted (which is the actually
-   hard-to-reverse step, not the env var).
-6. **Deferred cleanup (do NOT do this until `spans` is confirmed stable in
-   all environments)**: remove the `xray:GetTraceSummaries`/
-   `BatchGetTraces` grant + its NagSuppression from `telemetry-stack.ts`,
-   and consider removing the X-Ray fetch/parse path (`xray-filter.ts`,
-   `xray-waterfall.ts`, the X-Ray branches in `trace-query-handler.ts`)
-   entirely.
+   hard-to-reverse step, not the env var). **Note (post-cutover):** once
+   step 6 below has shipped, an env-only rollback is no longer sufficient
+   in an environment where the `xray:Get*` grant has been removed — the
+   grant must be re-added to `telemetry-stack.ts` in a deploy alongside
+   flipping `TRACE_BACKEND` back to `xray`.
+6. **Deferred cleanup — DONE for dev (2026-09-23, this PR).** Schema
+   verified 2026-09-21/23 against live `aws/spans` samples;
+   `TRACE_BACKEND=spans` is live in dev; the waterfall viewer was verified
+   2026-09-23 against execution `b0931a17` with governance ledger links
+   rendering correctly. The `xray:GetTraceSummaries`/`BatchGetTraces` grant
+   and its NagSuppression were removed from `telemetry-stack.ts` in this
+   PR — the `TraceQueryHandler` role's only remaining `Resource:*` grant is
+   the Logs Insights `GetQueryResults`/`StopQuery` pair. Rollback = set
+   `TRACE_BACKEND=xray` **and** re-add the `xray:Get*` grant in a deploy
+   (see the warning above). Still open: consider removing the X-Ray
+   fetch/parse path (`xray-filter.ts`, `xray-waterfall.ts`, the X-Ray
+   branches in `trace-query-handler.ts`) entirely, and repeat this cleanup
+   in any other environment once `spans` is confirmed stable there too.
 
 **(b) Keep the X-Ray APIs and do NOT enable Transaction Search.** The
 waterfall viewer keeps working exactly as documented in this runbook, and
