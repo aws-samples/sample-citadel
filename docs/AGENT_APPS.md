@@ -17,11 +17,12 @@
   replaced by `RegistryRecordStatus` (`DRAFT` / `PENDING_APPROVAL` /
   `APPROVED` / `REJECTED` / `DEPRECATED`). The new status domain aligns with
   governance Decision #3.
-- The shim resolver `backend/src/lambda/agent-app-shim-resolver.ts`
-  preserves the `type AgentApp` GraphQL surface and every original
-  `citadel.apps` EventBridge detail-type during the `@deprecated` grace
-  window (Decision #5, SPLIT verdict). Subscribers and clients require no
-  code changes for the duration of the window.
+- The registry-backed resolver
+  `backend/src/lambda/registry-agent-record-resolver.ts` preserves the
+  `type AgentApp` GraphQL surface and the `citadel.apps` EventBridge
+  event envelope during the `@deprecated` grace window (Decision #5, SPLIT
+  verdict). Subscribers and clients require no code changes for the
+  duration of the window.
 
 ## What Moved Where
 
@@ -29,18 +30,20 @@
 |----------------------------------------------------|------------------------------------------------------------------------------------------|
 | `AppsTable` row (catalogue side)                   | `RegistryAgentRecord` in the AgentCore Registry (see [AGENT_RECORDS.md](./AGENT_RECORDS.md)) |
 | Component table GSI (`AGENT#`, `PERMISSION#`, `CONFIG#`) | `customDescriptorContent.manifest` JSON on the registry record                     |
-| `backend/src/lambda/app-resolver.ts`               | `backend/src/lambda/agent-app-shim-resolver.ts`                                          |
+| `backend/src/lambda/app-resolver.ts`               | `backend/src/lambda/registry-agent-record-resolver.ts`                                   |
 | `citadel-agent-{appId}` per-app IAM role           | Per-record workload-identity attribute on the registry record (Decision #6)              |
 | `AuthorityUnit.appId`                              | `AuthorityUnit.registryId` (Decision #9)                                                 |
 
 ## Sunset Timeline
 
 - PR 3 of the governance retrofit landed the registry-backed implementation
-  and the `agent-app-shim-resolver.ts` shim. `type AgentApp` carries the
-  `@deprecated` directive in the GraphQL schema from PR 3 onward.
+  and the `AgentApp` compatibility surface in
+  `backend/src/lambda/registry-agent-record-resolver.ts`. `type AgentApp`
+  carries the `@deprecated` directive in the GraphQL schema from PR 3 onward.
 - The `@deprecated type AgentApp` GraphQL surface remains callable through
   PR 6 (post-MVP) to give downstream clients a migration window.
-- PR 6 removes the `@deprecated` type and retires the shim. Gate conditions
+- PR 6 removes the `@deprecated` type and retires the compatibility
+  surface. Gate conditions
   for PR 6: registry MVP stable for at least one release cycle, explicit
   frontend sign-off, and zero `@deprecated` `AgentApp` reads observed in
   client telemetry for a full rolling observation window.
@@ -299,8 +302,10 @@ guidance:
 1. Open the app and go to its **Workflows** tab.
 2. **Publish** the workflow (from its card or the canvas) — publishing the
    workflow is what enables **Run**.
-3. **Activate** the app — the app-level **Publish** button only appears once
-   the app is `APPROVED`.
+3. **Activate** the app — Activate submits it for approval
+   (`PENDING_APPROVAL`); registry auto-approval when configured, or an admin
+   decision, makes it `APPROVED`, and only then does the app-level
+   **Publish** button appear.
 4. **Publish**, then **Confirm Publish** — this returns the endpoint URL and
    the API key, which is shown only once.
 5. After publishing, the **API Dashboard** appears in the app.

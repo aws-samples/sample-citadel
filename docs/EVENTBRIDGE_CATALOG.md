@@ -668,35 +668,41 @@ Published by the Supervisor for real-time visibility into agent coordination.
 
 ## App Lifecycle Events (source: `citadel.apps`)
 
-As of PR 3 of the governance retrofit, all `citadel.apps` events are emitted
-by the registry-backed shim `backend/src/lambda/agent-app-shim-resolver.ts`.
-The event envelope and detail-type names are preserved from the legacy
-`app-resolver.ts` for backward compatibility during the `@deprecated type AgentApp`
-grace window. Subscribers need no changes. See
+As of PR 3 of the governance retrofit, `citadel.apps` events are emitted by
+the registry-backed resolver
+`backend/src/lambda/registry-agent-record-resolver.ts` and, for the publish
+flow, `backend/src/lambda/app-publish-handler.ts`. The event envelope is
+preserved from the legacy `app-resolver.ts` for backward compatibility during
+the `@deprecated type AgentApp` grace window. Subscribers need no changes. See
 [`AGENT_RECORDS.md`](./AGENT_RECORDS.md) for the underlying data model.
 
-Published by the App Resolver during status transitions and component changes.
+Published during status transitions and component changes.
 
 | DetailType | Description |
 |------------|-------------|
-| `app.access.granted` | Access entry granted to user via grantAppAccess shim handler |
-| `app.access.revoked` | Access entry revoked from user via revokeAppAccess shim handler |
-| `app.agent.binding.updated` | Agent binding fields updated via updateAgentBinding shim handler |
-| `app.auth.config.set` | App auth configuration set via setAppAuthConfig shim handler |
-| `app.component.added` | Component added to app via addAppComponent shim handler |
-| `app.component.removed` | Component removed from app via removeAppComponent shim handler |
-| `app.config.schema.set` | App config JSON Schema set via setAppConfigSchema shim handler |
-| `app.config.values.set` | App config values set via setAppConfigValues shim handler |
+| `app.access.granted` | Access entry granted to user via grantAppAccess handler |
+| `app.access.revoked` | Access entry revoked from user via revokeAppAccess handler |
+| `app.agent.binding.updated` | Agent binding fields updated via updateAgentBinding handler |
+| `app.auth.config.set` | App auth configuration set via setAppAuthConfig handler |
+| `app.component.added` | Component added to app via addAppComponent handler |
+| `app.component.removed` | Component removed from app via removeAppComponent handler |
+| `app.config.schema.set` | App config JSON Schema set via setAppConfigSchema handler |
+| `app.config.values.set` | App config values set via setAppConfigValues handler |
 | `app.created` | App created via createApp shim handler (after registry record create and authority grant) |
 | `app.deleted` | App deleted via deleteApp shim handler (after authority revoke and registry record delete) |
 | `app.published` | App API Gateway provisioned |
-| `app.status.active_to_archived` | App archived (ACTIVE → ARCHIVED) via updateApp shim handler |
-| `app.status.archived_to_draft` | App reactivated (ARCHIVED → DRAFT) via updateApp shim handler |
-| `app.status.draft_to_approved` | App approved (DRAFT → APPROVED) via updateApp shim handler |
-| `app.status.published` | App status change published via publishAppStatusEvent shim handler (IAM-authed passthrough) |
-| `app.updated` | App metadata updated via updateApp shim handler |
-| `app.workflow.bound` | Workflow bound to app via bindWorkflowToApp shim handler |
-| `app.workflow.unbound` | Workflow unbound from app via unbindWorkflowFromApp shim handler |
+| `app.status.{prev}_to_{new}` | Status transition — the detail-type is built from the lowercased previous and new registry statuses (`registry-agent-record-resolver.ts` `updateApp`; `app-publish-handler.ts` for the publish flow). Examples: `app.status.draft_to_pending_approval` (Activate submits for approval), `app.status.pending_approval_to_approved` / `app.status.pending_approval_to_rejected` (admin decision), `app.status.approved_to_deprecated` (Deprecate/Archive; also emitted from `DRAFT` and `REJECTED`), `app.status.published_to_draft` (unpublish bookkeeping) |
+| `app.status.published` | App status change published via publishAppStatusEvent handler (IAM-authed passthrough) |
+| `app.updated` | App metadata updated via updateApp handler |
+| `app.workflow.bound` | Workflow bound to app via bindWorkflowToApp handler |
+| `app.workflow.unbound` | Workflow unbound from app via unbindWorkflowFromApp handler |
+
+Historical: the pre-retrofit detail-types `app.status.active_to_archived`,
+`app.status.archived_to_draft`, and `app.status.draft_to_approved` belonged
+to the retired `AgentApp` status enum (`DRAFT`/`ACTIVE`/`ARCHIVED`). None can
+be emitted today: `ACTIVE` and `ARCHIVED` no longer exist, `DRAFT →
+APPROVED` is not a direct transition (Activate submits for approval), and
+`DEPRECATED` is terminal, so there is no reactivation path.
 
 ## Fabrication Events
 
@@ -892,7 +898,7 @@ Emitted by `backend/src/lambda/cost-budget-evaluator.ts` (hourly `CostBudgetEval
 4. If the event needs to reach the frontend, add it to the Fan-out Lambda's event pattern and create a corresponding AppSync subscription
 5. Always include `correlationId` and `timestamp` in the event detail
 6. Use the `IdempotencyGuard` in the consuming Lambda handler
-7. For registry-backed app events, the emission point is `backend/src/lambda/agent-app-shim-resolver.ts::emitEvent` — do not re-introduce legacy `app-resolver.ts` call sites.
+7. For registry-backed app events, the emission point is `backend/src/lambda/registry-agent-record-resolver.ts::emitEvent` — do not re-introduce legacy `app-resolver.ts` call sites.
 
 ## Tool Circuit Breaker Events (source: `citadel.tool.breaker`)
 
