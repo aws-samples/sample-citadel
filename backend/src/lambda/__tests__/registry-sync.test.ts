@@ -98,17 +98,20 @@ function makeAgentResource(
   overrides: RegistryResourcePayload = {},
 ): RegistryResourcePayload {
   return {
-    description: JSON.stringify({ name: "TestAgent", filename: "test.py" }),
+    description: "A test agent for registry sync",
     customDescriptorContent: JSON.stringify({
       categories: ["cat1"],
       icon: "icon.png",
-      state: "active",
+      state: "APPROVED",
       appId: "app-1",
       manifest: {
         name: "TestAgent",
         version: "1.0",
         description: "A test agent",
       },
+      config: { name: "TestAgent", filename: "test.py", schema: {} },
+      createdBy: "user-1",
+      sourceProjectId: "proj-1",
     }),
     createdAt: "2024-01-01T00:00:00.000Z",
     updatedAt: "2024-01-02T00:00:00.000Z",
@@ -322,7 +325,12 @@ describe("buildAgentCacheRecord", () => {
     const record = buildAgentCacheRecord("agent-1", resource);
 
     expect(record.agentId).toBe("agent-1");
-    expect(record.config).toBe(resource.description);
+    expect(record.config).toEqual({
+      name: "TestAgent",
+      filename: "test.py",
+      schema: {},
+    });
+    expect(record.description).toBe(resource.description);
     expect(record.state).toBe("active");
     expect(record.categories).toEqual(["cat1"]);
     expect(record.icon).toBe("icon.png");
@@ -332,6 +340,8 @@ describe("buildAgentCacheRecord", () => {
       version: "1.0",
       description: "A test agent",
     });
+    expect(record.createdBy).toBe("user-1");
+    expect(record.sourceProjectId).toBe("proj-1");
     expect(record.createdAt).toBe("2024-01-01T00:00:00.000Z");
     expect(record.updatedAt).toBe("2024-01-02T00:00:00.000Z");
   });
@@ -341,12 +351,15 @@ describe("buildAgentCacheRecord", () => {
     const record = buildAgentCacheRecord("agent-2", resource);
 
     expect(record.agentId).toBe("agent-2");
-    expect(record.config).toBe("desc");
+    expect(record.config).toBeUndefined();
+    expect(record.description).toBe("desc");
     expect(record.state).toBe("active");
     expect(record.categories).toEqual([]);
     expect(record.icon).toBe("");
     expect(record.appId).toBeUndefined();
     expect(record.manifest).toBeUndefined();
+    expect(record.createdBy).toBeUndefined();
+    expect(record.sourceProjectId).toBeUndefined();
   });
 
   test("generates timestamps when not provided", () => {
@@ -374,7 +387,7 @@ describe("buildAgentCacheRecord", () => {
         orgId: "",
         categories: [],
         icon: "",
-        state: "active",
+        state: "APPROVED",
       }),
     });
     const record = buildAgentCacheRecord("agent-1", resource);
@@ -387,7 +400,7 @@ describe("buildAgentCacheRecord", () => {
         orgId: "org-1",
         categories: [],
         icon: "",
-        state: "active",
+        state: "APPROVED",
       }),
     });
     const record = buildAgentCacheRecord("agent-1", resource);
@@ -402,7 +415,7 @@ describe("buildAgentCacheRecord", () => {
       customDescriptorContent: JSON.stringify({
         categories: [],
         icon: "",
-        state: "active",
+        state: "APPROVED",
       }),
     });
     const record = buildAgentCacheRecord("agent-1", resource);
@@ -412,6 +425,92 @@ describe("buildAgentCacheRecord", () => {
   test("leaves orgId undefined when customDescriptorContent is entirely absent", () => {
     const record = buildAgentCacheRecord("agent-1", { description: "desc" });
     expect(record.orgId).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Finding c2538f86 — parity + negative coverage
+  // -------------------------------------------------------------------------
+
+  test("finding c2538f86: config/description/createdBy/sourceProjectId/state parity with inlineContent", () => {
+    const inlineConfig = {
+      name: "FabricatedAgent",
+      filename: "fabricated.py",
+      schema: { type: "object" },
+    };
+    const resource = makeAgentResource({
+      description: "Prose description that must NOT land in config",
+      customDescriptorContent: JSON.stringify({
+        config: inlineConfig,
+        createdBy: "user-42",
+        orgId: "org-9",
+        sourceProjectId: "proj-9",
+        state: "DEPRECATED",
+        categories: ["fabricated"],
+        icon: "fab-icon.png",
+      }),
+    });
+
+    const record = buildAgentCacheRecord("agent-fab-1", resource);
+
+    expect(record.config).toEqual(inlineConfig);
+    expect(record.description).toBe(resource.description);
+    expect(record.createdBy).toBe("user-42");
+    expect(record.orgId).toBe("org-9");
+    expect(record.sourceProjectId).toBe("proj-9");
+    expect(record.state).toBe(toInternalState("DEPRECATED"));
+    expect(record.state).toBe("inactive");
+  });
+
+  test("finding c2538f86: meta.config as a JSON string is parsed into an object", () => {
+    const inlineConfig = { name: "StrConfigAgent", filename: "str.py" };
+    const resource = makeAgentResource({
+      customDescriptorContent: JSON.stringify({
+        config: JSON.stringify(inlineConfig),
+        state: "APPROVED",
+        categories: [],
+        icon: "",
+      }),
+    });
+
+    const record = buildAgentCacheRecord("agent-fab-2", resource);
+    expect(record.config).toEqual(inlineConfig);
+  });
+
+  test("finding c2538f86: missing meta.config leaves config undefined and warns with the recordId, never falling back to description", () => {
+    const resource = makeAgentResource({
+      description: "Some prose description",
+      customDescriptorContent: JSON.stringify({
+        state: "APPROVED",
+        categories: [],
+        icon: "",
+      }),
+    });
+
+    const record = buildAgentCacheRecord("agent-fab-3", resource);
+    expect(record.config).toBeUndefined();
+    expect(record.config).not.toBe(resource.description);
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("agent-fab-3"),
+    );
+  });
+
+  test("finding c2538f86: a prose string in meta.config leaves config undefined and warns, never writing prose into config", () => {
+    const resource = makeAgentResource({
+      description: "The canonical description",
+      customDescriptorContent: JSON.stringify({
+        config: "This is prose, not a config object",
+        state: "APPROVED",
+        categories: [],
+        icon: "",
+      }),
+    });
+
+    const record = buildAgentCacheRecord("agent-fab-4", resource);
+    expect(record.config).toBeUndefined();
+    expect(record.config).not.toBe(resource.description);
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("agent-fab-4"),
+    );
   });
 });
 
