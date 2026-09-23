@@ -236,6 +236,26 @@ export function getMockRegistryService() {
       records.set(`${type}:${id}`, updated);
       return updated as RegistryRecord;
     },
+    /**
+     * Mirrors RegistryService.submitForApproval: the only legal path from
+     * DRAFT (or REJECTED-then-DRAFT) towards approval. No autoApproval is
+     * configured in tests, so this mock — like the real registry without
+     * autoApproval — always lands on PENDING_APPROVAL, never auto-advancing
+     * to APPROVED. Never used by updateResourceStatus/`updateApp`'s generic
+     * status-change path.
+     */
+    async submitForApproval(id: string): Promise<RegistryRecord> {
+      const key = `agent:${id}`;
+      const existing = records.get(key);
+      if (!existing) throw new Error(`Record not found: ${key}`);
+      const updated = {
+        ...existing,
+        status: "PENDING_APPROVAL",
+        updatedAt: new Date(),
+      };
+      records.set(key, updated);
+      return updated as RegistryRecord;
+    },
     async deleteResource(type: ResourceType, id: string): Promise<void> {
       deleteResourceCallCount += 1;
       records.delete(`${type}:${id}`);
