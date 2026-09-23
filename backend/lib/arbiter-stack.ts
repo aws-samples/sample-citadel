@@ -299,6 +299,10 @@ export class ArbiterStack extends cdk.Stack {
     // the layer's bundling command only copied source directories with no
     // pip install step, so aws_xray_sdk was never actually present at
     // /opt/python and every patch_all() call raised ModuleNotFoundError.
+    // Shared arbiter modules: catalog (registry_client + utilities), common
+    // (cross-region prefix + tracing), governance (release resolution +
+    // grandfathering). aws-xray-sdk ensures common.tracing's patch_all()
+    // activation succeeds at /opt/python; prior finding 616dc6e6/40061019.
     const catalogLayer = new lambda.LayerVersion(this, "ArbiterCatalogLayer", {
       layerVersionName: `citadel-arbiter-catalog-${props.environment}`,
       code: lambda.Code.fromAsset(ARBITER_ROOT, {
@@ -313,10 +317,8 @@ export class ArbiterStack extends cdk.Stack {
       }),
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_14],
       description:
-        "Shared arbiter Python packages (catalog: registry_client and utilities; " +
-        "common: cross-region prefix helper; governance: release resolution + " +
-        "grandfathering for release-aware dispatch) plus aws-xray-sdk so " +
-        "common.tracing's patch_all() activation succeeds at /opt/python.",
+        "Shared arbiter Python packages: catalog, common, governance modules " +
+        "plus aws-xray-sdk for common.tracing.",
     });
 
     // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
