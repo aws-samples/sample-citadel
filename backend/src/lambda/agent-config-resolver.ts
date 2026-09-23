@@ -463,14 +463,18 @@ export async function createAgentConfigRegistry(
     customMetadata,
   });
 
-  // If an initial state is provided, update the status accordingly
+  // If an initial state is provided, update the status accordingly. A newly
+  // created record always starts DRAFT; requesting 'inactive' here throws
+  // (via toRegistryStatus, decision 3d5843e9/finding 462c17ad) — a
+  // just-created record cannot be "deactivated". The only non-activation
+  // initial state that reaches the registry is 'maintenance' (deprecate
+  // intent -> DEPRECATED).
   if (input.state) {
     const registryStatus = registryService.toRegistryStatus(input.state);
     // DRAFT -> APPROVED is rejected by the registry directly; the sanctioned
     // path for activation is SubmitRegistryRecordForApproval, which
     // auto-advances to APPROVED when the registry has autoApproval, else
-    // lands on PENDING_APPROVAL (finding adde5b79). Non-activation initial
-    // states (DEPRECATED/inactive, DRAFT/maintenance) are unaffected.
+    // lands on PENDING_APPROVAL (finding adde5b79).
     if (registryStatus === RegistryRecordStatusValues.APPROVED) {
       await registryService.submitForApproval(input.agentId);
     } else {
@@ -590,6 +594,24 @@ export async function updateAgentConfigRegistry(
   const existing = await registryService.getResource("agent", input.agentId);
   if (!existing) {
     throw new Error(`Agent config not found: ${input.agentId}`);
+  }
+
+  // Decision 3d5843e9 (supersedes a3fb5542; finding 462c17ad): the AWS
+  // registry rejects DRAFT as an UpdateRegistryRecordStatus target, so the
+  // Catalog Deactivate action ('inactive') can no longer be honoured for a
+  // registry-backed record — silently substituting a different transition
+  // (e.g. deprecate) would surprise a caller who explicitly asked to
+  // deactivate (reversible) rather than deprecate (irreversible). Fail with
+  // a structured, actionable error BEFORE any registry call. The deprecate
+  // intent is expressed via `state: "maintenance"` (see desiredRegistryStatus
+  // below) — the one AgentState enum value not already claimed by
+  // active/inactive and not sent by any current frontend write path — and is
+  // routed through the same validated REGISTRY_TRANSITIONS gate used for
+  // every other transition.
+  if (input.state === "inactive") {
+    throw new Error(
+      "ValidationError: Deactivation is not supported for registry records; use Deprecate (irreversible)",
+    );
   }
 
   const existingMeta = registryService.deserializeCustomMetadata<{
@@ -876,27 +898,30 @@ export async function updateAgentConfigRegistry(
 
     // Activation (-> APPROVED) must go through SubmitRegistryRecordForApproval,
     // never a direct UpdateRegistryRecordStatus(APPROVED) — the AWS registry
-    // rejects DRAFT -> APPROVED (finding adde5b79). DRAFT submits directly;
-    // REJECTED must first transition back to DRAFT (resubmit) before it can
-    // be submitted; APPROVED is already active and is a no-op handled by the
-    // outer `desiredRegistryStatus !== existing.status` guard above. Every
-    // other transition (e.g. -> DEPRECATED) is unaffected and keeps using
-    // updateResourceStatus directly.
+    // rejects DRAFT -> APPROVED (finding adde5b79). DRAFT submits directly.
+    // Decision 3d5843e9 (finding 462c17ad): a REJECTED record can no longer
+    // be resubmitted via the removed REJECTED -> DRAFT step added in #182 —
+    // UpdateRegistryRecordStatus rejects DRAFT as a target outright, so that
+    // step always failed at the registry call. Fail closed with a structured
+    // error instead. APPROVED is already active and is a no-op handled by
+    // the outer `desiredRegistryStatus !== existing.status` guard above.
+    // Every other transition (e.g. -> DEPRECATED) is unaffected and keeps
+    // using updateResourceStatus directly.
     if (desiredRegistryStatus === RegistryRecordStatusValues.APPROVED) {
       if (existing.status === RegistryRecordStatusValues.REJECTED) {
-        await registryService.updateResourceStatus(
-          "agent",
-          input.agentId,
-          RegistryRecordStatusValues.DRAFT,
+        throw new Error(
+          "ValidationError: Rejected records cannot be resubmitted; create a new record",
         );
       }
       await registryService.submitForApproval(input.agentId);
     } else {
       // Route through the validated-transition gate: pass existing.status as
       // currentStatus so registry-service.updateResourceStatus enforces
-      // REGISTRY_TRANSITIONS (decision a3fb5542) instead of silently
-      // coercing an unvalidated transition (e.g. Deactivate on an APPROVED
-      // record now issuing DRAFT, and DEPRECATED staying terminal).
+      // REGISTRY_TRANSITIONS (decision 3d5843e9) instead of silently
+      // coercing an unvalidated transition. The only non-APPROVED target
+      // reachable here is DEPRECATED (deprecate intent, state:"maintenance"
+      // — see toRegistryStatus); 'inactive' is rejected above before this
+      // block is ever reached.
       await registryService.updateResourceStatus(
         "agent",
         input.agentId,
@@ -1199,13 +1224,15 @@ export async function activateProjectAgents(
       );
       // Activation must go through SubmitRegistryRecordForApproval, never a
       // direct UpdateRegistryRecordStatus(APPROVED) — the AWS registry
-      // rejects DRAFT -> APPROVED (finding adde5b79). REJECTED records must
-      // first transition back to DRAFT (resubmit) before submitting.
+      // rejects DRAFT -> APPROVED (finding adde5b79). Decision 3d5843e9
+      // (finding 462c17ad): the REJECTED -> DRAFT resubmit step added in
+      // #182 is removed — UpdateRegistryRecordStatus rejects DRAFT as a
+      // target outright, so that step always failed at the registry call.
+      // Fail this record into `failed` with a structured, actionable reason
+      // instead of attempting the doomed resubmit.
       if (record.status === RegistryRecordStatusValues.REJECTED) {
-        await registryService.updateResourceStatus(
-          "agent",
-          record.recordId,
-          RegistryRecordStatusValues.DRAFT,
+        throw new Error(
+          "ValidationError: Rejected records cannot be resubmitted; create a new record",
         );
       }
       await registryService.submitForApproval(record.recordId);

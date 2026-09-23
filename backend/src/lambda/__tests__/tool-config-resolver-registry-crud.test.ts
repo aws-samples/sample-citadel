@@ -39,14 +39,17 @@ const mockDeserializeCustomMetadata = jest.fn(
   },
 );
 const mockToRegistryStatus = jest.fn((state: string) => {
+  // Decision 3d5843e9 (supersedes a3fb5542; finding 462c17ad): the AWS
+  // registry rejects DRAFT as an UpdateRegistryRecordStatus target.
+  // 'inactive' now throws in the real toRegistryStatus (see
+  // registry-service.ts) — the resolver intercepts it even earlier with a
+  // structured error before this mock would ever be reached in practice.
+  // 'maintenance' is repurposed as the deprecate-intent value -> DEPRECATED.
   const map: Record<string, string> = {
     active: "APPROVED",
-    // Decision a3fb5542: Deactivate is reversible — 'inactive' now maps to
-    // DRAFT, not the terminal DEPRECATED.
-    inactive: "DRAFT",
-    maintenance: "DRAFT",
+    maintenance: "DEPRECATED",
   };
-  return map[state] || "DRAFT";
+  return map[state] || "DEPRECATED";
 });
 const mockToInternalState = jest.fn((status: string) => {
   const map: Record<string, string> = {
@@ -603,23 +606,43 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       await updateToolConfigRegistry(
         {
           toolId: "tool-1",
-          state: "inactive",
+          state: "maintenance",
         },
         "unknown",
         eventWithOrg,
       );
 
-      expect(mockToRegistryStatus).toHaveBeenCalledWith("inactive");
-      // Decision a3fb5542: Deactivate issues DRAFT (not DEPRECATED), routed
-      // through the validated-transition gate — existing.status ("APPROVED")
-      // is passed as currentStatus.
+      expect(mockToRegistryStatus).toHaveBeenCalledWith("maintenance");
+      // Decision 3d5843e9 (finding 462c17ad): deprecate intent
+      // (state:"maintenance") issues DEPRECATED, routed through the
+      // validated-transition gate — existing.status ("APPROVED") is passed
+      // as currentStatus.
       expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
         "tool",
         "tool-1",
-        "DRAFT",
+        "DEPRECATED",
         undefined,
         "APPROVED",
       );
+    });
+
+    test("Deactivate ('inactive') on a registry-backed record is rejected with a structured error, no SDK call (decision 3d5843e9, finding 462c17ad)", async () => {
+      mockGetResource.mockResolvedValue(existingRecord); // status: APPROVED
+
+      await expect(
+        updateToolConfigRegistry(
+          { toolId: "tool-1", state: "inactive" },
+          "unknown",
+          eventWithOrg,
+        ),
+      ).rejects.toThrow(
+        "ValidationError: Deactivation is not supported for registry records; use Deprecate (irreversible)",
+      );
+
+      // The registry rejects DRAFT as an UpdateRegistryRecordStatus target
+      // (finding 462c17ad) — the resolver must fail BEFORE any SDK call.
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+      expect(mockUpdateResource).not.toHaveBeenCalled();
     });
 
     test("does not update status when state is unchanged", async () => {
@@ -645,7 +668,7 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       await updateToolConfigRegistry(
         {
           toolId: "tool-1",
-          state: "inactive",
+          state: "maintenance",
         },
         "unknown",
         eventWithOrg,
@@ -785,7 +808,7 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       mockUpdateResource.mockResolvedValue(updatedRecord);
 
       await updateToolConfigRegistry(
-        { toolId: "tool-1", state: "inactive" },
+        { toolId: "tool-1", state: "maintenance" },
         "unknown",
         eventWithOrg,
       );
@@ -795,7 +818,7 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
         "tool",
         "tool-1",
-        "DRAFT",
+        "DEPRECATED",
         undefined,
         "APPROVED",
       );
@@ -831,37 +854,26 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
     });
 
-    test("REJECTED + active → resubmits (DRAFT transition) before submitting for approval", async () => {
+    test("REJECTED + active → structured error, no DRAFT call, no submit (decision 3d5843e9, finding 462c17ad)", async () => {
       const rejectedRecord = { ...existingRecord, status: "REJECTED" };
-      mockGetResource
-        .mockResolvedValueOnce(rejectedRecord)
-        .mockResolvedValueOnce({
-          ...rejectedRecord,
-          status: "PENDING_APPROVAL",
-        });
-      mockUpdateResource.mockResolvedValue(rejectedRecord);
-      mockUpdateResourceStatus.mockResolvedValue(undefined);
-      mockSubmitForApproval.mockResolvedValue({
-        ...rejectedRecord,
-        status: "PENDING_APPROVAL",
-      });
+      mockGetResource.mockResolvedValue(rejectedRecord);
 
-      await updateToolConfigRegistry(
-        { toolId: "tool-1", state: "active" },
-        "unknown",
-        eventWithOrg,
+      await expect(
+        updateToolConfigRegistry(
+          { toolId: "tool-1", state: "active" },
+          "unknown",
+          eventWithOrg,
+        ),
+      ).rejects.toThrow(
+        "ValidationError: Rejected records cannot be resubmitted; create a new record",
       );
 
-      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
-        "tool",
-        "tool-1",
-        "DRAFT",
-      );
-      expect(mockSubmitForApproval).toHaveBeenCalledWith("tool-1");
-      const draftCallOrder =
-        mockUpdateResourceStatus.mock.invocationCallOrder[0];
-      const submitCallOrder = mockSubmitForApproval.mock.invocationCallOrder[0];
-      expect(draftCallOrder).toBeLessThan(submitCallOrder);
+      // The removed #182 resubmit step (REJECTED -> DRAFT) always failed at
+      // the registry call (finding 462c17ad) — assert it's gone, not just
+      // reordered.
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+      expect(mockSubmitForApproval).not.toHaveBeenCalled();
+      expect(mockUpdateResource).not.toHaveBeenCalled();
     });
 
     test("metadata is left untouched when submitForApproval fails (no partial drift)", async () => {

@@ -1,7 +1,18 @@
-import { Pause, Play, Settings, Bot } from 'lucide-react';
+import { useState } from 'react';
+import { Pause, Play, Settings, Bot, AlertTriangle } from 'lucide-react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './ui/alert-dialog';
 import { AgentConfig } from '../services/agentConfigService';
 
 interface AgentCardProps {
@@ -11,7 +22,23 @@ interface AgentCardProps {
   userRole?: string;
 }
 
+/**
+ * A record is registry-backed iff it carries a `name` key at all (registry
+ * mapper `mapToAgentConfig` always sets `name: record.name ?? ""`; legacy
+ * DynamoDB `getAgentConfig` never sets `name`, see
+ * backend/src/lambda/agent-config-resolver.ts). Decision 3d5843e9: the
+ * registry rejects APPROVED -> DRAFT (the old Deactivate target), so
+ * registry-backed APPROVED agents no longer offer Deactivate at all — only
+ * the irreversible Deprecate (-> DEPRECATED, wire value state:"maintenance",
+ * see registry-service.ts's toRegistryStatus).
+ */
+function isRegistryBacked(agent: AgentConfig): boolean {
+  return (agent as { name?: string }).name !== undefined;
+}
+
 export function AgentCard({ agent, onToggleState, onConfigure, userRole }: AgentCardProps) {
+  const [showDeprecateConfirm, setShowDeprecateConfirm] = useState(false);
+
   // Parse config if it's a string
   const config = typeof agent.config === 'string' ? (() => { try { return JSON.parse(agent.config); } catch { return {}; } })() : (agent.config ?? {});
 
@@ -21,15 +48,20 @@ export function AgentCard({ agent, onToggleState, onConfigure, userRole }: Agent
   // Only show config button for admin and developer roles
   const canConfigure = userRole === 'admin' || userRole === 'developer';
 
-  // Decision a3fb5542: Catalog Deactivate now returns an APPROVED registry
-  // record to DRAFT (internal state 'maintenance') rather than the terminal
-  // DEPRECATED, so a deactivated agent surfaces here with state
-  // 'maintenance'. The Catalog must label that as "Inactive" — not
-  // "Maintenance" (a distinct, unrelated meaning used elsewhere, e.g.
-  // AgentNode/AgentTrayItem on the workflow canvas) and not "Activated".
-  // This is a display-only relabel local to the Catalog; it does not change
-  // agent.state itself or the Activate button's copy/behavior.
-  const stateLabel = agent.state === 'maintenance' ? 'inactive' : agent.state;
+  const registryBacked = isRegistryBacked(agent);
+  // Registry-backed DEPRECATED/REJECTED records surface as internal state
+  // 'inactive' (toInternalState) but are terminal at the registry — no
+  // action can move them anywhere. Legacy 'inactive' stays reversible
+  // (Activate). Decision 3d5843e9 (supersedes a3fb5542): 'maintenance' is
+  // no longer produced by Deactivate, so it is displayed as-is ("Draft" /
+  // "Maintenance" per the existing mapping used on the workflow canvas,
+  // e.g. AgentNode/AgentTrayItem) rather than relabeled to "inactive".
+  const isTerminalDeprecated = registryBacked && agent.state === 'inactive';
+
+  const handleDeprecateConfirm = () => {
+    setShowDeprecateConfirm(false);
+    onToggleState(agent);
+  };
 
   return (
     <Card 
@@ -68,7 +100,7 @@ export function AgentCard({ agent, onToggleState, onConfigure, userRole }: Agent
                   : 'bg-muted/20 text-muted-foreground border-0'
               }
             >
-              {stateLabel}
+              {isTerminalDeprecated ? 'Deprecated' : agent.state}
             </Badge>
           </div>
         </div>
@@ -120,7 +152,36 @@ export function AgentCard({ agent, onToggleState, onConfigure, userRole }: Agent
         )}
         
         <div className="flex gap-2 pt-2">
-          {agent.state === 'active' ? (
+          {isTerminalDeprecated ? null : agent.state === 'active' && registryBacked ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 bg-transparent border-border text-foreground hover:bg-accent"
+                onClick={() => setShowDeprecateConfirm(true)}
+              >
+                <AlertTriangle className="size-4 mr-1" />
+                Deprecate
+              </Button>
+              <AlertDialog open={showDeprecateConfirm} onOpenChange={setShowDeprecateConfirm}>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Deprecate {displayName}?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This is irreversible. Once deprecated, this agent will no longer be
+                      dispatchable or releasable, and it cannot be reactivated.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={handleDeprecateConfirm}>
+                      Deprecate
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </>
+          ) : agent.state === 'active' ? (
             <Button
               variant="outline"
               size="sm"
@@ -141,7 +202,7 @@ export function AgentCard({ agent, onToggleState, onConfigure, userRole }: Agent
               Activate
             </Button>
           )}
-          {canConfigure && (
+          {!isTerminalDeprecated && canConfigure && (
             <Button
               variant="outline"
               size="sm"

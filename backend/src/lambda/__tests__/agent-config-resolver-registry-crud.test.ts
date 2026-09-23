@@ -35,14 +35,17 @@ const mockDeserializeCustomMetadata = jest.fn(
   },
 );
 const mockToRegistryStatus = jest.fn((state: string) => {
+  // Decision 3d5843e9 (supersedes a3fb5542; finding 462c17ad): the AWS
+  // registry rejects DRAFT as an UpdateRegistryRecordStatus target.
+  // 'inactive' now throws in the real toRegistryStatus (see
+  // registry-service.ts) — the resolver intercepts it even earlier with a
+  // structured error before this mock would ever be reached in practice.
+  // 'maintenance' is repurposed as the deprecate-intent value -> DEPRECATED.
   const map: Record<string, string> = {
     active: "APPROVED",
-    // Decision a3fb5542: Deactivate is reversible — 'inactive' now maps to
-    // DRAFT, not the terminal DEPRECATED.
-    inactive: "DRAFT",
-    maintenance: "DRAFT",
+    maintenance: "DEPRECATED",
   };
-  return map[state] || "DRAFT";
+  return map[state] || "DEPRECATED";
 });
 
 /** Registry record fixture shape consumed by the mock mapper. */
@@ -364,19 +367,20 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       await updateAgentConfigRegistry(
         {
           agentId: "agent-1",
-          state: "inactive",
+          state: "maintenance",
         },
         eventWithOrg,
       );
 
-      expect(mockToRegistryStatus).toHaveBeenCalledWith("inactive");
-      // Decision a3fb5542: Deactivate issues DRAFT (not DEPRECATED), routed
-      // through the validated-transition gate — existing.status ("APPROVED")
-      // is passed as currentStatus.
+      expect(mockToRegistryStatus).toHaveBeenCalledWith("maintenance");
+      // Decision 3d5843e9 (finding 462c17ad): deprecate intent
+      // (state:"maintenance") issues DEPRECATED, routed through the
+      // validated-transition gate — existing.status ("APPROVED") is passed
+      // as currentStatus.
       expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
         "agent",
         "agent-1",
-        "DRAFT",
+        "DEPRECATED",
         undefined,
         "APPROVED",
       );
@@ -397,29 +401,55 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
     });
 
-    test("Deactivate on an already-DRAFT record is an idempotent no-op (decision a3fb5542)", async () => {
+    test("Deactivate ('inactive') on a registry-backed record is rejected with a structured error, no SDK call (decision 3d5843e9, finding 462c17ad)", async () => {
       const draftExistingRecord = { ...existingRecord, status: "DRAFT" };
       mockGetResource.mockResolvedValue(draftExistingRecord);
+
+      await expect(
+        updateAgentConfigRegistry(
+          {
+            agentId: "agent-1",
+            state: "inactive",
+          },
+          eventWithOrg,
+        ),
+      ).rejects.toThrow(
+        "ValidationError: Deactivation is not supported for registry records; use Deprecate (irreversible)",
+      );
+
+      // The registry rejects DRAFT as an UpdateRegistryRecordStatus target
+      // (finding 462c17ad) — the resolver must fail BEFORE any SDK call,
+      // not attempt the write and let it fail downstream.
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+      expect(mockUpdateResource).not.toHaveBeenCalled();
+    });
+
+    test("deprecate intent (state: 'maintenance') on an APPROVED record maps to DEPRECATED via the validated gate", async () => {
+      mockGetResource.mockResolvedValue(existingRecord); // status: APPROVED
+      mockUpdateResourceStatus.mockResolvedValue({
+        recordId: "agent-1",
+        status: "DEPRECATED",
+      });
       mockUpdateResource.mockResolvedValue({
         ...updatedRecord,
-        status: "DRAFT",
+        status: "DEPRECATED",
       });
 
       await updateAgentConfigRegistry(
         {
           agentId: "agent-1",
-          state: "inactive",
+          state: "maintenance",
         },
         eventWithOrg,
       );
 
-      // toRegistryStatus("inactive") -> "DRAFT", which equals the existing
-      // record's status, so the outer `desiredRegistryStatus !== existing.status`
-      // guard skips the entire status-write branch: no gate check, no
-      // UpdateRegistryRecordStatus call, no re-fetch.
-      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
-      // Only the single initial getResource call — no post-transition refetch.
-      expect(mockGetResource).toHaveBeenCalledTimes(1);
+      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
+        "agent",
+        "agent-1",
+        "DEPRECATED",
+        undefined,
+        "APPROVED",
+      );
     });
 
     test("preserves existing config when no new config provided", async () => {
@@ -429,7 +459,7 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       await updateAgentConfigRegistry(
         {
           agentId: "agent-1",
-          state: "inactive",
+          state: "maintenance",
         },
         eventWithOrg,
       );
@@ -450,7 +480,7 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       const result = await updateAgentConfigRegistry(
         {
           agentId: "agent-1",
-          state: "inactive",
+          state: "maintenance",
         },
         eventWithOrg,
       );
@@ -650,37 +680,25 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
     });
 
-    test("REJECTED + active → resubmits (DRAFT transition) before submitting for approval", async () => {
+    test("REJECTED + active → structured error, no DRAFT call, no submit (decision 3d5843e9, finding 462c17ad)", async () => {
       const rejectedRecord = { ...existingRecord, status: "REJECTED" };
-      mockGetResource
-        .mockResolvedValueOnce(rejectedRecord)
-        .mockResolvedValueOnce({
-          ...rejectedRecord,
-          status: "PENDING_APPROVAL",
-        });
-      mockUpdateResource.mockResolvedValue(rejectedRecord);
-      mockUpdateResourceStatus.mockResolvedValue(undefined);
-      mockSubmitForApproval.mockResolvedValue({
-        ...rejectedRecord,
-        status: "PENDING_APPROVAL",
-      });
+      mockGetResource.mockResolvedValue(rejectedRecord);
 
-      await updateAgentConfigRegistry(
-        { agentId: "agent-1", state: "active" },
-        eventWithOrg,
+      await expect(
+        updateAgentConfigRegistry(
+          { agentId: "agent-1", state: "active" },
+          eventWithOrg,
+        ),
+      ).rejects.toThrow(
+        "ValidationError: Rejected records cannot be resubmitted; create a new record",
       );
 
-      expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
-        "agent",
-        "agent-1",
-        "DRAFT",
-      );
-      expect(mockSubmitForApproval).toHaveBeenCalledWith("agent-1");
-      // Resubmit happens BEFORE submit.
-      const draftCallOrder =
-        mockUpdateResourceStatus.mock.invocationCallOrder[0];
-      const submitCallOrder = mockSubmitForApproval.mock.invocationCallOrder[0];
-      expect(draftCallOrder).toBeLessThan(submitCallOrder);
+      // The removed #182 resubmit step (REJECTED -> DRAFT) always failed at
+      // the registry call (finding 462c17ad) — assert it's gone, not just
+      // reordered.
+      expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
+      expect(mockSubmitForApproval).not.toHaveBeenCalled();
+      expect(mockUpdateResource).not.toHaveBeenCalled();
     });
 
     test("metadata is left untouched when submitForApproval fails (no partial drift)", async () => {

@@ -206,16 +206,15 @@ describe("REGISTRY_TRANSITIONS", () => {
 
   describe("valid transitions", () => {
     const validCases: [string, string][] = [
-      ["DRAFT", "PENDING_APPROVAL"],
-      ["DRAFT", "DEPRECATED"],
       ["PENDING_APPROVAL", "APPROVED"],
       ["PENDING_APPROVAL", "REJECTED"],
-      ["REJECTED", "DRAFT"],
       ["REJECTED", "DEPRECATED"],
       ["APPROVED", "DEPRECATED"],
-      // Decision a3fb5542: Catalog Deactivate returns an APPROVED record to
-      // DRAFT (reversible — reactivation resubmits for approval).
-      ["APPROVED", "DRAFT"],
+      // Decision 3d5843e9 (supersedes a3fb5542; finding 462c17ad): DRAFT is
+      // reachable only via Create — never as an UpdateRegistryRecordStatus
+      // target — but it IS a valid status-update *source* toward the one
+      // target the registry accepts from it, DEPRECATED (deprecate intent).
+      ["DRAFT", "DEPRECATED"],
     ];
 
     test.each(validCases)("%s → %s does not throw", (from, to) => {
@@ -226,6 +225,17 @@ describe("REGISTRY_TRANSITIONS", () => {
   describe("invalid transitions", () => {
     const invalidCases: [string, string][] = [
       ["DRAFT", "APPROVED"],
+      // Decision 3d5843e9 (finding 462c17ad): the AWS registry's
+      // UpdateRegistryRecordStatus operation accepts ONLY
+      // APPROVED/REJECTED/DEPRECATED as targets — DRAFT and
+      // PENDING_APPROVAL are rejected flat, so neither may appear as a
+      // *target* of any transition in this table, from any source.
+      ["DRAFT", "PENDING_APPROVAL"],
+      ["REJECTED", "DRAFT"],
+      ["REJECTED", "PENDING_APPROVAL"],
+      ["APPROVED", "DRAFT"],
+      ["APPROVED", "PENDING_APPROVAL"],
+      ["PENDING_APPROVAL", "DRAFT"],
       // DEPRECATED remains terminal: no outgoing transition, including from
       // any other status.
       ["DEPRECATED", "DRAFT"],

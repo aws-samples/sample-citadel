@@ -221,28 +221,36 @@ export const ROUND_TRANSITIONS: TransitionMap = {
   },
 };
 
-// Decision #3 (AgentCore Registry governance retrofit): status domain and
-// allowed transitions for a RegistryAgentRecord. Status values sourced from
-// RegistryRecordStatusValues in backend/src/services/registry-service.ts.
-// Not wired into any resolver in PR 1 — PR 3 wires agent-config-resolver's
-// UpdateRegistryRecordStatus calls through LifecycleManager.validateTransition.
+// Decision 3d5843e9 (supersedes a3fb5542; finding 462c17ad): the AWS
+// AgentCore Registry's UpdateRegistryRecordStatus operation accepts ONLY
+// APPROVED, REJECTED, and DEPRECATED as targets — DRAFT and PENDING_APPROVAL
+// are rejected flat by the service itself. This transition table must stay
+// honest about that: it MUST NOT offer DRAFT or PENDING_APPROVAL as a target
+// of any status-update transition. Those two statuses are reachable only via
+// the Create (DRAFT) and Submit-for-approval (PENDING_APPROVAL) operations,
+// never via UpdateRegistryRecordStatus / LifecycleManager.validateTransition.
+//
+// Status values sourced from RegistryRecordStatusValues in
+// backend/src/services/registry-service.ts.
 export const REGISTRY_TRANSITIONS: TransitionMap = {
   transitions: {
-    DRAFT: ["PENDING_APPROVAL", "DEPRECATED"],
+    // DRAFT/PENDING_APPROVAL are reached only via Create/Submit — never
+    // listed as a *target* below, even from states that could otherwise
+    // reach them, because the registry service rejects those targets.
+    DRAFT: ["DEPRECATED"],
     PENDING_APPROVAL: ["APPROVED", "REJECTED"],
-    REJECTED: ["DRAFT", "DEPRECATED"], // resubmit or abandon
-    // Decision a3fb5542: Catalog Deactivate returns an APPROVED record to
-    // DRAFT (reversible — reactivation resubmits for approval), instead of
-    // the terminal DEPRECATED. DEPRECATED remains reachable from APPROVED
-    // for the Archive action (AppDetailView), which stays terminal.
-    APPROVED: ["DRAFT", "DEPRECATED"],
+    REJECTED: ["DEPRECATED"], // abandon; resubmission is a new record, not DRAFT
+    // Decision 3d5843e9: APPROVED's only status-update target is DEPRECATED
+    // (irreversible). The previous APPROVED -> DRAFT "Deactivate" path
+    // (decision a3fb5542) is removed because the registry rejects DRAFT as
+    // an UpdateRegistryRecordStatus target.
+    APPROVED: ["DEPRECATED"],
     DEPRECATED: [], // terminal
   },
   actions: {
     submit: ["DRAFT"],
     approve: ["PENDING_APPROVAL"],
     reject: ["PENDING_APPROVAL"],
-    resubmit: ["REJECTED"],
     deprecate: ["DRAFT", "REJECTED", "APPROVED"],
   },
 };

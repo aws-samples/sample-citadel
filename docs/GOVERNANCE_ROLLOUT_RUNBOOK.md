@@ -142,14 +142,14 @@ ticket; do not flip on a partial checklist.
 2. **Every `registryId` on an authority unit points to a live registry
    record.** Sample a random subset (≥ 50) of authority units, resolve
    each via `GetRegistryRecord`, and confirm the record exists and is
-   not in `DEPRECATED` state — `DEPRECATED` is terminal, so a record in
-   that state can never become usable again. A record found in `DRAFT`
-   is not itself a readiness failure: besides the pre-submission default,
-   `DRAFT` is now also reached from `APPROVED` via the Catalog's
-   Deactivate action (decision a3fb5542) and is reversible — the agent
-   or tool owner can resubmit it for approval. Treat a sampled `DRAFT`
-   record as "currently deactivated, resolvable by the owner," and flag
-   only `DEPRECATED` hits as unrecoverable in the readiness report.
+   in a usable state (`APPROVED` or other non-terminal status). A record
+   found in `DRAFT` is a registry record that has not yet been submitted
+   for approval — this is not itself a readiness failure, but note that
+   `DRAFT` records cannot be used for new agent executions (the workload-
+   identity gate requires `APPROVED` records). A record found in
+   `DEPRECATED` is terminal and unrecoverable — flag it as a critical
+   readiness issue, as the authority unit references a record that can
+   never be reactivated.
 
    A dedicated sampling CLI is not yet shipped. Until it lands, use the
    following ad-hoc invocation of the Python registry client:
@@ -168,10 +168,8 @@ ticket; do not flip on a partial checklist.
    for u in sample:
        rec = get_agent_record(registry_id, u["recordId"])
        assert rec is not None, f"missing {u['recordId']}"
-       # DEPRECATED is terminal (unrecoverable); DRAFT may be a
-       # reversible Deactivate (decision a3fb5542) and is not a failure
-       # on its own — report it separately if you want visibility into
-       # currently-deactivated agents.
+       # DEPRECATED is terminal (unrecoverable); flag as critical.
+       # DRAFT records exist but are not active; note separately for visibility.
        assert rec["status"] != "DEPRECATED", f"deprecated {u['recordId']}"
    ```
 

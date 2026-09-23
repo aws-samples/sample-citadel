@@ -287,15 +287,22 @@ const USER_POOL_ID = process.env.USER_POOL_ID || "";
 
 /**
  * Agent-record approval lifecycle gate. Every status change dispatched
- * through this resolver (updateApp) MUST route through
- * registryLifecycle.validateTransition before the Registry write —
- * illegal transitions throw RegistryLifecycleError rather than being
- * silently coerced. See backend/src/adapters/lifecycle.ts REGISTRY_TRANSITIONS:
- *   DRAFT             -> PENDING_APPROVAL | DEPRECATED
+ * through this resolver's updateApp MUST route through this gate before any
+ * Registry status write. See backend/src/adapters/lifecycle.ts
+ * REGISTRY_TRANSITIONS (decision 3d5843e9) for the authoritative table:
+ *   DRAFT             -> DEPRECATED
  *   PENDING_APPROVAL  -> APPROVED | REJECTED
- *   REJECTED          -> DRAFT | DEPRECATED
+ *   REJECTED          -> DEPRECATED
  *   APPROVED          -> DEPRECATED
  *   DEPRECATED        -> (terminal)
+ *
+ * DRAFT -> PENDING_APPROVAL is NOT a transition validated against this
+ * table — the AWS registry's UpdateRegistryRecordStatus rejects both DRAFT
+ * and PENDING_APPROVAL as targets (finding 462c17ad), so `updateApp`'s
+ * submit path calls `RegistryService.submitForApproval` directly instead,
+ * bypassing this gate entirely (see the submit special-case in `updateApp`).
+ * There is likewise no REJECTED -> DRAFT resubmit path any more: a rejected
+ * record cannot be revived, only deprecated or recreated.
  */
 const registryLifecycle = new LifecycleManager(REGISTRY_TRANSITIONS);
 
@@ -1730,10 +1737,27 @@ async function updateApp(
     );
   }
 
-  // Validated-transition gate. Every status change on this path MUST pass
-  // through registryLifecycle before any write — illegal transitions throw
-  // a structured error rather than being silently coerced.
-  if (isStatusChange && input.status !== "PUBLISHED") {
+  // Submit special-case: DRAFT -> PENDING_APPROVAL is NOT validated against
+  // REGISTRY_TRANSITIONS/registryLifecycle at all, and NOT written via
+  // updateResourceStatus below. The AWS registry's UpdateRegistryRecordStatus
+  // rejects both DRAFT and PENDING_APPROVAL as targets (decision 3d5843e9,
+  // finding 462c17ad) — the only legal path from DRAFT towards approval is
+  // the dedicated `SubmitRegistryRecordForApproval` operation, wrapped here
+  // by `RegistryService.submitForApproval`. That method never auto-approves
+  // on its own (autoApproval is a registry-level config this service does
+  // not enable); it lands the record on PENDING_APPROVAL exactly like every
+  // other transition here, so the "no auto-approval regression" contract
+  // holds. Any other DRAFT target continues into the REGISTRY_TRANSITIONS
+  // gate below (e.g. DRAFT -> DEPRECATED).
+  const isSubmit =
+    isStatusChange &&
+    currentStatus === "DRAFT" &&
+    input.status === "PENDING_APPROVAL";
+
+  // Validated-transition gate. Every OTHER status change on this path MUST
+  // pass through registryLifecycle before any write — illegal transitions
+  // throw a structured error rather than being silently coerced.
+  if (isStatusChange && !isSubmit && input.status !== "PUBLISHED") {
     if (!registryLifecycle.isValidTransition(currentStatus, input.status!)) {
       const valid = REGISTRY_TRANSITIONS.transitions[currentStatus] || [];
       throw new RegistryLifecycleError(
@@ -1763,10 +1787,10 @@ async function updateApp(
   }
 
   // decidedBy/decidedAt/statusReason bookkeeping for the manifest. Only
-  // stamped on an actual approve/reject decision — resubmit (REJECTED ->
-  // DRAFT), submit (DRAFT -> PENDING_APPROVAL), and deprecate leave the
-  // prior decision fields untouched (or clear statusReason on resubmit,
-  // handled below via the isStatusChange branch order).
+  // stamped on an actual approve/reject decision — submit (DRAFT ->
+  // PENDING_APPROVAL) and deprecate leave the prior decision fields
+  // untouched. There is no resubmit (REJECTED -> DRAFT) path any more: a
+  // rejected record's only status-update target is DEPRECATED.
   const isDecision = isStatusChange && DECISION_STATUSES.has(input.status!);
   const decidedBy = isDecision ? getUserId(event.identity) : undefined;
   const decidedStatusReason = isDecision
@@ -1813,11 +1837,6 @@ async function updateApp(
     if (isDecision) {
       manifest.decidedBy = decidedBy;
       manifest.statusReason = decidedStatusReason || null;
-    } else if (input.status === "DRAFT") {
-      // Resubmit (REJECTED -> DRAFT): clear the prior decision so a stale
-      // rejection reason/decider does not linger on the fresh draft.
-      manifest.decidedBy = null;
-      manifest.statusReason = null;
     }
   });
 
@@ -1850,11 +1869,24 @@ async function updateApp(
 
   let finalRecord = record;
   if (isStatusChange) {
-    // Propagate to Registry record status so the lifecycle state is authoritative
-    // there, not just in the local manifest. Accepts Registry-native status values
-    // (DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, DEPRECATED) plus the
-    // app-specific PUBLISHED which is stored in manifest only.
-    if (input.status !== "PUBLISHED") {
+    if (isSubmit) {
+      // Submit special-case: the only legal path from DRAFT towards
+      // approval is the dedicated SubmitRegistryRecordForApproval
+      // operation — UpdateRegistryRecordStatus rejects both DRAFT and
+      // PENDING_APPROVAL as targets (decision 3d5843e9). No autoApproval is
+      // configured, so this always lands on PENDING_APPROVAL.
+      finalRecord = await getRegistryService().submitForApproval(input.appId);
+      const refreshed = await getRegistryService().getResource(
+        "agent",
+        input.appId,
+      );
+      if (refreshed) finalRecord = refreshed;
+    } else if (input.status !== "PUBLISHED") {
+      // Propagate to Registry record status so the lifecycle state is authoritative
+      // there, not just in the local manifest. Accepts Registry-native status values
+      // (APPROVED, REJECTED, DEPRECATED — never DRAFT/PENDING_APPROVAL, see
+      // REGISTRY_TRANSITIONS) plus the app-specific PUBLISHED which is
+      // stored in manifest only.
       finalRecord = await getRegistryService().updateResourceStatus(
         "agent",
         input.appId,

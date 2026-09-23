@@ -1,13 +1,18 @@
 /**
  * Approval lifecycle gate tests for registry-agent-record-resolver's
  * updateApp mutation:
- *   - no auto-approval regression (submit leaves the record PENDING_APPROVAL)
+ *   - no auto-approval regression (submit leaves the record PENDING_APPROVAL,
+ *     routed through RegistryService.submitForApproval, not
+ *     updateResourceStatus — decision 3d5843e9)
  *   - full REGISTRY_TRANSITIONS matrix (every legal + representative illegal)
  *   - pending-immutability (content edits rejected while PENDING_APPROVAL)
  *   - statusReason required on REJECTED
  *   - approve/reject is admin-only (role gating)
  *   - decidedBy is always server-derived, never from client input
- *   - REJECTED -> DRAFT resubmit path works and clears the prior decision
+ *
+ * There is no REJECTED -> DRAFT resubmit path: decision 3d5843e9 makes
+ * REJECTED's only status-update target DEPRECATED (abandon); a rejected
+ * record cannot be revived, only deprecated or recreated.
  */
 
 process.env.REGISTRY_ID = "test-registry-id";
@@ -183,12 +188,8 @@ describe("registry-agent-record-resolver — approval lifecycle gate", () => {
       ["DRAFT", "DEPRECATED", false],
       ["PENDING_APPROVAL", "APPROVED", true],
       ["PENDING_APPROVAL", "REJECTED", true],
-      ["REJECTED", "DRAFT", false],
       ["REJECTED", "DEPRECATED", false],
       ["APPROVED", "DEPRECATED", false],
-      // Decision a3fb5542: Catalog Deactivate returns an APPROVED record to
-      // DRAFT (reversible — reactivation resubmits for approval).
-      ["APPROVED", "DRAFT", false],
     ])("%s -> %s succeeds", async (current, next, admin) => {
       seedApp(current, 1);
       const input: Record<string, unknown> = {
@@ -211,11 +212,15 @@ describe("registry-agent-record-resolver — approval lifecycle gate", () => {
       ["DRAFT", "APPROVED"],
       ["DRAFT", "REJECTED"],
       ["APPROVED", "PENDING_APPROVAL"],
+      ["APPROVED", "DRAFT"],
       ["DEPRECATED", "DRAFT"],
       ["DEPRECATED", "APPROVED"],
       ["DEPRECATED", "PENDING_APPROVAL"],
       ["DEPRECATED", "REJECTED"],
       ["PENDING_APPROVAL", "DRAFT"],
+      ["REJECTED", "DRAFT"],
+      ["REJECTED", "APPROVED"],
+      ["REJECTED", "PENDING_APPROVAL"],
     ])("%s -> %s throws INVALID_TRANSITION", async (current, next) => {
       seedApp(current, 1);
 
@@ -457,38 +462,42 @@ describe("registry-agent-record-resolver — approval lifecycle gate", () => {
     });
   });
 
-  // -- Resubmit path ---------------------------------------------------------
+  // -- No resubmit path: REJECTED can only be deprecated ---------------------
 
-  describe("resubmit path (REJECTED -> DRAFT)", () => {
-    it("succeeds and clears the prior decidedBy/statusReason", async () => {
+  describe("REJECTED has no resubmit path (decision 3d5843e9)", () => {
+    it("REJECTED -> DRAFT is rejected with INVALID_TRANSITION, no SDK status call", async () => {
       seedApp("REJECTED", 2, "org-1", {
         decidedBy: "admin-1",
         statusReason: "missing tests",
       });
 
-      const result = (await invokeHandler(
-        makeEvent("updateApp", {
-          input: { appId: "app-1", status: "DRAFT", version: 2 },
-        }),
-      )) as Record<string, unknown>;
+      await expect(
+        invokeHandler(
+          makeEvent("updateApp", {
+            input: { appId: "app-1", status: "DRAFT", version: 2 },
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "INVALID_TRANSITION" });
 
-      expect(result.status).toBe("DRAFT");
-      expect(result.decidedBy).toBeNull();
-      expect(result.statusReason).toBeNull();
+      const persisted = await getMockRegistryService().getResource(
+        "agent",
+        "app-1",
+      );
+      expect(persisted?.status).toBe("REJECTED");
     });
 
-    it("allows a non-admin caller to resubmit", async () => {
+    it("REJECTED -> DEPRECATED (abandon) succeeds", async () => {
       seedApp("REJECTED", 2);
 
       const result = (await invokeHandler(
         makeEvent(
           "updateApp",
-          { input: { appId: "app-1", status: "DRAFT", version: 2 } },
+          { input: { appId: "app-1", status: "DEPRECATED", version: 2 } },
           false,
         ),
       )) as Record<string, unknown>;
 
-      expect(result.status).toBe("DRAFT");
+      expect(result.status).toBe("DEPRECATED");
     });
   });
 });

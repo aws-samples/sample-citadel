@@ -523,12 +523,17 @@ export async function createToolConfigRegistry(
     customMetadata,
   });
 
-  // If an initial state is provided, update the status accordingly
+  // If an initial state is provided, update the status accordingly. A newly
+  // created record always starts DRAFT; requesting 'inactive' here throws
+  // (via toRegistryStatus, decision 3d5843e9/finding 462c17ad) — a
+  // just-created record cannot be "deactivated". The only non-activation
+  // initial state that reaches the registry is 'maintenance' (deprecate
+  // intent -> DEPRECATED).
   if (input.state) {
     const registryStatus = registryService.toRegistryStatus(input.state);
     // DRAFT -> APPROVED is rejected by the registry directly; the sanctioned
     // path for activation is SubmitRegistryRecordForApproval (finding
-    // adde5b79). Non-activation initial states are unaffected.
+    // adde5b79).
     if (registryStatus === RegistryRecordStatusValues.APPROVED) {
       await registryService.submitForApproval(input.toolId);
     } else {
@@ -576,6 +581,21 @@ export async function updateToolConfigRegistry(
   const existing = await registryService.getResource("tool", input.toolId);
   if (!existing) {
     throw new Error(`Tool config not found: ${input.toolId}`);
+  }
+
+  // Decision 3d5843e9 (supersedes a3fb5542; finding 462c17ad): the AWS
+  // registry rejects DRAFT as an UpdateRegistryRecordStatus target, so the
+  // Catalog Deactivate action ('inactive') can no longer be honoured for a
+  // registry-backed record. Fail with a structured, actionable error BEFORE
+  // any registry call. The deprecate intent is expressed via
+  // `state: "maintenance"` — the one ToolState enum value not already
+  // claimed by active/inactive and not sent by any current frontend write
+  // path — and is routed through the same validated REGISTRY_TRANSITIONS
+  // gate used for every other transition.
+  if (input.state === "inactive") {
+    throw new Error(
+      "ValidationError: Deactivation is not supported for registry records; use Deprecate (irreversible)",
+    );
   }
 
   const existingMeta = registryService.deserializeCustomMetadata<{
@@ -684,23 +704,27 @@ export async function updateToolConfigRegistry(
   ) {
     // Activation (-> APPROVED) must go through SubmitRegistryRecordForApproval,
     // never a direct UpdateRegistryRecordStatus(APPROVED) — the AWS registry
-    // rejects DRAFT -> APPROVED (finding adde5b79). REJECTED must first
-    // transition back to DRAFT (resubmit) before it can be submitted. Every
-    // other transition (e.g. -> DEPRECATED) is unaffected.
+    // rejects DRAFT -> APPROVED (finding adde5b79). Decision 3d5843e9
+    // (finding 462c17ad): the REJECTED -> DRAFT resubmit step added in #182
+    // is removed — UpdateRegistryRecordStatus rejects DRAFT as a target
+    // outright, so that step always failed at the registry call. Fail
+    // closed with a structured error instead. Every other transition (e.g.
+    // -> DEPRECATED) is unaffected.
     if (desiredRegistryStatus === RegistryRecordStatusValues.APPROVED) {
       if (existing.status === RegistryRecordStatusValues.REJECTED) {
-        await registryService.updateResourceStatus(
-          "tool",
-          input.toolId,
-          RegistryRecordStatusValues.DRAFT,
+        throw new Error(
+          "ValidationError: Rejected records cannot be resubmitted; create a new record",
         );
       }
       await registryService.submitForApproval(input.toolId);
     } else {
       // Route through the validated-transition gate: pass existing.status as
       // currentStatus so registry-service.updateResourceStatus enforces
-      // REGISTRY_TRANSITIONS (decision a3fb5542) instead of silently
-      // coercing an unvalidated transition.
+      // REGISTRY_TRANSITIONS (decision 3d5843e9) instead of silently
+      // coercing an unvalidated transition. The only non-APPROVED target
+      // reachable here is DEPRECATED (deprecate intent, state:"maintenance"
+      // — see toRegistryStatus); 'inactive' is rejected above before this
+      // block is ever reached.
       await registryService.updateResourceStatus(
         "tool",
         input.toolId,

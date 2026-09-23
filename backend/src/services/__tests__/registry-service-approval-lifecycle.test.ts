@@ -94,16 +94,11 @@ describe("RegistryService.updateResourceStatus — approval lifecycle gate", () 
   });
 
   it.each([
-    ["DRAFT", "PENDING_APPROVAL"],
     ["PENDING_APPROVAL", "APPROVED"],
     ["PENDING_APPROVAL", "REJECTED"],
-    ["REJECTED", "DRAFT"],
     ["REJECTED", "DEPRECATED"],
     ["APPROVED", "DEPRECATED"],
     ["DRAFT", "DEPRECATED"],
-    // Decision a3fb5542: Catalog Deactivate returns an APPROVED record to
-    // DRAFT (reversible — reactivation resubmits for approval).
-    ["APPROVED", "DRAFT"],
   ])("allows the legal transition %s -> %s", async (current, next) => {
     sdkMock.on(UpdateRegistryRecordStatusCommand).resolves({
       recordId: "agent-1",
@@ -131,6 +126,16 @@ describe("RegistryService.updateResourceStatus — approval lifecycle gate", () 
     ["DEPRECATED", "PENDING_APPROVAL"],
     ["DEPRECATED", "REJECTED"],
     ["PENDING_APPROVAL", "DRAFT"],
+    // Decision 3d5843e9 (finding 462c17ad): the AWS registry's
+    // UpdateRegistryRecordStatus operation accepts ONLY
+    // APPROVED/REJECTED/DEPRECATED as targets — DRAFT and PENDING_APPROVAL
+    // are rejected flat, so neither may appear as a *target*, from any
+    // source. This supersedes decision a3fb5542's APPROVED -> DRAFT
+    // (reversible Deactivate) transition, which the registry never actually
+    // accepted.
+    ["DRAFT", "PENDING_APPROVAL"],
+    ["REJECTED", "DRAFT"],
+    ["APPROVED", "DRAFT"],
   ])("rejects the illegal transition %s -> %s", async (current, next) => {
     await expect(
       service.updateResourceStatus(

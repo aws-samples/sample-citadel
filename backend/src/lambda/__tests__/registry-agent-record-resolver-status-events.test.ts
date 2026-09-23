@@ -197,40 +197,40 @@ describe("registry-agent-record-resolver — status transition events", () => {
     expect(detail.newStatus).toBe("DEPRECATED");
   });
 
-  test("emits app.status.rejected_to_draft on REJECTED→DRAFT (resubmit) transition", async () => {
-    seedApp("REJECTED", 3);
+  test("emits app.status.draft_to_pending_approval on DRAFT→PENDING_APPROVAL (submit) transition", async () => {
+    seedApp("DRAFT", 1);
 
     await invokeHandler(
       makeEvent("updateApp", {
-        input: { appId: "app-1", status: "DRAFT", version: 3 },
+        input: { appId: "app-1", status: "PENDING_APPROVAL", version: 1 },
       }),
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvent = allEntries.find(
-      (e) => e?.DetailType === "app.status.rejected_to_draft",
+      (e) => e?.DetailType === "app.status.draft_to_pending_approval",
     );
 
     expect(statusEvent).toBeDefined();
     const detail = JSON.parse(statusEvent!.Detail!);
-    expect(detail.previousStatus).toBe("REJECTED");
-    expect(detail.newStatus).toBe("DRAFT");
+    expect(detail.previousStatus).toBe("DRAFT");
+    expect(detail.newStatus).toBe("PENDING_APPROVAL");
   });
 
   test("status event timestamp is valid ISO 8601", async () => {
-    seedApp("REJECTED", 3);
+    seedApp("APPROVED", 3);
 
     await invokeHandler(
       makeEvent("updateApp", {
-        input: { appId: "app-1", status: "DRAFT", version: 3 },
+        input: { appId: "app-1", status: "DEPRECATED", version: 3 },
       }),
     );
 
     const ebCalls = ebMock.commandCalls(PutEventsCommand);
     const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
     const statusEvent = allEntries.find(
-      (e) => e?.DetailType === "app.status.rejected_to_draft",
+      (e) => e?.DetailType === "app.status.approved_to_deprecated",
     );
     const detail = JSON.parse(statusEvent!.Detail!);
 
@@ -309,11 +309,11 @@ describe("registry-agent-record-resolver — status transition events", () => {
       new Error("AppSync unreachable"),
     );
 
-    seedApp("REJECTED", 3);
+    seedApp("APPROVED", 3);
 
     const result = (await invokeHandler(
       makeEvent("updateApp", {
-        input: { appId: "app-1", status: "DRAFT", version: 3 },
+        input: { appId: "app-1", status: "DEPRECATED", version: 3 },
       }),
     )) as Record<string, unknown>;
 
