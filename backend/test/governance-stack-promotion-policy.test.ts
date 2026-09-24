@@ -247,9 +247,6 @@ function createTestStack(): {
     }),
   );
 
-  const registryArn =
-    "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test";
-
   const alarmTopic = new sns.Topic(backendStack, "AlarmTopic", {
     topicName: "citadel-alarms-test-promotionpolicy",
   });
@@ -279,8 +276,6 @@ function createTestStack(): {
     conversationsTable,
     agentReleasesTable,
     agentReleaseWriterRole,
-    registryArn,
-    registryId: "citadel-test",
     environmentReleasePointersTable,
     environmentReleasePointerWriterRole,
     promotionPolicyConfigTable,

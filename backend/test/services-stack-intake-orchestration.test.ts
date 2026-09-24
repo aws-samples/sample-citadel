@@ -21,9 +21,6 @@ const APPSYNC_API_ID = "api123abc";
 const APPSYNC_API_ARN = `arn:aws:appsync:us-west-2:123456789012:apis/${APPSYNC_API_ID}`;
 const APPSYNC_URL =
   "https://api123abc.appsync-api.us-west-2.amazonaws.com/graphql";
-const REGISTRY_ID = "reg-orch123";
-const REGISTRY_ARN =
-  "arn:aws:agent-registry:us-west-2:123456789012:registry/reg-orch123";
 const USER_POOL_ID = "us-west-2_orchpool";
 const USER_POOL_ARN = `arn:aws:cognito-idp:us-west-2:123456789012:userpool/${USER_POOL_ID}`;
 
@@ -54,8 +51,6 @@ function buildStack(
     environment: "test",
     agentEventBus: bus,
     documentBucket: bucket,
-    registryArn: REGISTRY_ARN,
-    registryId: REGISTRY_ID,
     ...(withAppSync && {
       appSyncApiArn: APPSYNC_API_ARN,
       appSyncApiId: APPSYNC_API_ID,
@@ -137,8 +132,13 @@ describe("ServicesStack — intake post-fabrication orchestration wiring", () =>
           APPS_TABLE: "citadel-apps-test",
           AGENT_CONFIG_TABLE: "citadel-agents-test",
           EVENT_BUS_NAME: cdk.assertions.Match.anyValue(),
-          REGISTRY_ID,
+          // SSM-resolved (finding 8b7ee8af): renders as a Ref to the
+          // AWS::SSM::Parameter::Value<String> template parameter.
+          REGISTRY_ID: cdk.assertions.Match.objectLike({
+            Ref: cdk.assertions.Match.stringLikeRegexp("^SsmParameterValue"),
+          }),
           REGISTRY_ENABLED: "true",
+          REGISTRY_GENERATION: cdk.assertions.Match.anyValue(),
           AUTHORITY_UNITS_TABLE: "citadel-authority-units-test",
         }),
       },

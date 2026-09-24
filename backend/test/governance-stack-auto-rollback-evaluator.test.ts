@@ -153,9 +153,6 @@ function createTemplate(): Template {
     conversationsTable: t.Conversations,
     agentReleasesTable,
     agentReleaseWriterRole,
-    registryArn:
-      "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test",
-    registryId: "citadel-test",
     environmentReleasePointersTable,
     environmentReleasePointerWriterRole,
     promotionPolicyConfigTable,

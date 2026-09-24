@@ -25,6 +25,11 @@ import * as sns from "aws-cdk-lib/aws-sns";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
+import {
+  expectNoRegistryExportImports,
+  expectRegistryGenerationBesideRegistryId,
+  TemplateJson,
+} from "./helpers/registry-ssm";
 
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 
@@ -221,9 +226,6 @@ function createTestStack(): {
     }),
   );
 
-  const registryArn =
-    "arn:aws:agent-registry:us-east-1:123456789012:registry/citadel-test";
-
   const promotionPolicyConfigTable = new dynamodb.Table(
     backendStack,
     "PromotionPolicyConfigTable",
@@ -276,8 +278,6 @@ function createTestStack(): {
     conversationsTable,
     agentReleasesTable,
     agentReleaseWriterRole,
-    registryArn,
-    registryId: "citadel-test",
     environmentReleasePointersTable,
     environmentReleasePointerWriterRole,
     promotionPolicyConfigTable,
@@ -312,6 +312,14 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
         }),
       },
     });
+  });
+
+  test("every function with REGISTRY_ID also carries REGISTRY_GENERATION (SSM-shared seam, finding 8b7ee8af)", () => {
+    expectRegistryGenerationBesideRegistryId(template.toJSON() as TemplateJson);
+  });
+
+  test("the template does NOT import the backend registry exports (registry id/arn are SSM-resolved)", () => {
+    expectNoRegistryExportImports(template.toJSON() as TemplateJson);
   });
 
   test("AgentReleaseResolverFunction's execution role IS the existing AgentReleaseWriterRole (assumed, not a fresh grantReadWriteData role)", () => {

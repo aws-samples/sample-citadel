@@ -21,6 +21,7 @@ import * as cdk from "aws-cdk-lib";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import * as path from "path";
 import * as fs from "fs";
+import { CfnPolicyResourceLike } from "./helpers/registry-ssm";
 
 const assetDirs = [
   path.resolve(__dirname, "../src/schema"),
@@ -97,8 +98,6 @@ describe("CitadelRegistryStack — fabricator resolver grants on the fabrication
       modelCatalogTable: backendStack.modelCatalogTable,
       idempotencyTable: backendStack.idempotencyTable,
       userPool: backendStack.userPool,
-      registryArn: backendStack.registryArn,
-      registryId: backendStack.registryId,
       adrsTable: backendStack.adrsTable,
     });
     template = Template.fromStack(stack);
@@ -137,15 +136,16 @@ describe("CitadelRegistryStack — fabricator resolver grants on the fabrication
 
   test("a PutItem grant scoped to the jobs-table ARN exists (request resolver)", () => {
     const policies = template.findResources("AWS::IAM::Policy");
-    const hasScopedPut = Object.values(policies).some((policy: any) =>
-      (policy.Properties.PolicyDocument.Statement as any[]).some((stmt) => {
-        const resourceStr = JSON.stringify(stmt.Resource ?? "");
-        if (!resourceStr.includes(tableName)) return false;
-        const actions: string[] = Array.isArray(stmt.Action)
-          ? stmt.Action
-          : [stmt.Action];
-        return actions.includes("dynamodb:PutItem");
-      }),
+    const hasScopedPut = Object.values(policies).some(
+      (policy: CfnPolicyResourceLike) =>
+        (policy.Properties?.PolicyDocument?.Statement ?? []).some((stmt) => {
+          const resourceStr = JSON.stringify(stmt.Resource ?? "");
+          if (!resourceStr.includes(tableName)) return false;
+          const actions: string[] = Array.isArray(stmt.Action)
+            ? stmt.Action
+            : [stmt.Action];
+          return actions.includes("dynamodb:PutItem");
+        }),
     );
     expect(hasScopedPut).toBe(true);
   });

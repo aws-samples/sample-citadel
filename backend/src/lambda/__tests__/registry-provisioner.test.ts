@@ -7,7 +7,10 @@
  *   RegistryArn/RegistryId response attribute NAMES.
  * - Create conflict: falls back to ListRegistriesCommand lookup.
  * - Update: re-uses an alive registry; recreates on a dead one.
- * - Delete: sends DeleteRegistryCommand, tolerates already-deleted.
+ * - Delete: checks ListRegistryRecordsCommand first — RETAINS a registry
+ *   that still has records (SUCCESS without DeleteRegistryCommand, finding
+ *   8b7ee8af delete-safety); only an empty registry is deleted, tolerating
+ *   already-deleted.
  */
 import {
   AgentRegistryControlClient,
@@ -15,6 +18,7 @@ import {
   DeleteRegistryCommand,
   GetRegistryCommand,
   ListRegistriesCommand,
+  ListRegistryRecordsCommand,
   AutoApprovalRule,
 } from "@aws-sdk/client-agent-registry-control";
 import { mockClient } from "aws-sdk-client-mock";
@@ -184,7 +188,30 @@ describe("registry-provisioner handler", () => {
   });
 
   describe("Delete", () => {
-    it("sends DeleteRegistryCommand and reports SUCCESS", async () => {
+    it("retains a registry that still has records: no DeleteRegistryCommand, reports SUCCESS", async () => {
+      sdkMock.on(ListRegistryRecordsCommand).resolves({
+        registryRecords: [{ registryRecordId: "rec-1" }] as never,
+      });
+      sdkMock.on(DeleteRegistryCommand).resolves({});
+
+      const event = baseEvent({
+        RequestType: "Delete",
+        PhysicalResourceId:
+          "arn:aws:agent-registry:us-east-1:123:registry/reg-populated",
+      } as Partial<CloudFormationCustomResourceEvent>);
+      await handler(event);
+
+      expect(sdkMock.commandCalls(ListRegistryRecordsCommand)).toHaveLength(1);
+      expect(
+        sdkMock.commandCalls(ListRegistryRecordsCommand)[0].args[0].input,
+      ).toEqual({ registryId: "reg-populated", maxResults: 1 });
+      expect(sdkMock.commandCalls(DeleteRegistryCommand)).toHaveLength(0);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.Status).toBe("SUCCESS");
+    });
+
+    it("sends DeleteRegistryCommand and reports SUCCESS when the registry has zero records", async () => {
+      sdkMock.on(ListRegistryRecordsCommand).resolves({ registryRecords: [] });
       sdkMock.on(DeleteRegistryCommand).resolves({});
 
       const event = baseEvent({
@@ -195,12 +222,14 @@ describe("registry-provisioner handler", () => {
       await handler(event);
 
       const calls = sdkMock.commandCalls(DeleteRegistryCommand);
+      expect(calls).toHaveLength(1);
       expect(calls[0].args[0].input).toEqual({ registryId: "reg-todelete" });
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(body.Status).toBe("SUCCESS");
     });
 
     it("tolerates an already-deleted registry (ResourceNotFoundException) without failing", async () => {
+      sdkMock.on(ListRegistryRecordsCommand).resolves({ registryRecords: [] });
       const err = new Error("gone") as Error & { name: string };
       err.name = "ResourceNotFoundException";
       sdkMock.on(DeleteRegistryCommand).rejects(err);

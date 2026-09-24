@@ -23,6 +23,12 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
+import {
+  expectNoRegistryExportImports,
+  expectRegistryGenerationBesideRegistryId,
+  registrySsmParamLogicalIds,
+  TemplateJson,
+} from "./helpers/registry-ssm";
 import { assertSharedAsyncDlqShape } from "./helpers/shared-dlq-shape";
 
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
@@ -152,9 +158,6 @@ function createFixture(app: cdk.App) {
     idempotencyTable,
     adrsTable,
     userPool,
-    registryArn:
-      "arn:aws:agent-registry:us-east-1:123456789012:registry/mock-registry",
-    registryId: "mock-registry",
   };
 }
 
@@ -532,6 +535,19 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
       const fn = agentCodeResolverFn();
       const envVars = fn.Properties?.Environment?.Variables ?? {};
       expect(envVars.REGISTRY_ID).toBeDefined();
+    });
+
+    test("REGISTRY_ID is SSM-resolved (finding 8b7ee8af) and accompanied by REGISTRY_GENERATION on every carrier", () => {
+      const json = template.toJSON() as TemplateJson;
+      const { idParam } = registrySsmParamLogicalIds(json, "test");
+      const fn = agentCodeResolverFn();
+      const envVars = fn.Properties?.Environment?.Variables ?? {};
+      expect(envVars.REGISTRY_ID).toEqual({ Ref: idParam });
+      expectRegistryGenerationBesideRegistryId(json);
+    });
+
+    test("the template does NOT import the backend registry exports (SSM is the only sharing channel)", () => {
+      expectNoRegistryExportImports(template.toJSON() as TemplateJson);
     });
 
     test("has a READ-ONLY agent-registry:GetRegistryRecord statement scoped to the registry ARN — no Create/Update/Delete", () => {
