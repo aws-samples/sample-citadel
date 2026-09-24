@@ -378,13 +378,12 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
     //
     // The registry-read grant (agent-registry:GetRegistryRecord) is the
     // ONE exception: it is attached via a standalone iam.Policy +
-    // .attachToRole() rather than addToRolePolicy/grantXxx, specifically
-    // so the Policy *resource* is synthesized in GovernanceStack (the
-    // attaching stack) instead of BackendStack (the role-owning stack).
-    // Inlining it onto BackendStack's role from within GovernanceStack —
-    // which is what addToRolePolicy/grantXxx would do — created a
-    // backend<->governance DependencyCycle once registryArn started
-    // resolving via an SSM lookup owned by GovernanceStack. See
+    // .addToPrincipalPolicy() directly on the imported writer role,
+    // specifically so the Policy *resource* synthesizes in BackendStack
+    // (the role-owning stack) rather than GovernanceStack. This is safe
+    // now because the resource is an account-scoped wildcard — no SSM
+    // token, no governance-scoped token — so the statement carries no
+    // cross-stack reference and creates no new export. See
     // AgentReleaseResolverRegistryReadPolicy in governance-stack.ts.
     const policies = backendTemplate.findResources("AWS::IAM::Policy");
     const writerRolePolicies = Object.values(policies).filter((p) => {
@@ -407,25 +406,12 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
     );
     expect(allActions).toEqual(expect.arrayContaining(["dynamodb:GetItem"]));
 
-    // agent-registry:GetRegistryRecord lives in a Policy resource
-    // attached to the same role, but that Policy resource is synthesized
-    // in GovernanceStack's own template (attachToRole keeps the Policy
-    // in the attaching stack, not the role-owning stack). Cross-stack,
-    // the Roles entry is an Fn::ImportValue (or Fn::Sub wrapping one),
-    // not a same-stack Ref — collect every Policy resource in
-    // GovernanceStack's template that isn't already accounted for by
-    // BackendStack's own writerRolePolicies and inspect its actions
-    // directly rather than trying to pattern-match the Roles reference
-    // shape.
-    const governancePolicies = template.findResources("AWS::IAM::Policy");
-    const governanceActions = Object.values(governancePolicies).flatMap((p) =>
-      (
-        (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{
-          Action?: string | string[];
-        }>
-      ).flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action])),
-    );
-    expect(governanceActions).toEqual(
+    // agent-registry:GetRegistryRecord now lives in the SAME
+    // backend-hosted writer-role policy set: addToPrincipalPolicy on the
+    // imported role inlines the statement into BackendStack's template,
+    // not GovernanceStack's, because the resource is account-scoped
+    // (no cross-stack token to force a separate Policy resource).
+    expect(allActions).toEqual(
       expect.arrayContaining(["agent-registry:GetRegistryRecord"]),
     );
   });

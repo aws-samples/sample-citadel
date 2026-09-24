@@ -168,11 +168,10 @@ export class GovernanceStack extends cdk.Stack {
       "RegistryIdSsmLookup",
       `/citadel/${props.environment}/registry/id`,
     ).stringValue;
-    const registryArn = ssm.StringParameter.fromStringParameterName(
-      this,
-      "RegistryArnSsmLookup",
-      `/citadel/${props.environment}/registry/arn`,
-    ).stringValue;
+    // registryArn (SSM-resolved) is no longer read here: the registry-read
+    // grant on agentReleaseWriterRole now uses an account-scoped wildcard
+    // (see AgentReleaseResolverRegistryReadPolicy site below) so no
+    // governance-scoped token crosses into the backend template.
 
     // ============================================================
     // Cross-stack AppSync pattern — L1 CfnDataSource + CfnResolver
@@ -1348,31 +1347,38 @@ exports.handler = async (event) => {
     // inline this statement onto that backend-owned role's DefaultPolicy
     // from within GovernanceStack, creating a backend<->governance
     // construct dependency cycle.
-    new iam.Policy(this, "AgentReleaseResolverEvalSuitesUpdatePolicy", {
-      statements: [
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ["dynamodb:UpdateItem"],
-          resources: [props.evalSuitesTable.tableArn],
-        }),
-      ],
-    }).attachToRole(props.agentReleaseWriterRole);
+    // Granted directly via addToRolePolicy on the backend-owned writer
+    // role: the resource is the backend-owned EvalSuitesTable's own ARN
+    // token (no governance-scoped or SSM token), so this statement lands
+    // entirely in the backend template with no cross-stack reference.
+    props.agentReleaseWriterRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:UpdateItem"],
+        resources: [props.evalSuitesTable.tableArn],
+      }),
+    );
     props.projectsTable.grantReadData(agentReleaseResolverFunction);
-    // Attached as a standalone iam.Policy (not addToRolePolicy) because
-    // agentReleaseWriterRole is imported from BackendStack: calling
-    // addToRolePolicy directly on the Lambda would inline this statement
-    // onto that backend-owned role from within GovernanceStack, creating
-    // a backend<->governance construct dependency cycle now that
-    // registryArn is resolved via SSM token in this stack.
-    new iam.Policy(this, "AgentReleaseResolverRegistryReadPolicy", {
-      statements: [
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ["agent-registry:GetRegistryRecord"],
-          resources: [registryArn, `${registryArn}/*`],
-        }),
-      ],
-    }).attachToRole(props.agentReleaseWriterRole);
+    // Granted directly via addToRolePolicy on the backend-owned writer
+    // role: the resource is an account-scoped wildcard (no SSM token, no
+    // governance-scoped token), so this statement lands entirely in the
+    // backend template — it carries no cross-stack reference and no new
+    // export, avoiding the addToRolePolicy-on-imported-role deadlock
+    // (findings 8b7ee8af, 476e8d74).
+    // Wildcard is deliberate: the registry id is not knowable here
+    // without a cross-stack token that deadlocks deploys (findings
+    // 8b7ee8af, 476e8d74); tighten under CIT-182 once the registry is
+    // stable.
+    props.agentReleaseWriterRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["agent-registry:GetRegistryRecord"],
+        resources: [
+          `arn:aws:agent-registry:${this.region}:${this.account}:registry/*`,
+          `arn:aws:agent-registry:${this.region}:${this.account}:registry/*/record/*`,
+        ],
+      }),
+    );
 
     const agentReleaseDataSourceRole = new iam.Role(
       this,
