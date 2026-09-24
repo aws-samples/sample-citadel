@@ -22,6 +22,7 @@ import { CfnGraphQLSchema } from "aws-cdk-lib/aws-appsync";
 import * as path from "path";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
+import { REGISTRY_GENERATION } from "./registry-generation";
 
 interface BackendStackProps extends cdk.StackProps {
   environment: string;
@@ -507,7 +508,8 @@ export class BackendStack extends cdk.Stack {
           AutoApproval: String(registryAutoApproval),
           Description: `Citadel agent and tool registry for ${props.environment}`,
           // bumped to force the provisioner Update that creates the GA-namespace registry (finding c6544456); the old bedrock-agentcore registry is left in place for migration
-          ForceRecreate: "2026-09-24-agent-registry-ga",
+          // reverted to REGISTRY_GENERATION for phase 1 (no recreation); phase 2 bumps this
+          ForceRecreate: REGISTRY_GENERATION,
         },
       },
     );
@@ -528,6 +530,21 @@ export class BackendStack extends cdk.Stack {
       description: "AgentCore Registry ID",
       exportName: `${this.stackName}-RegistryId`,
     });
+
+    // Publish registry id/arn to SSM (mirrors the oauth-return-url param
+    // above) so consumers can resolve them without a cross-stack Fn::ImportValue.
+    new ssm.StringParameter(this, "RegistryIdParam", {
+      parameterName: `/citadel/${props.environment}/registry/id`,
+      stringValue: this.registryId,
+    });
+    new ssm.StringParameter(this, "RegistryArnParam", {
+      parameterName: `/citadel/${props.environment}/registry/arn`,
+      stringValue: this.registryArn,
+    });
+
+    // keeps the existing cross-stack exports alive while consumers move to SSM; phase 2 removes
+    this.exportValue(this.registryId);
+    this.exportValue(this.registryArn);
 
     // NOTE: registrySyncRule, registrySyncDlq, and registrySyncLambda moved
     // to CitadelRegistryStack (backend-stack-split phase 2, decision
@@ -569,6 +586,7 @@ export class BackendStack extends cdk.Stack {
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
           APPS_TABLE: this.appsTable.tableName,
         },
         timeout: cdk.Duration.minutes(5),
@@ -945,6 +963,7 @@ export class BackendStack extends cdk.Stack {
           AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
           REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
           // Governance activation gate (US-IMP): ENVIRONMENT selects the
           // governance rollout SSM parameter path (getGovernanceEnforce);
           // EVENT_BUS_NAME targets the shared bus for best-effort gate
@@ -1016,6 +1035,7 @@ export class BackendStack extends cdk.Stack {
           TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
           REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "ToolConfigResolverFunctionLogs", {
