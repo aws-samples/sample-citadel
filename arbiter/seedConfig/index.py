@@ -1,7 +1,11 @@
 import json
+import logging
 import os
 import boto3
 import cfnresponse
+from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
 
 # US-ARB-011: governance table env vars. Read at module scope so the
 # handler stays a pure dispatch on event['RequestType']. Both are optional
@@ -71,6 +75,15 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
       - IDEMPOTENT: mirrors the fabricator's lookup-first behavior — when a
         record with this name already exists, CreateRegistryRecord is
         skipped so CFN re-runs never create duplicates.
+      - NON-FATAL: any botocore ClientError raised by CreateRegistryRecord
+        (e.g. AccessDeniedException, ResourceNotFoundException) is caught,
+        logged as a WARNING with the operation and error code, and treated
+        as "not seeded" rather than propagating. The DynamoDB/S3 seeding
+        this handler performs elsewhere stays authoritative and unaffected.
+
+    Returns:
+        True if a registry record was created (or already existed), False
+        if the seed was skipped or denied for any reason.
     """
     registry_id = os.environ.get('REGISTRY_ID')
     registry_enabled = os.environ.get('REGISTRY_ENABLED')
@@ -79,7 +92,7 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
             'Registry not configured (REGISTRY_ID/REGISTRY_ENABLED unset) — '
             f'skipping {agent_id} registry record seed'
         )
-        return
+        return False
 
     try:
         # Shared client from the arbiter catalog layer (same import pattern
@@ -91,17 +104,20 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
             'WARNING: catalog.registry_client unavailable (catalog layer '
             f'not attached?) — skipping {agent_id} registry record seed'
         )
-        return
+        return False
 
     # Idempotency lookup first (mirrors the fabricator's
     # _find_existing_record_id): exact name match on the record name.
+    # list_agent_records already swallows ClientError internally and
+    # returns [] on failure, so a denied/unavailable list is treated the
+    # same as "no existing record" and falls through to attempt create.
     for record in list_agent_records(registry_id):
         if isinstance(record, dict) and record.get('name') == agent_id:
             print(
                 f"Registry record '{agent_id}' already exists "
                 f"(recordId={record.get('recordId')}); skipping create"
             )
-            return
+            return True
 
     # Fabricator-shaped executable config + manifest + custom metadata
     # (see store_agent_config_registry in arbiter/fabricator/index.py).
@@ -142,30 +158,47 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
     }
 
     client = boto3.client('agent-registry-control')
-    response = client.create_registry_record(
-        registryId=registry_id,
-        name=agent_id,
-        displayName=agent_id,
-        description=description,
-        recordType='CUSTOM',
-        descriptors={
-            'custom': {
-                'data': json.dumps(custom_metadata, default=str),
+    try:
+        response = client.create_registry_record(
+            registryId=registry_id,
+            name=agent_id,
+            displayName=agent_id,
+            description=description,
+            recordType='CUSTOM',
+            descriptors={
+                'custom': {
+                    'data': json.dumps(custom_metadata, default=str),
+                },
             },
-        },
-    )
+        )
+    except ClientError as exc:
+        error_code = exc.response.get('Error', {}).get('Code', 'Unknown')
+        logger.warning(
+            "Registry create_registry_record failed for %s "
+            "(errorCode=%s): %s", agent_id, error_code, exc,
+        )
+        print(
+            f"WARNING: create_registry_record denied/unavailable for "
+            f"{agent_id} (errorCode={error_code}) — continuing without a "
+            "registry record; DynamoDB/S3 seeding is unaffected"
+        )
+        return False
     print(
         f"Created registry record for {agent_id} "
         f"(status={response.get('status')}); leaving it in its post-create "
         'DRAFT status like fabricator-created records'
     )
+    return True
 
 
 def _seed_demo_agent_registry_record(worker_queue_url):
     """Backward-compatible wrapper around the generalized registry seeder,
     kept so the demo-echo-agent call site (and its existing tests) do not
-    need to change shape."""
-    _seed_agent_registry_record(
+    need to change shape.
+
+    Returns the underlying seeder's success flag (True if a record was
+    created or already existed, False if skipped/denied)."""
+    return _seed_agent_registry_record(
         DEMO_ECHO_AGENT_ID, DEMO_ECHO_DESCRIPTION, DEMO_ECHO_MODULE_FILENAME,
         worker_queue_url,
     )
@@ -182,6 +215,10 @@ def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
     Never called at all in a production deploy — see ``SMOKE_FIXTURES_ENABLED``
     and ``backend/lib/arbiter-stack.ts`` for how CDK withholds the env var
     (and therefore the table/grant this agent's tool needs) in prod.
+
+    Returns the registry seed's success flag (see
+    ``_seed_agent_registry_record``); the DDB row and module upload are
+    unaffected by registry outcomes and always attempted.
     """
     smoke_agent = {
         'agentId': SMOKE_IDEMPOTENCY_AGENT_ID,
@@ -239,7 +276,7 @@ def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
             "module upload (partial deploy?). Agent config still seeded."
         )
 
-    _seed_agent_registry_record(
+    return _seed_agent_registry_record(
         SMOKE_IDEMPOTENCY_AGENT_ID, SMOKE_IDEMPOTENCY_DESCRIPTION,
         SMOKE_IDEMPOTENCY_MODULE_FILENAME, worker_queue_url,
     )
@@ -359,8 +396,10 @@ def handler(event, context):
         # Dual-store seam: the DDB row above serves worker dispatch; the
         # AgentCore Registry record below is what the app-publish readiness
         # gate (agent binding DESIGN→READY) resolves by name. Guarded +
-        # idempotent — see the helper docstring.
-        _seed_demo_agent_registry_record(worker_queue_url)
+        # idempotent — see the helper docstring. Non-fatal: any denial or
+        # unavailability is caught inside the helper and only lowers
+        # registry_seeded; DDB/S3 seeding above already happened.
+        registry_seeded = _seed_demo_agent_registry_record(worker_queue_url)
 
         # ------------------------------------------------------------------
         # Idempotency-seam smoke agent — DIAGNOSTIC FIXTURE, non-prod only.
@@ -371,7 +410,10 @@ def handler(event, context):
         # table/grant it depends on — simply do not exist there. Idempotent
         # by the same plain-put_item/put_object semantics as the echo agent.
         if SMOKE_FIXTURES_ENABLED:
-            _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket)
+            smoke_registry_seeded = _seed_smoke_idempotency_agent(
+                table, worker_queue_url, agent_bucket
+            )
+            registry_seeded = registry_seeded and smoke_registry_seeded
         else:
             print(
                 "SMOKE_FIXTURES_ENABLED unset — skipping smoke-idempotency "
@@ -461,7 +503,8 @@ def handler(event, context):
             )
 
         cfnresponse.send(event, context, cfnresponse.SUCCESS, {
-            'Message': 'Agent config seeded successfully'
+            'Message': 'Agent config seeded successfully',
+            'registrySeeded': registry_seeded,
         })
     except Exception as e:
         print(f"Error seeding data: {str(e)}")
