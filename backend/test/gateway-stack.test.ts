@@ -11,7 +11,14 @@ for (const dir of assetDirs) {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-import { GatewayStack, GatewayStackProps } from "../lib/gateway-stack";
+import { GatewayStack } from "../lib/gateway-stack";
+import {
+  CfnPolicyResourceLike,
+  expectNoRegistryExportImports,
+  expectRegistryGenerationBesideRegistryId,
+  registrySsmParamLogicalIds,
+  TemplateJson,
+} from "./helpers/registry-ssm";
 
 function createTestStack(): { stack: GatewayStack; template: Template } {
   const app = new cdk.App();
@@ -45,9 +52,6 @@ function createTestStack(): { stack: GatewayStack; template: Template } {
     appsTable,
     eventBus,
     idempotencyTable,
-    registryId: "test-registry-id",
-    registryArn:
-      "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry-id",
   });
 
   const template = Template.fromStack(stack);
@@ -105,16 +109,29 @@ describe("GatewayStack — Shared Lambda Functions (Task 1.1)", () => {
     });
   });
 
-  // --- Owner-gate registry wiring (finding 13a58234) ---
-  test("AppPublishHandler has REGISTRY_ID environment variable", () => {
+  // --- Owner-gate registry wiring (finding 13a58234; SSM-resolved per
+  // finding 8b7ee8af) ---
+  test("AppPublishHandler has REGISTRY_ID environment variable Ref'ing the SSM registry-id parameter", () => {
+    const { idParam } = registrySsmParamLogicalIds(
+      template.toJSON() as TemplateJson,
+      "test",
+    );
     template.hasResourceProperties("AWS::Lambda::Function", {
       Handler: "app-publish-handler.handler",
       Environment: {
         Variables: Match.objectLike({
-          REGISTRY_ID: "test-registry-id",
+          REGISTRY_ID: { Ref: idParam },
         }),
       },
     });
+  });
+
+  test("every function with REGISTRY_ID also carries REGISTRY_GENERATION", () => {
+    expectRegistryGenerationBesideRegistryId(template.toJSON() as TemplateJson);
+  });
+
+  test("the template does NOT import the backend registry exports (SSM is the only sharing channel)", () => {
+    expectNoRegistryExportImports(template.toJSON() as TemplateJson);
   });
 
   // --- API-key HMAC pepper wiring (authorizer + publish handler) ---
@@ -170,12 +187,14 @@ describe("GatewayStack — Shared Lambda Functions (Task 1.1)", () => {
       lambdas[handlerLogicalId!].Properties.Role?.["Fn::GetAtt"]?.[0];
     expect(handlerRoleRef).toBeDefined();
 
-    const handlerPolicies = Object.values(policies).filter((p: any) =>
-      (p.Properties?.Roles ?? []).some((r: any) => r.Ref === handlerRoleRef),
+    const handlerPolicies = (
+      Object.values(policies) as CfnPolicyResourceLike[]
+    ).filter((p) =>
+      (p.Properties?.Roles ?? []).some((r) => r.Ref === handlerRoleRef),
     );
 
-    const matched = handlerPolicies.some((policy: any) =>
-      (policy.Properties.PolicyDocument.Statement as any[]).some((stmt) => {
+    const matched = handlerPolicies.some((policy: CfnPolicyResourceLike) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some((stmt) => {
         const actions: string[] = Array.isArray(stmt.Action)
           ? stmt.Action
           : [stmt.Action];
@@ -198,12 +217,14 @@ describe("GatewayStack — Shared Lambda Functions (Task 1.1)", () => {
     const handlerRoleRef =
       lambdas[handlerLogicalId!].Properties.Role?.["Fn::GetAtt"]?.[0];
 
-    const handlerPolicies = Object.values(policies).filter((p: any) =>
-      (p.Properties?.Roles ?? []).some((r: any) => r.Ref === handlerRoleRef),
+    const handlerPolicies = (
+      Object.values(policies) as CfnPolicyResourceLike[]
+    ).filter((p) =>
+      (p.Properties?.Roles ?? []).some((r) => r.Ref === handlerRoleRef),
     );
 
-    const matched = handlerPolicies.some((policy: any) =>
-      (policy.Properties.PolicyDocument.Statement as any[]).some((stmt) => {
+    const matched = handlerPolicies.some((policy: CfnPolicyResourceLike) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some((stmt) => {
         const actions: string[] = Array.isArray(stmt.Action)
           ? stmt.Action
           : [stmt.Action];
@@ -326,7 +347,11 @@ describe("GatewayStack — IAM Permissions (Task 1.1)", () => {
   // silently fails closed in production (GetResource throws an access
   // error) rather than merely being untested — asserting its presence
   // here prevents that regression from shipping unnoticed.
-  test("publish handler has agent-registry:GetRegistryRecord scoped to the registry ARN (read-only, no list/write)", () => {
+  test("publish handler has agent-registry:GetRegistryRecord scoped to the SSM-resolved registry ARN (read-only, no list/write)", () => {
+    const { arnParam } = registrySsmParamLogicalIds(
+      template.toJSON() as TemplateJson,
+      "test",
+    );
     template.hasResourceProperties("AWS::IAM::Policy", {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -334,8 +359,8 @@ describe("GatewayStack — IAM Permissions (Task 1.1)", () => {
             Effect: "Allow",
             Action: "agent-registry:GetRegistryRecord",
             Resource: Match.arrayWith([
-              "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry-id",
-              "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry-id/*",
+              { Ref: arnParam },
+              { "Fn::Join": ["", [{ Ref: arnParam }, "/*"]] },
             ]),
           }),
         ]),
@@ -352,17 +377,20 @@ describe("GatewayStack — IAM Permissions (Task 1.1)", () => {
     const handlerRoleRef =
       lambdas[handlerLogicalId!].Properties.Role?.["Fn::GetAtt"]?.[0];
 
-    const handlerPolicies = Object.values(policies).filter((p: any) =>
-      (p.Properties?.Roles ?? []).some((r: any) => r.Ref === handlerRoleRef),
+    const handlerPolicies = (
+      Object.values(policies) as CfnPolicyResourceLike[]
+    ).filter((p) =>
+      (p.Properties?.Roles ?? []).some((r) => r.Ref === handlerRoleRef),
     );
 
-    const registryStatements = handlerPolicies.flatMap((policy: any) =>
-      (policy.Properties.PolicyDocument.Statement as any[]).filter((stmt) => {
-        const actions: string[] = Array.isArray(stmt.Action)
-          ? stmt.Action
-          : [stmt.Action];
-        return actions.some((a) => a.startsWith("agent-registry:"));
-      }),
+    const registryStatements = handlerPolicies.flatMap(
+      (policy: CfnPolicyResourceLike) =>
+        (policy.Properties?.PolicyDocument?.Statement ?? []).filter((stmt) => {
+          const actions: string[] = Array.isArray(stmt.Action)
+            ? stmt.Action
+            : [stmt.Action];
+          return actions.some((a) => a.startsWith("agent-registry:"));
+        }),
     );
     expect(registryStatements.length).toBeGreaterThan(0);
     for (const stmt of registryStatements) {

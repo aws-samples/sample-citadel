@@ -25,6 +25,11 @@ import * as sns from "aws-cdk-lib/aws-sns";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
+import {
+  expectNoRegistryExportImports,
+  expectRegistryGenerationBesideRegistryId,
+  TemplateJson,
+} from "./helpers/registry-ssm";
 
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 
@@ -221,9 +226,6 @@ function createTestStack(): {
     }),
   );
 
-  const registryArn =
-    "arn:aws:agent-registry:us-east-1:123456789012:registry/citadel-test";
-
   const promotionPolicyConfigTable = new dynamodb.Table(
     backendStack,
     "PromotionPolicyConfigTable",
@@ -276,8 +278,6 @@ function createTestStack(): {
     conversationsTable,
     agentReleasesTable,
     agentReleaseWriterRole,
-    registryArn,
-    registryId: "citadel-test",
     environmentReleasePointersTable,
     environmentReleasePointerWriterRole,
     promotionPolicyConfigTable,
@@ -312,6 +312,14 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
         }),
       },
     });
+  });
+
+  test("every function with REGISTRY_ID also carries REGISTRY_GENERATION (SSM-shared seam, finding 8b7ee8af)", () => {
+    expectRegistryGenerationBesideRegistryId(template.toJSON() as TemplateJson);
+  });
+
+  test("the template does NOT import the backend registry exports (registry id/arn are SSM-resolved)", () => {
+    expectNoRegistryExportImports(template.toJSON() as TemplateJson);
   });
 
   test("AgentReleaseResolverFunction's execution role IS the existing AgentReleaseWriterRole (assumed, not a fresh grantReadWriteData role)", () => {
@@ -367,6 +375,17 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
     // expected cross-stack shape, and it is itself part of what proves
     // the resolver assumes the existing role rather than getting a new
     // grantReadWriteData-generated one.
+    //
+    // The registry-read grant (agent-registry:GetRegistryRecord) is the
+    // ONE exception: it is attached via a standalone iam.Policy +
+    // .attachToRole() rather than addToRolePolicy/grantXxx, specifically
+    // so the Policy *resource* is synthesized in GovernanceStack (the
+    // attaching stack) instead of BackendStack (the role-owning stack).
+    // Inlining it onto BackendStack's role from within GovernanceStack —
+    // which is what addToRolePolicy/grantXxx would do — created a
+    // backend<->governance DependencyCycle once registryArn started
+    // resolving via an SSM lookup owned by GovernanceStack. See
+    // AgentReleaseResolverRegistryReadPolicy in governance-stack.ts.
     const policies = backendTemplate.findResources("AWS::IAM::Policy");
     const writerRolePolicies = Object.values(policies).filter((p) => {
       const roles = (p.Properties?.Roles ?? []) as Array<{ Ref?: string }>;
@@ -387,7 +406,26 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
       Array.isArray(s.Action) ? s.Action : [s.Action],
     );
     expect(allActions).toEqual(expect.arrayContaining(["dynamodb:GetItem"]));
-    expect(allActions).toEqual(
+
+    // agent-registry:GetRegistryRecord lives in a Policy resource
+    // attached to the same role, but that Policy resource is synthesized
+    // in GovernanceStack's own template (attachToRole keeps the Policy
+    // in the attaching stack, not the role-owning stack). Cross-stack,
+    // the Roles entry is an Fn::ImportValue (or Fn::Sub wrapping one),
+    // not a same-stack Ref — collect every Policy resource in
+    // GovernanceStack's template that isn't already accounted for by
+    // BackendStack's own writerRolePolicies and inspect its actions
+    // directly rather than trying to pattern-match the Roles reference
+    // shape.
+    const governancePolicies = template.findResources("AWS::IAM::Policy");
+    const governanceActions = Object.values(governancePolicies).flatMap((p) =>
+      (
+        (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{
+          Action?: string | string[];
+        }>
+      ).flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action])),
+    );
+    expect(governanceActions).toEqual(
       expect.arrayContaining(["agent-registry:GetRegistryRecord"]),
     );
   });

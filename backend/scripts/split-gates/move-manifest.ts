@@ -1846,6 +1846,33 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
       "as its already-wired sibling Query.getToolConfig. Reads only the " +
       "static, non-tenant OPERATIONS_REGISTRY — no org scoping needed.",
   },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // E19 phase-1 registry IAM resources migration (finding 8b7ee8af, decision
+  // 06077146): agent-registry:* IAM statements now use SSM parameter
+  // references instead of Fn::ImportValue for registry ARN/ID resolution.
+  // Backend gained 2 SSM parameters (RegistryIdParam, RegistryArnParam) to
+  // enable cross-stack registry identification. These parameters are
+  // retained exports from CitadelRegistryStack to support potential future
+  // registry discovery or re-addressing — a deliberate design choice, not a
+  // temporary artifact. The allowlist route (decision 453d1acc) is used
+  // rather than regenerating the baseline, as per the established
+  // reconciliation pattern.
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    logicalId: "RegistryIdParam7D00EE41",
+    justification:
+      "E19 phase-1: SSM parameter for registry ID (finding 8b7ee8af, " +
+      "decision 06077146). Enables cross-stack registry identification; " +
+      "retained as export from CitadelRegistryStack.",
+  },
+  {
+    logicalId: "RegistryArnParam22606220",
+    justification:
+      "E19 phase-1: SSM parameter for registry ARN (finding 8b7ee8af, " +
+      "decision 06077146). Replaces Fn::ImportValue for IAM resource " +
+      "resolution; retained as export from CitadelRegistryStack.",
+  },
 ];
 
 /**
@@ -1908,8 +1935,9 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       resources: ["GETATT:RegistryAsyncDlq778E7865:Arn"],
       conditionKeys: [],
     },
-    // agent-registry GA namespace migration (finding c6544456): renamed
-    // from bedrock-agentcore:GetRegistryRecord/UpdateRegistryRecord.
+    // E19 phase-1: agent-registry GA namespace migration + SSM resolution
+    // (finding c6544456, finding 8b7ee8af, decision 06077146). Registry
+    // ARN/ID now resolved via SSM parameters instead of Fn::ImportValue.
     {
       effect: "Allow",
       actions: [
@@ -1917,8 +1945,8 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
         "agent-registry:UpdateRegistryRecord",
       ],
       resources: [
-        "GETATT:AgentCoreRegistry:RegistryArn",
-        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+        "GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref",
+        "JOIN::GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref/*",
       ],
       conditionKeys: [],
     },
@@ -1931,43 +1959,46 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       conditionKeys: [],
     },
   ],
-  // Finding 1a9181a4: agent-code-resolver's org+role authz fix (a29f50b)
-  // wired a bedrock-agentcore:GetRegistryRecord-only grant on the Registry
-  // (02a95f3) to look up the agent's Registry record for the orgId
-  // reconciliation check. Read-only, scoped to the registry ARN — no
-  // Create/Update/Delete action is granted. The satellite's frozen
-  // baseline predates this branch's authz work, so it cannot cover the
-  // statement; allowlisted here per the PR 111 reconciliation pattern
-  // rather than regenerating the baseline (a separate governance act).
-  // Action renamed bedrock-agentcore:GetRegistryRecord -> agent-registry:
-  // GetRegistryRecord in the GA namespace migration below (finding
-  // c6544456) — same statement, same justification, updated action string.
+  // E19 phase-1: agent-code-resolver's org+role authz fix (a29f50b) + SSM
+  // resolution (finding 8b7ee8af, decision 06077146) wired a bedrock-
+  // agentcore:GetRegistryRecord-only grant on the Registry (02a95f3, later
+  // renamed to agent-registry:GetRegistryRecord per finding c6544456) to
+  // look up the agent's Registry record for the orgId reconciliation check.
+  // Read-only, scoped to the registry ARN — no Create/Update/Delete action
+  // is granted. The satellite's frozen baseline predates this branch's authz
+  // work, so it cannot cover the statement; allowlisted here per the PR 111
+  // reconciliation pattern rather than regenerating the baseline
+  // (a separate governance act). E19 phase-1 now resolves the registry
+  // reference via SSM parameters instead of Fn::ImportValue.
   AgentCodeResolverFunction720FFFB6: [
     {
       effect: "Allow",
       actions: ["agent-registry:GetRegistryRecord"],
       resources: [
-        "GETATT:AgentCoreRegistry:RegistryArn",
-        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+        "GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref",
+        "JOIN::GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref/*",
       ],
       conditionKeys: [],
     },
   ],
 
   // ═══════════════════════════════════════════════════════════════════════
-  // agent-registry GA namespace migration (finding c6544456, decision
+  // agent-registry GA namespace migration + E19 phase-1 SSM resolution
+  // (finding c6544456, finding 8b7ee8af, decision 06077146, decision
   // 453d1acc: allowlist route, do not regenerate the frozen pre-split
   // baseline). Every bedrock-agentcore:*Registry*/*RegistryRecord* action
-  // across the 5 moved-Lambda roles below was renamed to the agent-registry:
+  // across the moved-Lambda roles was renamed to the agent-registry:
   // equivalent (same operation names, same resource scoping) as part of the
-  // agent-registry GA rollout — this is a deliberate, intended IAM change,
-  // not a broadening. The frozen baseline (captured before this migration)
-  // can never cover an agent-registry:* action, so each renamed statement
-  // is allowlisted here per-Lambda rather than regenerating the baseline.
-  // Actions/resources below are byte-identical to what registry-stack.ts
-  // grants each function post-rename; confirmed via a live
-  // `cdk synth citadel-registry-dev citadel-backend-dev` + `npm run
-  // split:gates` run, not hand-typed.
+  // agent-registry GA rollout — a deliberate, intended IAM change, not a
+  // broadening. Additionally, E19 phase-1 (finding 8b7ee8af, decision
+  // 06077146) changed registry ARN/ID resolution from Fn::ImportValue to SSM
+  // parameter references, enabling cross-stack registry identification. The
+  // frozen baseline (captured pre-migration) can never cover an
+  // agent-registry:* action NOR SSM-resolved resources, so each statement
+  // is allowlisted here per-Lambda. Actions/resources below match what
+  // registry-stack.ts grants post-rename and post-SSM-migration; confirmed
+  // via a live `cdk synth citadel-registry-dev citadel-backend-dev` + `npm
+  // run split:gates` run, not hand-typed.
   // ═══════════════════════════════════════════════════════════════════════
   AgentImportResolverFunctionE5B20F94: [
     {
@@ -1982,8 +2013,8 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
         "agent-registry:ListRegistryRecords",
       ],
       resources: [
-        "GETATT:AgentCoreRegistry:RegistryArn",
-        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+        "GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref",
+        "JOIN::GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref/*",
       ],
       conditionKeys: [],
     },
@@ -2006,8 +2037,8 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
         "agent-registry:ListRegistryRecords",
       ],
       resources: [
-        "GETATT:AgentCoreRegistry:RegistryArn",
-        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+        "GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref",
+        "JOIN::GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref/*",
       ],
       conditionKeys: [],
     },
@@ -2024,8 +2055,8 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
         "agent-registry:ListRegistryRecords",
       ],
       resources: [
-        "GETATT:AgentCoreRegistry:RegistryArn",
-        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+        "GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref",
+        "JOIN::GETATT:SsmParameterValuecitadeldevregistryarnC96584B6F00A464EAD1953AFF4B05118Parameter:Ref/*",
       ],
       conditionKeys: [],
     },

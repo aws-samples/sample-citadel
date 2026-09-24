@@ -12,6 +12,7 @@ import {
   DeleteRegistryCommand,
   GetRegistryCommand,
   ListRegistriesCommand,
+  ListRegistryRecordsCommand,
   AutoApprovalRule,
 } from "@aws-sdk/client-agent-registry-control";
 import type {
@@ -184,6 +185,19 @@ export async function handler(
       case "Delete": {
         const physicalId = event.PhysicalResourceId;
         const registryId = physicalId.split("/").pop()!;
+
+        const recordsClient = new AgentRegistryControlClient({});
+        const existingRecords = await recordsClient.send(
+          new ListRegistryRecordsCommand({ registryId, maxResults: 1 }),
+        );
+        if (
+          existingRecords.registryRecords &&
+          existingRecords.registryRecords.length > 0
+        ) {
+          console.log("refusing to delete registry with records; retaining");
+          await sendResponse(event, "SUCCESS", {}, physicalId);
+          break;
+        }
 
         try {
           await client.send(new DeleteRegistryCommand({ registryId }));

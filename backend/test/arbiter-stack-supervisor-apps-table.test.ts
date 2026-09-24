@@ -10,6 +10,7 @@ import {
   scaffoldBackendAssetDirs,
   scaffoldArbiterStubs,
 } from "./helpers/scaffold-stub-assets";
+import { CfnPolicyResourceLike } from "./helpers/registry-ssm";
 
 // Ensure asset directories exist for CDK synthesis
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
@@ -42,12 +43,18 @@ function findSupervisorLogicalId(template: Template): string {
 /**
  * Helper: find IAM policies attached to a given role logical ID.
  */
-function findPoliciesForRole(template: Template, roleLogicalId: string): any[] {
-  const all = template.toJSON().Resources;
+function findPoliciesForRole(
+  template: Template,
+  roleLogicalId: string,
+): CfnPolicyResourceLike[] {
+  const all = template.toJSON().Resources as Record<
+    string,
+    CfnPolicyResourceLike
+  >;
   return Object.values(all).filter(
-    (r: any) =>
+    (r) =>
       r.Type === "AWS::IAM::Policy" &&
-      r.Properties?.Roles?.some((role: any) => role.Ref === roleLogicalId),
+      r.Properties?.Roles?.some((role) => role.Ref === roleLogicalId),
   );
 }
 
@@ -135,7 +142,7 @@ function createFixture(app: cdk.App) {
   };
 }
 
-describe("Supervisor with registryArn provided", () => {
+describe("Supervisor registry wiring (SSM-resolved)", () => {
   let template: Template;
 
   beforeAll(() => {
@@ -146,9 +153,6 @@ describe("Supervisor with registryArn provided", () => {
       environment: "test",
       env: { account: "123456789012", region: "us-east-1" },
       ...fixture,
-      registryArn:
-        "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry",
-      registryId: "test-registry",
     });
 
     template = Template.fromStack(stack);
@@ -203,9 +207,9 @@ describe("Supervisor with registryArn provided", () => {
     const policies = findPoliciesForRole(template, roleRef);
     expect(policies.length).toBeGreaterThan(0);
 
-    const hasDdbRead = policies.some((policy: any) =>
-      policy.Properties.PolicyDocument.Statement.some(
-        (stmt: any) =>
+    const hasDdbRead = policies.some((policy) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some(
+        (stmt) =>
           stmt.Effect === "Allow" &&
           Array.isArray(stmt.Action) &&
           stmt.Action.includes("dynamodb:GetItem") &&
@@ -224,9 +228,9 @@ describe("Supervisor with registryArn provided", () => {
     const policies = findPoliciesForRole(template, roleRef);
     expect(policies.length).toBeGreaterThan(0);
 
-    const hasRegistryRead = policies.some((policy: any) =>
-      policy.Properties.PolicyDocument.Statement.some(
-        (stmt: any) =>
+    const hasRegistryRead = policies.some((policy) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some(
+        (stmt) =>
           stmt.Effect === "Allow" &&
           Array.isArray(stmt.Action) &&
           stmt.Action.includes("agent-registry:GetRegistryRecord") &&
@@ -235,49 +239,12 @@ describe("Supervisor with registryArn provided", () => {
     );
     expect(hasRegistryRead).toBe(true);
   });
-});
-
-describe("Supervisor without registryArn", () => {
-  let template: Template;
-
-  beforeAll(() => {
-    const app = new cdk.App({ context: { "aws:cdk:bundling-stacks": [] } });
-    const fixture = createFixture(app);
-
-    const stack = new ArbiterStack(app, "TestArbiterStackNoRegistry", {
-      environment: "test",
-      env: { account: "123456789012", region: "us-east-1" },
-      ...fixture,
-      registryArn: undefined,
-      registryId: undefined,
-    });
-
-    template = Template.fromStack(stack);
-  });
-
-  test("Supervisor does NOT have REGISTRY_ID when registryArn is absent", () => {
+  test("Supervisor has REGISTRY_GENERATION beside REGISTRY_ID (redeploy pin)", () => {
     const supervisorId = findSupervisorLogicalId(template);
     const all = template.toJSON().Resources;
     const envVars = all[supervisorId].Properties.Environment.Variables;
 
-    expect(envVars).not.toHaveProperty("REGISTRY_ID");
-    expect(envVars).not.toHaveProperty("REGISTRY_ENABLED");
-  });
-
-  test("Supervisor does NOT have Registry IAM when registryArn is absent", () => {
-    const supervisorId = findSupervisorLogicalId(template);
-    const all = template.toJSON().Resources;
-    const roleRef = all[supervisorId].Properties.Role["Fn::GetAtt"][0];
-
-    const policies = findPoliciesForRole(template, roleRef);
-
-    const hasRegistryRead = policies.some((policy: any) =>
-      policy.Properties.PolicyDocument.Statement.some(
-        (stmt: any) =>
-          Array.isArray(stmt.Action) &&
-          stmt.Action.includes("agent-registry:GetRegistryRecord"),
-      ),
-    );
-    expect(hasRegistryRead).toBe(false);
+    expect(envVars).toHaveProperty("REGISTRY_ID");
+    expect(envVars).toHaveProperty("REGISTRY_GENERATION");
   });
 });

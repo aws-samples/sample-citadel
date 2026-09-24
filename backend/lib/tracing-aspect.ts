@@ -83,6 +83,19 @@ export class EnableLambdaTracing implements cdk.IAspect {
 
     const role = node.role;
     if (role) {
+      // Skip roles imported from a different stack than the Lambda being
+      // visited. Calling addManagedPolicy()/addResourceSuppressions() on a
+      // cross-stack role from within this stack's Aspect pass inlines a
+      // policy attachment onto the OTHER stack's construct tree, creating a
+      // CDK construct dependency cycle between the two stacks (observed with
+      // governance-stack.ts Lambdas sharing BackendStack's imported
+      // agentReleaseWriterRole). Cross-stack-role Lambdas are left untraced
+      // by this Aspect; the owning stack is responsible for tracing/managed
+      // policies on roles it owns.
+      if (cdk.Stack.of(role) !== cdk.Stack.of(node)) {
+        return;
+      }
+
       role.addManagedPolicy(
         iam.ManagedPolicy.fromAwsManagedPolicyName("AWSXRayDaemonWriteAccess"),
       );

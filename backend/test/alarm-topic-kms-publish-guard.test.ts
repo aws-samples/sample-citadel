@@ -203,8 +203,6 @@ describe("structural guard: alarm -> encrypted-topic -> key-policy must grant cl
       appSyncEndpoint: backend.appSyncApi.graphqlUrl,
       appsTable: backend.appsTable,
       executionSpecificationsTable: backend.executionSpecificationsTable,
-      registryArn: backend.registryArn,
-      registryId: backend.registryId,
       alarmTopic: backend.alarmTopic,
     });
     const resources = Template.fromStack(arbiter).toJSON().Resources;

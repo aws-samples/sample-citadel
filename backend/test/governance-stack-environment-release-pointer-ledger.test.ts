@@ -221,9 +221,6 @@ function createTestStack(): {
     }),
   );
 
-  const registryArn =
-    "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test";
-
   const promotionPolicyConfigTable = new dynamodb.Table(
     backendStack,
     "PromotionPolicyConfigTable",
@@ -279,8 +276,6 @@ function createTestStack(): {
       conversationsTable,
       agentReleasesTable,
       agentReleaseWriterRole,
-      registryArn,
-      registryId: "citadel-test",
       environmentReleasePointersTable,
       environmentReleasePointerWriterRole,
       promotionPolicyConfigTable,

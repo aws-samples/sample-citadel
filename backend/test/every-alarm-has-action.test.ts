@@ -98,8 +98,6 @@ describe("every CloudWatch alarm has at least one action (muted-alarm regression
       appSyncEndpoint: backend.appSyncApi.graphqlUrl,
       appsTable: backend.appsTable,
       executionSpecificationsTable: backend.executionSpecificationsTable,
-      registryArn: backend.registryArn,
-      registryId: backend.registryId,
       alarmTopic: backend.alarmTopic,
     });
 

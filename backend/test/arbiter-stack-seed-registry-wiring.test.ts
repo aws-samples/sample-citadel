@@ -1,20 +1,23 @@
 /**
- * Seed Lambda — AgentCore Registry wiring (dual-store agent seam)
+ * Seed Lambda — AgentCore Registry wiring (dual-store agent seam),
+ * SSM-resolved.
  *
  * The seedConfig custom-resource Lambda must be able to create the
  * demo-echo-agent's AgentCore Registry record (in addition to its DDB row)
  * so the out-of-box demo flow can pass the app-publish readiness gate
  * (agent binding DESIGN→READY resolves the agent by name in the registry).
  *
+ * Since finding 8b7ee8af the registry id/arn are resolved from the SSM
+ * parameters `/citadel/<env>/registry/{id,arn}` instead of props, so the
+ * wiring is unconditional (the old without-props variant is gone).
+ *
  * Asserts on SeedAgentConfigFunction:
  *   A. Catalog layer attached (unconditional — enables the
  *      catalog.registry_client import used for the idempotency lookup).
- *   B. REGISTRY_ID / REGISTRY_ENABLED env present only when props.registryId
- *      is provided (same conditional pattern as the fabricator).
+ *   B. REGISTRY_ID (SSM Ref) / REGISTRY_ENABLED / REGISTRY_GENERATION env.
  *   C. Minimal bedrock-agentcore grants (CreateRegistryRecord +
- *      ListRegistryRecords ONLY) scoped to props.registryArn (+ /*), only
- *      when props.registryArn is provided. No mutation surface beyond
- *      create (no Update/Delete/Submit/status actions).
+ *      ListRegistryRecords ONLY) scoped to the SSM-resolved registry arn
+ *      (+ /*). No mutation surface beyond create.
  *   D. SeedAgentConfigResource Version bumped so the seed re-runs on the
  *      next deploy and creates the registry record in existing envs.
  */
@@ -27,6 +30,14 @@ import {
   scaffoldBackendAssetDirs,
   scaffoldArbiterStubs,
 } from "./helpers/scaffold-stub-assets";
+import {
+  CfnPolicyResourceLike,
+  CfnResourceLike,
+  CfnStatementLike,
+  registrySsmParamLogicalIds,
+  TemplateJson,
+} from "./helpers/registry-ssm";
+import { REGISTRY_GENERATION } from "../lib/registry-generation";
 
 // CI + clean-checkout safety: stub the asset dirs that ArbiterStack expects.
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
@@ -34,13 +45,9 @@ scaffoldArbiterStubs();
 
 import { ArbiterStack } from "../lib/arbiter-stack";
 
-const REGISTRY_ARN =
-  "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry";
-const REGISTRY_ID = "test-registry-id";
+type Resources = TemplateJson["Resources"];
 
-type Resources = Record<string, any>;
-
-function buildStack(withRegistry: boolean): Resources {
+function buildStack(): TemplateJson {
   const app = new cdk.App({ context: { "aws:cdk:bundling-stacks": [] } });
   const backendStack = new cdk.Stack(app, "MockBackendStack", {
     env: { account: "123456789012", region: "us-east-1" },
@@ -78,15 +85,14 @@ function buildStack(withRegistry: boolean): Resources {
     agentConfigTable,
     codeBucket,
     executionSpecificationsTable,
-    ...(withRegistry && { registryArn: REGISTRY_ARN, registryId: REGISTRY_ID }),
   });
-  return Template.fromStack(stack).toJSON().Resources as Resources;
+  return Template.fromStack(stack).toJSON() as TemplateJson;
 }
 
 function findSeedLambdaId(resources: Resources): string {
   const entry = Object.entries(resources).find(
     ([key, r]) =>
-      (r as any).Type === "AWS::Lambda::Function" &&
+      r.Type === "AWS::Lambda::Function" &&
       key.startsWith("SeedAgentConfigFunction"),
   );
   if (!entry) throw new Error("SeedAgentConfigFunction not found");
@@ -103,20 +109,24 @@ function seedEnv(resources: Resources): Record<string, unknown> {
 function getPoliciesForLambda(
   resources: Resources,
   lambdaLogicalId: string,
-): any[] {
-  const roleRef =
-    resources[lambdaLogicalId]?.Properties?.Role?.["Fn::GetAtt"]?.[0];
+): CfnPolicyResourceLike[] {
+  const roleRef = (
+    resources[lambdaLogicalId]?.Properties?.Role as
+      { "Fn::GetAtt"?: string[] } | undefined
+  )?.["Fn::GetAtt"]?.[0];
   if (!roleRef) return [];
-  return Object.values(resources).filter(
-    (r: any) =>
+  return (Object.values(resources) as CfnPolicyResourceLike[]).filter(
+    (r) =>
       r.Type === "AWS::IAM::Policy" &&
       Array.isArray(r.Properties?.Roles) &&
-      r.Properties.Roles.some((role: any) => role.Ref === roleRef),
+      r.Properties.Roles.some((role) => role.Ref === roleRef),
   );
 }
 
-function collectAgentcoreStatements(policies: any[]): any[] {
-  const statements: any[] = [];
+function collectAgentcoreStatements(
+  policies: CfnPolicyResourceLike[],
+): CfnStatementLike[] {
+  const statements: CfnStatementLike[] = [];
   for (const p of policies) {
     for (const stmt of p.Properties?.PolicyDocument?.Statement ?? []) {
       const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
@@ -133,10 +143,10 @@ function collectAgentcoreStatements(policies: any[]): any[] {
   return statements;
 }
 
-function findSeedCustomResource(resources: Resources): any {
+function findSeedCustomResource(resources: Resources): CfnResourceLike {
   const entry = Object.entries(resources).find(
     ([key, r]) =>
-      (r as any).Type === "AWS::CloudFormation::CustomResource" &&
+      r.Type === "AWS::CloudFormation::CustomResource" &&
       key.startsWith("SeedAgentConfigResource"),
   );
   if (!entry) throw new Error("SeedAgentConfigResource not found");
@@ -144,94 +154,75 @@ function findSeedCustomResource(resources: Resources): any {
 }
 
 describe("ArbiterStack — seed Lambda registry wiring (dual-store agent seam)", () => {
-  describe("with registryArn/registryId provided", () => {
-    let resources: Resources;
-    beforeAll(() => {
-      resources = buildStack(true);
-    });
+  let template: TemplateJson;
+  let resources: Resources;
+  let idParam: string;
+  let arnParam: string;
 
-    test("A. seed Lambda has the catalog layer attached", () => {
-      const layers = resources[findSeedLambdaId(resources)]?.Properties?.Layers;
-      expect(Array.isArray(layers)).toBe(true);
-      const layerRefs = layers.map((l: any) => l.Ref).filter(Boolean);
-      expect(
-        layerRefs.some((ref: string) => ref.startsWith("ArbiterCatalogLayer")),
-      ).toBe(true);
-    });
-
-    test("B. seed env carries REGISTRY_ID and REGISTRY_ENABLED", () => {
-      const env = seedEnv(resources);
-      expect(env.REGISTRY_ID).toBe(REGISTRY_ID);
-      expect(env.REGISTRY_ENABLED).toBe("true");
-    });
-
-    test("C1. seed role grants CreateRegistryRecord + ListRegistryRecords scoped to registryArn", () => {
-      const statements = collectAgentcoreStatements(
-        getPoliciesForLambda(resources, findSeedLambdaId(resources)),
-      );
-      expect(statements.length).toBeGreaterThanOrEqual(1);
-      const actions = statements.flatMap((s) =>
-        Array.isArray(s.Action) ? s.Action : [s.Action],
-      );
-      expect(actions).toContain("agent-registry:CreateRegistryRecord");
-      expect(actions).toContain("agent-registry:ListRegistryRecords");
-      for (const stmt of statements) {
-        const resourceList = Array.isArray(stmt.Resource)
-          ? stmt.Resource
-          : [stmt.Resource];
-        expect(resourceList).toEqual(
-          expect.arrayContaining([REGISTRY_ARN, `${REGISTRY_ARN}/*`]),
-        );
-      }
-    });
-
-    test("C2. seed role has NO registry mutation actions beyond create (least privilege)", () => {
-      const actions = collectAgentcoreStatements(
-        getPoliciesForLambda(resources, findSeedLambdaId(resources)),
-      ).flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
-      for (const forbidden of [
-        "agent-registry:UpdateRegistryRecord",
-        "agent-registry:UpdateRegistryRecordStatus",
-        "agent-registry:SubmitRegistryRecordForApproval",
-        "agent-registry:DeleteRegistryRecord",
-      ]) {
-        expect(actions).not.toContain(forbidden);
-      }
-    });
-
-    test("D. SeedAgentConfigResource Version bumped to v1.4.0", () => {
-      expect(findSeedCustomResource(resources).Properties?.Version).toBe(
-        "v1.4.0",
-      );
-    });
+  beforeAll(() => {
+    template = buildStack();
+    resources = template.Resources;
+    ({ idParam, arnParam } = registrySsmParamLogicalIds(template, "test"));
   });
 
-  describe("without registryArn/registryId", () => {
-    let resources: Resources;
-    beforeAll(() => {
-      resources = buildStack(false);
-    });
+  test("A. seed Lambda has the catalog layer attached", () => {
+    const layers = resources[findSeedLambdaId(resources)]?.Properties?.Layers;
+    expect(Array.isArray(layers)).toBe(true);
+    const layerRefs = (layers as Array<{ Ref?: string }>)
+      .map((l) => l.Ref)
+      .filter((ref): ref is string => Boolean(ref));
+    expect(
+      layerRefs.some((ref: string) => ref.startsWith("ArbiterCatalogLayer")),
+    ).toBe(true);
+  });
 
-    test("A. catalog layer still attached (unconditional)", () => {
-      const layers = resources[findSeedLambdaId(resources)]?.Properties?.Layers;
-      expect(Array.isArray(layers)).toBe(true);
-      const layerRefs = layers.map((l: any) => l.Ref).filter(Boolean);
-      expect(
-        layerRefs.some((ref: string) => ref.startsWith("ArbiterCatalogLayer")),
-      ).toBe(true);
-    });
+  test("B. seed env carries REGISTRY_ID (SSM Ref), REGISTRY_ENABLED and REGISTRY_GENERATION", () => {
+    const env = seedEnv(resources);
+    expect(env.REGISTRY_ID).toEqual({ Ref: idParam });
+    expect(env.REGISTRY_ENABLED).toBe("true");
+    expect(env.REGISTRY_GENERATION).toBe(REGISTRY_GENERATION);
+  });
 
-    test("B. seed env has no REGISTRY_ID / REGISTRY_ENABLED", () => {
-      const env = seedEnv(resources);
-      expect(env.REGISTRY_ID).toBeUndefined();
-      expect(env.REGISTRY_ENABLED).toBeUndefined();
-    });
-
-    test("C. seed role has zero bedrock-agentcore actions", () => {
-      const statements = collectAgentcoreStatements(
-        getPoliciesForLambda(resources, findSeedLambdaId(resources)),
+  test("C1. seed role grants CreateRegistryRecord + ListRegistryRecords scoped to the SSM-resolved registry arn", () => {
+    const statements = collectAgentcoreStatements(
+      getPoliciesForLambda(resources, findSeedLambdaId(resources)),
+    );
+    expect(statements.length).toBeGreaterThanOrEqual(1);
+    const actions = statements.flatMap((s) =>
+      Array.isArray(s.Action) ? s.Action : [s.Action],
+    );
+    expect(actions).toContain("agent-registry:CreateRegistryRecord");
+    expect(actions).toContain("agent-registry:ListRegistryRecords");
+    for (const stmt of statements) {
+      const resourceList = Array.isArray(stmt.Resource)
+        ? stmt.Resource
+        : [stmt.Resource];
+      expect(resourceList).toEqual(
+        expect.arrayContaining([
+          { Ref: arnParam },
+          { "Fn::Join": ["", [{ Ref: arnParam }, "/*"]] },
+        ]),
       );
-      expect(statements).toEqual([]);
-    });
+    }
+  });
+
+  test("C2. seed role has NO registry mutation actions beyond create (least privilege)", () => {
+    const actions = collectAgentcoreStatements(
+      getPoliciesForLambda(resources, findSeedLambdaId(resources)),
+    ).flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
+    for (const forbidden of [
+      "agent-registry:UpdateRegistryRecord",
+      "agent-registry:UpdateRegistryRecordStatus",
+      "agent-registry:SubmitRegistryRecordForApproval",
+      "agent-registry:DeleteRegistryRecord",
+    ]) {
+      expect(actions).not.toContain(forbidden);
+    }
+  });
+
+  test("D. SeedAgentConfigResource Version bumped to v1.4.0", () => {
+    expect(findSeedCustomResource(resources).Properties?.Version).toBe(
+      "v1.4.0",
+    );
   });
 });

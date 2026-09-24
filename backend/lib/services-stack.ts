@@ -22,6 +22,7 @@ import * as s3n from "aws-cdk-lib/aws-s3-notifications";
 import { NagSuppressions } from "cdk-nag";
 import * as fs from "fs";
 import * as path from "path";
+import { REGISTRY_GENERATION } from "./registry-generation";
 
 /**
  * Resolve the repo-root `service/` directory regardless of whether this
@@ -78,12 +79,6 @@ export interface ServicesStackProps extends cdk.StackProps {
   environment: string;
   agentEventBus: events.EventBus;
   documentBucket: s3.Bucket;
-  // Optional AgentCore Registry handles so the intake runtime can read the
-  // factory catalog (fabricated agents live in the Registry, not DynamoDB).
-  // Optional + conditionally wired — mirrors the fabricator in arbiter-stack.ts
-  // — so test paths that construct ServicesStack without a registry still work.
-  registryArn?: string;
-  registryId?: string;
   // Optional AppSync handles so the intake runtime can call the 4 IAM-only
   // intake post-fabrication mutations over SigV4, and so this stack can host
   // the backing intake-orchestration resolver (attached to BackendStack's API
@@ -112,6 +107,15 @@ export class ServicesStack extends cdk.Stack {
 
   constructor(scope: Construct, id: string, props: ServicesStackProps) {
     super(scope, id, props);
+
+    const registryId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/citadel/${props.environment}/registry/id`,
+    );
+    const registryArn = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/citadel/${props.environment}/registry/arn`,
+    );
 
     // Session Memory Table
     this.sessionMemoryTable = new dynamodb.Table(this, "SessionMemoryTable", {
@@ -1117,7 +1121,8 @@ def handler(event, context):
           // Registry id so the intake catalog (list_factory_agents /
           // plan_fabrication) can read fabricated agents from the AgentCore
           // Registry. Conditionally wired, mirroring the fabricator.
-          ...(props.registryId && { REGISTRY_ID: props.registryId }),
+          REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
           // AppSync GraphQL endpoint for the SigV4-signed intake
           // post-fabrication mutations. Conditionally wired like REGISTRY_ID.
           ...(props.appSyncGraphqlUrl && {
@@ -1343,15 +1348,15 @@ def handler(event, context):
     // runtime can list/get fabricated agent records for the factory catalog
     // (list_factory_agents / plan_fabrication). Mirrors the fabricator's
     // registry grant scope in arbiter-stack.ts (ARN + its /* sub-resources).
-    // Conditional on props.registryArn — wired only when a registry exists.
-    if (props.registryArn) {
+    // Conditional on registryArn — wired only when a registry exists.
+    if (registryArn) {
       agentIntakeSingleRuntime.grantPrincipal.addToPrincipalPolicy(
         new iam.PolicyStatement({
           actions: [
             "agent-registry:ListRegistryRecords",
             "agent-registry:GetRegistryRecord",
           ],
-          resources: [props.registryArn, `${props.registryArn}/*`],
+          resources: [registryArn, `${registryArn}/*`],
         }),
       );
     }
@@ -1393,7 +1398,8 @@ def handler(event, context):
             AGENT_CONFIG_TABLE: `citadel-agents-${props.environment}`,
             EVENT_BUS_NAME: props.agentEventBus.eventBusName,
             // registry-backed cores (activateProjectAgents / createApp)
-            ...(props.registryId && { REGISTRY_ID: props.registryId }),
+            REGISTRY_ID: registryId,
+            REGISTRY_GENERATION,
             REGISTRY_ENABLED: "true",
             AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
             // Owner-org Cognito fallback for org-less project rows
@@ -1495,7 +1501,7 @@ def handler(event, context):
       // Registry record access for activation (list/get/updateStatus/submit)
       // and app creation (create). Deliberately NARROWER than the general
       // registry-agent-record resolver: no delete path exists here.
-      if (props.registryArn) {
+      if (registryArn) {
         intakeOrchestrationResolverFn.addToRolePolicy(
           new iam.PolicyStatement({
             actions: [
@@ -1506,7 +1512,7 @@ def handler(event, context):
               "agent-registry:GetRegistryRecord",
               "agent-registry:ListRegistryRecords",
             ],
-            resources: [props.registryArn, `${props.registryArn}/*`],
+            resources: [registryArn, `${registryArn}/*`],
           }),
         );
       }

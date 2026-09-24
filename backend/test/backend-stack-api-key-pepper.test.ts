@@ -18,6 +18,7 @@ import * as cdk from "aws-cdk-lib";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import * as path from "path";
 import * as fs from "fs";
+import { CfnPolicyResourceLike } from "./helpers/registry-ssm";
 
 // Ensure asset directories exist for CDK synthesis
 const assetDirs = [
@@ -53,8 +54,6 @@ describe("CitadelRegistryStack — API-key HMAC pepper wiring (registry-agent-re
       modelCatalogTable: backendStack.modelCatalogTable,
       idempotencyTable: backendStack.idempotencyTable,
       userPool: backendStack.userPool,
-      registryArn: backendStack.registryArn,
-      registryId: backendStack.registryId,
       adrsTable: backendStack.adrsTable,
     });
     template = Template.fromStack(stack);
@@ -73,8 +72,8 @@ describe("CitadelRegistryStack — API-key HMAC pepper wiring (registry-agent-re
 
   function policiesForRole(roleRef: string) {
     const policies = template.findResources("AWS::IAM::Policy");
-    return Object.values(policies).filter((p: any) =>
-      (p.Properties?.Roles ?? []).some((r: any) => r.Ref === roleRef),
+    return (Object.values(policies) as CfnPolicyResourceLike[]).filter((p) =>
+      (p.Properties?.Roles ?? []).some((r) => r.Ref === roleRef),
     );
   }
 
@@ -95,8 +94,8 @@ describe("CitadelRegistryStack — API-key HMAC pepper wiring (registry-agent-re
     );
     const policies = policiesForRole(roleRef);
 
-    const matched = policies.some((policy: any) =>
-      (policy.Properties.PolicyDocument.Statement as any[]).some((stmt) => {
+    const matched = policies.some((policy: CfnPolicyResourceLike) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some((stmt) => {
         const actions: string[] = Array.isArray(stmt.Action)
           ? stmt.Action
           : [stmt.Action];
@@ -116,8 +115,8 @@ describe("CitadelRegistryStack — API-key HMAC pepper wiring (registry-agent-re
     );
     const policies = policiesForRole(roleRef);
 
-    const matched = policies.some((policy: any) =>
-      (policy.Properties.PolicyDocument.Statement as any[]).some((stmt) => {
+    const matched = policies.some((policy: CfnPolicyResourceLike) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some((stmt) => {
         const actions: string[] = Array.isArray(stmt.Action)
           ? stmt.Action
           : [stmt.Action];

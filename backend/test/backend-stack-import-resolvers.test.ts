@@ -135,8 +135,6 @@ describe("CitadelRegistryStack — agent-import resolver wiring (US-IMP-017 guar
       modelCatalogTable: backendStack.modelCatalogTable,
       idempotencyTable: backendStack.idempotencyTable,
       userPool: backendStack.userPool,
-      registryArn: backendStack.registryArn,
-      registryId: backendStack.registryId,
       adrsTable: backendStack.adrsTable,
     });
     const template = Template.fromStack(stack);
