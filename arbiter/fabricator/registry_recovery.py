@@ -144,7 +144,7 @@ def recover_creating_record(
     best-effort.
 
     Args:
-        client: bedrock-agentcore-control client (get_registry_record used).
+        client: agent-registry-control client (get_registry_record used).
         registry_id: Registry containing the record.
         record_id: The recordId whose approve raised the CREATING conflict.
         name: Record name (the tool_id) — for logs and terminal messages.

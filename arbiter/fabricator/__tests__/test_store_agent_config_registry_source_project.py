@@ -66,7 +66,7 @@ def _create_kwargs(client):
 
 
 def _custom_metadata(client):
-    inline = _create_kwargs(client)["descriptors"]["custom"]["inlineContent"]
+    inline = _create_kwargs(client)["descriptors"]["custom"]["data"]
     return json.loads(inline)
 
 

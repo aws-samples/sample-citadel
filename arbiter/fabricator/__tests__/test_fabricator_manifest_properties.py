@@ -110,7 +110,7 @@ def _reset_cached_client():
 
 def _inline_meta_from_create_call(client):
     kwargs = client.create_registry_record.call_args.kwargs
-    return json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+    return json.loads(kwargs["descriptors"]["custom"]["data"])
 
 
 # ---------------------------------------------------------------------------
