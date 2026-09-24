@@ -666,6 +666,28 @@ export const REMOVAL_ALLOWLIST: AllowlistEntry[] = [
   // and a fresh synth of citadel-backend-dev + citadel-registry-dev.
   // ═══════════════════════════════════════════════════════════════════════
 
+  // --- E19 phase-1 registry exports (decision 06077146): registry ARN/ID now resolved via SSM ---
+  {
+    logicalId: "AgentCoreRegistryArn",
+    justification:
+      "Retained only during E19 phase 1; consumers now read the registry id/arn from SSM (finding 8b7ee8af, decision 06077146).",
+  },
+  {
+    logicalId: "AgentCoreRegistryId",
+    justification:
+      "Retained only during E19 phase 1; consumers now read the registry id/arn from SSM (finding 8b7ee8af, decision 06077146).",
+  },
+  {
+    logicalId: "ExportsOutputFnGetAttAgentCoreRegistryRegistryArn635B1025",
+    justification:
+      "Retained only during E19 phase 1; consumers now read the registry id/arn from SSM (finding 8b7ee8af, decision 06077146).",
+  },
+  {
+    logicalId: "ExportsOutputFnGetAttAgentCoreRegistryRegistryId501C916F",
+    justification:
+      "Retained only during E19 phase 1; consumers now read the registry id/arn from SSM (finding 8b7ee8af, decision 06077146).",
+  },
+
   // --- Lambda functions (7 clusters, 4 CFN each: fn, log group, role, policy) ---
   {
     logicalId: "AgentImportResolverFunctionE5B20F94",
