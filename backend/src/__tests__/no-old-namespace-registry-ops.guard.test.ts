@@ -227,15 +227,14 @@ const PY_REGISTRY_OP_METHODS = [
  * 'agent-registry' clients + the same schema adapter used in
  * registry-service.ts, then delete this allowlist.
  */
-const ALLOWLISTED_PY_OLD_NAMESPACE_FILES = new Set([
-  path.join("arbiter", "fabricator", "index.py"),
-  path.join("arbiter", "catalog", "registry_client.py"),
-  path.join("arbiter", "seedConfig", "index.py"),
-  // NOTE: arbiter/fabricator/registry_recovery.py performs registry ops too,
-  // but receives an externally-constructed boto3 client as a parameter
-  // rather than calling boto3.client('bedrock-agentcore-control') itself, so
-  // it is outside this file-level detector's reach; its ops will be caught
-  // transitively once fabricator/index.py's client construction migrates.
+const ALLOWLISTED_PY_OLD_NAMESPACE_FILES = new Set<string>([
+  // Empty since the Python migration (fabricator/index.py,
+  // catalog/registry_client.py, seedConfig/index.py all moved to
+  // boto3.client('agent-registry-control')). Any NEW old-namespace
+  // registry-op site added from here on fails the build with no allowlist
+  // escape hatch. arbiter/fabricator/registry_recovery.py receives its
+  // client as a parameter, so it is covered transitively via
+  // fabricator/index.py's (now migrated) client construction.
 ]);
 
 function listPyFiles(dir: string): string[] {
