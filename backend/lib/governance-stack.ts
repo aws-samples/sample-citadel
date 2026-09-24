@@ -42,6 +42,7 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
+import { REGISTRY_GENERATION } from "./registry-generation";
 
 export interface GovernanceStackProps extends cdk.StackProps {
   environment: string;
@@ -88,10 +89,6 @@ export interface GovernanceStackProps extends cdk.StackProps {
   // this table, by design.
   agentReleasesTable: dynamodb.ITable;
   agentReleaseWriterRole: iam.IRole;
-  /** AgentCore Registry handles — release-resolver reads the registry
-   * record (agent config) being released via GetRegistryRecord only. */
-  registryArn: string;
-  registryId: string;
   // Environment release pointer (follow-on to slices 1-2) — owned by
   // BackendStack, consumed here by environment-release-pointer-resolver.
   // Deliberately a SEPARATE table AND a SEPARATE role from
@@ -152,6 +149,15 @@ export class GovernanceStack extends cdk.Stack {
           "Pass BackendStack's alarmTopic explicitly.",
       );
     }
+
+    const registryId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/citadel/${props.environment}/registry/id`,
+    );
+    const registryArn = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/citadel/${props.environment}/registry/arn`,
+    );
 
     // ============================================================
     // Cross-stack AppSync pattern — L1 CfnDataSource + CfnResolver
@@ -1294,7 +1300,8 @@ exports.handler = async (event) => {
           EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
           EVAL_SUITES_TABLE: props.evalSuitesTable.tableName,
           PROJECTS_TABLE: props.projectsTable.tableName,
-          REGISTRY_ID: props.registryId,
+          REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "AgentReleaseResolverFunctionLogs", {
@@ -1331,7 +1338,7 @@ exports.handler = async (event) => {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ["agent-registry:GetRegistryRecord"],
-        resources: [props.registryArn, `${props.registryArn}/*`],
+        resources: [registryArn, `${registryArn}/*`],
       }),
     );
 

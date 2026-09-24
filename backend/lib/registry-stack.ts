@@ -91,8 +91,10 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 import { buildImportDiscoveryPolicy } from "../src/utils/agent-import-policy";
+import { REGISTRY_GENERATION } from "./registry-generation";
 
 export interface RegistryStackProps extends cdk.StackProps {
   environment: string;
@@ -106,9 +108,6 @@ export interface RegistryStackProps extends cdk.StackProps {
   modelCatalogTable: dynamodb.ITable;
   idempotencyTable: dynamodb.ITable;
   userPool: cognito.IUserPool;
-  /** AgentCoreRegistry custom resource stays in BackendStack; threaded as props. */
-  registryArn: string;
-  registryId: string;
   /** Write-only ADR creation for the import resolver's system-generated ADR. */
   adrsTable: dynamodb.ITable;
 }
@@ -116,6 +115,15 @@ export interface RegistryStackProps extends cdk.StackProps {
 export class RegistryStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: RegistryStackProps) {
     super(scope, id, props);
+
+    const registryId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/citadel/${props.environment}/registry/id`,
+    );
+    const registryArn = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/citadel/${props.environment}/registry/arn`,
+    );
 
     // These literals match the CDK L2 defaults for
     // appsync.MappingTemplate.lambdaRequest() / lambdaResult() exactly
@@ -192,7 +200,7 @@ export class RegistryStack extends cdk.Stack {
         // without another CDK change — registry-sync.ts narrows further.
         source: ["aws.agent-registry"],
         detail: {
-          registryId: [props.registryId],
+          registryId: [registryId],
         },
       },
     });
@@ -229,7 +237,8 @@ export class RegistryStack extends cdk.Stack {
       environment: {
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
         TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
-        REGISTRY_ID: props.registryId,
+        REGISTRY_ID: registryId,
+        REGISTRY_GENERATION,
       },
       timeout: cdk.Duration.seconds(30),
       logGroup: new logs.LogGroup(this, "RegistrySyncLambdaLogs", {
@@ -263,7 +272,7 @@ export class RegistryStack extends cdk.Stack {
           "agent-registry:GetRegistryRecord",
           "agent-registry:ListRegistryRecords",
         ],
-        resources: [props.registryArn, `${props.registryArn}/*`],
+        resources: [registryArn, `${registryArn}/*`],
       }),
     );
     registrySyncDlq.grantSendMessages(registrySyncLambda);
@@ -289,7 +298,8 @@ export class RegistryStack extends cdk.Stack {
         environment: {
           AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
           REGISTRY_ENABLED: "true",
-          REGISTRY_ID: props.registryId,
+          REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
           AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
           ACCOUNT_ID: this.account,
@@ -402,7 +412,7 @@ export class RegistryStack extends cdk.Stack {
           "agent-registry:GetRegistryRecord",
           "agent-registry:ListRegistryRecords",
         ],
-        resources: [props.registryArn, `${props.registryArn}/*`],
+        resources: [registryArn, `${registryArn}/*`],
       }),
     );
 
@@ -492,7 +502,8 @@ export class RegistryStack extends cdk.Stack {
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           REGISTRY_ENABLED: "true",
-          REGISTRY_ID: props.registryId,
+          REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
           IDEMPOTENCY_TABLE: props.idempotencyTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
@@ -517,7 +528,7 @@ export class RegistryStack extends cdk.Stack {
           "agent-registry:GetRegistryRecord",
           "agent-registry:UpdateRegistryRecord",
         ],
-        resources: [props.registryArn, `${props.registryArn}/*`],
+        resources: [registryArn, `${registryArn}/*`],
       }),
     );
 
@@ -635,7 +646,8 @@ export class RegistryStack extends cdk.Stack {
           // DynamoDB access, reconciling its orgId against the caller via
           // the shared assertRowOrg gate (auth-event.ts) — mirrors the
           // publish handler's REGISTRY_ID wiring in gateway-stack.ts.
-          REGISTRY_ID: props.registryId,
+          REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "AgentCodeResolverFunctionLogs", {
@@ -653,7 +665,7 @@ export class RegistryStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ["agent-registry:GetRegistryRecord"],
-        resources: [props.registryArn, `${props.registryArn}/*`],
+        resources: [registryArn, `${registryArn}/*`],
       }),
     );
 
@@ -967,7 +979,8 @@ export class RegistryStack extends cdk.Stack {
           AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
           USER_POOL_ID: props.userPool.userPoolId,
-          REGISTRY_ID: props.registryId,
+          REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
           AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
           MODEL_CATALOG_TABLE: props.modelCatalogTable.tableName,
           ENVIRONMENT: props.environment,
@@ -1050,7 +1063,7 @@ export class RegistryStack extends cdk.Stack {
           "agent-registry:GetRegistryRecord",
           "agent-registry:ListRegistryRecords",
         ],
-        resources: [props.registryArn, `${props.registryArn}/*`],
+        resources: [registryArn, `${registryArn}/*`],
       }),
     );
 

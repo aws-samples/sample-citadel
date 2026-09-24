@@ -129,8 +129,6 @@ const registryStack = new RegistryStack(
     modelCatalogTable: backendStack.modelCatalogTable,
     idempotencyTable: backendStack.idempotencyTable,
     userPool: backendStack.userPool,
-    registryArn: backendStack.registryArn,
-    registryId: backendStack.registryId,
     adrsTable: backendStack.adrsTable,
   },
 );
@@ -145,10 +143,6 @@ const servicesStack = new ServicesStack(
     description: `Agent services for Citadel - ${environment}`,
     agentEventBus: backendStack.agentEventBus,
     documentBucket: backendStack.documentBucket,
-    // Registry handles so the intake runtime can read the factory catalog from
-    // the AgentCore Registry (conditionally wired in the stack).
-    registryArn: backendStack.registryArn,
-    registryId: backendStack.registryId,
     // AppSync handles so the intake runtime can call the 4 IAM-only intake
     // post-fabrication mutations over SigV4, and so ServicesStack can host the
     // backing intake-orchestration resolver via L1 cross-stack attachment
@@ -200,8 +194,6 @@ const governanceStack = new GovernanceStack(
     // AgentRelease Resolver section.
     agentReleasesTable: backendStack.agentReleasesTable,
     agentReleaseWriterRole: backendStack.agentReleaseWriterRole,
-    registryArn: backendStack.registryArn,
-    registryId: backendStack.registryId,
     // Environment release pointer (follow-on to slices 1-2): separate
     // table + separate writer role from AgentReleasesTable above — see
     // backend-stack.ts's EnvironmentReleasePointersTable construction
@@ -253,8 +245,6 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   // against these tables before granting any AssumeRole policy.
   dataStoresTable: backendStack.dataStoresTable,
   integrationsTable: backendStack.integrationsTable,
-  registryArn: backendStack.registryArn,
-  registryId: backendStack.registryId,
   // Governance UI Wave 1: the new governance-ui-resolver lives in
   // ArbiterStack (next to the ledger table) and attaches to BackendStack's
   // GraphQL API via the L1 CfnDataSource cross-stack pattern. Passing the
@@ -443,12 +433,6 @@ const gatewayStack = new GatewayStack(app, `citadel-gateway-${environment}`, {
   appsTable: backendStack.appsTable,
   eventBus: backendStack.agentEventBus,
   idempotencyTable: backendStack.idempotencyTable,
-  // Owner gate (finding 13a58234): publish/unpublish must read the app's
-  // Registry manifest before any provisioning/teardown. Same
-  // registryId/registryArn already threaded into ServicesStack/
-  // GovernanceStack/ArbiterStack below.
-  registryId: backendStack.registryId,
-  registryArn: backendStack.registryArn,
 });
 
 // Telemetry stack has already been instantiated above (before FrontendStack)

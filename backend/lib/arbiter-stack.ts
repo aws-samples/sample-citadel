@@ -32,6 +32,7 @@ import {
 import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
+import { REGISTRY_GENERATION } from "./registry-generation";
 
 // Resolve the repo-root `arbiter/` directory regardless of whether this
 // module is loaded from source (`backend/lib/`) via ts-jest or from the
@@ -162,8 +163,6 @@ interface ArbiterStackProps extends cdk.StackProps {
   // request that declares a dataStore/integration id fails closed.
   dataStoresTable?: dynamodb.Table;
   integrationsTable?: dynamodb.Table;
-  registryArn?: string;
-  registryId?: string;
   // Governance UI Wave 1: optional AppSync API handle so the new
   // governance-ui-resolver can be wired as a data source + resolvers on
   // the BackendStack-owned API. Optional because some test paths
@@ -246,6 +245,15 @@ export class ArbiterStack extends cdk.Stack {
 
   constructor(scope: Construct, id: string, props: ArbiterStackProps) {
     super(scope, id, props);
+
+    const registryId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/citadel/${props.environment}/registry/id`,
+    );
+    const registryArn = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/citadel/${props.environment}/registry/arn`,
+    );
 
     this.orchestrationTable = new dynamodb.Table(this, "OrchestrationTable", {
       tableName: `citadel-agent-orchestration-${props.environment}`,
@@ -387,8 +395,11 @@ export class ArbiterStack extends cdk.Stack {
         MODEL_CATALOG_TABLE: `citadel-model-catalog-${props.environment}`,
         CODE_VERSION: "2", // Force Lambda code update
         ...(props.appsTable && { APPS_TABLE: props.appsTable.tableName }),
-        ...(props.registryId && { REGISTRY_ID: props.registryId }),
-        ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+        REGISTRY_ID: registryId,
+
+        REGISTRY_GENERATION,
+
+        REGISTRY_ENABLED: "true",
         // Release-aware dispatch (this story): table names only, omitted
         // entirely when the tables aren't provisioned (forward-compatible
         // no-op — see ArbiterStackProps's agentReleasesTable/
@@ -487,7 +498,7 @@ export class ArbiterStack extends cdk.Stack {
     // Grant Supervisor read-only access to Registry APIs so it can
     // resolve agent/app identifiers during orchestration. Full CRUD
     // stays on the Fabricator per least-privilege.
-    if (props.registryArn) {
+    if (registryArn) {
       supervisorLambda.addToRolePolicy(
         new PolicyStatement({
           effect: Effect.ALLOW,
@@ -495,7 +506,7 @@ export class ArbiterStack extends cdk.Stack {
             "agent-registry:GetRegistryRecord",
             "agent-registry:ListRegistryRecords",
           ],
-          resources: [props.registryArn, `${props.registryArn}/*`],
+          resources: [registryArn, `${registryArn}/*`],
         }),
       );
     }
@@ -851,8 +862,11 @@ export class ArbiterStack extends cdk.Stack {
           TOOL_BREAKER_RECOVERY_SECONDS: "30",
           TOOL_BREAKER_PROBE_LEASE_SECONDS: "30",
           TOOL_BREAKER_CACHE_TTL_SECONDS: "3",
-          ...(props.registryId && { REGISTRY_ID: props.registryId }),
-          ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+          REGISTRY_ID: registryId,
+
+          REGISTRY_GENERATION,
+
+          REGISTRY_ENABLED: "true",
           // Idempotency-seam smoke fixture (non-prod only): the worker's
           // smoke tool refuses to run (raises, never silently no-ops) if
           // SMOKE_IDEMPOTENCY_TABLE is unset — so a prod deploy, which never
@@ -1126,7 +1140,7 @@ export class ArbiterStack extends cdk.Stack {
     // Grant WorkerAgentWrapper read-only access to Registry APIs so it
     // can resolve agent/app identifiers at dispatch time. Full CRUD
     // stays on the Fabricator per least-privilege.
-    if (props.registryArn) {
+    if (registryArn) {
       workerAgentWrapperLambda.addToRolePolicy(
         new PolicyStatement({
           effect: Effect.ALLOW,
@@ -1134,7 +1148,7 @@ export class ArbiterStack extends cdk.Stack {
             "agent-registry:GetRegistryRecord",
             "agent-registry:ListRegistryRecords",
           ],
-          resources: [props.registryArn, `${props.registryArn}/*`],
+          resources: [registryArn, `${registryArn}/*`],
         }),
       );
     }
@@ -1230,8 +1244,11 @@ export class ArbiterStack extends cdk.Stack {
         // AppsTable.OrgIndex, so without this env var fabricated agents
         // would only become visible after the reconciler runs.
         ...(props.appsTable && { APPS_TABLE: props.appsTable.tableName }),
-        ...(props.registryId && { REGISTRY_ID: props.registryId }),
-        ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+        REGISTRY_ID: registryId,
+
+        REGISTRY_GENERATION,
+
+        REGISTRY_ENABLED: "true",
       },
       initialPolicy: [
         new PolicyStatement({
@@ -1331,7 +1348,7 @@ export class ArbiterStack extends cdk.Stack {
     }
 
     // Grant Fabricator permission to call Registry APIs
-    if (props.registryArn) {
+    if (registryArn) {
       fabricatorLambda.addToRolePolicy(
         new PolicyStatement({
           effect: Effect.ALLOW,
@@ -1344,7 +1361,7 @@ export class ArbiterStack extends cdk.Stack {
             "agent-registry:GetRegistryRecord",
             "agent-registry:ListRegistryRecords",
           ],
-          resources: [props.registryArn, `${props.registryArn}/*`],
+          resources: [registryArn, `${registryArn}/*`],
         }),
       );
     }
@@ -1392,8 +1409,11 @@ export class ArbiterStack extends cdk.Stack {
           // agents by name in the registry). Same conditional pattern as the
           // fabricator — unset in registry-less environments, where the seed
           // logs and skips the registry write.
-          ...(props.registryId && { REGISTRY_ID: props.registryId }),
-          ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+          REGISTRY_ID: registryId,
+
+          REGISTRY_GENERATION,
+
+          REGISTRY_ENABLED: "true",
           // Idempotency-seam smoke agent (non-prod only): gates whether the
           // seed writes the diagnostic smoke-idempotency-agent row at all.
           // A prod deploy leaves this unset, and the seed's own
@@ -1413,7 +1433,7 @@ export class ArbiterStack extends cdk.Stack {
     // DRAFT status, mirroring fabricator-created records. Scoped to the
     // registry ARN like the fabricator's grant, and only wired when a
     // registry is provisioned.
-    if (props.registryArn) {
+    if (registryArn) {
       seedAgentConfigLambda.addToRolePolicy(
         new PolicyStatement({
           effect: Effect.ALLOW,
@@ -1421,7 +1441,7 @@ export class ArbiterStack extends cdk.Stack {
             "agent-registry:CreateRegistryRecord",
             "agent-registry:ListRegistryRecords",
           ],
-          resources: [props.registryArn, `${props.registryArn}/*`],
+          resources: [registryArn, `${registryArn}/*`],
         }),
       );
       // Same residual wildcard as every other registry-wired role (see the
@@ -2557,8 +2577,11 @@ export class ArbiterStack extends cdk.Stack {
           // wire REGISTRY_ID / REGISTRY_ENABLED when an actual registry is
           // provisioned; the resolver tolerates an unset REGISTRY_ID by
           // returning UNKNOWN for those checks.
-          ...(props.registryId && { REGISTRY_ID: props.registryId }),
-          ...(props.registryId && { REGISTRY_ENABLED: "true" }),
+          REGISTRY_ID: registryId,
+
+          REGISTRY_GENERATION,
+
+          REGISTRY_ENABLED: "true",
         },
         logGroup: new logs.LogGroup(this, "GovernanceUiResolverFnLogs", {
           retention: logs.RetentionDays.ONE_WEEK,
@@ -2777,7 +2800,7 @@ export class ArbiterStack extends cdk.Stack {
     // Supervisor / Worker grants — never CRUD, just Get + List. Only attach
     // the policy when the registry ARN is provided; in test paths the
     // resolver tolerates UNKNOWN for these two checks.
-    if (props.registryArn) {
+    if (registryArn) {
       governanceUiResolverFn.addToRolePolicy(
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
@@ -2785,7 +2808,7 @@ export class ArbiterStack extends cdk.Stack {
             "agent-registry:GetRegistryRecord",
             "agent-registry:ListRegistryRecords",
           ],
-          resources: [props.registryArn, `${props.registryArn}/*`],
+          resources: [registryArn, `${registryArn}/*`],
         }),
       );
     }
