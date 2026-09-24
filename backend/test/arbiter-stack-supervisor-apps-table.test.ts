@@ -147,7 +147,7 @@ describe("Supervisor with registryArn provided", () => {
       env: { account: "123456789012", region: "us-east-1" },
       ...fixture,
       registryArn:
-        "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/test-registry",
+        "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry",
       registryId: "test-registry",
     });
 
@@ -229,8 +229,8 @@ describe("Supervisor with registryArn provided", () => {
         (stmt: any) =>
           stmt.Effect === "Allow" &&
           Array.isArray(stmt.Action) &&
-          stmt.Action.includes("bedrock-agentcore:GetRegistryRecord") &&
-          stmt.Action.includes("bedrock-agentcore:ListRegistryRecords"),
+          stmt.Action.includes("agent-registry:GetRegistryRecord") &&
+          stmt.Action.includes("agent-registry:ListRegistryRecords"),
       ),
     );
     expect(hasRegistryRead).toBe(true);
@@ -275,7 +275,7 @@ describe("Supervisor without registryArn", () => {
       policy.Properties.PolicyDocument.Statement.some(
         (stmt: any) =>
           Array.isArray(stmt.Action) &&
-          stmt.Action.includes("bedrock-agentcore:GetRegistryRecord"),
+          stmt.Action.includes("agent-registry:GetRegistryRecord"),
       ),
     );
     expect(hasRegistryRead).toBe(false);

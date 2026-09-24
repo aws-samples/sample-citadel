@@ -78,8 +78,8 @@ interface EventOverrides {
 
 function makeEvent(overrides: EventOverrides = {}): RegistryEvent {
   return {
-    source: "aws.bedrock-agentcore",
-    "detail-type": "AgentCore Registry Resource Change",
+    source: "aws.agent-registry",
+    "detail-type": "Agent Registry Record Created",
     detail: {
       resourceId: "res-123",
       resourceType: "agent",
@@ -165,10 +165,36 @@ describe("validateEvent", () => {
     ).toContain("Unexpected detail-type");
   });
 
+  // GA namespace migration: the rule/handler no longer accept a single
+  // hard-coded detail-type — every record-lifecycle detail-type in the
+  // allowlist must validate, and a registry-lifecycle detail-type (which
+  // this record-only handler does not process) must still be rejected.
+  test("accepts every allowlisted record detail-type", () => {
+    for (const detailType of [
+      "Agent Registry Record Created",
+      "Agent Registry Record Updated",
+      "Agent Registry Record Deleted",
+      "Agent Registry Record Status Changed",
+      "Agent Registry Record Pending Approval",
+      "Agent Registry Record Approved",
+      "Agent Registry Record Rejected",
+    ]) {
+      expect(
+        validateEvent(makeEvent({ "detail-type": detailType })),
+      ).toBeNull();
+    }
+  });
+
+  test("rejects a registry-lifecycle detail-type (not a record event)", () => {
+    expect(
+      validateEvent(makeEvent({ "detail-type": "Registry Ready" })),
+    ).toContain("Unexpected detail-type");
+  });
+
   test("rejects missing detail", () => {
     const event = {
-      source: "aws.bedrock-agentcore",
-      "detail-type": "AgentCore Registry Resource Change",
+      source: "aws.agent-registry",
+      "detail-type": "Agent Registry Record Created",
     };
     expect(validateEvent(event)).toBe("Event detail is missing");
   });

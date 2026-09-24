@@ -105,6 +105,28 @@ const VALID_EVENT_TYPES: ReadonlySet<unknown> = new Set([
   "STATUS_CHANGED",
 ]);
 
+// GA namespace migration: event source moved from 'aws.bedrock-agentcore' to
+// 'aws.agent-registry'. Per the agent-registry GA FAQ, record-lifecycle
+// events are emitted under several detail-type strings (creation, update,
+// status transitions incl. "Pending Approval", plus GA additions) rather
+// than the single legacy "AgentCore Registry Resource Change" string. This
+// handler only processes RECORD events (it needs resourceId/resourceType,
+// which registry-lifecycle events like "Registry Ready" do not carry) — the
+// CDK rule (registry-stack.ts RegistrySyncRule) already filters on
+// source + detail.registryId only and forwards every detail-type, so this
+// set is the handler-side allowlist of the record detail types it knows how
+// to route; anything else (e.g. a future registry-lifecycle detail-type)
+// is rejected here as unexpected rather than silently mis-processed.
+const VALID_RECORD_DETAIL_TYPES: ReadonlySet<unknown> = new Set([
+  "Agent Registry Record Created",
+  "Agent Registry Record Updated",
+  "Agent Registry Record Deleted",
+  "Agent Registry Record Status Changed",
+  "Agent Registry Record Pending Approval",
+  "Agent Registry Record Approved",
+  "Agent Registry Record Rejected",
+]);
+
 /**
  * Validates the incoming EventBridge event structure.
  * Returns an error message string if invalid, or null if valid.
@@ -116,11 +138,11 @@ export function validateEvent(
     return "Event is null or undefined";
   }
 
-  if (event.source !== "aws.bedrock-agentcore") {
+  if (event.source !== "aws.agent-registry") {
     return `Unexpected event source: ${event.source}`;
   }
 
-  if (event["detail-type"] !== "AgentCore Registry Resource Change") {
+  if (!VALID_RECORD_DETAIL_TYPES.has(event["detail-type"])) {
     return `Unexpected detail-type: ${event["detail-type"]}`;
   }
 

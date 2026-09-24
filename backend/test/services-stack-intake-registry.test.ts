@@ -15,7 +15,7 @@ import { ServicesStack } from "../lib/services-stack";
 
 const REGISTRY_ID = "reg-abc123";
 const REGISTRY_ARN =
-  "arn:aws:bedrock-agentcore:us-west-2:123456789012:registry/reg-abc123";
+  "arn:aws:agent-registry:us-west-2:123456789012:registry/reg-abc123";
 
 describe("AgentIntakeSingle runtime — AgentCore Registry read access", () => {
   let template: cdk.assertions.Template;
@@ -54,8 +54,8 @@ describe("AgentIntakeSingle runtime — AgentCore Registry read access", () => {
           cdk.assertions.Match.objectLike({
             Effect: "Allow",
             Action: cdk.assertions.Match.arrayWith([
-              "bedrock-agentcore:ListRegistryRecords",
-              "bedrock-agentcore:GetRegistryRecord",
+              "agent-registry:ListRegistryRecords",
+              "agent-registry:GetRegistryRecord",
             ]),
             Resource: cdk.assertions.Match.arrayWith([
               REGISTRY_ARN,
@@ -117,7 +117,7 @@ describe("AgentIntakeSingle runtime — registry props omitted", () => {
         const actions: string[] = Array.isArray(rawAction)
           ? (rawAction as string[])
           : [rawAction as string];
-        return actions.includes("bedrock-agentcore:ListRegistryRecords");
+        return actions.includes("agent-registry:ListRegistryRecords");
       });
     });
     expect(hasRegistryGrant).toBe(false);

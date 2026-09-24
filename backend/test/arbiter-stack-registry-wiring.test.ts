@@ -37,7 +37,7 @@ scaffoldArbiterStubs();
 import { ArbiterStack } from "../lib/arbiter-stack";
 
 const REGISTRY_ARN =
-  "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/test-registry";
+  "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry";
 const REGISTRY_ID = "test-registry-id";
 
 const PREFIXES = {
@@ -140,7 +140,7 @@ function findGetRegistryRecordStatement(policies: any[]): any | undefined {
   for (const p of policies) {
     for (const stmt of p.Properties?.PolicyDocument?.Statement ?? []) {
       const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
-      if (actions.includes("bedrock-agentcore:GetRegistryRecord")) return stmt;
+      if (actions.includes("agent-registry:GetRegistryRecord")) return stmt;
     }
   }
   return undefined;
@@ -197,7 +197,7 @@ describe("ArbiterStack — Registry wiring across arbiter PythonFunctions (PR 2 
 
     describe("B. Registry IAM policy on Supervisor/Worker/Fabricator", () => {
       test.each(positive)(
-        "%s role statement includes bedrock-agentcore:GetRegistryRecord",
+        "%s role statement includes agent-registry:GetRegistryRecord",
         (_label, prefix) => {
           const stmt = findGetRegistryRecordStatement(
             getPoliciesForLambda(
@@ -237,12 +237,12 @@ describe("ArbiterStack — Registry wiring across arbiter PythonFunctions (PR 2 
           ),
         );
         for (const action of [
-          "bedrock-agentcore:CreateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
-          "bedrock-agentcore:DeleteRegistryRecord",
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
+          "agent-registry:CreateRegistryRecord",
+          "agent-registry:UpdateRegistryRecord",
+          "agent-registry:UpdateRegistryRecordStatus",
+          "agent-registry:DeleteRegistryRecord",
+          "agent-registry:GetRegistryRecord",
+          "agent-registry:ListRegistryRecords",
         ]) {
           expect(actions).toContain(action);
         }
@@ -290,14 +290,14 @@ describe("ArbiterStack — Registry wiring across arbiter PythonFunctions (PR 2 
 
     describe("B. No Registry IAM on any of the 4 PythonFunctions", () => {
       test.each(allFour)(
-        "%s role has zero bedrock-agentcore:* actions",
+        "%s role has zero agent-registry:* actions",
         (_label, prefix) => {
           const agentcore = collectActions(
             getPoliciesForLambda(
               resources,
               findLambdaLogicalId(resources, prefix),
             ),
-          ).filter((a) => a.startsWith("bedrock-agentcore:"));
+          ).filter((a) => a.startsWith("agent-registry:"));
           expect(agentcore).toEqual([]);
         },
       );
@@ -331,13 +331,13 @@ describe("ArbiterStack — Registry wiring across arbiter PythonFunctions (PR 2 
           resources = buildStack(withRegistry);
         });
 
-        test("Activator role has zero bedrock-agentcore:* actions", () => {
+        test("Activator role has zero agent-registry:* actions", () => {
           const agentcore = collectActions(
             getPoliciesForLambda(
               resources,
               findLambdaLogicalId(resources, PREFIXES.Activator),
             ),
-          ).filter((a) => a.startsWith("bedrock-agentcore:"));
+          ).filter((a) => a.startsWith("agent-registry:"));
           expect(agentcore).toEqual([]);
         });
         test("Activator env has no REGISTRY_ID", () => {

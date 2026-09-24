@@ -1908,6 +1908,20 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       resources: ["GETATT:RegistryAsyncDlq778E7865:Arn"],
       conditionKeys: [],
     },
+    // agent-registry GA namespace migration (finding c6544456): renamed
+    // from bedrock-agentcore:GetRegistryRecord/UpdateRegistryRecord.
+    {
+      effect: "Allow",
+      actions: [
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:UpdateRegistryRecord",
+      ],
+      resources: [
+        "GETATT:AgentCoreRegistry:RegistryArn",
+        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+      ],
+      conditionKeys: [],
+    },
   ],
   FabricationEventHandlerFunctionA425E3C0: [
     {
@@ -1925,10 +1939,90 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
   // baseline predates this branch's authz work, so it cannot cover the
   // statement; allowlisted here per the PR 111 reconciliation pattern
   // rather than regenerating the baseline (a separate governance act).
+  // Action renamed bedrock-agentcore:GetRegistryRecord -> agent-registry:
+  // GetRegistryRecord in the GA namespace migration below (finding
+  // c6544456) — same statement, same justification, updated action string.
   AgentCodeResolverFunction720FFFB6: [
     {
       effect: "Allow",
-      actions: ["bedrock-agentcore:GetRegistryRecord"],
+      actions: ["agent-registry:GetRegistryRecord"],
+      resources: [
+        "GETATT:AgentCoreRegistry:RegistryArn",
+        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+      ],
+      conditionKeys: [],
+    },
+  ],
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // agent-registry GA namespace migration (finding c6544456, decision
+  // 453d1acc: allowlist route, do not regenerate the frozen pre-split
+  // baseline). Every bedrock-agentcore:*Registry*/*RegistryRecord* action
+  // across the 5 moved-Lambda roles below was renamed to the agent-registry:
+  // equivalent (same operation names, same resource scoping) as part of the
+  // agent-registry GA rollout — this is a deliberate, intended IAM change,
+  // not a broadening. The frozen baseline (captured before this migration)
+  // can never cover an agent-registry:* action, so each renamed statement
+  // is allowlisted here per-Lambda rather than regenerating the baseline.
+  // Actions/resources below are byte-identical to what registry-stack.ts
+  // grants each function post-rename; confirmed via a live
+  // `cdk synth citadel-registry-dev citadel-backend-dev` + `npm run
+  // split:gates` run, not hand-typed.
+  // ═══════════════════════════════════════════════════════════════════════
+  AgentImportResolverFunctionE5B20F94: [
+    {
+      effect: "Allow",
+      actions: [
+        "agent-registry:CreateRegistryRecord",
+        "agent-registry:UpdateRegistryRecord",
+        "agent-registry:UpdateRegistryRecordStatus",
+        "agent-registry:SubmitRegistryRecordForApproval",
+        "agent-registry:DeleteRegistryRecord",
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:ListRegistryRecords",
+      ],
+      resources: [
+        "GETATT:AgentCoreRegistry:RegistryArn",
+        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+      ],
+      conditionKeys: [],
+    },
+  ],
+  // AgentImportManifestResultHandlerAC7A0B8E is merged into its existing
+  // key above (sqs:SendMessage DLQ grant + the renamed agent-registry
+  // statement, same finding c6544456) rather than duplicated here — a
+  // second top-level key with the same name would silently shadow the
+  // first in the object literal.
+  RegistryAgentRecordResolverFunction5D7EA0BC: [
+    {
+      effect: "Allow",
+      actions: [
+        "agent-registry:CreateRegistryRecord",
+        "agent-registry:UpdateRegistryRecord",
+        "agent-registry:UpdateRegistryRecordStatus",
+        "agent-registry:SubmitRegistryRecordForApproval",
+        "agent-registry:DeleteRegistryRecord",
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:ListRegistryRecords",
+      ],
+      resources: [
+        "GETATT:AgentCoreRegistry:RegistryArn",
+        "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",
+      ],
+      conditionKeys: [],
+    },
+  ],
+  RegistrySyncLambdaC145524B: [
+    {
+      effect: "Allow",
+      actions: [
+        "agent-registry:CreateRegistryRecord",
+        "agent-registry:UpdateRegistryRecord",
+        "agent-registry:UpdateRegistryRecordStatus",
+        "agent-registry:DeleteRegistryRecord",
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:ListRegistryRecords",
+      ],
       resources: [
         "GETATT:AgentCoreRegistry:RegistryArn",
         "JOIN::GETATT:AgentCoreRegistry:RegistryArn/*",

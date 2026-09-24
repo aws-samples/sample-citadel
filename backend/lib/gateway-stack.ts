@@ -260,7 +260,7 @@ export class GatewayStack extends cdk.Stack {
     this.publishHandler.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["bedrock-agentcore:GetRegistryRecord"],
+        actions: ["agent-registry:GetRegistryRecord"],
         resources: [props.registryArn, `${props.registryArn}/*`],
       }),
     );
