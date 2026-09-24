@@ -915,13 +915,35 @@ if (app.node.tryGetContext("nag") !== "false") {
   );
 
   // IAM5 — Registry ARN wildcards for AgentCore registry CRUD operations.
+  //
+  // appliesTo regex covers TWO token shapes for the same underlying
+  // resource (the AgentCore registry ARN's wildcard sub-resources):
+  //   1. <AgentCoreRegistry.RegistryArn>/* — direct construct reference,
+  //      used only in BackendStack (where the registry is created).
+  //   2. <SsmParameterValue...Parameter>/* or <...SsmLookupParameter>/* —
+  //      every OTHER stack resolves the registry ARN via SSM
+  //      (valueForStringParameter or fromStringParameterName) rather than
+  //      a cross-stack construct reference, per the registry-id-via-ssm
+  //      migration (commits 2626249, 727133b) — this was already the case
+  //      before this branch's dependency-cycle fix and was previously
+  //      masked because synth never reached the cdk-nag pass. Same
+  //      resource (the registry ARN's sub-resources), same suppression
+  //      reasoning, just a different token shape depending on how the
+  //      value entered the stack.
   const registryArnSuppression = [
     {
       id: "AwsSolutions-IAM5",
       reason:
-        "AgentCore registry operations require wildcard on registry ARN sub-resources (agents, tools, versions). Scoped to the specific registry ARN.",
+        "AgentCore registry operations require wildcard on registry ARN sub-resources (agents, tools, versions). Scoped to the specific registry ARN, however it was resolved into the stack (direct construct reference or SSM parameter lookup).",
       appliesTo: [
         { regex: "/^Resource::<AgentCoreRegistry\\.RegistryArn>\\/\\*$/g" },
+        {
+          regex:
+            "/^Resource::<[A-Za-z0-9]*SsmParameterValue[A-Za-z0-9]*Parameter>\\/\\*$/g",
+        },
+        {
+          regex: "/^Resource::<[A-Za-z0-9]*SsmLookupParameter>\\/\\*$/g",
+        },
       ],
     },
   ];
@@ -943,6 +965,10 @@ if (app.node.tryGetContext("nag") !== "false") {
     [arbiterStack, "SupervisorAgent/ServiceRole/DefaultPolicy/Resource"],
     [arbiterStack, "WorkerAgentWrapper/ServiceRole/DefaultPolicy/Resource"],
     [arbiterStack, "GovernanceUiResolverFn/ServiceRole/DefaultPolicy/Resource"],
+    [
+      arbiterStack,
+      "SeedAgentConfigFunction/ServiceRole/DefaultPolicy/Resource",
+    ],
     [
       registryStack,
       "RegistryAgentRecordResolverFunction/ServiceRole/DefaultPolicy/Resource",
@@ -976,6 +1002,16 @@ if (app.node.tryGetContext("nag") !== "false") {
     // only. Not a fresh per-function ServiceRole — the shared, hand-named
     // writer role — so its DefaultPolicy lives under backendStack.
     [backendStack, "AgentReleaseWriterRole/DefaultPolicy/Resource"],
+    // AgentReleaseResolverRegistryReadPolicy (governance-stack.ts): the
+    // standalone iam.Policy attached to the imported agentReleaseWriterRole
+    // for the same GetRegistryRecord grant above, but the Policy resource
+    // itself (and thus this DefaultPolicy-equivalent path) lives in
+    // GovernanceStack, not BackendStack — attachToRole() on a cross-stack
+    // role keeps the Policy resource in the attaching stack. Resolves
+    // registryArn via fromStringParameterName (dynamic SSM reference) to
+    // avoid the backend<->governance DependencyCycle a CfnParameter-based
+    // lookup caused here.
+    [governanceStack, "AgentReleaseResolverRegistryReadPolicy/Resource"],
     // Publish handler owner gate (finding 13a58234): GetRegistryRecord
     // only, scoped to the registry ARN + its records, to fetch the app's
     // manifest for the owner-role check before any provisioning/teardown.

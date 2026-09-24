@@ -150,14 +150,29 @@ export class GovernanceStack extends cdk.Stack {
       );
     }
 
-    const registryId = ssm.StringParameter.valueForStringParameter(
+    // Use the dynamic-reference form ({{resolve:ssm:name}}, inlined per
+    // resource attribute at CFN evaluation time) rather than
+    // valueForStringParameter (which allocates a stack-level
+    // AWS::SSM::Parameter::Value<String> CfnParameter construct). The
+    // CfnParameter form was the actual source of the backend<->governance
+    // DependencyCycle: cdk synth's cycle report pointed at
+    // `citadel-backend-dev -> .../SsmParameterValue:...Parameter.Ref`, and
+    // removing every USE of registryArn/registryId did not clear the
+    // cycle — only the CfnParameter construct's mere existence in this
+    // stack (paired with the existing governance->backend edge from
+    // agentReleaseWriterRole etc.) triggered it. fromStringParameterName's
+    // .stringValue is a plain token string with no separate construct, so
+    // it carries no stack-level dependency of its own.
+    const registryId = ssm.StringParameter.fromStringParameterName(
       this,
+      "RegistryIdSsmLookup",
       `/citadel/${props.environment}/registry/id`,
-    );
-    const registryArn = ssm.StringParameter.valueForStringParameter(
+    ).stringValue;
+    const registryArn = ssm.StringParameter.fromStringParameterName(
       this,
+      "RegistryArnSsmLookup",
       `/citadel/${props.environment}/registry/arn`,
-    );
+    ).stringValue;
 
     // ============================================================
     // Cross-stack AppSync pattern — L1 CfnDataSource + CfnResolver
@@ -1326,21 +1341,38 @@ exports.handler = async (event) => {
     // hand that role dynamodb:DeleteItem/BatchWriteItem/UpdateItem on
     // EvalSuitesTable, widening every principal that can assume the role.
     // This statement only ever needs UpdateItem.
-    agentReleaseResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:UpdateItem"],
-        resources: [props.evalSuitesTable.tableArn],
-      }),
-    );
+    //
+    // Attached as a standalone iam.Policy (not addToRolePolicy) for the
+    // same reason as the registry-read policy below: agentReleaseWriterRole
+    // is imported from BackendStack, so addToRolePolicy on the Lambda would
+    // inline this statement onto that backend-owned role's DefaultPolicy
+    // from within GovernanceStack, creating a backend<->governance
+    // construct dependency cycle.
+    new iam.Policy(this, "AgentReleaseResolverEvalSuitesUpdatePolicy", {
+      statements: [
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:UpdateItem"],
+          resources: [props.evalSuitesTable.tableArn],
+        }),
+      ],
+    }).attachToRole(props.agentReleaseWriterRole);
     props.projectsTable.grantReadData(agentReleaseResolverFunction);
-    agentReleaseResolverFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["agent-registry:GetRegistryRecord"],
-        resources: [registryArn, `${registryArn}/*`],
-      }),
-    );
+    // Attached as a standalone iam.Policy (not addToRolePolicy) because
+    // agentReleaseWriterRole is imported from BackendStack: calling
+    // addToRolePolicy directly on the Lambda would inline this statement
+    // onto that backend-owned role from within GovernanceStack, creating
+    // a backend<->governance construct dependency cycle now that
+    // registryArn is resolved via SSM token in this stack.
+    new iam.Policy(this, "AgentReleaseResolverRegistryReadPolicy", {
+      statements: [
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["agent-registry:GetRegistryRecord"],
+          resources: [registryArn, `${registryArn}/*`],
+        }),
+      ],
+    }).attachToRole(props.agentReleaseWriterRole);
 
     const agentReleaseDataSourceRole = new iam.Role(
       this,
