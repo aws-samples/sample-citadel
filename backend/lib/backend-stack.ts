@@ -506,7 +506,8 @@ export class BackendStack extends cdk.Stack {
           RegistryName: `citadel-registry-${props.environment}`,
           AutoApproval: String(registryAutoApproval),
           Description: `Citadel agent and tool registry for ${props.environment}`,
-          ForceRecreate: "2026-05-03b",
+          // bumped to force the provisioner Update that creates the GA-namespace registry (finding c6544456); the old bedrock-agentcore registry is left in place for migration
+          ForceRecreate: "2026-09-24-agent-registry-ga",
         },
       },
     );
