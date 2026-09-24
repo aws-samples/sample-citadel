@@ -153,7 +153,7 @@ function createFixture(app: cdk.App) {
     adrsTable,
     userPool,
     registryArn:
-      "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/mock-registry",
+      "arn:aws:agent-registry:us-east-1:123456789012:registry/mock-registry",
     registryId: "mock-registry",
   };
 }
@@ -534,7 +534,7 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
       expect(envVars.REGISTRY_ID).toBeDefined();
     });
 
-    test("has a READ-ONLY bedrock-agentcore:GetRegistryRecord statement scoped to the registry ARN — no Create/Update/Delete", () => {
+    test("has a READ-ONLY agent-registry:GetRegistryRecord statement scoped to the registry ARN — no Create/Update/Delete", () => {
       const fn = agentCodeResolverFn();
       const roleRef = fn.Properties?.Role?.["Fn::GetAtt"]?.[0];
       expect(roleRef).toBeDefined();
@@ -553,7 +553,7 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
         const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
         return actions.some(
           (a: string) =>
-            typeof a === "string" && a.startsWith("bedrock-agentcore:"),
+            typeof a === "string" && a.startsWith("agent-registry:"),
         );
       });
       expect(registryStatements.length).toBeGreaterThan(0);
@@ -563,15 +563,15 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
           ? stmt.Action
           : [stmt.Action];
         expect(new Set(actions)).toEqual(
-          new Set(["bedrock-agentcore:GetRegistryRecord"]),
+          new Set(["agent-registry:GetRegistryRecord"]),
         );
         // No write-capable registry action anywhere on this role.
-        expect(actions).not.toContain("bedrock-agentcore:CreateRegistryRecord");
-        expect(actions).not.toContain("bedrock-agentcore:UpdateRegistryRecord");
+        expect(actions).not.toContain("agent-registry:CreateRegistryRecord");
+        expect(actions).not.toContain("agent-registry:UpdateRegistryRecord");
         expect(actions).not.toContain(
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
+          "agent-registry:UpdateRegistryRecordStatus",
         );
-        expect(actions).not.toContain("bedrock-agentcore:DeleteRegistryRecord");
+        expect(actions).not.toContain("agent-registry:DeleteRegistryRecord");
       }
     });
   });

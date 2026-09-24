@@ -141,15 +141,16 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
         'orgId': '',
     }
 
-    client = boto3.client('bedrock-agentcore-control')
+    client = boto3.client('agent-registry-control')
     response = client.create_registry_record(
         registryId=registry_id,
         name=agent_id,
+        displayName=agent_id,
         description=description,
-        descriptorType='CUSTOM',
+        recordType='CUSTOM',
         descriptors={
             'custom': {
-                'inlineContent': json.dumps(custom_metadata, default=str),
+                'data': json.dumps(custom_metadata, default=str),
             },
         },
     )

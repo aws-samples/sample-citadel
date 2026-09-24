@@ -466,10 +466,15 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "bedrock-agentcore:CreateRegistry",
-          "bedrock-agentcore:DeleteRegistry",
-          "bedrock-agentcore:GetRegistry",
-          "bedrock-agentcore:ListRegistries",
+          "agent-registry:CreateRegistry",
+          "agent-registry:DeleteRegistry",
+          "agent-registry:GetRegistry",
+          "agent-registry:ListRegistries",
+          // Workload-identity actions stay on the bedrock-agentcore
+          // namespace per the agent-registry GA migration guide — the
+          // registry GA split moved only the Registry/RegistryRecord
+          // surface to agent-registry:*; workload identity remains a
+          // bedrock-agentcore primitive.
           "bedrock-agentcore:CreateWorkloadIdentity",
           "bedrock-agentcore:DeleteWorkloadIdentity",
           "bedrock-agentcore:GetWorkloadIdentity",
@@ -482,11 +487,11 @@ export class BackendStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ["iam:CreateServiceLinkedRole"],
         resources: [
-          "arn:aws:iam::*:role/aws-service-role/bedrock-agentcore.amazonaws.com/*",
+          "arn:aws:iam::*:role/aws-service-role/agent-registry.amazonaws.com/*",
         ],
         conditions: {
           StringEquals: {
-            "iam:AWSServiceName": "bedrock-agentcore.amazonaws.com",
+            "iam:AWSServiceName": "agent-registry.amazonaws.com",
           },
         },
       }),
@@ -585,8 +590,8 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
+          "agent-registry:GetRegistryRecord",
+          "agent-registry:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
       }),
@@ -1088,13 +1093,13 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "bedrock-agentcore:CreateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
-          "bedrock-agentcore:SubmitRegistryRecordForApproval",
-          "bedrock-agentcore:DeleteRegistryRecord",
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
+          "agent-registry:CreateRegistryRecord",
+          "agent-registry:UpdateRegistryRecord",
+          "agent-registry:UpdateRegistryRecordStatus",
+          "agent-registry:SubmitRegistryRecordForApproval",
+          "agent-registry:DeleteRegistryRecord",
+          "agent-registry:GetRegistryRecord",
+          "agent-registry:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
       }),
@@ -1198,13 +1203,13 @@ export class BackendStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "bedrock-agentcore:CreateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
-          "bedrock-agentcore:SubmitRegistryRecordForApproval",
-          "bedrock-agentcore:DeleteRegistryRecord",
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
+          "agent-registry:CreateRegistryRecord",
+          "agent-registry:UpdateRegistryRecord",
+          "agent-registry:UpdateRegistryRecordStatus",
+          "agent-registry:SubmitRegistryRecordForApproval",
+          "agent-registry:DeleteRegistryRecord",
+          "agent-registry:GetRegistryRecord",
+          "agent-registry:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
       }),

@@ -163,8 +163,8 @@ class TestCreateResourceCall:
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
-        assert kwargs["descriptorType"] == "CUSTOM"
-        inline = kwargs["descriptors"]["custom"]["inlineContent"]
+        assert kwargs["recordType"] == "CUSTOM"
+        inline = kwargs["descriptors"]["custom"]["data"]
         meta = json.loads(inline)
 
         # categories / icon / state — unchanged contract
@@ -197,7 +197,7 @@ class TestCreateResourceCall:
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
-        meta = json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+        meta = json.loads(kwargs["descriptors"]["custom"]["data"])
         assert meta["createdBy"] == requester
 
     @given(agent_id=agent_ids, schema=tool_schemas)
@@ -214,7 +214,7 @@ class TestCreateResourceCall:
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
-        meta = json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+        meta = json.loads(kwargs["descriptors"]["custom"]["data"])
         assert meta["createdBy"] == "fabricator"
 
     @given(agent_id=agent_ids, org=safe_text, schema=tool_schemas)
@@ -232,7 +232,7 @@ class TestCreateResourceCall:
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
-        meta = json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+        meta = json.loads(kwargs["descriptors"]["custom"]["data"])
         assert meta["orgId"] == org
 
     @given(agent_id=agent_ids, schema=tool_schemas)
@@ -249,7 +249,7 @@ class TestCreateResourceCall:
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
-        meta = json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+        meta = json.loads(kwargs["descriptors"]["custom"]["data"])
         assert meta["orgId"] == ""
 
     @given(agent_id=agent_ids, app_id=app_ids, schema=tool_schemas)
@@ -266,7 +266,7 @@ class TestCreateResourceCall:
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
-        meta = json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+        meta = json.loads(kwargs["descriptors"]["custom"]["data"])
         assert meta["appId"] == app_id
 
     @given(agent_id=agent_ids, schema=tool_schemas)
@@ -282,7 +282,7 @@ class TestCreateResourceCall:
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
-        meta = json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+        meta = json.loads(kwargs["descriptors"]["custom"]["data"])
         assert "appId" not in meta
 
 
@@ -400,7 +400,7 @@ class TestInitialStatusDraft:
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
-        meta = json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+        meta = json.loads(kwargs["descriptors"]["custom"]["data"])
         assert meta["state"] == "inactive"
 
 
@@ -511,7 +511,7 @@ class TestSchemaAsString:
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
-        meta = json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+        meta = json.loads(kwargs["descriptors"]["custom"]["data"])
         assert meta["config"]["schema"] == schema
 
 

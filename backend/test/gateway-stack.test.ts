@@ -47,7 +47,7 @@ function createTestStack(): { stack: GatewayStack; template: Template } {
     idempotencyTable,
     registryId: "test-registry-id",
     registryArn:
-      "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/test-registry-id",
+      "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry-id",
   });
 
   const template = Template.fromStack(stack);
@@ -326,16 +326,16 @@ describe("GatewayStack — IAM Permissions (Task 1.1)", () => {
   // silently fails closed in production (GetResource throws an access
   // error) rather than merely being untested — asserting its presence
   // here prevents that regression from shipping unnoticed.
-  test("publish handler has bedrock-agentcore:GetRegistryRecord scoped to the registry ARN (read-only, no list/write)", () => {
+  test("publish handler has agent-registry:GetRegistryRecord scoped to the registry ARN (read-only, no list/write)", () => {
     template.hasResourceProperties("AWS::IAM::Policy", {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
             Effect: "Allow",
-            Action: "bedrock-agentcore:GetRegistryRecord",
+            Action: "agent-registry:GetRegistryRecord",
             Resource: Match.arrayWith([
-              "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/test-registry-id",
-              "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/test-registry-id/*",
+              "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry-id",
+              "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry-id/*",
             ]),
           }),
         ]),
@@ -361,7 +361,7 @@ describe("GatewayStack — IAM Permissions (Task 1.1)", () => {
         const actions: string[] = Array.isArray(stmt.Action)
           ? stmt.Action
           : [stmt.Action];
-        return actions.some((a) => a.startsWith("bedrock-agentcore:"));
+        return actions.some((a) => a.startsWith("agent-registry:"));
       }),
     );
     expect(registryStatements.length).toBeGreaterThan(0);
@@ -369,7 +369,7 @@ describe("GatewayStack — IAM Permissions (Task 1.1)", () => {
       const actions: string[] = Array.isArray(stmt.Action)
         ? stmt.Action
         : [stmt.Action];
-      expect(actions).toEqual(["bedrock-agentcore:GetRegistryRecord"]);
+      expect(actions).toEqual(["agent-registry:GetRegistryRecord"]);
     }
   });
 });

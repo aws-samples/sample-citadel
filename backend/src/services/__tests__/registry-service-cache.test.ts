@@ -21,8 +21,8 @@ import { RegistryService } from "../registry-service";
 
 const sendMock = jest.fn();
 
-jest.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
-  BedrockAgentCoreControlClient: jest.fn().mockImplementation(() => ({
+jest.mock("@aws-sdk/client-agent-registry-control", () => ({
+  AgentRegistryControlClient: jest.fn().mockImplementation(() => ({
     send: sendMock,
   })),
   CreateRegistryRecordCommand: jest.fn(),
@@ -32,8 +32,19 @@ jest.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
   DeleteRegistryRecordCommand: jest.fn(),
   ListRegistryRecordsCommand: jest.fn((input) => ({ __type: "List", input })),
   SubmitRegistryRecordForApprovalCommand: jest.fn(),
-  DescriptorType: { CUSTOM: "CUSTOM" },
   RegistryRecordStatus: {},
+  RegistryRecordFilterName: {
+    NAME: "name",
+    RECORD_TYPE: "recordType",
+    STATUS: "status",
+  },
+  RecordType: {
+    AGENT: "AGENT",
+    CUSTOM: "CUSTOM",
+    GATEWAY: "GATEWAY",
+    MCP: "MCP",
+    SKILL: "SKILL",
+  },
 }));
 
 function makeSummary(name: string, recordId: string) {
@@ -110,7 +121,7 @@ describe("RegistryService.resolveRecordId — LRU cache", () => {
           name: "shared_name",
           status: "APPROVED",
           descriptors: {
-            custom: { inlineContent: JSON.stringify({ manifest: {} }) },
+            custom: { data: JSON.stringify({ manifest: {} }) },
           },
         };
       }
@@ -119,7 +130,7 @@ describe("RegistryService.resolveRecordId — LRU cache", () => {
           recordId: "tol000000001",
           name: "shared_name",
           status: "APPROVED",
-          descriptors: { custom: { inlineContent: JSON.stringify({}) } },
+          descriptors: { custom: { data: JSON.stringify({}) } },
         };
       }
       return {

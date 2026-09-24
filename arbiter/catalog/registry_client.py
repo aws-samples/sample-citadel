@@ -41,7 +41,7 @@ def _get_client() -> Any:
     """
     global _client
     if _client is None:
-        _client = boto3.client("bedrock-agentcore-control")
+        _client = boto3.client("agent-registry-control")
     return _client
 
 
@@ -79,7 +79,7 @@ def get_agent_record(registry_id: str, record_id: str) -> dict | None:
         return None
     return {
         "recordId": response.get("recordId"),
-        "name": response.get("name"),
+        "name": response.get("displayName"),
         "description": response.get("description"),
         "status": response.get("status"),
         "customDescriptorContent": response.get("customDescriptorContent"),
@@ -123,6 +123,8 @@ def list_agent_records(registry_id: str, filter_status: str | None = None) -> li
     client = _get_client()
     try:
         kwargs: dict[str, Any] = {"registryId": registry_id}
+        if filter_status is not None:
+            kwargs["filters"] = [{"key": "status", "values": [filter_status]}]
         items: list[dict] = []
         while True:
             response = client.list_registry_records(**kwargs)
@@ -136,11 +138,9 @@ def list_agent_records(registry_id: str, filter_status: str | None = None) -> li
             if summaries is None:
                 summaries = response.get("records", [])
             for summary in summaries:
-                if filter_status is not None and summary.get("status") != filter_status:
-                    continue
                 items.append({
                     "recordId": summary.get("recordId"),
-                    "name": summary.get("name"),
+                    "name": summary.get("displayName"),
                     "status": summary.get("status"),
                     "updatedAt": summary.get("updatedAt"),
                 })

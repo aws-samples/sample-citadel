@@ -222,7 +222,7 @@ function createTestStack(): {
   );
 
   const registryArn =
-    "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/citadel-test";
+    "arn:aws:agent-registry:us-east-1:123456789012:registry/citadel-test";
 
   const promotionPolicyConfigTable = new dynamodb.Table(
     backendStack,
@@ -388,7 +388,7 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
     );
     expect(allActions).toEqual(expect.arrayContaining(["dynamodb:GetItem"]));
     expect(allActions).toEqual(
-      expect.arrayContaining(["bedrock-agentcore:GetRegistryRecord"]),
+      expect.arrayContaining(["agent-registry:GetRegistryRecord"]),
     );
   });
 

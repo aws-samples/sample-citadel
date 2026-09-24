@@ -911,7 +911,10 @@ if (app.node.tryGetContext("nag") !== "false") {
     ],
   );
 
-  // IAM5 — RegistryProvisionerFunction needs SLR wildcard for bedrock-agentcore service-linked role creation.
+  // IAM5 — RegistryProvisionerFunction needs SLR wildcard for agent-registry service-linked role creation.
+  // GA namespace migration: service principal moved from
+  // bedrock-agentcore.amazonaws.com to agent-registry.amazonaws.com for the
+  // registry-specific service-linked role (see backend-stack.ts).
   NagSuppressions.addResourceSuppressionsByPath(
     backendStack,
     `/${backendStack.stackName}/RegistryProvisionerFunction/ServiceRole/DefaultPolicy/Resource`,
@@ -919,9 +922,9 @@ if (app.node.tryGetContext("nag") !== "false") {
       {
         id: "AwsSolutions-IAM5",
         reason:
-          "iam:CreateServiceLinkedRole requires wildcard on the SLR path. Scoped to bedrock-agentcore.amazonaws.com service only.",
+          "iam:CreateServiceLinkedRole requires wildcard on the SLR path. Scoped to agent-registry.amazonaws.com service only.",
         appliesTo: [
-          "Resource::arn:aws:iam::*:role/aws-service-role/bedrock-agentcore.amazonaws.com/*",
+          "Resource::arn:aws:iam::*:role/aws-service-role/agent-registry.amazonaws.com/*",
         ],
       },
     ],

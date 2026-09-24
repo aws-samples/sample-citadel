@@ -29,8 +29,8 @@ const sendMock = jest.fn();
 const getRegistryRecordCtor = jest.fn();
 const listRegistryRecordsCtor = jest.fn();
 
-jest.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
-  BedrockAgentCoreControlClient: jest.fn().mockImplementation(() => ({
+jest.mock("@aws-sdk/client-agent-registry-control", () => ({
+  AgentRegistryControlClient: jest.fn().mockImplementation(() => ({
     send: sendMock,
   })),
   CreateRegistryRecordCommand: jest.fn(),
@@ -52,8 +52,19 @@ jest.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
     return { input };
   }),
   SubmitRegistryRecordForApprovalCommand: jest.fn(),
-  DescriptorType: { CUSTOM: "CUSTOM" },
   RegistryRecordStatus: {},
+  RegistryRecordFilterName: {
+    NAME: "name",
+    RECORD_TYPE: "recordType",
+    STATUS: "status",
+  },
+  RecordType: {
+    AGENT: "AGENT",
+    CUSTOM: "CUSTOM",
+    GATEWAY: "GATEWAY",
+    MCP: "MCP",
+    SKILL: "SKILL",
+  },
 }));
 
 function makeSummary(name: string, recordId: string) {
@@ -221,7 +232,7 @@ describe("RegistryService.resolveRecordId — bounded enumeration fallback", () 
           recordId: "toolshared01",
           name: "shared_name",
           status: "APPROVED",
-          descriptors: { custom: { inlineContent: JSON.stringify({}) } },
+          descriptors: { custom: { data: JSON.stringify({}) } },
         };
       }
       if (input.recordId === "agtshared001") {
@@ -231,7 +242,7 @@ describe("RegistryService.resolveRecordId — bounded enumeration fallback", () 
           name: "shared_name",
           status: "APPROVED",
           descriptors: {
-            custom: { inlineContent: JSON.stringify({ manifest: {} }) },
+            custom: { data: JSON.stringify({ manifest: {} }) },
           },
         };
       }

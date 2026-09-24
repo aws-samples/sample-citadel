@@ -5,7 +5,7 @@
  * Fabricator use this module instead of calling Registry APIs directly.
  */
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   CreateRegistryRecordCommand,
   GetRegistryRecordCommand,
   UpdateRegistryRecordCommand,
@@ -14,12 +14,14 @@ import {
   DeleteRegistryRecordCommand,
   ListRegistryRecordsCommand,
   RegistryRecordStatus,
-} from "@aws-sdk/client-bedrock-agentcore-control";
+  RegistryRecordFilterName,
+  RecordType,
+} from "@aws-sdk/client-agent-registry-control";
 import type {
   GetRegistryRecordCommandOutput,
   ListRegistryRecordsCommandOutput,
   RegistryRecordSummary,
-} from "@aws-sdk/client-bedrock-agentcore-control";
+} from "@aws-sdk/client-agent-registry-control";
 import { sanitizeRegistryName } from "../utils/registry-name";
 import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { ConnectorError } from "../adapters/errors";
@@ -552,7 +554,7 @@ export interface ListResourcesOptions {
 }
 
 export class RegistryService {
-  private readonly client: BedrockAgentCoreControlClient;
+  private readonly client: AgentRegistryControlClient;
   /**
    * Shared LifecycleManager for REGISTRY_TRANSITIONS (agent-record approval
    * lifecycle). Stateless — safe as a single static instance across all
@@ -595,7 +597,7 @@ export class RegistryService {
 
   constructor(config: RegistryServiceConfig) {
     this.registryId = config.registryId;
-    this.client = new BedrockAgentCoreControlClient({
+    this.client = new AgentRegistryControlClient({
       region: config.region,
     });
   }
@@ -642,7 +644,7 @@ export class RegistryService {
   }
 
   /** Returns the underlying SDK client (useful for testing / mocking). */
-  getClient(): BedrockAgentCoreControlClient {
+  getClient(): AgentRegistryControlClient {
     return this.client;
   }
 
@@ -712,10 +714,15 @@ export class RegistryService {
    * Creates a new resource (agent or tool) in the Registry.
    *
    * The SDK's CreateRegistryRecord does not accept a recordId — the service
-   * generates one. We store custom metadata in a CUSTOM descriptor's
-   * inlineContent field. After creation we issue a GetRegistryRecord to
-   * retrieve the full record (the create response only returns recordArn +
-   * status).
+   * generates one. We store custom metadata in a CUSTOM descriptor's `data`
+   * field (GA schema: the old `descriptors.custom.inlineContent` became
+   * `descriptors.custom.data`). GA also requires both a unique `name` and a
+   * `recordType`; the old API's single `name` field is now `displayName`
+   * (non-unique, human-readable) — the sanitized name is sent as BOTH `name`
+   * (uniqueness constraint) and `displayName` (display value) so existing
+   * callers that only ever supplied one name string keep working unchanged.
+   * After creation we issue a GetRegistryRecord to retrieve the full record
+   * (the create response only returns recordArn + status).
    */
   async createResource(
     type: ResourceType,
@@ -732,18 +739,12 @@ export class RegistryService {
         new CreateRegistryRecordCommand({
           registryId: this.registryId,
           name: safeName,
+          displayName: safeName,
           description: input.description,
-          // Use the literal 'CUSTOM' instead of DescriptorType.CUSTOM enum access.
-          // governance-ui-resolver.ts is bundled with --external:@aws-sdk/* and
-          // resolves the SDK from Lambda's bundled snapshot at runtime, which
-          // doesn't yet ship the AgentCore registry-record DescriptorType enum.
-          // The string literal is part of the field's TS union type ('MCP' | 'A2A'
-          // | 'CUSTOM' | 'AGENT_SKILLS'), so this type-checks cleanly without the
-          // runtime import dependency.
-          descriptorType: "CUSTOM",
+          recordType: RecordType.CUSTOM,
           descriptors: {
             custom: {
-              inlineContent: input.customMetadata,
+              data: input.customMetadata,
             },
           },
         }),
@@ -795,7 +796,7 @@ export class RegistryService {
         ),
       );
 
-      const customDescriptorContent = result.descriptors?.custom?.inlineContent;
+      const customDescriptorContent = result.descriptors?.custom?.data;
 
       // Enforce requested type vs descriptor content. Tools store their
       // config in the `description` field and have no manifest; agents
@@ -857,7 +858,7 @@ export class RegistryService {
 
   /**
    * Extracts the recordId from a Registry record ARN
-   * (`arn:aws:bedrock-agentcore:<region>:<account>:registry/<registryId>/record/<recordId>`).
+   * (`arn:aws:agent-registry:<region>:<account>:registry/<registryId>/record/<recordId>`).
    * Returns undefined if `id` is not ARN-shaped.
    */
   private static extractRecordIdFromArn(id: string): string | undefined {
@@ -928,7 +929,12 @@ export class RegistryService {
           this.client.send(
             new ListRegistryRecordsCommand({
               registryId: this.registryId,
-              descriptorType: "CUSTOM",
+              filters: [
+                {
+                  name: RegistryRecordFilterName.RECORD_TYPE,
+                  values: [RecordType.CUSTOM],
+                },
+              ],
               nextToken,
             }),
           ),
@@ -993,6 +999,12 @@ export class RegistryService {
 
   /**
    * Updates an existing resource in the Registry.
+   *
+   * GA shape: `name` is a plain string (unwrapped — omit to leave unchanged).
+   * `description` and `descriptors.custom.data` use PATCH wrapper objects
+   * (`{ optionalValue: ... }`) — omitting the wrapper entirely leaves the
+   * field unchanged, while an empty wrapper `{}` would unset it (not used
+   * here since callers only ever supply a new value or nothing).
    */
   async updateResource(
     type: ResourceType,
@@ -1008,7 +1020,7 @@ export class RegistryService {
           // Renames hit the same name constraint as creates — sanitize with
           // the shared rule (legal names pass through unchanged).
           name:
-            input.name != null ? sanitizeRegistryName(input.name) : input.name,
+            input.name != null ? sanitizeRegistryName(input.name) : undefined,
           description:
             input.description != null
               ? { optionalValue: input.description }
@@ -1019,7 +1031,7 @@ export class RegistryService {
                   optionalValue: {
                     custom: {
                       optionalValue: {
-                        inlineContent: input.customMetadata,
+                        data: { optionalValue: input.customMetadata },
                       },
                     },
                   },
@@ -1034,7 +1046,7 @@ export class RegistryService {
       name: result.name ?? "",
       description: result.description,
       status: result.status ?? "",
-      customDescriptorContent: result.descriptors?.custom?.inlineContent,
+      customDescriptorContent: result.descriptors?.custom?.data,
       createdAt: result.createdAt,
       updatedAt: result.updatedAt,
     };
@@ -1172,7 +1184,7 @@ export class RegistryService {
       name: refreshed.name ?? "",
       description: refreshed.description,
       status: refreshed.status ?? "",
-      customDescriptorContent: refreshed.descriptors?.custom?.inlineContent,
+      customDescriptorContent: refreshed.descriptors?.custom?.data,
       createdAt: refreshed.createdAt,
       updatedAt: refreshed.updatedAt,
     };
@@ -1216,7 +1228,12 @@ export class RegistryService {
           this.client.send(
             new ListRegistryRecordsCommand({
               registryId: this.registryId,
-              descriptorType: "CUSTOM",
+              filters: [
+                {
+                  name: RegistryRecordFilterName.RECORD_TYPE,
+                  values: [RecordType.CUSTOM],
+                },
+              ],
               nextToken,
             }),
           ),
@@ -1333,7 +1350,7 @@ export class RegistryService {
    * Lists all resources of a given type from the Registry.
    * Handles pagination automatically, returning all records.
    *
-   * Uses CUSTOM descriptorType filter since all our resources use CUSTOM
+   * Uses a RECORD_TYPE=CUSTOM filter since all our resources use CUSTOM
    * descriptors. The `type` parameter is reserved for future use when the
    * Registry supports finer-grained filtering.
    *
@@ -1385,7 +1402,12 @@ export class RegistryService {
           this.client.send(
             new ListRegistryRecordsCommand({
               registryId: this.registryId,
-              descriptorType: "CUSTOM",
+              filters: [
+                {
+                  name: RegistryRecordFilterName.RECORD_TYPE,
+                  values: [RecordType.CUSTOM],
+                },
+              ],
               nextToken,
             }),
           ),
@@ -1437,8 +1459,7 @@ export class RegistryService {
               name: detail.name ?? rec.name ?? "",
               description: detail.description,
               status: detail.status ?? rec.status ?? "",
-              customDescriptorContent:
-                detail.descriptors?.custom?.inlineContent,
+              customDescriptorContent: detail.descriptors?.custom?.data,
               createdAt: detail.createdAt,
               updatedAt: detail.updatedAt,
             };
@@ -1498,8 +1519,11 @@ export class RegistryService {
   /**
    * Searches for resources by query string using the Registry's name filter.
    *
-   * Uses `ListRegistryRecordsCommand` with the `name` parameter for
-   * server-side filtering. Handles pagination automatically.
+   * GA shape: the old top-level `name` param is now expressed as a
+   * structured `filters` entry (`RegistryRecordFilterName.NAME`), combined
+   * with the existing `RECORD_TYPE=CUSTOM` filter (multiple filter entries
+   * AND together per the GA filter semantics). Handles pagination
+   * automatically.
    */
   async searchResources(
     type: ResourceType,
@@ -1514,8 +1538,13 @@ export class RegistryService {
           this.client.send(
             new ListRegistryRecordsCommand({
               registryId: this.registryId,
-              descriptorType: "CUSTOM",
-              name: query,
+              filters: [
+                {
+                  name: RegistryRecordFilterName.RECORD_TYPE,
+                  values: [RecordType.CUSTOM],
+                },
+                { name: RegistryRecordFilterName.NAME, values: [query] },
+              ],
               nextToken,
             }),
           ),

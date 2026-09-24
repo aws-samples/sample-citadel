@@ -1348,8 +1348,8 @@ def handler(event, context):
       agentIntakeSingleRuntime.grantPrincipal.addToPrincipalPolicy(
         new iam.PolicyStatement({
           actions: [
-            "bedrock-agentcore:ListRegistryRecords",
-            "bedrock-agentcore:GetRegistryRecord",
+            "agent-registry:ListRegistryRecords",
+            "agent-registry:GetRegistryRecord",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),
@@ -1499,12 +1499,12 @@ def handler(event, context):
         intakeOrchestrationResolverFn.addToRolePolicy(
           new iam.PolicyStatement({
             actions: [
-              "bedrock-agentcore:CreateRegistryRecord",
-              "bedrock-agentcore:UpdateRegistryRecord",
-              "bedrock-agentcore:UpdateRegistryRecordStatus",
-              "bedrock-agentcore:SubmitRegistryRecordForApproval",
-              "bedrock-agentcore:GetRegistryRecord",
-              "bedrock-agentcore:ListRegistryRecords",
+              "agent-registry:CreateRegistryRecord",
+              "agent-registry:UpdateRegistryRecord",
+              "agent-registry:UpdateRegistryRecordStatus",
+              "agent-registry:SubmitRegistryRecordForApproval",
+              "agent-registry:GetRegistryRecord",
+              "agent-registry:ListRegistryRecords",
             ],
             resources: [props.registryArn, `${props.registryArn}/*`],
           }),

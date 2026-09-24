@@ -7,15 +7,15 @@
  * registry has autoApproval configured, else lands on PENDING_APPROVAL.
  */
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   SubmitRegistryRecordForApprovalCommand,
   GetRegistryRecordCommand,
   UpdateRegistryRecordStatusCommand,
-} from "@aws-sdk/client-bedrock-agentcore-control";
+} from "@aws-sdk/client-agent-registry-control";
 import { mockClient } from "aws-sdk-client-mock";
 import { RegistryService } from "../registry-service";
 
-const sdkMock = mockClient(BedrockAgentCoreControlClient);
+const sdkMock = mockClient(AgentRegistryControlClient);
 
 describe("RegistryService.submitForApproval", () => {
   let service: RegistryService;

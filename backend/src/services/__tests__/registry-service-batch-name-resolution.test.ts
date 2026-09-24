@@ -12,15 +12,15 @@
  * enrichment (the N+1 fix).
  */
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   GetRegistryRecordCommand,
   ListRegistryRecordsCommand,
-  DescriptorType,
-} from "@aws-sdk/client-bedrock-agentcore-control";
+  RecordType,
+} from "@aws-sdk/client-agent-registry-control";
 import { mockClient } from "aws-sdk-client-mock";
 import { RegistryService } from "../registry-service";
 
-const sdkMock = mockClient(BedrockAgentCoreControlClient);
+const sdkMock = mockClient(AgentRegistryControlClient);
 
 describe("RegistryService — listResourceSummaries", () => {
   let service: RegistryService;
@@ -46,7 +46,7 @@ describe("RegistryService — listResourceSummaries", () => {
           recordArn: "arn:1/r1",
           recordId: "recordidone1",
           name: "Agent One",
-          descriptorType: DescriptorType.CUSTOM,
+          recordType: RecordType.CUSTOM,
           recordVersion: "1",
           status: "APPROVED",
           createdAt: new Date(),
@@ -57,7 +57,7 @@ describe("RegistryService — listResourceSummaries", () => {
           recordArn: "arn:1/r2",
           recordId: "recordidtwo2",
           name: "Agent Two",
-          descriptorType: DescriptorType.CUSTOM,
+          recordType: RecordType.CUSTOM,
           recordVersion: "1",
           status: "APPROVED",
           createdAt: new Date(),
@@ -87,7 +87,7 @@ describe("RegistryService — listResourceSummaries", () => {
             recordArn: "arn:1/r1",
             recordId: "recordidone1",
             name: "Agent One",
-            descriptorType: DescriptorType.CUSTOM,
+            recordType: RecordType.CUSTOM,
             recordVersion: "1",
             status: "APPROVED",
             createdAt: new Date(),
@@ -103,7 +103,7 @@ describe("RegistryService — listResourceSummaries", () => {
             recordArn: "arn:1/r2",
             recordId: "recordidtwo2",
             name: "Agent Two",
-            descriptorType: DescriptorType.CUSTOM,
+            recordType: RecordType.CUSTOM,
             recordVersion: "1",
             status: "APPROVED",
             createdAt: new Date(),
@@ -148,7 +148,7 @@ describe("RegistryService — getResourcesByRefs", () => {
       recordId: "recordidone1",
       name: "Agent One",
       status: "APPROVED",
-      descriptors: { custom: { inlineContent: '{"manifest":{}}' } },
+      descriptors: { custom: { data: '{"manifest":{}}' } },
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -168,7 +168,7 @@ describe("RegistryService — getResourcesByRefs", () => {
           recordArn: "arn:1/r1",
           recordId: "recordidone1",
           name: "LegacyAgentName",
-          descriptorType: DescriptorType.CUSTOM,
+          recordType: RecordType.CUSTOM,
           recordVersion: "1",
           status: "APPROVED",
           createdAt: new Date(),
@@ -181,7 +181,7 @@ describe("RegistryService — getResourcesByRefs", () => {
       recordId: "recordidone1",
       name: "LegacyAgentName",
       status: "APPROVED",
-      descriptors: { custom: { inlineContent: '{"manifest":{}}' } },
+      descriptors: { custom: { data: '{"manifest":{}}' } },
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -200,7 +200,7 @@ describe("RegistryService — getResourcesByRefs", () => {
       recordId: "recordidone1",
       name: "Agent One",
       status: "APPROVED",
-      descriptors: { custom: { inlineContent: '{"manifest":{}}' } },
+      descriptors: { custom: { data: '{"manifest":{}}' } },
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -222,7 +222,7 @@ describe("RegistryService — getResourcesByRefs", () => {
         recordId: input.recordId,
         name: `Name-${input.recordId}`,
         status: "APPROVED",
-        descriptors: { custom: { inlineContent: '{"manifest":{}}' } },
+        descriptors: { custom: { data: '{"manifest":{}}' } },
         createdAt: new Date(),
         updatedAt: new Date(),
       }));
@@ -247,7 +247,7 @@ describe("RegistryService — getResourcesByRefs", () => {
           recordId: input.recordId,
           name: "Good Agent",
           status: "APPROVED",
-          descriptors: { custom: { inlineContent: '{"manifest":{}}' } },
+          descriptors: { custom: { data: '{"manifest":{}}' } },
           createdAt: new Date(),
           updatedAt: new Date(),
         };
@@ -283,7 +283,7 @@ describe("RegistryService — getResourcesByRefs", () => {
           recordArn: "arn:1/r2",
           recordId: "recordidtwo2",
           name: "LegacyAgentName",
-          descriptorType: DescriptorType.CUSTOM,
+          recordType: RecordType.CUSTOM,
           recordVersion: "1",
           status: "APPROVED",
           createdAt: new Date(),
@@ -303,7 +303,7 @@ describe("RegistryService — getResourcesByRefs", () => {
           recordId: input.recordId,
           name: names[input.recordId] ?? "Unknown",
           status: "APPROVED",
-          descriptors: { custom: { inlineContent: '{"manifest":{}}' } },
+          descriptors: { custom: { data: '{"manifest":{}}' } },
           createdAt: new Date(),
           updatedAt: new Date(),
         };

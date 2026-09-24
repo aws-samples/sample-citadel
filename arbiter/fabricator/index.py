@@ -69,13 +69,13 @@ _registry_client = None
 
 
 def _get_registry_client():
-    """Lazy boto3 client for bedrock-agentcore-control Registry APIs.
+    """Lazy boto3 client for agent-registry-control Registry APIs.
 
     QB-013-1 pattern: construct at first call so module import is cheap.
     """
     global _registry_client
     if _registry_client is None:
-        _registry_client = boto3.client('bedrock-agentcore-control')
+        _registry_client = boto3.client('agent-registry-control')
     return _registry_client
 
 
@@ -159,8 +159,10 @@ def _find_existing_record_id(registry_id: str, agent_id: str) -> str | None:
     while True:
         kwargs: dict[str, Any] = {
             "registryId": registry_id,
-            "descriptorType": "CUSTOM",
-            "name": agent_id,
+            "filters": [
+                {"key": "recordType", "values": ["CUSTOM"]},
+                {"key": "displayName", "values": [agent_id]},
+            ],
         }
         if next_token:
             kwargs["nextToken"] = next_token
@@ -178,7 +180,7 @@ def _find_existing_record_id(registry_id: str, agent_id: str) -> str | None:
         if summaries is None:
             summaries = response.get("records", [])
         for summary in summaries:
-            if isinstance(summary, dict) and summary.get("name") == agent_id:
+            if isinstance(summary, dict) and summary.get("displayName") == agent_id:
                 return summary.get("recordId")
         next_token = response.get("nextToken")
         if not isinstance(next_token, str) or not next_token:
@@ -1560,11 +1562,12 @@ def store_agent_config_registry(
         response = _get_registry_client().create_registry_record(
             registryId=registry_id,
             name=agent_id,
+            displayName=agent_id,
             description=display_description,
-            descriptorType="CUSTOM",
+            recordType="CUSTOM",
             descriptors={
                 "custom": {
-                    "inlineContent": json.dumps(custom_metadata, default=str),
+                    "data": json.dumps(custom_metadata, default=str),
                 },
             },
         )
@@ -1789,11 +1792,12 @@ def store_tool_config_registry(
         create_kwargs = {
             "registryId": registry_id,
             "name": tool_id,
+            "displayName": tool_id,
             "description": tool_description or "",
-            "descriptorType": "CUSTOM",
+            "recordType": "CUSTOM",
             "descriptors": {
                 "custom": {
-                    "inlineContent": json.dumps(custom_metadata, default=str),
+                    "data": json.dumps(custom_metadata, default=str),
                 },
             },
         }

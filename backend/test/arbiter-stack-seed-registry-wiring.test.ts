@@ -35,7 +35,7 @@ scaffoldArbiterStubs();
 import { ArbiterStack } from "../lib/arbiter-stack";
 
 const REGISTRY_ARN =
-  "arn:aws:bedrock-agentcore:us-east-1:123456789012:registry/test-registry";
+  "arn:aws:agent-registry:us-east-1:123456789012:registry/test-registry";
 const REGISTRY_ID = "test-registry-id";
 
 type Resources = Record<string, any>;
@@ -123,7 +123,7 @@ function collectAgentcoreStatements(policies: any[]): any[] {
       if (
         actions.some(
           (a: unknown) =>
-            typeof a === "string" && a.startsWith("bedrock-agentcore:"),
+            typeof a === "string" && a.startsWith("agent-registry:"),
         )
       ) {
         statements.push(stmt);
@@ -173,8 +173,8 @@ describe("ArbiterStack — seed Lambda registry wiring (dual-store agent seam)",
       const actions = statements.flatMap((s) =>
         Array.isArray(s.Action) ? s.Action : [s.Action],
       );
-      expect(actions).toContain("bedrock-agentcore:CreateRegistryRecord");
-      expect(actions).toContain("bedrock-agentcore:ListRegistryRecords");
+      expect(actions).toContain("agent-registry:CreateRegistryRecord");
+      expect(actions).toContain("agent-registry:ListRegistryRecords");
       for (const stmt of statements) {
         const resourceList = Array.isArray(stmt.Resource)
           ? stmt.Resource
@@ -190,10 +190,10 @@ describe("ArbiterStack — seed Lambda registry wiring (dual-store agent seam)",
         getPoliciesForLambda(resources, findSeedLambdaId(resources)),
       ).flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
       for (const forbidden of [
-        "bedrock-agentcore:UpdateRegistryRecord",
-        "bedrock-agentcore:UpdateRegistryRecordStatus",
-        "bedrock-agentcore:SubmitRegistryRecordForApproval",
-        "bedrock-agentcore:DeleteRegistryRecord",
+        "agent-registry:UpdateRegistryRecord",
+        "agent-registry:UpdateRegistryRecordStatus",
+        "agent-registry:SubmitRegistryRecordForApproval",
+        "agent-registry:DeleteRegistryRecord",
       ]) {
         expect(actions).not.toContain(forbidden);
       }

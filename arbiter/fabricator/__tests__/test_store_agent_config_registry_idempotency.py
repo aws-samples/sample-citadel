@@ -61,7 +61,7 @@ def _make_registry_mock(existing_records=None, record_id="gen-record-id"):
     }
     client.create_registry_record.return_value = {
         "recordArn": (
-            "arn:aws:bedrock-agentcore:us-west-2:123456789012:"
+            "arn:aws:agent-registry:us-west-2:123456789012:"
             f"registry/reg/record/{record_id}"
         ),
         "recordId": record_id,
@@ -81,7 +81,7 @@ class TestIdempotentAgentCreation:
     def test_skips_create_when_same_named_record_exists(self):
         agent_id = "duplicate_agent"
         client = _make_registry_mock(
-            existing_records=[{"name": agent_id, "recordId": "existing-rec-id"}],
+            existing_records=[{"displayName": agent_id, "recordId": "existing-rec-id"}],
         )
         with patch("index._get_registry_client", return_value=client):
             result = store_agent_config_registry(
@@ -112,7 +112,7 @@ class TestIdempotentAgentCreation:
         """A record whose name differs must NOT block creation."""
         agent_id = "wanted_agent"
         client = _make_registry_mock(
-            existing_records=[{"name": "some_other_agent", "recordId": "other-id"}],
+            existing_records=[{"displayName": "some_other_agent", "recordId": "other-id"}],
         )
         with patch("index._get_registry_client", return_value=client):
             result = store_agent_config_registry(
@@ -132,10 +132,10 @@ class TestIdempotentAgentCreation:
         agent_id = "legacy_key_agent"
         client = MagicMock()
         client.list_registry_records.return_value = {
-            "records": [{"name": agent_id, "recordId": "existing-rec-id"}],
+            "records": [{"displayName": agent_id, "recordId": "existing-rec-id"}],
         }
         client.create_registry_record.return_value = {
-            "recordArn": "arn:aws:bedrock-agentcore:us-west-2:1:registry/reg/record/x",
+            "recordArn": "arn:aws:agent-registry:us-west-2:1:registry/reg/record/x",
             "recordId": "x",
         }
         with patch("index._get_registry_client", return_value=client):
@@ -167,7 +167,7 @@ class TestIdempotentAgentCreation:
         # live wire shape; a `response.get("records", [])`-only reader
         # returns [] here and the guard would return None (the live bug).
         client.list_registry_records.return_value = {
-            "registryRecords": [{"name": agent_id, "recordId": "live-rec-id"}],
+            "registryRecords": [{"displayName": agent_id, "recordId": "live-rec-id"}],
             "nextToken": None,
         }
         with patch("index._get_registry_client", return_value=client):

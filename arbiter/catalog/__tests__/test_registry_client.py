@@ -72,7 +72,7 @@ def _make_client_error(
 def _sample_get_response() -> dict[str, Any]:
     return {
         "recordId": "rec-1",
-        "name": "orchestrator",
+        "displayName": "orchestrator",
         "description": "primary supervisor",
         "status": "APPROVED",
         "customDescriptorContent": '{"sourceProjectId":"proj-9"}',
@@ -337,15 +337,14 @@ def test_list_agent_records_filter_status_excludes_other_statuses() -> None:
     fake = MagicMock()
     fake.list_registry_records.return_value = {
         "registryRecords": [
-            {"recordId": "a", "name": "A", "status": "APPROVED", "updatedAt": "t1"},
-            {"recordId": "b", "name": "B", "status": "DRAFT", "updatedAt": "t2"},
-            {"recordId": "c", "name": "C", "status": "APPROVED", "updatedAt": "t3"},
+            {"recordId": "a", "displayName": "A", "status": "APPROVED", "updatedAt": "t1"},
         ],
     }
     with patch.object(registry_client, "_get_client", return_value=fake):
         result = list_agent_records("reg-1", filter_status="APPROVED")
-    assert [r["recordId"] for r in result] == ["a", "c"]
-    assert all(r["status"] == "APPROVED" for r in result)
+    assert [r["recordId"] for r in result] == ["a"]
+    call = fake.list_registry_records.call_args
+    assert call.kwargs["filters"] == [{"key": "status", "values": ["APPROVED"]}]
 
 
 def test_list_agent_records_no_filter_includes_all_statuses() -> None:

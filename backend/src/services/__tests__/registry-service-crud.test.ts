@@ -8,29 +8,34 @@
  */
 
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   CreateRegistryRecordCommand,
   GetRegistryRecordCommand,
   UpdateRegistryRecordCommand,
   DeleteRegistryRecordCommand,
   ListRegistryRecordsCommand,
-  DescriptorType,
-} from '@aws-sdk/client-bedrock-agentcore-control';
-import { mockClient } from 'aws-sdk-client-mock';
-import { RegistryService, RegistryRecord, CreateResourceInput, UpdateResourceInput } from '../registry-service';
+  RecordType,
+} from "@aws-sdk/client-agent-registry-control";
+import { mockClient } from "aws-sdk-client-mock";
+import {
+  RegistryService,
+  RegistryRecord,
+  CreateResourceInput,
+  UpdateResourceInput,
+} from "../registry-service";
 
-const sdkMock = mockClient(BedrockAgentCoreControlClient);
+const sdkMock = mockClient(AgentRegistryControlClient);
 
-describe('RegistryService CRUD operations', () => {
+describe("RegistryService CRUD operations", () => {
   let service: RegistryService;
 
   beforeEach(() => {
     sdkMock.reset();
     service = new RegistryService({
-      registryId: 'test-registry',
-      region: 'us-east-1',
+      registryId: "test-registry",
+      region: "us-east-1",
     });
-    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    jest.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -39,44 +44,45 @@ describe('RegistryService CRUD operations', () => {
 
   // -- createResource ------------------------------------------------------
 
-  describe('createResource', () => {
-    it('sends CreateRegistryRecordCommand then GetRegistryRecordCommand and returns record', async () => {
+  describe("createResource", () => {
+    it("sends CreateRegistryRecordCommand then GetRegistryRecordCommand and returns record", async () => {
       const now = new Date();
       // CreateRegistryRecordCommand returns recordArn + status
       sdkMock.on(CreateRegistryRecordCommand).resolves({
-        recordArn: 'arn:aws:bedrock-agentcore:us-east-1:123:registry/test-registry/record/agent-1',
-        status: 'DRAFT',
+        recordArn:
+          "arn:aws:bedrock-agentcore:us-east-1:123:registry/test-registry/record/agent-1",
+        status: "DRAFT",
       });
       // Follow-up GetRegistryRecordCommand returns full record
       sdkMock.on(GetRegistryRecordCommand).resolves({
-        recordId: 'agent-1',
-        name: 'My Agent',
-        description: 'A test agent',
-        status: 'DRAFT',
-        descriptorType: DescriptorType.CUSTOM,
+        recordId: "agent-1",
+        name: "My Agent",
+        description: "A test agent",
+        status: "DRAFT",
+        recordType: RecordType.CUSTOM,
         descriptors: {
-          custom: { inlineContent: '{"categories":["ai"]}' },
+          custom: { data: '{"categories":["ai"]}' },
         },
         createdAt: now,
         updatedAt: now,
       });
 
       const input: CreateResourceInput = {
-        name: 'My Agent',
-        description: 'A test agent',
+        name: "My Agent",
+        description: "A test agent",
         customMetadata: '{"categories":["ai"]}',
       };
 
       // Test intent is generic CRUD mechanics (not agent-specific).
       // Use 'tool' here so the fixture's manifest-less descriptor is valid
       // under the type filter in getResource().
-      const result = await service.createResource('tool', 'agent-1', input);
+      const result = await service.createResource("tool", "agent-1", input);
 
       expect(result).toEqual<RegistryRecord>({
-        recordId: 'agent-1',
-        name: 'My Agent',
-        description: 'A test agent',
-        status: 'DRAFT',
+        recordId: "agent-1",
+        name: "My Agent",
+        description: "A test agent",
+        status: "DRAFT",
         customDescriptorContent: '{"categories":["ai"]}',
         createdAt: now,
         updatedAt: now,
@@ -85,148 +91,158 @@ describe('RegistryService CRUD operations', () => {
       const createCalls = sdkMock.commandCalls(CreateRegistryRecordCommand);
       expect(createCalls).toHaveLength(1);
       expect(createCalls[0].args[0].input).toEqual({
-        registryId: 'test-registry',
+        registryId: "test-registry",
         // Names are sanitized to the registry constraint
         // ^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$ before the call ('My Agent' would
         // be rejected with a ValidationException — spaces are illegal).
-        name: 'My-Agent',
-        description: 'A test agent',
-        descriptorType: DescriptorType.CUSTOM,
+        name: "My-Agent",
+        displayName: "My-Agent",
+        description: "A test agent",
+        recordType: RecordType.CUSTOM,
         descriptors: {
-          custom: { inlineContent: '{"categories":["ai"]}' },
+          custom: { data: '{"categories":["ai"]}' },
         },
       });
     });
 
-    it('uses fallback when GetRegistryRecordCommand fails after create', async () => {
+    it("uses fallback when GetRegistryRecordCommand fails after create", async () => {
       sdkMock.on(CreateRegistryRecordCommand).resolves({
-        recordArn: 'arn:aws:bedrock-agentcore:us-east-1:123:registry/test-registry/record/agent-2',
-        status: 'DRAFT',
+        recordArn:
+          "arn:aws:bedrock-agentcore:us-east-1:123:registry/test-registry/record/agent-2",
+        status: "DRAFT",
       });
       // Get fails with 404
-      const err = new Error('Not found') as Error & { $metadata?: { httpStatusCode?: number } };
-      err.name = 'ResourceNotFoundException';
+      const err = new Error("Not found") as Error & {
+        $metadata?: { httpStatusCode?: number };
+      };
+      err.name = "ResourceNotFoundException";
       err.$metadata = { httpStatusCode: 404 };
       sdkMock.on(GetRegistryRecordCommand).rejects(err);
 
       const input: CreateResourceInput = {
-        name: 'Fallback Agent',
-        customMetadata: '{}',
+        name: "Fallback Agent",
+        customMetadata: "{}",
       };
 
-      const result = await service.createResource('agent', 'agent-2', input);
+      const result = await service.createResource("agent", "agent-2", input);
 
-      expect(result.recordId).toBe('agent-2');
+      expect(result.recordId).toBe("agent-2");
       // The fallback record carries the sanitized name actually sent to the
       // registry, not the raw input.
-      expect(result.name).toBe('Fallback-Agent');
-      expect(result.status).toBe('DRAFT');
+      expect(result.name).toBe("Fallback-Agent");
+      expect(result.status).toBe("DRAFT");
     });
   });
 
   // -- getResource ---------------------------------------------------------
 
-  describe('getResource', () => {
-    it('returns record when found', async () => {
+  describe("getResource", () => {
+    it("returns record when found", async () => {
       const now = new Date();
       sdkMock.on(GetRegistryRecordCommand).resolves({
-        recordId: 'tool-1',
-        name: 'My Tool',
-        description: 'A test tool',
-        status: 'APPROVED',
-        descriptorType: DescriptorType.CUSTOM,
+        recordId: "tool-1",
+        name: "My Tool",
+        description: "A test tool",
+        status: "APPROVED",
+        recordType: RecordType.CUSTOM,
         descriptors: {
-          custom: { inlineContent: '{"categories":["data"]}' },
+          custom: { data: '{"categories":["data"]}' },
         },
         createdAt: now,
         updatedAt: now,
       });
 
-      const result = await service.getResource('tool', 'tool-1');
+      const result = await service.getResource("tool", "tool-1");
 
       expect(result).not.toBeNull();
-      expect(result!.recordId).toBe('tool-1');
-      expect(result!.status).toBe('APPROVED');
+      expect(result!.recordId).toBe("tool-1");
+      expect(result!.status).toBe("APPROVED");
       expect(result!.customDescriptorContent).toBe('{"categories":["data"]}');
     });
 
-    it('returns null on ResourceNotFoundException', async () => {
-      const err = new Error('Not found') as Error & { $metadata?: { httpStatusCode?: number } };
-      err.name = 'ResourceNotFoundException';
+    it("returns null on ResourceNotFoundException", async () => {
+      const err = new Error("Not found") as Error & {
+        $metadata?: { httpStatusCode?: number };
+      };
+      err.name = "ResourceNotFoundException";
       err.$metadata = { httpStatusCode: 404 };
       sdkMock.on(GetRegistryRecordCommand).rejects(err);
 
-      const result = await service.getResource('agent', 'nonexistent');
+      const result = await service.getResource("agent", "nonexistent");
 
       expect(result).toBeNull();
     });
 
-    it('returns null on 404 status code', async () => {
-      const err = new Error('Not found') as Error & { $metadata?: { httpStatusCode?: number } };
-      err.name = 'SomeOtherError';
+    it("returns null on 404 status code", async () => {
+      const err = new Error("Not found") as Error & {
+        $metadata?: { httpStatusCode?: number };
+      };
+      err.name = "SomeOtherError";
       err.$metadata = { httpStatusCode: 404 };
       sdkMock.on(GetRegistryRecordCommand).rejects(err);
 
-      const result = await service.getResource('agent', 'nonexistent');
+      const result = await service.getResource("agent", "nonexistent");
 
       expect(result).toBeNull();
     });
 
-    it('throws non-404 errors', async () => {
-      const err = new Error('Access denied') as Error & { $metadata?: { httpStatusCode?: number } };
-      err.name = 'AccessDeniedException';
+    it("throws non-404 errors", async () => {
+      const err = new Error("Access denied") as Error & {
+        $metadata?: { httpStatusCode?: number };
+      };
+      err.name = "AccessDeniedException";
       err.$metadata = { httpStatusCode: 403 };
       sdkMock.on(GetRegistryRecordCommand).rejects(err);
 
-      await expect(service.getResource('agent', 'agent-1')).rejects.toThrow(
-        'Access denied',
+      await expect(service.getResource("agent", "agent-1")).rejects.toThrow(
+        "Access denied",
       );
     });
   });
 
   // -- updateResource ------------------------------------------------------
 
-  describe('updateResource', () => {
-    it('sends UpdateRegistryRecordCommand with correct params and returns record', async () => {
+  describe("updateResource", () => {
+    it("sends UpdateRegistryRecordCommand with correct params and returns record", async () => {
       const now = new Date();
       sdkMock.on(UpdateRegistryRecordCommand).resolves({
-        recordId: 'agent-1',
-        name: 'Updated Agent',
-        description: 'Updated desc',
-        status: 'APPROVED',
-        descriptorType: DescriptorType.CUSTOM,
+        recordId: "agent-1",
+        name: "Updated Agent",
+        description: "Updated desc",
+        status: "APPROVED",
+        recordType: RecordType.CUSTOM,
         descriptors: {
-          custom: { inlineContent: '{"categories":["updated"]}' },
+          custom: { data: '{"categories":["updated"]}' },
         },
         createdAt: now,
         updatedAt: now,
       });
 
       const input: UpdateResourceInput = {
-        name: 'Updated Agent',
-        description: 'Updated desc',
+        name: "Updated Agent",
+        description: "Updated desc",
         customMetadata: '{"categories":["updated"]}',
       };
 
-      const result = await service.updateResource('agent', 'agent-1', input);
+      const result = await service.updateResource("agent", "agent-1", input);
 
-      expect(result.recordId).toBe('agent-1');
-      expect(result.name).toBe('Updated Agent');
+      expect(result.recordId).toBe("agent-1");
+      expect(result.name).toBe("Updated Agent");
       expect(result.customDescriptorContent).toBe('{"categories":["updated"]}');
 
       const calls = sdkMock.commandCalls(UpdateRegistryRecordCommand);
       expect(calls).toHaveLength(1);
       expect(calls[0].args[0].input).toEqual({
-        registryId: 'test-registry',
-        recordId: 'agent-1',
+        registryId: "test-registry",
+        recordId: "agent-1",
         // Renames are sanitized with the same shared rule as creates.
-        name: 'Updated-Agent',
-        description: { optionalValue: 'Updated desc' },
+        name: "Updated-Agent",
+        description: { optionalValue: "Updated desc" },
         descriptors: {
           optionalValue: {
             custom: {
               optionalValue: {
-                inlineContent: '{"categories":["updated"]}',
+                data: { optionalValue: '{"categories":["updated"]}' },
               },
             },
           },
@@ -234,14 +250,14 @@ describe('RegistryService CRUD operations', () => {
       });
     });
 
-    it('sends only provided fields (partial update)', async () => {
+    it("sends only provided fields (partial update)", async () => {
       sdkMock.on(UpdateRegistryRecordCommand).resolves({
-        recordId: 'tool-1',
-        name: 'Tool',
-        status: 'APPROVED',
-        descriptorType: DescriptorType.CUSTOM,
+        recordId: "tool-1",
+        name: "Tool",
+        status: "APPROVED",
+        recordType: RecordType.CUSTOM,
         descriptors: {
-          custom: { inlineContent: '{"categories":["new-cat"]}' },
+          custom: { data: '{"categories":["new-cat"]}' },
         },
       });
 
@@ -249,19 +265,19 @@ describe('RegistryService CRUD operations', () => {
         customMetadata: '{"categories":["new-cat"]}',
       };
 
-      await service.updateResource('tool', 'tool-1', input);
+      await service.updateResource("tool", "tool-1", input);
 
       const calls = sdkMock.commandCalls(UpdateRegistryRecordCommand);
       expect(calls[0].args[0].input).toEqual({
-        registryId: 'test-registry',
-        recordId: 'tool-1',
+        registryId: "test-registry",
+        recordId: "tool-1",
         name: undefined,
         description: undefined,
         descriptors: {
           optionalValue: {
             custom: {
               optionalValue: {
-                inlineContent: '{"categories":["new-cat"]}',
+                data: { optionalValue: '{"categories":["new-cat"]}' },
               },
             },
           },
@@ -272,58 +288,60 @@ describe('RegistryService CRUD operations', () => {
 
   // -- deleteResource ------------------------------------------------------
 
-  describe('deleteResource', () => {
-    it('sends DeleteRegistryRecordCommand with correct params', async () => {
+  describe("deleteResource", () => {
+    it("sends DeleteRegistryRecordCommand with correct params", async () => {
       sdkMock.on(DeleteRegistryRecordCommand).resolves({});
 
-      await service.deleteResource('agent', 'agent-1');
+      await service.deleteResource("agent", "agent-1");
 
       const calls = sdkMock.commandCalls(DeleteRegistryRecordCommand);
       expect(calls).toHaveLength(1);
       expect(calls[0].args[0].input).toEqual({
-        registryId: 'test-registry',
-        recordId: 'agent-1',
+        registryId: "test-registry",
+        recordId: "agent-1",
       });
     });
 
-    it('throws on non-transient errors', async () => {
-      const err = new Error('Not found') as Error & { $metadata?: { httpStatusCode?: number } };
-      err.name = 'ResourceNotFoundException';
+    it("throws on non-transient errors", async () => {
+      const err = new Error("Not found") as Error & {
+        $metadata?: { httpStatusCode?: number };
+      };
+      err.name = "ResourceNotFoundException";
       err.$metadata = { httpStatusCode: 404 };
       sdkMock.on(DeleteRegistryRecordCommand).rejects(err);
 
-      await expect(service.deleteResource('tool', 'tool-1')).rejects.toThrow(
-        'Not found',
+      await expect(service.deleteResource("tool", "tool-1")).rejects.toThrow(
+        "Not found",
       );
     });
   });
 
   // -- listResources -------------------------------------------------------
 
-  describe('listResources', () => {
-    it('returns all records for a resource type', async () => {
+  describe("listResources", () => {
+    it("returns all records for a resource type", async () => {
       const now = new Date();
       sdkMock.on(ListRegistryRecordsCommand).resolves({
         registryRecords: [
           {
-            recordId: 'agent-1',
-            name: 'Agent 1',
-            status: 'APPROVED',
-            recordArn: 'arn:1',
-            registryArn: 'arn:reg',
-            descriptorType: DescriptorType.CUSTOM,
-            recordVersion: '1',
+            recordId: "agent-1",
+            name: "Agent 1",
+            status: "APPROVED",
+            recordArn: "arn:1",
+            registryArn: "arn:reg",
+            recordType: RecordType.CUSTOM,
+            recordVersion: "1",
             createdAt: now,
             updatedAt: now,
           },
           {
-            recordId: 'agent-2',
-            name: 'Agent 2',
-            status: 'DRAFT',
-            recordArn: 'arn:2',
-            registryArn: 'arn:reg',
-            descriptorType: DescriptorType.CUSTOM,
-            recordVersion: '1',
+            recordId: "agent-2",
+            name: "Agent 2",
+            status: "DRAFT",
+            recordArn: "arn:2",
+            registryArn: "arn:reg",
+            recordType: RecordType.CUSTOM,
+            recordVersion: "1",
             createdAt: now,
             updatedAt: now,
           },
@@ -331,79 +349,83 @@ describe('RegistryService CRUD operations', () => {
         nextToken: undefined,
       });
 
-      const results = await service.listResources('agent');
+      const results = await service.listResources("agent");
 
       expect(results).toHaveLength(2);
-      expect(results[0].recordId).toBe('agent-1');
-      expect(results[1].recordId).toBe('agent-2');
+      expect(results[0].recordId).toBe("agent-1");
+      expect(results[1].recordId).toBe("agent-2");
 
       const calls = sdkMock.commandCalls(ListRegistryRecordsCommand);
       expect(calls[0].args[0].input).toEqual({
-        registryId: 'test-registry',
-        descriptorType: DescriptorType.CUSTOM,
+        registryId: "test-registry",
+        filters: [{ name: "recordType", values: [RecordType.CUSTOM] }],
         nextToken: undefined,
       });
     });
 
-    it('handles pagination across multiple pages', async () => {
+    it("handles pagination across multiple pages", async () => {
       sdkMock
         .on(ListRegistryRecordsCommand)
         .resolvesOnce({
-          registryRecords: [{
-            recordId: 'tool-1',
-            name: 'Tool 1',
-            status: 'APPROVED',
-            recordArn: 'arn:1',
-            registryArn: 'arn:reg',
-            descriptorType: DescriptorType.CUSTOM,
-            recordVersion: '1',
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          }],
-          nextToken: 'page2',
+          registryRecords: [
+            {
+              recordId: "tool-1",
+              name: "Tool 1",
+              status: "APPROVED",
+              recordArn: "arn:1",
+              registryArn: "arn:reg",
+              recordType: RecordType.CUSTOM,
+              recordVersion: "1",
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          ],
+          nextToken: "page2",
         })
         .resolvesOnce({
-          registryRecords: [{
-            recordId: 'tool-2',
-            name: 'Tool 2',
-            status: 'DRAFT',
-            recordArn: 'arn:2',
-            registryArn: 'arn:reg',
-            descriptorType: DescriptorType.CUSTOM,
-            recordVersion: '1',
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          }],
+          registryRecords: [
+            {
+              recordId: "tool-2",
+              name: "Tool 2",
+              status: "DRAFT",
+              recordArn: "arn:2",
+              registryArn: "arn:reg",
+              recordType: RecordType.CUSTOM,
+              recordVersion: "1",
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          ],
           nextToken: undefined,
         });
 
-      const results = await service.listResources('tool');
+      const results = await service.listResources("tool");
 
       expect(results).toHaveLength(2);
-      expect(results[0].recordId).toBe('tool-1');
-      expect(results[1].recordId).toBe('tool-2');
+      expect(results[0].recordId).toBe("tool-1");
+      expect(results[1].recordId).toBe("tool-2");
 
       const calls = sdkMock.commandCalls(ListRegistryRecordsCommand);
       expect(calls).toHaveLength(2);
     });
 
-    it('returns empty array when no records exist', async () => {
+    it("returns empty array when no records exist", async () => {
       sdkMock.on(ListRegistryRecordsCommand).resolves({
         registryRecords: [],
         nextToken: undefined,
       });
 
-      const results = await service.listResources('agent');
+      const results = await service.listResources("agent");
 
       expect(results).toEqual([]);
     });
 
-    it('returns empty array when registryRecords field is undefined', async () => {
+    it("returns empty array when registryRecords field is undefined", async () => {
       sdkMock.on(ListRegistryRecordsCommand).resolves({
         nextToken: undefined,
       });
 
-      const results = await service.listResources('tool');
+      const results = await service.listResources("tool");
 
       expect(results).toEqual([]);
     });
@@ -411,141 +433,150 @@ describe('RegistryService CRUD operations', () => {
 
   // -- Retry with exponential backoff --------------------------------------
 
-  describe('retry with exponential backoff', () => {
-    it('retries on 5xx errors and succeeds on subsequent attempt', async () => {
-      const serverError = new Error('Internal Server Error') as Error & { $metadata?: { httpStatusCode?: number } };
+  describe("retry with exponential backoff", () => {
+    it("retries on 5xx errors and succeeds on subsequent attempt", async () => {
+      const serverError = new Error("Internal Server Error") as Error & {
+        $metadata?: { httpStatusCode?: number };
+      };
       serverError.$metadata = { httpStatusCode: 500 };
 
       sdkMock
         .on(GetRegistryRecordCommand)
         .rejectsOnce(serverError)
         .resolves({
-          recordId: 'agent-1',
-          name: 'Agent',
-          status: 'APPROVED',
-          descriptorType: DescriptorType.CUSTOM,
+          recordId: "agent-1",
+          name: "Agent",
+          status: "APPROVED",
+          recordType: RecordType.CUSTOM,
           descriptors: {
-            custom: { inlineContent: JSON.stringify({ manifest: {} }) },
+            custom: { data: JSON.stringify({ manifest: {} }) },
           },
         });
 
-      const result = await service.getResource('agent', 'agent-1');
+      const result = await service.getResource("agent", "agent-1");
 
       expect(result).not.toBeNull();
-      expect(result!.recordId).toBe('agent-1');
+      expect(result!.recordId).toBe("agent-1");
       expect(sdkMock.commandCalls(GetRegistryRecordCommand)).toHaveLength(2);
     });
 
-    it('retries on ThrottlingException', async () => {
-      const throttleError = new Error('Rate exceeded');
-      throttleError.name = 'ThrottlingException';
+    it("retries on ThrottlingException", async () => {
+      const throttleError = new Error("Rate exceeded");
+      throttleError.name = "ThrottlingException";
 
       // First call to CreateRegistryRecordCommand throttles, second succeeds
       sdkMock
         .on(CreateRegistryRecordCommand)
         .rejectsOnce(throttleError)
         .resolves({
-          recordArn: 'arn:aws:bedrock-agentcore:us-east-1:123:registry/test-registry/record/agent-1',
-          status: 'DRAFT',
+          recordArn:
+            "arn:aws:bedrock-agentcore:us-east-1:123:registry/test-registry/record/agent-1",
+          status: "DRAFT",
         });
       // GetRegistryRecordCommand for the follow-up fetch
       sdkMock.on(GetRegistryRecordCommand).resolves({
-        recordId: 'agent-1',
-        name: 'Agent',
-        status: 'DRAFT',
-        descriptorType: DescriptorType.CUSTOM,
+        recordId: "agent-1",
+        name: "Agent",
+        status: "DRAFT",
+        recordType: RecordType.CUSTOM,
         descriptors: {
-          custom: { inlineContent: JSON.stringify({ manifest: {} }) },
+          custom: { data: JSON.stringify({ manifest: {} }) },
         },
       });
 
-      const result = await service.createResource('agent', 'agent-1', {
-        name: 'Agent',
-        customMetadata: '{}',
+      const result = await service.createResource("agent", "agent-1", {
+        name: "Agent",
+        customMetadata: "{}",
       });
 
-      expect(result.recordId).toBe('agent-1');
+      expect(result.recordId).toBe("agent-1");
       expect(sdkMock.commandCalls(CreateRegistryRecordCommand)).toHaveLength(2);
     });
 
-    it('retries on ServiceUnavailableException', async () => {
-      const unavailableError = new Error('Service unavailable');
-      unavailableError.name = 'ServiceUnavailableException';
+    it("retries on ServiceUnavailableException", async () => {
+      const unavailableError = new Error("Service unavailable");
+      unavailableError.name = "ServiceUnavailableException";
 
       sdkMock
         .on(DeleteRegistryRecordCommand)
         .rejectsOnce(unavailableError)
         .resolves({});
 
-      await service.deleteResource('tool', 'tool-1');
+      await service.deleteResource("tool", "tool-1");
 
       expect(sdkMock.commandCalls(DeleteRegistryRecordCommand)).toHaveLength(2);
     });
 
-    it('throws after exhausting all 3 retry attempts', async () => {
-      const serverError = new Error('Persistent failure') as Error & { $metadata?: { httpStatusCode?: number } };
+    it("throws after exhausting all 3 retry attempts", async () => {
+      const serverError = new Error("Persistent failure") as Error & {
+        $metadata?: { httpStatusCode?: number };
+      };
       serverError.$metadata = { httpStatusCode: 503 };
 
       sdkMock.on(GetRegistryRecordCommand).rejects(serverError);
 
-      await expect(service.getResource('agent', 'agent-1')).rejects.toThrow(
-        'Persistent failure',
+      await expect(service.getResource("agent", "agent-1")).rejects.toThrow(
+        "Persistent failure",
       );
 
       // 3 attempts total
       expect(sdkMock.commandCalls(GetRegistryRecordCommand)).toHaveLength(3);
     });
 
-    it('does not retry on non-transient errors (4xx)', async () => {
-      const clientError = new Error('Bad request') as Error & { $metadata?: { httpStatusCode?: number } };
-      clientError.name = 'ValidationException';
+    it("does not retry on non-transient errors (4xx)", async () => {
+      const clientError = new Error("Bad request") as Error & {
+        $metadata?: { httpStatusCode?: number };
+      };
+      clientError.name = "ValidationException";
       clientError.$metadata = { httpStatusCode: 400 };
 
       sdkMock.on(UpdateRegistryRecordCommand).rejects(clientError);
 
       await expect(
-        service.updateResource('agent', 'agent-1', {
-          name: 'Updated',
-          customMetadata: '{}',
+        service.updateResource("agent", "agent-1", {
+          name: "Updated",
+          customMetadata: "{}",
         }),
-      ).rejects.toThrow('Bad request');
+      ).rejects.toThrow("Bad request");
 
       // Only 1 attempt — no retries
       expect(sdkMock.commandCalls(UpdateRegistryRecordCommand)).toHaveLength(1);
     });
 
-    it('does not retry on AccessDeniedException', async () => {
-      const authError = new Error('Access denied') as Error & { $metadata?: { httpStatusCode?: number } };
-      authError.name = 'AccessDeniedException';
+    it("does not retry on AccessDeniedException", async () => {
+      const authError = new Error("Access denied") as Error & {
+        $metadata?: { httpStatusCode?: number };
+      };
+      authError.name = "AccessDeniedException";
       authError.$metadata = { httpStatusCode: 403 };
 
       sdkMock.on(ListRegistryRecordsCommand).rejects(authError);
 
-      await expect(service.listResources('agent')).rejects.toThrow(
-        'Access denied',
+      await expect(service.listResources("agent")).rejects.toThrow(
+        "Access denied",
       );
 
       expect(sdkMock.commandCalls(ListRegistryRecordsCommand)).toHaveLength(1);
     });
 
-    it('retries on InternalServerException by name', async () => {
-      const internalError = new Error('Internal error');
-      internalError.name = 'InternalServerException';
+    it("retries on InternalServerException by name", async () => {
+      const internalError = new Error("Internal error");
+      internalError.name = "InternalServerException";
 
       sdkMock
         .on(GetRegistryRecordCommand)
         .rejectsOnce(internalError)
         .resolves({
-          recordId: 'agent-1',
-          name: 'Agent',
-          status: 'APPROVED',
-          descriptorType: DescriptorType.CUSTOM,
+          recordId: "agent-1",
+          name: "Agent",
+          status: "APPROVED",
+          recordType: RecordType.CUSTOM,
           descriptors: {
-            custom: { inlineContent: JSON.stringify({ manifest: {} }) },
+            custom: { data: JSON.stringify({ manifest: {} }) },
           },
         });
 
-      const result = await service.getResource('agent', 'agent-1');
+      const result = await service.getResource("agent", "agent-1");
 
       expect(result).not.toBeNull();
       expect(sdkMock.commandCalls(GetRegistryRecordCommand)).toHaveLength(2);

@@ -492,8 +492,8 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
-            "bedrock-agentcore:GetRegistryRecord",
-            "bedrock-agentcore:ListRegistryRecords",
+            "agent-registry:GetRegistryRecord",
+            "agent-registry:ListRegistryRecords",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),
@@ -1131,8 +1131,8 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
-            "bedrock-agentcore:GetRegistryRecord",
-            "bedrock-agentcore:ListRegistryRecords",
+            "agent-registry:GetRegistryRecord",
+            "agent-registry:ListRegistryRecords",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),
@@ -1336,13 +1336,13 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
-            "bedrock-agentcore:CreateRegistryRecord",
-            "bedrock-agentcore:UpdateRegistryRecord",
-            "bedrock-agentcore:UpdateRegistryRecordStatus",
-            "bedrock-agentcore:SubmitRegistryRecordForApproval",
-            "bedrock-agentcore:DeleteRegistryRecord",
-            "bedrock-agentcore:GetRegistryRecord",
-            "bedrock-agentcore:ListRegistryRecords",
+            "agent-registry:CreateRegistryRecord",
+            "agent-registry:UpdateRegistryRecord",
+            "agent-registry:UpdateRegistryRecordStatus",
+            "agent-registry:SubmitRegistryRecordForApproval",
+            "agent-registry:DeleteRegistryRecord",
+            "agent-registry:GetRegistryRecord",
+            "agent-registry:ListRegistryRecords",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),
@@ -1418,8 +1418,8 @@ export class ArbiterStack extends cdk.Stack {
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
-            "bedrock-agentcore:CreateRegistryRecord",
-            "bedrock-agentcore:ListRegistryRecords",
+            "agent-registry:CreateRegistryRecord",
+            "agent-registry:ListRegistryRecords",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),
@@ -2782,8 +2782,8 @@ export class ArbiterStack extends cdk.Stack {
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
           actions: [
-            "bedrock-agentcore:GetRegistryRecord",
-            "bedrock-agentcore:ListRegistryRecords",
+            "agent-registry:GetRegistryRecord",
+            "agent-registry:ListRegistryRecords",
           ],
           resources: [props.registryArn, `${props.registryArn}/*`],
         }),

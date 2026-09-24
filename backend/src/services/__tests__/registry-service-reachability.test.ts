@@ -9,100 +9,104 @@
  *   - reachability is omitted from AgentConfig when absent.
  */
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   UpdateRegistryRecordCommand,
-} from '@aws-sdk/client-bedrock-agentcore-control';
-import { mockClient } from 'aws-sdk-client-mock';
-import { RegistryService, AgentCustomMetadata, RegistryRecord } from '../registry-service';
+} from "@aws-sdk/client-agent-registry-control";
+import { mockClient } from "aws-sdk-client-mock";
+import {
+  RegistryService,
+  AgentCustomMetadata,
+  RegistryRecord,
+} from "../registry-service";
 
-const sdkMock = mockClient(BedrockAgentCoreControlClient);
+const sdkMock = mockClient(AgentRegistryControlClient);
 
-describe('RegistryService reachability (US-IMP-017b)', () => {
+describe("RegistryService reachability (US-IMP-017b)", () => {
   let service: RegistryService;
 
   beforeEach(() => {
     sdkMock.reset();
-    service = new RegistryService({ registryId: 'r', region: 'us-east-1' });
+    service = new RegistryService({ registryId: "r", region: "us-east-1" });
   });
 
-  it('round-trips reachability through updateResource, preserving manifest + invocation', async () => {
+  it("round-trips reachability through updateResource, preserving manifest + invocation", async () => {
     const meta: AgentCustomMetadata = {
       categories: [],
-      icon: '',
-      state: 'maintenance',
-      manifest: { name: 'trusted' },
+      icon: "",
+      state: "maintenance",
+      manifest: { name: "trusted" },
       invocation: {
-        protocol: 'HTTP_ENDPOINT',
-        target: 'https://agent.example.com/invoke',
-        auth: { mode: 'NONE' },
-        mode: 'sync',
+        protocol: "HTTP_ENDPOINT",
+        target: "https://agent.example.com/invoke",
+        auth: { mode: "NONE" },
+        mode: "sync",
       },
       reachability: {
         reachable: true,
-        classification: 'reachable',
-        detail: 'HTTP 200',
-        checkedAt: '2026-06-30T00:00:00.000Z',
+        classification: "reachable",
+        detail: "HTTP 200",
+        checkedAt: "2026-06-30T00:00:00.000Z",
       },
     };
     const serialized = service.serializeCustomMetadata(meta);
     sdkMock.on(UpdateRegistryRecordCommand).resolves({
-      recordId: 'imp-1',
-      name: 'agent',
-      status: 'DRAFT',
-      descriptors: { custom: { inlineContent: serialized } },
+      recordId: "imp-1",
+      name: "agent",
+      status: "DRAFT",
+      descriptors: { custom: { data: serialized } },
     });
 
-    const updated = await service.updateResource('agent', 'imp-1', {
+    const updated = await service.updateResource("agent", "imp-1", {
       customMetadata: serialized,
     });
     const parsed = JSON.parse(updated.customDescriptorContent!);
-    expect(parsed.reachability.classification).toBe('reachable');
+    expect(parsed.reachability.classification).toBe("reachable");
     expect(parsed.reachability.reachable).toBe(true);
-    expect(parsed.reachability.detail).toBe('HTTP 200');
-    expect(parsed.reachability.checkedAt).toBe('2026-06-30T00:00:00.000Z');
+    expect(parsed.reachability.detail).toBe("HTTP 200");
+    expect(parsed.reachability.checkedAt).toBe("2026-06-30T00:00:00.000Z");
     // The trusted manifest and invocation are untouched by the reachability write.
-    expect(parsed.manifest).toEqual({ name: 'trusted' });
-    expect(parsed.invocation.target).toBe('https://agent.example.com/invoke');
+    expect(parsed.manifest).toEqual({ name: "trusted" });
+    expect(parsed.invocation.target).toBe("https://agent.example.com/invoke");
   });
 
-  it('mapToAgentConfig surfaces reachability read-only', () => {
+  it("mapToAgentConfig surfaces reachability read-only", () => {
     const meta: AgentCustomMetadata = {
       categories: [],
-      icon: '',
-      state: 'maintenance',
-      manifest: { name: 'trusted' },
+      icon: "",
+      state: "maintenance",
+      manifest: { name: "trusted" },
       reachability: {
         reachable: false,
-        classification: 'unverifiable_private',
-        detail: 'needs VPC peering/PrivateLink — out of scope',
-        checkedAt: '2026-06-30T00:00:00.000Z',
+        classification: "unverifiable_private",
+        detail: "needs VPC peering/PrivateLink — out of scope",
+        checkedAt: "2026-06-30T00:00:00.000Z",
       },
     };
     const record: RegistryRecord = {
-      recordId: 'imp-1',
-      name: 'agent',
-      status: 'DRAFT',
+      recordId: "imp-1",
+      name: "agent",
+      status: "DRAFT",
       customDescriptorContent: JSON.stringify(meta),
     };
 
     const config = service.mapToAgentConfig(record);
     expect(config.reachability).toBeDefined();
-    expect(config.reachability!.classification).toBe('unverifiable_private');
+    expect(config.reachability!.classification).toBe("unverifiable_private");
     expect(config.reachability!.reachable).toBe(false);
-    expect(config.reachability!.checkedAt).toBe('2026-06-30T00:00:00.000Z');
+    expect(config.reachability!.checkedAt).toBe("2026-06-30T00:00:00.000Z");
   });
 
-  it('mapToAgentConfig omits reachability when absent', () => {
+  it("mapToAgentConfig omits reachability when absent", () => {
     const meta: AgentCustomMetadata = {
       categories: [],
-      icon: '',
-      state: 'active',
-      manifest: { name: 'trusted' },
+      icon: "",
+      state: "active",
+      manifest: { name: "trusted" },
     };
     const record: RegistryRecord = {
-      recordId: 'a-1',
-      name: 'agent',
-      status: 'APPROVED',
+      recordId: "a-1",
+      name: "agent",
+      status: "APPROVED",
       customDescriptorContent: JSON.stringify(meta),
     };
     const config = service.mapToAgentConfig(record);

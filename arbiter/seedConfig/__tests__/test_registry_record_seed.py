@@ -60,10 +60,10 @@ def _ctx():
 
 
 def _make_registry_client(record_id="abc123def456"):
-    client = MagicMock(name="bedrock-agentcore-control-mock")
+    client = MagicMock(name="agent-registry-control-mock")
     client.create_registry_record.return_value = {
         "recordArn": (
-            "arn:aws:bedrock-agentcore:us-west-2:123456789012:"
+            "arn:aws:agent-registry:us-west-2:123456789012:"
             f"registry/reg/record/{record_id}"
         ),
         "recordId": record_id,
@@ -82,7 +82,7 @@ def _run_handler(registry_env, existing_records, registry_client):
     mock_dynamodb.Table.return_value = mock_table
 
     def _client_factory(service_name, *args, **kwargs):
-        if service_name == "bedrock-agentcore-control":
+        if service_name == "agent-registry-control":
             return registry_client
         return MagicMock(name=f"{service_name}-mock")
 
@@ -120,10 +120,11 @@ class TestRegistryRecordCreated:
 
         assert kwargs["registryId"] == REGISTRY_ID
         assert kwargs["name"] == "demo-echo-agent"
+        assert kwargs["displayName"] == "demo-echo-agent"
         assert isinstance(kwargs["description"], str) and kwargs["description"]
-        assert kwargs["descriptorType"] == "CUSTOM"
+        assert kwargs["recordType"] == "CUSTOM"
 
-        metadata = json.loads(kwargs["descriptors"]["custom"]["inlineContent"])
+        metadata = json.loads(kwargs["descriptors"]["custom"]["data"])
         # Fabricator descriptor shape (store_agent_config_registry).
         for field in (
             "categories", "icon", "state", "manifest", "config",
@@ -177,6 +178,7 @@ class TestRegistrySkippedWhenNotConfigured:
             c.args[0] for c in mock_boto3.client.call_args_list if c.args
         ]
         assert "bedrock-agentcore-control" not in service_names
+        assert "agent-registry-control" not in service_names
         # DDB seeding still runs.
         assert mock_table.put_item.call_count == 5
 

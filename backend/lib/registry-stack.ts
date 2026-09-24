@@ -180,10 +180,17 @@ export class RegistryStack extends cdk.Stack {
     const registrySyncRule = new events.Rule(this, "RegistrySyncRule", {
       ruleName: `citadel-registry-sync-${props.environment}`,
       description:
-        "Captures AgentCore Registry resource changes for DynamoDB cache sync",
+        "Captures agent-registry resource changes (registry + record lifecycle) for DynamoDB cache sync",
       eventPattern: {
-        source: ["aws.bedrock-agentcore"],
-        detailType: ["AgentCore Registry Resource Change"],
+        // GA namespace migration: event source moved from
+        // 'aws.bedrock-agentcore' to 'aws.agent-registry'. Detail types per
+        // the agent-registry GA FAQ — registry lifecycle ('Registry Ready',
+        // etc.) plus every record lifecycle detail type (incl. 'Pending
+        // Approval' and the new GA additions). Matched by source +
+        // detail.registryId only (no detailType filter) so any current or
+        // future record/registry detail type the FAQ adds is accepted
+        // without another CDK change — registry-sync.ts narrows further.
+        source: ["aws.agent-registry"],
         detail: {
           registryId: [props.registryId],
         },
@@ -249,12 +256,12 @@ export class RegistryStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "bedrock-agentcore:CreateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
-          "bedrock-agentcore:DeleteRegistryRecord",
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
+          "agent-registry:CreateRegistryRecord",
+          "agent-registry:UpdateRegistryRecord",
+          "agent-registry:UpdateRegistryRecordStatus",
+          "agent-registry:DeleteRegistryRecord",
+          "agent-registry:GetRegistryRecord",
+          "agent-registry:ListRegistryRecords",
         ],
         resources: [props.registryArn, `${props.registryArn}/*`],
       }),
@@ -387,13 +394,13 @@ export class RegistryStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "bedrock-agentcore:CreateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
-          "bedrock-agentcore:SubmitRegistryRecordForApproval",
-          "bedrock-agentcore:DeleteRegistryRecord",
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
+          "agent-registry:CreateRegistryRecord",
+          "agent-registry:UpdateRegistryRecord",
+          "agent-registry:UpdateRegistryRecordStatus",
+          "agent-registry:SubmitRegistryRecordForApproval",
+          "agent-registry:DeleteRegistryRecord",
+          "agent-registry:GetRegistryRecord",
+          "agent-registry:ListRegistryRecords",
         ],
         resources: [props.registryArn, `${props.registryArn}/*`],
       }),
@@ -507,8 +514,8 @@ export class RegistryStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
+          "agent-registry:GetRegistryRecord",
+          "agent-registry:UpdateRegistryRecord",
         ],
         resources: [props.registryArn, `${props.registryArn}/*`],
       }),
@@ -645,7 +652,7 @@ export class RegistryStack extends cdk.Stack {
     agentCodeResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: ["bedrock-agentcore:GetRegistryRecord"],
+        actions: ["agent-registry:GetRegistryRecord"],
         resources: [props.registryArn, `${props.registryArn}/*`],
       }),
     );
@@ -1035,13 +1042,13 @@ export class RegistryStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "bedrock-agentcore:CreateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecord",
-          "bedrock-agentcore:UpdateRegistryRecordStatus",
-          "bedrock-agentcore:SubmitRegistryRecordForApproval",
-          "bedrock-agentcore:DeleteRegistryRecord",
-          "bedrock-agentcore:GetRegistryRecord",
-          "bedrock-agentcore:ListRegistryRecords",
+          "agent-registry:CreateRegistryRecord",
+          "agent-registry:UpdateRegistryRecord",
+          "agent-registry:UpdateRegistryRecordStatus",
+          "agent-registry:SubmitRegistryRecordForApproval",
+          "agent-registry:DeleteRegistryRecord",
+          "agent-registry:GetRegistryRecord",
+          "agent-registry:ListRegistryRecords",
         ],
         resources: [props.registryArn, `${props.registryArn}/*`],
       }),

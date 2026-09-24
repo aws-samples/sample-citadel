@@ -23,7 +23,7 @@ const APPSYNC_URL =
   "https://api123abc.appsync-api.us-west-2.amazonaws.com/graphql";
 const REGISTRY_ID = "reg-orch123";
 const REGISTRY_ARN =
-  "arn:aws:bedrock-agentcore:us-west-2:123456789012:registry/reg-orch123";
+  "arn:aws:agent-registry:us-west-2:123456789012:registry/reg-orch123";
 const USER_POOL_ID = "us-west-2_orchpool";
 const USER_POOL_ARN = `arn:aws:cognito-idp:us-west-2:123456789012:userpool/${USER_POOL_ID}`;
 
@@ -352,24 +352,24 @@ describe("ServicesStack — intake post-fabrication orchestration wiring", () =>
       const action = stmt.Action;
       return (
         Array.isArray(action) &&
-        action.includes("bedrock-agentcore:ListRegistryRecords")
+        action.includes("agent-registry:ListRegistryRecords")
       );
     });
     expect(registryStatement).toBeDefined();
     expect(registryStatement?.Action).toEqual(
       expect.arrayContaining([
-        "bedrock-agentcore:CreateRegistryRecord",
-        "bedrock-agentcore:UpdateRegistryRecord",
-        "bedrock-agentcore:UpdateRegistryRecordStatus",
-        "bedrock-agentcore:SubmitRegistryRecordForApproval",
-        "bedrock-agentcore:GetRegistryRecord",
-        "bedrock-agentcore:ListRegistryRecords",
+        "agent-registry:CreateRegistryRecord",
+        "agent-registry:UpdateRegistryRecord",
+        "agent-registry:UpdateRegistryRecordStatus",
+        "agent-registry:SubmitRegistryRecordForApproval",
+        "agent-registry:GetRegistryRecord",
+        "agent-registry:ListRegistryRecords",
       ]),
     );
     // No delete path exists in this resolver — the grant must stay narrower
     // than the general registry-agent-record resolver's.
     expect(registryStatement?.Action).not.toEqual(
-      expect.arrayContaining(["bedrock-agentcore:DeleteRegistryRecord"]),
+      expect.arrayContaining(["agent-registry:DeleteRegistryRecord"]),
     );
   });
 
