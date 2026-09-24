@@ -8,11 +8,11 @@
  */
 
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   UpdateRegistryRecordStatusCommand,
   SubmitRegistryRecordForApprovalCommand,
   GetRegistryRecordCommand,
-} from "@aws-sdk/client-bedrock-agentcore-control";
+} from "@aws-sdk/client-agent-registry-control";
 import { mockClient } from "aws-sdk-client-mock";
 import {
   RegistryService,
@@ -20,7 +20,7 @@ import {
   RegistryLifecycleError,
 } from "../registry-service";
 
-const sdkMock = mockClient(BedrockAgentCoreControlClient);
+const sdkMock = mockClient(AgentRegistryControlClient);
 
 describe("RegistryService.updateResourceStatus — approval lifecycle gate", () => {
   let service: RegistryService;

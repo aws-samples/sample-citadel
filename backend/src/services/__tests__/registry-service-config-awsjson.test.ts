@@ -18,10 +18,10 @@
  *     exactly ONE JSON.parse (never a bare string, never throws)
  */
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   GetRegistryRecordCommand,
   ListRegistryRecordsCommand,
-} from "@aws-sdk/client-bedrock-agentcore-control";
+} from "@aws-sdk/client-agent-registry-control";
 import { mockClient } from "aws-sdk-client-mock";
 import {
   RegistryService,
@@ -29,7 +29,7 @@ import {
   RegistryRecordStatusValues,
 } from "../registry-service";
 
-const sdkMock = mockClient(BedrockAgentCoreControlClient);
+const sdkMock = mockClient(AgentRegistryControlClient);
 
 function toolRecord(overrides: Partial<RegistryRecord> = {}): RegistryRecord {
   return {
@@ -153,12 +153,16 @@ describe("RegistryService — AWSJSON config field invariant", () => {
   describe("case 4 — ''/undefined description falls back to '{}'", () => {
     it("mapToToolConfig injects record.name when description is ''", () => {
       const record = toolRecord({ description: "" });
-      expect(service.mapToToolConfig(record).config).toBe('{"name":"WeatherTool"}');
+      expect(service.mapToToolConfig(record).config).toBe(
+        '{"name":"WeatherTool"}',
+      );
     });
 
     it("mapToToolConfig injects record.name when description is undefined", () => {
       const record = toolRecord({ description: undefined });
-      expect(service.mapToToolConfig(record).config).toBe('{"name":"WeatherTool"}');
+      expect(service.mapToToolConfig(record).config).toBe(
+        '{"name":"WeatherTool"}',
+      );
     });
 
     it("mapToAgentConfig projects {} when description is ''", () => {

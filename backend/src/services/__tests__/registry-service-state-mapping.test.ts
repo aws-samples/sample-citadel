@@ -12,8 +12,8 @@ import {
 } from "../registry-service";
 
 // Mock the SDK client so we don't need real AWS credentials
-jest.mock("@aws-sdk/client-bedrock-agentcore-control", () => ({
-  BedrockAgentCoreControlClient: jest.fn().mockImplementation(() => ({})),
+jest.mock("@aws-sdk/client-agent-registry-control", () => ({
+  AgentRegistryControlClient: jest.fn().mockImplementation(() => ({})),
   CreateRegistryRecordCommand: jest.fn(),
   GetRegistryRecordCommand: jest.fn(),
   UpdateRegistryRecordCommand: jest.fn(),

@@ -9,53 +9,53 @@
  */
 
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   ListRegistryRecordsCommand,
-  DescriptorType,
-} from '@aws-sdk/client-bedrock-agentcore-control';
-import { mockClient } from 'aws-sdk-client-mock';
-import { RegistryService } from '../registry-service';
+  RecordType,
+} from "@aws-sdk/client-agent-registry-control";
+import { mockClient } from "aws-sdk-client-mock";
+import { RegistryService } from "../registry-service";
 
-const sdkMock = mockClient(BedrockAgentCoreControlClient);
+const sdkMock = mockClient(AgentRegistryControlClient);
 
 /** Helper to build a minimal RegistryRecordSummary-like object for mocks. */
 function makeSummary(overrides: Record<string, unknown>) {
   return {
-    recordArn: 'arn:mock',
-    registryArn: 'arn:reg',
-    descriptorType: DescriptorType.CUSTOM,
-    recordVersion: '1',
+    recordArn: "arn:mock",
+    registryArn: "arn:reg",
+    recordType: RecordType.CUSTOM,
+    recordVersion: "1",
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
   };
 }
 
-describe('RegistryService searchResources', () => {
+describe("RegistryService searchResources", () => {
   let service: RegistryService;
 
   beforeEach(() => {
     sdkMock.reset();
     service = new RegistryService({
-      registryId: 'test-registry',
-      region: 'us-east-1',
+      registryId: "test-registry",
+      region: "us-east-1",
     });
-    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    jest.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
   });
 
-  it('sends ListRegistryRecordsCommand with name filter and descriptorType', async () => {
+  it("sends ListRegistryRecordsCommand with name filter and descriptorType", async () => {
     const now = new Date();
     sdkMock.on(ListRegistryRecordsCommand).resolves({
       registryRecords: [
         makeSummary({
-          recordId: 'agent-1',
-          name: 'Search Agent',
-          description: 'Matches query',
-          status: 'APPROVED',
+          recordId: "agent-1",
+          name: "Search Agent",
+          description: "Matches query",
+          status: "APPROVED",
           createdAt: now,
           updatedAt: now,
         }),
@@ -63,123 +63,153 @@ describe('RegistryService searchResources', () => {
       nextToken: undefined,
     });
 
-    const results = await service.searchResources('agent', 'Search');
+    const results = await service.searchResources("agent", "Search");
 
     expect(results).toHaveLength(1);
-    expect(results[0].recordId).toBe('agent-1');
-    expect(results[0].name).toBe('Search Agent');
+    expect(results[0].recordId).toBe("agent-1");
+    expect(results[0].name).toBe("Search Agent");
     // Summaries don't include custom descriptor content
     expect(results[0].customDescriptorContent).toBeUndefined();
 
     const calls = sdkMock.commandCalls(ListRegistryRecordsCommand);
     expect(calls).toHaveLength(1);
     expect(calls[0].args[0].input).toEqual({
-      registryId: 'test-registry',
-      descriptorType: DescriptorType.CUSTOM,
-      name: 'Search',
+      registryId: "test-registry",
+      filters: [
+        { name: "recordType", values: [RecordType.CUSTOM] },
+        { name: "name", values: ["Search"] },
+      ],
       nextToken: undefined,
     });
   });
 
-  it('filters by tool resource type', async () => {
+  it("filters by tool resource type", async () => {
     sdkMock.on(ListRegistryRecordsCommand).resolves({
       registryRecords: [
-        makeSummary({ recordId: 'tool-1', name: 'Data Tool', status: 'APPROVED' }),
+        makeSummary({
+          recordId: "tool-1",
+          name: "Data Tool",
+          status: "APPROVED",
+        }),
       ],
       nextToken: undefined,
     });
 
-    const results = await service.searchResources('tool', 'Data');
+    const results = await service.searchResources("tool", "Data");
 
     expect(results).toHaveLength(1);
-    expect(results[0].recordId).toBe('tool-1');
+    expect(results[0].recordId).toBe("tool-1");
 
     const calls = sdkMock.commandCalls(ListRegistryRecordsCommand);
     expect(calls[0].args[0].input).toMatchObject({
-      descriptorType: DescriptorType.CUSTOM,
-      name: 'Data',
+      filters: [
+        { name: "recordType", values: [RecordType.CUSTOM] },
+        { name: "name", values: ["Data"] },
+      ],
     });
   });
 
-  it('handles pagination across multiple pages', async () => {
+  it("handles pagination across multiple pages", async () => {
     sdkMock
       .on(ListRegistryRecordsCommand)
       .resolvesOnce({
-        registryRecords: [makeSummary({ recordId: 'agent-1', name: 'Agent A', status: 'APPROVED' })],
-        nextToken: 'page2',
+        registryRecords: [
+          makeSummary({
+            recordId: "agent-1",
+            name: "Agent A",
+            status: "APPROVED",
+          }),
+        ],
+        nextToken: "page2",
       })
       .resolvesOnce({
-        registryRecords: [makeSummary({ recordId: 'agent-2', name: 'Agent B', status: 'DRAFT' })],
+        registryRecords: [
+          makeSummary({
+            recordId: "agent-2",
+            name: "Agent B",
+            status: "DRAFT",
+          }),
+        ],
         nextToken: undefined,
       });
 
-    const results = await service.searchResources('agent', 'Agent');
+    const results = await service.searchResources("agent", "Agent");
 
     expect(results).toHaveLength(2);
-    expect(results[0].recordId).toBe('agent-1');
-    expect(results[1].recordId).toBe('agent-2');
+    expect(results[0].recordId).toBe("agent-1");
+    expect(results[1].recordId).toBe("agent-2");
 
     const calls = sdkMock.commandCalls(ListRegistryRecordsCommand);
     expect(calls).toHaveLength(2);
     expect(calls[0].args[0].input.nextToken).toBeUndefined();
-    expect(calls[1].args[0].input.nextToken).toBe('page2');
+    expect(calls[1].args[0].input.nextToken).toBe("page2");
   });
 
-  it('returns empty array when no records match', async () => {
+  it("returns empty array when no records match", async () => {
     sdkMock.on(ListRegistryRecordsCommand).resolves({
       registryRecords: [],
       nextToken: undefined,
     });
 
-    const results = await service.searchResources('tool', 'nonexistent');
+    const results = await service.searchResources("tool", "nonexistent");
 
     expect(results).toEqual([]);
   });
 
-  it('returns empty array when registryRecords field is undefined', async () => {
+  it("returns empty array when registryRecords field is undefined", async () => {
     sdkMock.on(ListRegistryRecordsCommand).resolves({
       nextToken: undefined,
     });
 
-    const results = await service.searchResources('agent', 'missing');
+    const results = await service.searchResources("agent", "missing");
 
     expect(results).toEqual([]);
   });
 
-  it('retries on transient 5xx errors', async () => {
-    const serverError = new Error('Internal Server Error') as Error & { $metadata?: { httpStatusCode?: number } };
+  it("retries on transient 5xx errors", async () => {
+    const serverError = new Error("Internal Server Error") as Error & {
+      $metadata?: { httpStatusCode?: number };
+    };
     serverError.$metadata = { httpStatusCode: 500 };
 
     sdkMock
       .on(ListRegistryRecordsCommand)
       .rejectsOnce(serverError)
       .resolves({
-        registryRecords: [makeSummary({ recordId: 'agent-1', name: 'Recovered', status: 'APPROVED' })],
+        registryRecords: [
+          makeSummary({
+            recordId: "agent-1",
+            name: "Recovered",
+            status: "APPROVED",
+          }),
+        ],
         nextToken: undefined,
       });
 
-    const results = await service.searchResources('agent', 'Recovered');
+    const results = await service.searchResources("agent", "Recovered");
 
     expect(results).toHaveLength(1);
-    expect(results[0].name).toBe('Recovered');
+    expect(results[0].name).toBe("Recovered");
     expect(sdkMock.commandCalls(ListRegistryRecordsCommand)).toHaveLength(2);
   });
 
-  it('throws non-transient errors without retry', async () => {
-    const clientError = new Error('Access denied') as Error & { $metadata?: { httpStatusCode?: number } };
-    clientError.name = 'AccessDeniedException';
+  it("throws non-transient errors without retry", async () => {
+    const clientError = new Error("Access denied") as Error & {
+      $metadata?: { httpStatusCode?: number };
+    };
+    clientError.name = "AccessDeniedException";
     clientError.$metadata = { httpStatusCode: 403 };
 
     sdkMock.on(ListRegistryRecordsCommand).rejects(clientError);
 
-    await expect(
-      service.searchResources('agent', 'forbidden'),
-    ).rejects.toThrow('Access denied');
+    await expect(service.searchResources("agent", "forbidden")).rejects.toThrow(
+      "Access denied",
+    );
 
     expect(sdkMock.commandCalls(ListRegistryRecordsCommand)).toHaveLength(1);
   });
 
-  it('maps record fields with defaults for missing values', async () => {
+  it("maps record fields with defaults for missing values", async () => {
     sdkMock.on(ListRegistryRecordsCommand).resolves({
       registryRecords: [
         makeSummary({
@@ -193,13 +223,13 @@ describe('RegistryService searchResources', () => {
       nextToken: undefined,
     });
 
-    const results = await service.searchResources('tool', 'partial');
+    const results = await service.searchResources("tool", "partial");
 
     expect(results).toHaveLength(1);
     expect(results[0]).toMatchObject({
-      recordId: '',
-      name: '',
-      status: '',
+      recordId: "",
+      name: "",
+      status: "",
       customDescriptorContent: undefined,
     });
   });

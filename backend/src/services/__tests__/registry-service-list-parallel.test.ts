@@ -6,8 +6,8 @@
  * Contract:
  *  - Full-record fetches are REQUIRED for every summary (the projection
  *    evidence: mapToAgentConfig/mapToToolConfig read orgId — the tenant
- *    filter — from inlineContent, and the agent/tool classification is the
- *    inlineContent `manifest` discriminator), so the fix is PARALLEL
+ *    filter — from data, and the agent/tool classification is the
+ *    data `manifest` discriminator), so the fix is PARALLEL
  *    detail fetches with bounded concurrency (10), not a summary-only path.
  *  - A caller-supplied remaining-time budget (Lambda
  *    context.getRemainingTimeInMillis) short-circuits the fetch: when the
@@ -17,14 +17,14 @@
  *    (pre-existing behavior, preserved under the parallel path).
  */
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   GetRegistryRecordCommand,
   ListRegistryRecordsCommand,
-} from "@aws-sdk/client-bedrock-agentcore-control";
+} from "@aws-sdk/client-agent-registry-control";
 import { mockClient } from "aws-sdk-client-mock";
 import { RegistryService } from "../registry-service";
 
-const sdkMock = mockClient(BedrockAgentCoreControlClient);
+const sdkMock = mockClient(AgentRegistryControlClient);
 
 const RECORD_COUNT = 340;
 
@@ -45,7 +45,7 @@ function agentDetail(recordId: string, name: string) {
     description: `desc ${name}`,
     descriptors: {
       custom: {
-        inlineContent: JSON.stringify({ manifest: { name }, orgId: "org-1" }),
+        data: JSON.stringify({ manifest: { name }, orgId: "org-1" }),
       },
     },
   };

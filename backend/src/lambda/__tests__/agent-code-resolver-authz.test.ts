@@ -35,14 +35,14 @@ import {
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import {
-  BedrockAgentCoreControlClient,
+  AgentRegistryControlClient,
   GetRegistryRecordCommand,
-} from "@aws-sdk/client-bedrock-agentcore-control";
+} from "@aws-sdk/client-agent-registry-control";
 import { mockClient } from "aws-sdk-client-mock";
 
 const dynamoMock = mockClient(DynamoDBDocumentClient);
 const s3Mock = mockClient(S3Client);
-const registryMock = mockClient(BedrockAgentCoreControlClient);
+const registryMock = mockClient(AgentRegistryControlClient);
 
 import { handler } from "../agent-code-resolver";
 
@@ -77,9 +77,7 @@ function mockRegistryRecord(recordId: string, orgId: string | null): void {
     name: recordId,
     status: "APPROVED",
     descriptors:
-      orgId === null
-        ? undefined
-        : { custom: { inlineContent: agentDescriptor(orgId) } },
+      orgId === null ? undefined : { custom: { data: agentDescriptor(orgId) } },
   });
 }
 
