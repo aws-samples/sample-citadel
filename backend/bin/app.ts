@@ -944,6 +944,15 @@ if (app.node.tryGetContext("nag") !== "false") {
         {
           regex: "/^Resource::<[A-Za-z0-9]*SsmLookupParameter>\\/\\*$/g",
         },
+        // Account-scoped literal wildcard (no cross-stack/SSM token):
+        // arn:aws:agent-registry:<region>:<account>:registry/* and its
+        // /record/* sub-resource, used on AgentReleaseWriterRole so the
+        // grant lands in the backend template without a cross-stack
+        // reference (findings 8b7ee8af, 476e8d74; tighten under CIT-182).
+        {
+          regex:
+            "/^Resource::arn:aws:agent-registry:[a-z0-9-]+:\\d+:registry\\/\\*(\\/record\\/\\*)?$/g",
+        },
       ],
     },
   ];
@@ -1001,17 +1010,13 @@ if (app.node.tryGetContext("nag") !== "false") {
     // AgentCore registry record being released via GetRegistryRecord
     // only. Not a fresh per-function ServiceRole — the shared, hand-named
     // writer role — so its DefaultPolicy lives under backendStack.
+    // Both the registry-read grant and the evalSuitesTable UpdateItem
+    // grant on the shared writer role are attached via
+    // addToPrincipalPolicy directly on agentReleaseWriterRole (imported
+    // from BackendStack), so both statements inline onto this single
+    // DefaultPolicy path — no separate GovernanceStack-hosted iam.Policy
+    // resource exists for either grant.
     [backendStack, "AgentReleaseWriterRole/DefaultPolicy/Resource"],
-    // AgentReleaseResolverRegistryReadPolicy (governance-stack.ts): the
-    // standalone iam.Policy attached to the imported agentReleaseWriterRole
-    // for the same GetRegistryRecord grant above, but the Policy resource
-    // itself (and thus this DefaultPolicy-equivalent path) lives in
-    // GovernanceStack, not BackendStack — attachToRole() on a cross-stack
-    // role keeps the Policy resource in the attaching stack. Resolves
-    // registryArn via fromStringParameterName (dynamic SSM reference) to
-    // avoid the backend<->governance DependencyCycle a CfnParameter-based
-    // lookup caused here.
-    [governanceStack, "AgentReleaseResolverRegistryReadPolicy/Resource"],
     // Publish handler owner gate (finding 13a58234): GetRegistryRecord
     // only, scoped to the registry ARN + its records, to fetch the app's
     // manifest for the owner-role check before any provisioning/teardown.
