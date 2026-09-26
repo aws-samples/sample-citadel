@@ -519,18 +519,6 @@ export class BackendStack extends cdk.Stack {
     this.registryArn = registryArn;
     this.registryId = registryId;
 
-    new cdk.CfnOutput(this, "AgentCoreRegistryArn", {
-      value: registryArn,
-      description: "AgentCore Registry ARN",
-      exportName: `${this.stackName}-RegistryArn`,
-    });
-
-    new cdk.CfnOutput(this, "AgentCoreRegistryId", {
-      value: registryId,
-      description: "AgentCore Registry ID",
-      exportName: `${this.stackName}-RegistryId`,
-    });
-
     // Publish registry id/arn to SSM (mirrors the oauth-return-url param
     // above) so consumers can resolve them without a cross-stack Fn::ImportValue.
     new ssm.StringParameter(this, "RegistryIdParam", {
@@ -541,10 +529,6 @@ export class BackendStack extends cdk.Stack {
       parameterName: `/citadel/${props.environment}/registry/arn`,
       stringValue: this.registryArn,
     });
-
-    // keeps the existing cross-stack exports alive while consumers move to SSM; phase 2 removes
-    this.exportValue(this.registryId);
-    this.exportValue(this.registryArn);
 
     // NOTE: registrySyncRule, registrySyncDlq, and registrySyncLambda moved
     // to CitadelRegistryStack (backend-stack-split phase 2, decision

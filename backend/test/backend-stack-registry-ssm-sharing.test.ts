@@ -71,18 +71,40 @@ describe("BackendStack — registry exports retained + SSM parameters published"
   // 1. Retained CloudFormation exports
   // ---------------------------------------------------------------------
 
-  test(`still exports the registry ARN as ${STACK_NAME}-RegistryArn`, () => {
-    template.hasOutput("AgentCoreRegistryArn", {
-      Export: { Name: `${STACK_NAME}-RegistryArn` },
-      Value: { "Fn::GetAtt": [registryLogicalId, "RegistryArn"] },
-    });
+  test("phase 2 removed the registry ARN export (finding 8b7ee8af)", () => {
+    // Verify no Output has an Export.Name matching /RegistryArn|RegistryId|AgentCoreRegistry/
+    const outputs = templateJson.Outputs ?? {};
+    for (const [outputName, output] of Object.entries(outputs)) {
+      const exportRecord = output.Export as { Name?: unknown } | undefined;
+      const exportName = exportRecord?.Name as string | undefined;
+      if (
+        exportName &&
+        /RegistryArn|RegistryId|AgentCoreRegistry/.test(exportName)
+      ) {
+        throw new Error(
+          `Unexpected export "${exportName}" found on output "${outputName}". ` +
+            `Phase 2 should have removed all registry exports; consumers now read SSM parameters instead.`,
+        );
+      }
+    }
   });
 
-  test(`still exports the registry ID as ${STACK_NAME}-RegistryId`, () => {
-    template.hasOutput("AgentCoreRegistryId", {
-      Export: { Name: `${STACK_NAME}-RegistryId` },
-      Value: { "Fn::GetAtt": [registryLogicalId, "RegistryId"] },
-    });
+  test("phase 2 removed the registry ID export (finding 8b7ee8af)", () => {
+    // Verify no Output has an Export.Name matching /RegistryArn|RegistryId|AgentCoreRegistry/
+    const outputs = templateJson.Outputs ?? {};
+    for (const [outputName, output] of Object.entries(outputs)) {
+      const exportRecord = output.Export as { Name?: unknown } | undefined;
+      const exportName = exportRecord?.Name as string | undefined;
+      if (
+        exportName &&
+        /RegistryArn|RegistryId|AgentCoreRegistry/.test(exportName)
+      ) {
+        throw new Error(
+          `Unexpected export "${exportName}" found on output "${outputName}". ` +
+            `Phase 2 should have removed all registry exports; consumers now read SSM parameters instead.`,
+        );
+      }
+    }
   });
 
   // ---------------------------------------------------------------------

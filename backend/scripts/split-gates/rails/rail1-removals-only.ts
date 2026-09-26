@@ -123,6 +123,10 @@ export function runRemovalsOnlyDiff(
     if (!baseOut.Export?.Name) continue;
     const freshOut = fresh.Outputs?.[outName];
     if (!freshOut) {
+      // Check if this removed output is allowlisted
+      if (allowedIds.has(outName)) {
+        continue;
+      }
       violations.push({
         rail: "rail1",
         logicalId: outName,
