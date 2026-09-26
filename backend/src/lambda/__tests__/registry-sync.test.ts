@@ -1074,20 +1074,20 @@ describe("validateEvent — GA detail-types", () => {
 });
 
 describe("handler — GA agent-registry events", () => {
-  test("Draft event hydrates the record via RegistryService and writes to DynamoDB", async () => {
+  test("Draft event hydrates the record via RegistryService and writes to DynamoDB via merge UpdateCommand", async () => {
     mockGetResource.mockResolvedValueOnce(gaAgentRecord);
-    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
 
     await handler(makeGaDraftEvent() as RegistryEvent);
 
     expect(mockGetResource).toHaveBeenCalledWith("agent", "vxNX2kAHpkmo");
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
-    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
-    expect(input.Item!.agentId).toBe("vxNX2kAHpkmo");
-    expect(input.Item!.state).toBe("maintenance"); // DRAFT -> maintenance
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ agentId: "vxNX2kAHpkmo" });
+    expect(input.ExpressionAttributeValues![":state"]).toBe("maintenance"); // DRAFT -> maintenance
   });
 
-  test("Approved event hydrates the record and writes to DynamoDB", async () => {
+  test("Approved event hydrates the record and writes to DynamoDB via merge UpdateCommand", async () => {
     mockGetResource.mockResolvedValueOnce({
       ...gaAgentRecord,
       recordId: "rThMKcBX9RWn",
@@ -1098,14 +1098,14 @@ describe("handler — GA agent-registry events", () => {
         state: "APPROVED",
       }),
     });
-    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
 
     await handler(makeGaApprovedEvent() as RegistryEvent);
 
     expect(mockGetResource).toHaveBeenCalledWith("agent", "rThMKcBX9RWn");
-    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
-    expect(input.Item!.agentId).toBe("rThMKcBX9RWn");
-    expect(input.Item!.state).toBe("active"); // APPROVED -> active
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ agentId: "rThMKcBX9RWn" });
+    expect(input.ExpressionAttributeValues![":state"]).toBe("active"); // APPROVED -> active
   });
 
   test("falls back to tool type when the record is not an agent", async () => {
@@ -1125,14 +1125,14 @@ describe("handler — GA agent-registry events", () => {
         }),
       };
     });
-    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
 
     await handler(makeGaDraftEvent() as RegistryEvent);
 
     expect(mockGetResource).toHaveBeenCalledWith("agent", "vxNX2kAHpkmo");
     expect(mockGetResource).toHaveBeenCalledWith("tool", "vxNX2kAHpkmo");
-    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
-    expect(input.Item!.toolId).toBe("vxNX2kAHpkmo");
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.Key).toEqual({ toolId: "vxNX2kAHpkmo" });
   });
 
   test("missing record (null from getResource) sends to DLQ and does not throw", async () => {
@@ -1142,7 +1142,7 @@ describe("handler — GA agent-registry events", () => {
       handler(makeGaDraftEvent() as RegistryEvent),
     ).resolves.toBeUndefined();
 
-    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
   });
 
@@ -1157,6 +1157,136 @@ describe("handler — GA agent-registry events", () => {
     );
     expect(mockGetResource).not.toHaveBeenCalled();
     expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Bug: GA upsert must MERGE, not replace (fixtures = real GA records)
+  // -------------------------------------------------------------------------
+
+  const zdRecord: RegistryRecord = {
+    recordId: "zdZ6lqny0piH",
+    name: "shift_change_recorder_agent",
+    description:
+      "Digitises supervisor-submitted shift swaps, extensions, and call-ins into the actual roster record.",
+    status: "DRAFT",
+    customDescriptorContent: JSON.stringify({
+      categories: ["worker"],
+      icon: "",
+      state: "active",
+      manifest: {
+        name: "shift_change_recorder_agent",
+        description: "Digitises supervisor-submitted shift swaps.",
+        version: 1,
+        tools: [],
+      },
+      orgId: "",
+    }),
+    createdAt: new Date("2026-09-26T08:12:17.457Z"),
+    updatedAt: new Date("2026-09-26T21:46:14.404Z"),
+  };
+
+  const mjRecord: RegistryRecord = {
+    recordId: "mjaKkVyqoFGN",
+    name: "demo-echo-agent",
+    description: "Demo agent that echoes its input back as output.",
+    status: "APPROVED",
+    customDescriptorContent: JSON.stringify({
+      categories: ["built-in", "worker", "demo"],
+      icon: "",
+      state: "active",
+      manifest: {
+        name: "demo-echo-agent",
+        description: "Demo agent that echoes its input back as output.",
+        version: 1,
+        tools: [],
+      },
+      orgId: "",
+    }),
+    createdAt: new Date("2026-09-26T08:12:25.545Z"),
+    updatedAt: new Date("2026-09-26T08:12:29.372Z"),
+  };
+
+  test("real GA record zdZ6lqny0piH: UpdateExpression contains no REMOVE of config/createdBy/sourceProjectId", async () => {
+    mockGetResource.mockResolvedValueOnce(zdRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).not.toMatch(/REMOVE/i);
+    expect(input.UpdateExpression).not.toContain("config");
+    expect(input.UpdateExpression).not.toContain("createdBy");
+    expect(input.UpdateExpression).not.toContain("sourceProjectId");
+  });
+
+  test("real GA record mjaKkVyqoFGN: a pre-existing config/createdBy/sourceProjectId in DDB survives the merge (not overwritten or removed)", async () => {
+    mockGetResource.mockResolvedValueOnce(mjRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaApprovedEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    // The merge UpdateCommand must SET only derived fields; config/createdBy/
+    // sourceProjectId must not appear as SET targets since the GA record
+    // carries no source for them — this is what makes the existing DDB
+    // values survive (SET is a no-op on absent attribute names).
+    expect(input.UpdateExpression).not.toContain(":config");
+    expect(input.UpdateExpression).not.toContain(":createdBy");
+    expect(input.UpdateExpression).not.toContain(":sourceProjectId");
+  });
+
+  test("real GA record zdZ6lqny0piH: status 'DRAFT' maps to internal state 'maintenance'", async () => {
+    mockGetResource.mockResolvedValueOnce(zdRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ExpressionAttributeValues![":state"]).toBe("maintenance");
+  });
+
+  test("real GA record mjaKkVyqoFGN: status 'APPROVED' maps to internal state 'active'", async () => {
+    mockGetResource.mockResolvedValueOnce(mjRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaApprovedEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ExpressionAttributeValues![":state"]).toBe("active");
+  });
+
+  test("unknown status on GA path PRESERVES existing DDB state instead of forcing inactive, with a WARN", async () => {
+    mockGetResource.mockResolvedValueOnce({
+      ...zdRecord,
+      status: "SOME_FUTURE_LIFECYCLE_VALUE",
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    // No :state value bound at all => UpdateExpression must not SET #state,
+    // leaving whatever is already in DDB untouched.
+    expect(input.UpdateExpression).not.toContain("#state = :state");
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("SOME_FUTURE_LIFECYCLE_VALUE"),
+    );
+  });
+
+  test("GA merge UpdateExpression SETs name, description, updatedAt, and registry ids derived from the record", async () => {
+    mockGetResource.mockResolvedValueOnce(zdRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.ExpressionAttributeValues![":name"]).toBe(
+      "shift_change_recorder_agent",
+    );
+    expect(input.ExpressionAttributeValues![":description"]).toBe(
+      zdRecord.description,
+    );
+    expect(input.ExpressionAttributeValues![":updatedAt"]).toBeDefined();
   });
 });
 

@@ -508,6 +508,132 @@ export function buildToolCacheRecord(
   };
 }
 
+/**
+ * Maps a GA record `status` (e.g. "DRAFT", "APPROVED", or the lowercase
+ * lifecycle values observed in real records, e.g. "active") to the internal
+ * application state. Unlike `toInternalState` (used by the legacy
+ * resourceType/eventType path, which always resolves to a concrete state),
+ * this returns `undefined` for an unrecognized value so the caller can
+ * PRESERVE whatever state already exists in DDB instead of forcing
+ * "inactive" — logs a WARN either way.
+ */
+export function toInternalStateFromGaStatus(
+  status: string | undefined,
+): string | undefined {
+  switch (status) {
+    case "APPROVED":
+    case "active":
+      return "active";
+    case "DEPRECATED":
+    case "inactive":
+      return "inactive";
+    case "DRAFT":
+    case "maintenance":
+      return "maintenance";
+    case "PENDING_APPROVAL":
+    case "pending":
+      return "pending";
+    default:
+      console.warn(
+        `Unknown GA registry status "${status}", preserving existing state`,
+      );
+      return undefined;
+  }
+}
+
+/**
+ * Builds the set of fields the GA upsert path is allowed to write, derived
+ * strictly from the hydrated record. Fields with no source in the record
+ * (config, createdBy, sourceProjectId, appId, manifest when absent, etc.)
+ * are omitted entirely so the merge UpdateCommand never SETs — and thus
+ * never overwrites or removes — an attribute the record doesn't carry.
+ */
+function buildGaMergeFields(
+  resourceType: ResourceType,
+  record: RegistryRecord,
+): Record<string, unknown> {
+  const now = new Date().toISOString();
+  if (resourceType === "tool") {
+    const meta = deserializeCustomMetadata(
+      record.customDescriptorContent ?? null,
+      TOOL_METADATA_DEFAULTS,
+    );
+    const fields: Record<string, unknown> = {
+      config: record.description ?? "",
+      categories: meta.categories,
+      icon: meta.icon,
+      updatedAt: now,
+    };
+    if (meta.appId !== undefined) fields.appId = meta.appId;
+    if (meta.integrationBindings !== undefined)
+      fields.integrationBindings = meta.integrationBindings;
+    if (meta.dataStoreBindings !== undefined)
+      fields.dataStoreBindings = meta.dataStoreBindings;
+    const mappedState = toInternalStateFromGaStatus(record.status);
+    if (mappedState !== undefined) fields.state = mappedState;
+    return fields;
+  }
+
+  const meta = deserializeCustomMetadata(
+    record.customDescriptorContent ?? null,
+    AGENT_METADATA_DEFAULTS,
+  );
+
+  const fields: Record<string, unknown> = {
+    description: record.description ?? "",
+    categories: meta.categories,
+    icon: meta.icon,
+    updatedAt: now,
+  };
+  if (typeof record.name === "string") fields.name = record.name;
+  if (meta.appId !== undefined) fields.appId = meta.appId;
+  if (meta.manifest !== undefined) fields.manifest = meta.manifest;
+  if (meta.orgId !== undefined) fields.orgId = meta.orgId;
+  // Deliberately NOT setting config/createdBy/sourceProjectId here — the GA
+  // record carries no reliable source for them (see diag: `config` and
+  // `sourceProjectId` are absent from GA entirely; GA's `createdBy` is a
+  // numeric AWS account ID, a different form than DDB's value). Existing
+  // DDB values for these attributes must survive untouched.
+  const mappedState = toInternalStateFromGaStatus(record.status);
+  if (mappedState !== undefined) fields.state = mappedState;
+  return fields;
+}
+
+/**
+ * GA upsert — MERGE semantics via UpdateCommand. Only SETs fields derived
+ * from the hydrated record; never REMOVEs or overwrites attributes with no
+ * source in the record (config, createdBy, sourceProjectId when absent),
+ * and preserves the existing DDB state on an unrecognized descriptor state
+ * instead of forcing "inactive".
+ */
+export async function handleGaUpsert(
+  tableName: string,
+  resourceType: ResourceType,
+  resourceId: string,
+  record: RegistryRecord,
+): Promise<void> {
+  const fields = buildGaMergeFields(resourceType, record);
+  const names: Record<string, string> = {};
+  const values: Record<string, unknown> = {};
+  const setClauses: string[] = [];
+
+  for (const [key, value] of Object.entries(fields)) {
+    names[`#${key}`] = key;
+    values[`:${key}`] = value;
+    setClauses.push(`#${key} = :${key}`);
+  }
+
+  const params: UpdateCommandInput = {
+    TableName: tableName,
+    Key: getKeyForResource(resourceType, resourceId),
+    UpdateExpression: `SET ${setClauses.join(", ")}`,
+    ExpressionAttributeNames: names,
+    ExpressionAttributeValues: values,
+  };
+
+  await docClient.send(new UpdateCommand(params));
+}
+
 // ---------------------------------------------------------------------------
 // Cache operations
 // ---------------------------------------------------------------------------
@@ -840,17 +966,11 @@ async function handleGaEvent(event: RegistryEvent): Promise<void> {
 
   const { resourceType, record } = resolved;
   const tableName = getTableForResourceType(resourceType);
-  const resource = recordToResourcePayload(record);
 
   try {
-    await handleCreateOrUpdate(
-      tableName,
-      resourceType,
-      registryRecordId,
-      resource,
-    );
+    await handleGaUpsert(tableName, resourceType, registryRecordId, record);
     console.log(
-      `Cache upsert for ${resourceType} "${registryRecordId}" in ${tableName} (GA event)`,
+      `Cache merge-upsert for ${resourceType} "${registryRecordId}" in ${tableName} (GA event)`,
     );
   } catch (err: unknown) {
     if (
