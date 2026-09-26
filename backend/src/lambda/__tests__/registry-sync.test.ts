@@ -20,6 +20,22 @@ import {
   CloudWatchClient,
   PutMetricDataCommand,
 } from "@aws-sdk/client-cloudwatch";
+import { TypeMismatchError } from "../../services/registry-service";
+import type { RegistryRecord } from "../../services/registry-service";
+
+// Mock the shared RegistryService used by the GA record-fetch path — the
+// GA event only carries registryRecordId/registryId, so the handler must
+// hydrate the full record before it can build a cache row.
+const mockGetResource = jest.fn();
+jest.mock("../../services/registry-service", () => {
+  const actual = jest.requireActual("../../services/registry-service");
+  return {
+    ...actual,
+    RegistryService: jest.fn().mockImplementation(() => ({
+      getResource: mockGetResource,
+    })),
+  };
+});
 
 import {
   handler,
@@ -53,6 +69,7 @@ beforeEach(() => {
   ddbMock.reset();
   sqsMock.reset();
   cwMock.reset();
+  mockGetResource.mockReset();
   // Default: SQS and CloudWatch succeed
   sqsMock.on(SendMessageCommand).resolves({});
   cwMock.on(PutMetricDataCommand).resolves({});
@@ -967,6 +984,179 @@ describe("handler — cache operations", () => {
     );
     const body = JSON.parse(sqsInput.MessageBody!);
     expect(body.reason).toContain("Malformed event");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sendToDlq
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// GA agent-registry events — real event JSON from
+// /tmp/sync-diag-2026-09-26.md (detail-type "Registry Record State changed
+// to Draft" / "... to Approved"), detail carries only registryRecordId +
+// registryId. No inline resource payload — the handler must hydrate via
+// RegistryService.getResource before it can build a cache row.
+// ---------------------------------------------------------------------------
+
+function makeGaDraftEvent(): unknown {
+  return {
+    version: "0",
+    id: "82c22b67-cc81-4ef7-9b75-e084a05198bc",
+    "detail-type": "Registry Record State changed to Draft",
+    source: "aws.agent-registry",
+    account: "257192363080",
+    time: "2026-09-26T08:11:35Z",
+    region: "us-west-2",
+    resources: [
+      "arn:aws:agent-registry:us-west-2:257192363080:registry/7wjYVSCFgfe63ATN/record/vxNX2kAHpkmo",
+    ],
+    detail: {
+      registryRecordId: "vxNX2kAHpkmo",
+      registryId: "7wjYVSCFgfe63ATN",
+    },
+  };
+}
+
+function makeGaApprovedEvent(): unknown {
+  return {
+    version: "0",
+    id: "rThMKcBX9RWn-event-id",
+    "detail-type": "Registry Record State changed to Approved",
+    source: "aws.agent-registry",
+    account: "257192363080",
+    time: "2026-09-26T08:11:38Z",
+    region: "us-west-2",
+    resources: [
+      "arn:aws:agent-registry:us-west-2:257192363080:registry/7wjYVSCFgfe63ATN/record/rThMKcBX9RWn",
+    ],
+    detail: {
+      registryRecordId: "rThMKcBX9RWn",
+      registryId: "7wjYVSCFgfe63ATN",
+    },
+  };
+}
+
+const gaAgentRecord: RegistryRecord = {
+  recordId: "vxNX2kAHpkmo",
+  name: "TestAgent",
+  description: "A test agent for registry sync",
+  status: "DRAFT",
+  customDescriptorContent: JSON.stringify({
+    categories: ["cat1"],
+    icon: "icon.png",
+    state: "DRAFT",
+    appId: "app-1",
+    manifest: { name: "TestAgent", version: "1.0" },
+  }),
+  createdAt: new Date("2026-09-26T08:11:35.000Z"),
+  updatedAt: new Date("2026-09-26T08:11:35.000Z"),
+};
+
+describe("validateEvent — GA detail-types", () => {
+  test("accepts 'Registry Record State changed to Draft'", () => {
+    expect(validateEvent(makeGaDraftEvent() as RegistryEvent)).toBeNull();
+  });
+
+  test("accepts 'Registry Record State changed to Approved'", () => {
+    expect(validateEvent(makeGaApprovedEvent() as RegistryEvent)).toBeNull();
+  });
+
+  test("rejects an unknown GA-shaped detail-type", () => {
+    const event = {
+      ...(makeGaDraftEvent() as Record<string, unknown>),
+      "detail-type": "Registry Record State changed to Bogus",
+    };
+    expect(validateEvent(event as RegistryEvent)).toContain(
+      "Unexpected detail-type",
+    );
+  });
+});
+
+describe("handler — GA agent-registry events", () => {
+  test("Draft event hydrates the record via RegistryService and writes to DynamoDB", async () => {
+    mockGetResource.mockResolvedValueOnce(gaAgentRecord);
+    ddbMock.on(PutCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    expect(mockGetResource).toHaveBeenCalledWith("agent", "vxNX2kAHpkmo");
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    expect(input.Item!.agentId).toBe("vxNX2kAHpkmo");
+    expect(input.Item!.state).toBe("maintenance"); // DRAFT -> maintenance
+  });
+
+  test("Approved event hydrates the record and writes to DynamoDB", async () => {
+    mockGetResource.mockResolvedValueOnce({
+      ...gaAgentRecord,
+      recordId: "rThMKcBX9RWn",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        categories: [],
+        icon: "",
+        state: "APPROVED",
+      }),
+    });
+    ddbMock.on(PutCommand).resolves({});
+
+    await handler(makeGaApprovedEvent() as RegistryEvent);
+
+    expect(mockGetResource).toHaveBeenCalledWith("agent", "rThMKcBX9RWn");
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    expect(input.Item!.agentId).toBe("rThMKcBX9RWn");
+    expect(input.Item!.state).toBe("active"); // APPROVED -> active
+  });
+
+  test("falls back to tool type when the record is not an agent", async () => {
+    mockGetResource.mockImplementation(async (type: string, _id: string) => {
+      if (type === "agent") {
+        throw new TypeMismatchError("not an agent");
+      }
+      return {
+        recordId: "vxNX2kAHpkmo",
+        name: "TestTool",
+        description: JSON.stringify({ name: "TestTool" }),
+        status: "DRAFT",
+        customDescriptorContent: JSON.stringify({
+          categories: [],
+          icon: "",
+          state: "active",
+        }),
+      };
+    });
+    ddbMock.on(PutCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    expect(mockGetResource).toHaveBeenCalledWith("agent", "vxNX2kAHpkmo");
+    expect(mockGetResource).toHaveBeenCalledWith("tool", "vxNX2kAHpkmo");
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    expect(input.Item!.toolId).toBe("vxNX2kAHpkmo");
+  });
+
+  test("missing record (null from getResource) sends to DLQ and does not throw", async () => {
+    mockGetResource.mockResolvedValue(null);
+
+    await expect(
+      handler(makeGaDraftEvent() as RegistryEvent),
+    ).resolves.toBeUndefined();
+
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
+  });
+
+  test("unknown detail-type is rejected, sent to DLQ, and throws — negative test", async () => {
+    const badEvent = {
+      ...(makeGaDraftEvent() as Record<string, unknown>),
+      "detail-type": "Registry Record State changed to Bogus",
+    };
+
+    await expect(handler(badEvent as RegistryEvent)).rejects.toThrow(
+      "Malformed registry sync event",
+    );
+    expect(mockGetResource).not.toHaveBeenCalled();
+    expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(1);
   });
 });
 

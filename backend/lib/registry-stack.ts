@@ -239,6 +239,11 @@ export class RegistryStack extends cdk.Stack {
         TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
         REGISTRY_ID: registryId,
         REGISTRY_GENERATION,
+        // finding (sync-diag-2026-09-26): DLQ_URL was never set, so every
+        // handler-thrown error (malformed/unknown-record events, DynamoDB
+        // write failures) failed sendToDlq with QueueDoesNotExist instead of
+        // landing in the existing registrySyncDlq target-level queue.
+        DLQ_URL: registrySyncDlq.queueUrl,
       },
       timeout: cdk.Duration.seconds(30),
       logGroup: new logs.LogGroup(this, "RegistrySyncLambdaLogs", {

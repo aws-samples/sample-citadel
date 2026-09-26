@@ -483,6 +483,70 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     expect(Object.keys(queues)).toHaveLength(1);
   });
 
+  describe("RegistrySync DLQ_URL wiring (sync-diag-2026-09-26)", () => {
+    function registrySyncFn(): CfnLambdaFunctionResource {
+      const fns = template.findResources("AWS::Lambda::Function", {
+        Properties: { Handler: "registry-sync.handler" },
+      });
+      const fnLogicalId = Object.keys(fns)[0];
+      expect(fnLogicalId).toBeDefined();
+      return fns[fnLogicalId] as CfnLambdaFunctionResource;
+    }
+
+    test("sets DLQ_URL on the sync Lambda, pointed at the existing RegistrySyncDLQ queue", () => {
+      const fn = registrySyncFn();
+      const envVars = fn.Properties?.Environment?.Variables ?? {};
+      expect(envVars.DLQ_URL).toBeDefined();
+
+      const queues = template.findResources("AWS::SQS::Queue", {
+        Properties: Match.objectLike({
+          QueueName: "citadel-registry-sync-dlq-test",
+        }),
+      });
+      const dlqLogicalId = Object.keys(queues)[0];
+      expect(envVars.DLQ_URL).toEqual({ Ref: dlqLogicalId });
+    });
+
+    test("the sync Lambda's role can send messages to the RegistrySync DLQ", () => {
+      const fn = registrySyncFn();
+      const roleRef = fn.Properties?.Role?.["Fn::GetAtt"]?.[0];
+      expect(roleRef).toBeDefined();
+
+      const policies = template.findResources("AWS::IAM::Policy");
+      const attached = Object.values(policies).filter(
+        (p: CfnIamPolicyResource) =>
+          (p.Properties?.Roles ?? []).some((r) => r?.Ref === roleRef),
+      );
+      const statements = attached.flatMap(
+        (p: CfnIamPolicyResource) =>
+          p.Properties?.PolicyDocument?.Statement ?? [],
+      );
+      const sendMessageStatements = statements.filter((s: CfnIamStatement) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes("sqs:SendMessage");
+      });
+      expect(sendMessageStatements.length).toBeGreaterThan(0);
+    });
+
+    test("the RegistrySync rule's EventPattern has no detailType filter, so GA record detail-types match without a CDK change", () => {
+      const rules = template.findResources("AWS::Events::Rule", {
+        Properties: Match.objectLike({
+          Name: "citadel-registry-sync-test",
+        }),
+      });
+      const ruleLogicalId = Object.keys(rules)[0];
+      expect(ruleLogicalId).toBeDefined();
+      const pattern = (
+        rules[ruleLogicalId] as {
+          Properties?: { EventPattern?: Record<string, unknown> };
+        }
+      ).Properties?.EventPattern;
+      expect(pattern?.source).toEqual(["aws.agent-registry"]);
+      expect(pattern?.["detail-type"]).toBeUndefined();
+      expect(pattern?.detailType).toBeUndefined();
+    });
+  });
+
   // --- cdk-nag suppression parity ---
   test("every Lambda execution role assumes lambda.amazonaws.com with a ManagedPolicyArns array (matches the app-level IAM4 suppression category)", () => {
     const roles = template.findResources("AWS::IAM::Role", {
