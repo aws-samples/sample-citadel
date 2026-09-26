@@ -22,6 +22,11 @@ import {
   CloudWatchClient,
   PutMetricDataCommand,
 } from "@aws-sdk/client-cloudwatch";
+import {
+  RegistryService,
+  TypeMismatchError,
+} from "../services/registry-service";
+import type { RegistryRecord } from "../services/registry-service";
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -30,6 +35,8 @@ import {
 const AGENT_CONFIG_TABLE = process.env.AGENT_CONFIG_TABLE!;
 const TOOLS_CONFIG_TABLE = process.env.TOOLS_CONFIG_TABLE!;
 const DLQ_URL = process.env.DLQ_URL!;
+const REGISTRY_ID = process.env.REGISTRY_ID!;
+const REGION = process.env.AWS_REGION || "us-east-1";
 
 // ---------------------------------------------------------------------------
 // DynamoDB client
@@ -44,6 +51,18 @@ const docClient = DynamoDBDocumentClient.from(ddbClient);
 
 const sqsClient = new SQSClient({});
 const cwClient = new CloudWatchClient({});
+
+/** Lazy RegistryService singleton — same pattern as other lambdas (e.g. agent-code-resolver.ts). */
+let _registryService: RegistryService | undefined;
+function getRegistryService(): RegistryService {
+  if (!_registryService) {
+    _registryService = new RegistryService({
+      registryId: REGISTRY_ID,
+      region: REGION,
+    });
+  }
+  return _registryService;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,10 +93,22 @@ export interface RegistryEventDetail {
   newStatus?: string;
 }
 
+/**
+ * GA record-lifecycle event detail. GA's "Registry Record State changed to
+ * <State>" detail-types carry only `registryRecordId` + `registryId` — no
+ * inline resource payload, no resourceType/eventType. The handler hydrates
+ * the full record via RegistryService.getResource before it can route it
+ * through the existing cache-write path.
+ */
+export interface GaRegistryEventDetail {
+  registryRecordId: string;
+  registryId: string;
+}
+
 export interface RegistryEvent {
   source: string;
   "detail-type": string;
-  detail: RegistryEventDetail;
+  detail: RegistryEventDetail | GaRegistryEventDetail;
 }
 
 /**
@@ -127,6 +158,23 @@ const VALID_RECORD_DETAIL_TYPES: ReadonlySet<unknown> = new Set([
   "Agent Registry Record Rejected",
 ]);
 
+// GA additions (observed live, diag 2026-09-26): GA emits record-lifecycle
+// events under "Registry Record State changed to <State>" rather than the
+// legacy allowlist above. Exact strings observed: "Registry Record State
+// changed to Draft" and "... to Approved". Kept as its own allowlist
+// (rather than merged into VALID_RECORD_DETAIL_TYPES) because these events
+// carry a materially different detail shape (GaRegistryEventDetail) that
+// requires a record fetch, not an inline payload.
+const VALID_GA_RECORD_DETAIL_TYPES: ReadonlySet<unknown> = new Set([
+  "Registry Record State changed to Draft",
+  "Registry Record State changed to Approved",
+]);
+
+/** True if `detailType` is one of the GA "State changed to <X>" strings. */
+export function isGaRecordDetailType(detailType: unknown): boolean {
+  return VALID_GA_RECORD_DETAIL_TYPES.has(detailType);
+}
+
 /**
  * Validates the incoming EventBridge event structure.
  * Returns an error message string if invalid, or null if valid.
@@ -142,8 +190,10 @@ export function validateEvent(
     return `Unexpected event source: ${event.source}`;
   }
 
-  if (!VALID_RECORD_DETAIL_TYPES.has(event["detail-type"])) {
-    return `Unexpected detail-type: ${event["detail-type"]}`;
+  const detailType = event["detail-type"];
+  const isGa = isGaRecordDetailType(detailType);
+  if (!isGa && !VALID_RECORD_DETAIL_TYPES.has(detailType)) {
+    return `Unexpected detail-type: ${detailType}`;
   }
 
   const detail = event.detail;
@@ -151,16 +201,28 @@ export function validateEvent(
     return "Event detail is missing";
   }
 
-  if (!detail.resourceId || typeof detail.resourceId !== "string") {
+  if (isGa) {
+    const gaDetail = detail as UnvalidatedEventDetail;
+    if (
+      !gaDetail.registryRecordId ||
+      typeof gaDetail.registryRecordId !== "string"
+    ) {
+      return "Event detail missing required field: registryRecordId";
+    }
+    return null;
+  }
+
+  const legacyDetail = detail as UnvalidatedEventDetail;
+  if (!legacyDetail.resourceId || typeof legacyDetail.resourceId !== "string") {
     return "Event detail missing required field: resourceId";
   }
 
-  if (!VALID_RESOURCE_TYPES.has(detail.resourceType)) {
-    return `Invalid resourceType: ${detail.resourceType}`;
+  if (!VALID_RESOURCE_TYPES.has(legacyDetail.resourceType)) {
+    return `Invalid resourceType: ${legacyDetail.resourceType}`;
   }
 
-  if (!VALID_EVENT_TYPES.has(detail.eventType)) {
-    return `Invalid eventType: ${detail.eventType}`;
+  if (!VALID_EVENT_TYPES.has(legacyDetail.eventType)) {
+    return `Invalid eventType: ${legacyDetail.eventType}`;
   }
 
   return null;
@@ -589,6 +651,59 @@ export async function emitSyncFailureMetric(): Promise<void> {
 // Handler
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// GA record hydration
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps a hydrated RegistryRecord (from RegistryService.getResource) onto the
+ * RegistryResourcePayload shape the existing cache-record builders expect,
+ * so the GA path reuses buildAgentCacheRecord/buildToolCacheRecord unchanged.
+ */
+export function recordToResourcePayload(
+  record: RegistryRecord,
+): RegistryResourcePayload {
+  return {
+    name: record.name,
+    description: record.description,
+    customDescriptorContent: record.customDescriptorContent ?? null,
+    createdAt: record.createdAt?.toISOString(),
+    updatedAt: record.updatedAt?.toISOString(),
+  };
+}
+
+/**
+ * Resolves the resourceType for a GA record by attempting an agent fetch
+ * first, falling back to tool on TypeMismatchError. Returns null if the
+ * record does not exist (deleted before the event was processed, or a
+ * transient GA read-after-write gap).
+ */
+export async function resolveGaRecord(
+  recordId: string,
+): Promise<{ resourceType: ResourceType; record: RegistryRecord } | null> {
+  const registry = getRegistryService();
+  try {
+    const record = await registry.getResource("agent", recordId);
+    if (record) {
+      return { resourceType: "agent", record };
+    }
+  } catch (err) {
+    if (!(err instanceof TypeMismatchError)) {
+      throw err;
+    }
+  }
+
+  const toolRecord = await registry.getResource("tool", recordId);
+  if (!toolRecord) {
+    return null;
+  }
+  return { resourceType: "tool", record: toolRecord };
+}
+
+// ---------------------------------------------------------------------------
+// Handler
+// ---------------------------------------------------------------------------
+
 export const handler = async (event: RegistryEvent): Promise<void> => {
   console.log("Registry sync event received:", JSON.stringify(event, null, 2));
 
@@ -600,8 +715,13 @@ export const handler = async (event: RegistryEvent): Promise<void> => {
     throw new Error(`Malformed registry sync event: ${validationError}`);
   }
 
+  if (isGaRecordDetailType(event["detail-type"])) {
+    await handleGaEvent(event);
+    return;
+  }
+
   const { resourceId, resourceType, eventType, resource, newStatus } =
-    event.detail;
+    event.detail as RegistryEventDetail;
   const tableName = getTableForResourceType(resourceType);
 
   console.log(
@@ -682,3 +802,76 @@ export const handler = async (event: RegistryEvent): Promise<void> => {
     throw err;
   }
 };
+
+/**
+ * Handles GA "Registry Record State changed to <State>" events: hydrates
+ * the record via RegistryService, then routes it through the existing
+ * create-or-update cache path (a Draft/Approved state change always maps
+ * to an upsert — there is no separate DELETED signal in this GA detail-type
+ * family, and STATUS_CHANGED-only updates are naturally idempotent via the
+ * same conditional PutCommand used for CREATED/UPDATED).
+ */
+async function handleGaEvent(event: RegistryEvent): Promise<void> {
+  const { registryRecordId } = event.detail as GaRegistryEventDetail;
+
+  let resolved: { resourceType: ResourceType; record: RegistryRecord } | null;
+  try {
+    resolved = await resolveGaRecord(registryRecordId);
+  } catch (err) {
+    console.error(
+      `Failed to hydrate GA registry record "${registryRecordId}":`,
+      err,
+    );
+    await sendToDlq(
+      event,
+      `Registry hydration failure: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    await emitSyncFailureMetric();
+    throw err;
+  }
+
+  if (!resolved) {
+    console.warn(
+      `GA registry record "${registryRecordId}" not found, sending to DLQ`,
+    );
+    await sendToDlq(event, `Registry record not found: ${registryRecordId}`);
+    return;
+  }
+
+  const { resourceType, record } = resolved;
+  const tableName = getTableForResourceType(resourceType);
+  const resource = recordToResourcePayload(record);
+
+  try {
+    await handleCreateOrUpdate(
+      tableName,
+      resourceType,
+      registryRecordId,
+      resource,
+    );
+    console.log(
+      `Cache upsert for ${resourceType} "${registryRecordId}" in ${tableName} (GA event)`,
+    );
+  } catch (err: unknown) {
+    if (
+      err instanceof Error &&
+      err.name === "ConditionalCheckFailedException"
+    ) {
+      console.log(
+        `Conditional check failed for ${resourceType} "${registryRecordId}" — record already current, skipping`,
+      );
+      return;
+    }
+
+    console.error(
+      `DynamoDB write failure for ${resourceType} "${registryRecordId}":`,
+      err,
+    );
+    await sendToDlq(
+      event,
+      `DynamoDB write failure: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    await emitSyncFailureMetric();
+    throw err;
+  }
+}
