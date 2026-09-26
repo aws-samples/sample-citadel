@@ -992,8 +992,8 @@ describe("handler — cache operations", () => {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// GA agent-registry events — real event JSON from
-// /tmp/sync-diag-2026-09-26.md (detail-type "Registry Record State changed
+// GA agent-registry events — synthetic fixtures mirroring the shape of
+// real event JSON (detail-type "Registry Record State changed
 // to Draft" / "... to Approved"), detail carries only registryRecordId +
 // registryId. No inline resource payload — the handler must hydrate via
 // RegistryService.getResource before it can build a cache row.
@@ -1005,15 +1005,15 @@ function makeGaDraftEvent(): unknown {
     id: "82c22b67-cc81-4ef7-9b75-e084a05198bc",
     "detail-type": "Registry Record State changed to Draft",
     source: "aws.agent-registry",
-    account: "257192363080",
-    time: "2026-09-26T08:11:35Z",
+    account: "123456789012",
+    time: "2026-01-01T00:00:00Z",
     region: "us-west-2",
     resources: [
-      "arn:aws:agent-registry:us-west-2:257192363080:registry/7wjYVSCFgfe63ATN/record/vxNX2kAHpkmo",
+      "arn:aws:agent-registry:us-west-2:123456789012:registry/RegTest000001/record/RecDraft00001",
     ],
     detail: {
-      registryRecordId: "vxNX2kAHpkmo",
-      registryId: "7wjYVSCFgfe63ATN",
+      registryRecordId: "RecDraft00001",
+      registryId: "RegTest000001",
     },
   };
 }
@@ -1021,24 +1021,24 @@ function makeGaDraftEvent(): unknown {
 function makeGaApprovedEvent(): unknown {
   return {
     version: "0",
-    id: "rThMKcBX9RWn-event-id",
+    id: "RecApprv00001-event-id",
     "detail-type": "Registry Record State changed to Approved",
     source: "aws.agent-registry",
-    account: "257192363080",
-    time: "2026-09-26T08:11:38Z",
+    account: "123456789012",
+    time: "2026-01-01T00:00:03Z",
     region: "us-west-2",
     resources: [
-      "arn:aws:agent-registry:us-west-2:257192363080:registry/7wjYVSCFgfe63ATN/record/rThMKcBX9RWn",
+      "arn:aws:agent-registry:us-west-2:123456789012:registry/RegTest000001/record/RecApprv00001",
     ],
     detail: {
-      registryRecordId: "rThMKcBX9RWn",
-      registryId: "7wjYVSCFgfe63ATN",
+      registryRecordId: "RecApprv00001",
+      registryId: "RegTest000001",
     },
   };
 }
 
 const gaAgentRecord: RegistryRecord = {
-  recordId: "vxNX2kAHpkmo",
+  recordId: "RecDraft00001",
   name: "TestAgent",
   description: "A test agent for registry sync",
   status: "DRAFT",
@@ -1049,8 +1049,8 @@ const gaAgentRecord: RegistryRecord = {
     appId: "app-1",
     manifest: { name: "TestAgent", version: "1.0" },
   }),
-  createdAt: new Date("2026-09-26T08:11:35.000Z"),
-  updatedAt: new Date("2026-09-26T08:11:35.000Z"),
+  createdAt: new Date("2026-01-01T00:00:00.000Z"),
+  updatedAt: new Date("2026-01-01T00:00:00.000Z"),
 };
 
 describe("validateEvent — GA detail-types", () => {
@@ -1080,17 +1080,17 @@ describe("handler — GA agent-registry events", () => {
 
     await handler(makeGaDraftEvent() as RegistryEvent);
 
-    expect(mockGetResource).toHaveBeenCalledWith("agent", "vxNX2kAHpkmo");
+    expect(mockGetResource).toHaveBeenCalledWith("agent", "RecDraft00001");
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(input.Key).toEqual({ agentId: "vxNX2kAHpkmo" });
+    expect(input.Key).toEqual({ agentId: "RecDraft00001" });
     expect(input.ExpressionAttributeValues![":state"]).toBe("maintenance"); // DRAFT -> maintenance
   });
 
   test("Approved event hydrates the record and writes to DynamoDB via merge UpdateCommand", async () => {
     mockGetResource.mockResolvedValueOnce({
       ...gaAgentRecord,
-      recordId: "rThMKcBX9RWn",
+      recordId: "RecApprv00001",
       status: "APPROVED",
       customDescriptorContent: JSON.stringify({
         categories: [],
@@ -1102,9 +1102,9 @@ describe("handler — GA agent-registry events", () => {
 
     await handler(makeGaApprovedEvent() as RegistryEvent);
 
-    expect(mockGetResource).toHaveBeenCalledWith("agent", "rThMKcBX9RWn");
+    expect(mockGetResource).toHaveBeenCalledWith("agent", "RecApprv00001");
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(input.Key).toEqual({ agentId: "rThMKcBX9RWn" });
+    expect(input.Key).toEqual({ agentId: "RecApprv00001" });
     expect(input.ExpressionAttributeValues![":state"]).toBe("active"); // APPROVED -> active
   });
 
@@ -1114,7 +1114,7 @@ describe("handler — GA agent-registry events", () => {
         throw new TypeMismatchError("not an agent");
       }
       return {
-        recordId: "vxNX2kAHpkmo",
+        recordId: "RecDraft00001",
         name: "TestTool",
         description: JSON.stringify({ name: "TestTool" }),
         status: "DRAFT",
@@ -1129,10 +1129,10 @@ describe("handler — GA agent-registry events", () => {
 
     await handler(makeGaDraftEvent() as RegistryEvent);
 
-    expect(mockGetResource).toHaveBeenCalledWith("agent", "vxNX2kAHpkmo");
-    expect(mockGetResource).toHaveBeenCalledWith("tool", "vxNX2kAHpkmo");
+    expect(mockGetResource).toHaveBeenCalledWith("agent", "RecDraft00001");
+    expect(mockGetResource).toHaveBeenCalledWith("tool", "RecDraft00001");
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(input.Key).toEqual({ toolId: "vxNX2kAHpkmo" });
+    expect(input.Key).toEqual({ toolId: "RecDraft00001" });
   });
 
   test("missing record (null from getResource) sends to DLQ and does not throw", async () => {
@@ -1164,49 +1164,48 @@ describe("handler — GA agent-registry events", () => {
   // -------------------------------------------------------------------------
 
   const zdRecord: RegistryRecord = {
-    recordId: "zdZ6lqny0piH",
-    name: "shift_change_recorder_agent",
-    description:
-      "Digitises supervisor-submitted shift swaps, extensions, and call-ins into the actual roster record.",
+    recordId: "RecDraft00003",
+    name: "fixture_draft_agent",
+    description: "Synthetic DRAFT agent fixture for the GA sync path.",
     status: "DRAFT",
     customDescriptorContent: JSON.stringify({
       categories: ["worker"],
       icon: "",
       state: "active",
       manifest: {
-        name: "shift_change_recorder_agent",
-        description: "Digitises supervisor-submitted shift swaps.",
+        name: "fixture_draft_agent",
+        description: "Synthetic DRAFT agent fixture for the GA sync path.",
         version: 1,
         tools: [],
       },
       orgId: "",
     }),
-    createdAt: new Date("2026-09-26T08:12:17.457Z"),
-    updatedAt: new Date("2026-09-26T21:46:14.404Z"),
+    createdAt: new Date("2026-01-01T00:00:01.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:02.000Z"),
   };
 
   const mjRecord: RegistryRecord = {
-    recordId: "mjaKkVyqoFGN",
-    name: "demo-echo-agent",
-    description: "Demo agent that echoes its input back as output.",
+    recordId: "RecApprv00002",
+    name: "fixture_approved_agent",
+    description: "Synthetic APPROVED agent fixture for the GA sync path.",
     status: "APPROVED",
     customDescriptorContent: JSON.stringify({
       categories: ["built-in", "worker", "demo"],
       icon: "",
       state: "active",
       manifest: {
-        name: "demo-echo-agent",
-        description: "Demo agent that echoes its input back as output.",
+        name: "fixture_approved_agent",
+        description: "Synthetic APPROVED agent fixture for the GA sync path.",
         version: 1,
         tools: [],
       },
       orgId: "",
     }),
-    createdAt: new Date("2026-09-26T08:12:25.545Z"),
-    updatedAt: new Date("2026-09-26T08:12:29.372Z"),
+    createdAt: new Date("2026-01-01T00:00:01.000Z"),
+    updatedAt: new Date("2026-01-01T00:00:02.000Z"),
   };
 
-  test("real GA record zdZ6lqny0piH: UpdateExpression contains no REMOVE of config/createdBy/sourceProjectId", async () => {
+  test("real GA record RecDraft00003: UpdateExpression contains no REMOVE of config/createdBy/sourceProjectId", async () => {
     mockGetResource.mockResolvedValueOnce(zdRecord);
     ddbMock.on(UpdateCommand).resolves({});
 
@@ -1219,7 +1218,7 @@ describe("handler — GA agent-registry events", () => {
     expect(input.UpdateExpression).not.toContain("sourceProjectId");
   });
 
-  test("real GA record mjaKkVyqoFGN: a pre-existing config/createdBy/sourceProjectId in DDB survives the merge (not overwritten or removed)", async () => {
+  test("real GA record RecApprv00002: a pre-existing config/createdBy/sourceProjectId in DDB survives the merge (not overwritten or removed)", async () => {
     mockGetResource.mockResolvedValueOnce(mjRecord);
     ddbMock.on(UpdateCommand).resolves({});
 
@@ -1235,7 +1234,7 @@ describe("handler — GA agent-registry events", () => {
     expect(input.UpdateExpression).not.toContain(":sourceProjectId");
   });
 
-  test("real GA record zdZ6lqny0piH: status 'DRAFT' maps to internal state 'maintenance'", async () => {
+  test("real GA record RecDraft00003: status 'DRAFT' maps to internal state 'maintenance'", async () => {
     mockGetResource.mockResolvedValueOnce(zdRecord);
     ddbMock.on(UpdateCommand).resolves({});
 
@@ -1245,7 +1244,7 @@ describe("handler — GA agent-registry events", () => {
     expect(input.ExpressionAttributeValues![":state"]).toBe("maintenance");
   });
 
-  test("real GA record mjaKkVyqoFGN: status 'APPROVED' maps to internal state 'active'", async () => {
+  test("real GA record RecApprv00002: status 'APPROVED' maps to internal state 'active'", async () => {
     mockGetResource.mockResolvedValueOnce(mjRecord);
     ddbMock.on(UpdateCommand).resolves({});
 
@@ -1281,7 +1280,7 @@ describe("handler — GA agent-registry events", () => {
 
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.ExpressionAttributeValues![":name"]).toBe(
-      "shift_change_recorder_agent",
+      "fixture_draft_agent",
     );
     expect(input.ExpressionAttributeValues![":description"]).toBe(
       zdRecord.description,
