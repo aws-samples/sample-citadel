@@ -244,8 +244,11 @@ interface AllowlistEntry {
 
 const KNOWN_VIOLATIONS: AllowlistEntry[] = [
   {
-    exportName:
-      "citadel-backend-dev:ExportsOutputRefUserPoolClient2F5918F753847A55",
+    // The auto-generated logical-id hash suffix (2F5918F753847A55) is
+    // derived from construct path, not environment, so it stays constant
+    // across dev/test/prod — only the stack-name prefix varies with ENV
+    // (finding 81f8b586: this list must not hardcode "-dev").
+    exportName: `citadel-backend-${ENV}:ExportsOutputRefUserPoolClient2F5918F753847A55`,
     justification:
       "Auto-export of the Cognito UserPoolClient id, imported by frontend " +
       "and telemetry. Live lock-in already exists; migrating to the " +
@@ -253,21 +256,21 @@ const KNOWN_VIOLATIONS: AllowlistEntry[] = [
     followUpId: "CIT-207",
   },
   {
-    exportName: "citadel-backend-dev-UserPoolClientId",
+    exportName: `citadel-backend-${ENV}-UserPoolClientId`,
     justification:
       "Explicit orphan export of the same UserPoolClient id (no in-app " +
       "importer). Drop the exportName once CIT-207 lands.",
     followUpId: "CIT-207",
   },
   {
-    exportName: "citadel-services-dev-SessionKbId",
+    exportName: `citadel-services-${ENV}-SessionKbId`,
     justification:
       "Orphan export of the Bedrock KnowledgeBase id (no in-app " +
       "importer). Drop the exportName once CIT-207 lands.",
     followUpId: "CIT-207",
   },
   {
-    exportName: "citadel-services-dev-GatewayId",
+    exportName: `citadel-services-${ENV}-GatewayId`,
     justification:
       "Orphan export of the AgentCore Gateway id (no in-app importer; " +
       "docs/INTEGRATION_SETUP.md queries it out-of-band). The runtime " +
