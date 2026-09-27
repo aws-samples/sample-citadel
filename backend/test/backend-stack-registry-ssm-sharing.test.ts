@@ -145,4 +145,45 @@ describe("BackendStack — registry exports retained + SSM parameters published"
   test("every backend function with REGISTRY_ID also carries REGISTRY_GENERATION", () => {
     expectRegistryGenerationBesideRegistryId(templateJson);
   });
+
+  // ---------------------------------------------------------------------
+  // 4. AgentReleaseWriterRole registry grant scoped to this stack's
+  //    registryArn token, not an account-wide wildcard (CIT-198)
+  // ---------------------------------------------------------------------
+
+  test("AgentReleaseWriterRole has agent-registry:GetRegistryRecord scoped to the registry's ARN + /record/*", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      Roles: Match.arrayWith([
+        { Ref: Match.stringLikeRegexp("^AgentReleaseWriterRole") },
+      ]),
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Effect: "Allow",
+            Action: "agent-registry:GetRegistryRecord",
+            Resource: [
+              { "Fn::GetAtt": [registryLogicalId, "RegistryArn"] },
+              {
+                "Fn::Join": [
+                  "",
+                  [
+                    { "Fn::GetAtt": [registryLogicalId, "RegistryArn"] },
+                    "/record/*",
+                  ],
+                ],
+              },
+            ],
+          }),
+        ]),
+      }),
+    });
+  });
+
+  test("AgentReleaseWriterRole policy has no new export/ImportValue for the registry grant", () => {
+    const outputs = templateJson.Outputs ?? {};
+    const hasNewExport = Object.keys(outputs).some((name) =>
+      /^ExportsOutputRefAgentReleaseWriterRole/.test(name),
+    );
+    expect(hasNewExport).toBe(false);
+  });
 });

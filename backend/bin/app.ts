@@ -936,22 +936,16 @@ if (app.node.tryGetContext("nag") !== "false") {
       reason:
         "AgentCore registry operations require wildcard on registry ARN sub-resources (agents, tools, versions). Scoped to the specific registry ARN, however it was resolved into the stack (direct construct reference or SSM parameter lookup).",
       appliesTo: [
-        { regex: "/^Resource::<AgentCoreRegistry\\.RegistryArn>\\/\\*$/g" },
+        {
+          regex:
+            "/^Resource::<AgentCoreRegistry\\.RegistryArn>\\/(\\*|record\\/\\*)$/g",
+        },
         {
           regex:
             "/^Resource::<[A-Za-z0-9]*SsmParameterValue[A-Za-z0-9]*Parameter>\\/\\*$/g",
         },
         {
           regex: "/^Resource::<[A-Za-z0-9]*SsmLookupParameter>\\/\\*$/g",
-        },
-        // Account-scoped literal wildcard (no cross-stack/SSM token):
-        // arn:aws:agent-registry:<region>:<account>:registry/* and its
-        // /record/* sub-resource, used on AgentReleaseWriterRole so the
-        // grant lands in the backend template without a cross-stack
-        // reference (findings 8b7ee8af, 476e8d74; tighten under CIT-182).
-        {
-          regex:
-            "/^Resource::arn:aws:agent-registry:[a-z0-9-]+:\\d+:registry\\/\\*(\\/record\\/\\*)?$/g",
         },
       ],
     },

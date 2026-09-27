@@ -1359,26 +1359,6 @@ exports.handler = async (event) => {
       }),
     );
     props.projectsTable.grantReadData(agentReleaseResolverFunction);
-    // Granted directly via addToRolePolicy on the backend-owned writer
-    // role: the resource is an account-scoped wildcard (no SSM token, no
-    // governance-scoped token), so this statement lands entirely in the
-    // backend template — it carries no cross-stack reference and no new
-    // export, avoiding the addToRolePolicy-on-imported-role deadlock
-    // (findings 8b7ee8af, 476e8d74).
-    // Wildcard is deliberate: the registry id is not knowable here
-    // without a cross-stack token that deadlocks deploys (findings
-    // 8b7ee8af, 476e8d74); tighten under CIT-182 once the registry is
-    // stable.
-    props.agentReleaseWriterRole.addToPrincipalPolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["agent-registry:GetRegistryRecord"],
-        resources: [
-          `arn:aws:agent-registry:${this.region}:${this.account}:registry/*`,
-          `arn:aws:agent-registry:${this.region}:${this.account}:registry/*/record/*`,
-        ],
-      }),
-    );
 
     const agentReleaseDataSourceRole = new iam.Role(
       this,
