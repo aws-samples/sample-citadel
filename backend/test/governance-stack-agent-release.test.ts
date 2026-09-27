@@ -366,7 +366,7 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
     });
   });
 
-  test("grants read access (via the assumed AgentReleaseWriterRole's policy) to exec-specs/eval-runs/eval-suites/projects tables and the registry", () => {
+  test("grants read access (via the assumed AgentReleaseWriterRole's policy) to exec-specs/eval-runs/eval-suites/projects tables", () => {
     // Because agentReleaseWriterRole is an existing role passed in as a
     // prop (not created inside GovernanceStack), grantXxx calls against
     // it attach their statements to a policy owned by the role's own
@@ -376,15 +376,12 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
     // the resolver assumes the existing role rather than getting a new
     // grantReadWriteData-generated one.
     //
-    // The registry-read grant (agent-registry:GetRegistryRecord) is the
-    // ONE exception: it is attached via a standalone iam.Policy +
-    // .addToPrincipalPolicy() directly on the imported writer role,
-    // specifically so the Policy *resource* synthesizes in BackendStack
-    // (the role-owning stack) rather than GovernanceStack. This is safe
-    // now because the resource is an account-scoped wildcard — no SSM
-    // token, no governance-scoped token — so the statement carries no
-    // cross-stack reference and creates no new export. See
-    // AgentReleaseResolverRegistryReadPolicy in governance-stack.ts.
+    // The registry-read grant (agent-registry:GetRegistryRecord) is now
+    // defined directly in backend-stack.ts (CIT-198), scoped to the
+    // same-stack registryArn GetAtt token, and is asserted in
+    // backend-stack-registry-ssm-sharing.test.ts against the REAL
+    // BackendStack — not this file's mock backend stack, which never
+    // constructs that grant.
     const policies = backendTemplate.findResources("AWS::IAM::Policy");
     const writerRolePolicies = Object.values(policies).filter((p) => {
       const roles = (p.Properties?.Roles ?? []) as Array<{ Ref?: string }>;
@@ -405,15 +402,29 @@ describe("GovernanceStack — agent-release wiring (cutAgentRelease reachability
       Array.isArray(s.Action) ? s.Action : [s.Action],
     );
     expect(allActions).toEqual(expect.arrayContaining(["dynamodb:GetItem"]));
+  });
 
-    // agent-registry:GetRegistryRecord now lives in the SAME
-    // backend-hosted writer-role policy set: addToPrincipalPolicy on the
-    // imported role inlines the statement into BackendStack's template,
-    // not GovernanceStack's, because the resource is account-scoped
-    // (no cross-stack token to force a separate Policy resource).
-    expect(allActions).toEqual(
-      expect.arrayContaining(["agent-registry:GetRegistryRecord"]),
+  test("governance template has no agent-registry statement scoped to an account-wide registry/* resource (CIT-198)", () => {
+    const govPolicies = template.findResources("AWS::IAM::Policy");
+    const govStatements = Object.values(govPolicies).flatMap(
+      (p) =>
+        (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{
+          Action?: string | string[];
+          Resource?: unknown;
+        }>,
     );
+    const registryStatements = govStatements.filter((s) => {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      return actions.some((a) => String(a).startsWith("agent-registry:"));
+    });
+    for (const stmt of registryStatements) {
+      const resources = Array.isArray(stmt.Resource)
+        ? stmt.Resource
+        : [stmt.Resource];
+      for (const r of resources) {
+        expect(JSON.stringify(r)).not.toMatch(/registry\/\*/);
+      }
+    }
   });
 
   describe("IAM immutability floor survives wiring", () => {

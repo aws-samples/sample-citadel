@@ -3583,6 +3583,20 @@ export class BackendStack extends cdk.Stack {
         ],
       }),
     );
+    // Registry read access, scoped to this stack's registry ARN token
+    // (CIT-198): moved from governance-stack.ts, which previously granted
+    // an account-wide `registry/*` wildcard because the registry id was
+    // not knowable there without a cross-stack token. The writer role is
+    // backend-owned, so defining the grant here uses the same-stack
+    // registryArn GetAtt token directly, matching the pattern used for
+    // ReconcileAppsMetaScheduledFunction above.
+    agentReleaseWriterRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["agent-registry:GetRegistryRecord"],
+        resources: [registryArn, `${registryArn}/record/*`],
+      }),
+    );
     this.agentReleaseWriterRole = agentReleaseWriterRole;
 
     // Environment release pointer — MUTABLE cursor, deliberately the
