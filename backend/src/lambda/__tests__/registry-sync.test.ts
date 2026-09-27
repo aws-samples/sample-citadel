@@ -1287,6 +1287,135 @@ describe("handler — GA agent-registry events", () => {
     );
     expect(input.ExpressionAttributeValues![":updatedAt"]).toBeDefined();
   });
+
+  // -------------------------------------------------------------------------
+  // Bug fix: never overwrite cached fields with empty registry values
+  // (orgId '' from a migrated record must not clobber a real cached value).
+  // -------------------------------------------------------------------------
+
+  test("orgId '' from the registry record is OMITTED from the SET clause, preserving the cached 'Default' value, with a WARN naming orgId", async () => {
+    mockGetResource.mockResolvedValueOnce({
+      recordId: "RecDraft00001",
+      name: "fixture_migrated_agent",
+      description: "Synthetic migrated agent fixture.",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({
+        categories: ["worker"],
+        icon: "icon.png",
+        state: "active",
+        orgId: "",
+      }),
+      createdAt: new Date("2026-01-01T00:00:01.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:02.000Z"),
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).not.toContain("#orgId = :orgId");
+    expect(input.ExpressionAttributeValues![":orgId"]).toBeUndefined();
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("orgId"));
+  });
+
+  test("orgId 'Acme' from the registry record IS written to the SET clause", async () => {
+    mockGetResource.mockResolvedValueOnce({
+      recordId: "RecDraft00001",
+      name: "fixture_org_agent",
+      description: "Synthetic org-scoped agent fixture.",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({
+        categories: ["worker"],
+        icon: "icon.png",
+        state: "active",
+        orgId: "Acme",
+      }),
+      createdAt: new Date("2026-01-01T00:00:01.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:02.000Z"),
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain("#orgId = :orgId");
+    expect(input.ExpressionAttributeValues![":orgId"]).toBe("Acme");
+  });
+
+  test("icon '' from the registry record is OMITTED from the SET clause, preserving the cached icon", async () => {
+    mockGetResource.mockResolvedValueOnce({
+      recordId: "RecDraft00001",
+      name: "fixture_no_icon_agent",
+      description: "Synthetic agent fixture with empty icon.",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({
+        categories: ["worker"],
+        icon: "",
+        state: "active",
+        orgId: "Acme",
+      }),
+      createdAt: new Date("2026-01-01T00:00:01.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:02.000Z"),
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).not.toContain("#icon = :icon");
+    expect(input.ExpressionAttributeValues![":icon"]).toBeUndefined();
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("icon"));
+  });
+
+  test("appId '' is omitted; empty categories array is omitted; description '' is omitted — all preserving cached values", async () => {
+    mockGetResource.mockResolvedValueOnce({
+      recordId: "RecDraft00001",
+      name: "fixture_all_empty_agent",
+      description: "",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({
+        categories: [],
+        icon: "",
+        state: "active",
+        appId: "",
+        orgId: "",
+      }),
+      createdAt: new Date("2026-01-01T00:00:01.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:02.000Z"),
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    for (const field of [
+      "appId",
+      "categories",
+      "description",
+      "orgId",
+      "icon",
+    ]) {
+      expect(input.UpdateExpression).not.toContain(`#${field} = :${field}`);
+    }
+    // updatedAt and state are still written — the merge isn't a full no-op
+    expect(input.UpdateExpression).toContain("#updatedAt = :updatedAt");
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("skipping empty/absent record-derived fields"),
+    );
+  });
+
+  test("non-empty categories, icon, description, and name ARE written to the SET clause", async () => {
+    mockGetResource.mockResolvedValueOnce(zdRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain("#categories = :categories");
+    expect(input.UpdateExpression).toContain("#description = :description");
+    expect(input.UpdateExpression).toContain("#name = :name");
+    expect(input.ExpressionAttributeValues![":categories"]).toEqual(["worker"]);
+  });
 });
 
 // ---------------------------------------------------------------------------
