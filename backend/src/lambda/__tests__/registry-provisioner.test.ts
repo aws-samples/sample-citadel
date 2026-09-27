@@ -165,8 +165,10 @@ describe("registry-provisioner handler", () => {
       expect(body.Data.RegistryId).toBe("reg-live");
     });
 
-    it("recreates via CreateRegistryCommand with autoApprovalRules when the existing registry is gone", async () => {
-      sdkMock.on(GetRegistryCommand).rejects(new Error("not found"));
+    it("recreates via CreateRegistryCommand with autoApprovalRules when the existing registry is gone (ResourceNotFoundException)", async () => {
+      const notFoundErr = new Error("not found") as Error & { name: string };
+      notFoundErr.name = "ResourceNotFoundException";
+      sdkMock.on(GetRegistryCommand).rejects(notFoundErr);
       sdkMock.on(CreateRegistryCommand).resolves({
         registryArn: "arn:aws:agent-registry:us-east-1:123:registry/reg-new",
       });
@@ -179,11 +181,52 @@ describe("registry-provisioner handler", () => {
       await handler(event);
 
       const calls = sdkMock.commandCalls(CreateRegistryCommand);
+      expect(calls).toHaveLength(1);
       expect(calls[0].args[0].input.approvalConfiguration).toEqual({
         autoApprovalRules: [AutoApprovalRule.APPROVE_ALL],
       });
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(body.Data.RegistryId).toBe("reg-new");
+    });
+
+    it("retries GetRegistry up to 3 times on ThrottlingException, then fails without calling CreateRegistry", async () => {
+      const throttleErr = new Error("slow down") as Error & { name: string };
+      throttleErr.name = "ThrottlingException";
+      sdkMock.on(GetRegistryCommand).rejects(throttleErr);
+
+      const event = baseEvent({
+        RequestType: "Update",
+        PhysicalResourceId:
+          "arn:aws:agent-registry:us-east-1:123:registry/reg-throttled",
+      } as Partial<CloudFormationCustomResourceEvent>);
+      await handler(event);
+
+      // Initial call + 3 retries = 4 total GetRegistryCommand invocations.
+      expect(sdkMock.commandCalls(GetRegistryCommand)).toHaveLength(4);
+      expect(sdkMock.commandCalls(CreateRegistryCommand)).toHaveLength(0);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.Status).toBe("FAILED");
+    }, 10000);
+
+    it("fails immediately on AccessDeniedException without calling CreateRegistry", async () => {
+      const accessErr = new Error("no permission") as Error & {
+        name: string;
+      };
+      accessErr.name = "AccessDeniedException";
+      sdkMock.on(GetRegistryCommand).rejects(accessErr);
+
+      const event = baseEvent({
+        RequestType: "Update",
+        PhysicalResourceId:
+          "arn:aws:agent-registry:us-east-1:123:registry/reg-denied",
+      } as Partial<CloudFormationCustomResourceEvent>);
+      await handler(event);
+
+      expect(sdkMock.commandCalls(GetRegistryCommand)).toHaveLength(1);
+      expect(sdkMock.commandCalls(CreateRegistryCommand)).toHaveLength(0);
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.Status).toBe("FAILED");
+      expect(body.Reason).toContain("AccessDeniedException");
     });
   });
 
