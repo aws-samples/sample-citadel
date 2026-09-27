@@ -284,6 +284,68 @@ describe("RegistryService CRUD operations", () => {
         },
       });
     });
+
+    it("settles UPDATING to DRAFT via waitForStableState + re-fetch (decision b9910580)", async () => {
+      // Content edit on a previously-APPROVED agent: Update returns the
+      // transient UPDATING status; the record settles to DRAFT once GA
+      // finishes processing (approval invalidated by the edit).
+      sdkMock.on(UpdateRegistryRecordCommand).resolves({
+        recordId: "agent-1",
+        name: "Agent",
+        status: "UPDATING",
+        recordType: RecordType.CUSTOM,
+        descriptors: { custom: { data: '{"manifest":{}}' } },
+      });
+      sdkMock
+        .on(GetRegistryRecordCommand)
+        .resolvesOnce({
+          recordId: "agent-1",
+          name: "Agent",
+          status: "UPDATING",
+          recordType: RecordType.CUSTOM,
+          descriptors: { custom: { data: '{"manifest":{}}' } },
+        })
+        .resolvesOnce({
+          recordId: "agent-1",
+          name: "Agent",
+          status: "DRAFT",
+          recordType: RecordType.CUSTOM,
+          descriptors: { custom: { data: '{"manifest":{}}' } },
+        })
+        .resolvesOnce({
+          recordId: "agent-1",
+          name: "Agent",
+          status: "DRAFT",
+          recordType: RecordType.CUSTOM,
+          descriptors: { custom: { data: '{"manifest":{}}' } },
+        });
+
+      const result = await service.updateResource("agent", "agent-1", {
+        description: "edited",
+      });
+
+      expect(result.status).toBe("DRAFT");
+      // waitForStableState polls twice (UPDATING, then DRAFT clears the
+      // loop) + one final getResource fetch after it clears.
+      expect(sdkMock.commandCalls(GetRegistryRecordCommand)).toHaveLength(3);
+    });
+
+    it("keeps behaviour unchanged when the settled status did not transition (no wait/re-fetch)", async () => {
+      sdkMock.on(UpdateRegistryRecordCommand).resolves({
+        recordId: "tool-1",
+        name: "Tool",
+        status: "APPROVED",
+        recordType: RecordType.CUSTOM,
+        descriptors: { custom: { data: "{}" } },
+      });
+
+      const result = await service.updateResource("tool", "tool-1", {
+        description: "edited",
+      });
+
+      expect(result.status).toBe("APPROVED");
+      expect(sdkMock.commandCalls(GetRegistryRecordCommand)).toHaveLength(0);
+    });
   });
 
   // -- deleteResource ------------------------------------------------------

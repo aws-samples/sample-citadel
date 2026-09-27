@@ -752,6 +752,28 @@ export async function updateToolConfigRegistry(
     customMetadata: updatedMeta,
   });
 
+  // updateResource now returns the settled status (decision b9910580): GA
+  // demotes APPROVED/REJECTED -> DRAFT on any content edit. Surface this
+  // loss via a log line rather than hiding it or auto-resubmitting — the
+  // GraphQL ToolConfig type has no message/warnings field to carry it, so
+  // registryStatus (already returned below) is the client-visible signal.
+  // Compared against the raw string values (not the RegistryRecordStatusValues
+  // import) so this check degrades gracefully in tests that stub the module
+  // without the enum.
+  if (
+    (existing.status === "APPROVED" || existing.status === "REJECTED") &&
+    record.status === "DRAFT"
+  ) {
+    console.info(
+      "approval invalidated by content edit",
+      JSON.stringify({
+        toolId: input.toolId,
+        from: existing.status,
+        to: record.status,
+      }),
+    );
+  }
+
   return registryService.mapToToolConfig(record);
 }
 
