@@ -1524,6 +1524,7 @@ export class ArbiterStack extends cdk.Stack {
         properties: {
           Version: "v1.4.0",
           ModuleDigest: seedModuleDigest,
+          RegistryGeneration: REGISTRY_GENERATION,
         },
       },
     );
