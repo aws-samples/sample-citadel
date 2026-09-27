@@ -225,4 +225,10 @@ describe("ArbiterStack — seed Lambda registry wiring (dual-store agent seam)",
       "v1.4.0",
     );
   });
+
+  test("E. SeedAgentConfigResource RegistryGeneration matches REGISTRY_GENERATION (re-runs when the registry is recreated)", () => {
+    expect(
+      findSeedCustomResource(resources).Properties?.RegistryGeneration,
+    ).toBe(REGISTRY_GENERATION);
+  });
 });
