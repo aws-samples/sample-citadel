@@ -548,29 +548,59 @@ export function toInternalStateFromGaStatus(
  * are omitted entirely so the merge UpdateCommand never SETs — and thus
  * never overwrites or removes — an attribute the record doesn't carry.
  */
+/**
+ * True if `value` is a non-empty, present value — i.e. NOT undefined, null,
+ * or an empty string. Used to decide whether a record-derived scalar field
+ * may enter the GA merge SET clause. Migrated GA records carry orgId as an
+ * explicit '' rather than omitting it, so an `!== undefined` check alone
+ * lets the empty string through and overwrites a real cached value (e.g.
+ * 'Default') with ''. This is the single source of truth for that rule —
+ * never write undefined/null/'' over an existing cache value.
+ */
+function isPresentNonEmpty(value: unknown): value is string {
+  return typeof value === "string" && value !== "";
+}
+
 function buildGaMergeFields(
   resourceType: ResourceType,
   record: RegistryRecord,
 ): Record<string, unknown> {
   const now = new Date().toISOString();
+  const skipped: string[] = [];
+
   if (resourceType === "tool") {
     const meta = deserializeCustomMetadata(
       record.customDescriptorContent ?? null,
       TOOL_METADATA_DEFAULTS,
     );
-    const fields: Record<string, unknown> = {
-      config: record.description ?? "",
-      categories: meta.categories,
-      icon: meta.icon,
-      updatedAt: now,
-    };
-    if (meta.appId !== undefined) fields.appId = meta.appId;
+    const fields: Record<string, unknown> = { updatedAt: now };
+
+    if (isPresentNonEmpty(record.description))
+      fields.config = record.description;
+    else skipped.push("config");
+
+    if (Array.isArray(meta.categories) && meta.categories.length > 0)
+      fields.categories = meta.categories;
+    else skipped.push("categories");
+
+    if (isPresentNonEmpty(meta.icon)) fields.icon = meta.icon;
+    else skipped.push("icon");
+
+    if (isPresentNonEmpty(meta.appId)) fields.appId = meta.appId;
+    else skipped.push("appId");
+
     if (meta.integrationBindings !== undefined)
       fields.integrationBindings = meta.integrationBindings;
     if (meta.dataStoreBindings !== undefined)
       fields.dataStoreBindings = meta.dataStoreBindings;
     const mappedState = toInternalStateFromGaStatus(record.status);
     if (mappedState !== undefined) fields.state = mappedState;
+
+    if (skipped.length > 0) {
+      console.warn(
+        `GA merge-upsert for tool "${record.recordId}": skipping empty/absent record-derived fields to avoid overwriting cache values: ${skipped.join(", ")}`,
+      );
+    }
     return fields;
   }
 
@@ -579,16 +609,34 @@ function buildGaMergeFields(
     AGENT_METADATA_DEFAULTS,
   );
 
-  const fields: Record<string, unknown> = {
-    description: record.description ?? "",
-    categories: meta.categories,
-    icon: meta.icon,
-    updatedAt: now,
-  };
-  if (typeof record.name === "string") fields.name = record.name;
-  if (meta.appId !== undefined) fields.appId = meta.appId;
+  const fields: Record<string, unknown> = { updatedAt: now };
+
+  if (isPresentNonEmpty(record.description))
+    fields.description = record.description;
+  else skipped.push("description");
+
+  if (Array.isArray(meta.categories) && meta.categories.length > 0)
+    fields.categories = meta.categories;
+  else skipped.push("categories");
+
+  if (isPresentNonEmpty(meta.icon)) fields.icon = meta.icon;
+  else skipped.push("icon");
+
+  if (typeof record.name === "string" && record.name !== "")
+    fields.name = record.name;
+  else skipped.push("name");
+
+  if (isPresentNonEmpty(meta.appId)) fields.appId = meta.appId;
+  else skipped.push("appId");
+
   if (meta.manifest !== undefined) fields.manifest = meta.manifest;
-  if (meta.orgId !== undefined) fields.orgId = meta.orgId;
+
+  // The bug: migrated GA records carry orgId as an explicit '', not
+  // undefined — `!== undefined` alone let it through and overwrote the
+  // cached 'Default' value. Require non-empty as well.
+  if (isPresentNonEmpty(meta.orgId)) fields.orgId = meta.orgId;
+  else skipped.push("orgId");
+
   // Deliberately NOT setting config/createdBy/sourceProjectId here — the GA
   // record carries no reliable source for them (see diag: `config` and
   // `sourceProjectId` are absent from GA entirely; GA's `createdBy` is a
@@ -596,6 +644,12 @@ function buildGaMergeFields(
   // DDB values for these attributes must survive untouched.
   const mappedState = toInternalStateFromGaStatus(record.status);
   if (mappedState !== undefined) fields.state = mappedState;
+
+  if (skipped.length > 0) {
+    console.warn(
+      `GA merge-upsert for agent "${record.recordId}": skipping empty/absent record-derived fields to avoid overwriting cache values: ${skipped.join(", ")}`,
+    );
+  }
   return fields;
 }
 
