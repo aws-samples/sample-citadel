@@ -50,6 +50,11 @@ export const AgentDetails: React.FC<AgentDetailsProps> = ({
   const [agentCode, setAgentCode] = useState<string>('// Agent code goes here\n');
   const [originalAgentCode, setOriginalAgentCode] = useState<string>('// Agent code goes here\n');
   const [showDeprecateConfirm, setShowDeprecateConfirm] = useState(false);
+  // Registry-backed APPROVED agents lose approval on any content edit
+  // (backend: agent-config-resolver's content-only update path settles
+  // APPROVED/REJECTED -> DRAFT, surfaced to the UI as 'maintenance'). Gate
+  // the save behind a confirmation so the demotion isn't silent.
+  const [showEditApprovedConfirm, setShowEditApprovedConfirm] = useState(false);
   const [formData, setFormData] = useState({
     agentId: '',
     config: {} as any,
@@ -188,6 +193,22 @@ def handler(event, context):
     const newVersion = version + 0.1;
     // Round to 1 decimal place to avoid floating point issues
     return newVersion.toFixed(1);
+  };
+
+  const isEditingApprovedRegistryRecord =
+    !isCreating && !!agent && isRegistryBacked(agent) && agent.state === 'active';
+
+  const handleSaveDetailsClick = () => {
+    if (isEditingApprovedRegistryRecord) {
+      setShowEditApprovedConfirm(true);
+      return;
+    }
+    handleSaveDetails();
+  };
+
+  const handleEditApprovedConfirm = () => {
+    setShowEditApprovedConfirm(false);
+    handleSaveDetails();
   };
 
   const handleSaveDetails = async () => {
@@ -448,8 +469,7 @@ def handler(event, context):
                   >
                     {agent?.state === 'active' ? 'Deactivate' : 'Activate'}
                   </Button>
-                )}
-                {!agent?.categories?.includes('built-in') && (
+                )}                {!agent?.categories?.includes('built-in') && (
                   <Button
                     variant="outline"
                     onClick={handleDelete}
@@ -462,6 +482,24 @@ def handler(event, context):
             )}
           </div>
         </div>
+
+        <AlertDialog open={showEditApprovedConfirm} onOpenChange={setShowEditApprovedConfirm}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Saving will require re-approval</AlertDialogTitle>
+              <AlertDialogDescription>
+                This agent is approved. Saving changes moves it back to Draft in the registry;
+                use Activate afterwards to resubmit it for approval.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={handleEditApprovedConfirm}>
+                Save
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         {/* Tabs */}
         <div className="agent-details-tabs">
@@ -495,7 +533,7 @@ def handler(event, context):
             formData={formData}
             onFormDataChange={setFormData}
             onStartEdit={() => setIsEditingDetails(true)}
-            onSave={handleSaveDetails}
+            onSave={handleSaveDetailsClick}
             onCancel={handleCancelDetailsEdit}
             isFabricator={agent?.agentId === 'fabricator'}
           />

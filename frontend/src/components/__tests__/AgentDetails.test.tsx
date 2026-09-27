@@ -14,7 +14,8 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 jest.mock('../AgentConfig', () => ({
-  AgentConfigTab: () => React.createElement('div', { 'data-testid': 'agent-config-tab' }),
+  AgentConfigTab: ({ onSave }: { onSave: () => void }) =>
+    React.createElement('button', { onClick: onSave }, 'Save Details'),
 }));
 jest.mock('../AgentCode', () => ({
   AgentCodeTab: () => null,
@@ -165,5 +166,62 @@ describe('AgentDetails — legacy (non-registry) agents unchanged', () => {
 
     expect(screen.queryByText('Approved')).not.toBeInTheDocument();
     expect(screen.queryByText('Draft')).not.toBeInTheDocument();
+  });
+});
+
+describe('AgentDetails — confirm before saving content edits to an approved registry record', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (agentConfigService.getAgentCode as jest.Mock).mockRejectedValue(new Error('no code'));
+  });
+
+  it('shows the re-approval confirmation and does not save until confirmed, for a registry-backed active agent', async () => {
+    (agentConfigService.getAgentConfig as jest.Mock).mockResolvedValue(makeRegistryAgent('active'));
+    (agentConfigService.updateAgentConfig as jest.Mock).mockResolvedValue({});
+
+    render(<AgentDetails agentId="agent-1" onBack={jest.fn()} />);
+    await waitFor(() => expect(screen.getByText('Save Details')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText('Save Details'));
+
+    expect(await screen.findByText('Saving will require re-approval')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'This agent is approved. Saving changes moves it back to Draft in the registry; use Activate afterwards to resubmit it for approval.',
+      ),
+    ).toBeInTheDocument();
+    expect(agentConfigService.updateAgentConfig).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText('Cancel'));
+    expect(agentConfigService.updateAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it('saves and refreshes the agent after confirming, for a registry-backed active agent', async () => {
+    (agentConfigService.getAgentConfig as jest.Mock)
+      .mockResolvedValueOnce(makeRegistryAgent('active', 'APPROVED'))
+      .mockResolvedValueOnce(makeRegistryAgent('maintenance', 'DRAFT'));
+    (agentConfigService.updateAgentConfig as jest.Mock).mockResolvedValue({});
+
+    render(<AgentDetails agentId="agent-1" onBack={jest.fn()} />);
+    await waitFor(() => expect(screen.getByText('Save Details')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText('Save Details'));
+    fireEvent.click(await screen.findByText('Save'));
+
+    await waitFor(() => expect(agentConfigService.updateAgentConfig).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(agentConfigService.getAgentConfig).toHaveBeenCalledTimes(2));
+  });
+
+  it('saves directly without a confirmation for a non-approved (draft) registry-backed agent', async () => {
+    (agentConfigService.getAgentConfig as jest.Mock).mockResolvedValue(makeRegistryAgent('maintenance', 'DRAFT'));
+    (agentConfigService.updateAgentConfig as jest.Mock).mockResolvedValue({});
+
+    render(<AgentDetails agentId="agent-1" onBack={jest.fn()} />);
+    await waitFor(() => expect(screen.getByText('Save Details')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText('Save Details'));
+
+    await waitFor(() => expect(agentConfigService.updateAgentConfig).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Saving will require re-approval')).not.toBeInTheDocument();
   });
 });

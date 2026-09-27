@@ -658,6 +658,54 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       expect(result.agentId).toBe("agent-1");
     });
 
+    // ─── decision b9910580: settled-status visibility on content edits ───
+
+    test("content edit on an APPROVED agent returns the settled DRAFT status (maintenance), logs approval invalidation", async () => {
+      // updateResource (registry-service) now internally waits for the
+      // transient UPDATING status to clear and re-fetches — from the
+      // resolver's point of view this just means the record it gets back
+      // already carries the settled DRAFT status, not UPDATING.
+      const settledDraftRecord = { ...existingRecord, status: "DRAFT" };
+      mockGetResource.mockResolvedValue(existingRecord);
+      mockUpdateResource.mockResolvedValue(settledDraftRecord);
+      mockMapToAgentConfig.mockReturnValueOnce({
+        agentId: "agent-1",
+        state: "maintenance",
+      });
+      const infoSpy = jest.spyOn(console, "info").mockImplementation();
+
+      const result = await updateAgentConfigRegistry(
+        { agentId: "agent-1", description: "edited content" },
+        eventWithOrg,
+      );
+
+      expect(result.state).toBe("maintenance");
+      expect(mockMapToAgentConfig).toHaveBeenCalledWith(settledDraftRecord);
+      expect(infoSpy).toHaveBeenCalledWith(
+        "approval invalidated by content edit",
+        expect.stringContaining("agent-1"),
+      );
+      infoSpy.mockRestore();
+    });
+
+    test("content edit on a DRAFT agent (no status transition) does not log approval invalidation", async () => {
+      const draftExisting = { ...existingRecord, status: "DRAFT" };
+      mockGetResource.mockResolvedValue(draftExisting);
+      mockUpdateResource.mockResolvedValue(draftExisting);
+      const infoSpy = jest.spyOn(console, "info").mockImplementation();
+
+      await updateAgentConfigRegistry(
+        { agentId: "agent-1", description: "edited content" },
+        eventWithOrg,
+      );
+
+      expect(infoSpy).not.toHaveBeenCalledWith(
+        "approval invalidated by content edit",
+        expect.anything(),
+      );
+      infoSpy.mockRestore();
+    });
+
     // ─── finding adde5b79: submit-not-approve activation ─────────────
 
     test("DRAFT + active → submits for approval, never issues a direct UpdateRegistryRecordStatus(APPROVED)", async () => {

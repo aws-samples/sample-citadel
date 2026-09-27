@@ -1041,15 +1041,34 @@ export class RegistryService {
       ),
     );
 
-    return {
+    const statusBefore = result.status ?? "";
+    let record: RegistryRecord = {
       recordId: result.recordId ?? id,
       name: result.name ?? "",
       description: result.description,
-      status: result.status ?? "",
+      status: statusBefore,
       customDescriptorContent: result.descriptors?.custom?.data,
       createdAt: result.createdAt,
       updatedAt: result.updatedAt,
     };
+
+    // GA moves a record through UPDATING before it settles on its final
+    // status (decision b9910580). For APPROVED/REJECTED records, any content
+    // edit demotes UPDATING -> DRAFT once the write settles — this is real
+    // approval loss that Citadel must surface, not hide behind the
+    // transient UPDATING snapshot. Wait for the transitional state to clear
+    // and re-fetch so callers see the settled status. When the status was
+    // already stable (no transition), this is a same-value re-fetch and a
+    // no-op for callers.
+    if (statusBefore === "CREATING" || statusBefore === "UPDATING") {
+      await this.waitForStableState(recordId);
+      const settled = await this.getResource(type, recordId);
+      if (settled) {
+        record = settled;
+      }
+    }
+
+    return record;
   }
 
   /**

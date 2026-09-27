@@ -192,16 +192,22 @@ explicitly deferred outside the Registry lifecycle scope.
 | `DRAFT`            | `DEPRECATED`         | architect  | `UpdateRegistryRecordStatus` with `status=DEPRECATED`            |
 | `PENDING_APPROVAL` | `APPROVED`           | admin      | `UpdateRegistryRecordStatus` with `status=APPROVED`; `decidedBy` stamped server-side |
 | `PENDING_APPROVAL` | `REJECTED`           | admin      | `UpdateRegistryRecordStatus` with `status=REJECTED`, `statusReason` required |
+| `APPROVED`         | `DRAFT`              | any (content edit) | `UpdateRegistryRecordCommand` (name/description/manifest) settles `UPDATING` → `DRAFT`; approval invalidated — logged as INFO "approval invalidated by content edit". Re-approve via Submit/Activate. |
+| `REJECTED`         | `DRAFT`              | any (content edit) | Same as above — GA allows content edits on `REJECTED` records too; the settled status demotes to `DRAFT` and is surfaced the same way. `REJECTED` → `APPROVED` is API-legal via `UpdateRegistryRecordStatus` but unused by Citadel. |
 | `REJECTED`         | `DEPRECATED`         | architect  | `UpdateRegistryRecordStatus` with `status=DEPRECATED` (abandon; create new record to revise) |
 | `APPROVED`         | `DEPRECATED`         | architect / admin | `UpdateRegistryRecordStatus` with `status=DEPRECATED` (Archive; irreversible) |
 | `DEPRECATED`       | —                    | —          | Terminal; no outbound transitions                                |
 
 **Rejection and revision:** When a record is `REJECTED`, the architect cannot
-revise and resubmit the same record. The architect must create a new record
-with a revised project/manifest. The rejected record can only transition to
-`DEPRECATED` (abandon), not back to `DRAFT` or re-approval. This ensures
-each approval cycle has a unique record identity for audit and governance
-traceability.
+use `UpdateRegistryRecordStatus` to revise and resubmit the same record — the
+only status-transition target from `REJECTED` via that API is `DEPRECATED`
+(abandon; create a new record to revise). However, a plain content edit
+(`UpdateRegistryRecordCommand`, e.g. via `updateAgentConfig`/`updateToolConfig`)
+IS allowed on a `REJECTED` record and, like `APPROVED`, settles from the
+transient `UPDATING` status to `DRAFT` (decision b9910580) rather than
+silently staying "approved-looking". This is the mechanism by which a
+rejected record can return to `DRAFT` for revision and re-submission — it
+happens through content edits, not through `UpdateRegistryRecordStatus`.
 
 **UpdateRegistryRecordStatus target constraints:** The Registry's
 `UpdateRegistryRecordStatus` API accepts only three valid target statuses:

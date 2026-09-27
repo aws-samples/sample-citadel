@@ -661,6 +661,33 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
     });
 
+    // ─── decision b9910580: settled-status visibility on content edits ───
+
+    test("content edit on an APPROVED tool returns the settled DRAFT status (maintenance), logs approval invalidation", async () => {
+      const settledDraftRecord = { ...existingRecord, status: "DRAFT" };
+      mockGetResource.mockResolvedValue(existingRecord);
+      mockUpdateResource.mockResolvedValue(settledDraftRecord);
+      mockMapToToolConfig.mockReturnValueOnce({
+        toolId: "tool-1",
+        state: "maintenance",
+      });
+      const infoSpy = jest.spyOn(console, "info").mockImplementation();
+
+      const result = await updateToolConfigRegistry(
+        { toolId: "tool-1", categories: ["new-cat"] },
+        "unknown",
+        eventWithOrg,
+      );
+
+      expect(result.state).toBe("maintenance");
+      expect(mockMapToToolConfig).toHaveBeenCalledWith(settledDraftRecord);
+      expect(infoSpy).toHaveBeenCalledWith(
+        "approval invalidated by content edit",
+        expect.stringContaining("tool-1"),
+      );
+      infoSpy.mockRestore();
+    });
+
     test("preserves existing bindings when not provided in input", async () => {
       mockGetResource.mockResolvedValue(existingRecord);
       mockUpdateResource.mockResolvedValue(updatedRecord);
