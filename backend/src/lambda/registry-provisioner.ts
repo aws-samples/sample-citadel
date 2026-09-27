@@ -117,14 +117,14 @@ export async function handler(
 
       case "Update": {
         const physicalId = event.PhysicalResourceId;
+        const registryId = physicalId.split("/").pop()!;
 
         // Check if the existing registry is still alive
         let registryArn = physicalId;
+        let needsReplacement = false;
         try {
           const existing = await client.send(
-            new GetRegistryCommand({
-              registryId: physicalId.split("/").pop()!,
-            }),
+            new GetRegistryCommand({ registryId }),
           );
           const status = existing.status as string;
           if (
@@ -134,11 +134,69 @@ export async function handler(
           ) {
             throw new Error(`Registry in bad state: ${existing.status}`);
           }
-        } catch {
-          // Registry is gone or failed — find or create a replacement
-          console.log(
-            "Existing registry unavailable, finding or creating replacement...",
-          );
+        } catch (getErr: unknown) {
+          const errName =
+            getErr instanceof Error ? getErr.name : "UnknownError";
+          const httpStatus = (
+            getErr as { $metadata?: { httpStatusCode?: number } }
+          )?.$metadata?.httpStatusCode;
+          const isThrottling =
+            errName === "ThrottlingException" ||
+            errName === "TooManyRequestsException" ||
+            (httpStatus !== undefined && httpStatus >= 500);
+
+          if (errName === "ResourceNotFoundException") {
+            console.log(
+              `GetRegistry error (${errName}): registry is gone, finding or creating replacement...`,
+            );
+            needsReplacement = true;
+          } else if (isThrottling) {
+            console.log(
+              `GetRegistry error (${errName}): retrying up to 3 times before failing`,
+            );
+            let lastErr: unknown = getErr;
+            let recovered = false;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              await new Promise((resolve) =>
+                setTimeout(resolve, 500 * attempt),
+              );
+              try {
+                const retried = await client.send(
+                  new GetRegistryCommand({ registryId }),
+                );
+                const status = retried.status as string;
+                if (
+                  status === "CREATE_FAILED" ||
+                  status === "DELETING" ||
+                  status === "DELETE_FAILED"
+                ) {
+                  throw new Error(`Registry in bad state: ${retried.status}`);
+                }
+                recovered = true;
+                break;
+              } catch (retryErr: unknown) {
+                lastErr = retryErr;
+                console.log(
+                  `GetRegistry retry ${attempt} failed (${
+                    retryErr instanceof Error ? retryErr.name : "UnknownError"
+                  })`,
+                );
+              }
+            }
+            if (!recovered) {
+              throw lastErr;
+            }
+          } else {
+            console.log(`GetRegistry error (${errName}): failing update`);
+            throw new Error(
+              `GetRegistry failed with ${errName}: ${
+                getErr instanceof Error ? getErr.message : String(getErr)
+              }`,
+            );
+          }
+        }
+
+        if (needsReplacement) {
           try {
             const result = await client.send(
               new CreateRegistryCommand({
@@ -169,13 +227,13 @@ export async function handler(
           }
         }
 
-        const registryId = registryArn.split("/").pop()!;
+        const finalRegistryId = registryArn.split("/").pop()!;
         await sendResponse(
           event,
           "SUCCESS",
           {
             RegistryArn: registryArn,
-            RegistryId: registryId,
+            RegistryId: finalRegistryId,
           },
           registryArn,
         );

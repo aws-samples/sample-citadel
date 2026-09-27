@@ -20,9 +20,31 @@ import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3";
 import { Asset } from "aws-cdk-lib/aws-s3-assets";
 import { CfnGraphQLSchema } from "aws-cdk-lib/aws-appsync";
 import * as path from "path";
+import * as fs from "fs";
+import * as crypto from "crypto";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
 import { REGISTRY_GENERATION } from "./registry-generation";
+
+// Resolve backend/src/lambda/registry-provisioner.ts regardless of whether
+// this module is loaded from source (backend/lib/) via ts-jest or from the
+// compiled output (backend/dist/lib/) via `node dist/bin/app.js`. Mirrors
+// resolveArbiterRoot in lib/arbiter-stack.ts.
+function resolveRegistryProvisionerSource(startDir: string): string {
+  const candidates = [
+    path.join(startDir, "..", "src", "lambda", "registry-provisioner.ts"), // source: backend/lib/ -> backend/src/...
+    path.join(startDir, "..", "..", "src", "lambda", "registry-provisioner.ts"), // dist: backend/dist/lib/ -> backend/src/...
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(
+    `Unable to locate backend/src/lambda/registry-provisioner.ts from ${startDir}. ` +
+      `Tried: ${candidates.join(", ")}`,
+  );
+}
 
 interface BackendStackProps extends cdk.StackProps {
   environment: string;
@@ -498,6 +520,11 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    const registryProvisionerCodeDigest = crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(resolveRegistryProvisionerSource(__dirname)))
+      .digest("hex");
+
     const agentCoreRegistry = new cdk.CustomResource(
       this,
       "AgentCoreRegistry",
@@ -510,6 +537,8 @@ export class BackendStack extends cdk.Stack {
           // bumped to force the provisioner Update that creates the GA-namespace registry (finding c6544456); the old bedrock-agentcore registry is left in place for migration
           // reverted to REGISTRY_GENERATION for phase 1 (no recreation); phase 2 bumps this
           ForceRecreate: REGISTRY_GENERATION,
+          // keys the resource on the provisioner source so code changes trigger updates
+          CodeDigest: registryProvisionerCodeDigest,
         },
       },
     );
