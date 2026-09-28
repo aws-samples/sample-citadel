@@ -1,15 +1,12 @@
 /**
- * BackendStack — SSM-shared Cognito UserPoolClient id seam (CIT-207 phase 1).
+ * BackendStack — SSM-shared Cognito UserPoolClient id seam (CIT-207 phase 2).
  *
- * BackendStack publishes the UserPoolClient id on TWO channels during
- * phase 1:
- *   1. The auto-generated CloudFormation export
- *      (`ExportsOutputRefUserPoolClient...`) — kept alive via
- *      `this.exportValue(...)` so already-deployed frontend/telemetry
- *      stacks keep working while they migrate.
- *   2. The SSM parameter `/citadel/<env>/cognito/client-id` — the NEW
- *      sharing channel, mirroring the registry id/arn seam
- *      (registry-ssm.ts / backend-stack-registry-ssm-sharing.test.ts).
+ * BackendStack publishes the UserPoolClient id via the SSM parameter
+ * `/citadel/<env>/cognito/client-id` (mirroring the registry id/arn seam,
+ * registry-ssm.ts / backend-stack-registry-ssm-sharing.test.ts). Phase 1's
+ * exportValue keep-alive for the auto-generated CloudFormation export
+ * (`ExportsOutputRefUserPoolClient...`) has been removed now that phase 1
+ * is live everywhere and frontend/telemetry consumers read SSM directly.
  *
  * This test also asserts the duplicate explicit export
  * (`UserPoolClientIdExport`, `<stackName>-UserPoolClientId`) is gone — it
@@ -35,7 +32,7 @@ import { BackendStack } from "../lib/backend-stack";
 
 const STACK_NAME = "TestBackendStackCognitoSeam";
 
-describe("BackendStack — Cognito client id retained export + SSM parameter", () => {
+describe("BackendStack — Cognito client id SSM parameter, no export", () => {
   let template: Template;
   let templateJson: {
     Resources: Record<string, { Type: string; Properties?: unknown }>;
@@ -77,10 +74,10 @@ describe("BackendStack — Cognito client id retained export + SSM parameter", (
   });
 
   // ---------------------------------------------------------------------
-  // 2. Auto-export retained (exportValue keep-alive)
+  // 2. Auto-export keep-alive removed (CIT-207 phase 2)
   // ---------------------------------------------------------------------
 
-  test("retains the auto-generated export of the UserPoolClient id (exportValue keep-alive)", () => {
+  test("no auto-generated export of the UserPoolClient id remains (exportValue keep-alive dropped)", () => {
     const outputs = templateJson.Outputs ?? {};
     const hasAutoExport = Object.entries(outputs).some(([, output]) => {
       const exportName = (output.Export as { Name?: unknown } | undefined)
@@ -90,7 +87,7 @@ describe("BackendStack — Cognito client id retained export + SSM parameter", (
         /ExportsOutputRefUserPoolClient/.test(exportName)
       );
     });
-    expect(hasAutoExport).toBe(true);
+    expect(hasAutoExport).toBe(false);
   });
 
   // ---------------------------------------------------------------------
