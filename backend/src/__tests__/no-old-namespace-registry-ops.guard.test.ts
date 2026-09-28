@@ -41,9 +41,12 @@
  *    old-namespace call cannot sneak in unnoticed while the tracked ones
  *    await their own migration stage.
  */
-import * as fs from "fs";
 import * as path from "path";
 import * as ts from "typescript";
+import {
+  listSourceFiles,
+  readSourceFileOrNull,
+} from "../lambda/__tests__/fixtures/source-file-walker";
 
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const TS_SCAN_DIR = path.join("backend", "src");
@@ -111,31 +114,19 @@ function isRegistryCommandName(name: string): boolean {
 
 function listTsFiles(dir: string): string[] {
   const abs = path.join(REPO_ROOT, dir);
-  if (!fs.existsSync(abs)) return [];
-  const out: string[] = [];
-  const stack = [abs];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (entry.name === "node_modules") continue;
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(full);
-      } else if (
-        entry.isFile() &&
-        /\.tsx?$/.test(entry.name) &&
-        !/\.test\.tsx?$/.test(entry.name) &&
-        !full.includes(`${path.sep}__tests__${path.sep}`)
-      ) {
-        out.push(full);
-      }
-    }
-  }
-  return out;
+  return listSourceFiles(abs, { skipDirs: ["node_modules"] }).filter(
+    (full) =>
+      !/\.test\.tsx?$/.test(path.basename(full)) &&
+      !full.includes(`${path.sep}__tests__${path.sep}`),
+  );
 }
 
-function parseSourceFile(filePath: string, text?: string): ts.SourceFile {
-  const content = text ?? fs.readFileSync(filePath, "utf-8");
+function parseSourceFile(
+  filePath: string,
+  text?: string,
+): ts.SourceFile | null {
+  const content = text ?? readSourceFileOrNull(filePath);
+  if (content === null) return null;
   return ts.createSourceFile(
     filePath,
     content,
@@ -185,6 +176,7 @@ function scanTs(): Array<{ file: string; imports: string[] }> {
   for (const file of listTsFiles(TS_SCAN_DIR)) {
     const relPath = path.relative(REPO_ROOT, file);
     const sf = parseSourceFile(file);
+    if (sf === null) continue;
     const hits = findOldNamespaceRegistryImports(sf);
     if (hits.length > 0) {
       violations.push({ file: relPath, imports: hits });
@@ -239,29 +231,14 @@ const ALLOWLISTED_PY_OLD_NAMESPACE_FILES = new Set<string>([
 
 function listPyFiles(dir: string): string[] {
   const abs = path.join(REPO_ROOT, dir);
-  if (!fs.existsSync(abs)) return [];
-  const out: string[] = [];
-  const stack = [abs];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === "__pycache__") {
-        continue;
-      }
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(full);
-      } else if (
-        entry.isFile() &&
-        entry.name.endsWith(".py") &&
-        !entry.name.startsWith("test_") &&
-        !full.includes(`${path.sep}__tests__${path.sep}`)
-      ) {
-        out.push(full);
-      }
-    }
-  }
-  return out;
+  return listSourceFiles(abs, {
+    extensions: [".py"],
+    skipDirs: ["node_modules", "__pycache__"],
+  }).filter(
+    (full) =>
+      !path.basename(full).startsWith("test_") &&
+      !full.includes(`${path.sep}__tests__${path.sep}`),
+  );
 }
 
 /**
@@ -284,7 +261,8 @@ function scanPy(): string[] {
   const hits: string[] = [];
   for (const file of listPyFiles(PY_SCAN_DIR)) {
     const relPath = path.relative(REPO_ROOT, file);
-    const content = fs.readFileSync(file, "utf-8");
+    const content = readSourceFileOrNull(file);
+    if (content === null) continue;
     if (usesOldNamespaceRegistryOps(content)) {
       hits.push(relPath);
     }
@@ -305,7 +283,7 @@ describe("no-old-namespace-registry-ops guard (finding c6544456 / decision 06077
         "import { CreateRegistryRecordCommand } from '@aws-sdk/client-bedrock-agentcore-control';",
         "export const x = CreateRegistryRecordCommand;",
       ].join("\n"),
-    );
+    )!;
     expect(findOldNamespaceRegistryImports(sf)).toEqual([
       "CreateRegistryRecordCommand",
     ]);
@@ -318,7 +296,7 @@ describe("no-old-namespace-registry-ops guard (finding c6544456 / decision 06077
         "import { ListRegistriesCommand } from '@aws-sdk/client-bedrock-agentcore-control';",
         "export const x = ListRegistriesCommand;",
       ].join("\n"),
-    );
+    )!;
     expect(findOldNamespaceRegistryImports(sf)).toEqual([
       "ListRegistriesCommand",
     ]);
@@ -336,7 +314,7 @@ describe("no-old-namespace-registry-ops guard (finding c6544456 / decision 06077
         "} from '@aws-sdk/client-bedrock-agentcore-control';",
         "export const x = [InvokeAgentRuntimeCommand, CreateGatewayTargetCommand, GetWorkloadAccessTokenCommand, CreateApiKeyCredentialProviderCommand];",
       ].join("\n"),
-    );
+    )!;
     expect(findOldNamespaceRegistryImports(sf)).toEqual([]);
   });
 
@@ -347,7 +325,7 @@ describe("no-old-namespace-registry-ops guard (finding c6544456 / decision 06077
         "import { CreateRegistryRecordCommand, ListRegistriesCommand } from '@aws-sdk/client-agent-registry-control';",
         "export const x = [CreateRegistryRecordCommand, ListRegistriesCommand];",
       ].join("\n"),
-    );
+    )!;
     expect(findOldNamespaceRegistryImports(sf)).toEqual([]);
   });
 
@@ -361,7 +339,7 @@ describe("no-old-namespace-registry-ops guard (finding c6544456 / decision 06077
         " */",
         "export function noop(): void {}",
       ].join("\n"),
-    );
+    )!;
     expect(findOldNamespaceRegistryImports(sf)).toEqual([]);
   });
 
@@ -377,7 +355,7 @@ describe("no-old-namespace-registry-ops guard (finding c6544456 / decision 06077
       ),
     ];
     for (const file of migratedFiles) {
-      const sf = parseSourceFile(file);
+      const sf = parseSourceFile(file)!;
       expect(findOldNamespaceRegistryImports(sf)).toEqual([]);
     }
   });
